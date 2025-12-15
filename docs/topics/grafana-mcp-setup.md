@@ -6,15 +6,19 @@
 go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest
 ```
 
-## Add to Claude Code
+## Verify Installation
 
-### Without Authentication
+Check where the binary was installed:
 
 ```bash
-claude mcp add grafana mcp-grafana -e GRAFANA_URL=http://localhost:3000
+which mcp-grafana
+# Or check GOPATH:
+ls $(go env GOPATH)/bin/mcp-grafana
 ```
 
-### With Authentication
+## Add to Claude Code
+
+### Option 1: Using command name (requires mcp-grafana in PATH)
 
 ```bash
 claude mcp add grafana mcp-grafana \
@@ -22,17 +26,18 @@ claude mcp add grafana mcp-grafana \
   -e GRAFANA_API_KEY=<your-token>
 ```
 
-### JSON Format
+### Option 2: Using full path (recommended for reliability)
+
+If `which mcp-grafana` doesn't find the binary or you get connection errors:
 
 ```bash
-claude mcp add-json "grafana" '{
-  "command": "mcp-grafana",
-  "args": [],
-  "env": {
-    "GRAFANA_URL": "https://grafana.dev.plundr.ai",
-    "GRAFANA_API_KEY": "your-token"  # pragma: allowlist secret
-  }
-}'
+# Find the full path first
+GRAFANA_BIN=$(go env GOPATH)/bin/mcp-grafana
+
+# Add using full path
+claude mcp add grafana $GRAFANA_BIN \
+  -e GRAFANA_URL=https://grafana.dev.plundr.ai \
+  -e GRAFANA_API_KEY=<your-token>
 ```
 
 ## Create Service Account Token
