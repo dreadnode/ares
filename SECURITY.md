@@ -1,8 +1,9 @@
 # Reporting and Fixing Security Issues
 
 Please do not open GitHub issues or pull requests - this makes the problem
-immediately visible to everyone, including malicious actors. Security issues in
-this open source project can be safely reported contacting support@dreadnode.io.
+immediately visible to everyone, including malicious actors.
+Security issues in this open source project can be safely reported by
+contacting support@dreadnode.io.
 
 ## Static Analysis with Semgrep
 

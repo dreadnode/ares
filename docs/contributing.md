@@ -1,15 +1,15 @@
 # Contributing Guide
 
-Thank you for your interest in contributing to this project! This guide will
-help you get started with contributing effectively.
+Thank you for your interest in contributing to this project!
+This guide will help you get started with contributing effectively.
 
 ## Getting Started
 
 1. Fork the repository and clone your fork:
 
    ```bash
-   gh repo clone dreadnode/python-template
-   cd python-template
+   gh repo clone dreadnode/ares
+   cd ares
    ```
 
 1. Set up your development environment with your preferred package manager:

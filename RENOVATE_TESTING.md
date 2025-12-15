@@ -1,16 +1,19 @@
 # Testing Renovate Locally
 
-This guide explains how to use our Taskfile to test Renovate locally using Docker.
+This guide explains how to use our Taskfile to test Renovate locally using
+Docker.
 
 ## Prerequisites
 
 - Docker installed and running
 - Task v3 or later installed
-- [GitHub CLI](https://cli.github.com/) installed and authenticated (`gh auth token`)
+- [GitHub CLI](https://cli.github.com/) installed and authenticated
+  (`gh auth token`)
 
 ## Configuration
 
-The Renovate configuration is stored in `.github/renovate.json5`. This file defines:
+The Renovate configuration is stored in `.github/renovate.json5`.
+This file defines:
 
 - Package managers (poetry, pip)
 - Auto-merge rules
@@ -79,12 +82,12 @@ task renovate-docker-debug -- --dry-run=true
 
 ## Environment Variables Reference
 
-| Variable     | Description          | Required | Default |
-| ------------ | -------------------- | -------- | ------- |
-| GITHUB_TOKEN | Authentication token | Yes      | -       |
-| REPOSITORY   | Target repository    | Yes      | -       |
-| LOG_LEVEL    | Logging verbosity    | No       | debug   |
-| PLATFORM     | Git platform         | No       | github  |
+| Variable       | Description          | Required | Default |
+| -------------- | -------------------- | -------- | ------- |
+| `GITHUB_TOKEN` | Authentication token | Yes      | -       |
+| `REPOSITORY`   | Target repository    | Yes      | -       |
+| `LOG_LEVEL`    | Logging verbosity    | No       | debug   |
+| `PLATFORM`     | Git platform         | No       | github  |
 
 ## Example Usage
 
@@ -92,7 +95,8 @@ Using GitHub CLI (recommended):
 
 ```bash
 # One-line command with automatic token generation
-TASK_X_REMOTE_TASKFILES=1 REPOSITORY="org/repo" GITHUB_TOKEN=$(gh auth token) task renovate:renovate-docker-debug
+TASK_X_REMOTE_TASKFILES=1 REPOSITORY="org/repo" \
+  GITHUB_TOKEN=$(gh auth token) task renovate:renovate-docker-debug
 ```
 
 Manual token setup:
@@ -121,7 +125,7 @@ TASK_X_REMOTE_TASKFILES=1 task renovate:renovate-docker-debug
    Error: Repository must be in org/repo format
    ```
 
-Solution: Ensure REPOSITORY is set correctly (e.g., "microsoft/vscode")
+   Solution: Ensure REPOSITORY is set correctly (e.g., "microsoft/vscode")
 
 1. **Authentication failed:**
 
@@ -129,4 +133,4 @@ Solution: Ensure REPOSITORY is set correctly (e.g., "microsoft/vscode")
    Error: Authentication error
    ```
 
-Solution: Verify GITHUB_TOKEN is set and has correct permissions
+   Solution: Verify GITHUB_TOKEN is set and has correct permissions
