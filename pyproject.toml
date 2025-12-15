@@ -1,0 +1,111 @@
+[project]
+name = "python-template"
+version = "0.1.0"
+description = "A Python project template"
+requires-python = ">=3.9"
+dependencies = [
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.6.1",
+    "mkdocs-section-index>=0.3.8",
+    "tomli>=2.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=4.1.0",
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0",
+    "pytest-randomly>=3.15.0",
+    "tomli>=2.0.1",
+]
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B101"]
+
+[tool.poetry]
+name = "python-template"
+version = "0.1.0"
+description = "A Python project template"
+authors = ["Your Name <your.email@example.com>"]
+
+[tool.poetry.dependencies]
+python = ">=3.14,<3.15"
+
+[tool.poetry.group.docs.dependencies]
+mkdocs = "^1.6.1"
+mkdocs-material = { extras = ["imaging"], version = "^9.5.20" }
+mkdocstrings = "^0.30.0"
+mkdocstrings-python = "^2.0.0"
+mkdocs-section-index = "^0.3.9"
+pymdown-extensions = "^10.8.1"
+pygments = "^2.18.0"
+
+[tool.poetry.group.dev.dependencies]
+pre-commit = "^4.1.0"
+pytest = "^9.0.0"
+pytest-cov = "^7.0.0"
+pytest-randomly = "^4.0.0"
+tomli = "^2.0.1"
+rigging = "^3.0.0"
+
+[tool.poetry.scripts]
+# Define CLI entry points here, e.g.:
+# mycommand = "my_project.module:function"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = ["--strict-markers", "--cov=scripts", "--cov-report=term-missing"]
+pythonpath = ["."]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+include = ["*.py", "**/pyproject.toml", "*.ipynb"]
+extend-include = [".hooks/*.py"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N"]
+ignore = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.coverage.run]
+branch = true
+source = ["scripts"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+
+[tool.readme]
+github_org = "dreadnode"
+logo_url = "https://d1lppblt9t2x15.cloudfront.net/logos/5714928f3cdc09503751580cffbe8d02.png"
+tagline = "with batteries included 🔋"
+emoji = "🐍"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.hatch.build.targets.sdist]
+packages = ["src"]
