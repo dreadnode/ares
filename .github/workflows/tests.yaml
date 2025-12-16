@@ -45,7 +45,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov ruff
+          pip install pytest pytest-cov pytest-asyncio ruff
           pip install -e .
 
       - name: Lint with ruff
