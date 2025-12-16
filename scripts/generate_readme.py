@@ -1,14 +1,19 @@
 #!/usr/bin/python3
 import argparse
+import sys
 from typing import Any
 
-import tomli
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
 from jinja2 import Environment, FileSystemLoader
 
 
 def load_project_metadata() -> dict[str, Any]:
     with open("pyproject.toml", "rb") as f:
-        pyproject = tomli.load(f)
+        pyproject = tomllib.load(f)
     return {
         **pyproject["project"],
         **pyproject.get("tool", {}).get("readme", {}),
@@ -105,7 +110,7 @@ def main() -> None:
                 )
 
     if args.dry_run:
-        pass
+        print(existing_content)
     else:
         write_file("README.md", existing_content)
 
