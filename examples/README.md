@@ -1,30 +1,30 @@
-# Ares Tests
+# Ares Examples
 
-This directory contains tests for the Ares SOC Investigation Agent.
+This directory contains example scripts demonstrating Ares agent capabilities.
 
-## Grafana MCP Windows Attack Query Test
+## Grafana MCP Windows Attack Query Examples
 
 ### Overview
 
-The `test_grafana_mcp_windows.py` script demonstrates the agent's capability
-to query Grafana/Loki for Windows security events and attack indicators.
+The `grafana_mcp_windows_example.py` script demonstrates the types of queries
+the agent can make to Grafana/Loki for Windows security events and attack
+indicators.
 
-### Running the Test
+### Running the Example
 
 ```bash
 # Using Task
-task ares:test:windows
+task ares:example:grafana-windows
 
 # Or directly with Python
-python tests/test_grafana_mcp_windows.py
+python examples/grafana_mcp_windows_example.py
 ```
 
-### What It Tests
+### Query Examples Demonstrated
 
-The test demonstrates 9 types of queries the agent can make:
+The example script demonstrates 9 types of queries the agent can make:
 
-1. **Label Discovery** - Find available labels (environment, host, job,
-   etc.)
+1. **Label Discovery** - Find available labels (environment, host, job, etc.)
 2. **Environment Values** - List all environment values
 3. **Log Volume** - Check log statistics before querying
 4. **Attack Indicators** - Search for mimikatz, impacket, exploit, payload,
@@ -92,7 +92,7 @@ mcp__grafana__list_loki_label_names(
 
 ### Expected Output
 
-The test script prints:
+The example script prints:
 
 - The exact queries that will be executed
 - Expected output format for each query type
@@ -160,7 +160,7 @@ The agent uses these LogQL patterns:
 
 ### Next Steps
 
-After running this test, you can:
+After running this example, you can:
 
 1. **Run a full investigation**: `task ares:run`
 2. **Check configuration**: `task ares:config:check`

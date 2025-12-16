@@ -33,8 +33,10 @@ mappings.
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
 - [Task](https://taskfile.dev/installation/) (optional but recommended)
-- [1Password CLI](https://developer.1password.com/docs/cli/get-started/) for credential management
-- [mcp-grafana](https://github.com/grafana/mcp-grafana) MCP server: `go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest`
+- [1Password CLI](https://developer.1password.com/docs/cli/get-started/)
+  for credential management
+- [mcp-grafana](https://github.com/grafana/mcp-grafana) MCP server:
+  `go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest`
 
 **Setup:**
 
@@ -90,8 +92,8 @@ task ares:reports:latest      # Show latest report
 **Available Tasks:**
 
 | Command | Description |
-|---------|-------------|
-| `task ares:run` | Run agent in poll mode (checks Grafana every 30s for new alerts) |
+| ------- | ----------- |
+| `task ares:run` | Run agent in poll mode (checks Grafana every 30s) |
 | `task ares:run:local` | Run using .env file instead of 1Password |
 | `task ares:investigate ALERT=<file>` | Investigate a specific alert from JSON file |
 | `task ares:config:check` | Verify configuration and 1Password access |
@@ -141,7 +143,7 @@ uv run python -m src investigate-alert test-alerts/example-alert.json \
 **Agent Arguments (`--args.*`):**
 
 | Option | Default | Description |
-|--------|---------|-------------|
+| ------ | ------- | ----------- |
 | `--args.model` | `claude-sonnet-4-20250514` | LLM model to use |
 | `--args.grafana-url` | `https://grafana.dev.plundr.ai` | Grafana URL for alerts and MCP |
 | `--args.poll-interval` | `30` | Seconds between alert polls |
@@ -151,7 +153,7 @@ uv run python -m src investigate-alert test-alerts/example-alert.json \
 **Dreadnode Platform Arguments (`--dn-args.*`):**
 
 | Option | Default | Description |
-|--------|---------|-------------|
+| ------ | ------- | ----------- |
 | `--dn-args.server` | `https://platform.dev.plundr.ai/` | Dreadnode platform server URL |
 | `--dn-args.token` | from `DREADNODE_API_KEY` | Dreadnode API token |
 | `--dn-args.organization` | `ares` | Dreadnode organization name |
@@ -279,13 +281,16 @@ pytest --cov=src tests/
 ### Environment Variables
 
 | Variable | Required | Description |
-|----------|----------|-------------|
+| -------- | -------- | ----------- |
 | `GRAFANA_URL` | Yes | Grafana instance URL (e.g., `https://grafana.example.com`) |
 | `GRAFANA_SERVICE_ACCOUNT_TOKEN` | Yes | Grafana service account token for API access |
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude models |
 | `DREADNODE_API_KEY` | No | Dreadnode platform token for observability |
 
-**Note:** `GRAFANA_API_KEY` is deprecated. Use `GRAFANA_SERVICE_ACCOUNT_TOKEN` instead. See [Grafana's service account documentation](https://grafana.com/docs/grafana/latest/administration/service-accounts/) for details.
+**Note:** `GRAFANA_API_KEY` is deprecated. Use `GRAFANA_SERVICE_ACCOUNT_TOKEN`
+instead. See [Grafana's service account
+documentation](https://grafana.com/docs/grafana/latest/administration/service-accounts/)
+for details.
 
 ### Supported LLM Models
 

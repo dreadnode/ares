@@ -28,7 +28,8 @@ claude mcp add grafana mcp-grafana \
 
 ### Option 2: Using full path (recommended for reliability)
 
-If `which mcp-grafana` doesn't find the binary or you get connection errors:
+If `which mcp-grafana` doesn't find the binary or you get connection
+errors:
 
 ```bash
 # Find the full path first
@@ -50,7 +51,9 @@ claude mcp add grafana $GRAFANA_BIN \
 
 ```bash
 claude mcp remove grafana
-claude mcp add grafana mcp-grafana -e GRAFANA_URL=<url> -e GRAFANA_API_KEY=<token>
+claude mcp add grafana mcp-grafana \
+  -e GRAFANA_URL=<url> \
+  -e GRAFANA_API_KEY=<token>
 ```
 
 ## Config Location

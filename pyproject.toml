@@ -189,3 +189,7 @@ skip-magic-trailing-comma = false
     "PTH123",  # open() vs Path.open() is fine for scripts
     "RUF059",  # unused unpacked variables is fine
 ]
+"examples/**/*.py" = [
+    "T201",    # printing is fine for examples
+    "DTZ003",  # datetime without tz is fine for examples
+]

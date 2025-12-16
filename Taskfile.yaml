@@ -386,7 +386,7 @@ tasks:
         asyncio.run(test())
         "
 
-  ares:test:windows:
-    desc: Test Grafana MCP integration for Windows attack queries
+  ares:example:grafana-windows:
+    desc: Show example Grafana MCP queries for Windows attack detection
     cmds:
-      - python tests/test_grafana_mcp_windows.py
+      - python examples/grafana_mcp_windows_example.py
