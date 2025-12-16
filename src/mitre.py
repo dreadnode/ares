@@ -1,6 +1,7 @@
 """MITRE ATT&CK STIX/TAXII client for live technique data."""
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import httpx
 from loguru import logger
@@ -51,7 +52,7 @@ class MITREAttackClient:
         self._loaded = False
 
     # Tactic shortname to ID mapping
-    TACTIC_MAP = {
+    TACTIC_MAP: ClassVar[dict[str, str]] = {
         "reconnaissance": "TA0043",
         "resource-development": "TA0042",
         "initial-access": "TA0001",
@@ -271,9 +272,10 @@ class MITREAttackClient:
         matches = []
 
         for technique in self._techniques.values():
-            if keyword_lower in technique.name.lower():
-                matches.append(technique)
-            elif keyword_lower in technique.description.lower():
+            if (
+                keyword_lower in technique.name.lower()
+                or keyword_lower in technique.description.lower()
+            ):
                 matches.append(technique)
 
             if len(matches) >= limit:

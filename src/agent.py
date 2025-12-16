@@ -5,18 +5,19 @@ Main agent implementation using Dreadnode Agent SDK.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import dreadnode as dn
 from dreadnode.agent.events import AgentStalled, ToolEnd, ToolStart
 from dreadnode.agent.hooks import retry_with_feedback
-from dreadnode.agent.stop import stop_on_tool_use
+from dreadnode.agent.stop import tool_use
 from loguru import logger
 
 from .mitre import MITREAttackClient
 from .models import InvestigationState
 from .tools import (
+    GrafanaMCPTools,
     GrafanaTools,
     InvestigationTools,
     LokiTools,
@@ -118,6 +119,27 @@ LogQL examples:
 PromQL examples:
 - rate(http_requests_total{status=~"5.."}[5m])
 - node_cpu_seconds_total{instance="X:9100"}
+
+## Grafana MCP Tools (Enhanced Querying)
+
+You have access to enhanced Grafana MCP tools for more powerful querying:
+
+**Discovery Phase:**
+1. list_loki_label_names() - Discover available labels
+2. list_loki_label_values(label_name) - Get values for specific labels
+3. discover_environment(environment) - Get complete environment structure
+
+**Investigation Phase:**
+1. query_loki_stats(logql) - Check data volume BEFORE querying
+2. query_loki_logs(logql, limit, direction) - Query logs with full LogQL support
+3. search_attack_indicators(environment) - Pre-built attack indicator searches
+4. check_dcsync_activity(environment) - Look for DCSync (Event ID 4662)
+5. check_authentication_events(environment) - Check auth events (Event ID 4624)
+
+**When to use MCP vs Direct Loki:**
+- Use MCP tools for: label discovery, stats checks, and convenience methods
+- Use direct LokiTools for: custom queries with specific time windows
+- Both are valid - choose based on the task
 
 ## Evidence Recording
 
@@ -223,6 +245,7 @@ class InvestigationOrchestrator:
             base_url=self.grafana_url,
             api_key=self.grafana_api_key,
         )
+        grafana_mcp_tools = GrafanaMCPTools(datasource_uid="loki")
 
         investigation_tools = InvestigationTools()
         investigation_tools.set_state(state)
@@ -255,6 +278,7 @@ class InvestigationOrchestrator:
                     loki_tools,
                     prometheus_tools,
                     grafana_tools,
+                    grafana_mcp_tools,
                     investigation_tools,
                     question_tools,
                     mitre_tools,
@@ -267,8 +291,8 @@ class InvestigationOrchestrator:
                     unstall_hook,
                 ],
                 stop_conditions=[
-                    stop_on_tool_use("complete_investigation"),
-                    stop_on_tool_use("escalate_investigation"),
+                    tool_use("complete_investigation"),
+                    tool_use("escalate_investigation"),
                 ],
             )
 
@@ -313,7 +337,7 @@ class InvestigationOrchestrator:
         summary = annotations.get("summary", "No summary provided")
         description = annotations.get("description", "No description provided")
 
-        starts_at = alert.get("startsAt", datetime.utcnow().isoformat())
+        starts_at = alert.get("startsAt", datetime.now(timezone.utc).isoformat())
 
         return f"""
 ALERT RECEIVED - BEGIN INVESTIGATION
@@ -344,7 +368,7 @@ Remember: Execute queries in PARALLEL when they are independent.
 The goal is to reach TTPs (Pyramid level 6), not just collect IOCs.
 """
 
-    def _generate_report(self, state: InvestigationState, result) -> Path:
+    def _generate_report(self, state: InvestigationState, _result) -> Path:
         """Generate the markdown investigation report."""
         from .report import MarkdownReportGenerator
 

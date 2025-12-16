@@ -166,9 +166,7 @@ class InvestigativeQuestion:
         # Questions in a reasoning chain should be sequential
         if self.generated_from_question_id == other.id:
             return False
-        if other.generated_from_question_id == self.id:
-            return False
-        return True
+        return other.generated_from_question_id != self.id
 
     def to_dict(self) -> dict:
         return {

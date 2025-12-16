@@ -5,10 +5,12 @@ Following Dreadnode SDK patterns - tools are exposed to the agent
 for interacting with data sources and managing investigation state.
 """
 
-from datetime import datetime, timedelta
+import contextlib
+from datetime import datetime, timedelta, timezone
 
 import dreadnode as dn
 import httpx
+from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
 from .engines import MITRENavigator, PyramidClimber
@@ -22,7 +24,7 @@ from .models import (
 )
 
 
-class LokiTools(dn.Toolset):
+class LokiTools(Toolset):
     """Tools for querying Loki log aggregation system."""
 
     base_url: str
@@ -140,7 +142,7 @@ class LokiTools(dn.Toolset):
             return []
 
 
-class PrometheusTools(dn.Toolset):
+class PrometheusTools(Toolset):
     """Tools for querying Prometheus metrics."""
 
     base_url: str
@@ -258,7 +260,7 @@ class PrometheusTools(dn.Toolset):
             return []
 
 
-class GrafanaTools(dn.Toolset):
+class GrafanaTools(Toolset):
     """Tools for interacting with Grafana alerting."""
 
     base_url: str
@@ -296,7 +298,7 @@ class GrafanaTools(dn.Toolset):
     @dn.tool_method
     async def get_alert_history(
         self,
-        hours: int = 24,
+        _hours: int = 24,
     ) -> list[dict]:
         """
         Get alert history from Grafana.
@@ -320,7 +322,233 @@ class GrafanaTools(dn.Toolset):
             return []
 
 
-class InvestigationTools(dn.Toolset):
+class GrafanaMCPTools(Toolset):
+    """
+    Tools for interacting with Grafana via MCP (Model Context Protocol).
+
+    Provides enhanced capabilities for querying Loki datasources, discovering
+    labels, checking log volumes, and searching for security indicators.
+
+    These are wrapper tools that guide the agent to use the native
+    mcp__grafana__* tools that are available in the environment.
+    """
+
+    datasource_uid: str = "loki"
+
+    @dn.tool_method
+    def list_loki_label_names_guide(self) -> str:
+        """
+        Guide for listing available Loki label names.
+
+        This tool provides instructions on how to discover labels in your
+        Loki environment using the native MCP tool.
+
+        Returns:
+            Instructions for using mcp__grafana__list_loki_label_names
+        """
+        dn.log_metric("grafana_mcp_label_names_guide", 1, mode="count")
+
+        return f"""
+To list available Loki label names, use the MCP tool:
+
+mcp__grafana__list_loki_label_names(
+    datasourceUid="{self.datasource_uid}",
+    startRfc3339=<optional_start_time>,
+    endRfc3339=<optional_end_time>
+)
+
+This will return label names like: environment, deployment, host, job, namespace, etc.
+
+Common labels to check:
+- environment (staging, production, dev)
+- deployment (service/app deployments)
+- host (hostnames)
+- job (log collection jobs)
+- namespace (Kubernetes namespaces)
+"""
+
+    @dn.tool_method
+    def list_loki_label_values_guide(self, label_name: str) -> str:
+        """
+        Guide for listing values for a specific Loki label.
+
+        Args:
+            label_name: The label to get values for (e.g., "environment", "host", "job")
+
+        Returns:
+            Instructions for using mcp__grafana__list_loki_label_values
+        """
+        dn.log_metric("grafana_mcp_label_values_guide", 1, mode="count")
+
+        return f"""
+To list values for label '{label_name}', use the MCP tool:
+
+mcp__grafana__list_loki_label_values(
+    datasourceUid="{self.datasource_uid}",
+    labelName="{label_name}",
+    startRfc3339=<optional_start_time>,
+    endRfc3339=<optional_end_time>
+)
+
+This will return all values for the '{label_name}' label in your environment.
+"""
+
+    @dn.tool_method
+    def query_loki_stats_guide(self, logql_selector: str) -> str:
+        """
+        Guide for querying Loki log statistics.
+
+        Args:
+            logql_selector: LogQL label selector (e.g., '{{environment="staging"}}')
+
+        Returns:
+            Instructions for using mcp__grafana__query_loki_stats
+        """
+        dn.log_metric("grafana_mcp_stats_guide", 1, mode="count")
+
+        return f"""
+To get statistics for logs matching: {logql_selector}
+
+Use the MCP tool:
+
+mcp__grafana__query_loki_stats(
+    datasourceUid="{self.datasource_uid}",
+    logql="{logql_selector}",
+    startRfc3339=<optional_start_time>,
+    endRfc3339=<optional_end_time>
+)
+
+This returns:
+- streams: Number of log streams
+- chunks: Number of chunks
+- entries: Total log entries
+- bytes: Total byte volume
+
+Use this BEFORE querying logs to understand data volume.
+"""
+
+    @dn.tool_method
+    def query_loki_logs_guide(self, logql: str, limit: int = 10) -> str:
+        """
+        Guide for querying Loki logs with LogQL.
+
+        Args:
+            logql: Full LogQL query with filters
+            limit: Maximum results (default 10)
+
+        Returns:
+            Instructions for using mcp__grafana__query_loki_logs
+        """
+        dn.log_metric("grafana_mcp_logs_guide", 1, mode="count")
+
+        return f"""
+To query Loki logs with: {logql}
+
+Use the MCP tool:
+
+mcp__grafana__query_loki_logs(
+    datasourceUid="{self.datasource_uid}",
+    logql="{logql}",
+    limit={limit},
+    direction="backward",  # or "forward" for oldest-first
+    startRfc3339=<optional_start_time>,
+    endRfc3339=<optional_end_time>
+)
+
+LogQL Examples:
+- {{environment="staging"}} |~ "(?i)(exploit|payload|shell)"
+- {{environment="staging"}} | json | event_id="4662"
+- {{environment="staging"}} | json | event_id="4624"
+"""
+
+    @dn.tool_method
+    def search_attack_indicators_guide(self, environment: str = "staging") -> str:
+        """
+        Guide for searching attack indicators in an environment.
+
+        Args:
+            environment: Environment to search (default "staging")
+
+        Returns:
+            Pre-built LogQL queries for common attack indicators
+        """
+        dn.log_metric("grafana_mcp_attack_search_guide", 1, mode="count")
+
+        return f"""
+To search for attack indicators in {environment}, use these queries with
+mcp__grafana__query_loki_logs:
+
+1. General Attack Indicators:
+   logql='{{environment="{environment}"}} |~
+   "(?i)(exploit|payload|shell|mimikatz|impacket|meterpreter|cobalt|beacon)"'
+
+2. DCSync Activity (Event ID 4662):
+   logql='{{environment="{environment}"}} | json | event_id="4662"'
+
+3. Authentication Events (Event ID 4624):
+   logql='{{environment="{environment}"}} | json | event_id="4624"'
+
+4. Failed Authentication (Event ID 4625):
+   logql='{{environment="{environment}"}} | json | event_id="4625"'
+
+5. PowerShell Activity:
+   logql='{{environment="{environment}"}} |~
+   "(?i)(powershell|pwsh|invoke-|iex)"'
+
+6. Suspicious Network Activity:
+   logql='{{environment="{environment}"}} |~
+   "(?i)(nc |netcat|ncat|curl.*sh|wget.*sh)"'
+
+All queries should use datasourceUid="{self.datasource_uid}"
+"""
+
+    @dn.tool_method
+    def discover_environment_guide(self, environment: str = "staging") -> str:
+        """
+        Guide for discovering environment structure.
+
+        Args:
+            environment: Environment name to discover
+
+        Returns:
+            Step-by-step guide for environment discovery
+        """
+        dn.log_metric("grafana_mcp_discovery_guide", 1, mode="count")
+
+        return f"""
+To discover the {environment} environment structure, follow these steps:
+
+1. List available labels:
+   mcp__grafana__list_loki_label_names(
+       datasourceUid="{self.datasource_uid}")
+
+2. For each important label, get its values:
+   - environment: mcp__grafana__list_loki_label_values(
+       datasourceUid="{self.datasource_uid}", labelName="environment")
+   - deployment: mcp__grafana__list_loki_label_values(
+       datasourceUid="{self.datasource_uid}", labelName="deployment")
+   - host: mcp__grafana__list_loki_label_values(
+       datasourceUid="{self.datasource_uid}", labelName="host")
+   - job: mcp__grafana__list_loki_label_values(
+       datasourceUid="{self.datasource_uid}", labelName="job")
+   - namespace: mcp__grafana__list_loki_label_values(
+       datasourceUid="{self.datasource_uid}", labelName="namespace")
+
+3. Check data volume:
+   mcp__grafana__query_loki_stats(
+       datasourceUid="{self.datasource_uid}",
+       logql='{{environment="{environment}"}}')
+
+4. Query sample logs:
+   mcp__grafana__query_loki_logs(
+       datasourceUid="{self.datasource_uid}",
+       logql='{{environment="{environment}"}}', limit=10)
+
+This will give you a complete picture of the environment structure.
+"""
+
+
+class InvestigationTools(Toolset):
     """
     Tools for managing investigation state.
 
@@ -382,10 +610,8 @@ class InvestigationTools(dn.Toolset):
 
         ts = None
         if timestamp:
-            try:
+            with contextlib.suppress(ValueError):
                 ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-            except ValueError:
-                pass
 
         ev = Evidence(
             id=evidence_id,
@@ -447,7 +673,7 @@ class InvestigationTools(dn.Toolset):
         try:
             ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
         except ValueError:
-            ts = datetime.utcnow()
+            ts = datetime.now(timezone.utc)
 
         event = TimelineEvent(
             id=event_id,
@@ -570,7 +796,7 @@ Loki:
 """
 
 
-class QuestionEngineTools(dn.Toolset):
+class QuestionEngineTools(Toolset):
     """
     Tools for the question engines that drive the investigation.
 
@@ -693,7 +919,7 @@ class QuestionEngineTools(dn.Toolset):
         return [q.to_dict() for q in all_questions[:max_questions]]
 
 
-class MITRELookupTools(dn.Toolset):
+class MITRELookupTools(Toolset):
     """Tools for looking up MITRE ATT&CK data."""
 
     mitre_client: MITREAttackClient | None = None
@@ -878,7 +1104,7 @@ async def escalate_investigation(
             "severity": severity,
             "findings": current_findings,
             "immediate_actions": immediate_actions,
-            "escalated_at": datetime.utcnow().isoformat(),
+            "escalated_at": datetime.now(timezone.utc).isoformat(),
         },
     )
 

@@ -16,7 +16,7 @@ def load_project_metadata():
 
 
 def read_file(path: str) -> str:
-    with open(path, "r") as f:
+    with open(path) as f:
         return f.read()
 
 
@@ -78,11 +78,13 @@ def main():
         # Add other marker pairs here as needed
     ]:
         start_marker, end_marker = marker_pair
-        new_section, start_idx, end_idx = get_section_content(new_content, start_marker, end_marker)
+        new_section, _start_idx, _end_idx = get_section_content(
+            new_content, start_marker, end_marker
+        )
         if not new_section:
             continue
 
-        existing_section, existing_start, existing_end = get_section_content(
+        _existing_section, existing_start, existing_end = get_section_content(
             existing_content, start_marker, end_marker
         )
         if existing_start >= 0:
@@ -103,7 +105,7 @@ def main():
                 )
 
     if args.dry_run:
-        print(existing_content)
+        pass
     else:
         write_file("README.md", existing_content)
 

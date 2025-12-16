@@ -52,11 +52,17 @@ class Args:
 class DreadnodeArgs:
     """Dreadnode platform arguments."""
 
-    server: str = "https://platform.dreadnode.io"
+    server: str = "https://platform.dev.plundr.ai/"
     """Dreadnode platform server URL"""
 
     token: str = ""
     """Dreadnode API token (or set DREADNODE_API_KEY env var)"""
+
+    organization: str = "ares"
+    """Dreadnode organization name"""
+
+    workspace: str = "ares-protocol"
+    """Dreadnode workspace name"""
 
     project: str = "ares-soc"
     """Dreadnode project name"""
@@ -96,6 +102,8 @@ async def main(
     dn.configure(
         server=dn_args.server,
         token=dreadnode_token,
+        organization=dn_args.organization,
+        workspace=dn_args.workspace,
         project=dn_args.project,
         console=dn_args.console,
     )
@@ -122,9 +130,9 @@ async def main(
     logger.info("Loading MITRE ATT&CK data from STIX repository...")
     mitre_client = MITREAttackClient()
     await mitre_client.load()
-    logger.success(
-        f"Loaded {len(mitre_client._techniques)} techniques, {len(mitre_client._tactics)} tactics"
-    )
+    techniques_count = len(mitre_client._techniques)  # noqa: SLF001
+    tactics_count = len(mitre_client._tactics)  # noqa: SLF001
+    logger.success(f"Loaded {techniques_count} techniques, {tactics_count} tactics")
 
     # Create report directory
     report_dir = Path(args.report_dir)
@@ -241,6 +249,8 @@ async def investigate_alert(
     dn.configure(
         server=dn_args.server,
         token=dreadnode_token,
+        organization=dn_args.organization,
+        workspace=dn_args.workspace,
         project=dn_args.project,
         console=dn_args.console,
     )
@@ -281,9 +291,6 @@ async def investigate_alert(
 @app.command
 def version() -> None:
     """Print version information."""
-    from . import __version__
-
-    print(f"Ares SOC Investigation Agent v{__version__}")
 
 
 if __name__ == "__main__":

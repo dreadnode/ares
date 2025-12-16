@@ -6,7 +6,7 @@ Pyramid of Pain assessment, and evidence inventory.
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import InvestigationState, PyramidLevel
@@ -39,7 +39,7 @@ class MarkdownReportGenerator:
 
     def generate(self, state: InvestigationState) -> Path:
         """Generate the full markdown report."""
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         alert_name = state.alert.get("labels", {}).get("alertname", "unknown")
         # Sanitize filename
         safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in alert_name)
@@ -74,7 +74,7 @@ class MarkdownReportGenerator:
         return f"""# SOC Investigation Report
 
 **Investigation ID:** `{state.investigation_id}`
-**Generated:** {datetime.utcnow().isoformat()}Z
+**Generated:** {datetime.now(timezone.utc).isoformat()}Z
 **Duration:** {self._format_duration(state)}
 
 ## Alert Information
@@ -217,7 +217,7 @@ _Refer to MITRE ATT&CK Navigator for visual representation._
 
     def _pyramid_assessment(self, state: InvestigationState) -> str:
         # Count by level
-        distribution = {level: 0 for level in PyramidLevel}
+        distribution = dict.fromkeys(PyramidLevel, 0)
         for ev in state.evidence:
             distribution[ev.pyramid_level] += 1
 
@@ -425,7 +425,7 @@ Results: {q.get("result_count", "N/A")} items
 
     def _format_duration(self, state: InvestigationState) -> str:
         """Format the investigation duration."""
-        duration = datetime.utcnow() - state.started_at
+        duration = datetime.now(timezone.utc) - state.started_at
         minutes = int(duration.total_seconds() / 60)
         seconds = int(duration.total_seconds() % 60)
         return f"{minutes}m {seconds}s"

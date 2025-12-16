@@ -10,118 +10,68 @@
 </div>
 <!-- END_AUTO_BADGES -->
 
-<div align="center">
+[![Pre-Commit](https://github.com/dreadnode/python-template/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/python-template/actions/workflows/pre-commit.yaml)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-**Question-Driven Security Investigation Automation**
+Autonomous security investigation agent that polls Grafana for alerts, queries
+Loki/Prometheus, and generates investigation reports with MITRE ATT&CK
+mappings.
 
-_Elevate from IOCs to TTPs with AI-powered investigation_
+## What It Does
 
-</div>
+- Polls Grafana for firing alerts
+- Autonomously investigates Windows security events
+- Queries Loki for logs (Event IDs 4624, 4662, etc.)
+- Maps findings to MITRE ATT&CK techniques
+- Generates markdown reports with timeline and recommendations
+- Detects DCSync, authentication patterns, and attack indicators
 
-## Overview
+## Quick Start
 
-Ares is an autonomous Security Operations Center (SOC) investigation agent that
-transforms security alerts into actionable threat intelligence.
-Using the [Dreadnode Agent SDK](https://github.com/dreadnode/agent-sdk), Ares
-conducts systematic, question-driven investigations guided by two complementary
-engines:
+```bash
+# Install
+git clone https://github.com/dreadnode/ares.git && cd ares
+uv venv && source .venv/bin/activate
+uv pip install -e .
 
-1. **MITRE ATT&CK Navigator**: Maps evidence to techniques, predicts follow-on
-   attacks, and identifies tactical gaps
-2. **Pyramid of Pain Climber**: Elevates analysis from trivial indicators (IPs,
-   hashes) to meaningful TTPs
+# Configure API keys in 1Password:
+# - "Dreadnode Dev Platform" -> api-key
+# - "Grafana" -> api-key
+# - "Anthropic" -> api-key
 
-## Key Features
+# Check config
+task ares:config:check
 
-- **Autonomous Investigation**: Polls Grafana for alerts and investigates
-  them end-to-end without human intervention
-- **Question-Driven Analysis**: Uses AI to generate and prioritize
-  investigative questions based on evidence
-- **Parallel Query Execution**: Maximizes efficiency by executing independent
-  queries simultaneously
-- **MITRE ATT&CK Integration**: Live integration with MITRE ATT&CK STIX/TAXII
-  for technique mapping and relationships
-- **Pyramid of Pain Framework**: Systematically elevates understanding from
-  trivial IOCs to behavioral TTPs
-- **Multi-Stage Workflow**: Structured investigation through
-  Triage → Causation → Lateral Movement → Synthesis
-- **Rich Observability**: Queries Loki (logs), Prometheus (metrics), and
-  Grafana (dashboards)
-- **Detailed Reports**: Generates markdown investigation reports with
-  timelines, MITRE mappings, and recommendations
-
-## Architecture
-
-```text
-┌─────────────────┐
-│  Grafana Alerts │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────────────────────────────┐
-│     Investigation Orchestrator          │
-│  (Dreadnode Agent SDK)                  │
-└─────────────┬───────────────────────────┘
-              │
-      ┌───────┴───────┐
-      │               │
-      ▼               ▼
-┌─────────────┐ ┌─────────────────┐
-│  Question   │ │  Investigation  │
-│  Engines    │ │  Tools          │
-├─────────────┤ ├─────────────────┤
-│ • MITRE     │ │ • Loki Query    │
-│   Navigator │ │ • Prometheus    │
-│ • Pyramid   │ │ • Grafana       │
-│   Climber   │ │ • State Mgmt    │
-└─────────────┘ └─────────────────┘
-              │
-              ▼
-      ┌───────────────┐
-      │   Markdown    │
-      │   Reports     │
-      └───────────────┘
+# Run
+task ares:run
 ```
-
-## Installation
-
-### Prerequisites
-
-- Python 3.11+
-- Access to Grafana, Loki, and Prometheus instances
-- API keys for:
-  - Grafana (for alert polling)
-  - OpenAI/Anthropic (for LLM inference)
-  - Dreadnode Platform (optional, for observability)
-
-### Setup
-
-1. Clone the repository:
-
-   ```bash
-   git clone https://github.com/dreadnode/ares.git
-   cd ares
-   ```
-
-2. Install dependencies using `uv`:
-
-   ```bash
-   uv venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   uv pip install -e .
-   ```
-
-3. Configure environment variables:
-
-   ```bash
-   export GRAFANA_API_KEY="your-grafana-api-key"  # pragma: allowlist secret
-   export ANTHROPIC_API_KEY="your-anthropic-api-key"  # pragma: allowlist secret
-   export DREADNODE_API_KEY="your-dreadnode-api-key"  # pragma: allowlist secret
-   ```
 
 ## Usage
 
-### Poll Mode (Continuous)
+### Using Taskfile (Recommended)
+
+The easiest way to run Ares is using the provided Taskfile with 1Password integration:
+
+```bash
+# Check configuration and 1Password access
+task ares:config:check
+
+# Run Ares in poll mode (retrieves API keys from 1Password)
+task ares:run
+
+# Investigate a specific alert
+task ares:investigate ALERT=alert.json
+
+# View investigation reports
+task ares:reports:list
+task ares:reports:latest
+```
+
+See [Taskfile Usage Guide](docs/taskfile_usage.md) for detailed documentation.
+
+### Direct CLI Usage
+
+#### Poll Mode (Continuous)
 
 Run Ares in continuous polling mode to automatically investigate alerts:
 
@@ -135,7 +85,7 @@ uv run python -m ares \
   --report-dir ./reports
 ```
 
-### Single Alert Investigation
+#### Single Alert Investigation
 
 Investigate a specific alert by providing it as JSON:
 
@@ -282,7 +232,8 @@ pytest --cov=src tests/
 
 ### Supported LLM Models
 
-Ares uses [litellm](https://github.com/BerriAI/litellm) format for model selection:
+Ares uses [litellm](https://github.com/BerriAI/litellm) format for model
+selection:
 
 - `claude-sonnet-4-20250514` (recommended)
 - `gpt-4o`
@@ -291,12 +242,33 @@ Ares uses [litellm](https://github.com/BerriAI/litellm) format for model selecti
 
 ## Observability
 
-Ares integrates with the Dreadnode Platform for comprehensive observability:
+Ares integrates with the Dreadnode Platform at
+<https://platform.dev.plundr.ai/> for comprehensive observability:
 
 - **Metrics**: Evidence count, pyramid levels, tool usage
 - **Traces**: Full investigation execution traces
 - **Logs**: Structured logs with context
 - **Artifacts**: Evidence items, questions, and reports
+
+### Configuring the Platform
+
+The Dreadnode platform can be configured via command-line arguments or
+environment variables:
+
+```bash
+# Via command line
+uv run python -m ares \
+  --dn-args.server https://platform.dev.plundr.ai/ \
+  --dn-args.token your-api-token \
+  --dn-args.organization ares \
+  --dn-args.workspace ares-protocol \
+  --dn-args.project ares-soc
+
+# Via environment variable
+export DREADNODE_API_KEY="your-dreadnode-api-key"  # pragma: allowlist secret
+```
+
+The default platform URL is `https://platform.dev.plundr.ai/`
 
 ## Contributing
 

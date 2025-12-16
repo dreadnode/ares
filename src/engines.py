@@ -330,7 +330,7 @@ class PyramidClimber:
 
         Returns distribution and recommendations.
         """
-        distribution = {level: 0 for level in PyramidLevel}
+        distribution = dict.fromkeys(PyramidLevel, 0)
 
         for ev in state.evidence:
             distribution[ev.pyramid_level] += 1

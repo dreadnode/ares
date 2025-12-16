@@ -2,7 +2,6 @@
 import re
 import sys
 from pathlib import Path
-from typing import List, Tuple
 
 
 class GitHubActionChecker:
@@ -30,9 +29,9 @@ class GitHubActionChecker:
         """
         return f"{file_path}:{line_number}"
 
-    def get_line_numbers(self, content: str, pattern: re.Pattern) -> List[Tuple[str, int]]:
+    def get_line_numbers(self, content: str, pattern: re.Pattern) -> list[tuple[str, int]]:
         """Find matches with their line numbers."""
-        matches: List[Tuple[str, int]] = []
+        matches: list[tuple[str, int]] = []
         matches.extend(
             (match.group(0), i)
             for i, line in enumerate(content.splitlines(), 1)
