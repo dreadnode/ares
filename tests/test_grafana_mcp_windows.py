@@ -10,7 +10,7 @@ import asyncio
 from datetime import datetime, timedelta
 
 
-async def test_grafana_mcp_windows_queries():
+async def test_grafana_mcp_windows_queries() -> None:
     """Test Grafana MCP integration for Windows attack detection."""
 
     # Note: This test demonstrates what queries the agent CAN make

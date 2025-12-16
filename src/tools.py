@@ -24,13 +24,13 @@ from .models import (
 )
 
 
-class LokiTools(Toolset):
+class LokiTools(Toolset):  # type: ignore[misc]
     """Tools for querying Loki log aggregation system."""
 
     base_url: str
     timeout: int = 30
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     async def query_logs(
         self,
         logql: str,
@@ -84,7 +84,7 @@ class LokiTools(Toolset):
             logger.error(f"Loki query failed: {e}")
             return {"error": str(e), "data": {"result": []}}
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     async def query_logs_around_timestamp(
         self,
         logql: str,
@@ -117,7 +117,7 @@ class LokiTools(Toolset):
             limit=limit,
         )
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     async def get_label_values(self, label: str) -> list[str]:
         """
         Get all values for a specific Loki label.
@@ -142,13 +142,13 @@ class LokiTools(Toolset):
             return []
 
 
-class PrometheusTools(Toolset):
+class PrometheusTools(Toolset):  # type: ignore[misc]
     """Tools for querying Prometheus metrics."""
 
     base_url: str
     timeout: int = 30
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     async def query_instant(
         self,
         promql: str,
@@ -191,7 +191,7 @@ class PrometheusTools(Toolset):
             logger.error(f"Prometheus query failed: {e}")
             return {"error": str(e), "data": {"result": []}}
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     async def query_range(
         self,
         promql: str,
@@ -231,7 +231,7 @@ class PrometheusTools(Toolset):
             logger.error(f"Prometheus range query failed: {e}")
             return {"error": str(e), "data": {"result": []}}
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     async def get_metric_names(self, search: str | None = None) -> list[str]:
         """
         Get available Prometheus metric names.
@@ -260,7 +260,7 @@ class PrometheusTools(Toolset):
             return []
 
 
-class GrafanaTools(Toolset):
+class GrafanaTools(Toolset):  # type: ignore[misc]
     """Tools for interacting with Grafana alerting."""
 
     base_url: str
@@ -270,7 +270,7 @@ class GrafanaTools(Toolset):
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}"}
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     async def get_firing_alerts(self) -> list[dict]:
         """
         Get all currently firing alerts from Grafana.
@@ -295,7 +295,7 @@ class GrafanaTools(Toolset):
             logger.error(f"Failed to get alerts: {e}")
             return []
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     async def get_alert_history(
         self,
         _hours: int = 24,
@@ -322,7 +322,7 @@ class GrafanaTools(Toolset):
             return []
 
 
-class GrafanaMCPTools(Toolset):
+class GrafanaMCPTools(Toolset):  # type: ignore[misc]
     """
     Tools for interacting with Grafana via MCP (Model Context Protocol).
 
@@ -335,7 +335,7 @@ class GrafanaMCPTools(Toolset):
 
     datasource_uid: str = "loki"
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def list_loki_label_names_guide(self) -> str:
         """
         Guide for listing available Loki label names.
@@ -367,7 +367,7 @@ Common labels to check:
 - namespace (Kubernetes namespaces)
 """
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def list_loki_label_values_guide(self, label_name: str) -> str:
         """
         Guide for listing values for a specific Loki label.
@@ -393,7 +393,7 @@ mcp__grafana__list_loki_label_values(
 This will return all values for the '{label_name}' label in your environment.
 """
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def query_loki_stats_guide(self, logql_selector: str) -> str:
         """
         Guide for querying Loki log statistics.
@@ -427,7 +427,7 @@ This returns:
 Use this BEFORE querying logs to understand data volume.
 """
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def query_loki_logs_guide(self, logql: str, limit: int = 10) -> str:
         """
         Guide for querying Loki logs with LogQL.
@@ -461,7 +461,7 @@ LogQL Examples:
 - {{environment="staging"}} | json | event_id="4624"
 """
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def search_attack_indicators_guide(self, environment: str = "staging") -> str:
         """
         Guide for searching attack indicators in an environment.
@@ -502,7 +502,7 @@ mcp__grafana__query_loki_logs:
 All queries should use datasourceUid="{self.datasource_uid}"
 """
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def discover_environment_guide(self, environment: str = "staging") -> str:
         """
         Guide for discovering environment structure.
@@ -548,7 +548,7 @@ This will give you a complete picture of the environment structure.
 """
 
 
-class InvestigationTools(Toolset):
+class InvestigationTools(Toolset):  # type: ignore[misc]
     """
     Tools for managing investigation state.
 
@@ -562,7 +562,7 @@ class InvestigationTools(Toolset):
         """Set the investigation state (called by orchestrator)."""
         self.state = state
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def record_evidence(
         self,
         evidence_type: str,
@@ -641,7 +641,7 @@ class InvestigationTools(Toolset):
 
         return evidence_id
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def add_timeline_event(
         self,
         timestamp: str,
@@ -693,7 +693,7 @@ class InvestigationTools(Toolset):
 
         return event_id
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def transition_stage(self, new_stage: str) -> str:
         """
         Transition to a new investigation stage.
@@ -723,7 +723,7 @@ class InvestigationTools(Toolset):
 
         return f"Transitioned from {old_stage.value} to {new_stage}"
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def get_investigation_summary(self) -> dict:
         """
         Get a summary of the current investigation state.
@@ -738,7 +738,7 @@ class InvestigationTools(Toolset):
 
         return self.state.to_summary()
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def track_host_investigation(self, hostname: str) -> str:
         """
         Mark a host as being investigated for lateral scope.
@@ -769,7 +769,7 @@ Prometheus:
 - process_cpu_seconds_total{{instance=~"{hostname}.*"}}
 """
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def track_user_investigation(self, username: str) -> str:
         """
         Mark a user as being investigated for lateral scope.
@@ -796,7 +796,7 @@ Loki:
 """
 
 
-class QuestionEngineTools(Toolset):
+class QuestionEngineTools(Toolset):  # type: ignore[misc]
     """
     Tools for the question engines that drive the investigation.
 
@@ -818,7 +818,7 @@ class QuestionEngineTools(Toolset):
         self.pyramid_climber = PyramidClimber()
         self.state = state
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def generate_mitre_questions(self) -> list[dict]:
         """
         Generate investigative questions based on MITRE ATT&CK framework.
@@ -844,7 +844,7 @@ class QuestionEngineTools(Toolset):
 
         return [q.to_dict() for q in questions[:10]]
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def generate_pyramid_questions(self) -> list[dict]:
         """
         Generate questions to climb the Pyramid of Pain.
@@ -874,7 +874,7 @@ class QuestionEngineTools(Toolset):
 
         return [q.to_dict() for q in questions[:10]]
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def assess_pyramid_state(self) -> dict:
         """
         Assess the current Pyramid of Pain state of the investigation.
@@ -890,7 +890,7 @@ class QuestionEngineTools(Toolset):
 
         return self.pyramid_climber.assess_pyramid_state(self.state)
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def get_combined_questions(self, max_questions: int = 10) -> list[dict]:
         """
         Get prioritized questions from BOTH engines combined.
@@ -919,7 +919,7 @@ class QuestionEngineTools(Toolset):
         return [q.to_dict() for q in all_questions[:max_questions]]
 
 
-class MITRELookupTools(Toolset):
+class MITRELookupTools(Toolset):  # type: ignore[misc]
     """Tools for looking up MITRE ATT&CK data."""
 
     mitre_client: MITREAttackClient | None = None
@@ -927,7 +927,7 @@ class MITRELookupTools(Toolset):
     def set_client(self, client: MITREAttackClient):
         self.mitre_client = client
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def lookup_technique(self, technique_id: str) -> dict | None:
         """
         Look up a MITRE ATT&CK technique by ID.
@@ -956,7 +956,7 @@ class MITRELookupTools(Toolset):
             "detection": technique.detection,
         }
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def get_related_techniques(self, technique_id: str) -> list[dict]:
         """
         Get techniques related to the given technique.
@@ -975,7 +975,7 @@ class MITRELookupTools(Toolset):
 
         return self.mitre_client.get_related_techniques(technique_id)
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def identify_tactical_gaps(self) -> list[dict]:
         """
         Identify which attack tactics haven't been investigated yet.
@@ -1001,7 +1001,7 @@ class MITRELookupTools(Toolset):
             for t in uncovered[:10]
         ]
 
-    @dn.tool_method
+    @dn.tool_method  # type: ignore[untyped-decorator]
     def search_techniques(self, keyword: str) -> list[dict]:
         """
         Search for techniques by keyword.
@@ -1027,7 +1027,7 @@ class MITRELookupTools(Toolset):
         ]
 
 
-@dn.tool()
+@dn.tool()  # type: ignore[untyped-decorator]
 async def complete_investigation(
     summary: str,
     attack_synopsis: str,
@@ -1068,7 +1068,7 @@ async def complete_investigation(
     return "Investigation completed. Report will be generated."
 
 
-@dn.tool()
+@dn.tool()  # type: ignore[untyped-decorator]
 async def escalate_investigation(
     reason: str,
     severity: str,

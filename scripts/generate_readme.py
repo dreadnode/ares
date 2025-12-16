@@ -1,12 +1,12 @@
 #!/usr/bin/python3
 import argparse
-import sys
+from typing import Any
 
 import tomli
 from jinja2 import Environment, FileSystemLoader
 
 
-def load_project_metadata():
+def load_project_metadata() -> dict[str, Any]:
     with open("pyproject.toml", "rb") as f:
         pyproject = tomli.load(f)
     return {
@@ -35,7 +35,7 @@ def get_section_content(content: str, start_marker: str, end_marker: str) -> tup
     return (content[start_idx : end_idx + len(end_marker)], start_idx, end_idx + len(end_marker))
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dry-run", action="store_true", help="Print to stdout instead of writing file"
@@ -111,4 +111,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

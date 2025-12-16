@@ -5,7 +5,7 @@ import sys
 from collections import defaultdict
 
 
-def get_commits_between_tags(previous_tag, current_tag):
+def get_commits_between_tags(previous_tag: str, current_tag: str) -> list[str]:
     """Get all commits between two tags."""
     try:
         # If current_tag is "HEAD", use the latest commit
@@ -23,7 +23,7 @@ def get_commits_between_tags(previous_tag, current_tag):
         sys.exit(1)
 
 
-def get_latest_tag():
+def get_latest_tag() -> str:
     """Get the latest tag in the repository."""
     try:
         cmd = "git describe --tags --abbrev=0"
@@ -35,7 +35,7 @@ def get_latest_tag():
         sys.exit(1)
 
 
-def get_previous_tag(current_tag):
+def get_previous_tag(current_tag: str) -> str:
     """Get the tag before the current tag."""
     try:
         cmd = f"git describe --tags --abbrev=0 {current_tag}^"
@@ -47,7 +47,7 @@ def get_previous_tag(current_tag):
         sys.exit(1)
 
 
-def categorize_commits(commits):
+def categorize_commits(commits: list[str]) -> dict[str, list[dict[str, str]]]:
     """Categorize commits based on conventional commit prefixes or patterns."""
     categories = {
         "feat": "New Features",
@@ -95,7 +95,9 @@ def categorize_commits(commits):
     return categorized_commits
 
 
-def format_for_llm(current_tag, previous_tag, categorized_commits):
+def format_for_llm(
+    current_tag: str, previous_tag: str, categorized_commits: dict[str, list[dict[str, str]]]
+) -> str:
     """Format the commits in a way that's useful for an LLM."""
     output = []
 
@@ -129,7 +131,7 @@ def format_for_llm(current_tag, previous_tag, categorized_commits):
     return "\n".join(output)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate release notes content for LLM from git commits."
     )

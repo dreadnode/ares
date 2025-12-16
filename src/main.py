@@ -71,7 +71,7 @@ class DreadnodeArgs:
     """Enable console output"""
 
 
-@app.default
+@app.default  # type: ignore[untyped-decorator]
 async def main(
     *,
     args: Args | None = None,
@@ -217,7 +217,7 @@ async def main(
             await asyncio.sleep(args.poll_interval)
 
 
-@app.command
+@app.command  # type: ignore[untyped-decorator]
 async def investigate_alert(
     alert_json: str,
     *,
@@ -288,7 +288,7 @@ async def investigate_alert(
     logger.success(f"  Report: {result['report_path']}")
 
 
-@app.command
+@app.command  # type: ignore[untyped-decorator]
 def version() -> None:
     """Print version information."""
 
