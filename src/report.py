@@ -31,14 +31,25 @@ PYRAMID_NAMES = {
 
 
 class MarkdownReportGenerator:
-    """Generates local markdown reports from investigation results."""
+    """Generates local markdown reports from investigation results.
+
+    Attributes:
+        output_dir: Directory where reports will be written.
+    """
 
     def __init__(self, output_dir: Path):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
 
     def generate(self, state: InvestigationState) -> Path:
-        """Generate the full markdown report."""
+        """Generate the full markdown report.
+
+        Args:
+            state: Investigation state containing all findings.
+
+        Returns:
+            Path to the generated markdown report file.
+        """
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         alert_name = state.alert.get("labels", {}).get("alertname", "unknown")
         # Sanitize filename
@@ -52,7 +63,14 @@ class MarkdownReportGenerator:
         return filepath
 
     def _build_report(self, state: InvestigationState) -> str:
-        """Build the full report content."""
+        """Build the full report content.
+
+        Args:
+            state: Investigation state to generate report from.
+
+        Returns:
+            Complete markdown report as a string.
+        """
         sections = [
             self._header(state),
             self._executive_summary(state),

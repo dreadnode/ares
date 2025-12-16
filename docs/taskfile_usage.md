@@ -152,9 +152,7 @@ Configuration:
   Workspace: ares-protocol
   Project: ares-soc
   Model: claude-sonnet-4-20250514
-  Grafana: http://localhost:3000
-  Loki: http://localhost:3100
-  Prometheus: http://localhost:9090
+  Grafana: https://grafana.dev.plundr.ai
 
 Checking 1Password CLI access...
   ✅ 1Password CLI installed: 2.24.0
@@ -248,9 +246,7 @@ All tasks support the following configuration variables:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `MODEL` | `claude-sonnet-4-20250514` | LLM model to use |
-| `GRAFANA_URL` | `http://localhost:3000` | Grafana URL for alerts |
-| `LOKI_URL` | `http://localhost:3100` | Loki URL for log queries |
-| `PROMETHEUS_URL` | `http://localhost:9090` | Prometheus URL for metrics |
+| `GRAFANA_URL` | `https://grafana.dev.plundr.ai` | Grafana URL for alerts |
 | `POLL_INTERVAL` | `30` | Seconds between alert polls |
 | `MAX_STEPS` | `150` | Maximum agent steps per investigation |
 | `REPORT_DIR` | `./reports` | Directory for markdown reports |

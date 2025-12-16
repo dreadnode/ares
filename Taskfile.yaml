@@ -14,8 +14,6 @@ vars:
   # Ares configuration
   MODEL: '{{.MODEL | default "claude-sonnet-4-20250514"}}'
   GRAFANA_URL: '{{.GRAFANA_URL | default "https://grafana.dev.plundr.ai"}}'
-  LOKI_URL: '{{.LOKI_URL | default "http://localhost:3100"}}'
-  PROMETHEUS_URL: '{{.PROMETHEUS_URL | default "http://localhost:9090"}}'
   POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
   MAX_STEPS: '{{.MAX_STEPS | default "150"}}'
   REPORT_DIR: '{{.REPORT_DIR | default "./reports"}}'
@@ -160,15 +158,13 @@ tasks:
 
         # Get API keys from 1Password
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
-        export GRAFANA_API_KEY=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
+        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
         export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
 
         # Run Ares using uv
         uv run python -m src \
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
-          --args.loki-url {{.LOKI_URL}} \
-          --args.prometheus-url {{.PROMETHEUS_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
           --args.max-steps {{.MAX_STEPS}} \
           --args.report-dir {{.REPORT_DIR}} \
@@ -202,8 +198,6 @@ tasks:
         uv run python -m src \
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
-          --args.loki-url {{.LOKI_URL}} \
-          --args.prometheus-url {{.PROMETHEUS_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
           --args.max-steps {{.MAX_STEPS}} \
           --args.report-dir {{.REPORT_DIR}} \
@@ -228,15 +222,13 @@ tasks:
 
         # Get API keys from 1Password
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
-        export GRAFANA_API_KEY=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
+        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
         export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
 
         # Run investigation
         uv run python -m src investigate-alert {{.ALERT}} \
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
-          --args.loki-url {{.LOKI_URL}} \
-          --args.prometheus-url {{.PROMETHEUS_URL}} \
           --args.max-steps {{.MAX_STEPS}} \
           --args.report-dir {{.REPORT_DIR}} \
           --dn-args.server {{.DREADNODE_SERVER}} \
@@ -286,11 +278,11 @@ tasks:
           echo "     Field: 'api-key'"
         fi
 
-        # Check Grafana API key
+        # Check Grafana service account token
         if op item get "Ares Grafana MCP" --fields grafana-token --reveal >/dev/null 2>&1; then
-          echo "  ✅ Grafana API key accessible"
+          echo "  ✅ Grafana service account token accessible"
         else
-          echo "  ⚠️  Grafana API key not found in 1Password"
+          echo "  ⚠️  Grafana service account token not found in 1Password"
           echo "     Item: 'Ares Grafana MCP'"
           echo "     Field: 'grafana-token'"
         fi
@@ -324,8 +316,7 @@ tasks:
         echo ""
         echo "Data Sources:"
         echo "  Grafana: {{.GRAFANA_URL}}"
-        echo "  Loki: {{.LOKI_URL}}"
-        echo "  Prometheus: {{.PROMETHEUS_URL}}"
+        echo "  Query Method: Grafana MCP (requires mcp-grafana binary)"
         echo ""
         echo "Output:"
         echo "  Reports: {{.REPORT_DIR}}"

@@ -28,22 +28,42 @@ mappings.
 
 ## Quick Start
 
+**Prerequisites:**
+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
+- [Task](https://taskfile.dev/installation/) (optional but recommended)
+- [1Password CLI](https://developer.1password.com/docs/cli/get-started/) for credential management
+- [mcp-grafana](https://github.com/grafana/mcp-grafana) MCP server: `go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest`
+
+**Setup:**
+
 ```bash
-# Install
+# 1. Clone and install
 git clone https://github.com/dreadnode/ares.git && cd ares
-uv venv && source .venv/bin/activate
-uv pip install -e .
+uv sync
 
-# Configure API keys in 1Password:
-# - "Dreadnode Dev Platform" -> api-key
-# - "Grafana" -> api-key
-# - "Anthropic" -> api-key
+# 2. Configure API keys in 1Password (or set environment variables):
+#    - "Dreadnode Dev Platform" -> api-key field
+#    - "Ares Grafana MCP" -> grafana-token field
+#    - "claude.ai" -> dreadnode-api-key field
 
-# Check config
+# 3. Verify configuration
 task ares:config:check
 
-# Run
+# 4. Run the agent (polls Grafana for alerts)
 task ares:run
+```
+
+**Without 1Password:**
+
+```bash
+# Create .env file with your credentials
+cp .env.example .env
+# Edit .env with your API keys
+
+# Run using local environment
+task ares:run:local
 ```
 
 ## Usage
@@ -56,33 +76,52 @@ The easiest way to run Ares is using the provided Taskfile with 1Password integr
 # Check configuration and 1Password access
 task ares:config:check
 
-# Run Ares in poll mode (retrieves API keys from 1Password)
+# Run Ares in poll mode (retrieves API keys from 1Password automatically)
 task ares:run
 
-# Investigate a specific alert
-task ares:investigate ALERT=alert.json
+# Investigate a specific alert from JSON file
+task ares:investigate ALERT=test-alerts/example-alert.json
 
 # View investigation reports
-task ares:reports:list
-task ares:reports:latest
+task ares:reports:list        # List all reports
+task ares:reports:latest      # Show latest report
 ```
+
+**Available Tasks:**
+
+| Command | Description |
+|---------|-------------|
+| `task ares:run` | Run agent in poll mode (checks Grafana every 30s for new alerts) |
+| `task ares:run:local` | Run using .env file instead of 1Password |
+| `task ares:investigate ALERT=<file>` | Investigate a specific alert from JSON file |
+| `task ares:config:check` | Verify configuration and 1Password access |
+| `task ares:config:show` | Display current configuration (no secrets) |
+| `task ares:reports:list` | List all investigation reports |
+| `task ares:reports:latest` | Show the most recent report |
+| `task ares:reports:clean` | Delete all reports (asks for confirmation) |
+| `task ares:mitre:test` | Test MITRE ATT&CK data loading |
 
 See [Taskfile Usage Guide](docs/taskfile_usage.md) for detailed documentation.
 
-### Direct CLI Usage
+### Direct CLI Usage (Advanced)
 
 #### Poll Mode (Continuous)
 
 Run Ares in continuous polling mode to automatically investigate alerts:
 
 ```bash
-uv run python -m ares \
-  --model claude-sonnet-4-20250514 \
-  --grafana-url http://grafana:3000 \
-  --loki-url http://loki:3100 \
-  --prometheus-url http://prometheus:9090 \
-  --poll-interval 30 \
-  --report-dir ./reports
+# Set required environment variables
+export GRAFANA_SERVICE_ACCOUNT_TOKEN="your-grafana-token"  # pragma: allowlist secret
+export ANTHROPIC_API_KEY="your-anthropic-key"  # pragma: allowlist secret
+export DREADNODE_API_KEY="your-dreadnode-key"  # optional  # pragma: allowlist secret
+
+# Run the agent
+uv run python -m src \
+  --args.model claude-sonnet-4-20250514 \
+  --args.grafana-url https://grafana.example.com \
+  --args.poll-interval 30 \
+  --args.max-steps 150 \
+  --args.report-dir ./reports
 ```
 
 #### Single Alert Investigation
@@ -90,21 +129,34 @@ uv run python -m ares \
 Investigate a specific alert by providing it as JSON:
 
 ```bash
-uv run python -m ares investigate-alert alert.json
+# Using environment variables (as above)
+uv run python -m src investigate-alert test-alerts/example-alert.json \
+  --args.model claude-sonnet-4-20250514 \
+  --args.grafana-url https://grafana.example.com \
+  --args.max-steps 150
 ```
 
 ### Command-Line Options
 
-```text
---model              LLM model to use (default: claude-sonnet-4-20250514)
---grafana-url        Grafana URL (default: http://localhost:3000)
---grafana-api-key    Grafana API key (or set GRAFANA_API_KEY env var)
---loki-url           Loki URL for log queries (default: http://localhost:3100)
---prometheus-url     Prometheus URL for metrics (default: http://localhost:9090)
---poll-interval      Seconds between alert polls (default: 30)
---max-steps          Maximum agent steps per investigation (default: 150)
---report-dir         Directory for markdown reports (default: reports)
-```
+**Agent Arguments (`--args.*`):**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--args.model` | `claude-sonnet-4-20250514` | LLM model to use |
+| `--args.grafana-url` | `https://grafana.dev.plundr.ai` | Grafana URL for alerts and MCP |
+| `--args.poll-interval` | `30` | Seconds between alert polls |
+| `--args.max-steps` | `150` | Maximum agent steps per investigation |
+| `--args.report-dir` | `./reports` | Directory for markdown reports |
+
+**Dreadnode Platform Arguments (`--dn-args.*`):**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--dn-args.server` | `https://platform.dev.plundr.ai/` | Dreadnode platform server URL |
+| `--dn-args.token` | from `DREADNODE_API_KEY` | Dreadnode API token |
+| `--dn-args.organization` | `ares` | Dreadnode organization name |
+| `--dn-args.workspace` | `ares-protocol` | Dreadnode workspace name |
+| `--dn-args.project` | `ares-soc` | Dreadnode project name |
 
 ## Investigation Workflow
 
@@ -226,9 +278,14 @@ pytest --cov=src tests/
 
 ### Environment Variables
 
-- `GRAFANA_API_KEY`: Grafana API key for alert polling
-- `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`: LLM provider API key
-- `DREADNODE_API_KEY`: Dreadnode platform token (optional)
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GRAFANA_URL` | Yes | Grafana instance URL (e.g., `https://grafana.example.com`) |
+| `GRAFANA_SERVICE_ACCOUNT_TOKEN` | Yes | Grafana service account token for API access |
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude models |
+| `DREADNODE_API_KEY` | No | Dreadnode platform token for observability |
+
+**Note:** `GRAFANA_API_KEY` is deprecated. Use `GRAFANA_SERVICE_ACCOUNT_TOKEN` instead. See [Grafana's service account documentation](https://grafana.com/docs/grafana/latest/administration/service-accounts/) for details.
 
 ### Supported LLM Models
 

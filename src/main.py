@@ -21,56 +21,47 @@ app = cyclopts.App(
 
 @dataclass
 class Args:
-    """Investigation agent arguments."""
+    """Investigation agent arguments.
+
+    Attributes:
+        model: LLM model to use (supports litellm format).
+        grafana_url: Grafana URL for alert polling and MCP connection.
+        grafana_api_key: Grafana API key (or set GRAFANA_API_KEY env var).
+        poll_interval: Seconds between alert polling cycles.
+        max_steps: Maximum agent steps per investigation.
+        report_dir: Directory for markdown reports.
+    """
 
     model: str = "claude-sonnet-4-20250514"
-    """LLM model to use (supports litellm format)"""
-
-    grafana_url: str = "http://localhost:3000"
-    """Grafana URL for alert polling"""
-
+    grafana_url: str = "https://grafana.dev.plundr.ai"
     grafana_api_key: str = ""
-    """Grafana API key (or set GRAFANA_API_KEY env var)"""
-
-    loki_url: str = "http://localhost:3100"
-    """Loki URL for log queries"""
-
-    prometheus_url: str = "http://localhost:9090"
-    """Prometheus URL for metric queries"""
-
     poll_interval: int = 30
-    """Seconds between alert polling cycles"""
-
     max_steps: int = 150
-    """Maximum agent steps per investigation"""
-
     report_dir: str = "reports"
-    """Directory for markdown reports"""
 
 
 @dataclass
 class DreadnodeArgs:
-    """Dreadnode platform arguments."""
+    """Dreadnode platform arguments.
+
+    Attributes:
+        server: Dreadnode platform server URL.
+        token: Dreadnode API token (or set DREADNODE_API_KEY env var).
+        organization: Dreadnode organization name.
+        workspace: Dreadnode workspace name.
+        project: Dreadnode project name.
+        console: Enable console output.
+    """
 
     server: str = "https://platform.dev.plundr.ai/"
-    """Dreadnode platform server URL"""
-
     token: str = ""
-    """Dreadnode API token (or set DREADNODE_API_KEY env var)"""
-
     organization: str = "ares"
-    """Dreadnode organization name"""
-
     workspace: str = "ares-protocol"
-    """Dreadnode workspace name"""
-
     project: str = "ares-soc"
-    """Dreadnode project name"""
-
     console: bool = True
-    """Enable console output"""
 
 
+# Cyclopts decorator typing not yet fully supported by type checkers
 @app.default  # type: ignore[untyped-decorator]
 async def main(
     *,
@@ -114,14 +105,11 @@ async def main(
     logger.info("=" * 60)
     logger.info(f"Model: {args.model}")
     logger.info(f"Grafana: {args.grafana_url}")
-    logger.info(f"Loki: {args.loki_url}")
-    logger.info(f"Prometheus: {args.prometheus_url}")
     logger.info(f"Poll Interval: {args.poll_interval}s")
     logger.info(f"Max Steps: {args.max_steps}")
     logger.info(f"Report Dir: {args.report_dir}")
     logger.info("=" * 60)
 
-    # Import here to avoid circular imports
     from .agent import InvestigationOrchestrator
     from .mitre import MITREAttackClient
     from .tools import GrafanaTools
@@ -130,6 +118,7 @@ async def main(
     logger.info("Loading MITRE ATT&CK data from STIX repository...")
     mitre_client = MITREAttackClient()
     await mitre_client.load()
+    # Accessing protected members for logging/diagnostics only - not modifying internal state
     techniques_count = len(mitre_client._techniques)  # noqa: SLF001
     tactics_count = len(mitre_client._tactics)  # noqa: SLF001
     logger.success(f"Loaded {techniques_count} techniques, {tactics_count} tactics")
@@ -142,8 +131,6 @@ async def main(
     orchestrator = InvestigationOrchestrator(
         model=args.model,
         grafana_url=args.grafana_url,
-        loki_url=args.loki_url,
-        prometheus_url=args.prometheus_url,
         grafana_api_key=grafana_api_key,
         mitre_client=mitre_client,
         report_dir=report_dir,
@@ -217,6 +204,7 @@ async def main(
             await asyncio.sleep(args.poll_interval)
 
 
+# Cyclopts decorator typing not yet fully supported by type checkers
 @app.command  # type: ignore[untyped-decorator]
 async def investigate_alert(
     alert_json: str,
@@ -270,8 +258,6 @@ async def investigate_alert(
     orchestrator = InvestigationOrchestrator(
         model=args.model,
         grafana_url=args.grafana_url,
-        loki_url=args.loki_url,
-        prometheus_url=args.prometheus_url,
         grafana_api_key=grafana_api_key,
         mitre_client=mitre_client,
         report_dir=report_dir,
@@ -288,6 +274,7 @@ async def investigate_alert(
     logger.success(f"  Report: {result['report_path']}")
 
 
+# Cyclopts decorator typing not yet fully supported by type checkers
 @app.command  # type: ignore[untyped-decorator]
 def version() -> None:
     """Print version information."""

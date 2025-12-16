@@ -1,5 +1,11 @@
 # Testing code
 notebooks/
+test-alerts/
+
+# Project-specific ignores
+TODO
+.tool-versions
+reports/
 
 # Custom parquet storage
 *.parquet

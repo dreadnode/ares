@@ -11,9 +11,22 @@ MITRE_STIX_URL = "https://raw.githubusercontent.com/mitre-attack/attack-stix-dat
 
 @dataclass
 class Technique:
-    """A MITRE ATT&CK technique."""
+    """A MITRE ATT&CK technique.
 
-    id: str  # e.g., T1059.001
+    Attributes:
+        id: Technique ID (e.g., T1059.001).
+        name: Human-readable technique name.
+        description: Detailed description of the technique.
+        tactic: Tactic short name (e.g., "execution").
+        tactic_id: Tactic ID (e.g., "TA0002").
+        platforms: List of platforms this technique applies to.
+        data_sources: List of data sources for detecting this technique.
+        detection: Detection guidance text.
+        is_subtechnique: Whether this is a sub-technique.
+        parent_technique: Parent technique ID if this is a sub-technique.
+    """
+
+    id: str
     name: str
     description: str
     tactic: str
@@ -27,20 +40,29 @@ class Technique:
 
 @dataclass
 class Tactic:
-    """A MITRE ATT&CK tactic."""
+    """A MITRE ATT&CK tactic.
 
-    id: str  # e.g., TA0001
+    Attributes:
+        id: Tactic ID (e.g., TA0001).
+        name: Human-readable tactic name.
+        shortname: Short name used in kill chain phases.
+        description: Detailed description of the tactic.
+    """
+
+    id: str
     name: str
     shortname: str
     description: str
 
 
 class MITREAttackClient:
-    """
-    Client for MITRE ATT&CK data.
+    """Client for MITRE ATT&CK data.
 
     Fetches live data from the MITRE STIX repository and provides
     lookups for techniques, tactics, and relationships.
+
+    Attributes:
+        TACTIC_MAP: Class-level mapping of tactic shortnames to IDs.
     """
 
     def __init__(self):
@@ -166,15 +188,63 @@ class MITREAttackClient:
         self._tactics[tactic_id] = tactic
 
     def get_technique(self, technique_id: str) -> Technique | None:
-        """Get a technique by ID."""
+        """Get a technique by ID.
+
+        Args:
+            technique_id: MITRE technique ID (e.g., "T1059.001").
+
+        Returns:
+            Technique object if found, None otherwise.
+
+        Example:
+            >>> client.get_technique("T1059.001")
+            Technique(id='T1059.001', name='PowerShell', ...)
+
+        See Also:
+            get_tactic: For retrieving tactic information.
+            get_techniques_for_tactic: For all techniques in a tactic.
+        """
         return self._techniques.get(technique_id)
 
     def get_tactic(self, tactic_id: str) -> Tactic | None:
-        """Get a tactic by ID."""
+        """Get a tactic by ID.
+
+        Args:
+            tactic_id: MITRE tactic ID (e.g., "TA0002").
+
+        Returns:
+            Tactic object if found, None otherwise.
+
+        Example:
+            >>> client.get_tactic("TA0002")
+            Tactic(id='TA0002', name='Execution', shortname='execution', ...)
+
+        See Also:
+            get_technique: For retrieving technique information.
+            get_techniques_for_tactic: For all techniques in this tactic.
+        """
         return self._tactics.get(tactic_id)
 
     def get_techniques_for_tactic(self, tactic_id: str) -> list[Technique]:
-        """Get all techniques in a tactic."""
+        """Get all techniques in a tactic.
+
+        Args:
+            tactic_id: MITRE tactic ID (e.g., "TA0002").
+
+        Returns:
+            List of Technique objects for the tactic.
+
+        Example:
+            >>> techniques = client.get_techniques_for_tactic("TA0002")
+            >>> len(techniques)
+            42
+            >>> techniques[0].name
+            'PowerShell'
+
+        See Also:
+            get_tactic: For retrieving tactic details.
+            get_uncovered_tactics: For finding gaps in coverage.
+        """
         tech_ids = self._tactic_to_techniques.get(tactic_id, [])
         return [self._techniques[tid] for tid in tech_ids if tid in self._techniques]
 
