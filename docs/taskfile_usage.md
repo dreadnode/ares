@@ -1,0 +1,440 @@
+# Taskfile Usage for Ares
+
+This document describes how to use the Taskfile to run and manage the Ares SOC
+Investigation Agent.
+
+## Prerequisites
+
+1. **Task**: Install from https://taskfile.dev/installation/
+2. **1Password CLI**: Install from https://developer.1password.com/docs/cli/get-started/
+3. **uv**: Python package manager (installed via the setup process)
+
+## Quick Start
+
+### 1. Trust Remote Taskfiles (First Time Only)
+
+The first time you run tasks, you'll need to trust the remote taskfiles:
+
+```bash
+task --trust
+```
+
+### 2. Check Configuration
+
+Verify your configuration and 1Password access:
+
+```bash
+task ares:config:check
+```
+
+This will check:
+
+- Python and uv installation
+- Dreadnode platform configuration
+- 1Password CLI access
+- API key availability in 1Password
+
+### 3. Run Ares
+
+Start Ares in poll mode (automatically polls Grafana for alerts):
+
+```bash
+task ares:run
+```
+
+This will:
+
+1. Retrieve API keys from 1Password:
+   - `Dreadnode Dev Platform` → `api-key` field
+   - `Grafana` → `api-key` field
+   - `Anthropic` → `api-key` field
+2. Start Ares with the configured platform (https://platform.dev.plundr.ai/)
+3. Poll for alerts every 30 seconds (configurable)
+
+## Available Tasks
+
+### Running Ares
+
+#### `task ares:run`
+
+Run Ares in poll mode with 1Password API keys.
+
+**Example:**
+
+```bash
+# Use default configuration
+task ares:run
+
+# Custom Grafana URL
+task ares:run GRAFANA_URL=http://grafana.example.com:3000
+
+# Custom model
+task ares:run MODEL=gpt-4o
+
+# Custom poll interval (60 seconds)
+task ares:run POLL_INTERVAL=60
+
+# Multiple overrides
+task ares:run \
+  GRAFANA_URL=http://grafana.example.com:3000 \
+  LOKI_URL=http://loki.example.com:3100 \
+  MODEL=claude-sonnet-4-20250514 \
+  POLL_INTERVAL=60
+```
+
+#### `task ares:run:local`
+
+Run Ares using `.env` file instead of 1Password.
+
+**Example:**
+
+```bash
+# Create .env file first
+cp .env.example .env
+# Edit .env with your API keys
+
+# Run with .env
+task ares:run:local
+```
+
+#### `task ares:investigate`
+
+Investigate a specific alert from a JSON file.
+
+**Example:**
+
+```bash
+# Create alert.json with alert data
+cat > alert.json <<EOF
+{
+  "labels": {
+    "alertname": "HighCPUUsage",
+    "severity": "warning",
+    "instance": "web-01",
+    "job": "kubernetes-nodes"
+  },
+  "annotations": {
+    "summary": "High CPU usage detected",
+    "description": "CPU usage is above 80% for 5 minutes"
+  },
+  "startsAt": "2024-01-15T10:00:00Z"
+}
+EOF
+
+# Investigate the alert
+task ares:investigate ALERT=alert.json
+```
+
+### Configuration
+
+#### `task ares:config:check`
+
+Check configuration and verify 1Password access.
+
+**Example:**
+
+```bash
+task ares:config:check
+```
+
+**Output:**
+
+```text
+Checking Ares configuration...
+
+Environment:
+  Python: Python 3.11.7
+  uv: uv 0.1.0
+
+Configuration:
+  Platform: https://platform.dev.plundr.ai/
+  Organization: ares
+  Workspace: ares-protocol
+  Project: ares-soc
+  Model: claude-sonnet-4-20250514
+  Grafana: https://grafana.dev.plundr.ai
+
+Checking 1Password CLI access...
+  ✅ 1Password CLI installed: 2.24.0
+  ✅ Dreadnode API key accessible
+  ✅ Grafana API key accessible
+  ✅ Anthropic API key accessible
+
+Configuration check complete
+```
+
+#### `task ares:config:show`
+
+Display current configuration (without secrets).
+
+**Example:**
+
+```bash
+task ares:config:show
+```
+
+### Reports
+
+#### `task ares:reports:list`
+
+List all investigation reports.
+
+**Example:**
+
+```bash
+task ares:reports:list
+```
+
+#### `task ares:reports:latest`
+
+Display the most recent investigation report.
+
+**Example:**
+
+```bash
+task ares:reports:latest
+```
+
+#### `task ares:reports:clean`
+
+Remove all investigation reports (prompts for confirmation).
+
+**Example:**
+
+```bash
+task ares:reports:clean
+```
+
+### Development
+
+#### `task ares:version`
+
+Show Ares version information.
+
+**Example:**
+
+```bash
+task ares:version
+```
+
+#### `task ares:mitre:test`
+
+Test MITRE ATT&CK data loading.
+
+**Example:**
+
+```bash
+task ares:mitre:test
+```
+
+**Output:**
+
+```text
+✅ Loaded 642 techniques
+✅ Loaded 14 tactics
+
+Sample technique:
+  ID: T1059.001
+  Name: PowerShell
+  Tactic: execution
+```
+
+## Configuration Variables
+
+All tasks support the following configuration variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MODEL` | `claude-sonnet-4-20250514` | LLM model to use |
+| `GRAFANA_URL` | `https://grafana.dev.plundr.ai` | Grafana URL for alerts |
+| `POLL_INTERVAL` | `30` | Seconds between alert polls |
+| `MAX_STEPS` | `150` | Maximum agent steps per investigation |
+| `REPORT_DIR` | `./reports` | Directory for markdown reports |
+| `DREADNODE_SERVER` | `https://platform.dev.plundr.ai/` | Dreadnode platform URL |
+| `DREADNODE_ORGANIZATION` | `ares` | Dreadnode organization name |
+| `DREADNODE_WORKSPACE` | `ares-protocol` | Dreadnode workspace name |
+| `DREADNODE_PROJECT` | `ares-soc` | Dreadnode project name |
+
+**Example with custom variables:**
+
+```bash
+task ares:run \
+  MODEL=gpt-4o \
+  GRAFANA_URL=http://grafana.prod.example.com:3000 \
+  LOKI_URL=http://loki.prod.example.com:3100 \
+  PROMETHEUS_URL=http://prometheus.prod.example.com:9090 \
+  POLL_INTERVAL=60 \
+  MAX_STEPS=200 \
+  REPORT_DIR=./production-reports \
+  DREADNODE_PROJECT=ares-prod
+```
+
+## 1Password Setup
+
+### Required Items
+
+Ares expects the following items in 1Password:
+
+1. **Dreadnode Dev Platform** (Required)
+   - Field: `api-key`
+   - Used for: Platform observability and tracing
+
+2. **Grafana** (Optional, can use GRAFANA_API_KEY env var)
+   - Field: `api-key`
+   - Used for: Alert polling and dashboard access
+
+3. **Anthropic** (Optional, can use ANTHROPIC_API_KEY env var)
+   - Field: `api-key`
+   - Used for: Claude model inference
+
+### Creating 1Password Items
+
+If items don't exist, create them:
+
+```bash
+# Create Dreadnode item
+op item create \
+  --category="API Credential" \
+  --title="Dreadnode Dev Platform" \
+  api-key="your-dreadnode-api-key"
+
+# Create Grafana item
+op item create \
+  --category="API Credential" \
+  --title="Grafana" \
+  api-key="your-grafana-api-key"
+
+# Create Anthropic item
+op item create \
+  --category="API Credential" \
+  --title="Anthropic" \
+  api-key="your-anthropic-api-key"
+```
+
+### Verifying 1Password Access
+
+Test that you can retrieve the API keys:
+
+```bash
+# Test Dreadnode key
+op item get "Dreadnode Dev Platform" --fields api-key --reveal
+
+# Test Grafana key
+op item get "Grafana" --fields api-key --reveal
+
+# Test Anthropic key
+op item get "Anthropic" --fields api-key --reveal
+```
+
+## Common Workflows
+
+### Development Workflow
+
+```bash
+# 1. Check configuration
+task ares:config:check
+
+# 2. Test MITRE data loading
+task ares:mitre:test
+
+# 3. Run Ares in poll mode
+task ares:run
+
+# 4. In another terminal, check reports
+task ares:reports:list
+
+# 5. View latest report
+task ares:reports:latest
+```
+
+### Production Workflow
+
+```bash
+# Run with production configuration
+task ares:run \
+  GRAFANA_URL=http://grafana.prod.example.com:3000 \
+  LOKI_URL=http://loki.prod.example.com:3100 \
+  PROMETHEUS_URL=http://prometheus.prod.example.com:9090 \
+  DREADNODE_PROJECT=ares-prod \
+  POLL_INTERVAL=60
+```
+
+### Single Alert Investigation
+
+```bash
+# 1. Create alert JSON
+cat > suspicious-activity.json <<EOF
+{
+  "labels": {
+    "alertname": "SuspiciousProcessExecution",
+    "severity": "high",
+    "host": "web-01"
+  }
+}
+EOF
+
+# 2. Investigate
+task ares:investigate ALERT=suspicious-activity.json
+
+# 3. View report
+task ares:reports:latest
+```
+
+## Troubleshooting
+
+### 1Password CLI Not Found
+
+```bash
+# Install 1Password CLI
+# macOS
+brew install --cask 1password-cli
+
+# Linux
+curl -sS https://downloads.1password.com/linux/keys/1password.asc | \
+sudo gpg --dearmor --output /usr/share/keyrings/1password-archive-keyring.gpg
+```
+
+### API Key Not Found
+
+If you get "API key not found" errors:
+
+1. Check 1Password item names match exactly:
+   - "Dreadnode Dev Platform"
+   - "Grafana"
+   - "Anthropic"
+
+2. Verify field name is "api-key"
+
+3. Ensure you're signed into 1Password CLI:
+
+   ```bash
+   op signin
+   ```
+
+### Task Not Trusted
+
+```bash
+# Trust remote taskfiles
+task --trust
+
+# Or trust permanently
+echo 'export TASK_X_REMOTE_TASKFILES=1' >> ~/.bashrc
+source ~/.bashrc
+```
+
+## Additional Tasks
+
+The Taskfile also includes standard development tasks:
+
+- `task init` - Initialize project
+- `task clean` - Clean Python artifacts
+- `task mypy` - Run type checking
+- `task ruff` - Run linting
+- `task pytest` - Run tests
+- `task pre-commit:run-hooks` - Run pre-commit hooks
+
+For a complete list of available tasks:
+
+```bash
+task --list
+```

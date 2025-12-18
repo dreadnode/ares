@@ -5,7 +5,7 @@ import sys
 from collections import defaultdict
 
 
-def get_commits_between_tags(previous_tag, current_tag):
+def get_commits_between_tags(previous_tag: str, current_tag: str) -> list[str]:
     """Get all commits between two tags."""
     try:
         # If current_tag is "HEAD", use the latest commit
@@ -19,12 +19,11 @@ def get_commits_between_tags(previous_tag, current_tag):
             cmd, shell=True, check=True, capture_output=True, text=True
         )
         return result.stdout.strip().split("\n")
-    except subprocess.CalledProcessError as e:
-        print(f"Error getting commits between tags: {e}")
+    except subprocess.CalledProcessError:
         sys.exit(1)
 
 
-def get_latest_tag():
+def get_latest_tag() -> str:
     """Get the latest tag in the repository."""
     try:
         cmd = "git describe --tags --abbrev=0"
@@ -32,12 +31,11 @@ def get_latest_tag():
             cmd, shell=True, check=True, capture_output=True, text=True
         )
         return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print(f"Error getting latest tag: {e}")
+    except subprocess.CalledProcessError:
         sys.exit(1)
 
 
-def get_previous_tag(current_tag):
+def get_previous_tag(current_tag: str) -> str:
     """Get the tag before the current tag."""
     try:
         cmd = f"git describe --tags --abbrev=0 {current_tag}^"
@@ -45,12 +43,11 @@ def get_previous_tag(current_tag):
             cmd, shell=True, check=True, capture_output=True, text=True
         )
         return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print(f"Error getting previous tag: {e}")
+    except subprocess.CalledProcessError:
         sys.exit(1)
 
 
-def categorize_commits(commits):
+def categorize_commits(commits: list[str]) -> dict[str, list[dict[str, str]]]:
     """Categorize commits based on conventional commit prefixes or patterns."""
     categories = {
         "feat": "New Features",
@@ -98,7 +95,9 @@ def categorize_commits(commits):
     return categorized_commits
 
 
-def format_for_llm(current_tag, previous_tag, categorized_commits):
+def format_for_llm(
+    current_tag: str, previous_tag: str, categorized_commits: dict[str, list[dict[str, str]]]
+) -> str:
     """Format the commits in a way that's useful for an LLM."""
     output = []
 
@@ -112,7 +111,7 @@ def format_for_llm(current_tag, previous_tag, categorized_commits):
         "Please generate comprehensive release notes based on the following commit information."
     )
     output.append(
-        "Organize the notes by category, highlight major features and fixes, and provide a brief summary of the release."  # noqa: E501
+        "Organize the notes by category, highlight major features and fixes, and provide a brief summary of the release."
     )
     output.append("The notes should be clear, concise, and suitable for users of the software.\n")
 
@@ -132,7 +131,7 @@ def format_for_llm(current_tag, previous_tag, categorized_commits):
     return "\n".join(output)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate release notes content for LLM from git commits."
     )
@@ -160,18 +159,9 @@ def main():
     # Determine previous tag
     previous_tag = args.previous_tag if args.previous_tag else get_previous_tag(current_tag)
 
-    print(
-        f"Generating release notes from {previous_tag} to {current_tag}...",
-        file=sys.stderr,
-    )
-
     # Get and categorize commits
     commits = get_commits_between_tags(previous_tag, current_tag)
     if not commits or (len(commits) == 1 and not commits[0]):
-        print(
-            f"No commits found between {previous_tag} and {current_tag}",
-            file=sys.stderr,
-        )
         sys.exit(0)
 
     categorized_commits = categorize_commits(commits)
@@ -183,9 +173,8 @@ def main():
     if args.output:
         with open(args.output, "w") as f:
             f.write(content)
-        print(f"Release notes content written to {args.output}", file=sys.stderr)
     else:
-        print(content)
+        pass
 
 
 if __name__ == "__main__":

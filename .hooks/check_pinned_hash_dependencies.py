@@ -2,11 +2,10 @@
 import re
 import sys
 from pathlib import Path
-from typing import List, Tuple
 
 
 class GitHubActionChecker:
-    def __init__(self):
+    def __init__(self) -> None:
         # Pattern for actions with SHA-1 hashes (pinned)
         self.pinned_pattern = re.compile(r"uses:\s+([^@\s]+)@([a-f0-9]{40})")
 
@@ -30,9 +29,9 @@ class GitHubActionChecker:
         """
         return f"{file_path}:{line_number}"
 
-    def get_line_numbers(self, content: str, pattern: re.Pattern) -> List[Tuple[str, int]]:
+    def get_line_numbers(self, content: str, pattern: re.Pattern[str]) -> list[tuple[str, int]]:
         """Find matches with their line numbers."""
-        matches: List[Tuple[str, int]] = []
+        matches: list[tuple[str, int]] = []
         matches.extend(
             (match.group(0), i)
             for i, line in enumerate(content.splitlines(), 1)
@@ -107,7 +106,7 @@ class GitHubActionChecker:
         return not has_errors
 
 
-def main():
+def main() -> None:
     checker = GitHubActionChecker()
     files_to_check = sys.argv[1:]
 
