@@ -1,13 +1,26 @@
 ---
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
 version: "3"
 
 includes:
+  aws: "https://raw.githubusercontent.com/CowDogMoo/taskfile-templates/main/aws/Taskfile.yaml"
   github: "https://raw.githubusercontent.com/CowDogMoo/taskfile-templates/main/github/Taskfile.yaml"
   pre-commit: "https://raw.githubusercontent.com/CowDogMoo/taskfile-templates/main/pre-commit/Taskfile.yaml"
   renovate: "https://raw.githubusercontent.com/CowDogMoo/taskfile-templates/main/renovate/Taskfile.yaml"
+  secrets: "https://raw.githubusercontent.com/CowDogMoo/taskfile-templates/main/secrets/Taskfile.yaml"  # pragma: allowlist secret
 
 vars:
   API_DIR: "."
+  # Ares configuration
+  MODEL: '{{.MODEL | default "claude-sonnet-4-20250514"}}'
+  GRAFANA_URL: '{{.GRAFANA_URL | default "https://grafana.dev.plundr.ai"}}'
+  POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
+  MAX_STEPS: '{{.MAX_STEPS | default "150"}}'
+  REPORT_DIR: '{{.REPORT_DIR | default "./reports"}}'
+  DREADNODE_SERVER: '{{.DREADNODE_SERVER | default "https://platform.dev.plundr.ai/"}}'
+  DREADNODE_ORGANIZATION: '{{.DREADNODE_ORGANIZATION | default "ares"}}'
+  DREADNODE_WORKSPACE: '{{.DREADNODE_WORKSPACE | default "ares-protocol"}}'
+  DREADNODE_PROJECT: '{{.DREADNODE_PROJECT | default "ares-soc"}}'
 
 tasks:
   default:
@@ -129,3 +142,251 @@ tasks:
     desc: Create a release on GitHub
     cmds:
       - task: github:create-release
+
+  # ===========================================================================
+  # Ares SOC Agent Tasks
+  # ===========================================================================
+
+  ares:run:
+    desc: Run Ares in poll mode (retrieves API keys from 1Password)
+    cmds:
+      - |
+        echo "Starting Ares SOC Investigation Agent..."
+        echo "Platform: {{.DREADNODE_SERVER}}"
+        echo "Model: {{.MODEL}}"
+        echo ""
+
+        # Get API keys from 1Password
+        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
+        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
+        export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
+
+        # Run Ares using uv
+        uv run python -m src \
+          --args.model {{.MODEL}} \
+          --args.grafana-url {{.GRAFANA_URL}} \
+          --args.poll-interval {{.POLL_INTERVAL}} \
+          --args.max-steps {{.MAX_STEPS}} \
+          --args.report-dir {{.REPORT_DIR}} \
+          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.token "$DREADNODE_API_KEY" \
+          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
+          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
+          --dn-args.project {{.DREADNODE_PROJECT}}
+
+  ares:run:local:
+    desc: Run Ares using local environment variables (no 1Password)
+    cmds:
+      - |
+        echo "Starting Ares SOC Investigation Agent (using .env)..."
+        echo "Platform: {{.DREADNODE_SERVER}}"
+        echo "Model: {{.MODEL}}"
+        echo ""
+
+        # Check for .env file
+        if [ ! -f .env ]; then
+          echo "⚠️  Warning: .env file not found. Copy .env.example to .env and configure."
+          exit 1
+        fi
+
+        # Load .env
+        set -a
+        . ./.env
+        set +a
+
+        # Run Ares using uv
+        uv run python -m src \
+          --args.model {{.MODEL}} \
+          --args.grafana-url {{.GRAFANA_URL}} \
+          --args.poll-interval {{.POLL_INTERVAL}} \
+          --args.max-steps {{.MAX_STEPS}} \
+          --args.report-dir {{.REPORT_DIR}} \
+          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
+          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
+          --dn-args.project {{.DREADNODE_PROJECT}}
+
+  ares:investigate:
+    desc: "Investigate a specific alert from JSON file (usage: task ares:investigate ALERT=alert.json)"
+    vars:
+      ALERT: '{{.ALERT | default ""}}'
+    preconditions:
+      - sh: test -n "{{.ALERT}}"
+        msg: "ALERT variable is required. Usage: task ares:investigate ALERT=alert.json"
+      - sh: test -f "{{.ALERT}}"
+        msg: "Alert file not found: {{.ALERT}}"
+    cmds:
+      - |
+        echo "Investigating alert from: {{.ALERT}}"
+        echo ""
+
+        # Get API keys from 1Password
+        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
+        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
+        export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
+
+        # Run investigation
+        uv run python -m src investigate-alert {{.ALERT}} \
+          --args.model {{.MODEL}} \
+          --args.grafana-url {{.GRAFANA_URL}} \
+          --args.max-steps {{.MAX_STEPS}} \
+          --args.report-dir {{.REPORT_DIR}} \
+          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.token "$DREADNODE_API_KEY" \
+          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
+          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
+          --dn-args.project {{.DREADNODE_PROJECT}}
+
+  ares:config:check:
+    desc: Check configuration and API key access
+    cmds:
+      - |
+        echo "Checking Ares configuration..."
+        echo ""
+        echo "Environment:"
+        echo "  Python: $(python --version)"
+        echo "  uv: $(uv --version 2>/dev/null || echo 'not installed')"
+        echo ""
+        echo "Configuration:"
+        echo "  Platform: {{.DREADNODE_SERVER}}"
+        echo "  Project: {{.DREADNODE_PROJECT}}"
+        echo "  Model: {{.MODEL}}"
+        echo "  Grafana: {{.GRAFANA_URL}}"
+        echo "  Loki: {{.LOKI_URL}}"
+        echo "  Prometheus: {{.PROMETHEUS_URL}}"
+        echo ""
+        echo "Checking 1Password CLI access..."
+
+        # Check if op is installed
+        if ! command -v op >/dev/null 2>&1; then
+          echo "  ❌ 1Password CLI (op) not installed"
+          echo ""
+          echo "Install from: https://developer.1password.com/docs/cli/get-started/"
+          exit 1
+        fi
+
+        echo "  ✅ 1Password CLI installed: $(op --version)"
+        echo ""
+        echo "Checking 1Password items..."
+
+        # Check Dreadnode API key
+        if op item get "Dreadnode Dev Platform" --fields api-key --reveal >/dev/null 2>&1; then
+          echo "  ✅ Dreadnode API key accessible"
+        else
+          echo "  ❌ Dreadnode API key not found in 1Password"
+          echo "     Item: 'Dreadnode Dev Platform'"
+          echo "     Field: 'api-key'"
+        fi
+
+        # Check Grafana service account token
+        if op item get "Ares Grafana MCP" --fields grafana-token --reveal >/dev/null 2>&1; then
+          echo "  ✅ Grafana service account token accessible"
+        else
+          echo "  ⚠️  Grafana service account token not found in 1Password"
+          echo "     Item: 'Ares Grafana MCP'"
+          echo "     Field: 'grafana-token'"
+        fi
+
+        # Check Anthropic API key
+        if op item get "claude.ai" --fields dreadnode-api-key --reveal >/dev/null 2>&1; then
+          echo "  ✅ Anthropic API key accessible"
+        else
+          echo "  ⚠️  Anthropic API key not found in 1Password"
+          echo "     Item: 'claude.ai'"
+          echo "     Field: 'dreadnode-api-key'"
+        fi
+
+        echo ""
+        echo "Configuration check complete"
+
+  ares:config:show:
+    desc: Show current configuration (without secrets)
+    cmds:
+      - |
+        echo "Ares Configuration:"
+        echo "===================="
+        echo "Platform Settings:"
+        echo "  Server: {{.DREADNODE_SERVER}}"
+        echo "  Project: {{.DREADNODE_PROJECT}}"
+        echo ""
+        echo "Agent Settings:"
+        echo "  Model: {{.MODEL}}"
+        echo "  Max Steps: {{.MAX_STEPS}}"
+        echo "  Poll Interval: {{.POLL_INTERVAL}}s"
+        echo ""
+        echo "Data Sources:"
+        echo "  Grafana: {{.GRAFANA_URL}}"
+        echo "  Query Method: Grafana MCP (requires mcp-grafana binary)"
+        echo ""
+        echo "Output:"
+        echo "  Reports: {{.REPORT_DIR}}"
+
+  ares:reports:list:
+    desc: List all investigation reports
+    cmds:
+      - |
+        echo "Investigation Reports:"
+        echo "======================"
+        if [ -d {{.REPORT_DIR}} ]; then
+          ls -lht {{.REPORT_DIR}}/*.md 2>/dev/null || echo "No reports found"
+        else
+          echo "Report directory not found: {{.REPORT_DIR}}"
+        fi
+
+  ares:reports:latest:
+    desc: Show the latest investigation report
+    cmds:
+      - |
+        LATEST=$(ls -t {{.REPORT_DIR}}/*.md 2>/dev/null | head -1)
+        if [ -n "$LATEST" ]; then
+          echo "Latest report: $LATEST"
+          echo "===================="
+          cat "$LATEST"
+        else
+          echo "No reports found in {{.REPORT_DIR}}"
+        fi
+
+  ares:reports:clean:
+    desc: Remove all investigation reports
+    cmds:
+      - |
+        read -p "Delete all reports in {{.REPORT_DIR}}? (y/N) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+          rm -rf {{.REPORT_DIR}}/*.md
+          echo "✅ Reports cleaned"
+        fi
+
+  ares:version:
+    desc: Show Ares version information
+    cmds:
+      - uv run python -m ares version
+
+  ares:mitre:test:
+    desc: Test MITRE ATT&CK data loading
+    cmds:
+      - |
+        uv run python -c "
+        import asyncio
+        from src.mitre import MITREAttackClient
+
+        async def test():
+            client = MITREAttackClient()
+            await client.load()
+            print(f'✅ Loaded {len(client._techniques)} techniques')
+            print(f'✅ Loaded {len(client._tactics)} tactics')
+
+            # Show a sample technique
+            sample = list(client._techniques.values())[0]
+            print(f'\nSample technique:')
+            print(f'  ID: {sample.id}')
+            print(f'  Name: {sample.name}')
+            print(f'  Tactic: {sample.tactic}')
+
+        asyncio.run(test())
+        "
+
+  ares:example:grafana-windows:
+    desc: Show example Grafana MCP queries for Windows attack detection
+    cmds:
+      - python examples/grafana_mcp_windows_example.py

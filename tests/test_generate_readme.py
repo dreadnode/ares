@@ -1,5 +1,6 @@
 import os
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -39,7 +40,7 @@ emoji = "🐍"
 """
 
 
-def test_get_section_content():
+def test_get_section_content() -> None:
     content = SAMPLE_README
     start_marker = "<!-- BEGIN_AUTO_BADGES -->"
     end_marker = "<!-- END_AUTO_BADGES -->"
@@ -51,8 +52,8 @@ def test_get_section_content():
     assert end > start
 
 
-@pytest.fixture
-def temp_project():
+@pytest.fixture  # type: ignore[untyped-decorator]
+def temp_project() -> Generator[Path, None, None]:
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create temporary project structure
         project_dir = Path(tmpdir)
@@ -83,7 +84,7 @@ def temp_project():
         os.chdir(original_dir)
 
 
-def test_readme_generation(temp_project):
+def test_readme_generation(temp_project: Path) -> None:
     # Run the generator
     main()
 
@@ -99,7 +100,7 @@ def test_readme_generation(temp_project):
     assert "This should not be modified" in content
 
 
-def test_readme_generation_dry_run(temp_project, capsys):
+def test_readme_generation_dry_run(temp_project: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # Run the generator with --dry-run
     import sys
 

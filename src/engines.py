@@ -19,7 +19,14 @@ from .models import (
 
 
 class ClimbStrategy(TypedDict):
-    """Type definition for pyramid climbing strategies."""
+    """Type definition for pyramid climbing strategies.
+
+    Attributes:
+        template: Question template string with {value} placeholder.
+        target: Target PyramidLevel to climb toward.
+        insight: Description of what insight this strategy provides.
+        elevation: Numeric elevation score indicating climb difficulty.
+    """
 
     template: str
     target: PyramidLevel
@@ -28,14 +35,16 @@ class ClimbStrategy(TypedDict):
 
 
 class MITRENavigator:
-    """
-    MITRE ATT&CK-driven question generator.
+    """MITRE ATT&CK-driven question generator.
 
     Generates questions that:
     1. Map evidence to techniques
     2. Predict follow-on techniques based on attack patterns
     3. Identify tactical gaps in the investigation
     4. Ensure complete attack lifecycle coverage
+
+    Attributes:
+        mitre: MITREAttackClient instance for technique lookups.
     """
 
     def __init__(self, mitre_client: MITREAttackClient):
@@ -45,7 +54,25 @@ class MITRENavigator:
         self,
         state: InvestigationState,
     ) -> list[InvestigativeQuestion]:
-        """Generate MITRE-informed investigative questions."""
+        """Generate MITRE-informed investigative questions.
+
+        Args:
+            state: Current investigation state with evidence and identified techniques.
+
+        Returns:
+            List of InvestigativeQuestion objects prioritized by relevance.
+
+        Example:
+            >>> navigator = MITRENavigator(mitre_client)
+            >>> questions = navigator.generate_questions(state)
+            >>> questions[0].source
+            <QuestionSource.MITRE: 'mitre'>
+            >>> questions[0].target_technique
+            'T1003.001'
+
+        See Also:
+            PyramidClimber.generate_questions: For Pyramid of Pain questions.
+        """
         questions = []
 
         # 1. Follow-on technique questions
@@ -269,8 +296,7 @@ PYRAMID_NAMES = {
 
 
 class PyramidClimber:
-    """
-    Pyramid of Pain-driven question generator.
+    """Pyramid of Pain-driven question generator.
 
     Focuses on ELEVATING understanding from trivial indicators to TTPs.
 
@@ -289,7 +315,29 @@ class PyramidClimber:
         self,
         state: InvestigationState,
     ) -> list[InvestigativeQuestion]:
-        """Generate questions that climb the Pyramid of Pain."""
+        """Generate questions that climb the Pyramid of Pain.
+
+        Args:
+            state: Current investigation state with evidence to elevate.
+
+        Returns:
+            List of InvestigativeQuestion objects that promote climbing to higher
+            pyramid levels, prioritized by elevation potential.
+
+        Example:
+            >>> climber = PyramidClimber()
+            >>> questions = climber.generate_questions(state)
+            >>> questions[0].source
+            <QuestionSource.PYRAMID: 'pyramid'>
+            >>> questions[0].current_pyramid_level
+            2
+            >>> questions[0].target_pyramid_level
+            5
+
+        See Also:
+            MITRENavigator.generate_questions: For MITRE ATT&CK questions.
+            assess_pyramid_state: For current pyramid position assessment.
+        """
         questions = []
 
         for ev in state.evidence:
@@ -325,12 +373,19 @@ class PyramidClimber:
         return questions
 
     def assess_pyramid_state(self, state: InvestigationState) -> dict:
-        """
-        Assess the current Pyramid of Pain state.
+        """Assess the current Pyramid of Pain state.
 
-        Returns distribution and recommendations.
+        Args:
+            state: Current investigation state to assess.
+
+        Returns:
+            A dict containing:
+                - distribution: Count of evidence at each pyramid level
+                - elevation_score: Score from 0-1 indicating how high we've climbed
+                - total_evidence: Total number of evidence items
+                - recommendations: List of suggestions for improving pyramid position
         """
-        distribution = {level: 0 for level in PyramidLevel}
+        distribution = dict.fromkeys(PyramidLevel, 0)
 
         for ev in state.evidence:
             distribution[ev.pyramid_level] += 1
@@ -359,7 +414,12 @@ class PyramidClimber:
 
 
 class QuestionPrioritizer:
-    """Combines and prioritizes questions from all engines."""
+    """Combines and prioritizes questions from all engines.
+
+    Attributes:
+        mitre: MITRENavigator instance for MITRE-driven questions.
+        pyramid: PyramidClimber instance for Pyramid of Pain questions.
+    """
 
     def __init__(
         self,
@@ -373,7 +433,14 @@ class QuestionPrioritizer:
         self,
         state: InvestigationState,
     ) -> list[InvestigativeQuestion]:
-        """Generate questions from both engines and prioritize."""
+        """Generate questions from both engines and prioritize.
+
+        Args:
+            state: Current investigation state.
+
+        Returns:
+            Combined list of questions sorted by priority score (highest first).
+        """
         questions = []
 
         # Generate from both engines
@@ -390,10 +457,16 @@ class QuestionPrioritizer:
         questions: list[InvestigativeQuestion],
         max_size: int = 5,
     ) -> list[InvestigativeQuestion]:
-        """
-        Get a batch of questions that can be executed in parallel.
+        """Get a batch of questions that can be executed in parallel.
 
-        Selects high-priority questions that don't conflict.
+        Selects high-priority questions that don't conflict with each other.
+
+        Args:
+            questions: List of questions to select from.
+            max_size: Maximum number of questions to include in batch.
+
+        Returns:
+            List of questions that can be safely parallelized, limited to max_size.
         """
         batch: list[InvestigativeQuestion] = []
 

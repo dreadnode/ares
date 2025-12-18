@@ -1,14 +1,19 @@
 #!/usr/bin/python3
 import argparse
 import sys
+from typing import Any
 
-import tomli
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
 from jinja2 import Environment, FileSystemLoader
 
 
-def load_project_metadata():
+def load_project_metadata() -> dict[str, Any]:
     with open("pyproject.toml", "rb") as f:
-        pyproject = tomli.load(f)
+        pyproject = tomllib.load(f)
     return {
         **pyproject["project"],
         **pyproject.get("tool", {}).get("readme", {}),
@@ -16,7 +21,7 @@ def load_project_metadata():
 
 
 def read_file(path: str) -> str:
-    with open(path, "r") as f:
+    with open(path) as f:
         return f.read()
 
 
@@ -35,7 +40,7 @@ def get_section_content(content: str, start_marker: str, end_marker: str) -> tup
     return (content[start_idx : end_idx + len(end_marker)], start_idx, end_idx + len(end_marker))
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dry-run", action="store_true", help="Print to stdout instead of writing file"
@@ -78,11 +83,13 @@ def main():
         # Add other marker pairs here as needed
     ]:
         start_marker, end_marker = marker_pair
-        new_section, start_idx, end_idx = get_section_content(new_content, start_marker, end_marker)
+        new_section, _start_idx, _end_idx = get_section_content(
+            new_content, start_marker, end_marker
+        )
         if not new_section:
             continue
 
-        existing_section, existing_start, existing_end = get_section_content(
+        _existing_section, existing_start, existing_end = get_section_content(
             existing_content, start_marker, end_marker
         )
         if existing_start >= 0:
@@ -109,4 +116,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
