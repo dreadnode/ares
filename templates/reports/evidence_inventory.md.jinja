@@ -1,0 +1,16 @@
+## Evidence Inventory
+
+{% if has_evidence %}
+{% for level_section in evidence_by_level %}
+### {{ level_section.emoji }} {{ level_section.name }} (Level {{ level_section.level }})
+
+| ID | Type | Value | Techniques | Confidence |
+|----|------|-------|------------|------------|
+{% for evidence in level_section.items %}
+| {{ evidence.id }} | {{ evidence.type }} | `{{ evidence.value }}` | {{ evidence.techniques }} | {{ evidence.confidence }} |
+{% endfor %}
+
+{% endfor %}
+{% else %}
+_No evidence recorded during investigation._
+{% endif %}

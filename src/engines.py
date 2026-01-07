@@ -7,7 +7,10 @@ These engines generate investigative questions based on:
 """
 
 import uuid
+from pathlib import Path
 from typing import TypedDict
+
+import yaml
 
 from .mitre import MITREAttackClient
 from .models import (
@@ -16,6 +19,7 @@ from .models import (
     PyramidLevel,
     QuestionSource,
 )
+from .templates import get_template_loader
 
 
 class ClimbStrategy(TypedDict):
@@ -100,6 +104,7 @@ class MITRENavigator:
 
             related = self.mitre.get_related_techniques(tech_id)
 
+            loader = get_template_loader()
             for rel in related[:5]:  # Limit per technique
                 if rel["technique_id"] in state.identified_techniques:
                     continue
@@ -108,15 +113,19 @@ class MITRENavigator:
                 if not rel_tech:
                     continue
 
+                question_text = loader.render(
+                    "engines/mitre_followon.md.jinja",
+                    source_technique_id=tech_id,
+                    source_technique_name=technique.name,
+                    target_technique_id=rel["technique_id"],
+                    target_technique_name=rel["name"],
+                    relationship=rel["relationship"],
+                )
+
                 questions.append(
                     InvestigativeQuestion(
                         id=f"mitre-followon-{uuid.uuid4().hex[:8]}",
-                        text=(
-                            f"We identified {tech_id} ({technique.name}). "
-                            f"Check for {rel['technique_id']} ({rel['name']}) "
-                            f"which is {rel['relationship']}. "
-                            f"What evidence would indicate this technique?"
-                        ),
+                        text=question_text,
                         source=QuestionSource.MITRE_NAVIGATOR,
                         rationale=f"{rel['technique_id']} commonly appears with {tech_id}",
                         target_insight=f"Detect presence of {rel['technique_id']}",
@@ -148,6 +157,7 @@ class MITRENavigator:
             "TA0011": 0.7,  # C2
         }
 
+        loader = get_template_loader()
         for tactic in uncovered:
             priority = priority_map.get(tactic.id, 0.5)
 
@@ -155,14 +165,17 @@ class MITRENavigator:
             example_techs = self.mitre.get_techniques_for_tactic(tactic.id)[:3]
             examples = ", ".join([t.name for t in example_techs])
 
+            question_text = loader.render(
+                "engines/mitre_gap.md.jinja",
+                tactic_name=tactic.name,
+                tactic_id=tactic.id,
+                example_techniques=examples,
+            )
+
             questions.append(
                 InvestigativeQuestion(
                     id=f"mitre-gap-{uuid.uuid4().hex[:8]}",
-                    text=(
-                        f"Tactical gap: No evidence found for {tactic.name} ({tactic.id}). "
-                        f"Common techniques include: {examples}. "
-                        f"What would indicate activity in this attack phase?"
-                    ),
+                    text=question_text,
                     source=QuestionSource.MITRE_NAVIGATOR,
                     rationale=f"Complete attacks usually involve {tactic.name}",
                     target_insight=f"Determine if {tactic.name} occurred",
@@ -183,14 +196,18 @@ class MITRENavigator:
         # Find evidence not mapped to techniques
         unmapped = [e for e in state.evidence if not e.mitre_techniques]
 
+        loader = get_template_loader()
         for ev in unmapped[:5]:  # Limit
+            question_text = loader.render(
+                "engines/mitre_mapping.md.jinja",
+                evidence_type=ev.type,
+                evidence_value=ev.value,
+            )
+
             questions.append(
                 InvestigativeQuestion(
                     id=f"mitre-map-{uuid.uuid4().hex[:8]}",
-                    text=(
-                        f"Evidence '{ev.type}={ev.value}' is not mapped to any MITRE technique. "
-                        f"What ATT&CK technique does this indicate?"
-                    ),
+                    text=question_text,
                     source=QuestionSource.MITRE_NAVIGATOR,
                     rationale="Unmapped evidence may indicate additional techniques",
                     target_insight="Map evidence to MITRE technique",
@@ -202,88 +219,52 @@ class MITRENavigator:
         return questions
 
 
-# Pyramid of Pain climbing strategies
-CLIMB_STRATEGIES: dict[PyramidLevel, list[ClimbStrategy]] = {
-    PyramidLevel.HASH_VALUES: [
-        {
-            "template": "What process or tool created the file with hash {value}?",
-            "target": PyramidLevel.TOOLS,
-            "insight": "Identify the tool that generated this artifact",
-            "elevation": 4,
-        },
-        {
-            "template": "What behavior led to the creation of file with hash {value}?",
-            "target": PyramidLevel.TTPS,
-            "insight": "Understand the TTP that produced this artifact",
-            "elevation": 5,
-        },
-    ],
-    PyramidLevel.IP_ADDRESSES: [
-        {
-            "template": "What domain names have resolved to IP {value}?",
-            "target": PyramidLevel.DOMAIN_NAMES,
-            "insight": "Identify associated domains",
-            "elevation": 1,
-        },
-        {
-            "template": "What TLS certificates are served by IP {value}?",
-            "target": PyramidLevel.NETWORK_HOST_ARTIFACTS,
-            "insight": "Identify infrastructure artifacts",
-            "elevation": 2,
-        },
-        {
-            "template": "What C2 framework or tool communicates with IP {value}?",
-            "target": PyramidLevel.TOOLS,
-            "insight": "Identify the tool using this IP",
-            "elevation": 3,
-        },
-    ],
-    PyramidLevel.DOMAIN_NAMES: [
-        {
-            "template": (
-                "What is the registration pattern of domain {value}? "
-                "(DGA, typosquat, newly registered?)"
-            ),
-            "target": PyramidLevel.TTPS,
-            "insight": "Understand adversary infrastructure TTP",
-            "elevation": 3,
-        },
-        {
-            "template": "What tool or malware is known to use domains similar to {value}?",
-            "target": PyramidLevel.TOOLS,
-            "insight": "Attribute domain to known tooling",
-            "elevation": 2,
-        },
-    ],
-    PyramidLevel.NETWORK_HOST_ARTIFACTS: [
-        {
-            "template": "What tool creates the artifact pattern '{value}'?",
-            "target": PyramidLevel.TOOLS,
-            "insight": "Identify tool from artifact",
-            "elevation": 1,
-        },
-        {
-            "template": "What behavior or TTP does artifact '{value}' indicate?",
-            "target": PyramidLevel.TTPS,
-            "insight": "Map artifact to TTP",
-            "elevation": 2,
-        },
-    ],
-    PyramidLevel.TOOLS: [
-        {
-            "template": "What TTPs does tool '{value}' enable?",
-            "target": PyramidLevel.TTPS,
-            "insight": "Understand tool capabilities as TTPs",
-            "elevation": 1,
-        },
-        {
-            "template": "What threat actors are known to use tool '{value}'?",
-            "target": PyramidLevel.TTPS,
-            "insight": "Attribute to threat actor TTP profile",
-            "elevation": 1,
-        },
-    ],
-}
+# Load Pyramid of Pain climbing strategies from YAML
+def _load_climb_strategies() -> dict[PyramidLevel, list[ClimbStrategy]]:
+    """Load climb strategies from YAML configuration file."""
+    # Get project root (parent of src/)
+    project_root = Path(__file__).parent.parent
+    strategies_path = project_root / "templates" / "engines" / "climb_strategies.yaml"
+
+    with strategies_path.open() as f:
+        data = yaml.safe_load(f)
+
+    # Map YAML keys to PyramidLevel enums
+    level_mapping = {
+        "hash_values": PyramidLevel.HASH_VALUES,
+        "ip_addresses": PyramidLevel.IP_ADDRESSES,
+        "domain_names": PyramidLevel.DOMAIN_NAMES,
+        "network_host_artifacts": PyramidLevel.NETWORK_HOST_ARTIFACTS,
+        "tools": PyramidLevel.TOOLS,
+    }
+
+    # Map YAML target values to PyramidLevel enums
+    target_mapping = {
+        "hash_values": PyramidLevel.HASH_VALUES,
+        "ip_addresses": PyramidLevel.IP_ADDRESSES,
+        "domain_names": PyramidLevel.DOMAIN_NAMES,
+        "network_host_artifacts": PyramidLevel.NETWORK_HOST_ARTIFACTS,
+        "tools": PyramidLevel.TOOLS,
+        "ttps": PyramidLevel.TTPS,
+    }
+
+    strategies: dict[PyramidLevel, list[ClimbStrategy]] = {}
+    for level_key, level_enum in level_mapping.items():
+        if level_key in data:
+            strategies[level_enum] = [
+                {
+                    "template": strategy["template"],
+                    "target": target_mapping[strategy["target"]],
+                    "insight": strategy["insight"],
+                    "elevation": strategy["elevation"],
+                }
+                for strategy in data[level_key]
+            ]
+
+    return strategies
+
+
+CLIMB_STRATEGIES = _load_climb_strategies()
 
 PYRAMID_NAMES = {
     PyramidLevel.HASH_VALUES: "Hash Values",
@@ -339,6 +320,7 @@ class PyramidClimber:
             assess_pyramid_state: For current pyramid position assessment.
         """
         questions = []
+        loader = get_template_loader()
 
         for ev in state.evidence:
             # Skip if already at TTP level
@@ -350,10 +332,16 @@ class PyramidClimber:
             for strategy in strategies:
                 elevation_score = strategy["elevation"] / 5.0  # Normalize to 0-1
 
+                # Format the question text using the template format string
+                question_text = loader.render(
+                    "engines/pyramid_climb.md.jinja",
+                    question_text=strategy["template"].format(value=ev.value),
+                )
+
                 questions.append(
                     InvestigativeQuestion(
                         id=f"pyramid-{uuid.uuid4().hex[:8]}",
-                        text=strategy["template"].format(value=ev.value),
+                        text=question_text,
                         source=QuestionSource.PYRAMID_CLIMBER,
                         rationale=(
                             f"Elevate from {PYRAMID_NAMES[ev.pyramid_level]} "

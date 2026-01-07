@@ -1,0 +1,63 @@
+---
+# Pyramid of Pain Climbing Strategies
+# Configuration for generating questions that elevate indicators to TTPs
+
+hash_values:
+  - template: "What process or tool created the file with hash {value}?"
+    target: tools
+    insight: "Identify the tool that generated this artifact"
+    elevation: 4
+
+  - template: "What behavior led to the creation of file with hash {value}?"
+    target: ttps
+    insight: "Understand the TTP that produced this artifact"
+    elevation: 5
+
+ip_addresses:
+  - template: "What domain names have resolved to IP {value}?"
+    target: domain_names
+    insight: "Identify associated domains"
+    elevation: 1
+
+  - template: "What TLS certificates are served by IP {value}?"
+    target: network_host_artifacts
+    insight: "Identify infrastructure artifacts"
+    elevation: 2
+
+  - template: "What C2 framework or tool communicates with IP {value}?"
+    target: tools
+    insight: "Identify the tool using this IP"
+    elevation: 3
+
+domain_names:
+  - template: "What is the registration pattern of domain {value}? (DGA, typosquat, newly registered?)"
+    target: ttps
+    insight: "Understand adversary infrastructure TTP"
+    elevation: 3
+
+  - template: "What tool or malware is known to use domains similar to {value}?"
+    target: tools
+    insight: "Attribute domain to known tooling"
+    elevation: 2
+
+network_host_artifacts:
+  - template: "What tool creates the artifact pattern '{value}'?"
+    target: tools
+    insight: "Identify tool from artifact"
+    elevation: 1
+
+  - template: "What behavior or TTP does artifact '{value}' indicate?"
+    target: ttps
+    insight: "Map artifact to TTP"
+    elevation: 2
+
+tools:
+  - template: "What TTPs does tool '{value}' enable?"
+    target: ttps
+    insight: "Understand tool capabilities as TTPs"
+    elevation: 1
+
+  - template: "What threat actors are known to use tool '{value}'?"
+    target: ttps
+    insight: "Attribute to threat actor TTP profile"
+    elevation: 1

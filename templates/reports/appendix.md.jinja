@@ -1,0 +1,23 @@
+## Appendix
+
+### Queries Executed
+
+{% if has_queries %}
+{% for query in queries %}
+**Query {{ query.number }}** ({{ query.type }})
+```
+{{ query.query_text }}
+```
+Results: {{ query.result_count }} items
+
+{% endfor %}
+{% else %}
+_No query data recorded._
+{% endif %}
+
+### Investigation Metadata
+
+- **Started:** {{ started_at }}
+- **Evidence Items:** {{ evidence_count }}
+- **Timeline Events:** {{ timeline_count }}
+- **Questions Generated:** {{ questions_count }}

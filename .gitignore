@@ -5,7 +5,7 @@ test-alerts/
 # Project-specific ignores
 TODO
 .tool-versions
-reports/
+/reports/
 
 # Custom parquet storage
 *.parquet

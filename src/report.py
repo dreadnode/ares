@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import InvestigationState, PyramidLevel
+from .templates import get_template_loader
 
 PYRAMID_EMOJI = {
     PyramidLevel.HASH_VALUES: "🔵",
@@ -35,11 +36,13 @@ class MarkdownReportGenerator:
 
     Attributes:
         output_dir: Directory where reports will be written.
+        loader: Template loader for rendering report sections.
     """
 
     def __init__(self, output_dir: Path):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
+        self.loader = get_template_loader()
 
     def generate(self, state: InvestigationState) -> Path:
         """Generate the full markdown report.
@@ -89,31 +92,18 @@ class MarkdownReportGenerator:
         alert = state.alert
         labels = alert.get("labels", {})
 
-        return f"""# SOC Investigation Report
-
-**Investigation ID:** `{state.investigation_id}`
-**Generated:** {datetime.now(timezone.utc).isoformat()}Z
-**Duration:** {self._format_duration(state)}
-
-## Alert Information
-
-| Field | Value |
-|-------|-------|
-| Alert Name | {labels.get("alertname", "Unknown")} |
-| Severity | {labels.get("severity", "Unknown")} |
-| Instance | {labels.get("instance", "Unknown")} |
-| Job | {labels.get("job", "Unknown")} |
-| Status | {"ESCALATED ⚠️" if state.escalated else "COMPLETED ✓"} |
-
-<details>
-<summary>Full Alert Payload</summary>
-
-```json
-{json.dumps(alert, indent=2, default=str)}
-```
-
-</details>
-"""
+        return self.loader.render(
+            "reports/header.md.jinja",
+            investigation_id=state.investigation_id,
+            generated_timestamp=datetime.now(timezone.utc).isoformat() + "Z",
+            duration=self._format_duration(state),
+            alert_name=labels.get("alertname", "Unknown"),
+            severity=labels.get("severity", "Unknown"),
+            instance=labels.get("instance", "Unknown"),
+            job=labels.get("job", "Unknown"),
+            status="ESCALATED ⚠️" if state.escalated else "COMPLETED ✓",
+            alert_json=json.dumps(alert, indent=2, default=str),
+        )
 
     def _executive_summary(self, state: InvestigationState) -> str:
         technique_count = len(state.identified_techniques)
