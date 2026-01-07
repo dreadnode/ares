@@ -1,0 +1,24 @@
+ALERT RECEIVED - BEGIN INVESTIGATION
+
+Alert Name: {{ alert_name }}
+Severity: {{ severity }}
+Instance: {{ instance }}
+Job: {{ job }}
+Started At: {{ starts_at }}
+
+Summary: {{ summary }}
+
+Description: {{ description }}
+
+Full Alert Labels: {{ labels }}
+
+---
+
+1. First, call get_combined_questions() to generate initial questions
+2. Parse the alert to understand what triggered it
+3. Query Loki/Prometheus to gather initial evidence around the alert time
+4. Record all evidence with record_evidence()
+5. Continue following the question engines' guidance
+
+Remember: Execute queries in PARALLEL when they are independent.
+The goal is to reach TTPs (Pyramid level 6), not just collect IOCs.

@@ -1,0 +1,11 @@
+Host '{{ hostname }}' marked for investigation. Suggested queries:
+
+Loki:
+- {hostname="{{ hostname }}"} |= "error" | json
+- {hostname="{{ hostname }}", job="auth"} | json
+- {hostname="{{ hostname }}"} |~ "(?i)(fail|denied|unauthorized)"
+
+Prometheus:
+- node_cpu_seconds_total{instance=~"{{ hostname }}.*"}
+- node_network_transmit_bytes_total{instance=~"{{ hostname }}.*"}
+- process_cpu_seconds_total{instance=~"{{ hostname }}.*"}

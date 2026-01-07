@@ -14,6 +14,7 @@ from loguru import logger
 from .core import create_investigation_agent
 from .mitre import MITREAttackClient
 from .models import InvestigationState
+from .templates import get_template_loader
 
 
 def build_initial_prompt(alert: dict) -> str:
@@ -37,42 +38,18 @@ def build_initial_prompt(alert: dict) -> str:
     labels = alert.get("labels", {})
     annotations = alert.get("annotations", {})
 
-    alert_name = labels.get("alertname", "Unknown")
-    severity = labels.get("severity", "unknown")
-    instance = labels.get("instance", "unknown")
-    job = labels.get("job", "unknown")
-
-    summary = annotations.get("summary", "No summary provided")
-    description = annotations.get("description", "No description provided")
-
-    starts_at = alert.get("startsAt", datetime.now(timezone.utc).isoformat())
-
-    return f"""
-ALERT RECEIVED - BEGIN INVESTIGATION
-
-Alert Name: {alert_name}
-Severity: {severity}
-Instance: {instance}
-Job: {job}
-Started At: {starts_at}
-
-Summary: {summary}
-
-Description: {description}
-
-Full Alert Labels: {labels}
-
----
-
-1. First, call get_combined_questions() to generate initial questions
-2. Parse the alert to understand what triggered it
-3. Query Loki/Prometheus to gather initial evidence around the alert time
-4. Record all evidence with record_evidence()
-5. Continue following the question engines' guidance
-
-Remember: Execute queries in PARALLEL when they are independent.
-The goal is to reach TTPs (Pyramid level 6), not just collect IOCs.
-"""
+    loader = get_template_loader()
+    return loader.render(
+        "agent/initial_alert_prompt.md.jinja",
+        alert_name=labels.get("alertname", "Unknown"),
+        severity=labels.get("severity", "unknown"),
+        instance=labels.get("instance", "unknown"),
+        job=labels.get("job", "unknown"),
+        starts_at=alert.get("startsAt", datetime.now(timezone.utc).isoformat()),
+        summary=annotations.get("summary", "No summary provided"),
+        description=annotations.get("description", "No description provided"),
+        labels=labels,
+    )
 
 
 class InvestigationOrchestrator:

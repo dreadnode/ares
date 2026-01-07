@@ -10,6 +10,7 @@ from loguru import logger
 from src.engines import MITRENavigator, PyramidClimber
 from src.mitre import MITREAttackClient
 from src.models import Evidence, InvestigationStage, InvestigationState, PyramidLevel, TimelineEvent
+from src.templates import get_template_loader
 
 
 class InvestigationTools(Toolset):  # type: ignore[misc]
@@ -238,19 +239,8 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
         self.state.queried_hosts.add(hostname)
         dn.log_metric("hosts_investigated", 1, mode="count")
 
-        return f"""
-Host '{hostname}' marked for investigation. Suggested queries:
-
-Loki:
-- {{hostname="{hostname}"}} |= "error" | json
-- {{hostname="{hostname}", job="auth"}} | json
-- {{hostname="{hostname}"}} |~ "(?i)(fail|denied|unauthorized)"
-
-Prometheus:
-- node_cpu_seconds_total{{instance=~"{hostname}.*"}}
-- node_network_transmit_bytes_total{{instance=~"{hostname}.*"}}
-- process_cpu_seconds_total{{instance=~"{hostname}.*"}}
-"""
+        loader = get_template_loader()
+        return loader.render("tools/host_queries.md.jinja", hostname=hostname)
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     def track_user_investigation(self, username: str) -> str:
@@ -268,14 +258,8 @@ Prometheus:
         self.state.queried_users.add(username)
         dn.log_metric("users_investigated", 1, mode="count")
 
-        return f"""
-User '{username}' marked for investigation. Suggested queries:
-
-Loki:
-- {{job="auth"}} |= "{username}" | json
-- {{job="syslog"}} |= "{username}" | json
-- {{job="audit"}} | json | user="{username}"
-"""
+        loader = get_template_loader()
+        return loader.render("tools/user_queries.md.jinja", username=username)
 
 
 class QuestionEngineTools(Toolset):  # type: ignore[misc]
