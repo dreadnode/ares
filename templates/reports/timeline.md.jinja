@@ -1,0 +1,11 @@
+## Timeline
+
+{% if has_events %}
+| Time (UTC) | Event | Techniques | Confidence |
+|------------|-------|------------|------------|
+{% for event in events %}
+| {{ event.timestamp }} | {{ event.description }} | {{ event.techniques }} | {{ event.confidence }} |
+{% endfor %}
+{% else %}
+_No timeline events recorded during investigation._
+{% endif %}
