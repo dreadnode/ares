@@ -18,3 +18,4 @@ indent_size = 2
 [*.hcl]
 indent_style = space
 indent_size = 2
+# Test trigger for template sync - round 2
