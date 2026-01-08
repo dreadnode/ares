@@ -47,6 +47,7 @@ jobs:
         uses: AndreasAugustin/actions-template-sync@v2
         with:
           source_gh_token: ${{ steps.app-token.outputs.token }}
+          target_gh_token: ${{ steps.app-token.outputs.token }}
           git_user_name: github-actions[bot]
           git_user_email: github-actions[bot]@users.noreply.github.com
           pr_title: "chore: sync infrastructure files with template"
