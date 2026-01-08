@@ -1,0 +1,506 @@
+# Attack Chain Definitions
+# Maps detected techniques to their common precursors and indicators
+#
+# When a technique is detected, the blue team should investigate:
+# 1. precursors: Techniques that typically come BEFORE this one
+# 2. windows_events: Windows Security Event IDs to search for
+# 3. log_patterns: LogQL query patterns for detection
+# 4. investigation_questions: Specific questions to ask
+
+---
+# DCSync - Domain Credential Dumping
+T1003.006:
+  name: "DCSync"
+  description: "Adversaries may attempt to access credentials and other sensitive information by abusing a Windows Domain Controller's replication mechanism."
+
+  precursors:
+    # Reconnaissance typically comes first
+    - technique: "T1087"
+      name: "Account Discovery"
+      relationship: "usually_precedes"
+      relevance: 0.95
+      rationale: "Attackers enumerate accounts to identify high-value targets before DCSync"
+
+    - technique: "T1087.002"
+      name: "Domain Account Discovery"
+      relationship: "usually_precedes"
+      relevance: 0.98
+      rationale: "Domain account enumeration is almost always performed before credential theft"
+
+    - technique: "T1135"
+      name: "Network Share Discovery"
+      relationship: "usually_precedes"
+      relevance: 0.85
+      rationale: "Attackers often enumerate shares looking for credentials or sensitive data"
+
+    - technique: "T1018"
+      name: "Remote System Discovery"
+      relationship: "usually_precedes"
+      relevance: 0.90
+      rationale: "Attackers discover domain controllers and other high-value targets"
+
+    - technique: "T1046"
+      name: "Network Service Scanning"
+      relationship: "usually_precedes"
+      relevance: 0.80
+      rationale: "Port scanning to identify services like LDAP, Kerberos, RPC"
+
+    # Credential Access precursors
+    - technique: "T1110"
+      name: "Brute Force"
+      relationship: "usually_precedes"
+      relevance: 0.85
+      rationale: "Password guessing to obtain initial access credentials"
+
+    - technique: "T1110.003"
+      name: "Password Spraying"
+      relationship: "usually_precedes"
+      relevance: 0.90
+      rationale: "Common technique to avoid lockouts while guessing passwords"
+
+    - technique: "T1039"
+      name: "Data from Network Shared Drive"
+      relationship: "usually_precedes"
+      relevance: 0.80
+      rationale: "Pilfering credentials from SYSVOL/NETLOGON shares"
+
+    - technique: "T1552.006"
+      name: "Group Policy Preferences"
+      relationship: "usually_precedes"
+      relevance: 0.75
+      rationale: "GPP passwords often stored in SYSVOL shares"
+
+    # Privilege Escalation
+    - technique: "T1068"
+      name: "Exploitation for Privilege Escalation"
+      relationship: "sometimes_precedes"
+      relevance: 0.60
+      rationale: "May need elevated privileges to perform DCSync"
+
+  windows_events:
+    - event_id: 4625
+      name: "Failed Logon"
+      relevance: 0.90
+      description: "Look for failed authentication attempts indicating brute force"
+      query_pattern: "EventID=4625"
+
+    - event_id: 4624
+      name: "Successful Logon"
+      relevance: 0.85
+      description: "Track successful logons from suspicious sources"
+      query_pattern: "EventID=4624"
+
+    - event_id: 5140
+      name: "Network Share Access"
+      relevance: 0.85
+      description: "Access to SYSVOL/NETLOGON shares"
+      query_pattern: "EventID=5140 AND (ShareName=*SYSVOL* OR ShareName=*NETLOGON*)"
+
+    - event_id: 5145
+      name: "Network Share Object Access"
+      relevance: 0.80
+      description: "Detailed file access on shares"
+      query_pattern: "EventID=5145"
+
+    - event_id: 4662
+      name: "AD Object Access"
+      relevance: 0.95
+      description: "DCSync replication requests"
+      query_pattern: "EventID=4662 AND Properties=*1131f6aa-9c07-11d1-f79f-00c04fc2dcd2*"
+
+    - event_id: 4768
+      name: "Kerberos TGT Request"
+      relevance: 0.70
+      description: "AS-REQ for initial ticket"
+      query_pattern: "EventID=4768"
+
+    - event_id: 4769
+      name: "Kerberos Service Ticket"
+      relevance: 0.70
+      description: "TGS-REQ for service tickets"
+      query_pattern: "EventID=4769"
+
+    - event_id: 4776
+      name: "NTLM Authentication"
+      relevance: 0.75
+      description: "Credential validation events"
+      query_pattern: "EventID=4776"
+
+  log_patterns:
+    - name: "Failed authentication pattern"
+      pattern: |
+        {job=~".*"} |~ "(?i)(failed|failure|denied|invalid)" |~ "(?i)(login|logon|auth|password)"
+      description: "Detect authentication failures indicating brute force"
+
+    - name: "LDAP enumeration pattern"
+      pattern: |
+        {job=~".*"} |~ "(?i)ldap" |~ "(?i)(query|search|bind)"
+      description: "Detect LDAP queries used for enumeration"
+
+    - name: "Share access pattern"
+      pattern: |
+        {job=~".*"} |~ "(?i)(sysvol|netlogon)" |~ "(?i)(access|connect|read)"
+      description: "Detect access to privileged shares"
+
+    - name: "User enumeration pattern"
+      pattern: |
+        {job=~".*"} |~ "(?i)(samaccountname|userprincipalname|memberof)"
+      description: "Detect AD user attribute queries"
+
+  investigation_questions:
+    - question: "Were there any failed authentication attempts from the source IP in the past 24 hours?"
+      priority: 0.95
+      target_technique: "T1110"
+
+    - question: "Which users were enumerated from the source IP before the DCSync attempt?"
+      priority: 0.95
+      target_technique: "T1087.002"
+
+    - question: "Were SYSVOL or NETLOGON shares accessed from the source IP?"
+      priority: 0.90
+      target_technique: "T1039"
+
+    - question: "What other hosts did the source IP communicate with?"
+      priority: 0.85
+      target_technique: "T1018"
+
+    - question: "Were any credentials found in accessed shares?"
+      priority: 0.90
+      target_technique: "T1552.006"
+
+# Kerberoasting
+T1558.003:
+  name: "Kerberoasting"
+  description: "Adversaries may abuse Kerberos to request service tickets for service accounts."
+
+  precursors:
+    - technique: "T1087.002"
+      name: "Domain Account Discovery"
+      relationship: "usually_precedes"
+      relevance: 0.95
+      rationale: "SPN enumeration to find kerberoastable accounts"
+
+    - technique: "T1069.002"
+      name: "Domain Groups"
+      relationship: "usually_precedes"
+      relevance: 0.85
+      rationale: "Enumerate groups to find privileged service accounts"
+
+    - technique: "T1018"
+      name: "Remote System Discovery"
+      relationship: "usually_precedes"
+      relevance: 0.80
+      rationale: "Identify domain controllers and services"
+
+  windows_events:
+    - event_id: 4769
+      name: "Kerberos Service Ticket Request"
+      relevance: 0.95
+      description: "TGS requests with RC4 encryption indicate Kerberoasting"
+      query_pattern: "EventID=4769 AND TicketEncryptionType=0x17"
+
+    - event_id: 4625
+      name: "Failed Logon"
+      relevance: 0.80
+      description: "Failed auth before Kerberoasting"
+      query_pattern: "EventID=4625"
+
+  investigation_questions:
+    - question: "Were there bulk TGS requests from the source for service accounts?"
+      priority: 0.95
+      target_technique: "T1558.003"
+
+    - question: "Were SPNs enumerated before the Kerberoasting attempt?"
+      priority: 0.90
+      target_technique: "T1087.002"
+
+# AS-REP Roasting
+T1558.004:
+  name: "AS-REP Roasting"
+  description: "Adversaries may obtain hashes for accounts without Kerberos pre-authentication."
+
+  precursors:
+    - technique: "T1087.002"
+      name: "Domain Account Discovery"
+      relationship: "usually_precedes"
+      relevance: 0.95
+      rationale: "Enumerate accounts without pre-auth required"
+
+  windows_events:
+    - event_id: 4768
+      name: "Kerberos TGT Request"
+      relevance: 0.95
+      description: "AS-REQ without pre-auth"
+      query_pattern: "EventID=4768 AND PreAuthType=0"
+
+# Pass the Hash
+T1550.002:
+  name: "Pass the Hash"
+  description: "Adversaries may use stolen password hashes to authenticate."
+
+  precursors:
+    - technique: "T1003"
+      name: "OS Credential Dumping"
+      relationship: "usually_precedes"
+      relevance: 0.95
+      rationale: "Must obtain hashes before passing them"
+
+    - technique: "T1003.001"
+      name: "LSASS Memory"
+      relationship: "usually_precedes"
+      relevance: 0.90
+      rationale: "Common source of NTLM hashes"
+
+  windows_events:
+    - event_id: 4624
+      name: "Successful Logon"
+      relevance: 0.90
+      description: "Type 9 (NewCredentials) logon with NTLM"
+      query_pattern: "EventID=4624 AND LogonType=9 AND AuthenticationPackageName=NTLM"
+
+    - event_id: 4648
+      name: "Explicit Credential Logon"
+      relevance: 0.85
+      description: "Logon with alternate credentials"
+      query_pattern: "EventID=4648"
+
+# Golden Ticket
+T1558.001:
+  name: "Golden Ticket"
+  description: "Adversaries may forge Kerberos TGTs to gain persistent access."
+
+  precursors:
+    - technique: "T1003.006"
+      name: "DCSync"
+      relationship: "usually_precedes"
+      relevance: 0.95
+      rationale: "Need krbtgt hash to forge golden ticket"
+
+    - technique: "T1003"
+      name: "OS Credential Dumping"
+      relationship: "usually_precedes"
+      relevance: 0.90
+      rationale: "Need to extract krbtgt hash"
+
+  windows_events:
+    - event_id: 4768
+      name: "Kerberos TGT Request"
+      relevance: 0.90
+      description: "TGT with suspicious lifetime or SID"
+      query_pattern: "EventID=4768"
+
+    - event_id: 4769
+      name: "Kerberos Service Ticket"
+      relevance: 0.85
+      description: "Service ticket from forged TGT"
+      query_pattern: "EventID=4769"
+
+# Brute Force
+T1110:
+  name: "Brute Force"
+  description: "Adversaries may use brute force to obtain account credentials."
+
+  follow_on:
+    - technique: "T1078"
+      name: "Valid Accounts"
+      relationship: "usually_follows"
+      relevance: 0.95
+      rationale: "Successful brute force leads to valid credential usage"
+
+    - technique: "T1021"
+      name: "Remote Services"
+      relationship: "usually_follows"
+      relevance: 0.90
+      rationale: "Use compromised credentials for lateral movement"
+
+  windows_events:
+    - event_id: 4625
+      name: "Failed Logon"
+      relevance: 0.98
+      description: "Multiple failures indicate brute force"
+      query_pattern: "EventID=4625"
+      threshold: "10+ failures from same source in 10 minutes"
+
+    - event_id: 4771
+      name: "Kerberos Pre-Auth Failure"
+      relevance: 0.90
+      description: "Kerberos authentication failures"
+      query_pattern: "EventID=4771"
+
+  detection_patterns:
+    password_spray:
+      description: "Multiple accounts, same password, short timeframe"
+      pattern: "Count distinct TargetUserName > 5 within 10 minutes from same source"
+
+    credential_stuffing:
+      description: "Same username, multiple passwords, short timeframe"
+      pattern: "Count EventID=4625 where TargetUserName=X > 10 within 5 minutes"
+
+# Password Spraying (sub-technique)
+T1110.003:
+  name: "Password Spraying"
+  description: "Adversaries may try one password against many accounts."
+
+  windows_events:
+    - event_id: 4625
+      name: "Failed Logon"
+      relevance: 0.98
+      description: "Many accounts, few failures per account"
+      query_pattern: "EventID=4625"
+      detection_logic: |
+        - Multiple target accounts (>5)
+        - Few failures per account (1-3)
+        - Same source IP or workstation
+        - Short time window (<30 minutes)
+
+  investigation_questions:
+    - question: "Were the same password(s) tried against multiple accounts?"
+      priority: 0.95
+
+    - question: "Did any of the sprayed accounts succeed in authentication?"
+      priority: 0.95
+
+# Network Share Discovery
+T1135:
+  name: "Network Share Discovery"
+  description: "Adversaries may look for shared folders on remote systems."
+
+  follow_on:
+    - technique: "T1039"
+      name: "Data from Network Shared Drive"
+      relationship: "usually_follows"
+      relevance: 0.90
+      rationale: "After discovering shares, attackers access them"
+
+    - technique: "T1552.006"
+      name: "Group Policy Preferences"
+      relationship: "sometimes_follows"
+      relevance: 0.75
+      rationale: "May look for GPP passwords in SYSVOL"
+
+  windows_events:
+    - event_id: 5140
+      name: "Network Share Access"
+      relevance: 0.90
+      description: "Share enumeration via SMB"
+      query_pattern: "EventID=5140"
+
+    - event_id: 5145
+      name: "Detailed Share Access"
+      relevance: 0.85
+      description: "File-level share access audit"
+      query_pattern: "EventID=5145"
+
+# Account Discovery
+T1087:
+  name: "Account Discovery"
+  description: "Adversaries may attempt to get a listing of accounts on a system."
+
+  follow_on:
+    - technique: "T1110"
+      name: "Brute Force"
+      relationship: "usually_follows"
+      relevance: 0.85
+      rationale: "Use discovered accounts for credential attacks"
+
+    - technique: "T1078"
+      name: "Valid Accounts"
+      relationship: "sometimes_follows"
+      relevance: 0.70
+      rationale: "Target discovered privileged accounts"
+
+  windows_events:
+    - event_id: 4661
+      name: "SAM Handle Request"
+      relevance: 0.80
+      description: "Direct SAM database access"
+      query_pattern: "EventID=4661"
+
+    - event_id: 4662
+      name: "AD Object Access"
+      relevance: 0.85
+      description: "LDAP queries for user objects"
+      query_pattern: "EventID=4662 AND ObjectType=*User*"
+
+# Domain Account Discovery (sub-technique)
+T1087.002:
+  name: "Domain Account Discovery"
+  description: "Adversaries may enumerate domain accounts."
+
+  windows_events:
+    - event_id: 4662
+      name: "AD Object Access"
+      relevance: 0.90
+      description: "LDAP enumeration of domain accounts"
+      query_pattern: "EventID=4662"
+
+  log_patterns:
+    - name: "LDAP user query"
+      pattern: |
+        {job=~".*"} |~ "(?i)(&(objectClass=user)|(objectCategory=person))"
+      description: "LDAP filter for user enumeration"
+
+    - name: "Net user domain commands"
+      pattern: |
+        {job=~".*"} |~ "net.*user.*/domain"
+      description: "net user /domain command execution"
+
+# Remote System Discovery
+T1018:
+  name: "Remote System Discovery"
+  description: "Adversaries may attempt to get a listing of systems within a network."
+
+  follow_on:
+    - technique: "T1021"
+      name: "Remote Services"
+      relationship: "usually_follows"
+      relevance: 0.85
+      rationale: "Use discovered systems for lateral movement"
+
+    - technique: "T1046"
+      name: "Network Service Scanning"
+      relationship: "sometimes_precedes"
+      relevance: 0.75
+      rationale: "Detailed service enumeration of discovered hosts"
+
+  log_patterns:
+    - name: "DNS queries for AD records"
+      pattern: |
+        {job=~".*"} |~ "(?i)(_ldap|_kerberos|_gc).*_tcp"
+      description: "SRV record queries for AD services"
+
+    - name: "Ping sweeps"
+      pattern: |
+        {job=~".*"} |~ "(?i)icmp" |~ "(?i)(request|reply)"
+      description: "ICMP ping sweep activity"
+
+# Lateral Movement - Remote Services
+T1021:
+  name: "Remote Services"
+  description: "Adversaries may use remote services to move laterally."
+
+  precursors:
+    - technique: "T1078"
+      name: "Valid Accounts"
+      relationship: "usually_precedes"
+      relevance: 0.95
+      rationale: "Need credentials to use remote services"
+
+    - technique: "T1018"
+      name: "Remote System Discovery"
+      relationship: "usually_precedes"
+      relevance: 0.85
+      rationale: "Need to identify target systems"
+
+  windows_events:
+    - event_id: 4624
+      name: "Successful Logon"
+      relevance: 0.85
+      description: "Type 3 (Network) or Type 10 (RemoteInteractive) logons"
+      query_pattern: "EventID=4624 AND (LogonType=3 OR LogonType=10)"
+
+    - event_id: 4648
+      name: "Explicit Credential Logon"
+      relevance: 0.80
+      description: "Remote authentication with explicit credentials"
+      query_pattern: "EventID=4648"

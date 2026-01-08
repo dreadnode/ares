@@ -6,7 +6,7 @@ API costs, and team collaboration.
 ## Quick Start
 
 ```python
-from src.templates import get_template_loader
+from ares.core.templates import get_template_loader
 
 loader = get_template_loader()
 result = loader.render(
@@ -36,16 +36,19 @@ result = loader.render(
 
 | Category | Purpose | Status |
 | -------- | ------- | ------ |
-| `agent/` | System instructions & alert prompts | ✅ Complete |
-| `engines/` | Question generation templates | ✅ Complete |
+| `agent/` | Blue team system instructions & alert prompts | ✅ Complete |
+| `engines/` | Question generation & attack chain templates | ✅ Complete |
 | `tools/` | Investigation query suggestions | ✅ Complete |
 | `reports/` | Report section templates | ⚠️ Partial |
+| `redteam/` | Red team agent templates | ✅ Complete |
 
 ## API Reference
 
 ### List Templates
 
 ```python
+from ares.core.templates import get_template_loader
+
 loader = get_template_loader()
 templates = loader.list_templates()
 ```
@@ -117,7 +120,7 @@ the questions.
 ## Testing
 
 ```python
-from src.templates import get_template_loader
+from ares.core.templates import get_template_loader
 
 loader = get_template_loader()
 
@@ -133,11 +136,14 @@ except Exception as e:
 
 | File | Status | Notes |
 | ---- | ------ | ----- |
-| `src/agent.py` | ✅ Complete | Uses template loader |
-| `src/core/create.py` | ✅ Complete | System instructions from template |
-| `src/engines.py` | ✅ Complete | All questions templated |
-| `src/tools/investigation.py` | ✅ Complete | Query suggestions templated |
-| `src/report.py` | ⚠️ Partial | Templates exist, integration incomplete |
+| `src/ares/agents/blue/soc_investigator.py` | ✅ Complete | Uses template loader |
+| `src/ares/agents/red/pentester.py` | ✅ Complete | Uses template loader |
+| `src/ares/core/factories/blue_factory.py` | ✅ Complete | System instructions from template |
+| `src/ares/core/factories/red_factory.py` | ✅ Complete | System instructions from template |
+| `src/ares/core/engines.py` | ✅ Complete | All questions templated |
+| `src/ares/tools/blue/investigation.py` | ✅ Complete | Query suggestions templated |
+| `src/ares/reports/investigation.py` | ⚠️ Partial | Templates exist, integration incomplete |
+| `src/ares/reports/redteam.py` | ✅ Complete | Red team reports templated |
 
 ## Troubleshooting
 

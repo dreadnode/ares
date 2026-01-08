@@ -1,0 +1,35 @@
+# Golden Ticket Generation Task
+
+Generate a golden ticket and dump secrets on the target domain.
+
+## Parameters
+
+- **KRBTGT Hash**: {{ krbtgt_hash }}
+- **Compromised User**: {{ user_name }}
+- **User Password**: {{ password }}
+- **Compromised Domain**: {{ compromised_domain }}
+- **Target Domain**: {{ target_domain }}
+{% if compromised_dc_ip %}- **Compromised DC IP**: {{ compromised_dc_ip }}{% endif %}
+{% if target_dc_ip %}- **Target DC IP**: {{ target_dc_ip }}{% endif %}
+
+## Steps
+
+1. **First**, use the get_sid tool to get the SID of the compromised domain **{{ compromised_domain }}**.
+   - Username: {{ user_name }}
+   - Password: {{ password }}
+   {% if compromised_dc_ip %}- Use dc_ip={{ compromised_dc_ip }} to connect to the domain controller{% endif %}
+   - Look for the line: "[*] Domain SID is: ..."
+
+2. **Second**, use the get_sid tool to get the SID of the target domain **{{ target_domain }}**.
+   - Username: {{ user_name }}
+   - Password: {{ password }}
+   {% if target_dc_ip %}- Use dc_ip={{ target_dc_ip }} to connect to the domain controller{% endif %}
+   - Look for the line: "[*] Domain SID is: ..."
+
+3. **Then**, use the generate_golden_ticket tool to generate a golden ticket for Administrator:
+   - KRBTGT Hash: {{ krbtgt_hash }}
+   - Domain: {{ compromised_domain }}
+   - Use the two SIDs you discovered
+   - **Add 519 to the target domain SID** for Enterprise Admin access
+
+**Return confirmation** that the golden ticket was generated successfully or not.

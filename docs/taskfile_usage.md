@@ -1,7 +1,7 @@
 # Taskfile Usage for Ares
 
-This document describes how to use the Taskfile to run and manage the Ares SOC
-Investigation Agent.
+This document describes how to use the Taskfile to run and manage the Ares
+security agents (Blue Team SOC and Red Team penetration testing).
 
 ## Prerequisites
 
@@ -36,57 +36,65 @@ This will check:
 
 ### 3. Run Ares
 
-Start Ares in poll mode (automatically polls Grafana for alerts):
+Start the Blue Team agent in poll mode (automatically polls Grafana for alerts):
 
 ```bash
-task ares:run
+task ares:blue:
+```
+
+Or run the Red Team agent against a target:
+
+```bash
+# Discover target via AWS EC2 Name tag filter
+task -y ares:red TARGET=dreadgoad
+
+# Or use a direct IP address
+task ares:red: TARGET=192.168.1.100
 ```
 
 This will:
 
 1. Retrieve API keys from 1Password:
    - `Dreadnode Dev Platform` → `api-key` field
-   - `Grafana` → `api-key` field
-   - `Anthropic` → `api-key` field
-2. Start Ares with the configured platform (https://platform.dev.plundr.ai/)
-3. Poll for alerts every 30 seconds (configurable)
+   - `Ares Grafana MCP` → `grafana-token` field (blue team only)
+   - `claude.ai` → `dreadnode-api-key` field
+2. Start the agent with the configured platform (https://platform.dev.plundr.ai/)
 
 ## Available Tasks
 
-### Running Ares
+### Blue Team Tasks
 
-#### `task ares:run`
+#### `task ares:blue:`
 
-Run Ares in poll mode with 1Password API keys.
+Run Blue Team agent in poll mode with 1Password API keys.
 
 **Example:**
 
 ```bash
 # Use default configuration
-task ares:run
+task ares:blue:
 
 # Custom Grafana URL
-task ares:run GRAFANA_URL=http://grafana.example.com:3000
+task ares:blue: GRAFANA_URL=http://grafana.example.com:3000
 
 # Custom model
-task ares:run MODEL=gpt-4o
+task ares:blue: MODEL=gpt-4o
 
 # Custom poll interval (60 seconds)
-task ares:run POLL_INTERVAL=60
-
-# Multiple overrides
-task ares:run \
-  GRAFANA_URL=http://grafana.example.com:3000 \
-  LOKI_URL=http://loki.example.com:3100 \
-  MODEL=claude-sonnet-4-20250514 \
-  POLL_INTERVAL=60
+task ares:blue: POLL_INTERVAL=60
 ```
 
-#### `task ares:run:local`
+#### `task ares:blue:once:`
 
-Run Ares using `.env` file instead of 1Password.
+Run Blue Team agent once and exit (processes current alerts only).
 
-**Example:**
+```bash
+task ares:blue:once:
+```
+
+#### `task ares:blue:local:`
+
+Run Blue Team using `.env` file instead of 1Password.
 
 ```bash
 # Create .env file first
@@ -94,7 +102,55 @@ cp .env.example .env
 # Edit .env with your API keys
 
 # Run with .env
-task ares:run:local
+task ares:blue:local:
+```
+
+### Red Team Tasks
+
+#### `task ares:red TARGET=<filter>`
+
+Run Red Team agent with automatic EC2 target discovery.
+
+**How Target Discovery Works:**
+
+When you provide a non-IP target (like `dreadgoad`), the task queries AWS EC2 to
+find running instances where the Name tag contains your filter string:
+
+```bash
+aws ec2 describe-instances \
+  --filters "Name=instance-state-name,Values=running" \
+  --query "Reservations[*].Instances[?contains(Tags[?Key=='Name'].Value|[0], 'TARGET')].PrivateIpAddress"
+```
+
+The first matching instance's private IP is used as the target.
+
+**Example:**
+
+```bash
+# EC2 target discovery - finds instances with "dreadgoad" in Name tag
+task -y ares:red TARGET=dreadgoad
+
+# Custom model and max steps
+task -y ares:red TARGET=dreadgoad MODEL=claude-sonnet-4-20250514 MAX_STEPS=300
+
+# Custom AWS profile and region
+task -y ares:red TARGET=dreadgoad PROFILE=production REGION=us-east-1
+```
+
+#### `task ares:red: TARGET=<ip>`
+
+Run Red Team agent against a direct IP address (bypasses EC2 discovery).
+
+```bash
+task ares:red: TARGET=192.168.1.100
+```
+
+#### `task ares:red:local: TARGET=<ip>`
+
+Run Red Team using `.env` file instead of 1Password.
+
+```bash
+task ares:red:local: TARGET=192.168.1.100
 ```
 
 #### `task ares:investigate`
@@ -279,12 +335,12 @@ Ares expects the following items in 1Password:
    - Field: `api-key`
    - Used for: Platform observability and tracing
 
-2. **Grafana** (Optional, can use GRAFANA_API_KEY env var)
-   - Field: `api-key`
-   - Used for: Alert polling and dashboard access
+2. **Ares Grafana MCP** (Required for Blue Team)
+   - Field: `grafana-token`
+   - Used for: Alert polling and Loki/Prometheus queries
 
-3. **Anthropic** (Optional, can use ANTHROPIC_API_KEY env var)
-   - Field: `api-key`
+3. **claude.ai** (Required)
+   - Field: `dreadnode-api-key`
    - Used for: Claude model inference
 
 ### Creating 1Password Items
@@ -301,14 +357,14 @@ op item create \
 # Create Grafana item
 op item create \
   --category="API Credential" \
-  --title="Grafana" \
-  api-key="your-grafana-api-key"
+  --title="Ares Grafana MCP" \
+  grafana-token="your-grafana-token"
 
 # Create Anthropic item
 op item create \
   --category="API Credential" \
-  --title="Anthropic" \
-  api-key="your-anthropic-api-key"
+  --title="claude.ai" \
+  dreadnode-api-key="your-anthropic-api-key"
 ```
 
 ### Verifying 1Password Access
@@ -320,15 +376,15 @@ Test that you can retrieve the API keys:
 op item get "Dreadnode Dev Platform" --fields api-key --reveal
 
 # Test Grafana key
-op item get "Grafana" --fields api-key --reveal
+op item get "Ares Grafana MCP" --fields grafana-token --reveal
 
 # Test Anthropic key
-op item get "Anthropic" --fields api-key --reveal
+op item get "claude.ai" --fields dreadnode-api-key --reveal
 ```
 
 ## Common Workflows
 
-### Development Workflow
+### Blue Team Development Workflow
 
 ```bash
 # 1. Check configuration
@@ -337,8 +393,8 @@ task ares:config:check
 # 2. Test MITRE data loading
 task ares:mitre:test
 
-# 3. Run Ares in poll mode
-task ares:run
+# 3. Run Blue Team agent in poll mode
+task ares:blue:
 
 # 4. In another terminal, check reports
 task ares:reports:list
@@ -347,14 +403,12 @@ task ares:reports:list
 task ares:reports:latest
 ```
 
-### Production Workflow
+### Blue Team Production Workflow
 
 ```bash
 # Run with production configuration
-task ares:run \
+task ares:blue: \
   GRAFANA_URL=http://grafana.prod.example.com:3000 \
-  LOKI_URL=http://loki.prod.example.com:3100 \
-  PROMETHEUS_URL=http://prometheus.prod.example.com:9090 \
   DREADNODE_PROJECT=ares-prod \
   POLL_INTERVAL=60
 ```
@@ -377,6 +431,19 @@ EOF
 task ares:investigate ALERT=suspicious-activity.json
 
 # 3. View report
+task ares:reports:latest
+```
+
+### Red Team Workflow
+
+```bash
+# 1. Run red team agent (discovers target via EC2 Name tag)
+task -y ares:red TARGET=dreadgoad
+
+# Or target a specific IP directly
+task ares:red: TARGET=192.168.1.100
+
+# 2. Monitor progress (reports generated on completion)
 task ares:reports:latest
 ```
 

@@ -34,19 +34,35 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
         Returns:
             List of firing alert instances with labels, annotations, and values.
         """
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(
-                    f"{self.base_url}/api/alertmanager/grafana/api/v2/alerts",
-                    headers=self._headers(),
-                    params={"active": "true"},
-                )
-                response.raise_for_status()
-                return response.json()
+        # Try multiple Grafana alert API endpoints (depends on Grafana version)
+        endpoints = [
+            "/api/alertmanager/grafana/api/v2/alerts",  # Grafana 9+
+            "/api/v1/alerts",  # Alternative
+            "/api/prometheus/grafana/api/v1/alerts",  # Older format
+        ]
 
-        except httpx.HTTPError as e:
-            logger.error(f"Failed to get alerts: {e}")
-            return []
+        for endpoint in endpoints:
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.get(
+                        f"{self.base_url}{endpoint}",
+                        headers=self._headers(),
+                        params={"active": "true"},
+                    )
+                    if response.status_code == 200:
+                        logger.info(f"Successfully connected to Grafana alerts at {endpoint}")
+                        return response.json()
+                    if response.status_code == 404:
+                        continue  # Try next endpoint
+                    response.raise_for_status()
+
+            except httpx.HTTPError as e:
+                if "404" not in str(e):
+                    logger.error(f"Failed to get alerts from {endpoint}: {e}")
+                continue
+
+        logger.warning("Could not find Grafana alerts endpoint. Using empty alerts list.")
+        return []
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def get_alert_history(

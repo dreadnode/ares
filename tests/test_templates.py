@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from jinja2 import TemplateNotFound
 
-from src.templates import TemplateLoader, get_template_loader
+from ares.core.templates import TemplateLoader, get_template_loader
 
 
 class TestTemplateLoader:
@@ -282,15 +282,15 @@ class TestClimbStrategiesConfig:
 
     def test_climb_strategies_file_exists(self) -> None:
         """Test that climb strategies YAML file exists."""
-        from src.engines import _load_climb_strategies
+        from ares.core.engines import _load_climb_strategies
 
         strategies = _load_climb_strategies()
         assert len(strategies) > 0
 
     def test_climb_strategies_structure(self) -> None:
         """Test that climb strategies have expected structure."""
-        from src.engines import CLIMB_STRATEGIES
-        from src.models import PyramidLevel
+        from ares.core.engines import CLIMB_STRATEGIES
+        from ares.core.models import PyramidLevel
 
         # Should have strategies for most pyramid levels
         assert len(CLIMB_STRATEGIES) > 0
@@ -315,7 +315,7 @@ class TestTemplateIntegration:
 
     def test_agent_uses_templates(self) -> None:
         """Test that agent.py uses templates correctly."""
-        from src.agent import build_initial_prompt
+        from ares.agents.blue.soc_investigator import build_initial_prompt
 
         alert = {
             "labels": {
@@ -339,7 +339,7 @@ class TestTemplateIntegration:
 
     def test_create_uses_system_instructions_template(self) -> None:
         """Test that create.py loads system instructions from template."""
-        from src.core.create import SYSTEM_INSTRUCTIONS
+        from ares.core.factories.blue_factory import SYSTEM_INSTRUCTIONS
 
         assert len(SYSTEM_INSTRUCTIONS) > 0
         # System instructions should be substantial
@@ -347,14 +347,14 @@ class TestTemplateIntegration:
 
     def test_engines_load_climb_strategies(self) -> None:
         """Test that engines.py loads climb strategies."""
-        from src.engines import CLIMB_STRATEGIES
+        from ares.core.engines import CLIMB_STRATEGIES
 
         assert len(CLIMB_STRATEGIES) > 0
 
     def test_investigation_tools_use_templates(self) -> None:
         """Test that investigation tools use templates."""
-        from src.models import InvestigationState
-        from src.tools.investigation import InvestigationTools
+        from ares.core.models import InvestigationState
+        from ares.tools.blue.investigation import InvestigationTools
 
         tools = InvestigationTools()
         state = InvestigationState(

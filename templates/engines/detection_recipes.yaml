@@ -1,0 +1,527 @@
+---
+# Detection Recipes for Windows Security Events
+# These recipes define specific patterns for detecting attack techniques
+# in Windows Security Event logs
+
+# ---
+# Password Spray Detection Recipe
+password_spray:
+  name: "Password Spray Attack Detection"
+  description: |
+    Detects password spray attacks where an attacker tries the same password
+    against multiple accounts to avoid account lockouts.
+
+  mitre_technique: "T1110.003"
+
+  indicators:
+    - "Multiple distinct target accounts (5+) with authentication failures"
+    - "Same source IP or workstation"
+    - "Short time window (< 30 minutes)"
+    - "Low failures per account (1-3)"
+
+  windows_events:
+    primary:
+      - event_id: 4625
+        fields:
+          - TargetUserName
+          - TargetDomainName
+          - IpAddress
+          - WorkstationName
+          - FailureReason
+          - SubStatus
+        detection_logic: |
+          COUNT(DISTINCT TargetUserName) > 5
+          WHERE TimeGenerated within 30 minutes
+          GROUP BY IpAddress
+
+    supporting:
+      - event_id: 4771
+        description: "Kerberos pre-auth failures"
+      - event_id: 4776
+        description: "NTLM credential validation failures"
+
+  logql_queries:
+    # Query 1: Find authentication failures grouped by source
+    - name: "Find spray source IPs"
+      query: |
+        {job=~".*"} |~ "(?i)(4625|4771|4776)" |~ "(?i)(failure|failed)"
+      limit: 100
+      direction: "backward"
+
+    # Query 2: Look for patterns
+    - name: "Multiple accounts from same source"
+      query: |
+        {job=~".*"} |= "4625" | json | __error__="" | line_format "{{.IpAddress}} {{.TargetUserName}}"
+      post_processing: "Count distinct usernames per IP"
+
+  investigation_steps:
+    1: "Identify source IPs with multiple failed authentications"
+    2: "List all target accounts from each source IP"
+    3: "Check if any sprayed accounts subsequently authenticated successfully"
+    4: "Identify the time window and pattern (same password indicator)"
+    5: "Document all affected accounts for password reset"
+
+  severity_thresholds:
+    low: "5-10 accounts targeted"
+    medium: "10-50 accounts targeted"
+    high: "50+ accounts targeted or privileged accounts targeted"
+
+# ---
+# Credential Stuffing Detection
+credential_stuffing:
+  name: "Credential Stuffing Detection"
+  description: |
+    Detects attempts to use leaked credentials against multiple accounts.
+    Different from password spray as it uses known credential pairs.
+
+  mitre_technique: "T1110.004"
+
+  windows_events:
+    primary:
+      - event_id: 4625
+        detection_logic: |
+          Same TargetUserName with many different failure codes
+          Rapid succession of attempts
+
+  logql_queries:
+    - name: "Rapid auth failures"
+      query: |
+        {job=~".*"} |= "4625" | json | count_over_time({job=~".*"} |= "4625"[5m]) > 10
+
+# ---
+# Share Access Enumeration Detection
+share_enumeration:
+  name: "Network Share Enumeration Detection"
+  description: |
+    Detects enumeration of network shares, particularly SYSVOL and NETLOGON
+    which may contain credentials or sensitive configurations.
+
+  mitre_technique: "T1135"
+
+  indicators:
+    - "Access to multiple shares from single source"
+    - "Access to SYSVOL or NETLOGON shares"
+    - "Access from non-administrative accounts"
+    - "Unusual access times"
+
+  windows_events:
+    primary:
+      - event_id: 5140
+        description: "Network share was accessed"
+        fields:
+          - SubjectUserName
+          - SubjectDomainName
+          - IpAddress
+          - ShareName
+          - ShareLocalPath
+        key_shares:
+          - "SYSVOL"
+          - "NETLOGON"
+          - "ADMIN$"
+          - "C$"
+          - "IPC$"
+
+      - event_id: 5145
+        description: "Network share object was checked for access"
+        fields:
+          - SubjectUserName
+          - IpAddress
+          - ShareName
+          - RelativeTargetName
+          - AccessMask
+
+  logql_queries:
+    - name: "SYSVOL access"
+      query: |
+        {job=~".*"} |~ "(?i)(5140|5145)" |~ "(?i)sysvol"
+
+    - name: "NETLOGON access"
+      query: |
+        {job=~".*"} |~ "(?i)(5140|5145)" |~ "(?i)netlogon"
+
+    - name: "Admin share access"
+      query: |
+        {job=~".*"} |~ "(?i)(5140|5145)" |~ "(?i)(admin\\$|c\\$)"
+
+  investigation_steps:
+    1: "Identify all shares accessed by the source IP/user"
+    2: "Check if SYSVOL or NETLOGON were accessed"
+    3: "List files accessed within those shares"
+    4: "Identify if any scripts or policies were read"
+    5: "Check for GPP password files (Groups.xml, etc.)"
+
+# ---
+# LDAP Enumeration Detection
+ldap_enumeration:
+  name: "LDAP/Active Directory Enumeration Detection"
+  description: |
+    Detects LDAP queries used for enumerating AD objects including
+    users, groups, computers, and domain trusts.
+
+  mitre_techniques:
+    - "T1087.002"  # Domain Account Discovery
+    - "T1069.002"  # Domain Groups
+    - "T1482"      # Domain Trust Discovery
+
+  indicators:
+    - "Bulk LDAP queries from single source"
+    - "Queries for all users/computers/groups"
+    - "Queries for sensitive attributes (adminCount, servicePrincipalName)"
+    - "Unusual query source (not a management server)"
+
+  windows_events:
+    primary:
+      - event_id: 4662
+        description: "Operation performed on AD object"
+        fields:
+          - SubjectUserName
+          - ObjectType
+          - ObjectName
+          - OperationType
+          - Properties
+
+      - event_id: 4661
+        description: "Handle to object requested"
+        fields:
+          - SubjectUserName
+          - ObjectType
+          - ObjectName
+
+  suspicious_ldap_filters:
+    user_enum:
+      - "(objectClass=user)"
+      - "(objectCategory=person)"
+      - "(samAccountType=805306368)"
+    computer_enum:
+      - "(objectClass=computer)"
+      - "(objectCategory=computer)"
+    group_enum:
+      - "(objectClass=group)"
+      - "(objectCategory=group)"
+    spn_enum:
+      - "(servicePrincipalName=*)"
+    admin_enum:
+      - "(adminCount=1)"
+      - "(memberOf=*Admins*)"
+    asrep_roast:
+      - "(userAccountControl:1.2.840.113556.1.4.803:=4194304)"
+
+  logql_queries:
+    - name: "User enumeration queries"
+      query: |
+        {job=~".*"} |~ "(?i)(objectclass=user|objectcategory=person)"
+
+    - name: "SPN enumeration (Kerberoasting recon)"
+      query: |
+        {job=~".*"} |~ "(?i)serviceprincipalname"
+
+    - name: "Admin account enumeration"
+      query: |
+        {job=~".*"} |~ "(?i)(admincount|admin.*member)"
+
+# ---
+# Kerberos Attack Detection
+kerberos_attacks:
+  name: "Kerberos-based Attack Detection"
+  description: |
+    Detects various Kerberos-based attacks including Kerberoasting,
+    AS-REP roasting, Golden/Silver ticket usage, and pass-the-ticket.
+
+  sub_patterns:
+    kerberoasting:
+      mitre_technique: "T1558.003"
+      indicators:
+        - "TGS requests for service accounts"
+        - "RC4 encryption requested (0x17)"
+        - "Bulk TGS requests in short time"
+
+      windows_events:
+        - event_id: 4769
+          fields:
+            - TargetUserName
+            - ServiceName
+            - TicketEncryptionType
+            - IpAddress
+          detection_logic: |
+            TicketEncryptionType = 0x17 (RC4)
+            AND COUNT(*) > 5 within 1 hour
+            FROM same IpAddress
+
+      logql_queries:
+        - name: "RC4 TGS requests"
+          query: |
+            {job=~".*"} |= "4769" |~ "(?i)(0x17|RC4)"
+
+    asrep_roasting:
+      mitre_technique: "T1558.004"
+      indicators:
+        - "AS-REQ without pre-authentication"
+        - "Targeting accounts with DONT_REQ_PREAUTH"
+
+      windows_events:
+        - event_id: 4768
+          fields:
+            - TargetUserName
+            - PreAuthType
+            - IpAddress
+          detection_logic: |
+            PreAuthType = 0 (no pre-auth)
+
+      logql_queries:
+        - name: "AS-REQ without pre-auth"
+          query: |
+            {job=~".*"} |= "4768" |~ "(?i)preauth.*0"
+
+    golden_ticket:
+      mitre_technique: "T1558.001"
+      indicators:
+        - "TGT with unusual lifetime"
+        - "TGT with forged SID"
+        - "Account logon from impossible location"
+
+      windows_events:
+        - event_id: 4768
+        - event_id: 4769
+        - event_id: 4624
+
+# ---
+# DCSync Detection
+dcsync:
+  name: "DCSync Attack Detection"
+  description: |
+    Detects DCSync attacks where an attacker mimics a domain controller
+    to request password data via replication.
+
+  mitre_technique: "T1003.006"
+
+  indicators:
+    - "Replication request from non-DC"
+    - "DS-Replication-Get-Changes-All permission usage"
+    - "Directory service access from unusual source"
+
+  windows_events:
+    primary:
+      - event_id: 4662
+        description: "AD object accessed with replication rights"
+        fields:
+          - SubjectUserName
+          - SubjectDomainName
+          - ObjectType
+          - Properties
+        detection_logic: |
+          Properties contains:
+          - 1131f6aa-9c07-11d1-f79f-00c04fc2dcd2 (DS-Replication-Get-Changes)
+          - 1131f6ad-9c07-11d1-f79f-00c04fc2dcd2 (DS-Replication-Get-Changes-All)
+          - 89e95b76-444d-4c62-991a-0facbeda640c (DS-Replication-Get-Changes-In-Filtered-Set)
+          AND source is NOT a known Domain Controller
+
+      - event_id: 4624
+        description: "Logon before DCSync"
+        fields:
+          - TargetUserName
+          - IpAddress
+          - LogonType
+
+  logql_queries:
+    - name: "DCSync replication GUIDs"
+      query: |
+        {job=~".*"} |= "4662" |~ "(?i)(1131f6aa|1131f6ad|89e95b76)"
+
+    - name: "Directory service access"
+      query: |
+        {job=~".*"} |~ "(?i)directory.*service.*access"
+
+  investigation_steps:
+    1: "Identify the source account and IP of the DCSync"
+    2: "Verify if the source is a legitimate Domain Controller"
+    3: "Check what accounts were replicated"
+    4: "Look for precursor reconnaissance (LDAP enumeration)"
+    5: "Check for authentication attempts before DCSync"
+    6: "Identify all compromised accounts that need password resets"
+
+# ---
+# Pass the Hash Detection
+pass_the_hash:
+  name: "Pass-the-Hash Attack Detection"
+  description: |
+    Detects attempts to authenticate using NTLM hashes instead of plaintext passwords.
+
+  mitre_technique: "T1550.002"
+
+  indicators:
+    - "NTLM authentication with Type 9 (NewCredentials) logon"
+    - "NTLM auth from unusual source"
+    - "Same hash used from multiple locations"
+
+  windows_events:
+    primary:
+      - event_id: 4624
+        fields:
+          - LogonType
+          - AuthenticationPackageName
+          - TargetUserName
+          - IpAddress
+          - WorkstationName
+        detection_logic: |
+          LogonType = 9 (NewCredentials)
+          AND AuthenticationPackageName = NTLM
+
+      - event_id: 4648
+        description: "Explicit credential logon"
+        fields:
+          - TargetUserName
+          - TargetServerName
+          - IpAddress
+
+  logql_queries:
+    - name: "NTLM NewCredentials logon"
+      query: |
+        {job=~".*"} |= "4624" |~ "(?i)logontype.*9" |~ "(?i)ntlm"
+
+    - name: "Explicit credential usage"
+      query: |
+        {job=~".*"} |= "4648"
+
+# ---
+# Service Enumeration Detection
+service_enumeration:
+  name: "Network Service Scanning/Enumeration Detection"
+  description: |
+    Detects port scanning and service enumeration activities.
+
+  mitre_technique: "T1046"
+
+  indicators:
+    - "Connection attempts to multiple ports on same host"
+    - "Connection attempts to same port on multiple hosts"
+    - "Rapid connection attempts"
+    - "Connections to sensitive services (LDAP, Kerberos, RPC)"
+
+  sensitive_ports:
+    - port: 389
+      service: "LDAP"
+    - port: 636
+      service: "LDAPS"
+    - port: 88
+      service: "Kerberos"
+    - port: 135
+      service: "RPC"
+    - port: 445
+      service: "SMB"
+    - port: 3389
+      service: "RDP"
+    - port: 5985
+      service: "WinRM HTTP"
+    - port: 5986
+      service: "WinRM HTTPS"
+    - port: 22
+      service: "SSH"
+    - port: 53
+      service: "DNS"
+
+  logql_queries:
+    - name: "Connection to AD services"
+      query: |
+        {job=~".*"} |~ "(?i)(389|636|88|135|445)" |~ "(?i)(connect|syn|established)"
+
+    - name: "RDP connection attempts"
+      query: |
+        {job=~".*"} |~ "(?i)3389" |~ "(?i)(connect|accept)"
+
+# ---
+# Privileged Account Usage Detection
+privileged_account_usage:
+  name: "Privileged Account Usage Detection"
+  description: |
+    Monitors usage of privileged accounts for anomalous behavior.
+
+  indicators:
+    - "Privileged account logon from unusual location"
+    - "Privileged account used outside business hours"
+    - "Multiple privileged accounts from same source"
+
+  windows_events:
+    primary:
+      - event_id: 4672
+        description: "Special privileges assigned to new logon"
+        fields:
+          - SubjectUserName
+          - SubjectDomainName
+          - PrivilegeList
+
+      - event_id: 4624
+        description: "Successful logon"
+
+  logql_queries:
+    - name: "Special privilege assignment"
+      query: |
+        {job=~".*"} |= "4672"
+
+    - name: "Admin account logons"
+      query: |
+        {job=~".*"} |= "4624" |~ "(?i)(admin|administrator|domain.*admin)"
+
+# ---
+# Investigation Query Templates
+# Ready-to-use queries for the blue team agent
+
+query_templates:
+  # Authentication investigation
+  auth_failures_by_source:
+    description: "Get all auth failures from a specific IP"
+    query: |
+      {job=~".*"} |= "4625" |~ "IpAddress.*{source_ip}"
+
+  auth_failures_by_user:
+    description: "Get all auth failures for a specific user"
+    query: |
+      {job=~".*"} |= "4625" |~ "TargetUserName.*{username}"
+
+  successful_auth_after_failures:
+    description: "Check if failed auth was followed by success"
+    query: |
+      {job=~".*"} |= "4624" |~ "TargetUserName.*{username}"
+
+  # Share investigation
+  share_access_by_source:
+    description: "Get all share access from a specific IP"
+    query: |
+      {job=~".*"} |~ "(?i)(5140|5145)" |~ "{source_ip}"
+
+  sysvol_netlogon_access:
+    description: "Get SYSVOL/NETLOGON access"
+    query: |
+      {job=~".*"} |~ "(?i)(5140|5145)" |~ "(?i)(sysvol|netlogon)"
+
+  # Enumeration investigation
+  ldap_queries_by_source:
+    description: "Get LDAP activity from a specific IP"
+    query: |
+      {job=~".*"} |~ "(?i)ldap" |~ "{source_ip}"
+
+  user_enumeration_activity:
+    description: "Detect user enumeration"
+    query: |
+      {job=~".*"} |~ "(?i)(objectclass=user|net.*user|samaccountname)"
+
+  # Kerberos investigation
+  kerberos_activity_by_user:
+    description: "Get all Kerberos activity for a user"
+    query: |
+      {job=~".*"} |~ "(?i)(4768|4769|4770|4771)" |~ "{username}"
+
+  tgs_requests_by_source:
+    description: "Get TGS requests from source"
+    query: |
+      {job=~".*"} |= "4769" |~ "{source_ip}"
+
+  # Lateral movement investigation
+  remote_logons_by_user:
+    description: "Get remote logons for a user"
+    query: |
+      {job=~".*"} |= "4624" |~ "(?i)(logontype.*(3|10))" |~ "{username}"
+
+  explicit_cred_usage:
+    description: "Get explicit credential usage"
+    query: |
+      {job=~".*"} |= "4648" |~ "{username}"

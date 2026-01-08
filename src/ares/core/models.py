@@ -1,7 +1,7 @@
 """Data models for Ares SOC Investigation Agent."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum, IntEnum
 from typing import Any
 
@@ -179,7 +179,7 @@ class InvestigativeQuestion:
     urgency_score: float = 0.0
 
     state: QuestionState = QuestionState.PENDING
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     answered_at: datetime | None = None
 
     generated_from_evidence_ids: list[str] = field(default_factory=list)
@@ -260,7 +260,7 @@ class InvestigationState:
     investigation_id: str
     alert: dict[str, Any]
     stage: InvestigationStage = InvestigationStage.TRIAGE
-    started_at: datetime = field(default_factory=datetime.utcnow)
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     evidence: list[Evidence] = field(default_factory=list)
     timeline: list[TimelineEvent] = field(default_factory=list)
@@ -332,3 +332,115 @@ class InvestigationState:
             "hosts_investigated": list(self.queried_hosts),
             "users_investigated": list(self.queried_users),
         }
+
+
+# Red Team Models
+@dataclass
+class Target:
+    """Primary target information."""
+
+    ip: str
+    hostname: str = ""
+    domain: str = ""
+
+
+@dataclass
+class Host:
+    """Discovered host information."""
+
+    ip: str
+    hostname: str = ""
+    os: str = ""
+    roles: list[str] = field(default_factory=list)
+    services: list[str] = field(default_factory=list)
+
+
+@dataclass
+class User:
+    """Discovered user account."""
+
+    username: str
+    domain: str = ""
+    description: str = ""
+    is_admin: bool = False
+
+
+@dataclass
+class Credential:
+    """Discovered credential."""
+
+    username: str
+    password: str
+    domain: str = ""
+    source: str = ""  # where it was found
+    is_admin: bool = False
+
+
+@dataclass
+class Hash:
+    """Discovered password hash."""
+
+    username: str
+    hash_value: str
+    hash_type: str = "NTLM"
+    domain: str = ""
+    cracked_password: str = ""
+
+
+@dataclass
+class Share:
+    """Discovered SMB share."""
+
+    host: str
+    name: str
+    permissions: str = ""  # READ, WRITE, READ/WRITE
+    comment: str = ""
+
+
+@dataclass
+class RedTeamState:
+    """Tracks state for red team operations."""
+
+    operation_id: str
+    target: Target
+    completed: bool = False
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    stage: InvestigationStage = InvestigationStage.TRIAGE
+    report_summary: str = ""
+
+    # Discovery tracking
+    hosts: list[Host] = field(default_factory=list)
+    users: list[User] = field(default_factory=list)
+    credentials: list[Credential] = field(default_factory=list)
+    hashes: list[Hash] = field(default_factory=list)
+    shares: list[Share] = field(default_factory=list)
+    weaknesses: list[str] = field(default_factory=list)
+
+    # Operation tracking
+    queried_hosts: set[str] = field(default_factory=set)
+    tested_credentials: set[str] = field(default_factory=set)
+    timeline: list[TimelineEvent] = field(default_factory=list)
+    identified_techniques: set[str] = field(default_factory=set)
+
+    # Success flags
+    has_domain_admin: bool = False
+    has_golden_ticket: bool = False
+
+    @property
+    def host_count(self) -> int:
+        """Count of discovered hosts."""
+        return len(self.hosts)
+
+    @property
+    def credential_count(self) -> int:
+        """Count of discovered credentials."""
+        return len(self.credentials)
+
+    @property
+    def admin_count(self) -> int:
+        """Count of admin credentials."""
+        return sum(1 for c in self.credentials if c.is_admin)
+
+    def get_credential_key(self, username: str, password: str, domain: str = "") -> str:
+        """Generate unique key for credential tracking."""
+        return f"{domain}:{username}:{password}".lower()

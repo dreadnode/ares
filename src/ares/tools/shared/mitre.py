@@ -3,7 +3,7 @@
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 
-from src.mitre import MITREAttackClient
+from ares.integrations.mitre import MITREAttackClient
 
 
 class MITRELookupTools(Toolset):  # type: ignore[misc]

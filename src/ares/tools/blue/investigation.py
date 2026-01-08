@@ -7,10 +7,21 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
-from src.engines import MITRENavigator, PyramidClimber
-from src.mitre import MITREAttackClient
-from src.models import Evidence, InvestigationStage, InvestigationState, PyramidLevel, TimelineEvent
-from src.templates import get_template_loader
+from ares.core.engines import (
+    MITRENavigator,
+    PyramidClimber,
+    _load_attack_chains,
+    _load_detection_recipes,
+)
+from ares.core.models import (
+    Evidence,
+    InvestigationStage,
+    InvestigationState,
+    PyramidLevel,
+    TimelineEvent,
+)
+from ares.core.templates import get_template_loader
+from ares.integrations.mitre import MITREAttackClient
 
 
 class InvestigationTools(Toolset):  # type: ignore[misc]
@@ -401,3 +412,137 @@ class QuestionEngineTools(Toolset):  # type: ignore[misc]
         dn.log_metric("combined_questions_generated", len(all_questions))
 
         return [q.to_dict() for q in all_questions[:max_questions]]
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    def get_attack_chain_precursors(self, technique_id: str) -> dict:
+        """Get precursor techniques for a detected technique.
+
+        When you detect a technique, call this to find out what typically
+        happens BEFORE this attack. Precursors are CRITICAL for understanding
+        the full attack chain.
+
+        Args:
+            technique_id: MITRE technique ID (e.g., "T1003.006" for DCSync).
+
+        Returns:
+            Dict with precursors, windows_events, log_patterns, and investigation_questions.
+
+        Example:
+            >>> get_attack_chain_precursors("T1003.006")
+            {
+                'technique': 'T1003.006',
+                'name': 'DCSync',
+                'precursors': [
+                    {'technique': 'T1087', 'name': 'Account Discovery', ...},
+                    {'technique': 'T1135', 'name': 'Network Share Discovery', ...},
+                    ...
+                ],
+                'windows_events': [
+                    {'event_id': 4625, 'name': 'Failed Logon', ...},
+                    ...
+                ],
+                ...
+            }
+        """
+        attack_chains = _load_attack_chains()
+
+        if technique_id not in attack_chains:
+            return {
+                "technique": technique_id,
+                "message": "No attack chain data available for this technique",
+                "suggestion": "Check related techniques or parent techniques",
+            }
+
+        chain_data = attack_chains[technique_id]
+        return {
+            "technique": technique_id,
+            "name": chain_data.get("name", ""),
+            "description": chain_data.get("description", ""),
+            "precursors": chain_data.get("precursors", []),
+            "windows_events": chain_data.get("windows_events", []),
+            "log_patterns": chain_data.get("log_patterns", []),
+            "investigation_questions": chain_data.get("investigation_questions", []),
+        }
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    def get_detection_recipe(self, recipe_name: str) -> dict:
+        """Get a specific detection recipe with Windows event patterns.
+
+        Detection recipes provide specific patterns for detecting attack
+        techniques using Windows Security Event logs and LogQL queries.
+
+        Available recipes:
+        - password_spray: Detect password spray attacks
+        - credential_stuffing: Detect credential stuffing
+        - share_enumeration: Detect network share enumeration
+        - ldap_enumeration: Detect LDAP/AD enumeration
+        - kerberos_attacks: Detect Kerberoasting, AS-REP roasting, etc.
+        - dcsync: Detect DCSync attacks
+        - pass_the_hash: Detect pass-the-hash attacks
+        - service_enumeration: Detect network service scanning
+
+        Args:
+            recipe_name: Name of the detection recipe.
+
+        Returns:
+            Dict with indicators, windows_events, logql_queries, and investigation_steps.
+
+        Example:
+            >>> get_detection_recipe("password_spray")
+            {
+                'name': 'Password Spray Attack Detection',
+                'mitre_technique': 'T1110.003',
+                'indicators': [...],
+                'windows_events': {...},
+                'logql_queries': [...],
+                'investigation_steps': {...}
+            }
+        """
+        recipes = _load_detection_recipes()
+
+        if recipe_name not in recipes:
+            available = [k for k in recipes if not k.startswith("query_")]
+            return {"error": f"Recipe '{recipe_name}' not found", "available_recipes": available}
+
+        recipe = recipes[recipe_name]
+        return {
+            "name": recipe.get("name", recipe_name),
+            "description": recipe.get("description", ""),
+            "mitre_technique": recipe.get("mitre_technique") or recipe.get("mitre_techniques"),
+            "indicators": recipe.get("indicators", []),
+            "windows_events": recipe.get("windows_events", {}),
+            "logql_queries": recipe.get("logql_queries", []),
+            "investigation_steps": recipe.get("investigation_steps", {}),
+            "detection_logic": recipe.get("detection_patterns", {}),
+        }
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    def list_detection_recipes(self) -> list[dict]:
+        """List all available detection recipes.
+
+        Use this to see what detection patterns are available for
+        different attack techniques.
+
+        Returns:
+            List of available recipes with name and MITRE technique mapping.
+        """
+        recipes = _load_detection_recipes()
+
+        result = []
+        for key, value in recipes.items():
+            if key.startswith("query_"):
+                continue  # Skip query template section
+            if isinstance(value, dict):
+                result.append(
+                    {
+                        "recipe_name": key,
+                        "name": value.get("name", key),
+                        "mitre_technique": value.get("mitre_technique")
+                        or value.get("mitre_techniques"),
+                        "description": value.get("description", "")[:100] + "..."
+                        if value.get("description")
+                        else "",
+                    }
+                )
+
+        return result
