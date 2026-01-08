@@ -116,7 +116,7 @@ def get_template_loader() -> TemplateLoader:
         >>> loader = get_template_loader()
         >>> prompt = loader.render("agent/initial_alert_prompt.md.jinja", ...)
     """
-    global _loader  # noqa: PLW0603
+    global _loader
     if _loader is None:
         _loader = TemplateLoader()
     return _loader

@@ -1,3 +1,4 @@
+---
 # Detection Recipes for Windows Security Events
 # These recipes define specific patterns for detecting attack techniques
 # in Windows Security Event logs

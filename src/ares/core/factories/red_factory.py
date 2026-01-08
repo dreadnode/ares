@@ -16,9 +16,9 @@ from dreadnode.agent.stop import tool_use
 from dreadnode.agent.thread import Thread
 from loguru import logger
 
-from ares.integrations.mitre import MITREAttackClient
 from ares.core.models import RedTeamState
 from ares.core.templates import get_template_loader
+from ares.integrations.mitre import MITREAttackClient
 from ares.tools.red.network import (
     BloodHoundTools,
     CertipyTools,

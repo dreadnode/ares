@@ -484,6 +484,8 @@ tasks:
     desc: "Run red team agent against a target (usage: task ares:red TARGET=dreadgoad)"
     vars:
       TARGET: '{{.TARGET | default ""}}'
+      PROFILE: '{{.PROFILE | default "lab"}}'
+      REGION: '{{.REGION | default "us-west-2"}}'
       REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
     preconditions:
       - sh: test -n "{{.TARGET}}"
@@ -494,7 +496,32 @@ tasks:
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
         export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
 
-        uv run python -m ares red-team {{.TARGET}} \
+        TARGET="{{.TARGET}}"
+
+        # Check if TARGET is an IP address (simple regex check)
+        if echo "$TARGET" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "🎯 Using direct IP: $TARGET"
+            RESOLVED_TARGET="$TARGET"
+        else
+            # Resolve TARGET via AWS EC2 Name tag filter
+            echo "🔍 Resolving '$TARGET' via AWS EC2 Name tag filter..."
+
+            RESOLVED_TARGET=$(aws ec2 describe-instances \
+                --profile "{{.PROFILE}}" \
+                --region "{{.REGION}}" \
+                --filters "Name=instance-state-name,Values=running" \
+                --query "Reservations[*].Instances[?contains(Tags[?Key==\`Name\`].Value|[0], \`$TARGET\`)].PrivateIpAddress" \
+                --output text | tr '\n' ' ' | awk '{print $1}')
+
+            if [ -z "$RESOLVED_TARGET" ]; then
+                echo "❌ No running EC2 instances found matching Name tag filter: $TARGET"
+                exit 1
+            fi
+
+            echo "✅ Resolved to: $RESOLVED_TARGET"
+        fi
+
+        uv run python -m ares red-team "$RESOLVED_TARGET" \
           --args.model {{.MODEL}} \
           --args.max-steps {{.MAX_STEPS}} \
           --args.report-dir {{.REPORT_DIR}} \
@@ -531,114 +558,6 @@ tasks:
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
           --dn-args.project {{.REDTEAM_PROJECT}}
-
-  ares:red:orchestrate:
-    desc: "Orchestrate red team via S3/SSM (usage: task ares:red:orchestrate TARGET_FILTER=dreadgoad)"
-    vars:
-      TARGET_FILTER: '{{.TARGET_FILTER | default "dreadgoad"}}'
-      KALI: '{{.KALI | default "dev-alpha-operator-range-kali"}}'
-      BUCKET: '{{.BUCKET | default "dread-infra-alpha-operator-range-dev-us-west-2"}}'
-      PROFILE: '{{.PROFILE | default "lab"}}'
-      REGION: '{{.REGION | default "us-west-2"}}'
-      REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
-    deps:
-      - task: check-aws-auth
-        vars:
-          PROFILE: '{{.PROFILE}}'
-          REGION: '{{.REGION}}'
-    cmds:
-      - |
-        TARGET_IPS=$(aws ec2 describe-instances \
-            --profile "{{.PROFILE}}" \
-            --region "{{.REGION}}" \
-            --filters "Name=instance-state-name,Values=running" \
-            --query 'Reservations[*].Instances[?contains(Tags[?Key==`Name`].Value|[0], `{{.TARGET_FILTER}}`)].PrivateIpAddress' \
-            --output text | tr '\n' ' ' | sed 's/[[:space:]]*$//')
-
-        if [ -z "$TARGET_IPS" ]; then
-            echo "Error: No running instances found matching filter: {{.TARGET_FILTER}}"
-            exit 1
-        fi
-
-        PRIMARY_TARGET=$(echo "$TARGET_IPS" | awk '{print $1}')
-        echo "Target: $PRIMARY_TARGET"
-
-        SSM_INSTANCE_ID=$(aws ec2 describe-instances \
-            --profile "{{.PROFILE}}" \
-            --region "{{.REGION}}" \
-            --filters "Name=tag:Name,Values={{.KALI}}" "Name=instance-state-name,Values=running" \
-            --query 'Reservations[0].Instances[0].InstanceId' \
-            --output text)
-
-        if [ "$SSM_INSTANCE_ID" == "None" ] || [ -z "$SSM_INSTANCE_ID" ]; then
-            echo "Error: Kali instance not found or not running"
-            exit 1
-        fi
-
-        echo "Kali instance: $SSM_INSTANCE_ID"
-
-        OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
-        ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null)
-        DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
-
-        ARES_DIR="$(pwd)"
-        TIMESTAMP=$(date +%s)
-        TARBALL="ares-redteam-${TIMESTAMP}.tar.gz"
-
-        cd "$(dirname "$ARES_DIR")"
-        tar -czf "/tmp/${TARBALL}" \
-            --exclude='.venv' \
-            --exclude='venv' \
-            --exclude='*.pyc' \
-            --exclude='__pycache__' \
-            --exclude='.git' \
-            "$(basename "$ARES_DIR")"
-
-        aws s3 cp "/tmp/${TARBALL}" "s3://{{.BUCKET}}/${TARBALL}" --profile "{{.PROFILE}}" --region "{{.REGION}}"
-
-        REMOTE_SCRIPT="#!/bin/bash
-        set -e
-        cd /tmp
-        aws s3 cp s3://{{.BUCKET}}/${TARBALL} . --region {{.REGION}}
-        tar -xzf ${TARBALL}
-        cd /tmp/$(basename "$ARES_DIR")
-        python3 -m pip install --break-system-packages -q uv
-        python3 -m uv sync --no-dev
-
-        export OPENAI_API_KEY='${OPENAI_API_KEY}'
-        export ANTHROPIC_API_KEY='${ANTHROPIC_API_KEY}'
-        export DREADNODE_API_KEY='${DREADNODE_API_KEY}'
-        export DREADNODE_SERVER='{{.DREADNODE_SERVER}}'
-        export DREADNODE_ORGANIZATION='{{.DREADNODE_ORGANIZATION}}'
-        export DREADNODE_WORKSPACE='{{.DREADNODE_WORKSPACE}}'
-        export DREADNODE_PROJECT='{{.REDTEAM_PROJECT}}'
-
-        uv run python -m ares red-team ${PRIMARY_TARGET} \
-            --args.model {{.MODEL}} \
-            --args.max-steps {{.MAX_STEPS}} \
-            --dn-args.server '{{.DREADNODE_SERVER}}' \
-            --dn-args.token '${DREADNODE_API_KEY}' \
-            --dn-args.organization '{{.DREADNODE_ORGANIZATION}}' \
-            --dn-args.workspace '{{.DREADNODE_WORKSPACE}}' \
-            --dn-args.project '{{.REDTEAM_PROJECT}}' \
-            2>&1 | tee /tmp/ares-redteam-output.log
-        "
-
-        COMMAND_ID=$(aws ssm send-command \
-            --profile "{{.PROFILE}}" \
-            --region "{{.REGION}}" \
-            --instance-ids "$SSM_INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --parameters "commands=[\"${REMOTE_SCRIPT}\"]" \
-            --timeout-seconds 7200 \
-            --comment "Ares red team - {{.TARGET_FILTER}} - $TIMESTAMP" \
-            --query 'Command.CommandId' \
-            --output text)
-
-        echo "Command ID: $COMMAND_ID"
-        echo ""
-        echo "Monitor: task ares:red:logs KALI={{.KALI}}"
-        echo "Cleanup: aws s3 rm s3://{{.BUCKET}}/${TARBALL} --profile {{.PROFILE}} --region {{.REGION}}"
 
   ares:red:logs:
     desc: "Tail red team agent logs from Kali via SSM (usage: task ares:red:logs [KALI=instance-name] [LINES=100] [FOLLOW=true])"

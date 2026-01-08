@@ -81,7 +81,7 @@ class LokiTools(Toolset):  # type: ignore[misc]
             return {
                 "status": "error",
                 "error": "Query contains empty-compatible regex '.*'. Use '.+' instead to require at least one character, or use specific label values.",
-                "suggestion": "Replace =~\".*\" with =~\".+\" or use exact matches like job=\"varlog\"",
+                "suggestion": 'Replace =~".*" with =~".+" or use exact matches like job="varlog"',
             }
 
         dn.log_metric("loki_queries", 1, mode="count")
@@ -195,7 +195,9 @@ class LokiTools(Toolset):  # type: ignore[misc]
                     result["_window_expanded"] = window_mins > 30
                     result["_search_start"] = start
                     result["_search_end"] = end
-                    logger.info(f"Progressive query: found {total_entries} entries in ±{window_mins}min window")
+                    logger.info(
+                        f"Progressive query: found {total_entries} entries in ±{window_mins}min window"
+                    )
                     return result
 
         # No results in any window

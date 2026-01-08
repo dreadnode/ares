@@ -1,23 +1,29 @@
-# Ares - Autonomous SOC Investigation Agent
+# Ares - Autonomous Security Operations Agent
 
-<!-- BEGIN_AUTO_BADGES -->
-<div align="center">
-
-[![Pre-Commit](https://github.com/dreadnode/python-template/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/python-template/actions/workflows/pre-commit.yaml)
-[![Renovate](https://github.com/dreadnode/python-template/actions/workflows/renovate.yaml/badge.svg)](https://github.com/dreadnode/python-template/actions/workflows/renovate.yaml)
+[![Pre-Commit](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-</div>
-<!-- END_AUTO_BADGES -->
+Autonomous security agent with dual capabilities: **Blue Team** (SOC alert
+investigation) and **Red Team** (penetration testing). Built with the Dreadnode
+Agent SDK and MITRE ATT&CK framework.
 
-[![Pre-Commit](https://github.com/dreadnode/python-template/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/python-template/actions/workflows/pre-commit.yaml)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+## Table of Contents
 
-Autonomous security investigation agent that polls Grafana for alerts, queries
-Loki/Prometheus, and generates investigation reports with MITRE ATT&CK
-mappings.
+- [Capabilities](#capabilities)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+- [Blue Team Investigation Workflow](#blue-team-investigation-workflow)
+- [Red Team Operation Workflow](#red-team-operation-workflow)
+- [Development](#development)
+- [Configuration](#configuration)
+- [Observability](#observability)
+- [Contributing](#contributing)
+- [License](#license)
 
-## What It Does
+## Capabilities
+
+### Blue Team - SOC Investigation
 
 - Polls Grafana for firing alerts
 - Autonomously investigates Windows security events
@@ -25,6 +31,17 @@ mappings.
 - Maps findings to MITRE ATT&CK techniques
 - Generates markdown reports with timeline and recommendations
 - Detects DCSync, authentication patterns, and attack indicators
+
+### Red Team - Penetration Testing
+
+- Autonomous Active Directory enumeration
+- Credential harvesting (secretsdump, kerberoasting, AS-REP roasting)
+- Password hash cracking (hashcat, John the Ripper)
+- SMB share pilfering for embedded credentials
+- BloodHound integration for ACL abuse paths
+- ADCS exploitation (ESC1-15 vulnerabilities)
+- Golden ticket generation for domain persistence
+- Delegation attacks (RBCD, unconstrained, constrained)
 
 ## Quick Start
 
@@ -52,9 +69,18 @@ uv sync
 
 # 3. Verify configuration
 task ares:config:check
+# Expected output: ✓ All configuration checks passed
 
-# 4. Run the agent (polls Grafana for alerts)
-task ares:run
+# 4. Run the blue team agent (polls Grafana for alerts)
+task ares:blue:
+```
+
+**Verification:**
+
+```bash
+# Confirm installation
+uv run python -m ares --help
+# Should display available commands: investigate-alert, red-team
 ```
 
 **Without 1Password:**
@@ -65,7 +91,7 @@ cp .env.example .env
 # Edit .env with your API keys
 
 # Run using local environment
-task ares:run:local
+task ares:blue:local:
 ```
 
 ## Usage
@@ -78,11 +104,20 @@ The easiest way to run Ares is using the provided Taskfile with 1Password integr
 # Check configuration and 1Password access
 task ares:config:check
 
-# Run Ares in poll mode (retrieves API keys from 1Password automatically)
-task ares:run
+# Blue Team: Run SOC agent in poll mode
+task ares:blue:
 
-# Investigate a specific alert from JSON file
+# Blue Team: Process current alerts once and exit
+task ares:blue:once:
+
+# Blue Team: Investigate a specific alert from JSON file
 task ares:investigate ALERT=test-alerts/example-alert.json
+
+# Red Team: Run penetration testing agent (resolves target via AWS EC2 Name tag)
+task -y ares:red TARGET=dreadgoad
+
+# Red Team: Direct IP target (bypasses EC2 discovery)
+task ares:red: TARGET=192.168.1.100
 
 # View investigation reports
 task ares:reports:list        # List all reports
@@ -93,9 +128,13 @@ task ares:reports:latest      # Show latest report
 
 | Command | Description |
 | ------- | ----------- |
-| `task ares:run` | Run agent in poll mode (checks Grafana every 30s) |
-| `task ares:run:local` | Run using .env file instead of 1Password |
+| `task ares:blue:` | Run blue team agent in poll mode (checks Grafana every 30s) |
+| `task ares:blue:once:` | Run blue team once and exit |
+| `task ares:blue:local:` | Run blue team using .env file instead of 1Password |
 | `task ares:investigate ALERT=<file>` | Investigate a specific alert from JSON file |
+| `task ares:red TARGET=<filter>` | Run red team agent (resolves target via EC2 Name tag filter) |
+| `task ares:red: TARGET=<ip>` | Run red team agent against direct IP address |
+| `task ares:red:local: TARGET=<ip>` | Run red team using .env file instead of 1Password |
 | `task ares:config:check` | Verify configuration and 1Password access |
 | `task ares:config:show` | Display current configuration (no secrets) |
 | `task ares:reports:list` | List all investigation reports |
@@ -107,7 +146,7 @@ See [Taskfile Usage Guide](docs/taskfile_usage.md) for detailed documentation.
 
 ### Direct CLI Usage (Advanced)
 
-#### Poll Mode (Continuous)
+#### Blue Team - Poll Mode (Continuous)
 
 Run Ares in continuous polling mode to automatically investigate alerts:
 
@@ -117,26 +156,69 @@ export GRAFANA_SERVICE_ACCOUNT_TOKEN="your-grafana-token"  # pragma: allowlist s
 export ANTHROPIC_API_KEY="your-anthropic-key"  # pragma: allowlist secret
 export DREADNODE_API_KEY="your-dreadnode-key"  # optional  # pragma: allowlist secret
 
-# Run the agent
-uv run python -m src \
+# Run the blue team agent (continuous polling)
+uv run python -m ares \
   --args.model claude-sonnet-4-20250514 \
   --args.grafana-url https://grafana.example.com \
   --args.poll-interval 30 \
   --args.max-steps 150 \
   --args.report-dir ./reports
+
+# Run once and exit (process current alerts only)
+uv run python -m ares --args.once
 ```
 
-#### Single Alert Investigation
+#### Blue Team - Single Alert Investigation
 
 Investigate a specific alert by providing it as JSON:
 
 ```bash
-# Using environment variables (as above)
-uv run python -m src investigate-alert test-alerts/example-alert.json \
+uv run python -m ares investigate-alert test-alerts/example-alert.json \
   --args.model claude-sonnet-4-20250514 \
   --args.grafana-url https://grafana.example.com \
   --args.max-steps 150
 ```
+
+#### Red Team - Penetration Testing
+
+The red team agent supports two targeting modes:
+
+**EC2 Target Discovery (Recommended):**
+
+When using the Taskfile, provide an EC2 Name tag filter instead of an IP address.
+The task queries AWS EC2 to find running instances where the Name tag contains
+your filter string, then uses the first matching instance's private IP.
+
+```bash
+# Discover target via AWS EC2 Name tag filter
+# Finds instances where Name tag contains "dreadgoad"
+task -y ares:red TARGET=dreadgoad
+```
+
+This uses `aws ec2 describe-instances` with:
+
+- Filter: `Name=instance-state-name,Values=running`
+- Query: Instances where `Name` tag contains the TARGET value
+- Returns: First matching instance's `PrivateIpAddress`
+
+**Direct IP Target:**
+
+For direct IP targeting (bypasses EC2 discovery):
+
+```bash
+# Direct IP address
+task ares:red: TARGET=192.168.1.100
+
+# Or via CLI
+uv run python -m ares red-team 192.168.1.100 \
+  --args.model claude-sonnet-4-20250514 \
+  --args.max-steps 150 \
+  --args.report-dir ./reports
+```
+
+**Red Team Prerequisites:** The target environment must have penetration testing
+tools installed (nmap, netexec, impacket-scripts, hashcat, john, certipy-ad,
+bloodhound-python).
 
 ### Command-Line Options
 
@@ -160,9 +242,9 @@ uv run python -m src investigate-alert test-alerts/example-alert.json \
 | `--dn-args.workspace` | `ares-protocol` | Dreadnode workspace name |
 | `--dn-args.project` | `ares-soc` | Dreadnode project name |
 
-## Investigation Workflow
+## Blue Team Investigation Workflow
 
-Ares follows a structured 4-stage investigation process:
+The SOC agent follows a structured 4-stage investigation process:
 
 ### 1. Triage (WHAT is happening?)
 
@@ -235,6 +317,37 @@ Generated reports include:
 
 Example report location: `reports/inv-<id>-<timestamp>.md`
 
+## Red Team Operation Workflow
+
+The red team agent follows a priority-driven attack workflow:
+
+### Priority 0: ADCS Vulnerabilities
+
+When certificate template vulnerabilities (ESC1-15) are discovered, immediately
+exploit them for potential direct path to Domain Admin.
+
+### Priority 1: KRBTGT Hash
+
+When a krbtgt hash is found, generate golden tickets for persistent domain
+access and cross-domain escalation.
+
+### Priority 2: Administrator Hash
+
+When Administrator hashes are found, immediately use domain_admin_checker on
+all targets and run secretsdump across the environment.
+
+### Priority 3: Credential Expansion
+
+For each new credential discovered:
+
+1. Check for privilege escalation paths (BloodHound ACL abuse, ADCS, delegation)
+2. Enumerate users and shares on all targets
+3. Pilfer accessible shares for embedded credentials
+4. Kerberoast and AS-REP roast with new credentials
+5. Crack discovered hashes and loop back
+
+Example report location: `reports/redteam-<operation-id>_report.md`
+
 ## Development
 
 ### Prerequisites
@@ -280,10 +393,19 @@ pytest --cov=src tests/
 
 ### Environment Variables
 
+**Blue Team (SOC Investigation):**
+
 | Variable | Required | Description |
 | -------- | -------- | ----------- |
 | `GRAFANA_URL` | Yes | Grafana instance URL (e.g., `https://grafana.example.com`) |
 | `GRAFANA_SERVICE_ACCOUNT_TOKEN` | Yes | Grafana service account token for API access |
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude models |
+| `DREADNODE_API_KEY` | No | Dreadnode platform token for observability |
+
+**Red Team (Penetration Testing):**
+
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude models |
 | `DREADNODE_API_KEY` | No | Dreadnode platform token for observability |
 
@@ -318,13 +440,17 @@ The Dreadnode platform can be configured via command-line arguments or
 environment variables:
 
 ```bash
-# Via command line
+# Via command line (blue team)
 uv run python -m ares \
   --dn-args.server https://platform.dev.plundr.ai/ \
   --dn-args.token your-api-token \
   --dn-args.organization ares \
   --dn-args.workspace ares-protocol \
   --dn-args.project ares-soc
+
+# Via command line (red team)
+uv run python -m ares red-team 192.168.1.100 \
+  --dn-args.project ares-redteam
 
 # Via environment variable
 export DREADNODE_API_KEY="your-dreadnode-api-key"  # pragma: allowlist secret

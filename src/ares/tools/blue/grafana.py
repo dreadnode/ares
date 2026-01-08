@@ -52,10 +52,9 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
                     if response.status_code == 200:
                         logger.info(f"Successfully connected to Grafana alerts at {endpoint}")
                         return response.json()
-                    elif response.status_code == 404:
+                    if response.status_code == 404:
                         continue  # Try next endpoint
-                    else:
-                        response.raise_for_status()
+                    response.raise_for_status()
 
             except httpx.HTTPError as e:
                 if "404" not in str(e):

@@ -7,10 +7,21 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
-from ares.core.engines import MITRENavigator, PyramidClimber, _load_attack_chains, _load_detection_recipes
-from ares.integrations.mitre import MITREAttackClient
-from ares.core.models import Evidence, InvestigationStage, InvestigationState, PyramidLevel, TimelineEvent
+from ares.core.engines import (
+    MITRENavigator,
+    PyramidClimber,
+    _load_attack_chains,
+    _load_detection_recipes,
+)
+from ares.core.models import (
+    Evidence,
+    InvestigationStage,
+    InvestigationState,
+    PyramidLevel,
+    TimelineEvent,
+)
 from ares.core.templates import get_template_loader
+from ares.integrations.mitre import MITREAttackClient
 
 
 class InvestigationTools(Toolset):  # type: ignore[misc]
@@ -439,7 +450,7 @@ class QuestionEngineTools(Toolset):  # type: ignore[misc]
             return {
                 "technique": technique_id,
                 "message": "No attack chain data available for this technique",
-                "suggestion": "Check related techniques or parent techniques"
+                "suggestion": "Check related techniques or parent techniques",
             }
 
         chain_data = attack_chains[technique_id]
@@ -490,11 +501,8 @@ class QuestionEngineTools(Toolset):  # type: ignore[misc]
         recipes = _load_detection_recipes()
 
         if recipe_name not in recipes:
-            available = [k for k in recipes.keys() if not k.startswith("query_")]
-            return {
-                "error": f"Recipe '{recipe_name}' not found",
-                "available_recipes": available
-            }
+            available = [k for k in recipes if not k.startswith("query_")]
+            return {"error": f"Recipe '{recipe_name}' not found", "available_recipes": available}
 
         recipe = recipes[recipe_name]
         return {
@@ -525,11 +533,16 @@ class QuestionEngineTools(Toolset):  # type: ignore[misc]
             if key.startswith("query_"):
                 continue  # Skip query template section
             if isinstance(value, dict):
-                result.append({
-                    "recipe_name": key,
-                    "name": value.get("name", key),
-                    "mitre_technique": value.get("mitre_technique") or value.get("mitre_techniques"),
-                    "description": value.get("description", "")[:100] + "..." if value.get("description") else "",
-                })
+                result.append(
+                    {
+                        "recipe_name": key,
+                        "name": value.get("name", key),
+                        "mitre_technique": value.get("mitre_technique")
+                        or value.get("mitre_techniques"),
+                        "description": value.get("description", "")[:100] + "..."
+                        if value.get("description")
+                        else "",
+                    }
+                )
 
         return result

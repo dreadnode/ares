@@ -217,7 +217,7 @@ class CredentialHarvestingTools(Toolset):
             Extracted credentials including NTLM hashes, Kerberos keys, and secrets
 
         Example:
-            >>> secretsdump("192.168.1.100", "Administrator", password="P@ssw0rd")
+            >>> secretsdump("192.168.1.100", "Administrator", password="P@ssw0rd")  # pragma: allowlist secret
             >>> secretsdump("192.168.1.100", "Administrator", hash="aad3b4...", domain="DOMAIN")
             >>> secretsdump("domain.local", "Administrator", no_pass=True)  # golden ticket
         """
@@ -380,7 +380,7 @@ class CredentialHarvestingTools(Toolset):
             Results showing which targets the account has admin access on
 
         Example:
-            >>> domain_admin_checker("192.168.1.100 192.168.1.101", "Administrator", password="P@ss")
+            >>> domain_admin_checker("192.168.1.100 192.168.1.101", "Administrator", password="P@ss")  # pragma: allowlist secret
             >>> domain_admin_checker("192.168.1.100 192.168.1.101", "Administrator", hash="aad3b4...")
         """
         try:
@@ -477,7 +477,7 @@ class CrackingTools(Toolset):
                     "--force",
                 ]
 
-                result = subprocess.run(
+                _result = subprocess.run(
                     cmd,
                     check=False,
                     capture_output=True,
@@ -1361,7 +1361,7 @@ class RedTeamReportingTools(Toolset):
         Example:
             >>> record_finding("credential", {
             ...     "username": "administrator",
-            ...     "password": "P@ssw0rd",
+            ...     "password": "P@ssw0rd",  # pragma: allowlist secret
             ...     "domain": "EXAMPLE",
             ...     "source": "secretsdump",
             ...     "is_admin": True

@@ -8,14 +8,13 @@ from dreadnode.agent.stop import tool_use
 from dreadnode.agent.thread import Thread
 from loguru import logger
 
-from ares.integrations.mitre import MITREAttackClient
 from ares.core.models import InvestigationState
 from ares.core.templates import get_template_loader
+from ares.integrations.mitre import MITREAttackClient
 from ares.tools.blue import (
     CompletionTools,
     GrafanaTools,
     InvestigationTools,
-    LokiTools,
     QuestionEngineTools,
     escalate_investigation,
 )
@@ -46,8 +45,12 @@ async def log_tool_usage(event: ToolStart):
             if len(_consecutive_queries) >= 3 and all(
                 "query_loki" in t or "query_prometheus" in t for t in _consecutive_queries[-3:]
             ):
-                logger.warning("⚠️ DETECTED QUERY LOOP: 3+ consecutive queries without recording evidence")
-                logger.warning("Agent should call record_evidence() or get_combined_questions() next")
+                logger.warning(
+                    "⚠️ DETECTED QUERY LOOP: 3+ consecutive queries without recording evidence"
+                )
+                logger.warning(
+                    "Agent should call record_evidence() or get_combined_questions() next"
+                )
         elif "record_evidence" in tool_name or "get_combined_questions" in tool_name:
             # Reset counter when workflow tools are called
             _consecutive_queries.clear()

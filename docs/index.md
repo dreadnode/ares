@@ -1,30 +1,52 @@
 # Ares Documentation
 
 Welcome to the Ares documentation.
-Ares is an autonomous Security Operations Center (SOC) investigation agent.
+Ares is an autonomous security operations agent with dual capabilities:
+**Blue Team** (SOC investigation) and **Red Team** (penetration testing).
 
 ## Quick Links
 
 - [Project README](../README.md)
+- [Taskfile Usage Guide](taskfile_usage.md)
+- [Grafana MCP Integration](grafana_mcp_usage.md)
+- [Prompt Templates](prompt_templates.md)
 - [Contributing Guide](contributing.md)
 - [Security Policy](../SECURITY.md)
-- [Changelog](../CHANGELOG.md)
 
 ## Overview
 
-Ares transforms security alerts into actionable threat intelligence through
-autonomous, question-driven investigations.
-Built with the Dreadnode Agent SDK, it systematically analyzes security events
-using MITRE ATT&CK framework and the Pyramid of Pain methodology.
+Ares provides autonomous security operations through two specialized agents:
+
+**Blue Team Agent** - Transforms security alerts into actionable threat
+intelligence through question-driven investigations. Uses MITRE ATT&CK
+framework and Pyramid of Pain methodology.
+
+**Red Team Agent** - Autonomous penetration testing for Active Directory
+environments. Systematically enumerates, harvests credentials, and attempts
+domain admin access.
+
+Built with the [Dreadnode Agent SDK](https://github.com/dreadnode/agent-sdk).
 
 ## Key Capabilities
 
-- Autonomous alert investigation
+### Blue Team (SOC Investigation)
+
+- Autonomous Grafana alert investigation
 - MITRE ATT&CK technique mapping
 - Pyramid of Pain-based analysis elevation
-- Multi-stage investigation workflow
-- Integration with Grafana, Loki, and Prometheus
+- Multi-stage investigation workflow (Triage, Causation, Lateral, Synthesis)
+- Integration with Grafana, Loki, and Prometheus via MCP
 - Comprehensive markdown reporting
+
+### Red Team (Penetration Testing)
+
+- Active Directory enumeration (hosts, users, shares)
+- Credential harvesting (secretsdump, kerberoasting, AS-REP roasting)
+- Password hash cracking (hashcat, John the Ripper)
+- BloodHound integration for ACL abuse paths
+- ADCS exploitation (ESC1-15 vulnerabilities)
+- Golden ticket generation
+- Delegation attacks (RBCD, unconstrained, constrained)
 
 ## Getting Started
 
@@ -35,11 +57,26 @@ examples.
 
 ```text
 ares/
-├── src/ares/           # Main source code
-├── tests/              # Test suite
-├── docs/               # Documentation
-├── reports/            # Generated investigation reports
-└── pyproject.toml      # Project configuration
+├── src/ares/                    # Main package
+│   ├── agents/                  # Agent orchestrators
+│   │   ├── blue/                # SOC investigation agent
+│   │   └── red/                 # Penetration testing agent
+│   ├── core/                    # Core models and engines
+│   │   └── factories/           # Agent factories
+│   ├── integrations/            # External integrations (MITRE)
+│   ├── reports/                 # Report generators
+│   └── tools/                   # Agent toolsets
+│       ├── blue/                # Blue team tools
+│       ├── red/                 # Red team tools
+│       └── shared/              # Shared tools (MITRE)
+├── templates/                   # Jinja2 prompt templates
+│   ├── agent/                   # Blue team agent templates
+│   ├── engines/                 # Question engine templates
+│   ├── redteam/                 # Red team agent templates
+│   └── reports/                 # Report templates
+├── tests/                       # Test suite
+├── docs/                        # Documentation
+└── reports/                     # Generated reports
 ```
 
 ## Development

@@ -121,8 +121,8 @@ async def main(
     mitre_client = MITREAttackClient()
     await mitre_client.load()
     # Accessing protected members for logging/diagnostics only - not modifying internal state
-    techniques_count = len(mitre_client._techniques)  # noqa: SLF001
-    tactics_count = len(mitre_client._tactics)  # noqa: SLF001
+    techniques_count = len(mitre_client._techniques)
+    tactics_count = len(mitre_client._tactics)
     logger.success(f"Loaded {techniques_count} techniques, {tactics_count} tactics")
 
     report_dir = Path(args.report_dir).resolve()
@@ -348,16 +348,16 @@ async def redteam(
     logger.info(f"Report Dir: {args.report_dir}")
     logger.info("=" * 60)
 
-    from ares.integrations.mitre import MITREAttackClient
     from ares.agents.red import RedTeamOrchestrator
+    from ares.integrations.mitre import MITREAttackClient
 
     # Load MITRE data
     logger.info("Loading MITRE ATT&CK data...")
     mitre_client = MITREAttackClient()
     await mitre_client.load()
     # Accessing protected members for logging/diagnostics only - not modifying internal state
-    techniques_count = len(mitre_client._techniques)  # noqa: SLF001
-    tactics_count = len(mitre_client._tactics)  # noqa: SLF001
+    techniques_count = len(mitre_client._techniques)
+    tactics_count = len(mitre_client._tactics)
     logger.success(f"Loaded {techniques_count} techniques, {tactics_count} tactics")
 
     report_dir = Path(args.report_dir).resolve()

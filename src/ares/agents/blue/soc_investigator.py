@@ -12,9 +12,9 @@ import dreadnode as dn
 from loguru import logger
 
 from ares.core.factories.blue_factory import create_investigation_agent
-from ares.integrations.mitre import MITREAttackClient
 from ares.core.models import InvestigationState
 from ares.core.templates import get_template_loader
+from ares.integrations.mitre import MITREAttackClient
 
 
 def build_initial_prompt(alert: dict) -> str:
@@ -67,8 +67,12 @@ def build_initial_prompt(alert: dict) -> str:
         labels=labels,
         mitre_technique=mitre_technique,
         current_time=current_time.isoformat().replace("+00:00", "Z"),
-        current_time_minus_1h=(current_time - timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
-        current_time_minus_2h=(current_time - timedelta(hours=2)).isoformat().replace("+00:00", "Z"),
+        current_time_minus_1h=(current_time - timedelta(hours=1))
+        .isoformat()
+        .replace("+00:00", "Z"),
+        current_time_minus_2h=(current_time - timedelta(hours=2))
+        .isoformat()
+        .replace("+00:00", "Z"),
     )
 
 
@@ -174,11 +178,11 @@ class InvestigationOrchestrator:
         labels = alert.get("labels", {})
         annotations = alert.get("annotations", {})
         for key in ["mitre_technique", "mitre", "technique_id", "technique"]:
-            if key in labels and labels[key]:
+            if labels.get(key):
                 state.identified_techniques.add(labels[key])
                 logger.info(f"Auto-recorded MITRE technique from alert: {labels[key]}")
                 break
-            if key in annotations and annotations[key]:
+            if annotations.get(key):
                 state.identified_techniques.add(annotations[key])
                 logger.info(f"Auto-recorded MITRE technique from alert: {annotations[key]}")
                 break

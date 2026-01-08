@@ -89,7 +89,7 @@ python_version = "3.10"
 exclude = ["tests", ".hooks", "scripts"]
 
 [[tool.mypy.overrides]]
-module = ["src.*"]
+module = ["ares.*"]
 disable_error_code = [
     "unused-ignore",
     "import-untyped",
@@ -101,6 +101,9 @@ disable_error_code = [
     "attr-defined",
     "call-arg",
     "list-item",
+    "misc",
+    "valid-type",
+    "untyped-decorator",
 ]
 
 [tool.pyright]
@@ -114,7 +117,13 @@ exclude = [".hooks", "tests"]
 
 [tool.bandit]
 exclude_dirs = ["tests"]
-skips = ["B101"]
+skips = [
+    "B101",  # assert_used
+    "B603",  # subprocess_without_shell_equals_true (intentional for pentesting tools)
+    "B404",  # import_subprocess (required for pentesting)
+    "B110",  # try_except_pass (acceptable in cleanup code)
+    "B107",  # hardcoded_password_default (false positives on empty string defaults)
+]
 
 [tool.coverage.run]
 branch = true
@@ -160,6 +169,21 @@ ignore = [
     "TRY300",  # consider moving to else block - often less readable
     "BLE001",  # blind exception catching - acceptable in top-level handlers
     "PLR0915", # too many statements - acceptable for main functions
+    "G004",    # f-strings in logging - we use loguru, not stdlib logging
+    "TRY400",  # logging.exception vs logging.error - we use loguru
+    "PLR0911", # too many return statements - acceptable for tool methods
+    "ARG001",  # unused function argument - tools API requires specific signatures
+    "ARG002",  # unused method argument - tools API requires specific signatures
+    "PLW0603", # global statement - acceptable for module-level caching
+    "SLF001",  # private member access - intentional for internal APIs
+    "SIM105",  # contextlib.suppress - style preference
+    "S110",    # try-except-pass - acceptable in cleanup code
+    "PTH108",  # os.unlink vs Path.unlink - compatibility
+    "PTH110",  # os.path.exists vs Path.exists - compatibility
+    "PTH123",  # open() vs Path.open() - style preference
+    "RUF005",  # list concatenation - style preference
+    "FBT001",  # boolean positional argument - acceptable for tool methods
+    "FBT002",  # boolean default positional argument - acceptable for tool methods
 ]
 
 [tool.ruff.format]

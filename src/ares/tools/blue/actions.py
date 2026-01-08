@@ -6,7 +6,7 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
-from ares.core.models import InvestigationStage, InvestigationState
+from ares.core.models import InvestigationState
 
 
 class CompletionTools(Toolset):  # type: ignore[misc]
