@@ -1,7 +1,7 @@
 """Data models for Ares SOC Investigation Agent."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum, IntEnum
 from typing import Any
 
@@ -179,7 +179,7 @@ class InvestigativeQuestion:
     urgency_score: float = 0.0
 
     state: QuestionState = QuestionState.PENDING
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     answered_at: datetime | None = None
 
     generated_from_evidence_ids: list[str] = field(default_factory=list)
@@ -260,7 +260,7 @@ class InvestigationState:
     investigation_id: str
     alert: dict[str, Any]
     stage: InvestigationStage = InvestigationStage.TRIAGE
-    started_at: datetime = field(default_factory=datetime.utcnow)
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     evidence: list[Evidence] = field(default_factory=list)
     timeline: list[TimelineEvent] = field(default_factory=list)
@@ -404,7 +404,7 @@ class RedTeamState:
     operation_id: str
     target: Target
     completed: bool = False
-    started_at: datetime = field(default_factory=datetime.utcnow)
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     stage: InvestigationStage = InvestigationStage.TRIAGE
     report_summary: str = ""
 

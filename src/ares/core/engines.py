@@ -4,15 +4,18 @@ Question Engines - The core drivers of the investigation.
 These engines generate investigative questions based on:
 1. MITRE ATT&CK Navigator: Technique chains, tactical gaps, attack lifecycle
 2. Pyramid of Pain Climber: Elevating from trivial IOCs to meaningful TTPs
+3. Attack Chain Awareness: Precursor techniques that typically precede detected attacks
+4. Detection Recipes: Pattern-based detection for Windows security events
 """
 
 import uuid
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import yaml
 
-from .mitre import MITREAttackClient
+from ares.integrations.mitre import MITREAttackClient
+
 from .models import (
     InvestigationState,
     InvestigativeQuestion,
@@ -20,6 +23,71 @@ from .models import (
     QuestionSource,
 )
 from .templates import get_template_loader
+
+
+# Type definitions for attack chain data
+class PrecursorTechnique(TypedDict):
+    """A technique that typically precedes another."""
+
+    technique: str
+    name: str
+    relationship: str
+    relevance: float
+    rationale: str
+
+
+class WindowsEvent(TypedDict):
+    """Windows Security Event for detection."""
+
+    event_id: int
+    name: str
+    relevance: float
+    description: str
+    query_pattern: str
+
+
+class AttackChainEntry(TypedDict, total=False):
+    """Attack chain definition for a technique."""
+
+    name: str
+    description: str
+    precursors: list[PrecursorTechnique]
+    follow_on: list[PrecursorTechnique]
+    windows_events: list[WindowsEvent]
+    log_patterns: list[dict[str, str]]
+    investigation_questions: list[dict[str, Any]]
+
+
+def _load_attack_chains() -> dict[str, AttackChainEntry]:
+    """Load attack chain definitions from YAML."""
+    project_root = Path(__file__).parent.parent.parent.parent
+    chains_path = project_root / "templates" / "engines" / "attack_chains.yaml"
+
+    if not chains_path.exists():
+        return {}
+
+    with chains_path.open() as f:
+        data = yaml.safe_load(f)
+
+    # Filter out non-technique entries (like document markers)
+    return {k: v for k, v in data.items() if isinstance(v, dict) and k.startswith("T")}
+
+
+def _load_detection_recipes() -> dict[str, Any]:
+    """Load detection recipes from YAML."""
+    project_root = Path(__file__).parent.parent.parent.parent
+    recipes_path = project_root / "templates" / "engines" / "detection_recipes.yaml"
+
+    if not recipes_path.exists():
+        return {}
+
+    with recipes_path.open() as f:
+        return yaml.safe_load(f) or {}
+
+
+# Global caches for attack chains and detection recipes
+ATTACK_CHAINS: dict[str, AttackChainEntry] = {}
+DETECTION_RECIPES: dict[str, Any] = {}
 
 
 class ClimbStrategy(TypedDict):
@@ -46,13 +114,27 @@ class MITRENavigator:
     2. Predict follow-on techniques based on attack patterns
     3. Identify tactical gaps in the investigation
     4. Ensure complete attack lifecycle coverage
+    5. Investigate PRECURSOR techniques that typically come BEFORE detected attacks
+    6. Apply detection recipes for Windows security event patterns
 
     Attributes:
         mitre: MITREAttackClient instance for technique lookups.
+        attack_chains: Loaded attack chain definitions.
+        detection_recipes: Loaded detection recipes.
     """
 
     def __init__(self, mitre_client: MITREAttackClient):
         self.mitre = mitre_client
+
+        # Load attack chains and detection recipes (lazy load, cached globally)
+        global ATTACK_CHAINS, DETECTION_RECIPES
+        if not ATTACK_CHAINS:
+            ATTACK_CHAINS = _load_attack_chains()
+        if not DETECTION_RECIPES:
+            DETECTION_RECIPES = _load_detection_recipes()
+
+        self.attack_chains = ATTACK_CHAINS
+        self.detection_recipes = DETECTION_RECIPES
 
     def generate_questions(
         self,
@@ -79,13 +161,20 @@ class MITRENavigator:
         """
         questions = []
 
-        # 1. Follow-on technique questions
+        # 1. PRECURSOR technique questions (HIGHEST PRIORITY - what came BEFORE?)
+        # This is critical for understanding the full attack chain
+        questions.extend(self._generate_precursor_questions(state))
+
+        # 2. Detection recipe questions (Windows security events)
+        questions.extend(self._generate_detection_recipe_questions(state))
+
+        # 3. Follow-on technique questions
         questions.extend(self._generate_followon_questions(state))
 
-        # 2. Tactical gap questions
+        # 4. Tactical gap questions
         questions.extend(self._generate_gap_questions(state))
 
-        # 3. Unmapped evidence questions
+        # 5. Unmapped evidence questions
         questions.extend(self._generate_mapping_questions(state))
 
         return questions
@@ -218,12 +307,190 @@ class MITRENavigator:
 
         return questions
 
+    def _generate_precursor_questions(
+        self,
+        state: InvestigationState,
+    ) -> list[InvestigativeQuestion]:
+        """Generate questions about PRECURSOR techniques.
+
+        This is CRITICAL for understanding the full attack chain.
+        When we detect a technique like DCSync (T1003.006), we need to
+        investigate what came BEFORE - enumeration, brute force, share access, etc.
+        """
+        questions = []
+        loader = get_template_loader()
+
+        for tech_id in state.identified_techniques:
+            # Check if we have attack chain data for this technique
+            chain_data = self.attack_chains.get(tech_id)
+            if not chain_data:
+                continue
+
+            precursors = chain_data.get("precursors", [])
+            windows_events = chain_data.get("windows_events", [])
+            log_patterns = chain_data.get("log_patterns", [])
+            investigation_qs = chain_data.get("investigation_questions", [])
+
+            technique = self.mitre.get_technique(tech_id)
+            tech_name = technique.name if technique else tech_id
+
+            # Generate questions for each precursor technique
+            for precursor in precursors:
+                precursor_id = precursor.get("technique", "")
+                if precursor_id in state.identified_techniques:
+                    continue  # Already found this one
+
+                # Format Windows events for this precursor
+                relevant_events = [
+                    f"Event {e['event_id']} ({e['name']})"
+                    for e in windows_events
+                    if e.get("relevance", 0) > 0.7
+                ][:3]
+                events_str = ", ".join(relevant_events) if relevant_events else None
+
+                # Format log patterns
+                patterns_str = None
+                if log_patterns:
+                    patterns_str = "; ".join([p.get("name", "") for p in log_patterns[:2]])
+
+                question_text = loader.render(
+                    "engines/mitre_precursor.md.jinja",
+                    detected_technique_id=tech_id,
+                    detected_technique_name=tech_name,
+                    precursor_technique_id=precursor_id,
+                    precursor_technique_name=precursor.get("name", precursor_id),
+                    rationale=precursor.get("rationale", ""),
+                    windows_events=events_str,
+                    log_patterns=patterns_str,
+                )
+
+                questions.append(
+                    InvestigativeQuestion(
+                        id=f"precursor-{uuid.uuid4().hex[:8]}",
+                        text=question_text,
+                        source=QuestionSource.MITRE_NAVIGATOR,
+                        rationale=f"Precursor to {tech_id}: {precursor.get('rationale', '')}",
+                        target_insight=f"Detect {precursor_id} before {tech_id}",
+                        target_technique=precursor_id,
+                        technique_chain_from=tech_id,
+                        mitre_coverage_score=precursor.get("relevance", 0.8),
+                        confidence_impact_score=0.9,  # High priority
+                        pyramid_elevation_score=0.8,  # Helps understand TTPs
+                    )
+                )
+
+            # Generate direct investigation questions from attack chain
+            for inv_q in investigation_qs:
+                questions.append(
+                    InvestigativeQuestion(
+                        id=f"chain-q-{uuid.uuid4().hex[:8]}",
+                        text=inv_q.get("question", ""),
+                        source=QuestionSource.MITRE_NAVIGATOR,
+                        rationale=f"Attack chain investigation for {tech_id}",
+                        target_insight="Understand full attack chain",
+                        target_technique=inv_q.get("target_technique"),
+                        technique_chain_from=tech_id,
+                        mitre_coverage_score=inv_q.get("priority", 0.8),
+                        confidence_impact_score=0.85,
+                    )
+                )
+
+        return questions
+
+    def _generate_detection_recipe_questions(
+        self,
+        state: InvestigationState,
+    ) -> list[InvestigativeQuestion]:
+        """Generate questions based on detection recipes.
+
+        Detection recipes provide specific patterns for Windows security events
+        that should be investigated based on identified techniques.
+        """
+        questions = []
+
+        # Map technique IDs to recipe names
+        technique_to_recipe = {
+            "T1110": "password_spray",
+            "T1110.003": "password_spray",
+            "T1110.004": "credential_stuffing",
+            "T1135": "share_enumeration",
+            "T1087": "ldap_enumeration",
+            "T1087.002": "ldap_enumeration",
+            "T1558.003": "kerberos_attacks",
+            "T1558.004": "kerberos_attacks",
+            "T1558.001": "kerberos_attacks",
+            "T1003.006": "dcsync",
+            "T1550.002": "pass_the_hash",
+            "T1046": "service_enumeration",
+        }
+
+        for tech_id in state.identified_techniques:
+            recipe_name = technique_to_recipe.get(tech_id)
+            if not recipe_name:
+                continue
+
+            recipe = self.detection_recipes.get(recipe_name)
+            if not recipe:
+                continue
+
+            # Generate questions based on recipe indicators
+            indicators = recipe.get("indicators", [])
+            for indicator in indicators[:3]:  # Limit indicators
+                questions.append(
+                    InvestigativeQuestion(
+                        id=f"recipe-{uuid.uuid4().hex[:8]}",
+                        text=f"Detection recipe for {tech_id}: Check for '{indicator}'. Query Windows security logs for this pattern.",
+                        source=QuestionSource.MITRE_NAVIGATOR,
+                        rationale=f"Detection recipe indicator for {recipe_name}",
+                        target_insight=f"Detect {recipe_name} pattern",
+                        target_technique=tech_id,
+                        mitre_coverage_score=0.85,
+                        confidence_impact_score=0.8,
+                    )
+                )
+
+            # Generate questions based on LogQL queries in recipe
+            logql_queries = recipe.get("logql_queries", [])
+            for query_info in logql_queries[:2]:  # Limit queries
+                query_name = query_info.get("name", "")
+                questions.append(
+                    InvestigativeQuestion(
+                        id=f"recipe-q-{uuid.uuid4().hex[:8]}",
+                        text=f"Execute detection query '{query_name}' to detect {recipe_name}. Use the suggested LogQL pattern from detection recipes.",
+                        source=QuestionSource.MITRE_NAVIGATOR,
+                        rationale=f"LogQL detection query for {recipe_name}",
+                        target_insight=f"Execute {query_name}",
+                        target_technique=tech_id,
+                        mitre_coverage_score=0.80,
+                        confidence_impact_score=0.75,
+                    )
+                )
+
+            # Add investigation steps as questions
+            steps = recipe.get("investigation_steps", {})
+            if isinstance(steps, dict):
+                for step_num, step_text in list(steps.items())[:3]:
+                    questions.append(
+                        InvestigativeQuestion(
+                            id=f"recipe-step-{uuid.uuid4().hex[:8]}",
+                            text=f"Investigation step {step_num}: {step_text}",
+                            source=QuestionSource.MITRE_NAVIGATOR,
+                            rationale=f"Structured investigation for {recipe_name}",
+                            target_insight=step_text,
+                            target_technique=tech_id,
+                            mitre_coverage_score=0.75,
+                            confidence_impact_score=0.70,
+                        )
+                    )
+
+        return questions
+
 
 # Load Pyramid of Pain climbing strategies from YAML
 def _load_climb_strategies() -> dict[PyramidLevel, list[ClimbStrategy]]:
     """Load climb strategies from YAML configuration file."""
-    # Get project root (parent of src/)
-    project_root = Path(__file__).parent.parent
+    # Get project root (from src/ares/core/engines.py -> ../../..)
+    project_root = Path(__file__).parent.parent.parent.parent
     strategies_path = project_root / "templates" / "engines" / "climb_strategies.yaml"
 
     with strategies_path.open() as f:

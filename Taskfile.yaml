@@ -149,6 +149,11 @@ tasks:
 
   ares:blue:
     desc: Run blue team agent in poll mode (uses 1Password for API keys)
+    deps:
+      - task: check-aws-auth
+        vars:
+          PROFILE: '{{.PROFILE | default "infrastructure"}}'
+          REGION: '{{.REGION | default "us-west-2"}}'
     cmds:
       - |
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
@@ -167,8 +172,39 @@ tasks:
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
           --dn-args.project {{.DREADNODE_PROJECT}}
 
+  ares:blue:once:
+    desc: Run blue team agent once and exit (uses 1Password for API keys)
+    deps:
+      - task: check-aws-auth
+        vars:
+          PROFILE: '{{.PROFILE | default "infrastructure"}}'
+          REGION: '{{.REGION | default "us-west-2"}}'
+    cmds:
+      - |
+        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
+        export GRAFANA_API_KEY=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
+        export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
+
+        uv run python -m ares \
+          --args.model {{.MODEL}} \
+          --args.grafana-url {{.GRAFANA_URL}} \
+          --args.poll-interval {{.POLL_INTERVAL}} \
+          --args.max-steps {{.MAX_STEPS}} \
+          --args.report-dir {{.REPORT_DIR}} \
+          --args.once \
+          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.token "$DREADNODE_API_KEY" \
+          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
+          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
+          --dn-args.project {{.DREADNODE_PROJECT}}
+
   ares:blue:local:
     desc: Run blue team agent using .env file (no 1Password)
+    deps:
+      - task: check-aws-auth
+        vars:
+          PROFILE: '{{.PROFILE | default "infrastructure"}}'
+          REGION: '{{.REGION | default "us-west-2"}}'
     cmds:
       - |
         if [ ! -f .env ]; then
@@ -191,6 +227,36 @@ tasks:
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
           --dn-args.project {{.DREADNODE_PROJECT}}
 
+  ares:blue:local:once:
+    desc: Run blue team agent once and exit using .env file (no 1Password)
+    deps:
+      - task: check-aws-auth
+        vars:
+          PROFILE: '{{.PROFILE | default "infrastructure"}}'
+          REGION: '{{.REGION | default "us-west-2"}}'
+    cmds:
+      - |
+        if [ ! -f .env ]; then
+          echo "Error: .env file not found"
+          exit 1
+        fi
+
+        set -a
+        . ./.env
+        set +a
+
+        uv run python -m ares \
+          --args.model {{.MODEL}} \
+          --args.grafana-url {{.GRAFANA_URL}} \
+          --args.poll-interval {{.POLL_INTERVAL}} \
+          --args.max-steps {{.MAX_STEPS}} \
+          --args.report-dir {{.REPORT_DIR}} \
+          --args.once \
+          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
+          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
+          --dn-args.project {{.DREADNODE_PROJECT}}
+
   ares:investigate:
     desc: "Investigate a specific alert from JSON file (usage: task ares:investigate ALERT=alert.json)"
     vars:
@@ -200,6 +266,11 @@ tasks:
         msg: "ALERT variable is required. Usage: task ares:investigate ALERT=alert.json"
       - sh: test -f "{{.ALERT}}"
         msg: "Alert file not found: {{.ALERT}}"
+    deps:
+      - task: check-aws-auth
+        vars:
+          PROFILE: '{{.PROFILE | default "infrastructure"}}'
+          REGION: '{{.REGION | default "us-west-2"}}'
     cmds:
       - |
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
@@ -375,14 +446,48 @@ tasks:
   # Ares Red Team Agent Tasks
   # ===========================================================================
 
+  check-aws-auth:
+    internal: true
+    vars:
+      PROFILE: '{{.PROFILE | default "lab"}}'
+      REGION: '{{.REGION | default "us-west-2"}}'
+    cmds:
+      - |
+        # Check if AWS CLI is installed
+        if ! command -v aws >/dev/null 2>&1; then
+          echo "❌ Error: AWS CLI is not installed"
+          echo ""
+          echo "The red team orchestration tasks require AWS CLI to access the infrastructure account."
+          echo "Install it from: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+          exit 1
+        fi
+
+        # Check if credentials are configured and valid for the profile
+        if ! aws sts get-caller-identity --profile "{{.PROFILE}}" --region "{{.REGION}}" >/dev/null 2>&1; then
+          echo "❌ Error: AWS authentication failed for profile '{{.PROFILE}}'"
+          echo ""
+          echo "You need to authenticate to the infrastructure account before running this task."
+          echo ""
+          echo "Troubleshooting:"
+          echo "  1. Verify your AWS credentials are configured: aws configure --profile {{.PROFILE}}"
+          echo "  2. If using SSO, authenticate: aws sso login --profile {{.PROFILE}}"
+          echo "  3. Check your profile exists: aws configure list --profile {{.PROFILE}}"
+          echo "  4. Verify your credentials are not expired"
+          exit 1
+        fi
+
+        # Success - show caller identity
+        echo "✅ AWS authentication verified"
+        aws sts get-caller-identity --profile "{{.PROFILE}}" --region "{{.REGION}}" --output table
+
   ares:red:
-    desc: "Run red team agent against a target (usage: task ares:red TARGET=192.168.1.100)"
+    desc: "Run red team agent against a target (usage: task ares:red TARGET=dreadgoad)"
     vars:
       TARGET: '{{.TARGET | default ""}}'
       REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
     preconditions:
       - sh: test -n "{{.TARGET}}"
-        msg: "TARGET variable is required. Usage: task ares:red TARGET=192.168.1.100"
+        msg: "TARGET variable is required. Usage: task ares:red TARGET=dreadgoad"
     cmds:
       - |
         export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
@@ -436,6 +541,11 @@ tasks:
       PROFILE: '{{.PROFILE | default "lab"}}'
       REGION: '{{.REGION | default "us-west-2"}}'
       REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
+    deps:
+      - task: check-aws-auth
+        vars:
+          PROFILE: '{{.PROFILE}}'
+          REGION: '{{.REGION}}'
     cmds:
       - |
         TARGET_IPS=$(aws ec2 describe-instances \
@@ -468,6 +578,7 @@ tasks:
         echo "Kali instance: $SSM_INSTANCE_ID"
 
         OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
+        ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null)
         DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
 
         ARES_DIR="$(pwd)"
@@ -481,7 +592,6 @@ tasks:
             --exclude='*.pyc' \
             --exclude='__pycache__' \
             --exclude='.git' \
-            --exclude="$(basename "$ARES_DIR")/reports/*" \
             "$(basename "$ARES_DIR")"
 
         aws s3 cp "/tmp/${TARBALL}" "s3://{{.BUCKET}}/${TARBALL}" --profile "{{.PROFILE}}" --region "{{.REGION}}"
@@ -496,6 +606,7 @@ tasks:
         python3 -m uv sync --no-dev
 
         export OPENAI_API_KEY='${OPENAI_API_KEY}'
+        export ANTHROPIC_API_KEY='${ANTHROPIC_API_KEY}'
         export DREADNODE_API_KEY='${DREADNODE_API_KEY}'
         export DREADNODE_SERVER='{{.DREADNODE_SERVER}}'
         export DREADNODE_ORGANIZATION='{{.DREADNODE_ORGANIZATION}}'
@@ -526,5 +637,88 @@ tasks:
 
         echo "Command ID: $COMMAND_ID"
         echo ""
-        echo "Monitor: ./tail_redteam_log.sh {{.KALI}}"
+        echo "Monitor: task ares:red:logs KALI={{.KALI}}"
         echo "Cleanup: aws s3 rm s3://{{.BUCKET}}/${TARBALL} --profile {{.PROFILE}} --region {{.REGION}}"
+
+  ares:red:logs:
+    desc: "Tail red team agent logs from Kali via SSM (usage: task ares:red:logs [KALI=instance-name] [LINES=100] [FOLLOW=true])"
+    vars:
+      KALI: '{{.KALI | default "dev-alpha-operator-range-kali"}}'
+      LINES: '{{.LINES | default "100"}}'
+      FOLLOW: '{{.FOLLOW | default "false"}}'
+      PROFILE: '{{.PROFILE | default "lab"}}'
+      REGION: '{{.REGION | default "us-west-2"}}'
+    deps:
+      - task: check-aws-auth
+        vars:
+          PROFILE: '{{.PROFILE}}'
+          REGION: '{{.REGION}}'
+    cmds:
+      - |
+        SSM_INSTANCE_ID=$(aws ec2 describe-instances \
+            --profile "{{.PROFILE}}" \
+            --region "{{.REGION}}" \
+            --filters "Name=tag:Name,Values={{.KALI}}" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].InstanceId' \
+            --output text)
+
+        if [ "$SSM_INSTANCE_ID" == "None" ] || [ -z "$SSM_INSTANCE_ID" ]; then
+            echo "❌ Kali instance not found or not running: {{.KALI}}"
+            exit 1
+        fi
+
+        if [ "{{.FOLLOW}}" = "true" ]; then
+            echo "📡 Following logs from {{.KALI}} (Press Ctrl+C to stop)"
+            echo "======================================================================"
+            echo ""
+
+            while true; do
+                clear
+                echo "🕐 $(date) - Refreshing..."
+                echo "======================================================================"
+
+                COMMAND_ID=$(aws ssm send-command \
+                    --profile "{{.PROFILE}}" \
+                    --region "{{.REGION}}" \
+                    --instance-ids "$SSM_INSTANCE_ID" \
+                    --document-name "AWS-RunShellScript" \
+                    --parameters 'commands=["tail -n 100 /tmp/ares-redteam-output.log 2>/dev/null || echo \"Log file not yet created\""]' \
+                    --query 'Command.CommandId' \
+                    --output text)
+
+                sleep 2
+
+                aws ssm get-command-invocation \
+                    --profile "{{.PROFILE}}" \
+                    --region "{{.REGION}}" \
+                    --command-id "$COMMAND_ID" \
+                    --instance-id "$SSM_INSTANCE_ID" \
+                    --query 'StandardOutputContent' \
+                    --output text
+
+                sleep 3
+            done
+        else
+            echo "📋 Fetching last {{.LINES}} lines from {{.KALI}}..."
+            echo "======================================================================"
+            echo ""
+
+            COMMAND_ID=$(aws ssm send-command \
+                --profile "{{.PROFILE}}" \
+                --region "{{.REGION}}" \
+                --instance-ids "$SSM_INSTANCE_ID" \
+                --document-name "AWS-RunShellScript" \
+                --parameters "commands=[\"tail -n {{.LINES}} /tmp/ares-redteam-output.log 2>/dev/null || echo 'Log file not yet created'\"]" \
+                --query 'Command.CommandId' \
+                --output text)
+
+            sleep 2
+
+            aws ssm get-command-invocation \
+                --profile "{{.PROFILE}}" \
+                --region "{{.REGION}}" \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$SSM_INSTANCE_ID" \
+                --query 'StandardOutputContent' \
+                --output text
+        fi

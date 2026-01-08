@@ -30,6 +30,7 @@ class Args:
         poll_interval: Seconds between alert polling cycles.
         max_steps: Maximum agent steps per investigation.
         report_dir: Directory for markdown reports.
+        once: Process current alerts once and exit (default: run forever).
     """
 
     model: str = "claude-sonnet-4-20250514"
@@ -37,7 +38,8 @@ class Args:
     grafana_api_key: str = ""
     poll_interval: int = 30
     max_steps: int = 150
-    report_dir: str = "reports"
+    report_dir: str = "./reports"  # Relative to CWD
+    once: bool = False  # Process current alerts once and exit
 
 
 @dataclass
@@ -110,9 +112,9 @@ async def main(
     logger.info(f"Report Dir: {args.report_dir}")
     logger.info("=" * 60)
 
-    from .agent import InvestigationOrchestrator
-    from .mitre import MITREAttackClient
-    from .tools import GrafanaTools
+    from ares.agents.blue import InvestigationOrchestrator
+    from ares.integrations.mitre import MITREAttackClient
+    from ares.tools.blue import GrafanaTools
 
     # Initialize MITRE client
     logger.info("Loading MITRE ATT&CK data from STIX repository...")
@@ -123,9 +125,9 @@ async def main(
     tactics_count = len(mitre_client._tactics)  # noqa: SLF001
     logger.success(f"Loaded {techniques_count} techniques, {tactics_count} tactics")
 
-    # Create report directory
-    report_dir = Path(args.report_dir)
-    report_dir.mkdir(exist_ok=True)
+    report_dir = Path(args.report_dir).resolve()
+    report_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Reports: {report_dir}")
 
     # Initialize orchestrator
     orchestrator = InvestigationOrchestrator(
@@ -146,62 +148,81 @@ async def main(
     # Track investigated alerts
     investigated_fingerprints: set[str] = set()
 
-    logger.info(f"Polling for alerts every {args.poll_interval}s...")
-    logger.info("Press Ctrl+C to stop")
+    if args.once:
+        logger.info("Processing current alerts once and exiting...")
+    else:
+        logger.info(f"Polling for alerts every {args.poll_interval}s...")
+        logger.info("Press Ctrl+C to stop")
     logger.info("")
 
-    while True:
-        try:
-            # Poll for firing alerts
-            alerts = await grafana.get_firing_alerts()
+    try:
+        while True:
+            try:
+                # Poll for firing alerts
+                alerts = await grafana.get_firing_alerts()
 
-            for alert in alerts:
-                fingerprint = alert.get("fingerprint", "")
+                for alert in alerts:
+                    fingerprint = alert.get("fingerprint", "")
 
-                # Skip already investigated
-                if fingerprint in investigated_fingerprints:
-                    continue
+                    # Skip already investigated
+                    if fingerprint in investigated_fingerprints:
+                        continue
 
-                alert_name = alert.get("labels", {}).get("alertname", "unknown")
-                severity = alert.get("labels", {}).get("severity", "unknown")
+                    alert_name = alert.get("labels", {}).get("alertname", "unknown")
+                    severity = alert.get("labels", {}).get("severity", "unknown")
 
+                    logger.info("")
+                    logger.info("=" * 60)
+                    logger.info(f"NEW ALERT: {alert_name}")
+                    logger.info(f"Severity: {severity}")
+                    logger.info(f"Fingerprint: {fingerprint}")
+                    logger.info("=" * 60)
+
+                    # Mark as being investigated
+                    investigated_fingerprints.add(fingerprint)
+
+                    # Run investigation
+                    try:
+                        result = await orchestrator.investigate(alert)
+
+                        logger.success("")
+                        logger.success("INVESTIGATION COMPLETE")
+                        logger.success(f"  Status: {result['status']}")
+                        logger.success(f"  Evidence: {result['evidence_count']} items")
+                        logger.success(f"  Techniques: {len(result['techniques_identified'])}")
+                        logger.success(f"  Pyramid Level: {result['highest_pyramid_level']}/6")
+                        logger.success(f"  Report: {result['report_path']}")
+
+                    except Exception as e:
+                        logger.error(f"Investigation failed: {e}")
+                        dn.log_metric("investigation_failed", 1, mode="count")
+
+                # If running in once mode, exit after processing current alerts
+                if args.once:
+                    logger.info("")
+                    logger.info("=" * 60)
+                    logger.info(f"Processed {len(investigated_fingerprints)} alerts")
+                    logger.info("Exiting (--once mode)")
+                    logger.info("=" * 60)
+                    break
+
+                # Wait before next poll
+                await asyncio.sleep(args.poll_interval)
+
+            except KeyboardInterrupt:
                 logger.info("")
-                logger.info("=" * 60)
-                logger.info(f"NEW ALERT: {alert_name}")
-                logger.info(f"Severity: {severity}")
-                logger.info(f"Fingerprint: {fingerprint}")
-                logger.info("=" * 60)
+                logger.info("Shutting down gracefully...")
+                break
 
-                # Mark as being investigated
-                investigated_fingerprints.add(fingerprint)
+            except Exception as e:
+                logger.error(f"Polling error: {e}")
+                await asyncio.sleep(args.poll_interval)
 
-                # Run investigation
-                try:
-                    result = await orchestrator.investigate(alert)
-
-                    logger.success("")
-                    logger.success("INVESTIGATION COMPLETE")
-                    logger.success(f"  Status: {result['status']}")
-                    logger.success(f"  Evidence: {result['evidence_count']} items")
-                    logger.success(f"  Techniques: {len(result['techniques_identified'])}")
-                    logger.success(f"  Pyramid Level: {result['highest_pyramid_level']}/6")
-                    logger.success(f"  Report: {result['report_path']}")
-
-                except Exception as e:
-                    logger.error(f"Investigation failed: {e}")
-                    dn.log_metric("investigation_failed", 1, mode="count")
-
-            # Wait before next poll
-            await asyncio.sleep(args.poll_interval)
-
-        except KeyboardInterrupt:
-            logger.info("")
-            logger.info("Shutting down...")
-            break
-
-        except Exception as e:
-            logger.error(f"Polling error: {e}")
-            await asyncio.sleep(args.poll_interval)
+    finally:
+        # Clean up MCP connection on shutdown
+        logger.info("Cleaning up connections...")
+        await orchestrator._shutdown_mcp()
+        logger.success("Shutdown complete")
 
 
 # Cyclopts decorator typing not yet fully supported by type checkers
@@ -243,17 +264,16 @@ async def investigate_alert(
         console=dn_args.console,
     )
 
-    from .agent import InvestigationOrchestrator
-    from .mitre import MITREAttackClient
+    from ares.agents.blue import InvestigationOrchestrator
+    from ares.integrations.mitre import MITREAttackClient
 
     # Load MITRE data
     logger.info("Loading MITRE ATT&CK data...")
     mitre_client = MITREAttackClient()
     await mitre_client.load()
 
-    # Create orchestrator
-    report_dir = Path(args.report_dir)
-    report_dir.mkdir(exist_ok=True)
+    report_dir = Path(args.report_dir).resolve()
+    report_dir.mkdir(parents=True, exist_ok=True)
 
     orchestrator = InvestigationOrchestrator(
         model=args.model,
@@ -327,13 +347,9 @@ async def redteam(
     logger.info(f"Max Steps: {args.max_steps}")
     logger.info(f"Report Dir: {args.report_dir}")
     logger.info("=" * 60)
-    logger.warning("")
-    logger.warning("⚠️  AUTHORIZED PENETRATION TESTING ONLY")
-    logger.warning("    Ensure you have proper authorization before proceeding")
-    logger.warning("")
 
-    from .mitre import MITREAttackClient
-    from .redteam_agent import RedTeamOrchestrator
+    from ares.integrations.mitre import MITREAttackClient
+    from ares.agents.red import RedTeamOrchestrator
 
     # Load MITRE data
     logger.info("Loading MITRE ATT&CK data...")
@@ -344,9 +360,9 @@ async def redteam(
     tactics_count = len(mitre_client._tactics)  # noqa: SLF001
     logger.success(f"Loaded {techniques_count} techniques, {tactics_count} tactics")
 
-    # Create report directory
-    report_dir = Path(args.report_dir)
-    report_dir.mkdir(exist_ok=True)
+    report_dir = Path(args.report_dir).resolve()
+    report_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Reports: {report_dir}")
 
     # Create orchestrator
     orchestrator = RedTeamOrchestrator(

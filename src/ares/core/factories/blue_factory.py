@@ -8,27 +8,49 @@ from dreadnode.agent.stop import tool_use
 from dreadnode.agent.thread import Thread
 from loguru import logger
 
-from src.mitre import MITREAttackClient
-from src.models import InvestigationState
-from src.templates import get_template_loader
-from src.tools import (
+from ares.integrations.mitre import MITREAttackClient
+from ares.core.models import InvestigationState
+from ares.core.templates import get_template_loader
+from ares.tools.blue import (
+    CompletionTools,
     GrafanaTools,
     InvestigationTools,
-    MITRELookupTools,
+    LokiTools,
     QuestionEngineTools,
-    complete_investigation,
     escalate_investigation,
 )
+from ares.tools.shared import MITRELookupTools
 
 # Load system instructions from template
 SYSTEM_INSTRUCTIONS = get_template_loader().render("agent/system_instructions.md.jinja")
 
+# Track consecutive query calls without workflow progress
+_consecutive_queries = []
+
 
 async def log_tool_usage(event: ToolStart):
-    """Log tool calls for observability."""
+    """Log tool calls for observability and detect loops."""
     if hasattr(event, "tool_call") and event.tool_call:
-        logger.info(f"🔧 Tool call: {event.tool_call.name}")
-        dn.log_metric(f"tool_{event.tool_call.name}", 1, mode="count")
+        tool_name = event.tool_call.name
+        logger.info(f"🔧 Tool call: {tool_name}")
+        dn.log_metric(f"tool_{tool_name}", 1, mode="count")
+
+        # Track if agent is stuck in query loop
+        if "query_loki" in tool_name or "query_prometheus" in tool_name:
+            _consecutive_queries.append(tool_name)
+            # Keep only last 5 calls
+            if len(_consecutive_queries) > 5:
+                _consecutive_queries.pop(0)
+
+            # If last 3 calls are all queries, warn
+            if len(_consecutive_queries) >= 3 and all(
+                "query_loki" in t or "query_prometheus" in t for t in _consecutive_queries[-3:]
+            ):
+                logger.warning("⚠️ DETECTED QUERY LOOP: 3+ consecutive queries without recording evidence")
+                logger.warning("Agent should call record_evidence() or get_combined_questions() next")
+        elif "record_evidence" in tool_name or "get_combined_questions" in tool_name:
+            # Reset counter when workflow tools are called
+            _consecutive_queries.clear()
 
 
 async def log_tool_result(event: ToolEnd):
@@ -47,8 +69,9 @@ unstall_hook = retry_with_feedback(
         "You seem stuck. Remember:\n"
         "1. Call get_combined_questions() to get next questions\n"
         "2. Execute queries in PARALLEL to answer those questions\n"
-        "3. Record evidence with record_evidence()\n"
-        "4. When done, call complete_investigation() or escalate_investigation()"
+        "3. Record evidence with record_evidence() for EVERY finding\n"
+        "4. When done, call complete_investigation() or escalate_investigation()\n\n"
+        "If queries return empty results, document that and try broader queries OR move forward."
     ),
 )
 
@@ -91,13 +114,16 @@ def create_investigation_agent(
     mitre_tools = MITRELookupTools()
     mitre_tools.set_client(mitre_client)
 
+    completion_tools = CompletionTools()
+    completion_tools.set_state(state)
+
     # Build tool list
     tools: list = [
         grafana_tools,
         investigation_tools,
         question_tools,
         mitre_tools,
-        complete_investigation,
+        completion_tools,
         escalate_investigation,
     ]
 

@@ -37,8 +37,8 @@ class TemplateLoader:
                          Defaults to PROJECT_ROOT/templates/.
         """
         if template_dir is None:
-            # Get project root (parent of src/)
-            project_root = Path(__file__).parent.parent
+            # Get project root (from src/ares/core/templates.py -> ../../..)
+            project_root = Path(__file__).parent.parent.parent.parent
             template_dir = project_root / "templates"
 
         self.template_dir = Path(template_dir)
@@ -112,7 +112,7 @@ def get_template_loader() -> TemplateLoader:
         Singleton TemplateLoader instance.
 
     Example:
-        >>> from src.templates import get_template_loader
+        >>> from ares.core.templates import get_template_loader
         >>> loader = get_template_loader()
         >>> prompt = loader.render("agent/initial_alert_prompt.md.jinja", ...)
     """

@@ -5,7 +5,7 @@ import os
 
 from loguru import logger
 
-from src.tools.grafana import connect_grafana_mcp
+from ares.tools.blue.grafana import connect_grafana_mcp
 
 
 async def test_mcp_connection() -> bool:

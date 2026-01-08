@@ -5,16 +5,16 @@ Main agent implementation using Dreadnode Agent SDK.
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import dreadnode as dn
 from loguru import logger
 
-from .core import create_investigation_agent
-from .mitre import MITREAttackClient
-from .models import InvestigationState
-from .templates import get_template_loader
+from ares.core.factories.blue_factory import create_investigation_agent
+from ares.integrations.mitre import MITREAttackClient
+from ares.core.models import InvestigationState
+from ares.core.templates import get_template_loader
 
 
 def build_initial_prompt(alert: dict) -> str:
@@ -38,6 +38,22 @@ def build_initial_prompt(alert: dict) -> str:
     labels = alert.get("labels", {})
     annotations = alert.get("annotations", {})
 
+    # Extract MITRE technique from alert if present
+    mitre_technique = None
+    for key in ["mitre_technique", "mitre", "technique_id", "technique"]:
+        if key in labels:
+            mitre_technique = labels[key]
+            break
+    # Also check annotations
+    if not mitre_technique:
+        for key in ["mitre_technique", "mitre", "technique_id", "technique"]:
+            if key in annotations:
+                mitre_technique = annotations[key]
+                break
+
+    # Current time for reference
+    current_time = datetime.now(timezone.utc)
+
     loader = get_template_loader()
     return loader.render(
         "agent/initial_alert_prompt.md.jinja",
@@ -45,10 +61,14 @@ def build_initial_prompt(alert: dict) -> str:
         severity=labels.get("severity", "unknown"),
         instance=labels.get("instance", "unknown"),
         job=labels.get("job", "unknown"),
-        starts_at=alert.get("startsAt", datetime.now(timezone.utc).isoformat()),
+        starts_at=alert.get("startsAt", current_time.isoformat()),
         summary=annotations.get("summary", "No summary provided"),
         description=annotations.get("description", "No description provided"),
         labels=labels,
+        mitre_technique=mitre_technique,
+        current_time=current_time.isoformat().replace("+00:00", "Z"),
+        current_time_minus_1h=(current_time - timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+        current_time_minus_2h=(current_time - timedelta(hours=2)).isoformat().replace("+00:00", "Z"),
     )
 
 
@@ -87,7 +107,7 @@ class InvestigationOrchestrator:
     async def _ensure_mcp_connection(self) -> None:
         """Ensure MCP connection is established."""
         if self._mcp_client is None:
-            from .tools import connect_grafana_mcp
+            from ares.tools.blue.grafana import connect_grafana_mcp
 
             try:
                 logger.info("Connecting to Grafana MCP server...")
@@ -149,6 +169,19 @@ class InvestigationOrchestrator:
             investigation_id=investigation_id,
             alert=alert,
         )
+
+        # Auto-extract and record MITRE technique from alert
+        labels = alert.get("labels", {})
+        annotations = alert.get("annotations", {})
+        for key in ["mitre_technique", "mitre", "technique_id", "technique"]:
+            if key in labels and labels[key]:
+                state.identified_techniques.add(labels[key])
+                logger.info(f"Auto-recorded MITRE technique from alert: {labels[key]}")
+                break
+            if key in annotations and annotations[key]:
+                state.identified_techniques.add(annotations[key])
+                logger.info(f"Auto-recorded MITRE technique from alert: {annotations[key]}")
+                break
 
         initial_prompt = build_initial_prompt(alert)
 
@@ -222,7 +255,7 @@ class InvestigationOrchestrator:
 
     def _generate_report(self, state: InvestigationState, _result) -> Path:
         """Generate the markdown investigation report."""
-        from .report import MarkdownReportGenerator
+        from ares.reports.investigation import MarkdownReportGenerator
 
         generator = MarkdownReportGenerator(self.report_dir)
         return generator.generate(state)

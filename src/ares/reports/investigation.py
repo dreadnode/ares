@@ -9,8 +9,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import InvestigationState, PyramidLevel
-from .templates import get_template_loader
+from ares.core.models import InvestigationState, PyramidLevel
+from ares.core.templates import get_template_loader
 
 PYRAMID_EMOJI = {
     PyramidLevel.HASH_VALUES: "🔵",

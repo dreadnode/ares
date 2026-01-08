@@ -16,10 +16,10 @@ from dreadnode.agent.stop import tool_use
 from dreadnode.agent.thread import Thread
 from loguru import logger
 
-from src.mitre import MITREAttackClient
-from src.models import RedTeamState
-from src.templates import get_template_loader
-from src.tools.redteam import (
+from ares.integrations.mitre import MITREAttackClient
+from ares.core.models import RedTeamState
+from ares.core.templates import get_template_loader
+from ares.tools.red.network import (
     BloodHoundTools,
     CertipyTools,
     CrackingTools,

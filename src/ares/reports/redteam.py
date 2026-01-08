@@ -5,10 +5,10 @@ Produces detailed penetration testing reports with discovered assets,
 credentials, attack paths, and MITRE ATT&CK mapping.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from .models import RedTeamState
-from .templates import get_template_loader
+from ares.core.models import RedTeamState
+from ares.core.templates import get_template_loader
 
 
 class RedTeamReportGenerator:
@@ -31,7 +31,7 @@ class RedTeamReportGenerator:
             Complete markdown report as a string.
         """
         # Calculate duration
-        duration = datetime.utcnow() - state.started_at
+        duration = datetime.now(timezone.utc) - state.started_at
         duration_str = str(duration).split(".")[0]  # Remove microseconds
 
         # Generate executive summary
@@ -43,7 +43,7 @@ class RedTeamReportGenerator:
             operation_id=state.operation_id,
             target_ip=state.target.ip,
             started_at=state.started_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
-            completed_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            completed_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             duration=duration_str,
             stage=state.stage.value,
             executive_summary=executive_summary,

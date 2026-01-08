@@ -9,13 +9,13 @@ import os
 import subprocess
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 
-from src.models import (
+from ares.core.models import (
     Credential,
     Hash,
     Host,
@@ -854,7 +854,7 @@ class GoldenTicketTools(Toolset):
                 # Add timeline event
                 event = TimelineEvent(
                     id=f"evt-{len(self.state.timeline):04d}",
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                     description=f"Golden ticket generated for {domain}",
                     mitre_techniques=["T1558.001"],  # Golden Ticket
                     confidence=1.0,
@@ -1452,7 +1452,7 @@ class RedTeamReportingTools(Toolset):
                 self.state.has_domain_admin = True
                 event = TimelineEvent(
                     id=f"evt-{len(self.state.timeline):04d}",
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                     description=f"Domain admin access achieved: {data.get('details', '')}",
                     mitre_techniques=["T1078.002"],  # Domain Accounts
                     confidence=1.0,
