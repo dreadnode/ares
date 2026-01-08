@@ -275,6 +275,119 @@ async def investigate_alert(
 
 
 # Cyclopts decorator typing not yet fully supported by type checkers
+@app.command(name="red-team")  # type: ignore[untyped-decorator]
+async def redteam(
+    target_ip: str,
+    *,
+    args: Args | None = None,
+    dn_args: DreadnodeArgs | None = None,
+) -> None:
+    """
+    Execute a red team operation against a target.
+
+    This command runs an autonomous penetration testing agent that will:
+    - Enumerate network hosts, users, and shares
+    - Harvest credentials via secretsdump, kerberoasting, and AS-REP roasting
+    - Crack password hashes
+    - Pilfer SMB shares for credentials
+    - Generate golden tickets if krbtgt hash is found
+    - Achieve domain admin access if possible
+
+    **WARNING**: Only use this command in authorized penetration testing environments.
+    Unauthorized use may be illegal.
+
+    Args:
+        target_ip: Primary target IP address for the red team operation
+
+    Example:
+        uv run python -m src.main redteam 192.168.1.100
+        uv run python -m src.main redteam 192.168.1.100 --args.model claude-sonnet-4-20250514
+    """
+    args = args or Args()
+    dn_args = dn_args or DreadnodeArgs()
+
+    # Configure Dreadnode
+    dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
+
+    dn.configure(
+        server=dn_args.server,
+        token=dreadnode_token,
+        organization=dn_args.organization,
+        workspace=dn_args.workspace,
+        project=dn_args.project,
+        console=dn_args.console,
+    )
+
+    # Log startup
+    logger.info("=" * 60)
+    logger.info("ARES RED TEAM AGENT")
+    logger.info("=" * 60)
+    logger.info(f"Target: {target_ip}")
+    logger.info(f"Model: {args.model}")
+    logger.info(f"Max Steps: {args.max_steps}")
+    logger.info(f"Report Dir: {args.report_dir}")
+    logger.info("=" * 60)
+    logger.warning("")
+    logger.warning("⚠️  AUTHORIZED PENETRATION TESTING ONLY")
+    logger.warning("    Ensure you have proper authorization before proceeding")
+    logger.warning("")
+
+    from .mitre import MITREAttackClient
+    from .redteam_agent import RedTeamOrchestrator
+
+    # Load MITRE data
+    logger.info("Loading MITRE ATT&CK data...")
+    mitre_client = MITREAttackClient()
+    await mitre_client.load()
+    # Accessing protected members for logging/diagnostics only - not modifying internal state
+    techniques_count = len(mitre_client._techniques)  # noqa: SLF001
+    tactics_count = len(mitre_client._tactics)  # noqa: SLF001
+    logger.success(f"Loaded {techniques_count} techniques, {tactics_count} tactics")
+
+    # Create report directory
+    report_dir = Path(args.report_dir)
+    report_dir.mkdir(exist_ok=True)
+
+    # Create orchestrator
+    orchestrator = RedTeamOrchestrator(
+        model=args.model,
+        mitre_client=mitre_client,
+        report_dir=report_dir,
+        max_steps=args.max_steps,
+    )
+
+    # Run operation
+    logger.info("")
+    logger.info(f"Starting red team operation against {target_ip}...")
+    logger.info("")
+
+    try:
+        result = await orchestrator.execute_operation(target_ip)
+
+        logger.success("")
+        logger.success("=" * 60)
+        logger.success("RED TEAM OPERATION COMPLETE")
+        logger.success("=" * 60)
+        logger.success(f"  Status: {result['status']}")
+        logger.success(f"  Hosts Discovered: {result.get('host_count', 0)}")
+        logger.success(f"  Credentials Obtained: {result.get('credential_count', 0)}")
+        logger.success(f"  Admins Found: {result.get('admin_count', 0)}")
+
+        if result.get("has_domain_admin"):
+            logger.success("  🎯 DOMAIN ADMIN ACCESS: ACHIEVED")
+        if result.get("has_golden_ticket"):
+            logger.success("  🎫 GOLDEN TICKET: GENERATED")
+
+        logger.success(f"  Report: {result['report_path']}")
+        logger.success("")
+
+    except Exception as e:
+        logger.error("")
+        logger.error(f"Red team operation failed: {e}")
+        raise
+
+
+# Cyclopts decorator typing not yet fully supported by type checkers
 @app.command  # type: ignore[untyped-decorator]
 def version() -> None:
     """Print version information."""
