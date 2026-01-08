@@ -144,25 +144,18 @@ tasks:
       - task: github:create-release
 
   # ===========================================================================
-  # Ares SOC Agent Tasks
+  # Ares Blue Team (SOC) Agent Tasks
   # ===========================================================================
 
-  ares:run:
-    desc: Run Ares in poll mode (retrieves API keys from 1Password)
+  ares:blue:
+    desc: Run blue team agent in poll mode (uses 1Password for API keys)
     cmds:
       - |
-        echo "Starting Ares SOC Investigation Agent..."
-        echo "Platform: {{.DREADNODE_SERVER}}"
-        echo "Model: {{.MODEL}}"
-        echo ""
-
-        # Get API keys from 1Password
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
-        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
+        export GRAFANA_API_KEY=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
         export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
 
-        # Run Ares using uv
-        uv run python -m src \
+        uv run python -m ares \
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
@@ -174,28 +167,20 @@ tasks:
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
           --dn-args.project {{.DREADNODE_PROJECT}}
 
-  ares:run:local:
-    desc: Run Ares using local environment variables (no 1Password)
+  ares:blue:local:
+    desc: Run blue team agent using .env file (no 1Password)
     cmds:
       - |
-        echo "Starting Ares SOC Investigation Agent (using .env)..."
-        echo "Platform: {{.DREADNODE_SERVER}}"
-        echo "Model: {{.MODEL}}"
-        echo ""
-
-        # Check for .env file
         if [ ! -f .env ]; then
-          echo "⚠️  Warning: .env file not found. Copy .env.example to .env and configure."
+          echo "Error: .env file not found"
           exit 1
         fi
 
-        # Load .env
         set -a
         . ./.env
         set +a
 
-        # Run Ares using uv
-        uv run python -m src \
+        uv run python -m ares \
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
@@ -217,16 +202,11 @@ tasks:
         msg: "Alert file not found: {{.ALERT}}"
     cmds:
       - |
-        echo "Investigating alert from: {{.ALERT}}"
-        echo ""
-
-        # Get API keys from 1Password
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
-        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
+        export GRAFANA_API_KEY=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
         export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
 
-        # Run investigation
-        uv run python -m src investigate-alert {{.ALERT}} \
+        uv run python -m ares investigate-alert {{.ALERT}} \
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.max-steps {{.MAX_STEPS}} \
@@ -278,11 +258,11 @@ tasks:
           echo "     Field: 'api-key'"
         fi
 
-        # Check Grafana service account token
+        # Check Grafana API key
         if op item get "Ares Grafana MCP" --fields grafana-token --reveal >/dev/null 2>&1; then
-          echo "  ✅ Grafana service account token accessible"
+          echo "  ✅ Grafana API key accessible"
         else
-          echo "  ⚠️  Grafana service account token not found in 1Password"
+          echo "  ⚠️  Grafana API key not found in 1Password"
           echo "     Item: 'Ares Grafana MCP'"
           echo "     Field: 'grafana-token'"
         fi
@@ -360,7 +340,7 @@ tasks:
   ares:version:
     desc: Show Ares version information
     cmds:
-      - uv run python -m ares version
+      - uv run python -c "import ares; print('Ares version:', ares.__version__)"
 
   ares:mitre:test:
     desc: Test MITRE ATT&CK data loading
@@ -368,7 +348,7 @@ tasks:
       - |
         uv run python -c "
         import asyncio
-        from src.mitre import MITREAttackClient
+        from ares.integrations.mitre import MITREAttackClient
 
         async def test():
             client = MITREAttackClient()
@@ -390,3 +370,161 @@ tasks:
     desc: Show example Grafana MCP queries for Windows attack detection
     cmds:
       - python examples/grafana_mcp_windows_example.py
+
+  # ===========================================================================
+  # Ares Red Team Agent Tasks
+  # ===========================================================================
+
+  ares:red:
+    desc: "Run red team agent against a target (usage: task ares:red TARGET=192.168.1.100)"
+    vars:
+      TARGET: '{{.TARGET | default ""}}'
+      REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
+    preconditions:
+      - sh: test -n "{{.TARGET}}"
+        msg: "TARGET variable is required. Usage: task ares:red TARGET=192.168.1.100"
+    cmds:
+      - |
+        export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
+        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
+        export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
+
+        uv run python -m ares red-team {{.TARGET}} \
+          --args.model {{.MODEL}} \
+          --args.max-steps {{.MAX_STEPS}} \
+          --args.report-dir {{.REPORT_DIR}} \
+          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.token "$DREADNODE_API_KEY" \
+          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
+          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
+          --dn-args.project {{.REDTEAM_PROJECT}}
+
+  ares:red:local:
+    desc: "Run red team agent using .env file (usage: task ares:red:local TARGET=192.168.1.100)"
+    vars:
+      TARGET: '{{.TARGET | default ""}}'
+      REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
+    preconditions:
+      - sh: test -n "{{.TARGET}}"
+        msg: "TARGET variable is required. Usage: task ares:red:local TARGET=192.168.1.100"
+    cmds:
+      - |
+        if [ ! -f .env ]; then
+          echo "Error: .env file not found"
+          exit 1
+        fi
+
+        set -a
+        . ./.env
+        set +a
+
+        uv run python -m ares red-team {{.TARGET}} \
+          --args.model {{.MODEL}} \
+          --args.max-steps {{.MAX_STEPS}} \
+          --args.report-dir {{.REPORT_DIR}} \
+          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
+          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
+          --dn-args.project {{.REDTEAM_PROJECT}}
+
+  ares:red:orchestrate:
+    desc: "Orchestrate red team via S3/SSM (usage: task ares:red:orchestrate TARGET_FILTER=dreadgoad)"
+    vars:
+      TARGET_FILTER: '{{.TARGET_FILTER | default "dreadgoad"}}'
+      KALI: '{{.KALI | default "dev-alpha-operator-range-kali"}}'
+      BUCKET: '{{.BUCKET | default "dread-infra-alpha-operator-range-dev-us-west-2"}}'
+      PROFILE: '{{.PROFILE | default "lab"}}'
+      REGION: '{{.REGION | default "us-west-2"}}'
+      REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
+    cmds:
+      - |
+        TARGET_IPS=$(aws ec2 describe-instances \
+            --profile "{{.PROFILE}}" \
+            --region "{{.REGION}}" \
+            --filters "Name=instance-state-name,Values=running" \
+            --query 'Reservations[*].Instances[?contains(Tags[?Key==`Name`].Value|[0], `{{.TARGET_FILTER}}`)].PrivateIpAddress' \
+            --output text | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+
+        if [ -z "$TARGET_IPS" ]; then
+            echo "Error: No running instances found matching filter: {{.TARGET_FILTER}}"
+            exit 1
+        fi
+
+        PRIMARY_TARGET=$(echo "$TARGET_IPS" | awk '{print $1}')
+        echo "Target: $PRIMARY_TARGET"
+
+        SSM_INSTANCE_ID=$(aws ec2 describe-instances \
+            --profile "{{.PROFILE}}" \
+            --region "{{.REGION}}" \
+            --filters "Name=tag:Name,Values={{.KALI}}" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].InstanceId' \
+            --output text)
+
+        if [ "$SSM_INSTANCE_ID" == "None" ] || [ -z "$SSM_INSTANCE_ID" ]; then
+            echo "Error: Kali instance not found or not running"
+            exit 1
+        fi
+
+        echo "Kali instance: $SSM_INSTANCE_ID"
+
+        OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
+        DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
+
+        ARES_DIR="$(pwd)"
+        TIMESTAMP=$(date +%s)
+        TARBALL="ares-redteam-${TIMESTAMP}.tar.gz"
+
+        cd "$(dirname "$ARES_DIR")"
+        tar -czf "/tmp/${TARBALL}" \
+            --exclude='.venv' \
+            --exclude='venv' \
+            --exclude='*.pyc' \
+            --exclude='__pycache__' \
+            --exclude='.git' \
+            --exclude="$(basename "$ARES_DIR")/reports/*" \
+            "$(basename "$ARES_DIR")"
+
+        aws s3 cp "/tmp/${TARBALL}" "s3://{{.BUCKET}}/${TARBALL}" --profile "{{.PROFILE}}" --region "{{.REGION}}"
+
+        REMOTE_SCRIPT="#!/bin/bash
+        set -e
+        cd /tmp
+        aws s3 cp s3://{{.BUCKET}}/${TARBALL} . --region {{.REGION}}
+        tar -xzf ${TARBALL}
+        cd /tmp/$(basename "$ARES_DIR")
+        python3 -m pip install --break-system-packages -q uv
+        python3 -m uv sync --no-dev
+
+        export OPENAI_API_KEY='${OPENAI_API_KEY}'
+        export DREADNODE_API_KEY='${DREADNODE_API_KEY}'
+        export DREADNODE_SERVER='{{.DREADNODE_SERVER}}'
+        export DREADNODE_ORGANIZATION='{{.DREADNODE_ORGANIZATION}}'
+        export DREADNODE_WORKSPACE='{{.DREADNODE_WORKSPACE}}'
+        export DREADNODE_PROJECT='{{.REDTEAM_PROJECT}}'
+
+        uv run python -m ares red-team ${PRIMARY_TARGET} \
+            --args.model {{.MODEL}} \
+            --args.max-steps {{.MAX_STEPS}} \
+            --dn-args.server '{{.DREADNODE_SERVER}}' \
+            --dn-args.token '${DREADNODE_API_KEY}' \
+            --dn-args.organization '{{.DREADNODE_ORGANIZATION}}' \
+            --dn-args.workspace '{{.DREADNODE_WORKSPACE}}' \
+            --dn-args.project '{{.REDTEAM_PROJECT}}' \
+            2>&1 | tee /tmp/ares-redteam-output.log
+        "
+
+        COMMAND_ID=$(aws ssm send-command \
+            --profile "{{.PROFILE}}" \
+            --region "{{.REGION}}" \
+            --instance-ids "$SSM_INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[\"${REMOTE_SCRIPT}\"]" \
+            --timeout-seconds 7200 \
+            --comment "Ares red team - {{.TARGET_FILTER}} - $TIMESTAMP" \
+            --query 'Command.CommandId' \
+            --output text)
+
+        echo "Command ID: $COMMAND_ID"
+        echo ""
+        echo "Monitor: ./tail_redteam_log.sh {{.KALI}}"
+        echo "Cleanup: aws s3 rm s3://{{.BUCKET}}/${TARBALL} --profile {{.PROFILE}} --region {{.REGION}}"
