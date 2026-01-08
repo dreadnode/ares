@@ -1,7 +1,7 @@
-# Ares Documentation
+# Python Project Template Documentation
 
-Welcome to the Ares documentation.
-Ares is an autonomous Security Operations Center (SOC) investigation agent.
+Welcome to the Python Project Template documentation.
+A modern Python project scaffold with batteries included.
 
 ## Quick Links
 
@@ -9,37 +9,44 @@ Ares is an autonomous Security Operations Center (SOC) investigation agent.
 - [Contributing Guide](contributing.md)
 - [Security Policy](../SECURITY.md)
 - [Changelog](../CHANGELOG.md)
+- [Project Setup Guide](topics/project-from-template.md)
 
 ## Overview
 
-Ares transforms security alerts into actionable threat intelligence through
-autonomous, question-driven investigations.
-Built with the Dreadnode Agent SDK, it systematically analyzes security events
-using MITRE ATT&CK framework and the Pyramid of Pain methodology.
+This template provides a complete Python project structure with modern
+development tools and best practices pre-configured.
+It's designed to help you start new Python projects quickly with quality
+tooling already in place.
 
-## Key Capabilities
+## Key Features
 
-- Autonomous alert investigation
-- MITRE ATT&CK technique mapping
-- Pyramid of Pain-based analysis elevation
-- Multi-stage investigation workflow
-- Integration with Grafana, Loki, and Prometheus
-- Comprehensive markdown reporting
+- 📝 Modern `pyproject.toml` configuration
+- 🧪 Testing setup with pytest
+- 🔍 Code quality tools (Black, Ruff, mypy)
+- 🔄 GitHub Actions workflows
+- 📚 Documentation with MkDocs
+- 🔒 Security policy and Semgrep analysis
 
 ## Getting Started
 
-See the [README](../README.md) for installation instructions and usage
-examples.
+See the [README](../README.md) for quick start instructions, or check out the
+detailed [Project Setup Guide](topics/project-from-template.md) for step-by-step
+instructions on using this template.
 
 ## Repository Layout
 
 ```text
-ares/
-├── src/ares/           # Main source code
-├── tests/              # Test suite
+python-template/
+├── CODEOWNERS          # Repository access control
+├── LICENSE             # Apache License 2.0
+├── README.md           # Project overview
+├── SECURITY.md         # Security policy
+├── Taskfile.yaml       # Task automation
 ├── docs/               # Documentation
-├── reports/            # Generated investigation reports
-└── pyproject.toml      # Project configuration
+├── examples/           # Usage examples
+├── pyproject.toml      # Python project config
+├── requirements.txt    # Dependencies
+└── tests/              # Test suite
 ```
 
 ## Development
