@@ -1,6 +1,10 @@
 ---
 name: Template Sync
 on:
+  repository_dispatch:
+    types:
+      - template-sync
+
   # checkov:skip=CKV_GHA_7: "Workflow dispatch inputs are required for manual debugging and configuration"
   workflow_dispatch:
     inputs:
@@ -13,27 +17,12 @@ on:
         default: "debug"
         required: false
 
-  schedule:
-    # Run on the 1st of every month at 00:00 UTC
-    - cron: "0 0 1 * *"
-
-  push:
-    branches: ["main"]
-    paths:
-      - ".github/**"
-      - ".hooks/**"
-      - ".pre-commit-config.yaml"
-      - ".mdlrc"
-      - ".editorconfig"
-      - "Taskfile.yaml"
-      - ".task/**"
-
 permissions:
   contents: write
   pull-requests: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.run_number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
