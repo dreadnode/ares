@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess  # nosec B404
 from pathlib import Path
+from typing import Any
 
 import dreadnode as dn
 import httpx
@@ -130,7 +131,7 @@ def find_mcp_grafana() -> str:
 async def connect_grafana_mcp(
     grafana_url: str | None = None,
     grafana_api_key: str | None = None,
-):  # type: ignore[no-untyped-def]
+) -> Any:
     """
     Connect to Grafana MCP server via Rigging.
 

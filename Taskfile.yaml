@@ -15,7 +15,8 @@ vars:
   MODEL: '{{.MODEL | default "claude-sonnet-4-20250514"}}'
   GRAFANA_URL: '{{.GRAFANA_URL | default "https://grafana.dev.plundr.ai"}}'
   POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
-  MAX_STEPS: '{{.MAX_STEPS | default "150"}}'
+  MAX_STEPS: '{{.MAX_STEPS | default "50"}}'
+  MAX_STEPS_ONCE: '{{.MAX_STEPS_ONCE | default "15"}}'  # ~15 min max for once mode
   REPORT_DIR: '{{.REPORT_DIR | default "./reports"}}'
   DREADNODE_SERVER: '{{.DREADNODE_SERVER | default "https://platform.dev.plundr.ai/"}}'
   DREADNODE_ORGANIZATION: '{{.DREADNODE_ORGANIZATION | default "ares"}}'
@@ -153,7 +154,7 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-2"}}'
+          REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - |
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
@@ -178,7 +179,7 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-2"}}'
+          REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - |
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
@@ -189,7 +190,7 @@ tasks:
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
-          --args.max-steps {{.MAX_STEPS}} \
+          --args.max-steps {{.MAX_STEPS_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --args.once \
           --dn-args.server {{.DREADNODE_SERVER}} \
@@ -204,7 +205,7 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-2"}}'
+          REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - |
         if [ ! -f .env ]; then
@@ -233,7 +234,7 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-2"}}'
+          REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - |
         if [ ! -f .env ]; then
@@ -249,7 +250,7 @@ tasks:
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
-          --args.max-steps {{.MAX_STEPS}} \
+          --args.max-steps {{.MAX_STEPS_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --args.once \
           --dn-args.server {{.DREADNODE_SERVER}} \
@@ -270,7 +271,7 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-2"}}'
+          REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - |
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
@@ -280,7 +281,7 @@ tasks:
         uv run python -m ares investigate-alert {{.ALERT}} \
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
-          --args.max-steps {{.MAX_STEPS}} \
+          --args.max-steps {{.MAX_STEPS_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --dn-args.server {{.DREADNODE_SERVER}} \
           --dn-args.token "$DREADNODE_API_KEY" \
@@ -450,7 +451,7 @@ tasks:
     internal: true
     vars:
       PROFILE: '{{.PROFILE | default "lab"}}'
-      REGION: '{{.REGION | default "us-west-2"}}'
+      REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - |
         # Check if AWS CLI is installed
@@ -485,7 +486,7 @@ tasks:
     vars:
       TARGET: '{{.TARGET | default ""}}'
       PROFILE: '{{.PROFILE | default "lab"}}'
-      REGION: '{{.REGION | default "us-west-2"}}'
+      REGION: '{{.REGION | default "us-west-1"}}'
       REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
     preconditions:
       - sh: test -n "{{.TARGET}}"
@@ -562,11 +563,11 @@ tasks:
   ares:red:logs:
     desc: "Tail red team agent logs from Kali via SSM (usage: task ares:red:logs [KALI=instance-name] [LINES=100] [FOLLOW=true])"
     vars:
-      KALI: '{{.KALI | default "dev-alpha-operator-range-kali"}}'
+      KALI: '{{.KALI | default "staging-alpha-operator-range-kali"}}'
       LINES: '{{.LINES | default "100"}}'
       FOLLOW: '{{.FOLLOW | default "false"}}'
       PROFILE: '{{.PROFILE | default "lab"}}'
-      REGION: '{{.REGION | default "us-west-2"}}'
+      REGION: '{{.REGION | default "us-west-1"}}'
     deps:
       - task: check-aws-auth
         vars:

@@ -15,6 +15,7 @@ from ares.tools.blue import (
     CompletionTools,
     GrafanaTools,
     InvestigationTools,
+    QueryTemplateTools,
     QuestionEngineTools,
     escalate_investigation,
 )
@@ -120,6 +121,11 @@ def create_investigation_agent(
     completion_tools = CompletionTools()
     completion_tools.set_state(state)
 
+    # Query templates for pre-built attack detection queries
+    # Uses Grafana URL to derive Loki endpoint (assumes /loki proxy)
+    loki_url = grafana_url.rstrip("/")
+    query_template_tools = QueryTemplateTools(loki_url=loki_url)
+
     # Build tool list
     tools: list = [
         grafana_tools,
@@ -127,6 +133,7 @@ def create_investigation_agent(
         question_tools,
         mitre_tools,
         completion_tools,
+        query_template_tools,
         escalate_investigation,
     ]
 

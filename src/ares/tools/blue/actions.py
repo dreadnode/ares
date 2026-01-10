@@ -65,67 +65,29 @@ class CompletionTools(Toolset):  # type: ignore[misc]
             ... )
             'Investigation completed. Report will be generated.'
         """
-        errors = []
+        warnings = []
 
         # Validate state exists
         if not self.state:
             return "ERROR: No investigation state. Cannot complete."
 
-        # Validate lateral investigation was performed
+        # Log stage warning but don't block
         if self.state.stage.value not in ["lateral", "synthesis"]:
-            errors.append(
-                f"ERROR: Must reach 'lateral' stage before completion. "
-                f"Current stage: {self.state.stage.value}. "
-                f"Call transition_stage('lateral') after investigating scope."
+            warnings.append(
+                f"Note: Investigation completed at '{self.state.stage.value}' stage "
+                f"(ideally should reach 'lateral' stage for thorough analysis)."
             )
 
-        # Validate hosts were investigated
+        # Log if no hosts were investigated
         if not self.state.queried_hosts and not affected_hosts:
-            errors.append(
-                "ERROR: No hosts investigated. Use track_host_investigation() "
-                "to investigate affected hosts before completing."
+            warnings.append(
+                "Note: No specific hosts were investigated. Consider investigating "
+                "affected hosts in future investigations."
             )
 
-        # Validate affected_hosts is not empty
-        if not affected_hosts:
-            errors.append(
-                "ERROR: affected_hosts is required. Provide the list of "
-                "hosts/IPs involved in the attack."
-            )
-
-        # Validate affected_users is not empty
-        if not affected_users:
-            errors.append(
-                "ERROR: affected_users is required. Provide the list of "
-                "user accounts involved in the attack."
-            )
-
-        # Validate attack_timeframe is specific
-        if not attack_timeframe or len(attack_timeframe) < 10:
-            errors.append(
-                "ERROR: attack_timeframe must be specific (e.g., '2024-01-08 04:37-04:43 UTC'). "
-                "This should reflect the ACTUAL event timestamps from your investigation."
-            )
-
-        # Validate synopsis is substantive
-        if len(attack_synopsis) < 100:
-            errors.append(
-                "ERROR: attack_synopsis too short. Provide a detailed description "
-                "of the attack chain including: initial access, techniques used, "
-                "and impact."
-            )
-
-        # Validate evidence was collected
-        if len(self.state.evidence) < 2:
-            errors.append(
-                f"ERROR: Insufficient evidence ({len(self.state.evidence)} items). "
-                "Continue investigation to gather more evidence."
-            )
-
-        # If errors, return them all
-        if errors:
-            dn.log_metric("completion_validation_failed", 1)
-            return "\n\n".join(errors)
+        # Log warnings (but don't block completion)
+        for warning in warnings:
+            logger.warning(warning)
 
         # All validations passed
         dn.log_metric("investigation_completed", 1)

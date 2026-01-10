@@ -195,7 +195,6 @@ async def main(
 
                     except Exception as e:
                         logger.error(f"Investigation failed: {e}")
-                        dn.log_metric("investigation_failed", 1, mode="count")
 
                 # If running in once mode, exit after processing current alerts
                 if args.once:
