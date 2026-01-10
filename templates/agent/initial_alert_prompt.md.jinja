@@ -104,11 +104,25 @@ mcp__grafana__query_loki_logs(
 If no results, try broader queries but ALWAYS use the time range above.
 
 **CRITICAL**: After EVERY query (whether it returns results or not), you MUST:
-1. If results found: Call record_evidence() for EACH user/host/IP/process/finding
+1. If results found: **PARSE THE JSON** and call record_evidence() for EACH user/host/IP/process found
 2. If NO results: Document this and either try a broader query OR move forward with get_combined_questions()
 3. DO NOT query multiple times without calling record_evidence() or get_combined_questions()
 
-**YOU ARE STUCK IN A LOOP IF**: You make 3+ queries without calling record_evidence() or get_combined_questions()
+**YOU ARE STUCK IN A LOOP IF**: You make 2+ queries without calling record_evidence()
+
+## How to Parse Query Results
+
+Loki returns JSON like this:
+```json
+{"line": "{\"computer\":\"winterfell.north.sevenkingdoms.local\", \"event_data\":\"<Data Name='TargetUserName'>robb.stark</Data><Data Name='IpAddress'>10.0.4.186</Data>\"}"}
+```
+
+**EXTRACT AND RECORD:**
+- `computer` field → record_evidence(evidence_type="hostname", value="winterfell...")
+- `TargetUserName` from event_data → record_evidence(evidence_type="user", value="robb.stark")
+- `IpAddress` from event_data → record_evidence(evidence_type="ip", value="10.0.4.186")
+
+**DO NOT** re-run the same query. **DO** parse results and extract IOCs.
 
 ---
 
@@ -161,12 +175,10 @@ If no results, try broader queries but ALWAYS use the time range above.
 18. ☐ Call transition_stage("synthesis")
 
 ### Stage 4: SYNTHESIS
-19. ☐ Call complete_investigation() with ALL required fields
+19. ☐ Call complete_investigation(summary="...") with a summary of your findings
 
-**DO NOT complete the investigation until you have:**
-- Identified specific affected hosts (including ALL domain controllers)
-- Identified ALL compromised user accounts
-- Investigated precursor techniques (enumeration, credential access)
-- Created a complete timeline from initial access to detected attack
-- Recorded at least 5 evidence items covering the full attack chain
-- Mapped the attack to multiple MITRE techniques (not just the alert technique)
+**Complete the investigation when you have:**
+- Investigated the alert and recorded evidence
+- Identified affected hosts and users
+- Built a timeline of events
+- Can provide recommendations

@@ -1,5 +1,7 @@
 """Factory for creating red team agents with presets."""
 
+import time
+
 import dreadnode as dn
 from dreadnode.agent import Agent
 from dreadnode.agent.events import (
@@ -36,37 +38,95 @@ REDTEAM_SYSTEM_INSTRUCTIONS = get_template_loader().render(
     "redteam/agents/system_instructions.md.jinja"
 )
 
+# Event deduplication state
+_last_event_times: dict[str, float] = {}
+_last_step_number: int | None = None
+_DEBOUNCE_WINDOW = 0.1  # 100ms debounce window
+
+
+def reset_event_tracking():
+    """Reset event tracking state for a new agent run."""
+    global _last_event_times, _last_step_number
+    _last_event_times = {}
+    _last_step_number = None
+
+
+def _should_log_event(event_type: str) -> bool:
+    """Check if event should be logged (debounce rapid duplicates)."""
+    now = time.time()
+    last_time = _last_event_times.get(event_type, 0)
+    if now - last_time < _DEBOUNCE_WINDOW:
+        return False
+    _last_event_times[event_type] = now
+    return True
+
 
 async def log_step_start(event: StepStart):
-    """Log step start for debugging."""
-    logger.info(f"📍 Step started: step_number={getattr(event, 'step_number', '?')}")
+    """Log step start for debugging - only when step number is meaningful."""
+    global _last_step_number
+    step_num = getattr(event, "step_number", None)
+
+    # Skip if no real step number or if it's the same as last logged step
+    if step_num is None or step_num == _last_step_number:
+        return
+
+    if not _should_log_event("step_start"):
+        return
+
+    _last_step_number = step_num
+    logger.info(f"📍 Step {step_num} started")
 
 
 async def log_generation_end(event: GenerationEnd):
-    """Log generation end with details."""
-    logger.info("📍 Generation ended")
-    # Log the message if available
-    if hasattr(event, "message") and event.message:
-        msg = event.message
-        logger.info(f"📍 Message type: {type(msg).__name__}")
-        if hasattr(msg, "content"):
-            logger.info(f"📍 Message content (first 500 chars): {str(msg.content)[:500]}")
-        if hasattr(msg, "tool_calls") and msg.tool_calls:
-            logger.info(f"📍 Tool calls requested: {[tc.name for tc in msg.tool_calls]}")
+    """Log generation end - only when there's meaningful content."""
+    # Skip empty/spurious generation events
+    if not hasattr(event, "message") or not event.message:
+        return
+
+    msg = event.message
+    has_content = hasattr(msg, "content") and msg.content and str(msg.content).strip()
+    has_tool_calls = hasattr(msg, "tool_calls") and msg.tool_calls
+
+    # Only log if there's actual content or tool calls
+    if not has_content and not has_tool_calls:
+        return
+
+    if not _should_log_event("generation_end"):
+        return
+
+    # Log concise summary
+    if has_tool_calls:
+        tool_names = [tc.name for tc in msg.tool_calls]
+        logger.info(f"🤖 Agent requesting tools: {tool_names}")
+    elif has_content:
+        content_preview = str(msg.content)[:200].replace("\n", " ")
+        logger.info(f"🤖 Agent: {content_preview}...")
 
 
 async def log_agent_error(event: AgentError):
-    """Log agent errors."""
+    """Log agent errors - only real errors, not spurious SDK events."""
     error = getattr(event, "error", None)
+    # Only log if there's an actual error (SDK emits AgentError with None frequently)
+    if error is None:
+        return  # Silently ignore spurious events
+
     logger.error(f"🚨 Agent error: {error}")
-    if hasattr(event, "traceback"):
+    if hasattr(event, "traceback") and event.traceback:
         logger.error(f"🚨 Traceback: {event.traceback}")
 
 
 async def log_agent_end(event: AgentEnd):
-    """Log agent end."""
+    """Log agent end - only when there's a meaningful stop reason."""
     stop_reason = getattr(event, "stop_reason", None)
-    logger.info(f"📍 Agent ended: stop_reason={stop_reason}")
+
+    # Skip spurious end events with no stop reason
+    if stop_reason is None:
+        return
+
+    if not _should_log_event("agent_end"):
+        return
+
+    logger.info(f"🏁 Agent ended: {stop_reason}")
 
 
 async def log_tool_usage(event: ToolStart):
@@ -151,6 +211,9 @@ def create_redteam_agent(
     Returns:
         Configured agent ready for penetration testing operations
     """
+    # Reset event tracking for fresh agent run
+    reset_event_tracking()
+
     # Initialize toolsets
     network_tools = NetworkEnumerationTools()
     network_tools.set_state(state)

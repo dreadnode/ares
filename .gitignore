@@ -6,6 +6,7 @@ test-alerts/
 TODO
 .tool-versions
 /reports/
+/logs/
 
 # Custom parquet storage
 *.parquet

@@ -13,8 +13,8 @@ from pathlib import Path
 import dreadnode as dn
 from loguru import logger
 
-from ares.core.factories.blue_factory import create_investigation_agent
-from ares.core.models import InvestigationState
+from ares.core.factories.blue_factory import create_investigation_agent, reset_query_tracking
+from ares.core.models import InvestigationState, TimelineEvent
 from ares.core.templates import get_template_loader
 from ares.integrations.mitre import MITREAttackClient
 
@@ -159,7 +159,7 @@ class InvestigationOrchestrator:
         grafana_api_key: str,
         mitre_client: MITREAttackClient,
         report_dir: Path,
-        max_steps: int = 150,
+        max_steps: int = 30,
     ):
         self.model = model
         self.grafana_url = grafana_url
@@ -244,6 +244,9 @@ class InvestigationOrchestrator:
 
         logger.info(f"Starting investigation {investigation_id} for alert: {alert_name}")
 
+        # Reset query tracking for this investigation
+        reset_query_tracking()
+
         # Create investigation state early so we can generate partial reports on timeout
         state = InvestigationState(
             investigation_id=investigation_id,
@@ -270,13 +273,32 @@ class InvestigationOrchestrator:
             annotations = alert.get("annotations", {})
             for key in ["mitre_technique", "mitre", "technique_id", "technique"]:
                 if labels.get(key):
-                    state.identified_techniques.add(labels[key])
-                    logger.info(f"Auto-recorded MITRE technique from alert: {labels[key]}")
+                    tech_id = labels[key]
+                    state.identified_techniques.add(tech_id)
+                    # Resolve technique name and tactic
+                    technique = self.mitre_client.get_technique(tech_id)
+                    if technique:
+                        state.technique_names[tech_id] = technique.name
+                        state.technique_to_tactic[tech_id] = technique.tactic or "Unknown"
+                        if technique.tactic:
+                            state.identified_tactics.add(technique.tactic)
+                    logger.info(f"Auto-recorded MITRE technique from alert: {tech_id}")
                     break
                 if annotations.get(key):
-                    state.identified_techniques.add(annotations[key])
-                    logger.info(f"Auto-recorded MITRE technique from alert: {annotations[key]}")
+                    tech_id = annotations[key]
+                    state.identified_techniques.add(tech_id)
+                    # Resolve technique name and tactic
+                    technique = self.mitre_client.get_technique(tech_id)
+                    if technique:
+                        state.technique_names[tech_id] = technique.name
+                        state.technique_to_tactic[tech_id] = technique.tactic or "Unknown"
+                        if technique.tactic:
+                            state.identified_tactics.add(technique.tactic)
+                    logger.info(f"Auto-recorded MITRE technique from alert: {tech_id}")
                     break
+
+            # Create initial timeline event from alert
+            self._create_alert_timeline_event(state, alert)
 
             initial_prompt = build_initial_prompt(alert)
 
@@ -370,6 +392,54 @@ class InvestigationOrchestrator:
         finally:
             # Always cancel the watchdog on normal completion
             watchdog.cancel()
+
+    def _create_alert_timeline_event(self, state: InvestigationState, alert: dict) -> None:
+        """Create an initial timeline event from the alert."""
+        labels = alert.get("labels", {})
+        annotations = alert.get("annotations", {})
+
+        # Parse alert timestamp
+        starts_at = alert.get("startsAt", "")
+        try:
+            if starts_at:
+                alert_time = datetime.fromisoformat(starts_at.replace("Z", "+00:00"))
+            else:
+                alert_time = datetime.now(timezone.utc)
+        except ValueError:
+            alert_time = datetime.now(timezone.utc)
+
+        # Build description from alert
+        alert_name = labels.get("alertname", "Unknown Alert")
+        severity = labels.get("severity", "unknown")
+        summary = annotations.get("summary", annotations.get("description", ""))
+
+        description = f"{severity.upper()} alert triggered: {alert_name}"
+        if summary:
+            description += f" - {summary[:100]}"
+
+        # Get MITRE technique from alert
+        mitre_techniques = []
+        for key in ["mitre_technique", "mitre", "technique_id"]:
+            if labels.get(key):
+                mitre_techniques.append(labels[key])
+                break
+            if annotations.get(key):
+                mitre_techniques.append(annotations[key])
+                break
+
+        # Create timeline event
+        event = TimelineEvent(
+            id="tl-alert-0000",
+            timestamp=alert_time,
+            description=description,
+            evidence_ids=[],
+            mitre_techniques=mitre_techniques,
+            confidence=0.9,
+            source="alert",
+        )
+
+        state.timeline.append(event)
+        logger.info(f"Created initial timeline event from alert: {description[:50]}...")
 
     def _generate_report(self, state: InvestigationState, _result) -> Path:
         """Generate the markdown investigation report."""

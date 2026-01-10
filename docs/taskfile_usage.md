@@ -304,17 +304,30 @@ All tasks support the following configuration variables:
 | `MODEL` | `claude-sonnet-4-20250514` | LLM model to use |
 | `GRAFANA_URL` | `https://grafana.dev.plundr.ai` | Grafana URL for alerts |
 | `POLL_INTERVAL` | `30` | Seconds between alert polls |
-| `MAX_STEPS` | `50` | Maximum agent steps for polling mode (~50 min timeout) |
-| `MAX_STEPS_ONCE` | `15` | Maximum agent steps for once/investigate modes (~15 min timeout) |
+| `MAX_STEPS` | `50` | Maximum agent steps for polling mode (Taskfile override, code default is 30) |
+| `MAX_STEPS_ONCE` | `15` | Maximum agent steps for once/investigate modes |
 | `REPORT_DIR` | `./reports` | Directory for markdown reports |
 | `DREADNODE_SERVER` | `https://platform.dev.plundr.ai/` | Dreadnode platform URL |
 | `DREADNODE_ORGANIZATION` | `ares` | Dreadnode organization name |
 | `DREADNODE_WORKSPACE` | `ares-protocol` | Dreadnode workspace name |
 | `DREADNODE_PROJECT` | `ares-soc` | Dreadnode project name |
 
+**Stop Conditions:**
+
+The agent will stop when **any** of these conditions are met:
+
+- Agent calls `complete_investigation()` (normal completion)
+- Agent calls `escalate_investigation()` (escalation to human)
+- 5 Loki/Prometheus queries executed
+- **20 total tool calls made** (prevents infinite loops)
+- `max_steps` LLM round trips reached
+
 **Timeout Behavior:**
 
-The agent timeout is calculated as `max_steps × 60 seconds` (1 minute per step):
+The agent has multiple timeout layers:
+
+- Hard timeout: `max_steps × 60 seconds` (1 minute per step)
+- Watchdog thread: Force-exits if timeout exceeded
 
 | Mode | Default Steps | Max Timeout |
 | --- | --- | --- |
