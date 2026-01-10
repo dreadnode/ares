@@ -4,7 +4,8 @@ Ares SOC Investigation Agent.
 Main agent implementation using Dreadnode Agent SDK.
 """
 
-import signal
+import os
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,6 +21,62 @@ from ares.integrations.mitre import MITREAttackClient
 
 class InvestigationTimeoutError(Exception):
     """Raised when investigation exceeds hard timeout."""
+
+
+class WatchdogTimer:
+    """Watchdog that generates report and forcefully exits if timeout is exceeded."""
+
+    def __init__(
+        self,
+        timeout_seconds: int,
+        investigation_id: str,
+        state: "InvestigationState",
+        report_dir: Path,
+    ):
+        self.timeout = timeout_seconds
+        self.investigation_id = investigation_id
+        self.state = state
+        self.report_dir = report_dir
+        self._timer: threading.Timer | None = None
+        self._cancelled = False
+
+    def _timeout_handler(self) -> None:
+        if self._cancelled:
+            return
+
+        logger.critical(
+            f"WATCHDOG: Investigation {self.investigation_id} exceeded "
+            f"hard timeout of {self.timeout}s"
+        )
+        logger.warning(
+            f"Current state: {len(self.state.evidence)} evidence items, "
+            f"{len(self.state.timeline)} timeline events"
+        )
+
+        # Generate partial report before dying
+        try:
+            from ares.reports.investigation import MarkdownReportGenerator
+
+            generator = MarkdownReportGenerator(self.report_dir)
+            report_path = generator.generate(self.state)
+            logger.warning(f"Partial report saved to: {report_path}")
+        except Exception as e:
+            logger.error(f"Failed to generate partial report: {e}")
+
+        logger.critical("Forcing exit due to timeout")
+        os._exit(1)
+
+    def start(self) -> None:
+        self._timer = threading.Timer(self.timeout, self._timeout_handler)
+        self._timer.daemon = True
+        self._timer.start()
+        logger.info(f"Watchdog started: {self.timeout}s ({self.timeout // 60}m)")
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        if self._timer:
+            self._timer.cancel()
+        logger.debug("Watchdog cancelled")
 
 
 def build_initial_prompt(alert: dict) -> str:
@@ -187,25 +244,22 @@ class InvestigationOrchestrator:
 
         logger.info(f"Starting investigation {investigation_id} for alert: {alert_name}")
 
-        # Hard timeout using signal (works even if event loop is blocked)
-        # 1 minute per step + 2 minutes buffer for setup/teardown
-        hard_timeout_seconds = (self.max_steps * 60) + 120
-
-        def _timeout_handler(signum, frame):
-            raise InvestigationTimeoutError(
-                f"Investigation {investigation_id} exceeded hard timeout of {hard_timeout_seconds}s"
-            )
-
-        # Set up signal-based hard timeout (Unix only)
-        old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-        signal.alarm(hard_timeout_seconds)
-        logger.info(f"Hard timeout set: {hard_timeout_seconds}s ({hard_timeout_seconds // 60}m)")
-
         # Create investigation state early so we can generate partial reports on timeout
         state = InvestigationState(
             investigation_id=investigation_id,
             alert=alert,
         )
+
+        # Hard timeout using watchdog thread (works even if event loop is blocked)
+        # 1 minute per step + 2 minutes buffer for setup/teardown
+        hard_timeout_seconds = (self.max_steps * 60) + 120
+        watchdog = WatchdogTimer(
+            hard_timeout_seconds,
+            investigation_id,
+            state,
+            self.report_dir,
+        )
+        watchdog.start()
 
         try:
             # Ensure MCP connection is ready
@@ -248,7 +302,7 @@ class InvestigationOrchestrator:
                     max_steps=self.max_steps,
                 )
 
-                # Run the investigation with asyncio timeout (backup to signal timeout)
+                # Run the investigation with asyncio timeout (backup to watchdog)
                 try:
                     import asyncio
 
@@ -313,30 +367,9 @@ class InvestigationOrchestrator:
                     dn.log_metric("investigation_failed", 1)
                     raise
 
-        except InvestigationTimeoutError:
-            logger.error(f"Investigation hit HARD TIMEOUT after {hard_timeout_seconds}s")
-            logger.error(
-                f"Current state: {len(state.evidence)} evidence items, "
-                f"{len(state.timeline)} timeline events"
-            )
-            dn.log_metric("investigation_hard_timeout", 1)
-
-            # Generate partial report
-            report_path = self._generate_report(state, None)
-            return {
-                "investigation_id": investigation_id,
-                "status": "hard_timeout",
-                "report_path": str(report_path),
-                "evidence_count": len(state.evidence),
-                "techniques_identified": list(state.identified_techniques),
-                "highest_pyramid_level": state.highest_pyramid_level,
-            }
-
         finally:
-            # Always cancel the alarm and restore old handler
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
-            logger.debug("Hard timeout signal handler cleaned up")
+            # Always cancel the watchdog on normal completion
+            watchdog.cancel()
 
     def _generate_report(self, state: InvestigationState, _result) -> Path:
         """Generate the markdown investigation report."""
