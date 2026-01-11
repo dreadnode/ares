@@ -229,7 +229,6 @@ exit $EXIT_CODE
         except (TokenRetrievalError, SSOTokenLoadError) as e:
             self._handle_sso_error(e)
         except ClientError as e:
-            # Check if this is an SSO-related error
             error_str = str(e).lower()
             if "token" in error_str and ("expired" in error_str or "sso" in error_str):
                 self._handle_sso_error(e)

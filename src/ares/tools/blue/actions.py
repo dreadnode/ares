@@ -69,7 +69,6 @@ class CompletionTools(Toolset):  # type: ignore[misc]
             ... )
             'Investigation completed. Report will be generated.'
         """
-        # Validate state exists
         if not self.state:
             return "ERROR: No investigation state. Cannot complete."
 
@@ -92,7 +91,6 @@ class CompletionTools(Toolset):  # type: ignore[misc]
             alert_annotations = self.state.alert.get("annotations", {})
             response_guidance = alert_annotations.get("response", "")
             if response_guidance:
-                # Parse numbered or bulleted steps from response
                 import re
 
                 steps = re.split(r"\d+\.\s+", response_guidance)
@@ -132,7 +130,6 @@ class CompletionTools(Toolset):  # type: ignore[misc]
 
         parts = []
 
-        # Get alert info
         alert_name = self.state.alert.get("labels", {}).get("alertname", "Unknown alert")
         severity = self.state.alert.get("labels", {}).get("severity", "unknown")
         starts_at = self.state.alert.get("startsAt", "")
@@ -142,12 +139,10 @@ class CompletionTools(Toolset):  # type: ignore[misc]
         if starts_at:
             parts.append(f"Alert triggered at {starts_at}.")
 
-        # Add technique info
         if self.state.identified_techniques:
             techniques = ", ".join(list(self.state.identified_techniques)[:3])
             parts.append(f"MITRE techniques identified: {techniques}.")
 
-        # Add host/user info
         if self.state.queried_hosts:
             hosts = ", ".join(list(self.state.queried_hosts)[:3])
             parts.append(f"Hosts involved: {hosts}.")
@@ -156,10 +151,8 @@ class CompletionTools(Toolset):  # type: ignore[misc]
             users = ", ".join(list(self.state.queried_users)[:3])
             parts.append(f"Users involved: {users}.")
 
-        # Add evidence summary
         if self.state.evidence:
             parts.append(f"{len(self.state.evidence)} evidence items collected.")
-            # Get highest-level evidence
             high_level = [e for e in self.state.evidence if e.pyramid_level.value >= 5]
             if high_level:
                 parts.append(f"{len(high_level)} high-value indicators (tools/TTPs) identified.")

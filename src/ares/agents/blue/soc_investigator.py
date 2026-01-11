@@ -15,6 +15,10 @@ from loguru import logger
 
 from ares.core.factories.blue_factory import create_investigation_agent, reset_query_tracking
 from ares.core.models import InvestigationState, TimelineEvent
+from ares.core.persistence import (
+    create_stored_investigation_from_state,
+    get_investigation_store,
+)
 from ares.core.templates import get_template_loader
 from ares.integrations.mitre import MITREAttackClient
 
@@ -106,7 +110,6 @@ def build_initial_prompt(alert: dict) -> str:
         if key in labels:
             mitre_technique = labels[key]
             break
-    # Also check annotations
     if not mitre_technique:
         for key in ["mitre_technique", "mitre", "technique_id", "technique"]:
             if key in annotations:
@@ -297,7 +300,6 @@ class InvestigationOrchestrator:
                     logger.info(f"Auto-recorded MITRE technique from alert: {tech_id}")
                     break
 
-            # Create initial timeline event from alert
             self._create_alert_timeline_event(state, alert)
 
             initial_prompt = build_initial_prompt(alert)
@@ -340,7 +342,6 @@ class InvestigationOrchestrator:
 
                     logger.success(f"Agent completed: {result.steps} steps, {result.stop_reason}")
 
-                    # Check if agent hit max_steps without proper completion
                     status = "completed"
                     if state.escalated:
                         status = "escalated"
@@ -352,6 +353,9 @@ class InvestigationOrchestrator:
 
                     # Generate report
                     report_path = self._generate_report(state, result)
+
+                    # Persist investigation for learning
+                    self._persist_investigation(state, status)
 
                     dn.log_output("report_path", str(report_path))
                     dn.log_metric("investigation_success", 1)
@@ -375,6 +379,10 @@ class InvestigationOrchestrator:
 
                     # Still generate a partial report on timeout
                     report_path = self._generate_report(state, None)
+
+                    # Persist investigation for learning (even on timeout)
+                    self._persist_investigation(state, "timeout")
+
                     return {
                         "investigation_id": investigation_id,
                         "status": "timeout",
@@ -387,6 +395,9 @@ class InvestigationOrchestrator:
                 except Exception as e:
                     logger.error(f"Investigation failed: {e}")
                     dn.log_metric("investigation_failed", 1)
+
+                    # Persist failed investigation
+                    self._persist_investigation(state, "failed")
                     raise
 
         finally:
@@ -398,7 +409,6 @@ class InvestigationOrchestrator:
         labels = alert.get("labels", {})
         annotations = alert.get("annotations", {})
 
-        # Parse alert timestamp
         starts_at = alert.get("startsAt", "")
         try:
             if starts_at:
@@ -408,7 +418,6 @@ class InvestigationOrchestrator:
         except ValueError:
             alert_time = datetime.now(timezone.utc)
 
-        # Build description from alert
         alert_name = labels.get("alertname", "Unknown Alert")
         severity = labels.get("severity", "unknown")
         summary = annotations.get("summary", annotations.get("description", ""))
@@ -417,7 +426,6 @@ class InvestigationOrchestrator:
         if summary:
             description += f" - {summary[:100]}"
 
-        # Get MITRE technique from alert
         mitre_techniques = []
         for key in ["mitre_technique", "mitre", "technique_id"]:
             if labels.get(key):
@@ -427,7 +435,6 @@ class InvestigationOrchestrator:
                 mitre_techniques.append(annotations[key])
                 break
 
-        # Create timeline event
         event = TimelineEvent(
             id="tl-alert-0000",
             timestamp=alert_time,
@@ -447,3 +454,84 @@ class InvestigationOrchestrator:
 
         generator = MarkdownReportGenerator(self.report_dir)
         return generator.generate(state)
+
+    def _persist_investigation(self, state: InvestigationState, status: str) -> None:
+        """Persist investigation results for learning.
+
+        Args:
+            state: Investigation state to persist
+            status: Final status (completed, escalated, timeout, failed)
+        """
+        try:
+            store = get_investigation_store()
+
+            # Create stored investigation from state
+            stored = create_stored_investigation_from_state(state, status)
+
+            # Store the investigation
+            store.store_investigation(stored)
+
+            # Update query effectiveness statistics
+            alert_name = state.alert.get("labels", {}).get("alertname", "unknown")
+            for query in state.executed_queries:
+                query_str = query.get("query", "")
+                if query_str:
+                    # Normalize query for pattern matching
+                    pattern = self._normalize_query_pattern(query_str)
+                    successful = query.get("result_count", 0) > 0
+                    # Check if any evidence was recorded after this query
+                    produced_evidence = len(state.evidence) > 0
+
+                    store.update_query_effectiveness(
+                        query_pattern=pattern,
+                        successful=successful,
+                        produced_evidence=produced_evidence,
+                        alert_type=alert_name,
+                    )
+
+            logger.info(f"Persisted investigation {state.investigation_id} to store")
+
+        except Exception as e:
+            # Don't fail the investigation if persistence fails
+            logger.warning(f"Failed to persist investigation: {e}")
+
+    def _normalize_query_pattern(self, query: str) -> str:
+        """Normalize a query string into a reusable pattern.
+
+        Replaces specific values with placeholders for pattern matching.
+
+        Args:
+            query: Raw query string
+
+        Returns:
+            Normalized pattern string
+        """
+        import re
+
+        pattern = query
+
+        # Replace timestamps with placeholder
+        pattern = re.sub(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?",
+            "<TIMESTAMP>",
+            pattern,
+        )
+
+        # Replace IP addresses with placeholder
+        pattern = re.sub(r"\d+\.\d+\.\d+\.\d+", "<IP>", pattern)
+
+        # Replace UUIDs with placeholder
+        pattern = re.sub(
+            r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}",
+            "<UUID>",
+            pattern,
+            flags=re.IGNORECASE,
+        )
+
+        # Replace specific hostnames (anything.domain.tld format)
+        return re.sub(
+            r"\b[a-z0-9-]+\.[a-z0-9-]+\.[a-z]{2,}\b",
+            "<HOSTNAME>",
+            pattern,
+            flags=re.IGNORECASE,
+        )

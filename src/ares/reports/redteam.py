@@ -30,11 +30,9 @@ class RedTeamReportGenerator:
         Returns:
             Complete markdown report as a string.
         """
-        # Calculate duration
         duration = datetime.now(timezone.utc) - state.started_at
-        duration_str = str(duration).split(".")[0]  # Remove microseconds
+        duration_str = str(duration).split(".")[0]
 
-        # Generate executive summary
         executive_summary = self._generate_executive_summary(state)
 
         # Render the report using the template

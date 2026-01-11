@@ -87,7 +87,6 @@ async def main(
     args = args or Args()
     dn_args = dn_args or DreadnodeArgs()
 
-    # Get API keys from environment if not provided
     grafana_api_key = args.grafana_api_key or os.getenv("GRAFANA_API_KEY", "")
     dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
 
@@ -116,7 +115,6 @@ async def main(
     from ares.integrations.mitre import MITREAttackClient
     from ares.tools.blue import GrafanaTools
 
-    # Initialize MITRE client
     logger.info("Loading MITRE ATT&CK data from STIX repository...")
     mitre_client = MITREAttackClient()
     await mitre_client.load()
@@ -129,7 +127,6 @@ async def main(
     report_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Reports: {report_dir}")
 
-    # Initialize orchestrator
     orchestrator = InvestigationOrchestrator(
         model=args.model,
         grafana_url=args.grafana_url,
@@ -139,7 +136,6 @@ async def main(
         max_steps=args.max_steps,
     )
 
-    # Initialize Grafana client for polling
     grafana = GrafanaTools(
         base_url=args.grafana_url,
         api_key=grafana_api_key,
@@ -158,7 +154,6 @@ async def main(
     try:
         while True:
             try:
-                # Poll for firing alerts
                 alerts = await grafana.get_firing_alerts()
 
                 for alert in alerts:
@@ -244,7 +239,6 @@ async def investigate_alert(
     args = args or Args()
     dn_args = dn_args or DreadnodeArgs()
 
-    # Parse alert
     if alert_json.startswith("{"):
         alert = json.loads(alert_json)
     else:
@@ -266,7 +260,6 @@ async def investigate_alert(
     from ares.agents.blue import InvestigationOrchestrator
     from ares.integrations.mitre import MITREAttackClient
 
-    # Load MITRE data
     logger.info("Loading MITRE ATT&CK data...")
     mitre_client = MITREAttackClient()
     await mitre_client.load()
@@ -350,7 +343,6 @@ async def redteam(
     from ares.agents.red import RedTeamOrchestrator
     from ares.integrations.mitre import MITREAttackClient
 
-    # Load MITRE data
     logger.info("Loading MITRE ATT&CK data...")
     mitre_client = MITREAttackClient()
     await mitre_client.load()
@@ -363,7 +355,6 @@ async def redteam(
     report_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Reports: {report_dir}")
 
-    # Create orchestrator
     orchestrator = RedTeamOrchestrator(
         model=args.model,
         mitre_client=mitre_client,

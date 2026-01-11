@@ -12,19 +12,20 @@ from dreadnode.agent.thread import Thread
 from loguru import logger
 
 from ares.core.models import InvestigationState
+from ares.core.query_resilience import QueryResilientExecutor, get_resilient_executor
 from ares.core.templates import get_template_loader
 from ares.integrations.mitre import MITREAttackClient
 from ares.tools.blue import (
     CompletionTools,
     GrafanaTools,
     InvestigationTools,
+    LearningTools,
     QueryTemplateTools,
     QuestionEngineTools,
     escalate_investigation,
 )
 from ares.tools.shared import MITRELookupTools
 
-# Load system instructions from template
 SYSTEM_INSTRUCTIONS = get_template_loader().render("agent/system_instructions.md.jinja")
 
 # Track query calls - reset per investigation via reset_query_tracking()
@@ -41,6 +42,8 @@ MAX_DUPLICATE_QUERIES = 2  # Max times same query can run before blocking
 
 def reset_query_tracking():
     """Reset query tracking for a new investigation."""
+    from ares.core.query_resilience import reset_resilient_executor
+
     global \
         _total_queries, \
         _consecutive_queries, \
@@ -54,6 +57,7 @@ def reset_query_tracking():
     _executed_queries = []
     _seen_queries = {}
     _current_state = None
+    reset_resilient_executor()
 
 
 def set_investigation_state(state: "InvestigationState"):
@@ -147,29 +151,34 @@ def _record_query(tool_name: str, kwargs: dict, result_count: int | None = None)
     }
     _executed_queries.append(query_record)
 
-    # Also add to investigation state if available
     if _current_state:
         _current_state.executed_queries.append(query_record)
 
 
-def create_rate_limited_mcp_tool(original_tool: Any) -> Any:
+def create_rate_limited_mcp_tool(
+    original_tool: Any, resilient_executor: QueryResilientExecutor | None = None
+) -> Any:
     """
-    Wrap an MCP tool with rate limiting.
+    Wrap an MCP tool with rate limiting and resilient execution.
 
     The wrapper checks the global query counter BEFORE executing.
     If limit is reached, returns an error message instead of executing.
     This ensures the LLM sees the limit message even when batching queries.
+
+    Features:
+    - Rate limiting to prevent query abuse
+    - Duplicate query detection
+    - Automatic retry with exponential backoff (via resilient executor)
+    - Automatic time range reduction on timeout
     """
-    # Get the tool name for checking if it's a query tool
     tool_name = getattr(original_tool, "name", "") or getattr(original_tool, "__name__", "")
 
     # Only wrap query tools
     if "query_loki" not in tool_name and "query_prometheus" not in tool_name:
         return original_tool
 
-    logger.debug(f"Wrapping MCP tool with rate limiting: {tool_name}")
+    logger.debug(f"Wrapping MCP tool with rate limiting and resilience: {tool_name}")
 
-    # Get the original function to wrap
     original_fn = getattr(original_tool, "fn", None)
     if original_fn is None and callable(original_tool):
         original_fn = original_tool
@@ -178,15 +187,15 @@ def create_rate_limited_mcp_tool(original_tool: Any) -> Any:
         logger.warning(f"Could not find callable for tool {tool_name}, not wrapping")
         return original_tool
 
+    executor = resilient_executor or get_resilient_executor()
+
     @functools.wraps(original_fn)
     async def rate_limited_wrapper(*args, **kwargs):
-        # Check limit BEFORE executing
         error_msg = _check_query_limit()
         if error_msg:
             logger.critical(f"🛑 Blocking query tool {tool_name} - limit reached")
             return error_msg
 
-        # Check for duplicate query
         query_str = kwargs.get("logql") or kwargs.get("expr") or ""
         if query_str:
             dup_msg = _check_duplicate_query(query_str)
@@ -197,18 +206,69 @@ def create_rate_limited_mcp_tool(original_tool: Any) -> Any:
         # Increment counter
         _increment_query_count(tool_name)
 
-        # Execute original
+        # Extract time parameters for resilient execution
+        start_time = kwargs.get("startRfc3339") or kwargs.get("start_time") or kwargs.get("start")
+        end_time = kwargs.get("endRfc3339") or kwargs.get("end_time") or kwargs.get("end")
+
+        # If we have time parameters, use resilient executor
+        if start_time and end_time and query_str:
+            logger.info(f"Using resilient executor for {tool_name}")
+            try:
+
+                async def query_wrapper(logql: str, start_time: str, end_time: str, **kw):
+                    updated_kwargs = {**kwargs}
+                    if "startRfc3339" in kwargs:
+                        updated_kwargs["startRfc3339"] = start_time
+                        updated_kwargs["endRfc3339"] = end_time
+                    elif "start_time" in kwargs:
+                        updated_kwargs["start_time"] = start_time
+                        updated_kwargs["end_time"] = end_time
+                    elif "start" in kwargs:
+                        updated_kwargs["start"] = start_time
+                        updated_kwargs["end"] = end_time
+                    if "logql" in updated_kwargs:
+                        updated_kwargs["logql"] = logql
+                    elif "expr" in updated_kwargs:
+                        updated_kwargs["expr"] = logql
+                    return await original_fn(*args, **updated_kwargs)
+
+                result = await executor.execute_with_resilience(
+                    query_wrapper,
+                    query_str,
+                    start_time,
+                    end_time,
+                )
+
+                # Record the query with result count
+                result_count = _extract_result_count(result)
+                _record_query(tool_name, kwargs, result_count)
+
+                # Log resilience metadata if present
+                if isinstance(result, dict) and "_resilience_metadata" in result:
+                    meta = result["_resilience_metadata"]
+                    if meta.get("time_range_reduced"):
+                        logger.info(
+                            f"Query succeeded with reduced time range "
+                            f"({meta.get('time_range_factor', 1.0) * 100:.0f}%)"
+                        )
+                    if meta.get("retry_count", 0) > 0:
+                        logger.info(f"Query succeeded after {meta['retry_count']} retries")
+
+                return result
+
+            except Exception as e:
+                logger.error(f"Resilient execution failed: {e}")
+                _record_query(tool_name, kwargs, result_count=0)
+                return {
+                    "status": "error",
+                    "error": str(e),
+                    "suggestion": "Try a shorter time range or more specific filters.",
+                }
+
+        # Fallback to original execution without resilience (no time params)
         try:
             result = await original_fn(*args, **kwargs)
-            # Record the query with result count
-            result_count = None
-            if isinstance(result, list):
-                result_count = len(result)
-            elif isinstance(result, dict) and "results" in result:
-                result_count = len(result.get("results", []))
-            elif isinstance(result, str):
-                # Try to estimate result count from string response
-                result_count = result.count("\n") if result else 0
+            result_count = _extract_result_count(result)
             _record_query(tool_name, kwargs, result_count)
             return result
         except Exception as e:
@@ -223,12 +283,9 @@ def create_rate_limited_mcp_tool(original_tool: Any) -> Any:
                     "or add more specific label filters to reduce the query scope."
                 }
             logger.error(f"Query tool {tool_name} failed: {e}")
-            # Record failed query
             _record_query(tool_name, kwargs, result_count=0)
             raise
 
-    # Create a new tool with the wrapped function
-    # Try to preserve the tool structure for dreadnode SDK
     if hasattr(original_tool, "fn"):
         # It's a Tool object with a .fn attribute
         original_tool.fn = rate_limited_wrapper
@@ -236,6 +293,28 @@ def create_rate_limited_mcp_tool(original_tool: Any) -> Any:
     # It's a callable, just return the wrapper
     rate_limited_wrapper.__name__ = tool_name
     return rate_limited_wrapper
+
+
+def _extract_result_count(result: Any) -> int | None:
+    """Extract result count from various result formats."""
+    if isinstance(result, list):
+        return len(result)
+    if isinstance(result, dict):
+        if "results" in result:
+            return len(result.get("results", []))
+        if "data" in result:
+            data = result.get("data", {})
+            if isinstance(data, dict) and "result" in data:
+                streams = data.get("result", [])
+                if isinstance(streams, list):
+                    total = 0
+                    for stream in streams:
+                        values = stream.get("values", [])
+                        total += len(values) if isinstance(values, list) else 0
+                    return total
+    if isinstance(result, str):
+        return result.count("\n") if result else 0
+    return None
 
 
 def wrap_mcp_query_tools(mcp_tools: list) -> list:
@@ -384,7 +463,6 @@ def create_investigation_agent(
     Returns:
         Configured agent ready to investigate
     """
-    # Set state for query recording
     set_investigation_state(state)
 
     grafana_tools = GrafanaTools(
@@ -405,12 +483,11 @@ def create_investigation_agent(
     completion_tools = CompletionTools()
     completion_tools.set_state(state)
 
-    # Query templates for pre-built attack detection queries
-    # Uses Grafana URL to derive Loki endpoint (assumes /loki proxy)
     loki_url = grafana_url.rstrip("/")
     query_template_tools = QueryTemplateTools(loki_url=loki_url)
 
-    # Build tool list
+    learning_tools = LearningTools()
+
     tools: list = [
         grafana_tools,
         investigation_tools,
@@ -418,10 +495,10 @@ def create_investigation_agent(
         mitre_tools,
         completion_tools,
         query_template_tools,
+        learning_tools,
         escalate_investigation,
     ]
 
-    # Add Grafana MCP tools if available - with rate limiting on query tools
     if grafana_mcp_tools:
         logger.info(f"Adding {len(grafana_mcp_tools)} Grafana MCP tools to agent")
         # Wrap query tools with rate limiting to prevent infinite query loops
