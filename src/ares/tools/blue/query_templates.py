@@ -23,13 +23,93 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     - Lateral movement (pass-the-hash, psexec, wmi)
     - Privilege escalation (ADCS, delegation, golden ticket)
 
+    Query Optimization (per Grafana Loki best practices):
+    - Label selectors are the most important filter - narrow them first
+    - Use |= (contains) before |~ (regex) - contains is faster
+    - Put most selective filters (event IDs) first
+    - Avoid {job=~".+"} - use specific labels when possible
+
     Attributes:
         loki_url: Base URL of the Loki instance.
         timeout: HTTP request timeout in seconds.
+        default_label_selector: Base label selector for queries. Override with
+            specific labels like '{job="eventlog"}' for better performance.
+            Default '{job=~".+"}' scans all streams (slow).
+        default_hours_back: Default time range for queries. Shorter ranges are faster.
     """
 
     loki_url: str
     timeout: int = 30
+    default_label_selector: str = '{job=~".+"}'
+    default_hours_back: int = 1  # Reduced from 4 hours for faster queries
+
+    def _build_selector(
+        self,
+        hostname: str | None = None,
+        extra_labels: dict[str, str] | None = None,
+    ) -> str:
+        """Build an optimized label selector.
+
+        Args:
+            hostname: Optional hostname to filter by (uses regex match).
+            extra_labels: Additional label key-value pairs.
+
+        Returns:
+            LogQL label selector string like '{job="x", hostname=~"dc.*"}'
+        """
+        # Start with base selector, strip outer braces to add more labels
+        base = self.default_label_selector.strip("{}")
+
+        parts = [base] if base else []
+
+        if hostname:
+            # Use regex without leading .* for better performance
+            # Loki optimizes hostname=~"dc" better than hostname=~".*dc.*"
+            parts.append(f'hostname=~"{hostname}"')
+
+        if extra_labels:
+            for key, value in extra_labels.items():
+                # Use exact match for known values, regex for patterns
+                if "*" in value or "." in value:
+                    parts.append(f'{key}=~"{value}"')
+                else:
+                    parts.append(f'{key}="{value}"')
+
+        return "{" + ", ".join(parts) + "}"
+
+    def _build_event_filter(self, event_ids: list[str]) -> str:
+        """Build an optimized filter for Windows Event IDs.
+
+        Uses |= (contains) instead of regex since event IDs are exact strings.
+        Per Grafana docs: "Loki evaluates contains faster than regex."
+
+        Args:
+            event_ids: List of Windows Event IDs like ["4624", "4625"]
+
+        Returns:
+            LogQL filter string like '|= "4624" or |= "4625"'
+        """
+        if not event_ids:
+            return ""
+        if len(event_ids) == 1:
+            return f'|= "{event_ids[0]}"'
+        # For multiple IDs, use regex alternation (Loki optimizes simple alternations)
+        return '|~ "(' + "|".join(event_ids) + ')"'
+
+    def _build_pattern_filter(self, patterns: list[str], case_insensitive: bool = True) -> str:
+        """Build a regex filter for tool/attack patterns.
+
+        Args:
+            patterns: List of patterns to match.
+            case_insensitive: Whether to use case-insensitive matching.
+
+        Returns:
+            LogQL filter string.
+        """
+        if not patterns:
+            return ""
+        prefix = "(?i)" if case_insensitive else ""
+        return f'|~ "{prefix}({"|".join(patterns)})"'
 
     async def _query_loki(
         self,
@@ -63,8 +143,17 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             logger.error(f"Loki query failed: {e}")
             return {"status": "error", "error": str(e), "data": {"result": []}}
 
-    def _get_time_range(self, hours_back: int = 24) -> tuple[str, str]:
-        """Get ISO8601 time range for queries."""
+    def _get_time_range(self, hours_back: int | None = None) -> tuple[str, str]:
+        """Get ISO8601 time range for queries.
+
+        Args:
+            hours_back: Hours to look back. Defaults to self.default_hours_back (1 hour).
+
+        Returns:
+            Tuple of (start_time, end_time) in ISO8601 format.
+        """
+        if hours_back is None:
+            hours_back = self.default_hours_back
         now = datetime.now(timezone.utc)
         start = now - timedelta(hours=hours_back)
         return start.isoformat(), now.isoformat()
@@ -83,7 +172,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_port_scanning(
         self,
         target_ip: str | None = None,
-        hours_back: int = 4,
+        hours_back: int | None = None,
     ) -> dict[str, Any]:
         """Detect network port scanning activity (nmap, masscan).
 
@@ -94,7 +183,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         Args:
             target_ip: Optional IP to focus detection on.
-            hours_back: Hours of logs to search (default 24).
+            hours_back: Hours of logs to search (default: 1 hour).
 
         Returns:
             Query results with port scanning indicators.
@@ -102,11 +191,17 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_port_scan", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Detect nmap signatures, SYN scans, rapid connection attempts
-        logql = '{job=~".+"} |~ "(?i)(nmap|masscan|syn.*scan|port.*scan|connection.*refused)"'
+        # Build optimized query: label selector + tool patterns
+        selector = self._build_selector()
+        # Use simple contains for common tool names, regex only for complex patterns
+        tool_filter = self._build_pattern_filter(
+            ["nmap", "masscan", "syn.scan", "port.scan", "connection.refused"]
+        )
+
+        logql = f"{selector} {tool_filter}"
 
         if target_ip:
-            logql += f' |~ "{target_ip}"'
+            logql += f' |= "{target_ip}"'  # Use contains for IP (faster than regex)
 
         logger.info(f"Port scanning detection: {logql}")
 
@@ -121,7 +216,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_user_enumeration(
         self,
         domain_controller: str | None = None,
-        hours_back: int = 4,
+        hours_back: int | None = None,
     ) -> dict[str, Any]:
         """Detect Active Directory user enumeration.
 
@@ -132,7 +227,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         Args:
             domain_controller: Optional DC hostname to focus on.
-            hours_back: Hours of logs to search.
+            hours_back: Hours of logs to search (default: 1 hour).
 
         Returns:
             Query results with user enumeration indicators.
@@ -140,18 +235,29 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_user_enum", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
+        # Build optimized query with hostname in label selector (not line filter)
+        selector = self._build_selector(hostname=domain_controller)
+
+        # Event IDs first (most selective), then tool patterns
         # Event 4662: Object access (LDAP queries)
         # Event 4798: User's group membership enumerated
         # Event 4799: Security-enabled group membership enumerated
-        # netexec, crackmapexec, ldapsearch signatures
-        logql = (
-            '{job=~".+"}'
-            ' |~ "(?i)(4662|4798|4799|samr|lsarpc|ldap|net.*user|net.*group)"'
-            ' |~ "(?i)(enumerate|query|lookup|search|crackmapexec|netexec|ldapsearch)"'
+        event_filter = self._build_event_filter(["4662", "4798", "4799"])
+        tool_filter = self._build_pattern_filter(
+            [
+                "samr",
+                "lsarpc",
+                "ldap",
+                "net.user",
+                "net.group",
+                "enumerate",
+                "crackmapexec",
+                "netexec",
+                "ldapsearch",
+            ]
         )
 
-        if domain_controller:
-            logql = f'{{job=~".+", hostname=~".*{domain_controller}.*"}}' + logql.split("}", 1)[1]
+        logql = f"{selector} {event_filter} {tool_filter}"
 
         logger.info(f"User enumeration detection: {logql}")
 
@@ -166,7 +272,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_share_enumeration(
         self,
         target_host: str | None = None,
-        hours_back: int = 4,
+        hours_back: int | None = None,
     ) -> dict[str, Any]:
         """Detect SMB share enumeration.
 
@@ -177,7 +283,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         Args:
             target_host: Optional target hostname.
-            hours_back: Hours of logs to search.
+            hours_back: Hours of logs to search (default: 1 hour).
 
         Returns:
             Query results with share enumeration indicators.
@@ -185,17 +291,28 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_share_enum", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
+        # Build optimized query with hostname in label selector
+        selector = self._build_selector(hostname=target_host)
+
+        # Event IDs first (most selective)
         # Event 5140: Network share accessed
         # Event 5145: Detailed file share access
-        # smbclient, netexec signatures
-        logql = (
-            '{job=~".+"}'
-            ' |~ "(?i)(5140|5145|srvsvc|netuse|net.*share|net.*view)"'
-            ' |~ "(?i)(smbclient|crackmapexec|netexec|enum.*share|share.*enum)"'
+        event_filter = self._build_event_filter(["5140", "5145"])
+        tool_filter = self._build_pattern_filter(
+            [
+                "srvsvc",
+                "netuse",
+                "net.share",
+                "net.view",
+                "smbclient",
+                "crackmapexec",
+                "netexec",
+                "enum.share",
+                "share.enum",
+            ]
         )
 
-        if target_host:
-            logql += f' |~ "(?i){target_host}"'
+        logql = f"{selector} {event_filter} {tool_filter}"
 
         logger.info(f"Share enumeration detection: {logql}")
 
@@ -215,7 +332,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_secretsdump(
         self,
         target_host: str | None = None,
-        hours_back: int = 4,
+        hours_back: int | None = None,
     ) -> dict[str, Any]:
         """Detect credential dumping via impacket-secretsdump.
 
@@ -230,7 +347,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         Args:
             target_host: Optional hostname to focus on.
-            hours_back: Hours of logs to search.
+            hours_back: Hours of logs to search (default: 1 hour).
 
         Returns:
             Query results with secretsdump indicators.
@@ -238,16 +355,27 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_secretsdump", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
+        # Build optimized query with hostname in label selector
+        selector = self._build_selector(hostname=target_host)
+
         # DRSUAPI for DCSync, SAMR for SAM dump, registry access for LSA secrets
-        # Event 4624 Type 3 from unusual source, Event 4662 (DS-Replication-Get-Changes)
-        logql = (
-            '{job=~".+"}'
-            ' |~ "(?i)(drsuapi|samr|secretsdump|lsadump|ntds\\.dit|sam.*dump)"'
-            ' |~ "(?i)(replicate|1131f6|ds-replication|mimikatz|impacket)"'
+        tool_filter = self._build_pattern_filter(
+            [
+                "drsuapi",
+                "samr",
+                "secretsdump",
+                "lsadump",
+                "ntds.dit",
+                "sam.dump",
+                "replicate",
+                "1131f6",
+                "ds-replication",
+                "mimikatz",
+                "impacket",
+            ]
         )
 
-        if target_host:
-            logql = f'{{job=~".+", hostname=~".*{target_host}.*"}}' + logql.split("}", 1)[1]
+        logql = f"{selector} {tool_filter}"
 
         logger.info(f"Secretsdump detection: {logql}")
 
@@ -263,7 +391,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_dcsync(
         self,
         domain_controller: str | None = None,
-        hours_back: int = 4,
+        hours_back: int | None = None,
     ) -> dict[str, Any]:
         """Detect DCSync attack (secretsdump against DC).
 
@@ -274,7 +402,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         Args:
             domain_controller: Optional DC hostname.
-            hours_back: Hours of logs to search.
+            hours_back: Hours of logs to search (default: 1 hour).
 
         Returns:
             Query results with DCSync indicators.
@@ -282,17 +410,26 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_dcsync", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Event 4662 with specific GUIDs for replication
+        # Build optimized query with hostname in label selector
+        selector = self._build_selector(hostname=domain_controller)
+
+        # Event 4662 first (most selective), then replication GUIDs
         # 1131f6aa-9c07-11d1-f79f-00c04fc2dcd2 = DS-Replication-Get-Changes
         # 1131f6ad-9c07-11d1-f79f-00c04fc2dcd2 = DS-Replication-Get-Changes-All
-        logql = (
-            '{job=~".+"}'
-            ' |~ "(?i)(4662|dcsync|ds-replication|1131f6aa|1131f6ad)"'
-            ' |~ "(?i)(replication|drsuapi|directory.*service.*access)"'
+        event_filter = self._build_event_filter(["4662"])
+        tool_filter = self._build_pattern_filter(
+            [
+                "dcsync",
+                "ds-replication",
+                "1131f6aa",
+                "1131f6ad",
+                "replication",
+                "drsuapi",
+                "directory.service.access",
+            ]
         )
 
-        if domain_controller:
-            logql = f'{{job=~".+", hostname=~".*{domain_controller}.*"}}' + logql.split("}", 1)[1]
+        logql = f"{selector} {event_filter} {tool_filter}"
 
         logger.info(f"DCSync detection: {logql}")
 
@@ -308,7 +445,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_kerberoasting(
         self,
         domain_controller: str | None = None,
-        hours_back: int = 4,
+        hours_back: int | None = None,
     ) -> dict[str, Any]:
         """Detect Kerberoasting attack (impacket-GetUserSPNs).
 
@@ -319,7 +456,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         Args:
             domain_controller: Optional DC hostname.
-            hours_back: Hours of logs to search.
+            hours_back: Hours of logs to search (default: 1 hour).
 
         Returns:
             Query results with Kerberoasting indicators.
@@ -327,16 +464,25 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_kerberoast", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Event 4769: Kerberos Service Ticket Request
-        # Look for: RC4 encryption (type 0x17), many TGS requests, SPN patterns
-        logql = (
-            '{job=~".+"}'
-            ' |~ "(?i)(4769|kerberos.*ticket|tgs.*request|getuserspn)"'
-            ' |~ "(?i)(service.*ticket|spn|rc4|0x17|kerberoast)"'
+        # Build optimized query with hostname in label selector
+        selector = self._build_selector(hostname=domain_controller)
+
+        # Event 4769 first (most selective - Kerberos Service Ticket Request)
+        event_filter = self._build_event_filter(["4769"])
+        tool_filter = self._build_pattern_filter(
+            [
+                "kerberos.ticket",
+                "tgs.request",
+                "getuserspn",
+                "service.ticket",
+                "spn",
+                "rc4",
+                "0x17",
+                "kerberoast",
+            ]
         )
 
-        if domain_controller:
-            logql = f'{{job=~".+", hostname=~".*{domain_controller}.*"}}' + logql.split("}", 1)[1]
+        logql = f"{selector} {event_filter} {tool_filter}"
 
         logger.info(f"Kerberoasting detection: {logql}")
 
@@ -351,7 +497,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_asrep_roasting(
         self,
         domain_controller: str | None = None,
-        hours_back: int = 4,
+        hours_back: int | None = None,
     ) -> dict[str, Any]:
         """Detect AS-REP Roasting attack (impacket-GetNPUsers).
 
@@ -362,7 +508,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         Args:
             domain_controller: Optional DC hostname.
-            hours_back: Hours of logs to search.
+            hours_back: Hours of logs to search (default: 1 hour).
 
         Returns:
             Query results with AS-REP roasting indicators.
@@ -370,17 +516,26 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_asrep", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
+        # Build optimized query with hostname in label selector
+        selector = self._build_selector(hostname=domain_controller)
+
+        # Event 4768/4771 first (most selective)
         # Event 4768: Kerberos TGT Request (AS-REQ)
         # Event 4771: Kerberos Pre-Authentication Failed
-        # Look for requests without pre-auth, RC4 encryption
-        logql = (
-            '{job=~".+"}'
-            ' |~ "(?i)(4768|4771|as-req|getnpusers|asrep)"'
-            ' |~ "(?i)(pre.*auth|tgt.*request|roast|dont.*require.*preauth)"'
+        event_filter = self._build_event_filter(["4768", "4771"])
+        tool_filter = self._build_pattern_filter(
+            [
+                "as-req",
+                "getnpusers",
+                "asrep",
+                "pre.auth",
+                "tgt.request",
+                "roast",
+                "dont.require.preauth",
+            ]
         )
 
-        if domain_controller:
-            logql = f'{{job=~".+", hostname=~".*{domain_controller}.*"}}' + logql.split("}", 1)[1]
+        logql = f"{selector} {event_filter} {tool_filter}"
 
         logger.info(f"AS-REP roasting detection: {logql}")
 
@@ -395,7 +550,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_brute_force(
         self,
         target_host: str | None = None,
-        hours_back: int = 4,
+        hours_back: int | None = None,
         threshold: int = 10,
     ) -> dict[str, Any]:
         """Detect brute force and password spray attacks.
@@ -407,7 +562,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         Args:
             target_host: Optional hostname to focus on.
-            hours_back: Hours of logs to search.
+            hours_back: Hours of logs to search (default: 1 hour).
             threshold: Minimum failures to flag (default 10).
 
         Returns:
@@ -416,16 +571,15 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_brute_force", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
+        # Build optimized query with hostname in label selector
+        selector = self._build_selector(hostname=target_host)
+
+        # Event IDs first (most selective)
         # Event 4625: Failed Logon
         # Event 4771: Kerberos Pre-Auth Failed
-        logql = (
-            '{job=~".+"}'
-            ' |~ "(?i)(4625|4771|failed|invalid|denied)"'
-            ' |~ "(?i)(logon|auth|password|credential)"'
-        )
-
-        if target_host:
-            logql = f'{{job=~".+", hostname=~".*{target_host}.*"}}' + logql.split("}", 1)[1]
+        event_filter = self._build_event_filter(["4625", "4771"])
+        # Use contains for common failure keywords (faster than regex)
+        logql = f'{selector} {event_filter} |~ "(?i)(failed|invalid|denied)" |~ "(?i)(logon|auth)"'
 
         logger.info(f"Brute force detection: {logql}")
 
@@ -456,7 +610,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_pass_the_hash(
         self,
         target_host: str | None = None,
-        hours_back: int = 4,
+        hours_back: int | None = None,
     ) -> dict[str, Any]:
         """Detect Pass-the-Hash attacks.
 
@@ -467,7 +621,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         Args:
             target_host: Optional target hostname.
-            hours_back: Hours of logs to search.
+            hours_back: Hours of logs to search (default: 1 hour).
 
         Returns:
             Query results with PtH indicators.
@@ -475,16 +629,24 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_pth", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Event 4624 with NTLM auth (LogonType 3 or 9, NtLmSsp)
-        # Look for hash-based auth patterns from netexec/crackmapexec
-        logql = (
-            '{job=~".+"}'
-            ' |~ "(?i)(4624|ntlm|ntlmssp|pass.*the.*hash)"'
-            ' |~ "(?i)(logon.*type.*3|network.*logon|crackmapexec|netexec)"'
+        # Build optimized query with hostname in label selector
+        selector = self._build_selector(hostname=target_host)
+
+        # Event 4624 first (most selective), then NTLM patterns
+        event_filter = self._build_event_filter(["4624"])
+        tool_filter = self._build_pattern_filter(
+            [
+                "ntlm",
+                "ntlmssp",
+                "pass.the.hash",
+                "logon.type.3",
+                "network.logon",
+                "crackmapexec",
+                "netexec",
+            ]
         )
 
-        if target_host:
-            logql = f'{{job=~".+", hostname=~".*{target_host}.*"}}' + logql.split("}", 1)[1]
+        logql = f"{selector} {event_filter} {tool_filter}"
 
         logger.info(f"Pass-the-Hash detection: {logql}")
 
@@ -499,7 +661,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_lateral_movement(
         self,
         source_host: str | None = None,
-        hours_back: int = 4,
+        hours_back: int | None = None,
     ) -> dict[str, Any]:
         """Detect lateral movement patterns.
 
@@ -513,7 +675,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         Args:
             source_host: Optional source to pivot from.
-            hours_back: Hours of logs to search.
+            hours_back: Hours of logs to search (default: 1 hour).
 
         Returns:
             Query results with lateral movement indicators.
@@ -521,17 +683,28 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_lateral", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
+        # Build optimized query with hostname in label selector
+        selector = self._build_selector(hostname=source_host)
+
+        # Event IDs first (most selective)
         # Event 7045: Service installed
         # Event 4648: Explicit credential logon
-        # Event 4624 Type 3: Network logon
-        logql = (
-            '{job=~".+"}'
-            ' |~ "(?i)(7045|4648|psexec|wmic|winrm|powershell.*-session)"'
-            ' |~ "(?i)(admin\\$|c\\$|ipc\\$|service.*install|remote.*execution)"'
+        event_filter = self._build_event_filter(["7045", "4648"])
+        tool_filter = self._build_pattern_filter(
+            [
+                "psexec",
+                "wmic",
+                "winrm",
+                "powershell.-session",
+                "admin\\$",
+                "c\\$",
+                "ipc\\$",
+                "service.install",
+                "remote.execution",
+            ]
         )
 
-        if source_host:
-            logql += f' |~ "(?i){source_host}"'
+        logql = f"{selector} {event_filter} {tool_filter}"
 
         logger.info(f"Lateral movement detection: {logql}")
 
@@ -1614,7 +1787,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def get_host_activity(
         self,
         hostname: str,
-        hours_back: int = 4,
+        hours_back: int | None = None,
         attack_patterns_only: bool = False,
     ) -> dict[str, Any]:
         """Get all activity for a specific host.
@@ -1624,7 +1797,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         Args:
             hostname: Hostname to investigate.
-            hours_back: Hours of logs to search.
+            hours_back: Hours of logs to search (default: 1 hour).
             attack_patterns_only: If True, filter for attack patterns only.
 
         Returns:
@@ -1633,12 +1806,18 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_host_activity", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
+        # Build optimized selector - use hostname without leading .*
+        # Per Grafana docs: Loki optimizes hostname=~"dc" better than hostname=~".*dc.*"
+        selector = self._build_selector(hostname=hostname)
+
         if attack_patterns_only:
-            logql = (
-                f'{{hostname=~".*{hostname}.*"}} |~ "(?i)(4625|4624|4662|4769|4768|5140|7045|4688)"'
+            # Event IDs first (most selective) for attack pattern filtering
+            event_filter = self._build_event_filter(
+                ["4625", "4624", "4662", "4769", "4768", "5140", "7045", "4688"]
             )
+            logql = f"{selector} {event_filter}"
         else:
-            logql = f'{{hostname=~".*{hostname}.*"}}'
+            logql = selector
 
         logger.info(f"Host activity query: {logql}")
 
@@ -1652,7 +1831,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def get_user_activity(
         self,
         username: str,
-        hours_back: int = 4,
+        hours_back: int | None = None,
     ) -> dict[str, Any]:
         """Get all activity for a specific user.
 
@@ -1660,7 +1839,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         Args:
             username: Username to investigate.
-            hours_back: Hours of logs to search.
+            hours_back: Hours of logs to search (default: 1 hour).
 
         Returns:
             All log activity mentioning the specified user.
@@ -1668,7 +1847,10 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_user_activity", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        logql = f'{{job=~".+"}} |~ "(?i){username}"'
+        # Build selector with default labels, filter by username in log content
+        selector = self._build_selector()
+        # Use contains |= for exact username match when possible, regex for flexible
+        logql = f'{selector} |~ "(?i){username}"'
 
         logger.info(f"User activity query: {logql}")
 

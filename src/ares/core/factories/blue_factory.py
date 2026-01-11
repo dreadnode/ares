@@ -48,6 +48,54 @@ MAX_QUERIES_PER_INVESTIGATION = 8  # Was 5
 MAX_QUERIES_CRITICAL = 12  # Was 8 - higher limit for critical alerts
 MAX_DUPLICATE_QUERIES = 2  # Max times same query can run before blocking
 
+# LogQL optimization patterns - broad selectors that cause timeouts
+_BROAD_SELECTOR_PATTERNS = [
+    '{job=~".+"}',
+    '{deployment=~".+"}',
+    '{namespace=~".+"}',
+    '{app=~".+"}',
+]
+
+
+def _optimize_logql_query(query: str) -> tuple[str, bool]:
+    """Optimize a LogQL query by warning about or fixing broad patterns.
+
+    Per Grafana Loki best practices:
+    - Label selectors are the most important filter
+    - Avoid {job=~".+"} which scans all streams
+    - Put selective filters (event IDs) before regex patterns
+
+    Args:
+        query: The original LogQL query string.
+
+    Returns:
+        Tuple of (optimized_query, was_modified).
+    """
+    was_modified = False
+    optimized = query
+
+    # Check for overly broad selectors
+    for pattern in _BROAD_SELECTOR_PATTERNS:
+        if pattern in query:
+            logger.warning(
+                f"Query contains broad selector '{pattern}' which may cause timeouts. "
+                'Consider using specific labels like {{job="eventlog"}} for better performance.'
+            )
+            # Don't modify the query - just warn
+            # In future, could inject a default label if configured
+            break
+
+    # Check for expensive patterns
+    if "|~" in query and "|=" not in query:
+        # Query only uses regex, no simple contains
+        logger.debug(
+            "Query uses only regex filters (|~). Consider using contains (|=) "
+            "for literal strings - it's faster."
+        )
+
+    return optimized, was_modified
+
+
 # Adaptive query limit settings - more generous for productive investigations
 BONUS_QUERIES_FOR_EVIDENCE = 3  # Was 2 - grant +3 queries when evidence is found
 BONUS_QUERIES_FOR_PYRAMID_L4 = 2  # Grant +2 queries when reaching pyramid level 4+
@@ -369,6 +417,9 @@ def create_rate_limited_mcp_tool(
 
         query_str = kwargs.get("logql") or kwargs.get("expr") or ""
         if query_str:
+            # Check for and warn about broad query patterns that cause timeouts
+            _optimize_logql_query(query_str)
+
             dup_msg = _check_duplicate_query(query_str)
             if dup_msg:
                 logger.warning(f"🔁 Blocking duplicate query: {query_str[:50]}...")
@@ -659,6 +710,11 @@ def create_investigation_agent(
     completion_tools.set_state(state)
 
     loki_url = grafana_url.rstrip("/")
+    # QueryTemplateTools now supports optimized queries:
+    # - default_label_selector: Override with specific labels like '{job="eventlog"}'
+    #   for better performance instead of scanning all streams
+    # - default_hours_back: Defaults to 1 hour (reduced from 4) for faster queries
+    # Example: QueryTemplateTools(loki_url=loki_url, default_label_selector='{job="windows"}')
     query_template_tools = QueryTemplateTools(loki_url=loki_url)
 
     learning_tools = LearningTools()
