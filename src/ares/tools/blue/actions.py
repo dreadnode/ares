@@ -26,129 +26,138 @@ class CompletionTools(Toolset):  # type: ignore[misc]
     async def complete_investigation(
         self,
         summary: str,
-        attack_synopsis: str,
-        recommendations: list[str],
-        confidence: str,
-        affected_hosts: list[str],
-        affected_users: list[str],
-        attack_timeframe: str,
+        attack_synopsis: str | None = None,
+        recommendations: list[str] | None = None,
     ) -> str:
         """Complete the investigation and signal report generation.
 
-        REQUIRED before calling:
-        1. Must have transitioned through lateral stage
-        2. Must have investigated at least one host
-        3. Must provide specific affected hosts/users
-        4. Must provide attack timeframe
+        Call this when you have:
+        - Answered the key questions about the alert
+        - Recorded evidence for your findings
+        - Built a timeline of events
+        - Identified affected hosts/users
 
         Args:
-            summary: Executive summary (2-3 sentences).
-            attack_synopsis: Detailed description of the attack chain.
-            recommendations: List of recommended actions.
-            confidence: Overall confidence level (high/medium/low with explanation).
-            affected_hosts: List of hosts involved in the attack (IPs or hostnames).
-            affected_users: List of user accounts involved.
-            attack_timeframe: Time range of the attack (e.g., "2024-01-15 14:30-15:45 UTC").
+            summary: Executive summary of the investigation including:
+                - What attack/activity was detected
+                - Key findings and evidence
+                - Affected hosts and users
+                - Confidence level (high/medium/low)
+            attack_synopsis: Narrative describing the attack chain chronologically.
+                Should include specific hostnames, usernames, IPs, and timestamps.
+                Explains how the attacker progressed through the attack.
+            recommendations: List of recommended actions to take. Should include
+                both immediate response actions and long-term improvements.
+                Check the alert's 'response' annotation for expert guidance.
 
         Returns:
-            Confirmation message or error if validation fails.
+            Confirmation message.
 
         Example:
             >>> await complete_investigation(
-            ...     summary="Detected Kerberoasting attack targeting service accounts.",
-            ...     attack_synopsis="Attacker performed AS-REP roasting against samwell.tarly...",
-            ...     recommendations=["Reset passwords for samwell.tarly and jeor.mormont"],
-            ...     confidence="High - Multiple corroborating Kerberos events",
-            ...     affected_hosts=["10.0.4.186", "WINTERFELL.north.sevenkingdoms.local"],
-            ...     affected_users=["samwell.tarly", "jeor.mormont"],
-            ...     attack_timeframe="2024-01-08 04:37-04:43 UTC"
+            ...     summary="Detected Kerberoasting attack targeting service accounts. "
+            ...             "User samwell.tarly requested TGS tickets with RC4 encryption "
+            ...             "for multiple SPNs from host 10.0.4.186. Confidence: High.",
+            ...     attack_synopsis="At 14:30 UTC, user samwell.tarly from 10.0.4.186 "
+            ...                     "began requesting TGS tickets for service accounts. "
+            ...                     "12 tickets requested with RC4 encryption over 5 minutes.",
+            ...     recommendations=[
+            ...         "Reset service account passwords immediately",
+            ...         "Enable AES-only Kerberos encryption",
+            ...         "Review service account permissions"
+            ...     ]
             ... )
             'Investigation completed. Report will be generated.'
         """
-        errors = []
-
-        # Validate state exists
         if not self.state:
             return "ERROR: No investigation state. Cannot complete."
 
-        # Validate lateral investigation was performed
+        # Log stage info
         if self.state.stage.value not in ["lateral", "synthesis"]:
-            errors.append(
-                f"ERROR: Must reach 'lateral' stage before completion. "
-                f"Current stage: {self.state.stage.value}. "
-                f"Call transition_stage('lateral') after investigating scope."
-            )
+            logger.info(f"Investigation completed at '{self.state.stage.value}' stage")
 
-        # Validate hosts were investigated
-        if not self.state.queried_hosts and not affected_hosts:
-            errors.append(
-                "ERROR: No hosts investigated. Use track_host_investigation() "
-                "to investigate affected hosts before completing."
-            )
+        # Store attack synopsis if provided
+        if attack_synopsis:
+            self.state.attack_synopsis = attack_synopsis
+            logger.info(f"Attack synopsis recorded: {attack_synopsis[:100]}...")
 
-        # Validate affected_hosts is not empty
-        if not affected_hosts:
-            errors.append(
-                "ERROR: affected_hosts is required. Provide the list of "
-                "hosts/IPs involved in the attack."
-            )
+        # Process recommendations
+        if recommendations:
+            self.state.recommendations.extend(recommendations)
+            logger.info(f"Added {len(recommendations)} recommendations")
 
-        # Validate affected_users is not empty
-        if not affected_users:
-            errors.append(
-                "ERROR: affected_users is required. Provide the list of "
-                "user accounts involved in the attack."
-            )
+        # Auto-extract recommendations from alert annotations if none provided
+        if not self.state.recommendations:
+            alert_annotations = self.state.alert.get("annotations", {})
+            response_guidance = alert_annotations.get("response", "")
+            if response_guidance:
+                import re
 
-        # Validate attack_timeframe is specific
-        if not attack_timeframe or len(attack_timeframe) < 10:
-            errors.append(
-                "ERROR: attack_timeframe must be specific (e.g., '2024-01-08 04:37-04:43 UTC'). "
-                "This should reflect the ACTUAL event timestamps from your investigation."
-            )
+                steps = re.split(r"\d+\.\s+", response_guidance)
+                extracted_recs = [s.strip() for s in steps if s.strip()]
+                if extracted_recs:
+                    self.state.recommendations.extend(extracted_recs)
+                    logger.info(f"Auto-extracted {len(extracted_recs)} recommendations from alert")
 
-        # Validate synopsis is substantive
-        if len(attack_synopsis) < 100:
-            errors.append(
-                "ERROR: attack_synopsis too short. Provide a detailed description "
-                "of the attack chain including: initial access, techniques used, "
-                "and impact."
-            )
+        # Auto-generate synopsis if not provided and we have evidence
+        if not self.state.attack_synopsis and self.state.evidence:
+            self._generate_fallback_synopsis()
 
-        # Validate evidence was collected
-        if len(self.state.evidence) < 2:
-            errors.append(
-                f"ERROR: Insufficient evidence ({len(self.state.evidence)} items). "
-                "Continue investigation to gather more evidence."
-            )
-
-        # If errors, return them all
-        if errors:
-            dn.log_metric("completion_validation_failed", 1)
-            return "\n\n".join(errors)
-
-        # All validations passed
+        # Record completion
         dn.log_metric("investigation_completed", 1)
         dn.log_output(
             "completion_summary",
             {
                 "summary": summary,
-                "attack_synopsis": attack_synopsis,
-                "recommendations": recommendations,
-                "confidence": confidence,
-                "affected_hosts": affected_hosts,
-                "affected_users": affected_users,
-                "attack_timeframe": attack_timeframe,
+                "attack_synopsis": self.state.attack_synopsis,
+                "recommendations": self.state.recommendations,
                 "evidence_count": len(self.state.evidence),
                 "timeline_events": len(self.state.timeline),
                 "hosts_investigated": list(self.state.queried_hosts),
                 "users_investigated": list(self.state.queried_users),
+                "techniques_identified": list(self.state.identified_techniques),
             },
         )
 
-        logger.success("Investigation completed")
+        logger.success(f"Investigation completed: {summary[:100]}...")
 
         return "Investigation completed. Report will be generated."
+
+    def _generate_fallback_synopsis(self) -> None:
+        """Generate a basic synopsis from evidence if none provided."""
+        if not self.state:
+            return
+
+        parts = []
+
+        alert_name = self.state.alert.get("labels", {}).get("alertname", "Unknown alert")
+        severity = self.state.alert.get("labels", {}).get("severity", "unknown")
+        starts_at = self.state.alert.get("startsAt", "")
+
+        parts.append(f"{severity.upper()} alert: {alert_name}")
+
+        if starts_at:
+            parts.append(f"Alert triggered at {starts_at}.")
+
+        if self.state.identified_techniques:
+            techniques = ", ".join(list(self.state.identified_techniques)[:3])
+            parts.append(f"MITRE techniques identified: {techniques}.")
+
+        if self.state.queried_hosts:
+            hosts = ", ".join(list(self.state.queried_hosts)[:3])
+            parts.append(f"Hosts involved: {hosts}.")
+
+        if self.state.queried_users:
+            users = ", ".join(list(self.state.queried_users)[:3])
+            parts.append(f"Users involved: {users}.")
+
+        if self.state.evidence:
+            parts.append(f"{len(self.state.evidence)} evidence items collected.")
+            high_level = [e for e in self.state.evidence if e.pyramid_level.value >= 5]
+            if high_level:
+                parts.append(f"{len(high_level)} high-value indicators (tools/TTPs) identified.")
+
+        self.state.attack_synopsis = " ".join(parts)
 
 
 @dn.tool()  # type: ignore[untyped-decorator]

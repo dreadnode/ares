@@ -32,13 +32,19 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
 
     Attributes:
         state: Current investigation state being managed.
+        mitre_client: MITRE ATT&CK client for technique lookups.
     """
 
     state: InvestigationState | None = None
+    mitre_client: MITREAttackClient | None = None
 
     def set_state(self, state: InvestigationState):
         """Set the investigation state (called by orchestrator)."""
         self.state = state
+
+    def set_mitre_client(self, client: MITREAttackClient):
+        """Set the MITRE client for technique lookups."""
+        self.mitre_client = client
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     def record_evidence(
@@ -116,6 +122,8 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
 
         if mitre_techniques:
             self.state.identified_techniques.update(mitre_techniques)
+            # Look up technique names and tactics
+            self._resolve_technique_metadata(mitre_techniques)
 
         dn.log_output(f"evidence_{evidence_id}", ev.to_dict())
         dn.log_metric("evidence_count", 1, mode="count")
@@ -126,6 +134,24 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
         )
 
         return evidence_id
+
+    def _resolve_technique_metadata(self, technique_ids: list[str]) -> None:
+        """Look up and cache technique names and tactics."""
+        if not self.state or not self.mitre_client:
+            return
+
+        for tech_id in technique_ids:
+            # Skip if already resolved
+            if tech_id in self.state.technique_names:
+                continue
+
+            technique = self.mitre_client.get_technique(tech_id)
+            if technique:
+                self.state.technique_names[tech_id] = technique.name
+                self.state.technique_to_tactic[tech_id] = technique.tactic or "Unknown"
+                if technique.tactic:
+                    self.state.identified_tactics.add(technique.tactic)
+                logger.debug(f"Resolved technique {tech_id}: {technique.name} ({technique.tactic})")
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     def add_timeline_event(

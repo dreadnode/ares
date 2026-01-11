@@ -76,7 +76,6 @@ class LokiTools(Toolset):  # type: ignore[misc]
             query_logs_around_timestamp: For time-window queries around a specific event.
             get_label_values: For discovering available log labels.
         """
-        # Validate query to prevent empty-compatible regex errors
         if '=~".*"' in logql or "=~'.*'" in logql:
             return {
                 "status": "error",
@@ -109,7 +108,6 @@ class LokiTools(Toolset):  # type: ignore[misc]
         except httpx.HTTPError as e:
             logger.error(f"Loki query failed: {e}")
             logger.error(f"Failed query was: {logql}")
-            # Return detailed error for the agent to learn from
             return {
                 "status": "error",
                 "error": str(e),
@@ -185,7 +183,6 @@ class LokiTools(Toolset):  # type: ignore[misc]
                 limit=limit,
             )
 
-            # Check if we got results
             data = result.get("data", {})
             results = data.get("result", [])
             if results:

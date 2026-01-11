@@ -1,5 +1,15 @@
 # Ares - Autonomous Security Operations Agent
 
+<!-- BEGIN_AUTO_BADGES -->
+<div align="center">
+
+[![Pre-Commit](https://github.com/dreadnode/python-template/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/python-template/actions/workflows/pre-commit.yaml)
+[![Renovate](https://github.com/dreadnode/python-template/actions/workflows/renovate.yaml/badge.svg)](https://github.com/dreadnode/python-template/actions/workflows/renovate.yaml)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
+</div>
+<!-- END_AUTO_BADGES -->
+
 [![Pre-Commit](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
@@ -161,7 +171,7 @@ uv run python -m ares \
   --args.model claude-sonnet-4-20250514 \
   --args.grafana-url https://grafana.example.com \
   --args.poll-interval 30 \
-  --args.max-steps 150 \
+  --args.max-steps 30 \
   --args.report-dir ./reports
 
 # Run once and exit (process current alerts only)
@@ -176,7 +186,7 @@ Investigate a specific alert by providing it as JSON:
 uv run python -m ares investigate-alert test-alerts/example-alert.json \
   --args.model claude-sonnet-4-20250514 \
   --args.grafana-url https://grafana.example.com \
-  --args.max-steps 150
+  --args.max-steps 30
 ```
 
 #### Red Team - Penetration Testing
@@ -212,7 +222,7 @@ task ares:red: TARGET=192.168.1.100
 # Or via CLI
 uv run python -m ares red-team 192.168.1.100 \
   --args.model claude-sonnet-4-20250514 \
-  --args.max-steps 150 \
+  --args.max-steps 30 \
   --args.report-dir ./reports
 ```
 
@@ -229,8 +239,27 @@ bloodhound-python).
 | `--args.model` | `claude-sonnet-4-20250514` | LLM model to use |
 | `--args.grafana-url` | `https://grafana.dev.plundr.ai` | Grafana URL for alerts and MCP |
 | `--args.poll-interval` | `30` | Seconds between alert polls |
-| `--args.max-steps` | `150` | Maximum agent steps per investigation |
+| `--args.max-steps` | `30` | Maximum LLM round trips per investigation |
 | `--args.report-dir` | `./reports` | Directory for markdown reports |
+| `--args.once` | `false` | Process current alerts once and exit |
+
+**Stop Conditions:**
+
+The agent stops when **any** of these conditions are met:
+
+- `complete_investigation()` tool is called (normal completion)
+- `escalate_investigation()` tool is called (escalation to human)
+- 5 Loki/Prometheus queries executed
+- 20 total tool calls made (prevents infinite loops)
+- `max_steps` LLM round trips reached
+
+**Timeout Behavior:**
+
+The agent has multiple timeout layers:
+
+- Hard timeout: `max_steps × 60 seconds` (1 minute per step)
+- Watchdog thread: Force-exits if timeout exceeded
+- When using Taskfile, defaults are 15 steps (once mode) or 50 steps (polling mode)
 
 **Dreadnode Platform Arguments (`--dn-args.*`):**
 

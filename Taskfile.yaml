@@ -15,8 +15,10 @@ vars:
   MODEL: '{{.MODEL | default "claude-sonnet-4-20250514"}}'
   GRAFANA_URL: '{{.GRAFANA_URL | default "https://grafana.dev.plundr.ai"}}'
   POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
-  MAX_STEPS: '{{.MAX_STEPS | default "150"}}'
+  MAX_STEPS: '{{.MAX_STEPS | default "50"}}'
+  MAX_STEPS_ONCE: '{{.MAX_STEPS_ONCE | default "15"}}'  # ~15 min max for once mode
   REPORT_DIR: '{{.REPORT_DIR | default "./reports"}}'
+  LOG_DIR: '{{.LOG_DIR | default "./logs"}}'
   DREADNODE_SERVER: '{{.DREADNODE_SERVER | default "https://platform.dev.plundr.ai/"}}'
   DREADNODE_ORGANIZATION: '{{.DREADNODE_ORGANIZATION | default "ares"}}'
   DREADNODE_WORKSPACE: '{{.DREADNODE_WORKSPACE | default "ares-protocol"}}'
@@ -153,12 +155,16 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-2"}}'
+          REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - |
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
         export GRAFANA_API_KEY=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
         export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
+
+        mkdir -p {{.LOG_DIR}}
+        LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
+        echo "📝 Logging to: $LOGFILE"
 
         uv run python -m ares \
           --args.model {{.MODEL}} \
@@ -170,7 +176,8 @@ tasks:
           --dn-args.token "$DREADNODE_API_KEY" \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.DREADNODE_PROJECT}}
+          --dn-args.project {{.DREADNODE_PROJECT}} \
+          2>&1 | tee -a "$LOGFILE"
 
   ares:blue:once:
     desc: Run blue team agent once and exit (uses 1Password for API keys)
@@ -178,25 +185,30 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-2"}}'
+          REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - |
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
         export GRAFANA_API_KEY=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
         export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
 
+        mkdir -p {{.LOG_DIR}}
+        LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
+        echo "📝 Logging to: $LOGFILE"
+
         uv run python -m ares \
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
-          --args.max-steps {{.MAX_STEPS}} \
+          --args.max-steps {{.MAX_STEPS_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --args.once \
           --dn-args.server {{.DREADNODE_SERVER}} \
           --dn-args.token "$DREADNODE_API_KEY" \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.DREADNODE_PROJECT}}
+          --dn-args.project {{.DREADNODE_PROJECT}} \
+          2>&1 | tee -a "$LOGFILE"
 
   ares:blue:local:
     desc: Run blue team agent using .env file (no 1Password)
@@ -204,7 +216,7 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-2"}}'
+          REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - |
         if [ ! -f .env ]; then
@@ -216,6 +228,10 @@ tasks:
         . ./.env
         set +a
 
+        mkdir -p {{.LOG_DIR}}
+        LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
+        echo "📝 Logging to: $LOGFILE"
+
         uv run python -m ares \
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
@@ -225,7 +241,8 @@ tasks:
           --dn-args.server {{.DREADNODE_SERVER}} \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.DREADNODE_PROJECT}}
+          --dn-args.project {{.DREADNODE_PROJECT}} \
+          2>&1 | tee -a "$LOGFILE"
 
   ares:blue:local:once:
     desc: Run blue team agent once and exit using .env file (no 1Password)
@@ -233,7 +250,7 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-2"}}'
+          REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - |
         if [ ! -f .env ]; then
@@ -245,17 +262,22 @@ tasks:
         . ./.env
         set +a
 
+        mkdir -p {{.LOG_DIR}}
+        LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
+        echo "📝 Logging to: $LOGFILE"
+
         uv run python -m ares \
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
-          --args.max-steps {{.MAX_STEPS}} \
+          --args.max-steps {{.MAX_STEPS_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --args.once \
           --dn-args.server {{.DREADNODE_SERVER}} \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.DREADNODE_PROJECT}}
+          --dn-args.project {{.DREADNODE_PROJECT}} \
+          2>&1 | tee -a "$LOGFILE"
 
   ares:investigate:
     desc: "Investigate a specific alert from JSON file (usage: task ares:investigate ALERT=alert.json)"
@@ -270,7 +292,7 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-2"}}'
+          REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - |
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
@@ -280,7 +302,7 @@ tasks:
         uv run python -m ares investigate-alert {{.ALERT}} \
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
-          --args.max-steps {{.MAX_STEPS}} \
+          --args.max-steps {{.MAX_STEPS_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --dn-args.server {{.DREADNODE_SERVER}} \
           --dn-args.token "$DREADNODE_API_KEY" \
@@ -408,6 +430,99 @@ tasks:
           echo "✅ Reports cleaned"
         fi
 
+  # ===========================================================================
+  # Ares Local Log Management
+  # ===========================================================================
+
+  ares:logs:list:
+    desc: List all local agent logs
+    cmds:
+      - |
+        echo "Agent Logs:"
+        echo "==========="
+        if [ -d {{.LOG_DIR}} ]; then
+          ls -lht {{.LOG_DIR}}/*.log 2>/dev/null || echo "No logs found"
+        else
+          echo "Log directory not found: {{.LOG_DIR}}"
+        fi
+
+  ares:logs:tail:
+    desc: "Tail the latest log file (usage: task ares:logs:tail [LINES=100] [FOLLOW=true])"
+    vars:
+      LINES: '{{.LINES | default "100"}}'
+      FOLLOW: '{{.FOLLOW | default "false"}}'
+    cmds:
+      - |
+        LATEST=$(ls -t {{.LOG_DIR}}/*.log 2>/dev/null | head -1)
+        if [ -z "$LATEST" ]; then
+          echo "No logs found in {{.LOG_DIR}}"
+          exit 1
+        fi
+
+        echo "📋 Log file: $LATEST"
+        echo "======================================================================"
+
+        if [ "{{.FOLLOW}}" = "true" ]; then
+          tail -f "$LATEST"
+        else
+          tail -n {{.LINES}} "$LATEST"
+        fi
+
+  ares:logs:blue:
+    desc: "Tail the latest blue team log (usage: task ares:logs:blue [LINES=100] [FOLLOW=true])"
+    vars:
+      LINES: '{{.LINES | default "100"}}'
+      FOLLOW: '{{.FOLLOW | default "false"}}'
+    cmds:
+      - |
+        LATEST=$(ls -t {{.LOG_DIR}}/blue-*.log 2>/dev/null | head -1)
+        if [ -z "$LATEST" ]; then
+          echo "No blue team logs found in {{.LOG_DIR}}"
+          exit 1
+        fi
+
+        echo "📋 Blue team log: $LATEST"
+        echo "======================================================================"
+
+        if [ "{{.FOLLOW}}" = "true" ]; then
+          tail -f "$LATEST"
+        else
+          tail -n {{.LINES}} "$LATEST"
+        fi
+
+  ares:logs:red:
+    desc: "Tail the latest red team log (usage: task ares:logs:red [LINES=100] [FOLLOW=true])"
+    vars:
+      LINES: '{{.LINES | default "100"}}'
+      FOLLOW: '{{.FOLLOW | default "false"}}'
+    cmds:
+      - |
+        LATEST=$(ls -t {{.LOG_DIR}}/red-*.log 2>/dev/null | head -1)
+        if [ -z "$LATEST" ]; then
+          echo "No red team logs found in {{.LOG_DIR}}"
+          exit 1
+        fi
+
+        echo "📋 Red team log: $LATEST"
+        echo "======================================================================"
+
+        if [ "{{.FOLLOW}}" = "true" ]; then
+          tail -f "$LATEST"
+        else
+          tail -n {{.LINES}} "$LATEST"
+        fi
+
+  ares:logs:clean:
+    desc: Remove all local agent logs
+    cmds:
+      - |
+        read -p "Delete all logs in {{.LOG_DIR}}? (y/N) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+          rm -rf {{.LOG_DIR}}/*.log
+          echo "✅ Logs cleaned"
+        fi
+
   ares:version:
     desc: Show Ares version information
     cmds:
@@ -450,7 +565,7 @@ tasks:
     internal: true
     vars:
       PROFILE: '{{.PROFILE | default "lab"}}'
-      REGION: '{{.REGION | default "us-west-2"}}'
+      REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - |
         # Check if AWS CLI is installed
@@ -485,7 +600,7 @@ tasks:
     vars:
       TARGET: '{{.TARGET | default ""}}'
       PROFILE: '{{.PROFILE | default "lab"}}'
-      REGION: '{{.REGION | default "us-west-2"}}'
+      REGION: '{{.REGION | default "us-west-1"}}'
       REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
     preconditions:
       - sh: test -n "{{.TARGET}}"
@@ -521,6 +636,10 @@ tasks:
             echo "✅ Resolved to: $RESOLVED_TARGET"
         fi
 
+        mkdir -p {{.LOG_DIR}}
+        LOGFILE="{{.LOG_DIR}}/red-$(date +%Y%m%d-%H%M%S).log"
+        echo "📝 Logging to: $LOGFILE"
+
         uv run python -m ares red-team "$RESOLVED_TARGET" \
           --args.model {{.MODEL}} \
           --args.max-steps {{.MAX_STEPS}} \
@@ -529,7 +648,8 @@ tasks:
           --dn-args.token "$DREADNODE_API_KEY" \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.REDTEAM_PROJECT}}
+          --dn-args.project {{.REDTEAM_PROJECT}} \
+          2>&1 | tee -a "$LOGFILE"
 
   ares:red:local:
     desc: "Run red team agent using .env file (usage: task ares:red:local TARGET=192.168.1.100)"
@@ -550,6 +670,10 @@ tasks:
         . ./.env
         set +a
 
+        mkdir -p {{.LOG_DIR}}
+        LOGFILE="{{.LOG_DIR}}/red-$(date +%Y%m%d-%H%M%S).log"
+        echo "📝 Logging to: $LOGFILE"
+
         uv run python -m ares red-team {{.TARGET}} \
           --args.model {{.MODEL}} \
           --args.max-steps {{.MAX_STEPS}} \
@@ -557,16 +681,17 @@ tasks:
           --dn-args.server {{.DREADNODE_SERVER}} \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.REDTEAM_PROJECT}}
+          --dn-args.project {{.REDTEAM_PROJECT}} \
+          2>&1 | tee -a "$LOGFILE"
 
   ares:red:logs:
     desc: "Tail red team agent logs from Kali via SSM (usage: task ares:red:logs [KALI=instance-name] [LINES=100] [FOLLOW=true])"
     vars:
-      KALI: '{{.KALI | default "dev-alpha-operator-range-kali"}}'
+      KALI: '{{.KALI | default "staging-alpha-operator-range-kali"}}'
       LINES: '{{.LINES | default "100"}}'
       FOLLOW: '{{.FOLLOW | default "false"}}'
       PROFILE: '{{.PROFILE | default "lab"}}'
-      REGION: '{{.REGION | default "us-west-2"}}'
+      REGION: '{{.REGION | default "us-west-1"}}'
     deps:
       - task: check-aws-auth
         vars:

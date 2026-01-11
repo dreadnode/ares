@@ -55,4 +55,12 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          pytest --cov=src --cov-report=term-missing || [ $? -eq 5 ] # Allow workflow to pass when no tests exist
+          pytest --cov=src --cov-report=xml --cov-report=term-missing || [ $? -eq 5 ] # Allow workflow to pass when no tests exist
+
+      - name: Upload coverage report
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 1

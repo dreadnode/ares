@@ -103,7 +103,6 @@ class MITREAttackClient:
             response.raise_for_status()
             bundle = response.json()
 
-        # Parse STIX objects
         for obj in bundle.get("objects", []):
             obj_type = obj.get("type")
 
@@ -131,12 +130,10 @@ class MITREAttackClient:
         if not technique_id:
             return
 
-        # Get tactic from kill chain
         kill_chain = obj.get("kill_chain_phases", [])
         tactic_shortname = kill_chain[0]["phase_name"] if kill_chain else "unknown"
         tactic_id = self.TACTIC_MAP.get(tactic_shortname, "")
 
-        # Check if subtechnique
         is_subtechnique = obj.get("x_mitre_is_subtechnique", False)
         parent = None
         if is_subtechnique and "." in technique_id:
