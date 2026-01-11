@@ -629,14 +629,15 @@ tasks:
                 --region "{{.REGION}}" \
                 --filters "Name=instance-state-name,Values=running" \
                 --query "Reservations[*].Instances[?contains(Tags[?Key==\`Name\`].Value|[0], \`$TARGET\`)].PrivateIpAddress" \
-                --output text | tr '\n' ' ' | awk '{print $1}')
+                --output text | tr '\t\n' ' ' | xargs)
 
             if [ -z "$RESOLVED_TARGET" ]; then
                 echo "❌ No running EC2 instances found matching Name tag filter: $TARGET"
                 exit 1
             fi
 
-            echo "✅ Resolved to: $RESOLVED_TARGET"
+            TARGET_COUNT=$(echo "$RESOLVED_TARGET" | wc -w | xargs)
+            echo "✅ Resolved $TARGET_COUNT target(s): $RESOLVED_TARGET"
         fi
 
         mkdir -p {{.LOG_DIR}}

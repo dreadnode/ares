@@ -1,6 +1,12 @@
 # Red Team Operation Task
 
-Enumerate and discover users, shares, hashes, and credentials for: **{{ target_ip }}**
+Enumerate and discover users, shares, hashes, and credentials for all targets.
+
+## Targets
+
+```
+{{ target_ip }}
+```
 
 ## Top Priorities
 1. Domain admin access
@@ -15,6 +21,6 @@ Enumerate and discover users, shares, hashes, and credentials for: **{{ target_i
 
 ## Starting Point
 
-Begin with: **nmap scan of {{ target_ip }}** to collect ports, services, and FQDNs
+Begin with: **nmap scan of ALL targets above** (pass all IPs space-separated to nmap_scan) to collect ports, services, and FQDNs
 
-Then proceed with systematic enumeration following the priority workflow.
+Then proceed with systematic enumeration following the priority workflow on ALL discovered hosts.
