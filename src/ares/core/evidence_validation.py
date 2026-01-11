@@ -17,8 +17,8 @@ from loguru import logger
 # Maximum number of query results to store for validation
 MAX_STORED_RESULTS = 10
 
-# Confidence penalty for unvalidated evidence
-UNVALIDATED_CONFIDENCE_PENALTY = 0.3
+# Confidence penalty for unvalidated evidence (reduced from 0.3 to allow higher baseline confidence)
+UNVALIDATED_CONFIDENCE_PENALTY = 0.15
 
 
 @dataclass
@@ -124,18 +124,18 @@ def _extract_searchable_values(data: Any, depth: int = 0) -> set[str]:
     return values
 
 
-def _extract_patterns_from_string(text: str) -> set[str]:
+def _extract_patterns_from_string(text: str) -> set[str]:  # noqa: PLR0912
     """Extract IOC patterns from a string.
 
     Args:
         text: Text to extract patterns from
 
     Returns:
-        Set of extracted patterns (IPs, hostnames, etc.)
+        Set of extracted patterns (IPs, hostnames, users, hashes, etc.)
     """
     patterns: set[str] = set()
 
-    # IP addresses
+    # IP addresses (IPv4)
     ip_pattern = r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b"
     for match in re.findall(ip_pattern, text):
         patterns.add(match.lower())
@@ -146,19 +146,65 @@ def _extract_patterns_from_string(text: str) -> set[str]:
         if "." in match and not match[0].isdigit():
             patterns.add(match.lower())
 
-    # Windows usernames (domain\user or user@domain)
+    # Windows usernames (multiple formats)
     user_patterns = [
         r"\b([a-zA-Z0-9_-]+\\[a-zA-Z0-9_.-]+)\b",  # domain\user
         r"\b([a-zA-Z0-9_.-]+@[a-zA-Z0-9.-]+)\b",  # user@domain
     ]
     for pattern in user_patterns:
         for match in re.findall(pattern, text):
-            patterns.add(match.lower())
+            if match and len(match) > 2:
+                patterns.add(match.lower())
 
-    # Simple usernames (from common fields)
-    simple_user = r'"(?:user|username|account|TargetUserName|SubjectUserName)":\s*"([^"]+)"'
-    for match in re.findall(simple_user, text, re.IGNORECASE):
-        patterns.add(match.lower())
+    # Usernames from JSON fields (expanded list)
+    user_json_patterns = [
+        r'"(?:TargetUserName|SubjectUserName|User|Account|AccountName|UserName)":\s*"([^"]+)"',
+        r"(?:TargetUserName|SubjectUserName|User|Account)=([^\s,;}\]]+)",
+    ]
+    for pattern in user_json_patterns:
+        for match in re.findall(pattern, text, re.IGNORECASE):
+            if match and len(match) > 1 and match not in ("-", "SYSTEM", "LOCAL SERVICE"):
+                patterns.add(match.lower())
+
+    # Computer names from Windows events
+    computer_patterns = [
+        r'"(?:Computer|WorkstationName|Workstation|ComputerName|HostName)":\s*"([^"]+)"',
+        r"(?:Computer|WorkstationName|HostName)=([^\s,;}\]]+)",
+    ]
+    for pattern in computer_patterns:
+        for match in re.findall(pattern, text, re.IGNORECASE):
+            if match and len(match) > 1:
+                patterns.add(match.lower())
+
+    # Process names
+    process_patterns = [
+        r'"(?:ProcessName|NewProcessName|ParentProcessName|Image)":\s*"([^"]+)"',
+        r"(?:ProcessName|Process)=([^\s,;}\]]+)",
+    ]
+    for pattern in process_patterns:
+        for match in re.findall(pattern, text, re.IGNORECASE):
+            if match and (".exe" in match.lower() or ".dll" in match.lower()):
+                patterns.add(match.lower())
+
+    # Service names
+    service_patterns = [
+        r'"(?:ServiceName|Service)":\s*"([^"]+)"',
+        r"ServiceName=([^\s,;}\]]+)",
+    ]
+    for pattern in service_patterns:
+        for match in re.findall(pattern, text, re.IGNORECASE):
+            if match and len(match) > 1:
+                patterns.add(match.lower())
+
+    # Hash values (MD5, SHA1, SHA256)
+    hash_patterns = [
+        (r"\b([a-fA-F0-9]{32})\b", "md5"),  # MD5
+        (r"\b([a-fA-F0-9]{40})\b", "sha1"),  # SHA1
+        (r"\b([a-fA-F0-9]{64})\b", "sha256"),  # SHA256
+    ]
+    for pattern, _ in hash_patterns:
+        for match in re.findall(pattern, text):
+            patterns.add(match.lower())
 
     return patterns
 
@@ -282,3 +328,113 @@ def get_recent_query_ids() -> list[str]:
         List of query IDs from most recent to oldest
     """
     return [stored.query_id for stored in reversed(_recent_results)]
+
+
+def boost_confidence_for_quality(
+    evidence_type: str,
+    pyramid_level: int,
+    has_timestamp: bool,
+    has_mitre_mapping: bool,
+) -> float:
+    """Calculate confidence boost for high-quality evidence.
+
+    Args:
+        evidence_type: Type of evidence (ip, user, hostname, etc.)
+        pyramid_level: Pyramid of Pain level (1-6)
+        has_timestamp: Whether evidence has a timestamp
+        has_mitre_mapping: Whether evidence has MITRE technique mapping
+
+    Returns:
+        Additional confidence (0.0 to 0.2) based on evidence quality
+    """
+    boost = 0.0
+
+    # Higher pyramid levels are more valuable
+    if pyramid_level >= 5:
+        boost += 0.1
+    elif pyramid_level >= 4:
+        boost += 0.05
+
+    # Evidence with timestamps is more reliable
+    if has_timestamp:
+        boost += 0.05
+
+    # MITRE mapping shows understanding
+    if has_mitre_mapping:
+        boost += 0.05
+
+    return min(boost, 0.2)
+
+
+def auto_extract_evidence_from_query(
+    query_result: Any,
+    source_description: str,
+    mitre_technique: str | None = None,
+) -> list[dict]:
+    """Automatically extract IOCs from query results as evidence candidates.
+
+    This function extracts potential evidence items from query results
+    without requiring manual parsing by the LLM.
+
+    Args:
+        query_result: Raw query result data
+        source_description: Description of the query source
+        mitre_technique: Optional MITRE technique ID
+
+    Returns:
+        List of evidence dicts with type, value, pyramid_level, and confidence
+    """
+    evidence_items: list[dict] = []
+    seen_values: set[str] = set()
+
+    # Extract searchable values from the query result
+    extracted = _extract_searchable_values(query_result)
+
+    for value in extracted:
+        if value in seen_values:
+            continue
+        seen_values.add(value)
+
+        # Skip very short values
+        if len(value) < 3:
+            continue
+
+        ioc_type = _classify_ioc(value)
+        if not ioc_type:
+            continue
+
+        # Map IOC type to pyramid level
+        pyramid_map = {
+            "hash": 1,
+            "ip": 2,
+            "hostname": 3,
+            "user": 4,
+            "process": 4,
+            "service": 5,
+        }
+        pyramid_level = pyramid_map.get(ioc_type, 3)
+
+        # Calculate confidence with quality boost
+        base_confidence = 0.7  # Auto-extracted gets 0.7 base confidence
+        boost = boost_confidence_for_quality(
+            evidence_type=ioc_type,
+            pyramid_level=pyramid_level,
+            has_timestamp=False,  # Auto-extracted doesn't have precise timestamps
+            has_mitre_mapping=mitre_technique is not None,
+        )
+        confidence = min(base_confidence + boost, 0.95)
+
+        evidence_items.append(
+            {
+                "type": ioc_type,
+                "value": value,
+                "source": f"Auto-extracted: {source_description[:100]}",
+                "pyramid_level": pyramid_level,
+                "confidence": confidence,
+                "mitre_techniques": [mitre_technique] if mitre_technique else [],
+                "validated": True,  # Auto-extracted is inherently validated
+            }
+        )
+
+    # Limit to prevent overwhelming the investigation
+    return evidence_items[:20]

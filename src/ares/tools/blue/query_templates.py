@@ -83,7 +83,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_port_scanning(
         self,
         target_ip: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect network port scanning activity (nmap, masscan).
 
@@ -121,7 +121,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_user_enumeration(
         self,
         domain_controller: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect Active Directory user enumeration.
 
@@ -166,7 +166,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_share_enumeration(
         self,
         target_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect SMB share enumeration.
 
@@ -215,7 +215,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_secretsdump(
         self,
         target_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect credential dumping via impacket-secretsdump.
 
@@ -263,7 +263,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_dcsync(
         self,
         domain_controller: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect DCSync attack (secretsdump against DC).
 
@@ -308,7 +308,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_kerberoasting(
         self,
         domain_controller: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect Kerberoasting attack (impacket-GetUserSPNs).
 
@@ -351,7 +351,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_asrep_roasting(
         self,
         domain_controller: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect AS-REP Roasting attack (impacket-GetNPUsers).
 
@@ -395,7 +395,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_brute_force(
         self,
         target_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
         threshold: int = 10,
     ) -> dict[str, Any]:
         """Detect brute force and password spray attacks.
@@ -456,7 +456,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_pass_the_hash(
         self,
         target_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect Pass-the-Hash attacks.
 
@@ -499,7 +499,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_lateral_movement(
         self,
         source_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect lateral movement patterns.
 
@@ -546,7 +546,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_smb_file_access(
         self,
         target_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect suspicious file access on SMB shares.
 
@@ -593,7 +593,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_adcs_exploitation(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect ADCS certificate abuse (ESC1-ESC15).
 
@@ -633,7 +633,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_delegation_abuse(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect Kerberos delegation attacks (RBCD, unconstrained, constrained).
 
@@ -673,7 +673,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_bloodhound_collection(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect BloodHound/SharpHound data collection.
 
@@ -715,7 +715,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_golden_ticket(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect Golden Ticket creation and usage.
 
@@ -760,7 +760,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_suspicious_execution(
         self,
         target_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect suspicious command execution.
 
@@ -805,7 +805,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_certipy_enumeration(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect Certipy certificate template enumeration.
 
@@ -843,7 +843,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_esc1_attack(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect ESC1 - Enrollee Supplies Subject attack.
 
@@ -886,7 +886,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_esc4_attack(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect ESC4 - Vulnerable Certificate Template ACL attack.
 
@@ -925,7 +925,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_esc8_attack(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect ESC8 - NTLM Relay to AD CS HTTP Endpoints.
 
@@ -966,7 +966,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_certificate_authentication(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect authentication using stolen/forged certificates.
 
@@ -1009,7 +1009,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_bloodhound_domain_enum(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect BloodHound domain trust and forest enumeration.
 
@@ -1048,7 +1048,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_bloodhound_acl_enum(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect BloodHound ACL/DACL enumeration.
 
@@ -1087,7 +1087,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_bloodhound_session_enum(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect BloodHound session enumeration.
 
@@ -1126,7 +1126,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_bloodhound_gpo_enum(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect BloodHound GPO enumeration.
 
@@ -1165,7 +1165,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_bloodhound_computer_enum(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect BloodHound computer enumeration.
 
@@ -1210,7 +1210,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_impacket_wmiexec(
         self,
         target_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect impacket-wmiexec remote execution.
 
@@ -1255,7 +1255,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_impacket_psexec(
         self,
         target_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect impacket-psexec remote execution.
 
@@ -1300,7 +1300,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_impacket_smbexec(
         self,
         target_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect impacket-smbexec remote execution.
 
@@ -1345,7 +1345,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_impacket_atexec(
         self,
         target_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect impacket-atexec remote execution.
 
@@ -1390,7 +1390,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_impacket_dcomexec(
         self,
         target_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect impacket-dcomexec remote execution.
 
@@ -1435,7 +1435,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_impacket_secretsdump_sam(
         self,
         target_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect impacket-secretsdump SAM database dump.
 
@@ -1480,7 +1480,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_impacket_secretsdump_lsa(
         self,
         target_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect impacket-secretsdump LSA secrets dump.
 
@@ -1524,7 +1524,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def detect_impacket_ntlmrelayx(
         self,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect impacket-ntlmrelayx NTLM relay attacks.
 
@@ -1565,7 +1565,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def detect_impacket_smbclient(
         self,
         target_host: str | None = None,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Detect impacket-smbclient share access.
 
@@ -1614,7 +1614,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def get_host_activity(
         self,
         hostname: str,
-        hours_back: int = 24,
+        hours_back: int = 4,
         attack_patterns_only: bool = False,
     ) -> dict[str, Any]:
         """Get all activity for a specific host.
@@ -1652,7 +1652,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     async def get_user_activity(
         self,
         username: str,
-        hours_back: int = 24,
+        hours_back: int = 4,
     ) -> dict[str, Any]:
         """Get all activity for a specific user.
 

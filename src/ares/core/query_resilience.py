@@ -57,15 +57,16 @@ class QueryResilientExecutor:
     - Statistics tracking for monitoring
     """
 
-    TIME_RANGE_FACTORS: ClassVar[list[float]] = [1.0, 0.5, 0.25, 0.1]
+    # Start with smaller time ranges to avoid mcp-grafana 10s timeout
+    TIME_RANGE_FACTORS: ClassVar[list[float]] = [0.5, 0.25, 0.1, 0.05]
     BACKOFF_DELAYS: ClassVar[list[int]] = [1, 2, 4]
 
     def __init__(
         self,
         max_retries: int = 3,
-        initial_timeout: float = 30.0,
+        initial_timeout: float = 8.0,  # Must be under mcp-grafana's 10s limit
         enable_chunking: bool = True,
-        chunk_size_minutes: int = 30,
+        chunk_size_minutes: int = 15,  # Smaller chunks for faster queries
     ):
         """Initialize the resilient executor.
 

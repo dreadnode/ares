@@ -227,7 +227,7 @@ class InvestigationOrchestrator:
                 self._mcp_client = None
                 self._mcp_tools = None
 
-    async def investigate(self, alert: dict) -> dict:
+    async def investigate(self, alert: dict, correlation_context: dict | None = None) -> dict:
         """Run a full investigation on an alert.
 
         Creates a new agent for this investigation and runs it
@@ -235,6 +235,8 @@ class InvestigationOrchestrator:
 
         Args:
             alert: The alert dictionary containing labels, annotations, and metadata.
+            correlation_context: Optional context from alert correlator with info about
+                related alerts (common hosts, users, IPs, techniques).
 
         Returns:
             A dict containing:
@@ -260,6 +262,7 @@ class InvestigationOrchestrator:
         state = InvestigationState(
             investigation_id=investigation_id,
             alert=alert,
+            correlation_context=correlation_context,
         )
 
         # Hard timeout using watchdog thread (works even if event loop is blocked)
