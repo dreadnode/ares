@@ -86,9 +86,9 @@ class TestQueryResilientExecutor:
         executor = QueryResilientExecutor()
 
         assert executor.max_retries == 3
-        assert executor.initial_timeout == 30.0
+        assert executor.initial_timeout == 8.0  # Updated: must be under mcp-grafana's 10s limit
         assert executor.enable_chunking is True
-        assert executor.chunk_size_minutes == 30
+        assert executor.chunk_size_minutes == 15  # Updated: smaller chunks for better reliability
 
     def test_init_custom_values(self) -> None:
         """Test initialization with custom values."""
@@ -429,8 +429,8 @@ class TestTimeRangeFactors:
         factors = QueryResilientExecutor.TIME_RANGE_FACTORS
 
         assert factors == sorted(factors, reverse=True)
-        assert factors[0] == 1.0  # Start with full range
-        assert factors[-1] < 0.5  # End with small range
+        assert factors[0] == 0.5  # Start with half range (more reliable for Loki queries)
+        assert factors[-1] < 0.1  # End with small range
 
     def test_backoff_delays_order(self) -> None:
         """Test that backoff delays are in ascending order."""

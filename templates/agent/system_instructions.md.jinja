@@ -114,10 +114,30 @@ your investigation is INCOMPLETE.**
 ### Stage 3: LATERAL (What is the SCOPE?) - CRITICAL FOR HIGH/CRITICAL ALERTS
 
 For HIGH and CRITICAL severity alerts, you MUST perform lateral investigation.
+**DO NOT SKIP THIS STAGE - IT'S CRITICAL FOR UNDERSTANDING THE FULL ATTACK SCOPE.**
 
-1. Call get_combined_questions() for scope questions
-2. Use track_host_investigation() and track_user_investigation() for EACH entity
-3. **MANDATORY LATERAL QUERIES:**
+**🚨 MANDATORY LATERAL ANALYSIS WORKFLOW 🚨**
+
+1. **FIRST**: Call `analyze_lateral_movement()` to see discovered host connections
+   - This shows hosts that have been connected to but not yet investigated
+   - It provides pivot suggestions for expanding your investigation
+
+2. **SECOND**: Call `get_correlated_alerts()` to see related alerts
+   - This shows other alerts that share common hosts/users/IPs/techniques
+   - Use this to understand if this is part of a larger attack campaign
+
+3. **THIRD**: For each pending host in pivot suggestions:
+   - Run `detect_lateral_movement(source_host="<host>")`
+   - Check authentication logs: `{hostname=~".*<host>.*"} |~ "4624|4625"`
+   - Look for process execution: `{hostname=~".*<host>.*"} |~ "4688"`
+   - Call `track_host_investigation("<host>")` to mark as investigated
+
+4. **FOURTH**: Record lateral movement connections
+   - For each connection you discover, call:
+     `record_lateral_connection(source_host, destination_host, connection_type, user)`
+   - Connection types: smb, rdp, wmi, psexec, ssh, winrm, dcom
+
+5. **FIFTH**: Build lateral movement queries:
 
 **For each user discovered:**
 ```
@@ -143,19 +163,23 @@ For HIGH and CRITICAL severity alerts, you MUST perform lateral investigation.
 - What services were accessed from this IP?
 - Is this IP associated with multiple users?
 
-4. Check these dimensions in PARALLEL:
+6. Check these dimensions in PARALLEL:
    - Same host: What else is this host doing?
    - Same user: Where else has this user been?
    - Same indicators: Where else do these IOCs appear?
    - Same timeframe: What else happened during this window?
 
-5. **Build a scope map:**
+7. **Build a scope map:**
    - List ALL compromised/affected hosts
    - List ALL compromised/affected users
    - Identify the attack origin point
    - Identify the furthest point of lateral movement
+   - Call `analyze_lateral_movement()` again to see the attack path
 
-6. Call transition_stage("synthesis")
+8. Call transition_stage("synthesis")
+
+**ANTI-PATTERN**: Skipping lateral analysis and going straight to synthesis
+**CORRECT PATTERN**: analyze_lateral_movement() -> investigate pending hosts -> record connections -> build attack path
 
 ### Stage 4: SYNTHESIS (Generate report)
 1. Call get_investigation_summary() to review findings

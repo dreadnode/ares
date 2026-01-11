@@ -112,6 +112,7 @@ async def main(
     logger.info("=" * 60)
 
     from ares.agents.blue import InvestigationOrchestrator
+    from ares.core.alert_correlation import AlertCorrelator
     from ares.integrations.mitre import MITREAttackClient
     from ares.tools.blue import GrafanaTools
 
@@ -140,6 +141,10 @@ async def main(
         base_url=args.grafana_url,
         api_key=grafana_api_key,
     )
+
+    # Initialize alert correlator for clustering related alerts
+    alert_correlator = AlertCorrelator()
+    logger.info("Alert correlation enabled - related alerts will be clustered")
 
     # Track investigated alerts
     investigated_fingerprints: set[str] = set()
@@ -176,9 +181,21 @@ async def main(
                     # Mark as being investigated
                     investigated_fingerprints.add(fingerprint)
 
-                    # Run investigation
+                    # Add alert to correlator and get context
+                    cluster = alert_correlator.add_alert(alert)
+                    correlation_context = alert_correlator.get_cluster_context(alert)
+                    related_count = correlation_context.get("related_alerts", 0)
+                    if related_count > 0:
+                        logger.info(
+                            f"Alert correlation: {related_count} related alerts in cluster "
+                            f"{cluster.cluster_id}"
+                        )
+
+                    # Run investigation with correlation context
                     try:
-                        result = await orchestrator.investigate(alert)
+                        result = await orchestrator.investigate(
+                            alert, correlation_context=correlation_context
+                        )
 
                         logger.success("")
                         logger.success("INVESTIGATION COMPLETE")

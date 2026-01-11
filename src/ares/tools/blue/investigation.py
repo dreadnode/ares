@@ -353,6 +353,192 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
         logger.info(f"Returning {len(suggestions)} suggested IOCs from query results")
         return suggestions
 
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    def analyze_lateral_movement(self, focus_host: str | None = None) -> dict:
+        """Analyze lateral movement patterns and get pivot suggestions.
+
+        CALL THIS DURING THE LATERAL STAGE to understand the attack scope.
+        This tool shows:
+        1. Which hosts have connected to which (lateral movement graph)
+        2. Which hosts are pending investigation
+        3. Suggested next steps for investigating pending hosts
+
+        Args:
+            focus_host: Optional host to focus analysis on. If provided,
+                       shows only connections involving this host.
+
+        Returns:
+            Lateral movement summary with graph statistics and pivot suggestions.
+
+        Example:
+            >>> analyze_lateral_movement()
+            {
+                'graph_summary': {
+                    'total_connections': 5,
+                    'hosts_investigated': 2,
+                    'hosts_pending': 3,
+                    'connection_types': {'smb': 3, 'rdp': 2},
+                    ...
+                },
+                'pivot_suggestions': [
+                    {
+                        'host': 'dc01.domain.local',
+                        'discovered_from': ['ws01.domain.local'],
+                        'priority': 3,
+                        'suggested_queries': ['...'],
+                        'suggested_actions': ['...']
+                    },
+                    ...
+                ]
+            }
+
+        See Also:
+            track_host_investigation: Call this when you investigate a suggested host.
+            detect_lateral_movement: Use QueryTemplateTools to detect lateral movement.
+        """
+        if not self.state:
+            return {"error": "No investigation state"}
+
+        from ares.core.lateral_analyzer import LateralMovementAnalyzer
+
+        analyzer = LateralMovementAnalyzer(self.state.lateral_graph)
+
+        result = {
+            "graph_summary": self.state.lateral_graph.to_summary(),
+            "pivot_suggestions": analyzer.get_pivot_suggestions(),
+            "attack_path": analyzer.get_attack_path(),
+        }
+
+        if focus_host:
+            result["host_connections"] = [
+                {
+                    "source": c.source_host,
+                    "destination": c.destination_host,
+                    "type": c.connection_type,
+                    "user": c.user,
+                    "mitre_technique": c.mitre_technique,
+                }
+                for c in self.state.lateral_graph.get_host_connections(focus_host)
+            ]
+
+        # Log metrics
+        dn.log_metric("lateral_connections", len(self.state.lateral_graph.connections))
+        dn.log_metric("hosts_pending_investigation", len(self.state.lateral_graph.pending_hosts))
+
+        return result
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    def record_lateral_connection(
+        self,
+        source_host: str,
+        destination_host: str,
+        connection_type: str,
+        user: str | None = None,
+        mitre_technique: str | None = None,
+    ) -> str:
+        """Record a lateral movement connection between hosts.
+
+        Call this when you discover evidence of movement between hosts.
+        This builds the lateral movement graph for scope analysis.
+
+        Args:
+            source_host: Origin host of the connection.
+            destination_host: Target host of the connection.
+            connection_type: Type of connection (smb, rdp, wmi, psexec, ssh, winrm, dcom).
+            user: Optional username used for the connection.
+            mitre_technique: Optional MITRE technique ID (e.g., T1021.002 for SMB).
+
+        Returns:
+            Confirmation message with connection details.
+
+        Example:
+            >>> record_lateral_connection(
+            ...     source_host="ws01.domain.local",
+            ...     destination_host="dc01.domain.local",
+            ...     connection_type="smb",
+            ...     user="admin",
+            ...     mitre_technique="T1021.002"
+            ... )
+            'Recorded SMB connection: ws01.domain.local -> dc01.domain.local'
+        """
+        if not self.state:
+            return "ERROR: No investigation state"
+
+        conn = self.state.lateral_graph.add_connection(
+            source=source_host,
+            destination=destination_host,
+            conn_type=connection_type,
+            user=user,
+            mitre_technique=mitre_technique,
+        )
+
+        if conn is None:
+            return "Connection not recorded (same source and destination)"
+
+        dn.log_metric("lateral_connections_recorded", 1, mode="count")
+
+        return (
+            f"Recorded {connection_type.upper()} connection: "
+            f"{source_host} -> {destination_host}" + (f" (user: {user})" if user else "")
+        )
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    def get_correlated_alerts(self) -> dict:
+        """Get information about alerts correlated with this investigation.
+
+        Shows other alerts that share common characteristics:
+        - Same hosts
+        - Same users
+        - Same IPs
+        - Same MITRE techniques
+        - Similar time windows
+
+        Use this to understand the broader attack context and identify
+        if this alert is part of a larger attack campaign.
+
+        Returns:
+            Correlation information including related alerts and common IOCs.
+
+        Example:
+            >>> get_correlated_alerts()
+            {
+                'cluster_id': 'cluster-0001',
+                'related_alert_count': 3,
+                'common_hosts': ['dc01.domain.local', 'ws01.domain.local'],
+                'common_users': ['admin'],
+                'techniques_in_cluster': ['T1558.003', 'T1078.002'],
+                'recommendation': 'This alert is part of a cluster...'
+            }
+        """
+        if not self.state:
+            return {"error": "No investigation state"}
+
+        ctx = self.state.correlation_context or {}
+
+        if not ctx.get("cluster_id"):
+            return {
+                "message": "This is the first alert in a potential cluster",
+                "suggestion": "Watch for similar alerts in the same time window",
+                "common_hosts": list(self.state.queried_hosts)[:5],
+                "common_users": list(self.state.queried_users)[:5],
+                "techniques_identified": list(self.state.identified_techniques)[:10],
+            }
+
+        return {
+            "cluster_id": ctx.get("cluster_id"),
+            "related_alert_count": ctx.get("related_alerts", 0),
+            "common_hosts": ctx.get("common_hosts", []),
+            "common_users": ctx.get("common_users", []),
+            "common_ips": ctx.get("common_ips", []),
+            "techniques_in_cluster": ctx.get("techniques_in_cluster", []),
+            "time_range": ctx.get("time_range"),
+            "recommendation": (
+                f"This alert is part of a cluster with {ctx.get('related_alerts', 0)} other alerts. "
+                "Consider investigating the common hosts/users across all alerts to understand "
+                "the full attack scope."
+            ),
+        }
+
 
 class QuestionEngineTools(Toolset):  # type: ignore[misc]
     """Tools for the question engines that drive the investigation.

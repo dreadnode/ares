@@ -299,6 +299,8 @@ class InvestigationState:
         escalation_reason: Reason for escalation if applicable.
         attack_synopsis: Summary of the attack for the report.
         recommendations: List of recommended actions.
+        lateral_graph: Graph tracking lateral movement between hosts.
+        correlation_context: Context from alert correlation (related alerts, common IOCs).
     """
 
     investigation_id: str
@@ -326,6 +328,21 @@ class InvestigationState:
     escalation_reason: str | None = None
     attack_synopsis: str | None = None
     recommendations: list[str] = field(default_factory=list)
+
+    # Lateral movement tracking
+    lateral_graph: Any = field(
+        default=None
+    )  # LateralGraph - imported lazily to avoid circular imports
+
+    # Alert correlation context
+    correlation_context: dict[str, Any] | None = None
+
+    def __post_init__(self):
+        """Initialize lateral graph if not provided."""
+        if self.lateral_graph is None:
+            from ares.core.lateral_analyzer import LateralGraph
+
+            self.lateral_graph = LateralGraph()
 
     @property
     def evidence_count(self) -> int:

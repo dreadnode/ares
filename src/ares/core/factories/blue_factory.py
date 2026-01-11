@@ -1,6 +1,7 @@
 """Factory for creating investigation agents with presets."""
 
 import functools
+import uuid
 from typing import Any
 
 import dreadnode as dn
@@ -10,8 +11,12 @@ from dreadnode.agent.hooks import retry_with_feedback
 from dreadnode.agent.stop import StopCondition, tool_use
 from loguru import logger
 
-from ares.core.evidence_validation import reset_evidence_validation, store_query_result
-from ares.core.models import InvestigationState
+from ares.core.evidence_validation import (
+    auto_extract_evidence_from_query,
+    reset_evidence_validation,
+    store_query_result,
+)
+from ares.core.models import Evidence, InvestigationState, PyramidLevel
 from ares.core.query_resilience import QueryResilientExecutor, get_resilient_executor
 from ares.core.templates import get_template_loader
 from ares.integrations.mitre import MITREAttackClient
@@ -38,22 +43,22 @@ _seen_queries: dict[str, int] = {}  # Track query -> count to detect loops
 _current_state: "InvestigationState | None" = None
 _bonus_queries_granted = 0  # Track bonus queries granted
 
-# Base query limits
-MAX_QUERIES_PER_INVESTIGATION = 5
-MAX_QUERIES_CRITICAL = 8  # Higher limit for critical alerts
+# Base query limits - increased for deeper investigations
+MAX_QUERIES_PER_INVESTIGATION = 8  # Was 5
+MAX_QUERIES_CRITICAL = 12  # Was 8 - higher limit for critical alerts
 MAX_DUPLICATE_QUERIES = 2  # Max times same query can run before blocking
 
-# Adaptive query limit settings
-BONUS_QUERIES_FOR_EVIDENCE = 2  # Grant +2 queries when evidence is found
+# Adaptive query limit settings - more generous for productive investigations
+BONUS_QUERIES_FOR_EVIDENCE = 3  # Was 2 - grant +3 queries when evidence is found
 BONUS_QUERIES_FOR_PYRAMID_L4 = 2  # Grant +2 queries when reaching pyramid level 4+
-MAX_TOTAL_QUERIES = 15  # Hard cap to prevent runaway investigations
+MAX_TOTAL_QUERIES = 25  # Was 15 - hard cap to prevent runaway investigations
 
 # Staged limits by investigation phase (cumulative budget per phase)
 QUERY_LIMITS_BY_STAGE = {
-    "triage": 5,  # Initial 5 queries for triage
-    "causation": 8,  # +3 more (8 total)
-    "lateral": 11,  # +3 more (11 total)
-    "synthesis": 11,  # No additional queries in synthesis phase
+    "triage": 8,  # Was 5 - initial queries for triage
+    "causation": 14,  # Was 8 - root cause analysis
+    "lateral": 20,  # Was 11 - lateral movement scope
+    "synthesis": 20,  # Was 11 - no additional queries in synthesis phase
 }
 
 
@@ -277,6 +282,48 @@ def _record_query(
             result_data=result_data,
             result_count=result_count,
         )
+
+        # AUTO-EXTRACTION: Automatically extract IOCs from query results
+        if _current_state:
+            try:
+                extracted = auto_extract_evidence_from_query(
+                    query_result=result_data,
+                    source_description=f"{tool_name}: {query_string[:100]}",
+                    mitre_technique=None,  # Will be enriched if agent provides context
+                )
+
+                if extracted:
+                    # Get existing values once and track new ones
+                    existing_values = {e.value for e in _current_state.evidence}
+                    added_count = 0
+
+                    for item in extracted:
+                        # Check for duplicates by value
+                        if item["value"] in existing_values:
+                            continue
+
+                        evidence = Evidence(
+                            id=f"auto-{uuid.uuid4().hex[:8]}",
+                            type=item["type"],
+                            value=item["value"],
+                            source=item["source"],
+                            timestamp=None,
+                            pyramid_level=PyramidLevel(item["pyramid_level"]),
+                            mitre_techniques=item.get("mitre_techniques", []),
+                            confidence=item["confidence"],
+                            validated=item.get("validated", True),
+                        )
+                        _current_state.evidence.append(evidence)
+                        existing_values.add(item["value"])  # Track for this batch
+                        added_count += 1
+
+                    if added_count > 0:
+                        logger.info(
+                            f"🔍 Auto-extracted {added_count} IOCs from query results "
+                            f"(total evidence: {len(_current_state.evidence)})"
+                        )
+            except Exception as e:
+                logger.warning(f"Auto-extraction failed: {e}")
 
 
 def create_rate_limited_mcp_tool(
@@ -651,8 +698,8 @@ def create_investigation_agent(
         stop_conditions=[
             tool_use("complete_investigation"),
             tool_use("escalate_investigation"),
-            max_queries_stop(max_queries=5),  # Force stop after 5 queries
-            max_tool_calls_stop(max_calls=20),  # Force stop after 20 total tool calls
+            max_queries_stop(max_queries=12),  # Was 5 - force stop after 12 queries
+            max_tool_calls_stop(max_calls=50),  # Was 20 - force stop after 50 total tool calls
         ],
         thread=Thread(),  # type: ignore[call-arg]
     )

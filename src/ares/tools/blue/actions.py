@@ -123,41 +123,125 @@ class CompletionTools(Toolset):  # type: ignore[misc]
 
         return "Investigation completed. Report will be generated."
 
-    def _generate_fallback_synopsis(self) -> None:
-        """Generate a basic synopsis from evidence if none provided."""
+    def _generate_fallback_synopsis(self) -> None:  # noqa: PLR0912
+        """Generate a comprehensive synopsis from evidence if none provided.
+
+        Creates a structured narrative including:
+        - Alert context (name, severity, time)
+        - MITRE techniques with names and tactics
+        - Hosts and users involved
+        - Evidence summary by pyramid level
+        - Lateral movement summary
+        - Timeline summary
+        - Confidence assessment
+        """
         if not self.state:
             return
 
-        parts = []
+        parts: list[str] = []
 
+        # Alert context
         alert_name = self.state.alert.get("labels", {}).get("alertname", "Unknown alert")
         severity = self.state.alert.get("labels", {}).get("severity", "unknown")
         starts_at = self.state.alert.get("startsAt", "")
 
-        parts.append(f"{severity.upper()} alert: {alert_name}")
-
+        parts.append(f"**Alert:** {severity.upper()} - {alert_name}")
         if starts_at:
-            parts.append(f"Alert triggered at {starts_at}.")
+            parts.append(f"**Time:** Alert triggered at {starts_at}")
 
+        # Attack techniques identified with names and tactics
         if self.state.identified_techniques:
-            techniques = ", ".join(list(self.state.identified_techniques)[:3])
-            parts.append(f"MITRE techniques identified: {techniques}.")
+            technique_details = []
+            for tech_id in list(self.state.identified_techniques)[:5]:
+                name = self.state.technique_names.get(tech_id, "")
+                tactic = self.state.technique_to_tactic.get(tech_id, "")
+                if name:
+                    technique_details.append(f"{tech_id} ({name}, {tactic})")
+                else:
+                    technique_details.append(tech_id)
+            parts.append(f"**MITRE Techniques:** {', '.join(technique_details)}")
 
+        # Hosts involved
         if self.state.queried_hosts:
-            hosts = ", ".join(list(self.state.queried_hosts)[:3])
-            parts.append(f"Hosts involved: {hosts}.")
+            hosts = list(self.state.queried_hosts)[:5]
+            parts.append(f"**Hosts Involved:** {', '.join(hosts)}")
+            if len(self.state.queried_hosts) > 5:
+                parts.append(f"  (and {len(self.state.queried_hosts) - 5} more)")
 
+        # Users involved
         if self.state.queried_users:
-            users = ", ".join(list(self.state.queried_users)[:3])
-            parts.append(f"Users involved: {users}.")
+            users = list(self.state.queried_users)[:5]
+            parts.append(f"**Users Involved:** {', '.join(users)}")
 
+        # Evidence summary by pyramid level
         if self.state.evidence:
-            parts.append(f"{len(self.state.evidence)} evidence items collected.")
-            high_level = [e for e in self.state.evidence if e.pyramid_level.value >= 5]
-            if high_level:
-                parts.append(f"{len(high_level)} high-value indicators (tools/TTPs) identified.")
+            by_level: dict[int, list] = {}
+            for ev in self.state.evidence:
+                level = ev.pyramid_level.value
+                if level not in by_level:
+                    by_level[level] = []
+                by_level[level].append(ev)
 
-        self.state.attack_synopsis = " ".join(parts)
+            parts.append(f"**Evidence Collected:** {len(self.state.evidence)} items")
+
+            level_names = {
+                1: "Hash Values",
+                2: "IP Addresses",
+                3: "Domain Names",
+                4: "Network/Host Artifacts",
+                5: "Tools",
+                6: "TTPs",
+            }
+            for level in sorted(by_level.keys(), reverse=True):
+                items = by_level[level]
+                level_name = level_names.get(level, f"Level {level}")
+                parts.append(f"  - {level_name}: {len(items)} items")
+                # Show top 3 values for each level
+                for ev in items[:3]:
+                    value_preview = ev.value[:50] + "..." if len(ev.value) > 50 else ev.value
+                    parts.append(f"    - {ev.type}: {value_preview}")
+
+        # Lateral movement summary
+        if (
+            hasattr(self.state, "lateral_graph")
+            and self.state.lateral_graph
+            and self.state.lateral_graph.connections
+        ):
+            graph = self.state.lateral_graph
+            parts.append(f"**Lateral Movement:** {len(graph.connections)} connections detected")
+            parts.append(f"  - Hosts investigated: {len(graph.investigated_hosts)}")
+            parts.append(f"  - Hosts pending: {len(graph.pending_hosts)}")
+            if graph.connections:
+                conn_types: dict[str, int] = {}
+                for c in graph.connections:
+                    conn_types[c.connection_type] = conn_types.get(c.connection_type, 0) + 1
+                parts.append(f"  - Connection types: {conn_types}")
+
+        # Timeline summary
+        if len(self.state.timeline) > 1:
+            sorted_timeline = sorted(self.state.timeline, key=lambda e: e.timestamp)
+            first = sorted_timeline[0]
+            last = sorted_timeline[-1]
+            parts.append(f"**Timeline:** {len(self.state.timeline)} events")
+            first_desc = (
+                first.description[:50] + "..." if len(first.description) > 50 else first.description
+            )
+            last_desc = (
+                last.description[:50] + "..." if len(last.description) > 50 else last.description
+            )
+            parts.append(f"  - First event: {first.timestamp.isoformat()} - {first_desc}")
+            parts.append(f"  - Last event: {last.timestamp.isoformat()} - {last_desc}")
+
+        # Confidence assessment
+        if self.state.evidence:
+            avg_confidence = sum(e.confidence for e in self.state.evidence) / len(
+                self.state.evidence
+            )
+            validated_count = sum(1 for e in self.state.evidence if e.validated)
+            parts.append(f"**Confidence:** {avg_confidence * 100:.0f}% average")
+            parts.append(f"  - Validated evidence: {validated_count}/{len(self.state.evidence)}")
+
+        self.state.attack_synopsis = "\n".join(parts)
 
 
 @dn.tool  # type: ignore[untyped-decorator]
