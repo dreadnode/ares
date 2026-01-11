@@ -527,3 +527,153 @@ class TestEdgeCases:
 
         # Should handle long queries without error
         assert result["found"] is True
+
+
+class TestGetStoreInitialization:
+    """Tests for lazy store initialization."""
+
+    def test_get_store_initializes_when_none(self) -> None:
+        """Test that get_store initializes a store when none is provided."""
+        tools = LearningTools(store=None)
+        assert tools.store is None
+
+        store = tools.get_store()
+        assert store is not None
+        assert tools.store is not None
+        assert tools.store is store
+
+
+class TestFalsePositivePatternEdgeCases:
+    """Tests for edge cases in check_false_positive_pattern."""
+
+    @pytest.mark.asyncio
+    async def test_fp_rate_zero_when_no_labeled(self, store: InvestigationStore) -> None:
+        """Test fp_rate is 0.0 when no investigations have is_true_positive set."""
+        now = datetime.now(timezone.utc)
+
+        # Create investigations with no labeling (is_true_positive=None)
+        for i in range(5):
+            inv = StoredInvestigation(
+                investigation_id=f"unlabeled-inv-{i}",
+                alert_name="UnlabeledAlert",
+                alert_fingerprint="unlabeled-rule",
+                severity="low",
+                technique_id="T1000",
+                technique_name="Test",
+                started_at=now - timedelta(minutes=i),
+                completed_at=now,
+                duration_seconds=60.0,
+                status="completed",
+                evidence_count=0,
+                highest_pyramid_level=0,
+                techniques_identified=[],
+                queries_executed=[],
+                query_success_rate=0.0,
+                effective_queries=[],
+                is_true_positive=None,  # No labeling
+            )
+            store.store_investigation(inv)
+
+        tools = LearningTools(store=store)
+        result = await tools.check_false_positive_pattern(alert_name="UnlabeledAlert")
+
+        # Should have 0% FP rate since no labeled investigations
+        assert "false_positive_rate" in result
+        assert result["false_positive_rate"] == "0%"
+        assert result["is_known_pattern"] is False
+        assert result["confidence"] == "low"  # Low confidence since none are labeled
+
+    @pytest.mark.asyncio
+    async def test_fp_rate_above_70_percent(self, store: InvestigationStore) -> None:
+        """Test detection when fp_rate > 0.7 but not known pattern."""
+        now = datetime.now(timezone.utc)
+
+        # Create 10 investigations with 8 false positives (80% FP rate)
+        for i in range(10):
+            inv = StoredInvestigation(
+                investigation_id=f"high-fp-inv-{i}",
+                alert_name="HighFPAlert",
+                alert_fingerprint=f"fp-rule-{i}",  # Different fingerprints so no known pattern
+                severity="low",
+                technique_id="T1000",
+                technique_name="Test",
+                started_at=now - timedelta(minutes=i),
+                completed_at=now,
+                duration_seconds=60.0,
+                status="completed",
+                evidence_count=0,
+                highest_pyramid_level=0,
+                techniques_identified=[],
+                queries_executed=[],
+                query_success_rate=0.0,
+                effective_queries=[],
+                is_true_positive=i < 2,  # Only 2 true positives = 80% FP rate
+            )
+            store.store_investigation(inv)
+
+        tools = LearningTools(store=store)
+        result = await tools.check_false_positive_pattern(alert_name="HighFPAlert")
+
+        # Should detect high FP rate and return recommendation
+        assert result["is_known_pattern"] is True
+        assert result["confidence"] == "medium"
+        assert "80%" in result["false_positive_rate"]
+        assert "recommendation" in result
+        assert "high false positive rate" in result["recommendation"]
+
+
+class TestGuidanceGenerationEdgeCases:
+    """Tests for edge cases in _generate_guidance."""
+
+    def test_generate_guidance_empty_similar(self, store: InvestigationStore) -> None:
+        """Test _generate_guidance returns fallback when similar is empty."""
+        tools = LearningTools(store=store)
+        # Call _generate_guidance directly with empty list
+        guidance = tools._generate_guidance([])
+        assert guidance == "No historical guidance available."
+
+    @pytest.mark.asyncio
+    async def test_guidance_no_similar_investigations(self, store: InvestigationStore) -> None:
+        """Test guidance when no similar investigations found."""
+        # Empty store - no similar investigations
+        tools = LearningTools(store=store)
+        result = await tools.find_similar_investigations(alert_name="NonexistentAlert")
+
+        # When no similar investigations found, the function returns early without guidance
+        # But the result should indicate nothing was found
+        assert result["found"] is False
+        assert "No similar investigations" in result["message"]
+        assert result["investigations"] == []
+
+    @pytest.mark.asyncio
+    async def test_guidance_no_completed_investigations(self, store: InvestigationStore) -> None:
+        """Test guidance when similar investigations exist but none completed."""
+        now = datetime.now(timezone.utc)
+
+        # Create investigations with non-completed status
+        for i in range(3):
+            inv = StoredInvestigation(
+                investigation_id=f"failed-inv-{i}",
+                alert_name="FailedAlert",
+                alert_fingerprint="failed-rule",
+                severity="high",
+                technique_id="T1000",
+                technique_name="Test",
+                started_at=now - timedelta(minutes=i),
+                completed_at=now,
+                duration_seconds=60.0,
+                status="failed",  # Not completed
+                evidence_count=0,
+                highest_pyramid_level=0,
+                techniques_identified=[],
+                queries_executed=[],
+                query_success_rate=0.0,
+                effective_queries=[],
+            )
+            store.store_investigation(inv)
+
+        tools = LearningTools(store=store)
+        result = await tools.find_similar_investigations(alert_name="FailedAlert")
+
+        # Should return guidance about no successful completions
+        assert "did not complete successfully" in result["guidance"]

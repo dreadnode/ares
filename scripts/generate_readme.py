@@ -61,7 +61,7 @@ def main() -> None:
     context = {
         "project_name": metadata.get("name", "Project Name"),
         "description": metadata.get("description", "A Python Project"),
-        "github_org": "organization",  # Could be loaded from git config
+        "github_org": metadata.get("github_org", "dreadnode"),
         "repo_name": metadata.get("name", "repository"),
         "emoji": "🐍",  # Default emoji
         "logo_url": None,  # Optional logo

@@ -1,13 +1,13 @@
 # Ares - Autonomous Security Operations Agent
 
-<div align="center">
+<!-- BEGIN_AUTO_BADGES -->
 
 [![Tests](https://github.com/dreadnode/ares/actions/workflows/tests.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/tests.yaml)
 [![Pre-Commit](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-</div>
+<!-- END_AUTO_BADGES -->
 
 Autonomous security agent with dual capabilities: **Blue Team** (SOC alert
 investigation) and **Red Team** (penetration testing). Built with the Dreadnode
@@ -131,21 +131,21 @@ task ares:reports:latest      # Show latest report
 
 **Available Tasks:**
 
-| Command | Description |
-| ------- | ----------- |
-| `task ares:blue:` | Run blue team agent in poll mode (checks Grafana every 30s) |
-| `task ares:blue:once:` | Run blue team once and exit |
-| `task ares:blue:local:` | Run blue team using .env file instead of 1Password |
-| `task ares:investigate ALERT=<file>` | Investigate a specific alert from JSON file |
-| `task ares:red TARGET=<filter>` | Run red team agent (resolves target via EC2 Name tag filter) |
-| `task ares:red: TARGET=<ip>` | Run red team agent against direct IP address |
-| `task ares:red:local: TARGET=<ip>` | Run red team using .env file instead of 1Password |
-| `task ares:config:check` | Verify configuration and 1Password access |
-| `task ares:config:show` | Display current configuration (no secrets) |
-| `task ares:reports:list` | List all investigation reports |
-| `task ares:reports:latest` | Show the most recent report |
-| `task ares:reports:clean` | Delete all reports (asks for confirmation) |
-| `task ares:mitre:test` | Test MITRE ATT&CK data loading |
+| Command                              | Description                                                  |
+| ------------------------------------ | ------------------------------------------------------------ |
+| `task ares:blue:`                    | Run blue team agent in poll mode (checks Grafana every 30s)  |
+| `task ares:blue:once:`               | Run blue team once and exit                                  |
+| `task ares:blue:local:`              | Run blue team using .env file instead of 1Password           |
+| `task ares:investigate ALERT=<file>` | Investigate a specific alert from JSON file                  |
+| `task ares:red TARGET=<filter>`      | Run red team agent (resolves target via EC2 Name tag filter) |
+| `task ares:red: TARGET=<ip>`         | Run red team agent against direct IP address                 |
+| `task ares:red:local: TARGET=<ip>`   | Run red team using .env file instead of 1Password            |
+| `task ares:config:check`             | Verify configuration and 1Password access                    |
+| `task ares:config:show`              | Display current configuration (no secrets)                   |
+| `task ares:reports:list`             | List all investigation reports                               |
+| `task ares:reports:latest`           | Show the most recent report                                  |
+| `task ares:reports:clean`            | Delete all reports (asks for confirmation)                   |
+| `task ares:mitre:test`               | Test MITRE ATT&CK data loading                               |
 
 See [Taskfile Usage Guide](docs/taskfile_usage.md) for detailed documentation.
 
@@ -229,14 +229,14 @@ bloodhound-python).
 
 **Agent Arguments (`--args.*`):**
 
-| Option | Default | Description |
-| ------ | ------- | ----------- |
-| `--args.model` | `claude-sonnet-4-20250514` | LLM model to use |
-| `--args.grafana-url` | `https://grafana.dev.plundr.ai` | Grafana URL for alerts and MCP |
-| `--args.poll-interval` | `30` | Seconds between alert polls |
-| `--args.max-steps` | `30` | Maximum LLM round trips per investigation |
-| `--args.report-dir` | `./reports` | Directory for markdown reports |
-| `--args.once` | `false` | Process current alerts once and exit |
+| Option                 | Default                         | Description                               |
+| ---------------------- | ------------------------------- | ----------------------------------------- |
+| `--args.model`         | `claude-sonnet-4-20250514`      | LLM model to use                          |
+| `--args.grafana-url`   | `https://grafana.dev.plundr.ai` | Grafana URL for alerts and MCP            |
+| `--args.poll-interval` | `30`                            | Seconds between alert polls               |
+| `--args.max-steps`     | `30`                            | Maximum LLM round trips per investigation |
+| `--args.report-dir`    | `./reports`                     | Directory for markdown reports            |
+| `--args.once`          | `false`                         | Process current alerts once and exit      |
 
 **Stop Conditions:**
 
@@ -258,13 +258,13 @@ The agent has multiple timeout layers:
 
 **Dreadnode Platform Arguments (`--dn-args.*`):**
 
-| Option | Default | Description |
-| ------ | ------- | ----------- |
-| `--dn-args.server` | `https://platform.dev.plundr.ai/` | Dreadnode platform server URL |
-| `--dn-args.token` | from `DREADNODE_API_KEY` | Dreadnode API token |
-| `--dn-args.organization` | `ares` | Dreadnode organization name |
-| `--dn-args.workspace` | `ares-protocol` | Dreadnode workspace name |
-| `--dn-args.project` | `ares-soc` | Dreadnode project name |
+| Option                   | Default                           | Description                   |
+| ------------------------ | --------------------------------- | ----------------------------- |
+| `--dn-args.server`       | `https://platform.dev.plundr.ai/` | Dreadnode platform server URL |
+| `--dn-args.token`        | from `DREADNODE_API_KEY`          | Dreadnode API token           |
+| `--dn-args.organization` | `ares`                            | Dreadnode organization name   |
+| `--dn-args.workspace`    | `ares-protocol`                   | Dreadnode workspace name      |
+| `--dn-args.project`      | `ares-soc`                        | Dreadnode project name        |
 
 ## Blue Team Investigation Workflow
 
@@ -419,19 +419,19 @@ pytest --cov=src tests/
 
 **Blue Team (SOC Investigation):**
 
-| Variable | Required | Description |
-| -------- | -------- | ----------- |
-| `GRAFANA_URL` | Yes | Grafana instance URL (e.g., `https://grafana.example.com`) |
-| `GRAFANA_SERVICE_ACCOUNT_TOKEN` | Yes | Grafana service account token for API access |
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude models |
-| `DREADNODE_API_KEY` | No | Dreadnode platform token for observability |
+| Variable                        | Required | Description                                                |
+| ------------------------------- | -------- | ---------------------------------------------------------- |
+| `GRAFANA_URL`                   | Yes      | Grafana instance URL (e.g., `https://grafana.example.com`) |
+| `GRAFANA_SERVICE_ACCOUNT_TOKEN` | Yes      | Grafana service account token for API access               |
+| `ANTHROPIC_API_KEY`             | Yes      | Anthropic API key for Claude models                        |
+| `DREADNODE_API_KEY`             | No       | Dreadnode platform token for observability                 |
 
 **Red Team (Penetration Testing):**
 
-| Variable | Required | Description |
-| -------- | -------- | ----------- |
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude models |
-| `DREADNODE_API_KEY` | No | Dreadnode platform token for observability |
+| Variable            | Required | Description                                |
+| ------------------- | -------- | ------------------------------------------ |
+| `ANTHROPIC_API_KEY` | Yes      | Anthropic API key for Claude models        |
+| `DREADNODE_API_KEY` | No       | Dreadnode platform token for observability |
 
 **Note:** `GRAFANA_API_KEY` is deprecated. Use `GRAFANA_SERVICE_ACCOUNT_TOKEN`
 instead. See [Grafana's service account
