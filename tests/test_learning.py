@@ -115,21 +115,21 @@ class TestLearningToolsInit:
         """Test initialization with provided store."""
         tools = LearningTools(store=store)
 
-        assert tools._store is store
+        assert tools.store is store
 
     def test_init_without_store(self) -> None:
         """Test initialization without store uses global."""
         tools = LearningTools()
 
-        assert tools._store is None
-        # Accessing store property should get/create global store
+        assert tools.store is None
+        # Accessing get_store() should get/create global store
         # (but we won't test that to avoid side effects)
 
-    def test_store_property_returns_provided_store(self, store: InvestigationStore) -> None:
-        """Test that store property returns provided store."""
+    def test_get_store_returns_provided_store(self, store: InvestigationStore) -> None:
+        """Test that get_store() returns provided store."""
         tools = LearningTools(store=store)
 
-        assert tools.store is store
+        assert tools.get_store() is store
 
 
 class TestFindSimilarInvestigations:

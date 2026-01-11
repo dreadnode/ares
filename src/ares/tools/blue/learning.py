@@ -19,22 +19,18 @@ class LearningTools(Toolset):  # type: ignore[misc]
 
     Provides access to historical investigation data, query effectiveness
     statistics, and false positive patterns.
+
+    Attributes:
+        store: Optional investigation store (uses global store if not provided).
     """
 
-    def __init__(self, store: InvestigationStore | None = None):
-        """Initialize learning tools.
+    store: InvestigationStore | None = None
 
-        Args:
-            store: Optional investigation store (uses global store if not provided)
-        """
-        self._store = store
-
-    @property
-    def store(self) -> InvestigationStore:
-        """Get the investigation store."""
-        if self._store is None:
-            self._store = get_investigation_store()
-        return self._store
+    def get_store(self) -> InvestigationStore:
+        """Get the investigation store, initializing if needed."""
+        if self.store is None:
+            self.store = get_investigation_store()
+        return self.store
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def find_similar_investigations(
@@ -63,7 +59,7 @@ class LearningTools(Toolset):  # type: ignore[misc]
             f"Looking up similar investigations: alert={alert_name}, technique={technique_id}"
         )
 
-        similar = self.store.find_similar_investigations(
+        similar = self.get_store().find_similar_investigations(
             alert_name=alert_name,
             technique_id=technique_id,
             severity=severity,
@@ -140,7 +136,7 @@ class LearningTools(Toolset):  # type: ignore[misc]
         dn.log_metric("learning_query_lookup", 1, mode="count")
         logger.info(f"Looking up effective queries for alert: {alert_name}")
 
-        effective = self.store.get_effective_queries(
+        effective = self.get_store().get_effective_queries(
             alert_type=alert_name,
             min_evidence_rate=0.2,  # At least 20% evidence rate
             limit=limit,
@@ -198,7 +194,7 @@ class LearningTools(Toolset):  # type: ignore[misc]
         logger.info(f"Checking false positive patterns for: {alert_name}")
 
         # Check for similar false positives
-        similar = self.store.find_similar_investigations(
+        similar = self.get_store().find_similar_investigations(
             alert_name=alert_name,
             alert_fingerprint=alert_fingerprint,
             limit=20,
@@ -223,7 +219,7 @@ class LearningTools(Toolset):  # type: ignore[misc]
             fp_rate = 0.0
 
         # Check known FP patterns
-        fp_patterns = self.store.get_false_positive_patterns(min_occurrences=2)
+        fp_patterns = self.get_store().get_false_positive_patterns(min_occurrences=2)
         matching_pattern = None
         for pattern in fp_patterns:
             if pattern["alert_name"] == alert_name:
@@ -278,7 +274,7 @@ class LearningTools(Toolset):  # type: ignore[misc]
         """
         dn.log_metric("learning_stats_lookup", 1, mode="count")
 
-        stats = self.store.get_statistics()
+        stats = self.get_store().get_statistics()
 
         return {
             "total_investigations": stats["total_investigations"],
