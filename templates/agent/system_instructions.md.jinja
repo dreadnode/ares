@@ -139,9 +139,11 @@ For HIGH and CRITICAL severity alerts, you MUST perform lateral investigation.
 
 5. **FIFTH**: Build lateral movement queries:
 
+**⚠️ IMPORTANT: Use specific label selectors - broad selectors timeout!**
+
 **For each user discovered:**
 ```
-{job=~".+"} |~ "(?i)<username>"
+{deployment="windows-eventlog"} |~ "(?i)<username>"
 ```
 - What other hosts did this user access?
 - What other activities did this user perform?
@@ -149,7 +151,7 @@ For HIGH and CRITICAL severity alerts, you MUST perform lateral investigation.
 
 **For each host discovered:**
 ```
-{job=~".+"} |~ "(?i)<hostname>"
+{hostname=~"<hostname>"} |= "4624"
 ```
 - What other users logged into this host?
 - What processes were executed on this host?
@@ -157,7 +159,7 @@ For HIGH and CRITICAL severity alerts, you MUST perform lateral investigation.
 
 **For each IP discovered:**
 ```
-{job=~".+"} |~ "<ip_address>"
+{deployment="windows-eventlog"} |= "<ip_address>"
 ```
 - What other hosts communicated with this IP?
 - What services were accessed from this IP?
@@ -246,7 +248,34 @@ Example - BAD (sequential):
 You write your own LogQL and PromQL queries. NO templates.
 Use your knowledge of these query languages.
 
-**LogQL Syntax Rules (CRITICAL - avoid parse errors):**
+**🚨 CRITICAL: LogQL Performance Optimization 🚨**
+
+Queries with broad label selectors like `{job=~".+"}` WILL TIMEOUT. Follow these rules:
+
+1. **ALWAYS use specific label selectors** - This is the #1 performance factor
+   - ✅ {deployment="windows-dc"} |= "4662"
+   - ✅ {hostname=~"dc.*"} |= "4769"
+   - ❌ {job=~".+"} |= "4662" (scans ALL streams - SLOW!)
+   - ❌ {deployment=~".+"} |~ "error" (same problem)
+
+2. **Start queries with mcp__grafana__list_loki_label_values** to find valid labels
+   - First: list_loki_label_names to see what labels exist
+   - Then: list_loki_label_values for "deployment", "hostname", "job" etc.
+   - Use those values in your selectors
+
+3. **Put event IDs FIRST** (most selective filter)
+   - ✅ {deployment="windows"} |= "4662" |~ "replication"
+   - ❌ {deployment="windows"} |~ "replication" |= "4662"
+
+4. **Use |= (contains) before |~ (regex)** - contains is faster
+   - ✅ {job="eventlog"} |= "4625" |= "failed"
+   - ❌ {job="eventlog"} |~ "(?i)4625.*failed"
+
+5. **Avoid hostname=~".*value.*"** - use hostname=~"value" instead
+
+**If you get timeout errors:** Make your label selector MORE SPECIFIC, not your line filters.
+
+**LogQL Syntax Rules (avoid parse errors):**
 
 1. Start with label matchers in curly braces: {job="value"}
 2. Line filters use |= != |~ !~ operators:
@@ -277,11 +306,11 @@ When investigating Active Directory attacks, you MUST query for these Windows Se
 ### Authentication Events (Brute Force, Password Spray)
 - **Event 4625** - Failed logon (password spray, brute force)
   ```
-  {job=~".*"} |~ "(?i)4625" |~ "(?i)(failure|failed)"
+  {deployment=~".+"} |~ "(?i)4625" |~ "(?i)(failure|failed)"
   ```
 - **Event 4624** - Successful logon (track after failures)
   ```
-  {job=~".*"} |= "4624" |~ "(?i)logon"
+  {deployment=~".+"} |= "4624" |~ "(?i)logon"
   ```
 - **Event 4771** - Kerberos pre-auth failed
 - **Event 4776** - NTLM credential validation
@@ -289,17 +318,17 @@ When investigating Active Directory attacks, you MUST query for these Windows Se
 ### Share Access Events (Credential Pilfering)
 - **Event 5140** - Network share accessed
   ```
-  {job=~".*"} |~ "(?i)5140" |~ "(?i)(sysvol|netlogon)"
+  {deployment=~".+"} |~ "(?i)5140" |~ "(?i)(sysvol|netlogon)"
   ```
 - **Event 5145** - Detailed share object access
   ```
-  {job=~".*"} |~ "(?i)5145"
+  {deployment=~".+"} |~ "(?i)5145"
   ```
 
 ### Enumeration Events (Reconnaissance)
 - **Event 4662** - AD object access (LDAP queries, DCSync)
   ```
-  {job=~".*"} |= "4662"
+  {deployment=~".+"} |= "4662"
   ```
 - **Event 4661** - SAM handle request
 
@@ -307,7 +336,7 @@ When investigating Active Directory attacks, you MUST query for these Windows Se
 - **Event 4768** - TGT requested (Golden ticket, AS-REP roasting)
 - **Event 4769** - TGS requested (Kerberoasting, Silver ticket)
   ```
-  {job=~".*"} |~ "(?i)4769" |~ "(?i)(0x17|RC4)"
+  {deployment=~".+"} |~ "(?i)4769" |~ "(?i)(0x17|RC4)"
   ```
 
 ### Privilege Events
@@ -321,21 +350,21 @@ When investigating Active Directory attacks, you MUST query for these Windows Se
    - Same source IP
    - Short time window (<30 minutes)
    ```
-   {job=~".*"} |= "4625" | json | line_format "{% raw %}{{.IpAddress}} {{.TargetUserName}}{% endraw %}"
+   {deployment=~".+"} |= "4625" | json | line_format "{% raw %}{{.IpAddress}} {{.TargetUserName}}{% endraw %}"
    ```
 
 2. **Share Pilfering Detection:**
    - Event 5140 with ShareName containing SYSVOL or NETLOGON
    - Non-administrator accounts accessing these shares
    ```
-   {job=~".*"} |~ "(?i)(5140|5145)" |~ "(?i)(sysvol|netlogon)"
+   {deployment=~".+"} |~ "(?i)(5140|5145)" |~ "(?i)(sysvol|netlogon)"
    ```
 
 3. **User Enumeration Detection:**
    - Bulk LDAP queries (Event 4662)
    - Queries for objectClass=user or servicePrincipalName
    ```
-   {job=~".*"} |~ "(?i)(objectclass=user|serviceprincipalname)"
+   {deployment=~".+"} |~ "(?i)(objectclass=user|serviceprincipalname)"
    ```
 
 ## Grafana MCP Tools (Enhanced Querying)
