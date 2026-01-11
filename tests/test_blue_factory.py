@@ -1,0 +1,783 @@
+"""Tests for the blue team agent factory."""
+
+from datetime import datetime, timezone
+from unittest.mock import MagicMock
+
+import pytest
+
+from ares.core.factories.blue_factory import (
+    BONUS_QUERIES_FOR_EVIDENCE,
+    BONUS_QUERIES_FOR_PYRAMID_L4,
+    MAX_DUPLICATE_QUERIES,
+    MAX_QUERIES_CRITICAL,
+    MAX_QUERIES_PER_INVESTIGATION,
+    MAX_TOTAL_QUERIES,
+    QUERY_LIMITS_BY_STAGE,
+    _calculate_bonus_queries,
+    _check_duplicate_query,
+    _check_query_limit,
+    _count_successful_query,
+    _extract_result_count,
+    _get_query_limit,
+    _increment_query_attempt,
+    _optimize_logql_query,
+    _record_query,
+    create_investigation_agent,
+    create_rate_limited_mcp_tool,
+    log_tool_result,
+    log_tool_usage,
+    max_queries_stop,
+    max_tool_calls_stop,
+    reset_query_tracking,
+    set_investigation_state,
+    wrap_mcp_query_tools,
+)
+from ares.core.lateral_analyzer import LateralGraph
+from ares.core.models import (
+    Evidence,
+    InvestigationStage,
+    InvestigationState,
+    PyramidLevel,
+)
+
+
+class TestQueryTrackingReset:
+    """Tests for reset_query_tracking function."""
+
+    def test_reset_clears_counters(self):
+        """Test that reset clears all tracking state."""
+        # Set some state first
+        import ares.core.factories.blue_factory as factory
+
+        factory._total_queries = 10
+        factory._total_queries_attempted = 15
+        factory._query_limit_hit = True
+        factory._executed_queries = [{"query": "test"}]
+        factory._seen_queries = {"test": 5}
+        factory._bonus_queries_granted = 3
+
+        reset_query_tracking()
+
+        assert factory._total_queries == 0
+        assert factory._total_queries_attempted == 0
+        assert factory._query_limit_hit is False
+        assert factory._executed_queries == []
+        assert factory._seen_queries == {}
+        assert factory._bonus_queries_granted == 0
+
+
+class TestSetInvestigationState:
+    """Tests for set_investigation_state function."""
+
+    def test_sets_current_state(self, investigation_state: InvestigationState):
+        """Test setting current state."""
+        import ares.core.factories.blue_factory as factory
+
+        set_investigation_state(investigation_state)
+        assert factory._current_state == investigation_state
+
+
+class TestCalculateBonusQueries:
+    """Tests for _calculate_bonus_queries function."""
+
+    def test_no_bonus_without_state(self):
+        """Test no bonus when no state set."""
+        import ares.core.factories.blue_factory as factory
+
+        factory._current_state = None
+        factory._bonus_queries_granted = 0
+        bonus = _calculate_bonus_queries()
+        assert bonus == 0
+
+    def test_bonus_for_evidence(self, investigation_state: InvestigationState):
+        """Test bonus granted for finding evidence."""
+
+        reset_query_tracking()
+        investigation_state.evidence = [
+            Evidence(
+                id="ev-1",
+                type="ip",
+                value="10.0.0.1",
+                source="test",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=[],
+                confidence=0.8,
+                validated=True,
+            )
+        ]
+        set_investigation_state(investigation_state)
+
+        bonus = _calculate_bonus_queries()
+        assert bonus == BONUS_QUERIES_FOR_EVIDENCE
+
+    def test_bonus_for_pyramid_level_4(self, investigation_state: InvestigationState):
+        """Test bonus granted for reaching pyramid level 4+."""
+
+        reset_query_tracking()
+        # Add TTP-level evidence to reach level 6
+        investigation_state.evidence = [
+            Evidence(
+                id="ev-1",
+                type="ttp",
+                value="Attack behavior",
+                source="test",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.TTPS,
+                mitre_techniques=["T1003"],
+                confidence=0.9,
+                validated=True,
+            )
+        ]
+        set_investigation_state(investigation_state)
+
+        bonus = _calculate_bonus_queries()
+        # Should get both evidence bonus and pyramid bonus
+        assert bonus >= BONUS_QUERIES_FOR_EVIDENCE
+
+
+class TestGetQueryLimit:
+    """Tests for _get_query_limit function."""
+
+    def test_default_limit_without_state(self):
+        """Test default limit when no state."""
+        import ares.core.factories.blue_factory as factory
+
+        factory._current_state = None
+        factory._bonus_queries_granted = 0
+        limit = _get_query_limit()
+        assert limit == MAX_QUERIES_PER_INVESTIGATION
+
+    def test_stage_based_limit(self, investigation_state: InvestigationState):
+        """Test limit based on investigation stage."""
+
+        reset_query_tracking()
+        investigation_state.stage = InvestigationStage.TRIAGE
+        set_investigation_state(investigation_state)
+
+        limit = _get_query_limit()
+        assert limit == QUERY_LIMITS_BY_STAGE["triage"]
+
+    def test_critical_severity_higher_limit(self, critical_alert: dict):
+        """Test higher limit for critical severity."""
+
+        reset_query_tracking()
+        state = InvestigationState(
+            investigation_id="test",
+            alert=critical_alert,
+            started_at=datetime.now(timezone.utc),
+            stage=InvestigationStage.TRIAGE,
+            evidence=[],
+            timeline=[],
+            questions=[],
+            identified_techniques=set(),
+            identified_tactics=set(),
+            technique_names={},
+            technique_to_tactic={},
+            queried_hosts=set(),
+            queried_users=set(),
+            executed_queries=[],
+            escalated=False,
+            escalation_reason=None,
+            attack_synopsis=None,
+            recommendations=[],
+            lateral_graph=LateralGraph(),
+        )
+        set_investigation_state(state)
+
+        limit = _get_query_limit()
+        assert limit >= MAX_QUERIES_CRITICAL
+
+    def test_limit_capped_at_max(self, investigation_state: InvestigationState):
+        """Test limit is capped at MAX_TOTAL_QUERIES."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()
+        # Grant maximum bonuses
+        factory._bonus_queries_granted = 100
+        set_investigation_state(investigation_state)
+
+        limit = _get_query_limit()
+        assert limit <= MAX_TOTAL_QUERIES
+
+
+class TestCheckQueryLimit:
+    """Tests for _check_query_limit function."""
+
+    def test_no_error_under_limit(self, investigation_state: InvestigationState):
+        """Test no error when under limit."""
+
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        result = _check_query_limit()
+        assert result is None
+
+    def test_error_at_limit(self, investigation_state: InvestigationState):
+        """Test error returned when at limit."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+        # Set queries to limit
+        factory._total_queries = MAX_TOTAL_QUERIES + 10
+
+        result = _check_query_limit()
+        assert result is not None
+        assert "QUERY LIMIT REACHED" in result
+
+    def test_error_when_limit_hit_flag_set(self, investigation_state: InvestigationState):
+        """Test error when limit hit flag is set."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+        factory._query_limit_hit = True
+
+        result = _check_query_limit()
+        assert result is not None
+
+
+class TestCheckDuplicateQuery:
+    """Tests for _check_duplicate_query function."""
+
+    def test_first_query_allowed(self):
+        """Test first occurrence of query is allowed."""
+
+        reset_query_tracking()
+        result = _check_duplicate_query("SELECT * FROM logs")
+        assert result is None
+
+    def test_duplicate_allowed_up_to_max(self):
+        """Test duplicates allowed up to MAX_DUPLICATE_QUERIES."""
+
+        reset_query_tracking()
+        query = "SELECT * FROM logs"
+
+        for _ in range(MAX_DUPLICATE_QUERIES):
+            result = _check_duplicate_query(query)
+            assert result is None
+
+    def test_duplicate_blocked_at_max(self):
+        """Test duplicate blocked when at max."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()
+        query = "SELECT * FROM logs"
+        factory._seen_queries[query.strip().lower()] = MAX_DUPLICATE_QUERIES
+
+        result = _check_duplicate_query(query)
+        assert result is not None
+        assert "DUPLICATE QUERY BLOCKED" in result
+
+    def test_query_normalized(self):
+        """Test query is normalized for comparison."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()
+        _check_duplicate_query("  SELECT * FROM logs  ")
+        _check_duplicate_query("SELECT * FROM LOGS")  # Different case
+
+        # Both should be treated as same query
+        assert factory._seen_queries.get("select * from logs", 0) == 2
+
+
+class TestIncrementQueryAttempt:
+    """Tests for _increment_query_attempt function."""
+
+    def test_increments_counter(self, investigation_state: InvestigationState):
+        """Test counter is incremented."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        _increment_query_attempt("query_loki")
+
+        assert factory._total_queries_attempted == 1
+
+    def test_adds_to_consecutive_queries(self, investigation_state: InvestigationState):
+        """Test tool name added to consecutive queries."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        _increment_query_attempt("query_loki")
+
+        assert "query_loki" in factory._consecutive_queries
+
+
+class TestCountSuccessfulQuery:
+    """Tests for _count_successful_query function."""
+
+    def test_counts_successful_query(self, investigation_state: InvestigationState):
+        """Test successful query is counted."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        _count_successful_query(10)
+
+        assert factory._total_queries == 1
+
+    def test_does_not_count_empty_result(self, investigation_state: InvestigationState):
+        """Test empty result not counted."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        _count_successful_query(0)
+
+        assert factory._total_queries == 0
+
+    def test_does_not_count_none_result(self, investigation_state: InvestigationState):
+        """Test None result not counted."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        _count_successful_query(None)
+
+        assert factory._total_queries == 0
+
+
+class TestRecordQuery:
+    """Tests for _record_query function."""
+
+    def test_records_query_details(self, investigation_state: InvestigationState):
+        """Test query details are recorded."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        _record_query(
+            "query_loki",
+            {"logql": '{job="test"}', "datasourceUid": "loki-1"},
+            result_count=5,
+        )
+
+        assert len(factory._executed_queries) == 1
+        assert factory._executed_queries[0]["type"] == "query_loki"
+
+    def test_records_to_state(self, investigation_state: InvestigationState):
+        """Test query recorded to investigation state."""
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        _record_query(
+            "query_loki",
+            {"logql": '{job="test"}'},
+            result_count=3,
+        )
+
+        assert len(investigation_state.executed_queries) == 1
+
+
+class TestExtractResultCount:
+    """Tests for _extract_result_count function."""
+
+    def test_extract_from_list(self):
+        """Test extraction from list result."""
+        result = [1, 2, 3, 4, 5]
+        count = _extract_result_count(result)
+        assert count == 5
+
+    def test_extract_from_dict_results(self):
+        """Test extraction from dict with results key."""
+        result = {"results": [{"a": 1}, {"b": 2}]}
+        count = _extract_result_count(result)
+        assert count == 2
+
+    def test_extract_from_loki_format(self):
+        """Test extraction from Loki response format."""
+        result = {
+            "data": {
+                "result": [
+                    {"values": [[1, "a"], [2, "b"]]},
+                    {"values": [[3, "c"]]},
+                ]
+            }
+        }
+        count = _extract_result_count(result)
+        assert count == 3  # Total values across all streams
+
+    def test_extract_from_string(self):
+        """Test extraction from string (count newlines)."""
+        result = "line1\nline2\nline3"
+        count = _extract_result_count(result)
+        assert count == 2  # Number of newlines
+
+    def test_extract_returns_none_for_unknown(self):
+        """Test returns None for unknown format."""
+        result = 12345
+        count = _extract_result_count(result)
+        assert count is None
+
+
+class TestCreateRateLimitedMcpTool:
+    """Tests for create_rate_limited_mcp_tool function."""
+
+    def test_non_query_tool_unchanged(self):
+        """Test non-query tools are not wrapped."""
+
+        def my_tool():
+            pass
+
+        my_tool.__name__ = "list_alerts"
+        result = create_rate_limited_mcp_tool(my_tool)
+        assert result == my_tool
+
+    def test_query_tool_wrapped(self, investigation_state: InvestigationState):
+        """Test query tools are wrapped."""
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        async def query_loki_logs(**kwargs):
+            return {"results": []}
+
+        query_loki_logs.__name__ = "query_loki_logs"
+        wrapped = create_rate_limited_mcp_tool(query_loki_logs)
+
+        # Should be wrapped (different function)
+        assert wrapped != query_loki_logs or hasattr(wrapped, "__wrapped__")
+
+
+class TestWrapMcpQueryTools:
+    """Tests for wrap_mcp_query_tools function."""
+
+    def test_wraps_query_tools(self):
+        """Test only query tools are wrapped."""
+
+        class MockTool:
+            def __init__(self, name):
+                self.name = name
+
+        tools = [
+            MockTool("list_alerts"),
+            MockTool("query_loki_logs"),
+            MockTool("get_datasources"),
+            MockTool("query_prometheus"),
+        ]
+
+        wrapped = wrap_mcp_query_tools(tools)
+
+        assert len(wrapped) == 4
+        # Non-query tools should be unchanged
+        assert wrapped[0] == tools[0]
+        assert wrapped[2] == tools[2]
+
+
+class TestLogToolUsage:
+    """Tests for log_tool_usage hook."""
+
+    @pytest.mark.asyncio
+    async def test_logs_tool_call(self):
+        """Test tool call is logged."""
+        mock_event = MagicMock()
+        mock_tool_call = MagicMock()
+        mock_tool_call.name = "query_loki"
+        mock_event.tool_call = mock_tool_call
+
+        await log_tool_usage(mock_event)
+        # Should not raise
+
+    @pytest.mark.asyncio
+    async def test_clears_consecutive_on_completion(self):
+        """Test consecutive queries cleared on completion."""
+        import ares.core.factories.blue_factory as factory
+
+        factory._consecutive_queries = ["query1", "query2"]
+
+        mock_event = MagicMock()
+        mock_tool_call = MagicMock()
+        mock_tool_call.name = "complete_investigation"
+        mock_event.tool_call = mock_tool_call
+
+        await log_tool_usage(mock_event)
+
+        assert factory._consecutive_queries == []
+
+
+class TestLogToolResult:
+    """Tests for log_tool_result hook."""
+
+    @pytest.mark.asyncio
+    async def test_logs_success(self):
+        """Test successful tool result is logged."""
+        mock_event = MagicMock()
+        mock_tool_call = MagicMock()
+        mock_tool_call.name = "query_loki"
+        mock_event.tool_call = mock_tool_call
+        mock_event.error = None
+
+        await log_tool_result(mock_event)
+        # Should not raise
+
+    @pytest.mark.asyncio
+    async def test_logs_error(self):
+        """Test tool error is logged."""
+        mock_event = MagicMock()
+        mock_tool_call = MagicMock()
+        mock_tool_call.name = "query_loki"
+        mock_event.tool_call = mock_tool_call
+        mock_event.error = "Query failed"
+
+        await log_tool_result(mock_event)
+        # Should not raise
+
+
+class TestMaxQueriesStop:
+    """Tests for max_queries_stop stop condition."""
+
+    def test_returns_stop_condition(self):
+        """Test that a StopCondition is returned."""
+        from dreadnode.agent.stop import StopCondition
+
+        stop_condition = max_queries_stop(max_queries=5)
+        assert isinstance(stop_condition, StopCondition)
+        assert callable(stop_condition.func)
+
+    def test_empty_events_does_not_stop(self):
+        """Test does not stop when events list is empty."""
+        stop_condition = max_queries_stop(max_queries=5)
+        result = stop_condition.func([])
+        assert result is False
+
+    def test_non_tool_events_do_not_count(self):
+        """Test that non-ToolEnd events don't count toward the limit."""
+        stop_condition = max_queries_stop(max_queries=1)
+        # Pass events that are not ToolEnd instances
+        events = [MagicMock(), MagicMock(), MagicMock()]
+        result = stop_condition.func(events)
+        assert result is False
+
+
+class TestMaxToolCallsStop:
+    """Tests for max_tool_calls_stop stop condition."""
+
+    def test_returns_stop_condition(self):
+        """Test that a StopCondition is returned."""
+        from dreadnode.agent.stop import StopCondition
+
+        stop_condition = max_tool_calls_stop(max_calls=20)
+        assert isinstance(stop_condition, StopCondition)
+        assert callable(stop_condition.func)
+
+    def test_empty_events_does_not_stop(self):
+        """Test does not stop when events list is empty."""
+        stop_condition = max_tool_calls_stop(max_calls=20)
+        result = stop_condition.func([])
+        assert result is False
+
+    def test_non_tool_events_do_not_count(self):
+        """Test that non-ToolEnd events don't count toward the limit."""
+        stop_condition = max_tool_calls_stop(max_calls=1)
+        # Pass events that are not ToolEnd instances
+        events = [MagicMock(), MagicMock(), MagicMock()]
+        result = stop_condition.func(events)
+        assert result is False
+
+
+class TestCreateInvestigationAgent:
+    """Tests for create_investigation_agent function."""
+
+    def test_creates_agent(
+        self, investigation_state: InvestigationState, mock_mitre_client: MagicMock
+    ):
+        """Test agent creation."""
+        reset_query_tracking()
+
+        agent = create_investigation_agent(
+            model="claude-3-sonnet",
+            grafana_url="http://grafana:3000",
+            grafana_api_key="test-key",  # pragma: allowlist secret
+            mitre_client=mock_mitre_client,
+            state=investigation_state,
+            grafana_mcp_tools=None,
+            max_steps=30,
+        )
+
+        assert agent is not None
+
+    def test_creates_agent_with_empty_mcp_tools(
+        self, investigation_state: InvestigationState, mock_mitre_client: MagicMock
+    ):
+        """Test agent creation with empty MCP tools list."""
+        reset_query_tracking()
+
+        # Pass empty list - the code path handling MCP tools will still be exercised
+        # but without the dreadnode tool discovery issues from mocks
+        agent = create_investigation_agent(
+            model="claude-3-sonnet",
+            grafana_url="http://grafana:3000",
+            grafana_api_key="test-key",  # pragma: allowlist secret
+            mitre_client=mock_mitre_client,
+            state=investigation_state,
+            grafana_mcp_tools=[],
+            max_steps=30,
+        )
+
+        assert agent is not None
+
+
+class TestConstants:
+    """Tests for module constants."""
+
+    def test_query_limits_reasonable(self):
+        """Test query limits are reasonable values."""
+        assert MAX_QUERIES_PER_INVESTIGATION > 0
+        assert MAX_QUERIES_CRITICAL > MAX_QUERIES_PER_INVESTIGATION
+        assert MAX_TOTAL_QUERIES > MAX_QUERIES_CRITICAL
+
+    def test_bonus_queries_positive(self):
+        """Test bonus queries are positive."""
+        assert BONUS_QUERIES_FOR_EVIDENCE > 0
+        assert BONUS_QUERIES_FOR_PYRAMID_L4 > 0
+
+    def test_duplicate_limit_reasonable(self):
+        """Test duplicate limit is reasonable."""
+        assert MAX_DUPLICATE_QUERIES >= 1
+
+    def test_stage_limits_progressive(self):
+        """Test stage limits increase through investigation."""
+        assert QUERY_LIMITS_BY_STAGE["triage"] <= QUERY_LIMITS_BY_STAGE["causation"]
+        assert QUERY_LIMITS_BY_STAGE["causation"] <= QUERY_LIMITS_BY_STAGE["lateral"]
+
+
+class TestOptimizeLogqlQuery:
+    """Tests for _optimize_logql_query function."""
+
+    def test_optimize_query_broad_selector(self):
+        """Test warning for broad selectors."""
+        query = '{job=~".*"}'
+        optimized, was_modified = _optimize_logql_query(query)
+        # Function warns but doesn't modify
+        assert was_modified is False
+        assert optimized == query
+
+    def test_optimize_query_regex_only(self):
+        """Test warning for regex-only queries."""
+        query = '{job="syslog"} |~ "error"'
+        optimized, was_modified = _optimize_logql_query(query)
+        assert was_modified is False
+        assert optimized == query
+
+    def test_optimize_query_with_contains(self):
+        """Test query with contains filter (efficient)."""
+        query = '{job="syslog"} |= "error"'
+        optimized, was_modified = _optimize_logql_query(query)
+        assert was_modified is False
+        assert optimized == query
+
+    def test_optimize_query_normal_query(self):
+        """Test normal query without issues."""
+        query = '{job="eventlog"} |= "4688"'
+        optimized, was_modified = _optimize_logql_query(query)
+        assert was_modified is False
+        assert optimized == query
+
+
+class TestExtractResultCountEdgeCases:
+    """Additional edge case tests for _extract_result_count function."""
+
+    def test_extract_from_empty_list(self):
+        """Test extracting count from empty list."""
+        result = []
+        assert _extract_result_count(result) == 0
+
+    def test_extract_from_dict_with_results_key(self):
+        """Test extracting count from dict with 'results' key."""
+        result = {"results": [{"a": 1}, {"b": 2}, {"c": 3}]}
+        assert _extract_result_count(result) == 3
+
+    def test_extract_from_dict_with_empty_results(self):
+        """Test extracting count from dict with empty 'results'."""
+        result = {"results": []}
+        assert _extract_result_count(result) == 0
+
+    def test_extract_from_dict_with_data_and_result_streams(self):
+        """Test extracting count from Loki-style result format."""
+        # This is the typical Loki response format with streams
+        result = {
+            "data": {
+                "result": [
+                    {"values": [["ts1", "line1"], ["ts2", "line2"]]},
+                    {"values": [["ts3", "line3"]]},
+                ]
+            }
+        }
+        assert _extract_result_count(result) == 3  # 2 + 1 values
+
+    def test_extract_from_dict_with_data_but_not_dict(self):
+        """Test extracting count when data is not a dict."""
+        result = {"data": [1, 2, 3]}
+        # data is a list, not dict, so won't find result key
+        assert _extract_result_count(result) is None
+
+    def test_extract_from_dict_with_data_dict_but_no_result(self):
+        """Test extracting count when data dict has no result key."""
+        result = {"data": {"something": "else"}}
+        assert _extract_result_count(result) is None
+
+    def test_extract_from_dict_with_empty_streams(self):
+        """Test extracting count from streams with no values."""
+        result = {
+            "data": {
+                "result": [
+                    {"values": []},
+                    {"values": []},
+                ]
+            }
+        }
+        assert _extract_result_count(result) == 0
+
+    def test_extract_from_string_with_newlines(self):
+        """Test extracting count from string counts newlines."""
+        result = "line1\nline2\nline3"
+        assert _extract_result_count(result) == 2
+
+    def test_extract_from_empty_string(self):
+        """Test extracting count from empty string."""
+        result = ""
+        assert _extract_result_count(result) == 0
+
+    def test_extract_from_string_no_newlines(self):
+        """Test extracting count from string without newlines."""
+        result = "single line"
+        assert _extract_result_count(result) == 0
+
+    def test_extract_from_none(self):
+        """Test extracting count from None."""
+        result = None
+        assert _extract_result_count(result) is None
+
+    def test_extract_from_int(self):
+        """Test extracting count from int returns None."""
+        result = 42
+        assert _extract_result_count(result) is None
+
+    def test_extract_from_empty_dict(self):
+        """Test extracting count from empty dict."""
+        result = {}
+        assert _extract_result_count(result) is None
+
+    def test_extract_from_dict_without_known_keys(self):
+        """Test extracting count from dict without known keys."""
+        result = {"unknown": "value", "count": 10}
+        assert _extract_result_count(result) is None
+
+    def test_extract_from_dict_with_stream_values_not_list(self):
+        """Test extracting count when stream values is not a list."""
+        result = {
+            "data": {
+                "result": [
+                    {"values": "not a list"},
+                ]
+            }
+        }
+        assert _extract_result_count(result) == 0

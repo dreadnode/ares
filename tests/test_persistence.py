@@ -6,10 +6,13 @@ from pathlib import Path
 
 import pytest
 
+from ares.core.lateral_analyzer import LateralGraph
+from ares.core.models import InvestigationStage, InvestigationState
 from ares.core.persistence import (
     InvestigationStore,
     QueryEffectiveness,
     StoredInvestigation,
+    create_stored_investigation_from_state,
     get_investigation_store,
     reset_investigation_store,
 )
@@ -535,3 +538,147 @@ class TestSimilarityScoring:
         assert len(similar) == 1
         assert similar[0].similarity_score == 0.15
         assert similar[0].matching_factors == ["same_technique"]
+
+
+class TestCreateStoredInvestigationFromState:
+    """Tests for create_stored_investigation_from_state function."""
+
+    def _make_state(
+        self,
+        investigation_id: str = "test-inv-001",
+        alert_name: str = "TestAlert",
+        fingerprint: str = "fp-001",
+        severity: str = "warning",
+    ) -> InvestigationState:
+        """Helper to create an investigation state."""
+        return InvestigationState(
+            investigation_id=investigation_id,
+            alert={
+                "fingerprint": fingerprint,
+                "labels": {
+                    "alertname": alert_name,
+                    "severity": severity,
+                    "__alert_rule_uid__": f"rule-{fingerprint}",
+                },
+                "annotations": {},
+            },
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            stage=InvestigationStage.SYNTHESIS,
+            evidence=[],
+            timeline=[],
+            questions=[],
+            identified_techniques=set(),
+            identified_tactics=set(),
+            technique_names={},
+            technique_to_tactic={},
+            queried_hosts=set(),
+            queried_users=set(),
+            executed_queries=[],
+            escalated=False,
+            escalation_reason=None,
+            attack_synopsis=None,
+            recommendations=[],
+            lateral_graph=LateralGraph(),
+        )
+
+    def test_basic_conversion(self) -> None:
+        """Test basic state to stored investigation conversion."""
+        state = self._make_state()
+        stored = create_stored_investigation_from_state(state, "completed")
+
+        assert stored.investigation_id == "test-inv-001"
+        assert stored.alert_name == "TestAlert"
+        assert stored.severity == "warning"
+        assert stored.status == "completed"
+
+    def test_fingerprint_from_alert_rule_uid(self) -> None:
+        """Test fingerprint is extracted from __alert_rule_uid__."""
+        state = self._make_state(fingerprint="test-fp")
+        stored = create_stored_investigation_from_state(state, "completed")
+
+        assert stored.alert_fingerprint == "rule-test-fp"
+
+    def test_fingerprint_fallback_to_alertname(self) -> None:
+        """Test fingerprint falls back to alertname when __alert_rule_uid__ missing."""
+        state = self._make_state()
+        # Remove the alert rule UID
+        state.alert["labels"].pop("__alert_rule_uid__")
+        stored = create_stored_investigation_from_state(state, "completed")
+
+        assert stored.alert_fingerprint == "TestAlert"
+
+    def test_query_success_rate_with_queries(self) -> None:
+        """Test query success rate calculation with queries."""
+        state = self._make_state()
+        state.executed_queries = [
+            {"query": "query1", "result_count": 10},
+            {"query": "query2", "result_count": 0},
+            {"query": "query3", "result_count": 5},
+            {"query": "query4", "result_count": 0},
+        ]
+        stored = create_stored_investigation_from_state(state, "completed")
+
+        assert stored.query_success_rate == 0.5  # 2 out of 4 queries succeeded
+
+    def test_query_success_rate_no_queries(self) -> None:
+        """Test query success rate with no queries."""
+        state = self._make_state()
+        state.executed_queries = []
+        stored = create_stored_investigation_from_state(state, "completed")
+
+        assert stored.query_success_rate == 0.0
+
+    def test_effective_queries_extraction(self) -> None:
+        """Test effective queries are extracted correctly."""
+        state = self._make_state()
+        state.executed_queries = [
+            {"query": "{job='windows'}", "result_count": 10},
+            {"query": "{job='linux'}", "result_count": 0},
+            {"query": "{job='syslog'}", "result_count": 5},
+        ]
+        stored = create_stored_investigation_from_state(state, "completed")
+
+        assert len(stored.effective_queries) == 2
+        assert "{job='windows'}" in stored.effective_queries
+        assert "{job='syslog'}" in stored.effective_queries
+        assert "{job='linux'}" not in stored.effective_queries
+
+    def test_techniques_extracted(self) -> None:
+        """Test techniques are extracted from state."""
+        state = self._make_state()
+        state.identified_techniques = {"T1003.006", "T1078"}
+        state.technique_names = {"T1003.006": "DCSync", "T1078": "Valid Accounts"}
+        stored = create_stored_investigation_from_state(state, "completed")
+
+        # First technique is extracted
+        assert stored.technique_id in ["T1003.006", "T1078"]
+        if stored.technique_id == "T1003.006":
+            assert stored.technique_name == "DCSync"
+        else:
+            assert stored.technique_name == "Valid Accounts"
+
+    def test_techniques_empty(self) -> None:
+        """Test handling when no techniques identified."""
+        state = self._make_state()
+        state.identified_techniques = set()
+        stored = create_stored_investigation_from_state(state, "completed")
+
+        assert stored.technique_id is None
+        assert stored.technique_name is None
+
+    def test_escalated_status(self) -> None:
+        """Test escalated status is stored."""
+        state = self._make_state()
+        state.escalated = True
+        stored = create_stored_investigation_from_state(state, "escalated")
+
+        assert stored.status == "escalated"
+        assert stored.metadata["escalated"] is True
+
+    def test_duration_calculation(self) -> None:
+        """Test duration is calculated correctly."""
+        state = self._make_state()
+        stored = create_stored_investigation_from_state(state, "completed")
+
+        # Should be approximately 5 minutes (300 seconds) based on started_at
+        assert stored.duration_seconds >= 299  # Allow for test execution time

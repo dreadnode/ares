@@ -395,3 +395,186 @@ class TestModelValidation:
         )
 
         assert evidence.confidence == 0.95
+
+
+class TestInvestigationStateHelpers:
+    """Tests for InvestigationState helper methods."""
+
+    def _make_state(self):
+        """Helper to create an InvestigationState for testing."""
+        from datetime import datetime, timezone
+
+        from ares.core.models import InvestigationStage, InvestigationState
+
+        return InvestigationState(
+            investigation_id="test-001",
+            alert={"fingerprint": "test", "labels": {"alertname": "Test"}},
+            started_at=datetime.now(timezone.utc),
+            stage=InvestigationStage.TRIAGE,
+            evidence=[],
+            timeline=[],
+            questions=[],
+            identified_techniques=set(),
+            identified_tactics=set(),
+            technique_names={},
+            technique_to_tactic={},
+            queried_hosts=set(),
+            queried_users=set(),
+            executed_queries=[],
+            escalated=False,
+        )
+
+    def test_get_evidence_by_id_found(self) -> None:
+        """Test getting evidence by ID when it exists."""
+        from ares.core.models import Evidence, PyramidLevel
+
+        state = self._make_state()
+
+        evidence1 = Evidence(
+            id="ev-001",
+            type="ip",
+            value="192.168.1.1",
+            source="test",
+            timestamp=None,
+            pyramid_level=PyramidLevel.IP_ADDRESSES,
+        )
+        evidence2 = Evidence(
+            id="ev-002",
+            type="hash",
+            value="abc123",
+            source="test",
+            timestamp=None,
+            pyramid_level=PyramidLevel.HASH_VALUES,
+        )
+        state.evidence.append(evidence1)
+        state.evidence.append(evidence2)
+
+        found = state.get_evidence_by_id("ev-002")
+        assert found is not None
+        assert found.id == "ev-002"
+        assert found.value == "abc123"
+
+    def test_get_evidence_by_id_not_found(self) -> None:
+        """Test getting evidence by ID when it doesn't exist."""
+        from ares.core.models import Evidence, PyramidLevel
+
+        state = self._make_state()
+
+        evidence = Evidence(
+            id="ev-001",
+            type="ip",
+            value="192.168.1.1",
+            source="test",
+            timestamp=None,
+            pyramid_level=PyramidLevel.IP_ADDRESSES,
+        )
+        state.evidence.append(evidence)
+
+        found = state.get_evidence_by_id("nonexistent")
+        assert found is None
+
+    def test_get_evidence_by_id_empty_state(self) -> None:
+        """Test getting evidence by ID from empty state."""
+        state = self._make_state()
+        found = state.get_evidence_by_id("ev-001")
+        assert found is None
+
+    def test_get_evidence_for_pyramid_questions(self) -> None:
+        """Test getting evidence formatted for pyramid climber."""
+        from ares.core.models import Evidence, PyramidLevel
+
+        state = self._make_state()
+
+        evidence1 = Evidence(
+            id="ev-001",
+            type="ip",
+            value="192.168.1.1",
+            source="network logs",
+            timestamp=None,
+            pyramid_level=PyramidLevel.IP_ADDRESSES,
+            mitre_techniques=["T1046"],
+        )
+        evidence2 = Evidence(
+            id="ev-002",
+            type="command",
+            value="whoami",
+            source="process logs",
+            timestamp=None,
+            pyramid_level=PyramidLevel.TTPS,
+            mitre_techniques=["T1059"],
+        )
+        state.evidence.append(evidence1)
+        state.evidence.append(evidence2)
+
+        result = state.get_evidence_for_pyramid_questions()
+
+        assert len(result) == 2
+        assert result[0]["id"] == "ev-001"
+        assert result[0]["pyramid_level"] == PyramidLevel.IP_ADDRESSES.value
+        assert result[1]["id"] == "ev-002"
+        assert result[1]["pyramid_level"] == PyramidLevel.TTPS.value
+
+    def test_get_evidence_for_pyramid_questions_empty(self) -> None:
+        """Test getting evidence from empty state."""
+        state = self._make_state()
+        result = state.get_evidence_for_pyramid_questions()
+        assert result == []
+
+
+class TestRedTeamStateHelpers:
+    """Tests for RedTeamState helper methods."""
+
+    def test_get_credential_key(self) -> None:
+        """Test generating credential key."""
+        from ares.core.models import RedTeamState, Target
+
+        state = RedTeamState(
+            operation_id="test-op",
+            target=Target(ip="192.168.1.1"),
+        )
+
+        key = state.get_credential_key("Admin", "P@ssword123", "DOMAIN")
+        assert key == "domain:admin:p@ssword123"
+
+    def test_get_credential_key_no_domain(self) -> None:
+        """Test generating credential key without domain."""
+        from ares.core.models import RedTeamState, Target
+
+        state = RedTeamState(
+            operation_id="test-op",
+            target=Target(ip="192.168.1.1"),
+        )
+
+        key = state.get_credential_key("user", "pass")
+        assert key == ":user:pass"
+
+    def test_admin_count(self) -> None:
+        """Test counting admin credentials."""
+        from ares.core.models import Credential, RedTeamState, Target
+
+        state = RedTeamState(
+            operation_id="test-op",
+            target=Target(ip="192.168.1.1"),
+            credentials=[
+                Credential(
+                    username="admin",
+                    password="pass",  # pragma: allowlist secret
+                    domain="test",
+                    is_admin=True,
+                ),
+                Credential(
+                    username="user",
+                    password="pass",  # pragma: allowlist secret
+                    domain="test",
+                    is_admin=False,
+                ),
+                Credential(
+                    username="root",
+                    password="pass",  # pragma: allowlist secret
+                    domain="test",
+                    is_admin=True,
+                ),
+            ],
+        )
+
+        assert state.admin_count == 2
