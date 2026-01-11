@@ -64,17 +64,21 @@ The alert's `startsAt` timestamp is likely STALE. The initial prompt provides:
 **🚨 MANDATORY WORKFLOW - DO NOT SKIP STEPS 🚨**
 
 1. **FIRST**: Run mcp__grafana__list_datasources to get Loki datasource UID
-2. **SECOND**: Query RECENT logs using time values from initial prompt
-3. **IMMEDIATELY AFTER QUERY**: Extract usernames, hostnames, IPs from the results
-4. **MANDATORY**: Call record_evidence() for EACH finding with MITRE technique if known
+2. **SECOND**: Discover available labels with mcp__grafana__list_loki_label_names
+   - This tells you what labels exist (e.g., job, deployment, hostname)
+   - Then call mcp__grafana__list_loki_label_values for "job" or "deployment"
+   - Use these specific values in your queries to avoid timeouts
+3. **THIRD**: Query RECENT logs using time values from initial prompt
+4. **IMMEDIATELY AFTER QUERY**: Extract usernames, hostnames, IPs from the results
+5. **MANDATORY**: Call record_evidence() for EACH finding with MITRE technique if known
    - If query returns results: record_evidence() for EACH user/host/IP/process found
    - If query returns EMPTY: Document this and try a broader query OR move forward
    - DO NOT make multiple queries without calling record_evidence() in between
-5. Call track_host_investigation() for each host found
-6. Call track_user_investigation() for each user found
-7. Call get_combined_questions() for follow-up questions
-8. Repeat until you understand WHAT triggered the alert
-9. Call transition_stage("causation")
+6. Call track_host_investigation() for each host found
+7. Call track_user_investigation() for each user found
+8. Call get_combined_questions() for follow-up questions
+9. Repeat until you understand WHAT triggered the alert
+10. Call transition_stage("causation")
 
 **ANTI-PATTERN - DO NOT DO THIS:**
 - ❌ Query logs → Query logs → Query logs → Query logs (NO EVIDENCE RECORDED)
@@ -248,28 +252,41 @@ Example - BAD (sequential):
 You write your own LogQL and PromQL queries. NO templates.
 Use your knowledge of these query languages.
 
+**🚨 CRITICAL: Query Planning - THINK BEFORE YOU QUERY 🚨**
+
+Before running ANY query, ask yourself:
+1. Have I already run a similar query? (Check your previous queries)
+2. Can I combine this with another planned query using |~ alternation?
+3. Do I have specific label values from label discovery?
+
+**PLAN YOUR QUERIES UPFRONT** - Don't run the same pattern with slight variations.
+If you need to search for multiple event IDs, combine them: `|~ "(4625|4624|4771)"`
+
 **🚨 CRITICAL: LogQL Performance Optimization 🚨**
 
 Queries with broad label selectors like `{job=~".+"}` WILL TIMEOUT. Follow these rules:
 
 1. **ALWAYS use specific label selectors** - This is the #1 performance factor
-   - ✅ {deployment="windows-dc"} |= "4662"
-   - ✅ {hostname=~"dc.*"} |= "4769"
+   - ✅ {job="eventlog"} |= "4662"
+   - ✅ {deployment="windows-dc"} |= "4769"
    - ❌ {job=~".+"} |= "4662" (scans ALL streams - SLOW!)
    - ❌ {deployment=~".+"} |~ "error" (same problem)
 
-2. **Start queries with mcp__grafana__list_loki_label_values** to find valid labels
-   - First: list_loki_label_names to see what labels exist
-   - Then: list_loki_label_values for "deployment", "hostname", "job" etc.
-   - Use those values in your selectors
+2. **MANDATORY: Discover labels FIRST** before writing queries
+   - Call list_loki_label_names to see what labels exist
+   - Call list_loki_label_values for "job" or "deployment"
+   - Use those EXACT values in your selectors (e.g., `{job="eventlog"}`)
 
 3. **Put event IDs FIRST** (most selective filter)
-   - ✅ {deployment="windows"} |= "4662" |~ "replication"
-   - ❌ {deployment="windows"} |~ "replication" |= "4662"
+   - ✅ {job="eventlog"} |= "4662" |~ "replication"
+   - ❌ {job="eventlog"} |~ "replication" |= "4662"
 
-4. **Use |= (contains) before |~ (regex)** - contains is faster
+4. **ALWAYS prefer |= (contains) over |~ (regex)** - contains is 10x faster
    - ✅ {job="eventlog"} |= "4625" |= "failed"
-   - ❌ {job="eventlog"} |~ "(?i)4625.*failed"
+   - ✅ {job="eventlog"} |= "4625" |= "TargetUserName"
+   - ❌ {job="eventlog"} |~ "(?i)4625.*failed" (slow regex!)
+   - ❌ {job="eventlog"} |~ "(?i)targetusername" (use |= for exact strings)
+   - Only use |~ when you need actual regex patterns (alternation, wildcards)
 
 5. **Avoid hostname=~".*value.*"** - use hostname=~"value" instead
 
@@ -301,16 +318,18 @@ Queries with broad label selectors like `{job=~".+"}` WILL TIMEOUT. Follow these
 
 ## Windows Security Event Detection (CRITICAL FOR AD ATTACKS)
 
-When investigating Active Directory attacks, you MUST query for these Windows Security Events:
+When investigating Active Directory attacks, you MUST query for these Windows Security Events.
+
+**⚠️ IMPORTANT: Replace `{job="eventlog"}` with the actual label from your label discovery step!**
 
 ### Authentication Events (Brute Force, Password Spray)
 - **Event 4625** - Failed logon (password spray, brute force)
   ```
-  {deployment=~".+"} |~ "(?i)4625" |~ "(?i)(failure|failed)"
+  {job="eventlog"} |= "4625" |= "failed"
   ```
 - **Event 4624** - Successful logon (track after failures)
   ```
-  {deployment=~".+"} |= "4624" |~ "(?i)logon"
+  {job="eventlog"} |= "4624"
   ```
 - **Event 4771** - Kerberos pre-auth failed
 - **Event 4776** - NTLM credential validation
@@ -318,17 +337,17 @@ When investigating Active Directory attacks, you MUST query for these Windows Se
 ### Share Access Events (Credential Pilfering)
 - **Event 5140** - Network share accessed
   ```
-  {deployment=~".+"} |~ "(?i)5140" |~ "(?i)(sysvol|netlogon)"
+  {job="eventlog"} |= "5140" |= "SYSVOL"
   ```
 - **Event 5145** - Detailed share object access
   ```
-  {deployment=~".+"} |~ "(?i)5145"
+  {job="eventlog"} |= "5145"
   ```
 
 ### Enumeration Events (Reconnaissance)
 - **Event 4662** - AD object access (LDAP queries, DCSync)
   ```
-  {deployment=~".+"} |= "4662"
+  {job="eventlog"} |= "4662"
   ```
 - **Event 4661** - SAM handle request
 
@@ -336,7 +355,7 @@ When investigating Active Directory attacks, you MUST query for these Windows Se
 - **Event 4768** - TGT requested (Golden ticket, AS-REP roasting)
 - **Event 4769** - TGS requested (Kerberoasting, Silver ticket)
   ```
-  {deployment=~".+"} |~ "(?i)4769" |~ "(?i)(0x17|RC4)"
+  {job="eventlog"} |= "4769" |= "0x17"
   ```
 
 ### Privilege Events
@@ -350,21 +369,21 @@ When investigating Active Directory attacks, you MUST query for these Windows Se
    - Same source IP
    - Short time window (<30 minutes)
    ```
-   {deployment=~".+"} |= "4625" | json | line_format "{% raw %}{{.IpAddress}} {{.TargetUserName}}{% endraw %}"
+   {job="eventlog"} |= "4625" | json | line_format "{% raw %}{{.IpAddress}} {{.TargetUserName}}{% endraw %}"
    ```
 
 2. **Share Pilfering Detection:**
    - Event 5140 with ShareName containing SYSVOL or NETLOGON
    - Non-administrator accounts accessing these shares
    ```
-   {deployment=~".+"} |~ "(?i)(5140|5145)" |~ "(?i)(sysvol|netlogon)"
+   {job="eventlog"} |~ "(5140|5145)" |= "SYSVOL"
    ```
 
 3. **User Enumeration Detection:**
    - Bulk LDAP queries (Event 4662)
    - Queries for objectClass=user or servicePrincipalName
    ```
-   {deployment=~".+"} |~ "(?i)(objectclass=user|serviceprincipalname)"
+   {job="eventlog"} |= "4662" |= "objectClass"
    ```
 
 ## Grafana MCP Tools (Enhanced Querying)
@@ -618,3 +637,40 @@ Call escalate_investigation() if:
 - Active, ongoing attack detected
 - Scope exceeds investigation capacity
 - Human intervention needed
+
+## Alert Rule Creation (OPTIONAL - Advanced)
+
+When you discover attack patterns during investigation, you can create Grafana alert rules
+to monitor for future occurrences using `create_detection_rule()`. This is valuable when:
+
+1. **You find a detection gap** - The alert that triggered this investigation could be improved
+2. **You discover related patterns** - New attack indicators worth monitoring
+3. **You identify precursor activity** - Earlier stages of the attack chain to catch next time
+
+### When to Create Alert Rules
+
+Consider creating an alert rule when:
+- You discover a LogQL query that reliably detects the attack
+- The pattern is specific enough to avoid false positives
+- Monitoring this pattern would provide early warning for future attacks
+
+### How to Create an Alert Rule
+
+Use the `create_detection_rule()` tool:
+
+```python
+create_detection_rule(
+    title="DCSync Detection - Replication Request",
+    logql_query='{job="eventlog"} |= "4662" |= "1131f6aa"',
+    description="Detects DCSync attacks by monitoring for directory replication requests with the DCSync GUID",
+    mitre_technique="T1003.006",
+    severity="critical",
+    pending_period="5m"
+)
+```
+
+**IMPORTANT:**
+- Only create rules with HIGH confidence detection patterns
+- The query MUST use specific labels (e.g., `{job="eventlog"}`), NOT broad selectors
+- Do NOT create rules for vague or noisy queries that would generate false positives
+- Include the MITRE technique ID when known

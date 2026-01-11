@@ -209,6 +209,23 @@ def _extract_patterns_from_string(text: str) -> set[str]:  # noqa: PLR0912
     return patterns
 
 
+def _is_mitre_technique_description(value: str) -> bool:
+    """Check if value is a MITRE technique description that shouldn't be validated.
+
+    MITRE technique descriptions (e.g., "T1003.006 - DCSync") don't appear in
+    query results, so they cannot be validated and should be skipped.
+
+    Args:
+        value: The evidence value to check
+
+    Returns:
+        True if value looks like a MITRE technique description
+    """
+    # Match patterns like "T1003", "T1003.006", "T1003.006 - DCSync", etc.
+    mitre_pattern = r"^T\d{4}(\.\d{3})?\s*(-\s*.+)?$"
+    return bool(re.match(mitre_pattern, value.strip(), re.IGNORECASE))
+
+
 def validate_evidence_value(value: str) -> tuple[bool, str | None]:
     """Validate an evidence value against recent query results.
 
@@ -220,6 +237,10 @@ def validate_evidence_value(value: str) -> tuple[bool, str | None]:
     """
     if not value:
         return False, None
+
+    if _is_mitre_technique_description(value):
+        logger.debug(f"Skipping validation for MITRE technique: {value}")
+        return True, None
 
     normalized_value = value.lower().strip()
 

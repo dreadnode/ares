@@ -32,15 +32,16 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     Attributes:
         loki_url: Base URL of the Loki instance.
         timeout: HTTP request timeout in seconds.
-        default_label_selector: Base label selector for queries. Override with
-            specific labels like '{job="eventlog"}' for better performance.
-            Default '{job=~".+"}' scans all streams (slow).
+        default_label_selector: Base label selector for queries. Defaults to
+            '{job="eventlog"}' for Windows event logs. Override for other log
+            types (e.g., '{job="syslog"}', '{deployment="windows-dc"}').
+            NEVER use broad patterns like '{job=~".+"}' - they scan all streams and timeout.
         default_hours_back: Default time range for queries. Shorter ranges are faster.
     """
 
     loki_url: str
     timeout: int = 30
-    default_label_selector: str = '{job=~".+"}'
+    default_label_selector: str = '{job="eventlog"}'
     default_hours_back: int = 1  # Reduced from 4 hours for faster queries
 
     def _build_selector(
