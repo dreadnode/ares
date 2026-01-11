@@ -15,8 +15,9 @@ vars:
   MODEL: '{{.MODEL | default "claude-sonnet-4-20250514"}}'
   GRAFANA_URL: '{{.GRAFANA_URL | default "https://grafana.dev.plundr.ai"}}'
   POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
-  MAX_STEPS: '{{.MAX_STEPS | default "50"}}'
-  MAX_STEPS_ONCE: '{{.MAX_STEPS_ONCE | default "15"}}'  # ~15 min max for once mode
+  MAX_STEPS_BLUE: '{{.MAX_STEPS_BLUE | default "50"}}'
+  MAX_STEPS_BLUE_ONCE: '{{.MAX_STEPS_BLUE_ONCE | default "15"}}'  # ~15 min max for once mode
+  MAX_STEPS_RED: '{{.MAX_STEPS_RED | default "150"}}'
   REPORT_DIR: '{{.REPORT_DIR | default "./reports"}}'
   LOG_DIR: '{{.LOG_DIR | default "./logs"}}'
   DREADNODE_SERVER: '{{.DREADNODE_SERVER | default "https://platform.dev.plundr.ai/"}}'
@@ -170,7 +171,7 @@ tasks:
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
-          --args.max-steps {{.MAX_STEPS}} \
+          --args.max-steps {{.MAX_STEPS_BLUE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --dn-args.server {{.DREADNODE_SERVER}} \
           --dn-args.token "$DREADNODE_API_KEY" \
@@ -200,7 +201,7 @@ tasks:
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
-          --args.max-steps {{.MAX_STEPS_ONCE}} \
+          --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --args.once \
           --dn-args.server {{.DREADNODE_SERVER}} \
@@ -236,7 +237,7 @@ tasks:
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
-          --args.max-steps {{.MAX_STEPS}} \
+          --args.max-steps {{.MAX_STEPS_BLUE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --dn-args.server {{.DREADNODE_SERVER}} \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
@@ -270,7 +271,7 @@ tasks:
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
-          --args.max-steps {{.MAX_STEPS_ONCE}} \
+          --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --args.once \
           --dn-args.server {{.DREADNODE_SERVER}} \
@@ -302,7 +303,7 @@ tasks:
         uv run python -m ares investigate-alert {{.ALERT}} \
           --args.model {{.MODEL}} \
           --args.grafana-url {{.GRAFANA_URL}} \
-          --args.max-steps {{.MAX_STEPS_ONCE}} \
+          --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --dn-args.server {{.DREADNODE_SERVER}} \
           --dn-args.token "$DREADNODE_API_KEY" \
@@ -384,7 +385,9 @@ tasks:
         echo ""
         echo "Agent Settings:"
         echo "  Model: {{.MODEL}}"
-        echo "  Max Steps: {{.MAX_STEPS}}"
+        echo "  Max Steps (Blue): {{.MAX_STEPS_BLUE}}"
+        echo "  Max Steps (Blue Once): {{.MAX_STEPS_BLUE_ONCE}}"
+        echo "  Max Steps (Red): {{.MAX_STEPS_RED}}"
         echo "  Poll Interval: {{.POLL_INTERVAL}}s"
         echo ""
         echo "Data Sources:"
@@ -642,7 +645,7 @@ tasks:
 
         uv run python -m ares red-team "$RESOLVED_TARGET" \
           --args.model {{.MODEL}} \
-          --args.max-steps {{.MAX_STEPS}} \
+          --args.max-steps {{.MAX_STEPS_RED}} \
           --args.report-dir {{.REPORT_DIR}} \
           --dn-args.server {{.DREADNODE_SERVER}} \
           --dn-args.token "$DREADNODE_API_KEY" \
@@ -676,7 +679,7 @@ tasks:
 
         uv run python -m ares red-team {{.TARGET}} \
           --args.model {{.MODEL}} \
-          --args.max-steps {{.MAX_STEPS}} \
+          --args.max-steps {{.MAX_STEPS_RED}} \
           --args.report-dir {{.REPORT_DIR}} \
           --dn-args.server {{.DREADNODE_SERVER}} \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \

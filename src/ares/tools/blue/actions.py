@@ -160,7 +160,7 @@ class CompletionTools(Toolset):  # type: ignore[misc]
         self.state.attack_synopsis = " ".join(parts)
 
 
-@dn.tool()  # type: ignore[untyped-decorator]
+@dn.tool  # type: ignore[untyped-decorator]
 async def escalate_investigation(
     reason: str,
     severity: str,

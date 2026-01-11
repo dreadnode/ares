@@ -3,7 +3,7 @@
 import time
 
 import dreadnode as dn
-from dreadnode.agent import Agent
+from dreadnode.agent import Agent, Thread
 from dreadnode.agent.events import (
     AgentEnd,
     AgentError,
@@ -15,7 +15,6 @@ from dreadnode.agent.events import (
 )
 from dreadnode.agent.hooks import retry_with_feedback
 from dreadnode.agent.stop import tool_use
-from dreadnode.agent.thread import Thread
 from loguru import logger
 
 from ares.core.models import RedTeamState

@@ -90,6 +90,134 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
             logger.error(f"Failed to get alert history: {e}")
             return []
 
+    async def create_annotation(
+        self,
+        text: str,
+        tags: list[str] | None = None,
+        dashboard_uid: str | None = None,
+        time_start: int | None = None,
+        time_end: int | None = None,
+    ) -> dict | None:
+        """Create an annotation in Grafana.
+
+        Args:
+            text: Annotation text/description.
+            tags: List of tags for filtering.
+            dashboard_uid: Optional dashboard UID to associate annotation with.
+            time_start: Start time as epoch milliseconds (defaults to now).
+            time_end: End time as epoch milliseconds (optional, for range annotations).
+
+        Returns:
+            Created annotation response or None on failure.
+        """
+        import time
+
+        payload: dict[str, Any] = {
+            "text": text,
+            "tags": tags or ["ares", "investigation"],
+            "time": time_start or int(time.time() * 1000),
+        }
+
+        if dashboard_uid:
+            payload["dashboardUID"] = dashboard_uid
+
+        if time_end:
+            payload["timeEnd"] = time_end
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/api/annotations",
+                    headers=self._headers(),
+                    json=payload,
+                )
+                response.raise_for_status()
+                result = response.json()
+                logger.info(f"Created Grafana annotation: {result.get('id', 'unknown')}")
+                return result
+        except httpx.HTTPError as e:
+            logger.warning(f"Failed to create annotation: {e}")
+            return None
+
+    async def post_investigation_started(
+        self,
+        investigation_id: str,
+        alert_name: str,
+        severity: str,
+    ) -> dict | None:
+        """Post annotation when investigation starts.
+
+        Args:
+            investigation_id: Unique investigation identifier.
+            alert_name: Name of the alert being investigated.
+            severity: Alert severity level.
+
+        Returns:
+            Created annotation response or None on failure.
+        """
+        text = (
+            f"🔍 **Investigation Started**\n\n"
+            f"- **ID:** {investigation_id}\n"
+            f"- **Alert:** {alert_name}\n"
+            f"- **Severity:** {severity}\n"
+            f"- **Status:** In Progress"
+        )
+        return await self.create_annotation(
+            text=text,
+            tags=["ares", "investigation", "started", alert_name, severity],
+        )
+
+    async def post_investigation_completed(
+        self,
+        investigation_id: str,
+        alert_name: str,
+        status: str,
+        evidence_count: int,
+        techniques: list[str],
+        pyramid_level: int,
+        summary: str | None = None,
+    ) -> dict | None:
+        """Post annotation when investigation completes.
+
+        Args:
+            investigation_id: Unique investigation identifier.
+            alert_name: Name of the alert investigated.
+            status: Final status (completed, escalated, timeout).
+            evidence_count: Number of evidence items collected.
+            techniques: List of MITRE ATT&CK techniques identified.
+            pyramid_level: Highest Pyramid of Pain level reached.
+            summary: Optional investigation summary.
+
+        Returns:
+            Created annotation response or None on failure.
+        """
+        status_emoji = {
+            "completed": "✅",
+            "escalated": "🚨",
+            "timeout": "⏰",
+            "failed": "❌",
+            "incomplete": "⚠️",
+        }.get(status, "📋")
+
+        text = (
+            f"{status_emoji} **Investigation {status.title()}**\n\n"
+            f"- **ID:** {investigation_id}\n"
+            f"- **Alert:** {alert_name}\n"
+            f"- **Evidence:** {evidence_count} items\n"
+            f"- **Techniques:** {', '.join(techniques) if techniques else 'None identified'}\n"
+            f"- **Pyramid Level:** {pyramid_level}/6"
+        )
+
+        if summary:
+            # Truncate summary if too long
+            truncated = summary[:500] + "..." if len(summary) > 500 else summary
+            text += f"\n\n**Summary:** {truncated}"
+
+        return await self.create_annotation(
+            text=text,
+            tags=["ares", "investigation", status, alert_name],
+        )
+
 
 def find_mcp_grafana() -> str:
     """Find the mcp-grafana binary.

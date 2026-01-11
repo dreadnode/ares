@@ -170,11 +170,47 @@ You MUST leverage parallelism. When you have multiple questions:
 2. Execute ALL independent queries in a SINGLE response
 3. This is the power of automation - don't waste it on sequential queries
 
+### Method 1: execute_parallel_queries() - RECOMMENDED
+
+Use this tool to batch multiple queries into a single call:
+```python
+await execute_parallel_queries(
+    queries=[
+        {"logql": '{job="syslog"} |= "4625"', "description": "Failed logins"},
+        {"logql": '{job="syslog"} |= "4624"', "description": "Successful logins"},
+        {"logql": '{job="app"} |= "powershell"', "description": "PowerShell activity"},
+    ],
+    start_time="2024-01-15T10:00:00Z",
+    end_time="2024-01-15T11:00:00Z"
+)
+```
+
+### Method 2: combine_query_patterns() - For similar patterns
+
+When searching for multiple patterns in the SAME log stream, combine them:
+```python
+# Instead of 3 queries, combine into one:
+combine_query_patterns(
+    base_selector='{job="auth"}',
+    patterns=["4625", "4624", "4771"]
+)
+# Returns: {job="auth"} |~ "4625|4624|4771"
+```
+
+### When to use which:
+- **execute_parallel_queries**: Different log streams or different label selectors
+- **combine_query_patterns**: Same log stream, searching for multiple patterns
+
 Example - GOOD (parallel):
 - Query 1: {hostname="web-01"} |= "powershell"
 - Query 2: {hostname="web-01"} |= "download"
 - Query 3: {job="auth", user="admin"} | json
-[Execute all 3 in one tool call batch]
+[Execute all 3 with execute_parallel_queries()]
+
+Example - BETTER (combined + parallel):
+- Combined Query: {hostname="web-01"} |~ "powershell|download"
+- Query 2: {job="auth", user="admin"} | json
+[2 queries instead of 3]
 
 Example - BAD (sequential):
 - Query 1, wait for response

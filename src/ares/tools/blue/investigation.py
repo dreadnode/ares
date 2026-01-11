@@ -13,6 +13,11 @@ from ares.core.engines import (
     _load_attack_chains,
     _load_detection_recipes,
 )
+from ares.core.evidence_validation import (
+    adjust_confidence_for_validation,
+    get_suggested_iocs,
+    validate_evidence_value,
+)
 from ares.core.models import (
     Evidence,
     InvestigationStage,
@@ -74,6 +79,10 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
         5. Tools (challenging)
         6. TTPs (tough - this is the goal!)
 
+        NOTE: Evidence is automatically validated against recent query results.
+        If the value cannot be found in query results, confidence will be reduced.
+        Use get_suggested_evidence() to see IOCs extracted from queries.
+
         Args:
             evidence_type: Type of evidence (ip, domain, hash, process, etc.).
             value: The actual evidence value.
@@ -84,7 +93,7 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
             confidence: Confidence score 0.0-1.0.
 
         Returns:
-            Evidence ID for reference.
+            Evidence ID and validation status.
 
         Example:
             >>> record_evidence(
@@ -95,7 +104,7 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
             ...     pyramid_level=2,
             ...     confidence=0.8
             ... )
-            'ev-0001'
+            'ev-0001 (validated)'
         """
         if not self.state:
             return "ERROR: No investigation state"
@@ -107,6 +116,12 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
             with contextlib.suppress(ValueError):
                 ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
 
+        # Validate evidence against recent query results
+        validated, source_query_id = validate_evidence_value(value)
+
+        # Adjust confidence based on validation
+        adjusted_confidence = adjust_confidence_for_validation(confidence, validated)
+
         ev = Evidence(
             id=evidence_id,
             type=evidence_type,
@@ -115,7 +130,9 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
             timestamp=ts,
             pyramid_level=PyramidLevel(min(max(pyramid_level, 1), 6)),
             mitre_techniques=mitre_techniques or [],
-            confidence=confidence,
+            confidence=adjusted_confidence,
+            source_query_id=source_query_id,
+            validated=validated,
         )
 
         self.state.evidence.append(ev)
@@ -128,12 +145,15 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
         dn.log_output(f"evidence_{evidence_id}", ev.to_dict())
         dn.log_metric("evidence_count", 1, mode="count")
         dn.log_metric("highest_pyramid_level", pyramid_level, mode="max")
+        dn.log_metric("evidence_validated", 1 if validated else 0, mode="count")
 
+        validation_status = "validated" if validated else "UNVALIDATED - confidence reduced"
         logger.info(
-            f"Recorded evidence: {evidence_type}={value[:50]}... (pyramid level {pyramid_level})"
+            f"Recorded evidence: {evidence_type}={value[:50]}... "
+            f"(pyramid level {pyramid_level}, {validation_status})"
         )
 
-        return evidence_id
+        return f"{evidence_id} ({validation_status})"
 
     def _resolve_technique_metadata(self, technique_ids: list[str]) -> None:
         """Look up and cache technique names and tactics."""
@@ -297,6 +317,41 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
 
         loader = get_template_loader()
         return loader.render("tools/user_queries.md.jinja", username=username)
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    def get_suggested_evidence(self) -> list[dict]:
+        """Get IOCs auto-extracted from recent query results.
+
+        This helps you record evidence that actually exists in query results,
+        ensuring proper provenance and avoiding hallucinated evidence.
+
+        The system automatically extracts:
+        - IP addresses
+        - Hostnames/FQDNs
+        - Usernames (domain\\user, user@domain formats)
+        - Hash values (MD5, SHA1, SHA256)
+
+        Returns:
+            List of suggested IOCs with type, value, and source query ID.
+
+        Example:
+            >>> get_suggested_evidence()
+            [
+                {'type': 'ip', 'value': '192.168.1.100', 'source_query_id': 'q-0001'},
+                {'type': 'hostname', 'value': 'dc01.domain.local', 'source_query_id': 'q-0001'},
+                {'type': 'user', 'value': 'DOMAIN\\\\admin', 'source_query_id': 'q-0002'},
+            ]
+
+        See Also:
+            record_evidence: Use this to record the suggested evidence.
+        """
+        suggestions = get_suggested_iocs()
+
+        if not suggestions:
+            return [{"message": "No IOCs extracted from recent queries. Run more queries first."}]
+
+        logger.info(f"Returning {len(suggestions)} suggested IOCs from query results")
+        return suggestions
 
 
 class QuestionEngineTools(Toolset):  # type: ignore[misc]

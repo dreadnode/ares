@@ -4,13 +4,13 @@ import functools
 from typing import Any
 
 import dreadnode as dn
-from dreadnode.agent import Agent
+from dreadnode.agent import Agent, Thread
 from dreadnode.agent.events import AgentEvent, AgentStalled, ToolEnd, ToolStart
 from dreadnode.agent.hooks import retry_with_feedback
 from dreadnode.agent.stop import StopCondition, tool_use
-from dreadnode.agent.thread import Thread
 from loguru import logger
 
+from ares.core.evidence_validation import reset_evidence_validation, store_query_result
 from ares.core.models import InvestigationState
 from ares.core.query_resilience import QueryResilientExecutor, get_resilient_executor
 from ares.core.templates import get_template_loader
@@ -29,15 +29,32 @@ from ares.tools.shared import MITRELookupTools
 SYSTEM_INSTRUCTIONS = get_template_loader().render("agent/system_instructions.md.jinja")
 
 # Track query calls - reset per investigation via reset_query_tracking()
-_total_queries = 0
+_total_queries = 0  # Only counts queries that returned results
+_total_queries_attempted = 0  # All queries attempted (including failed)
 _consecutive_queries: list[str] = []
 _query_limit_hit = False
 _executed_queries: list[dict] = []
 _seen_queries: dict[str, int] = {}  # Track query -> count to detect loops
 _current_state: "InvestigationState | None" = None
+_bonus_queries_granted = 0  # Track bonus queries granted
+
+# Base query limits
 MAX_QUERIES_PER_INVESTIGATION = 5
 MAX_QUERIES_CRITICAL = 8  # Higher limit for critical alerts
 MAX_DUPLICATE_QUERIES = 2  # Max times same query can run before blocking
+
+# Adaptive query limit settings
+BONUS_QUERIES_FOR_EVIDENCE = 2  # Grant +2 queries when evidence is found
+BONUS_QUERIES_FOR_PYRAMID_L4 = 2  # Grant +2 queries when reaching pyramid level 4+
+MAX_TOTAL_QUERIES = 15  # Hard cap to prevent runaway investigations
+
+# Staged limits by investigation phase (cumulative budget per phase)
+QUERY_LIMITS_BY_STAGE = {
+    "triage": 5,  # Initial 5 queries for triage
+    "causation": 8,  # +3 more (8 total)
+    "lateral": 11,  # +3 more (11 total)
+    "synthesis": 11,  # No additional queries in synthesis phase
+}
 
 
 def reset_query_tracking():
@@ -46,18 +63,23 @@ def reset_query_tracking():
 
     global \
         _total_queries, \
+        _total_queries_attempted, \
         _consecutive_queries, \
         _query_limit_hit, \
         _executed_queries, \
         _seen_queries, \
-        _current_state
+        _current_state, \
+        _bonus_queries_granted
     _total_queries = 0
+    _total_queries_attempted = 0
     _consecutive_queries = []
     _query_limit_hit = False
     _executed_queries = []
     _seen_queries = {}
     _current_state = None
+    _bonus_queries_granted = 0
     reset_resilient_executor()
+    reset_evidence_validation()  # Reset evidence validation state
 
 
 def set_investigation_state(state: "InvestigationState"):
@@ -66,13 +88,79 @@ def set_investigation_state(state: "InvestigationState"):
     _current_state = state
 
 
+def _calculate_bonus_queries() -> int:
+    """Calculate bonus queries based on investigation progress.
+
+    Grants bonus queries for:
+    - Finding evidence (+2 queries)
+    - Reaching pyramid level 4+ (+2 queries)
+
+    Returns:
+        Number of bonus queries to grant (0, 2, or 4)
+    """
+    global _bonus_queries_granted
+
+    if not _current_state:
+        return 0
+
+    new_bonus = 0
+
+    # Check if evidence has been found (grant bonus once)
+    if _current_state.evidence_count > 0 and _bonus_queries_granted < BONUS_QUERIES_FOR_EVIDENCE:
+        new_bonus += BONUS_QUERIES_FOR_EVIDENCE
+        logger.info(f"🎁 Granting +{BONUS_QUERIES_FOR_EVIDENCE} bonus queries for finding evidence")
+
+    # Check if pyramid level 4+ reached (grant bonus once)
+    if (
+        _current_state.highest_pyramid_level >= 4
+        and _bonus_queries_granted < BONUS_QUERIES_FOR_EVIDENCE + BONUS_QUERIES_FOR_PYRAMID_L4
+    ):
+        # Only grant pyramid bonus if not already at max bonus
+        pyramid_bonus = min(
+            BONUS_QUERIES_FOR_PYRAMID_L4,
+            BONUS_QUERIES_FOR_EVIDENCE + BONUS_QUERIES_FOR_PYRAMID_L4 - _bonus_queries_granted,
+        )
+        if pyramid_bonus > 0:
+            new_bonus += pyramid_bonus
+            logger.info(f"🎁 Granting +{pyramid_bonus} bonus queries for reaching pyramid level 4+")
+
+    if new_bonus > 0:
+        _bonus_queries_granted += new_bonus
+
+    return _bonus_queries_granted
+
+
 def _get_query_limit() -> int:
-    """Get the query limit based on alert severity."""
+    """Get the adaptive query limit based on investigation state.
+
+    The limit is determined by:
+    1. Base limit from alert severity (5 normal, 8 critical)
+    2. Stage-based limits (triage: 5, causation: 8, lateral: 11)
+    3. Bonus queries for productive investigations
+    4. Hard cap at MAX_TOTAL_QUERIES (15)
+
+    Returns:
+        Current query limit
+    """
+    # Start with stage-based limit
+    base_limit = MAX_QUERIES_PER_INVESTIGATION
+
     if _current_state:
+        # Use stage-based limit
+        stage_name = _current_state.stage.value
+        base_limit = QUERY_LIMITS_BY_STAGE.get(stage_name, MAX_QUERIES_PER_INVESTIGATION)
+
+        # Override with critical severity limit if higher
         severity = _current_state.alert.get("labels", {}).get("severity", "").lower()
         if severity == "critical":
-            return MAX_QUERIES_CRITICAL
-    return MAX_QUERIES_PER_INVESTIGATION
+            base_limit = max(base_limit, MAX_QUERIES_CRITICAL)
+
+    # Add bonus queries for productive investigations
+    bonus = _calculate_bonus_queries()
+    total_limit = base_limit + bonus
+
+    # Cap at maximum to prevent runaway
+    return min(total_limit, MAX_TOTAL_QUERIES)
 
 
 def _check_query_limit() -> str | None:
@@ -127,24 +215,51 @@ def _check_duplicate_query(query: str) -> str | None:
     return None
 
 
-def _increment_query_count(tool_name: str):
-    """Increment query counter and log."""
-    global _total_queries
-    _total_queries += 1
+def _increment_query_attempt(tool_name: str):
+    """Increment query attempt counter (called before query execution)."""
+    global _total_queries_attempted
+    _total_queries_attempted += 1
     _consecutive_queries.append(tool_name)
     if len(_consecutive_queries) > 5:
         _consecutive_queries.pop(0)
     limit = _get_query_limit()
-    logger.info(f"📊 Query count: {_total_queries}/{limit}")
+    logger.info(
+        f"📊 Query attempt: {_total_queries_attempted} (successful: {_total_queries}/{limit})"
+    )
 
 
-def _record_query(tool_name: str, kwargs: dict, result_count: int | None = None):
-    """Record a query to the investigation state."""
+def _count_successful_query(result_count: int | None):
+    """Count a query as successful if it returned results.
+
+    Only queries that return data count against the limit.
+    Failed queries (0 results) get a "free retry".
+    """
+    global _total_queries
+
+    if result_count is not None and result_count > 0:
+        _total_queries += 1
+        limit = _get_query_limit()
+        logger.info(
+            f"📊 Successful query count: {_total_queries}/{limit} (returned {result_count} results)"
+        )
+    else:
+        logger.info("📊 Query returned 0 results - not counting against limit")
+
+
+def _record_query(
+    tool_name: str,
+    kwargs: dict,
+    result_count: int | None = None,
+    result_data: Any = None,
+):
+    """Record a query to the investigation state and store for evidence validation."""
     from datetime import datetime, timezone
+
+    query_string = kwargs.get("logql") or kwargs.get("expr") or str(kwargs)
 
     query_record = {
         "type": tool_name,
-        "query": kwargs.get("logql") or kwargs.get("expr") or str(kwargs),
+        "query": query_string,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "result_count": result_count,
         "datasource": kwargs.get("datasourceUid", "unknown"),
@@ -153,6 +268,15 @@ def _record_query(tool_name: str, kwargs: dict, result_count: int | None = None)
 
     if _current_state:
         _current_state.executed_queries.append(query_record)
+
+    # Store query result for evidence validation (if we have results)
+    if result_data is not None and result_count and result_count > 0:
+        store_query_result(
+            query_type=tool_name,
+            query_string=query_string,
+            result_data=result_data,
+            result_count=result_count,
+        )
 
 
 def create_rate_limited_mcp_tool(
@@ -203,8 +327,8 @@ def create_rate_limited_mcp_tool(
                 logger.warning(f"🔁 Blocking duplicate query: {query_str[:50]}...")
                 return dup_msg
 
-        # Increment counter
-        _increment_query_count(tool_name)
+        # Increment attempt counter (successful count updated after results)
+        _increment_query_attempt(tool_name)
 
         # Extract time parameters for resilient execution
         start_time = kwargs.get("startRfc3339") or kwargs.get("start_time") or kwargs.get("start")
@@ -239,9 +363,11 @@ def create_rate_limited_mcp_tool(
                     end_time,
                 )
 
-                # Record the query with result count
+                # Record the query with result count and data for validation
                 result_count = _extract_result_count(result)
-                _record_query(tool_name, kwargs, result_count)
+                _record_query(tool_name, kwargs, result_count, result_data=result)
+                # Only count successful queries against the limit
+                _count_successful_query(result_count)
 
                 # Log resilience metadata if present
                 if isinstance(result, dict) and "_resilience_metadata" in result:
@@ -269,7 +395,9 @@ def create_rate_limited_mcp_tool(
         try:
             result = await original_fn(*args, **kwargs)
             result_count = _extract_result_count(result)
-            _record_query(tool_name, kwargs, result_count)
+            _record_query(tool_name, kwargs, result_count, result_data=result)
+            # Only count successful queries against the limit
+            _count_successful_query(result_count)
             return result
         except Exception as e:
             error_str = str(e)

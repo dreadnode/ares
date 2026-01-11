@@ -1,6 +1,8 @@
 """Observability tools for querying Loki and Prometheus."""
 
+import asyncio
 from datetime import datetime, timedelta
+from typing import Any
 
 import dreadnode as dn
 import httpx
@@ -268,6 +270,181 @@ class LokiTools(Toolset):  # type: ignore[misc]
         except httpx.HTTPError as e:
             logger.error(f"Failed to get label values: {e}")
             return []
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def execute_parallel_queries(
+        self,
+        queries: list[dict[str, Any]],
+        start_time: str,
+        end_time: str,
+        limit: int = 500,
+    ) -> list[dict]:
+        """Execute multiple LogQL queries in parallel for faster investigation.
+
+        This is the MOST EFFICIENT way to investigate when you have multiple
+        independent questions. Use this instead of sequential query_logs calls.
+
+        IMPORTANT: Only queries that are INDEPENDENT should be batched together.
+        If query B depends on results from query A, run query A first.
+
+        Args:
+            queries: List of query objects, each containing:
+                - logql: The LogQL query string
+                - description: What this query is looking for (for logging)
+            start_time: ISO8601 timestamp for query start (shared for all queries)
+            end_time: ISO8601 timestamp for query end (shared for all queries)
+            limit: Maximum number of log lines per query (default 500)
+
+        Returns:
+            List of results in the same order as input queries.
+            Each result contains:
+            - query: The original query string
+            - description: The query description
+            - result: Query results (same format as query_logs)
+            - success: Whether the query succeeded
+
+        Example:
+            >>> await execute_parallel_queries(
+            ...     queries=[
+            ...         {"logql": '{job="syslog"} |= "error"', "description": "Find errors"},
+            ...         {"logql": '{job="auth"} |= "4625"', "description": "Find failed logins"},
+            ...         {"logql": '{job="app"} |= "exception"', "description": "Find exceptions"},
+            ...     ],
+            ...     start_time="2024-01-15T10:00:00Z",
+            ...     end_time="2024-01-15T11:00:00Z"
+            ... )
+            [
+                {"query": "...", "description": "...", "result": {...}, "success": True},
+                {"query": "...", "description": "...", "result": {...}, "success": True},
+                {"query": "...", "description": "...", "result": {...}, "success": True}
+            ]
+
+        See Also:
+            query_logs: For single queries.
+            combine_query_patterns: For combining similar patterns into one query.
+        """
+        if not queries:
+            return []
+
+        if len(queries) > 10:
+            logger.warning(f"Large batch of {len(queries)} queries - consider reducing")
+            queries = queries[:10]  # Cap at 10 to prevent overload
+
+        dn.log_metric("parallel_query_batches", 1, mode="count")
+        dn.log_metric("parallel_queries_total", len(queries), mode="count")
+        logger.info(f"Executing {len(queries)} queries in parallel")
+
+        async def execute_single(query_obj: dict[str, Any]) -> dict:
+            logql = query_obj.get("logql", "")
+            description = query_obj.get("description", "")
+
+            if not logql:
+                return {
+                    "query": logql,
+                    "description": description,
+                    "result": {"error": "Empty query"},
+                    "success": False,
+                }
+
+            try:
+                result = await self.query_logs(
+                    logql=logql,
+                    start_time=start_time,
+                    end_time=end_time,
+                    limit=limit,
+                )
+                success = "error" not in result
+                return {
+                    "query": logql,
+                    "description": description,
+                    "result": result,
+                    "success": success,
+                }
+            except Exception as e:
+                logger.error(f"Parallel query failed: {e}")
+                return {
+                    "query": logql,
+                    "description": description,
+                    "result": {"error": str(e)},
+                    "success": False,
+                }
+
+        # Execute all queries in parallel
+        tasks = [execute_single(q) for q in queries]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Convert exceptions to error results
+        processed_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                processed_results.append(
+                    {
+                        "query": queries[i].get("logql", ""),
+                        "description": queries[i].get("description", ""),
+                        "result": {"error": str(result)},
+                        "success": False,
+                    }
+                )
+            else:
+                processed_results.append(result)  # type: ignore[arg-type]
+
+        # Log summary
+        successful = sum(1 for r in processed_results if r.get("success"))
+        logger.info(f"Parallel queries complete: {successful}/{len(queries)} successful")
+
+        return processed_results
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    def combine_query_patterns(
+        self,
+        base_selector: str,
+        patterns: list[str],
+    ) -> str:
+        """Combine multiple regex patterns into a single efficient LogQL query.
+
+        Instead of running 3 separate queries for "error", "failed", "exception",
+        combine them into one query with |~ "error|failed|exception".
+
+        This is MORE EFFICIENT than parallel queries when searching for
+        multiple patterns in the same log stream.
+
+        Args:
+            base_selector: The label selector (e.g., '{job="syslog"}')
+            patterns: List of patterns to combine (e.g., ["error", "failed", "exception"])
+
+        Returns:
+            Combined LogQL query string.
+
+        Example:
+            >>> combine_query_patterns(
+            ...     base_selector='{job="syslog"}',
+            ...     patterns=["error", "failed", "critical"]
+            ... )
+            '{job="syslog"} |~ "error|failed|critical"'
+
+            >>> combine_query_patterns(
+            ...     base_selector='{job="auth"}',
+            ...     patterns=["4625", "4624", "4771"]
+            ... )
+            '{job="auth"} |~ "4625|4624|4771"'
+
+        See Also:
+            execute_parallel_queries: For truly independent queries.
+        """
+        if not patterns:
+            return base_selector
+
+        # Escape any regex special characters in patterns
+        escaped = []
+        for p in patterns:
+            # Escape common regex chars but preserve intended regex
+            if not any(c in p for c in ".*+?()[]{}|\\^$"):
+                escaped.append(p)
+            else:
+                escaped.append(p)  # Keep as-is if it looks like regex
+
+        combined = "|".join(escaped)
+        return f'{base_selector} |~ "{combined}"'
 
 
 class PrometheusTools(Toolset):  # type: ignore[misc]
