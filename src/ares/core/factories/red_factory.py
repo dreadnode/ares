@@ -242,7 +242,6 @@ def create_redteam_agent(
     reporting_tools = RedTeamReportingTools()
     reporting_tools.set_state(state)
 
-    # Build tool list
     tools: list = [
         network_tools,
         credential_tools,

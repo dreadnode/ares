@@ -249,7 +249,6 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
         }
 
         try:
-            # First ensure the folder exists
             await self._ensure_alert_folder()
 
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -288,15 +287,13 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
         """Ensure the ares-security folder exists for alert rules."""
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                # Check if folder exists
                 response = await client.get(
                     f"{self.base_url}/api/folders/ares-security",
                     headers=self._headers(),
                 )
                 if response.status_code == 200:
-                    return  # Folder exists
+                    return
 
-                # Create folder
                 response = await client.post(
                     f"{self.base_url}/api/folders",
                     headers=self._headers(),
@@ -416,7 +413,6 @@ async def connect_grafana_mcp(
     """
     import rigging as rg
 
-    # Get credentials from environment if not provided
     grafana_url = grafana_url or os.getenv("GRAFANA_URL", "")
     # Prefer GRAFANA_SERVICE_ACCOUNT_TOKEN, fallback to GRAFANA_API_KEY for compatibility
     grafana_api_key = (

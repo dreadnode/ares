@@ -38,29 +38,25 @@ class AlertCluster:
         labels = alert.get("labels", {})
         annotations = alert.get("annotations", {})
 
-        # Extract hosts
         for key in ["hostname", "host", "computer"]:
             if key in labels:
                 self.common_hosts.add(labels[key].lower())
         # Instance often contains host:port
         if "instance" in labels:
             host = labels["instance"].split(":")[0]
-            if host and not host[0].isdigit():  # Skip if IP
+            if host and not host[0].isdigit():
                 self.common_hosts.add(host.lower())
 
-        # Extract users
         for key in ["user", "username", "account", "TargetUserName", "SubjectUserName"]:
             if key in labels:
                 self.common_users.add(labels[key].lower())
             if key in annotations:
                 self.common_users.add(annotations[key].lower())
 
-        # Extract IPs
         for key in ["ip", "source_ip", "src_ip", "IpAddress", "ClientAddress"]:
             if key in labels:
                 self.common_ips.add(labels[key])
 
-        # Extract techniques
         for key in ["mitre_technique", "technique", "technique_id"]:
             if key in labels:
                 tech = labels[key]
@@ -69,7 +65,6 @@ class AlertCluster:
                 else:
                     self.techniques.add(tech)
 
-        # Update time range
         starts_at = alert.get("startsAt")
         if starts_at:
             try:
@@ -189,7 +184,6 @@ class AlertCorrelator:
         Returns:
             The cluster this alert was added to
         """
-        # Find best matching cluster
         best_cluster = None
         best_score = 0.0
 
@@ -209,7 +203,7 @@ class AlertCorrelator:
                 f"(similarity: {best_score:.2f})"
             )
             return best_cluster
-        # Create new cluster
+
         self._cluster_counter += 1
         new_cluster = AlertCluster(cluster_id=f"cluster-{self._cluster_counter:04d}")
         new_cluster.add_alert(alert)

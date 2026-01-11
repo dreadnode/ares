@@ -263,10 +263,8 @@ class LateralMovementAnalyzer:
         connections: list[HostConnection] = []
         values = _extract_searchable_values(result_data)
 
-        # Extract hosts from values
         hosts: set[str] = set()
         for val in values:
-            # Check if it looks like a hostname
             if self._looks_like_hostname(val):
                 hosts.add(val.lower())
 
@@ -276,10 +274,8 @@ class LateralMovementAnalyzer:
             if self._looks_like_hostname(match):
                 hosts.add(match.lower())
 
-        # Determine connection type from result content
         conn_type = self._detect_connection_type(result_str)
 
-        # Create connections
         if source_host and hosts:
             source_host = source_host.lower()
             for dest_host in hosts:
@@ -388,7 +384,6 @@ class LateralMovementAnalyzer:
         if not entry_points:
             entry_points = sources
 
-        # Build path starting from entry points
         path: list[str] = []
         visited: set[str] = set()
 

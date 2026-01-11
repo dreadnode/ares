@@ -216,15 +216,12 @@ class RedBlueCorrelator:
         content = report_path.read_text()
         activities = []
 
-        # Extract operation ID
         operation_id_match = re.search(r"\*\*Operation ID\*\*:\s*(\S+)", content)
         operation_id = operation_id_match.group(1) if operation_id_match else "unknown"
 
-        # Extract target IP
         target_ip_match = re.search(r"\*\*Target\*\*:\s*(\d+\.\d+\.\d+\.\d+)", content)
         target_ip = target_ip_match.group(1) if target_ip_match else None
 
-        # Extract start time
         started_match = re.search(r"\*\*Started\*\*:\s*(.+?)(?:\n|$)", content)
         if started_match:
             try:
@@ -236,7 +233,6 @@ class RedBlueCorrelator:
         else:
             started_at = datetime.now(timezone.utc)
 
-        # Extract hosts discovered
         hosts_section = re.search(r"### Hosts \((\d+)\)(.*?)(?=###|\Z)", content, re.DOTALL)
         if hosts_section:
             host_count = int(hosts_section.group(1))
@@ -254,7 +250,6 @@ class RedBlueCorrelator:
                     )
                 )
 
-        # Extract credentials obtained
         creds_section = re.search(r"### Credentials \((\d+)\)(.*?)(?=###|\Z)", content, re.DOTALL)
         if creds_section:
             creds_content = creds_section.group(2)
@@ -279,7 +274,6 @@ class RedBlueCorrelator:
                     )
                 )
 
-        # Extract MITRE techniques from timeline
         timeline_section = re.search(
             r"### Timeline of Key Events(.*?)(?=---|\Z)", content, re.DOTALL
         )
@@ -308,7 +302,6 @@ class RedBlueCorrelator:
                     )
                 )
 
-        # Check for domain admin / golden ticket
         if "Domain Admin Access**: ✓" in content or "has_domain_admin: true" in content.lower():
             activities.append(
                 RedTeamActivity(
@@ -355,19 +348,15 @@ class RedBlueCorrelator:
         if "DatasourceNoData" in report_path.name:
             return None
 
-        # Extract investigation ID
         inv_id_match = re.search(r"\*\*Investigation ID:\*\*\s*`?(\S+?)`?(?:\n|$)", content)
         investigation_id = inv_id_match.group(1) if inv_id_match else None
 
-        # Extract alert name
         alert_match = re.search(r"\|\s*Alert Name\s*\|\s*(.+?)\s*\|", content)
         alert_name = alert_match.group(1).strip() if alert_match else "Unknown"
 
-        # Extract severity
         severity_match = re.search(r"\|\s*Severity\s*\|\s*(\w+)\s*\|", content)
         severity = severity_match.group(1).strip() if severity_match else "unknown"
 
-        # Extract timestamp from alert payload
         starts_at_match = re.search(r'"startsAt":\s*"([^"]+)"', content)
         if starts_at_match:
             try:
@@ -387,23 +376,18 @@ class RedBlueCorrelator:
             else:
                 timestamp = datetime.now(timezone.utc)
 
-        # Extract MITRE technique
         technique_match = re.search(r"(T\d{4}(?:\.\d{3})?)", content)
         technique_id = technique_match.group(1) if technique_match else None
 
-        # Extract status
         status_match = re.search(r"\|\s*Status\s*\|\s*(\w+)", content)
         status = status_match.group(1).strip().lower() if status_match else "unknown"
 
-        # Extract evidence count
         evidence_match = re.search(r"\*\*Evidence Collected:\*\*\s*(\d+)", content)
         evidence_count = int(evidence_match.group(1)) if evidence_match else 0
 
-        # Extract pyramid level
         pyramid_match = re.search(r"\*\*Highest Pyramid Level:\*\*\s*(\d+)", content)
         highest_pyramid_level = int(pyramid_match.group(1)) if pyramid_match else 0
 
-        # Extract target IP from content
         ip_match = re.search(r"(\d+\.\d+\.\d+\.\d+)", content)
         target_ip = ip_match.group(1) if ip_match else None
 
