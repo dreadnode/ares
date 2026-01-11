@@ -659,6 +659,11 @@ def create_investigation_agent(
     completion_tools.set_state(state)
 
     loki_url = grafana_url.rstrip("/")
+    # QueryTemplateTools now supports optimized queries:
+    # - default_label_selector: Override with specific labels like '{job="eventlog"}'
+    #   for better performance instead of scanning all streams
+    # - default_hours_back: Defaults to 1 hour (reduced from 4) for faster queries
+    # Example: QueryTemplateTools(loki_url=loki_url, default_label_selector='{job="windows"}')
     query_template_tools = QueryTemplateTools(loki_url=loki_url)
 
     learning_tools = LearningTools()
