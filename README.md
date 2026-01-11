@@ -1,5 +1,15 @@
 # Ares - Autonomous Security Operations Agent
 
+<!-- BEGIN_AUTO_BADGES -->
+<div align="center">
+
+[![Pre-Commit](https://github.com/dreadnode/python-template/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/python-template/actions/workflows/pre-commit.yaml)
+[![Renovate](https://github.com/dreadnode/python-template/actions/workflows/renovate.yaml/badge.svg)](https://github.com/dreadnode/python-template/actions/workflows/renovate.yaml)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
+</div>
+<!-- END_AUTO_BADGES -->
+
 [![Tests](https://github.com/dreadnode/ares/actions/workflows/tests.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/tests.yaml)
 [![Coverage](https://raw.githubusercontent.com/dreadnode/ares/main/.github/badges/coverage.svg)](https://github.com/dreadnode/ares/actions/workflows/coverage-badge.yaml)
 [![Pre-Commit](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml)
