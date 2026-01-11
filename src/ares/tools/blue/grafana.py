@@ -167,6 +167,143 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
             tags=["ares", "investigation", "started", alert_name, severity],
         )
 
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def create_detection_rule(
+        self,
+        title: str,
+        logql_query: str,
+        description: str,
+        mitre_technique: str | None = None,
+        severity: str = "warning",
+        evaluation_interval: str = "1m",
+        pending_period: str = "5m",
+    ) -> dict:
+        """Create a Grafana alert rule based on a detection pattern found during investigation.
+
+        Use this when you discover a LogQL query pattern that reliably detects malicious
+        activity and should be monitored continuously.
+
+        Args:
+            title: Alert rule title (e.g., "DCSync Detection - Replication Request")
+            logql_query: The LogQL query that detects the pattern (must use specific labels)
+            description: Description of what this rule detects and why it matters
+            mitre_technique: Optional MITRE ATT&CK technique ID (e.g., "T1003.006")
+            severity: Alert severity - "critical", "warning", or "info" (default: warning)
+            evaluation_interval: How often to evaluate the rule (default: 1m)
+            pending_period: How long condition must be true before firing (default: 5m)
+
+        Returns:
+            Dict with status and rule details or error message
+        """
+        # Validate the query doesn't use broad selectors
+        broad_patterns = ['{job=~".+"}', '{deployment=~".+"}', '{namespace=~".+"}']
+        for pattern in broad_patterns:
+            if pattern in logql_query:
+                return {
+                    "status": "error",
+                    "error": f"Query contains broad selector '{pattern}' which would cause performance issues. Use specific labels like {{job=\"eventlog\"}}.",
+                }
+
+        # Validate severity
+        valid_severities = ["critical", "warning", "info"]
+        if severity not in valid_severities:
+            severity = "warning"
+
+        # Build labels and annotations dicts
+        labels: dict[str, str] = {
+            "severity": severity,
+            "source": "ares-investigation",
+        }
+        annotations: dict[str, str] = {
+            "description": description,
+            "summary": f"ARES Detection: {title}",
+        }
+        if mitre_technique:
+            labels["mitre_technique"] = mitre_technique
+            annotations["mitre_technique"] = mitre_technique
+
+        # Build the alert rule payload for Grafana provisioning API
+        rule_payload = {
+            "title": title,
+            "ruleGroup": "ares-detections",
+            "folderUID": "ares-security",  # Will be created if doesn't exist
+            "noDataState": "OK",
+            "execErrState": "OK",
+            "for": pending_period,
+            "annotations": annotations,
+            "labels": labels,
+            "data": [
+                {
+                    "refId": "A",
+                    "datasourceUid": "loki",
+                    "queryType": "range",
+                    "model": {
+                        "expr": f"count_over_time({logql_query} [5m]) > 0",
+                        "queryType": "range",
+                        "refId": "A",
+                    },
+                    "relativeTimeRange": {"from": 300, "to": 0},
+                }
+            ],
+            "condition": "A",
+        }
+
+        try:
+            await self._ensure_alert_folder()
+
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/api/v1/provisioning/alert-rules",
+                    headers=self._headers(),
+                    json=rule_payload,
+                )
+
+                if response.status_code == 201:
+                    result = response.json()
+                    logger.info(
+                        f"Created detection rule: {title} (UID: {result.get('uid', 'unknown')})"
+                    )
+                    return {
+                        "status": "success",
+                        "message": f"Alert rule '{title}' created successfully",
+                        "uid": result.get("uid"),
+                        "rule_group": "ares-detections",
+                        "folder": "ares-security",
+                    }
+                error_text = response.text
+                logger.warning(
+                    f"Failed to create alert rule: {response.status_code} - {error_text}"
+                )
+                return {
+                    "status": "error",
+                    "error": f"Failed to create rule: {error_text}",
+                }
+
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error creating alert rule: {e}")
+            return {"status": "error", "error": str(e)}
+
+    async def _ensure_alert_folder(self) -> None:
+        """Ensure the ares-security folder exists for alert rules."""
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(
+                    f"{self.base_url}/api/folders/ares-security",
+                    headers=self._headers(),
+                )
+                if response.status_code == 200:
+                    return
+
+                response = await client.post(
+                    f"{self.base_url}/api/folders",
+                    headers=self._headers(),
+                    json={"uid": "ares-security", "title": "ARES Security Detections"},
+                )
+                if response.status_code in (200, 201):
+                    logger.info("Created ares-security folder for alert rules")
+        except httpx.HTTPError as e:
+            logger.warning(f"Could not ensure alert folder exists: {e}")
+
     async def post_investigation_completed(
         self,
         investigation_id: str,
@@ -276,7 +413,6 @@ async def connect_grafana_mcp(
     """
     import rigging as rg
 
-    # Get credentials from environment if not provided
     grafana_url = grafana_url or os.getenv("GRAFANA_URL", "")
     # Prefer GRAFANA_SERVICE_ACCOUNT_TOKEN, fallback to GRAFANA_API_KEY for compatibility
     grafana_api_key = (

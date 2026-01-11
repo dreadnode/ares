@@ -142,7 +142,6 @@ async def main(
         api_key=grafana_api_key,
     )
 
-    # Initialize alert correlator for clustering related alerts
     alert_correlator = AlertCorrelator()
     logger.info("Alert correlation enabled - related alerts will be clustered")
 
@@ -178,10 +177,8 @@ async def main(
                     logger.info(f"Fingerprint: {fingerprint}")
                     logger.info("=" * 60)
 
-                    # Mark as being investigated
                     investigated_fingerprints.add(fingerprint)
 
-                    # Add alert to correlator and get context
                     cluster = alert_correlator.add_alert(alert)
                     correlation_context = alert_correlator.get_cluster_context(alert)
                     related_count = correlation_context.get("related_alerts", 0)

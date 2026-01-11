@@ -54,11 +54,12 @@ _BROAD_SELECTOR_PATTERNS = [
     '{deployment=~".+"}',
     '{namespace=~".+"}',
     '{app=~".+"}',
+    '{hostname=~".+"}',
 ]
 
 
 def _optimize_logql_query(query: str) -> tuple[str, bool]:
-    """Optimize a LogQL query by warning about or fixing broad patterns.
+    """Optimize a LogQL query by rewriting broad selectors to prevent timeouts.
 
     Per Grafana Loki best practices:
     - Label selectors are the most important filter
@@ -74,19 +75,18 @@ def _optimize_logql_query(query: str) -> tuple[str, bool]:
     was_modified = False
     optimized = query
 
-    # Check for overly broad selectors
+    # Auto-rewrite broad selectors to use specific label
     for pattern in _BROAD_SELECTOR_PATTERNS:
         if pattern in query:
             logger.warning(
-                f"Query contains broad selector '{pattern}' which may cause timeouts. "
-                'Consider using specific labels like {{job="eventlog"}} for better performance.'
+                f"Query contains broad selector '{pattern}' - auto-rewriting to "
+                '{{job="eventlog"}} to prevent timeout.'
             )
-            # Don't modify the query - just warn
-            # In future, could inject a default label if configured
-            break
+            optimized = optimized.replace(pattern, '{job="eventlog"}')
+            was_modified = True
+            # Continue checking for other broad patterns
 
-    # Check for expensive patterns
-    if "|~" in query and "|=" not in query:
+    if "|~" in optimized and "|=" not in optimized:
         # Query only uses regex, no simple contains
         logger.debug(
             "Query uses only regex filters (|~). Consider using contains (|=) "
@@ -158,12 +158,10 @@ def _calculate_bonus_queries() -> int:
 
     new_bonus = 0
 
-    # Check if evidence has been found (grant bonus once)
     if _current_state.evidence_count > 0 and _bonus_queries_granted < BONUS_QUERIES_FOR_EVIDENCE:
         new_bonus += BONUS_QUERIES_FOR_EVIDENCE
         logger.info(f"🎁 Granting +{BONUS_QUERIES_FOR_EVIDENCE} bonus queries for finding evidence")
 
-    # Check if pyramid level 4+ reached (grant bonus once)
     if (
         _current_state.highest_pyramid_level >= 4
         and _bonus_queries_granted < BONUS_QUERIES_FOR_EVIDENCE + BONUS_QUERIES_FOR_PYRAMID_L4
@@ -208,7 +206,6 @@ def _get_query_limit() -> int:
         if severity == "critical":
             base_limit = max(base_limit, MAX_QUERIES_CRITICAL)
 
-    # Add bonus queries for productive investigations
     bonus = _calculate_bonus_queries()
     total_limit = base_limit + bonus
 
@@ -341,12 +338,10 @@ def _record_query(
                 )
 
                 if extracted:
-                    # Get existing values once and track new ones
                     existing_values = {e.value for e in _current_state.evidence}
                     added_count = 0
 
                     for item in extracted:
-                        # Check for duplicates by value
                         if item["value"] in existing_values:
                             continue
 
@@ -417,18 +412,20 @@ def create_rate_limited_mcp_tool(
 
         query_str = kwargs.get("logql") or kwargs.get("expr") or ""
         if query_str:
-            # Check for and warn about broad query patterns that cause timeouts
-            _optimize_logql_query(query_str)
+            optimized_query, was_modified = _optimize_logql_query(query_str)
+            if was_modified:
+                # Update kwargs with optimized query
+                query_key = "logql" if "logql" in kwargs else "expr"
+                kwargs[query_key] = optimized_query
+                query_str = optimized_query
 
             dup_msg = _check_duplicate_query(query_str)
             if dup_msg:
                 logger.warning(f"🔁 Blocking duplicate query: {query_str[:50]}...")
                 return dup_msg
 
-        # Increment attempt counter (successful count updated after results)
         _increment_query_attempt(tool_name)
 
-        # Extract time parameters for resilient execution
         start_time = kwargs.get("startRfc3339") or kwargs.get("start_time") or kwargs.get("start")
         end_time = kwargs.get("endRfc3339") or kwargs.get("end_time") or kwargs.get("end")
 

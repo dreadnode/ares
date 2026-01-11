@@ -32,15 +32,16 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     Attributes:
         loki_url: Base URL of the Loki instance.
         timeout: HTTP request timeout in seconds.
-        default_label_selector: Base label selector for queries. Override with
-            specific labels like '{job="eventlog"}' for better performance.
-            Default '{job=~".+"}' scans all streams (slow).
+        default_label_selector: Base label selector for queries. Defaults to
+            '{job="eventlog"}' for Windows event logs. Override for other log
+            types (e.g., '{job="syslog"}', '{deployment="windows-dc"}').
+            NEVER use broad patterns like '{job=~".+"}' - they scan all streams and timeout.
         default_hours_back: Default time range for queries. Shorter ranges are faster.
     """
 
     loki_url: str
     timeout: int = 30
-    default_label_selector: str = '{job=~".+"}'
+    default_label_selector: str = '{job="eventlog"}'
     default_hours_back: int = 1  # Reduced from 4 hours for faster queries
 
     def _build_selector(
@@ -119,7 +120,6 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         limit: int = 500,
     ) -> dict[str, Any]:
         """Execute a LogQL query against Loki."""
-        # Validate query to prevent empty-compatible regex errors
         if '=~".*"' in logql or "=~'.*'" in logql:
             return {
                 "status": "error",
@@ -191,7 +191,6 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_port_scan", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Build optimized query: label selector + tool patterns
         selector = self._build_selector()
         # Use simple contains for common tool names, regex only for complex patterns
         tool_filter = self._build_pattern_filter(
@@ -235,7 +234,6 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_user_enum", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Build optimized query with hostname in label selector (not line filter)
         selector = self._build_selector(hostname=domain_controller)
 
         # Event IDs first (most selective), then tool patterns
@@ -291,7 +289,6 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_share_enum", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Build optimized query with hostname in label selector
         selector = self._build_selector(hostname=target_host)
 
         # Event IDs first (most selective)
@@ -355,10 +352,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_secretsdump", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Build optimized query with hostname in label selector
         selector = self._build_selector(hostname=target_host)
-
-        # DRSUAPI for DCSync, SAMR for SAM dump, registry access for LSA secrets
         tool_filter = self._build_pattern_filter(
             [
                 "drsuapi",
@@ -410,10 +404,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_dcsync", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Build optimized query with hostname in label selector
         selector = self._build_selector(hostname=domain_controller)
-
-        # Event 4662 first (most selective), then replication GUIDs
         # 1131f6aa-9c07-11d1-f79f-00c04fc2dcd2 = DS-Replication-Get-Changes
         # 1131f6ad-9c07-11d1-f79f-00c04fc2dcd2 = DS-Replication-Get-Changes-All
         event_filter = self._build_event_filter(["4662"])
@@ -464,10 +455,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_kerberoast", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Build optimized query with hostname in label selector
         selector = self._build_selector(hostname=domain_controller)
-
-        # Event 4769 first (most selective - Kerberos Service Ticket Request)
         event_filter = self._build_event_filter(["4769"])
         tool_filter = self._build_pattern_filter(
             [
@@ -516,10 +504,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_asrep", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Build optimized query with hostname in label selector
         selector = self._build_selector(hostname=domain_controller)
-
-        # Event 4768/4771 first (most selective)
         # Event 4768: Kerberos TGT Request (AS-REQ)
         # Event 4771: Kerberos Pre-Authentication Failed
         event_filter = self._build_event_filter(["4768", "4771"])
@@ -571,10 +556,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_brute_force", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Build optimized query with hostname in label selector
         selector = self._build_selector(hostname=target_host)
-
-        # Event IDs first (most selective)
         # Event 4625: Failed Logon
         # Event 4771: Kerberos Pre-Auth Failed
         event_filter = self._build_event_filter(["4625", "4771"])
@@ -629,10 +611,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_pth", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Build optimized query with hostname in label selector
         selector = self._build_selector(hostname=target_host)
-
-        # Event 4624 first (most selective), then NTLM patterns
         event_filter = self._build_event_filter(["4624"])
         tool_filter = self._build_pattern_filter(
             [
@@ -683,10 +662,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_lateral", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Build optimized query with hostname in label selector
         selector = self._build_selector(hostname=source_host)
-
-        # Event IDs first (most selective)
         # Event 7045: Service installed
         # Event 4648: Explicit credential logon
         event_filter = self._build_event_filter(["7045", "4648"])

@@ -67,7 +67,6 @@ def store_query_result(
     _query_counter += 1
     query_id = f"q-{_query_counter:04d}"
 
-    # Extract searchable values from results
     extracted = _extract_searchable_values(result_data)
 
     stored = StoredQueryResult(
@@ -104,14 +103,12 @@ def _extract_searchable_values(data: Any, depth: int = 0) -> set[str]:
     values: set[str] = set()
 
     if isinstance(data, str):
-        # Add the string itself if it looks like an IOC
-        if data and len(data) < 500:  # Skip very long strings
+        if data and len(data) < 500:
             values.add(data.lower())
             # Also extract embedded patterns
             values.update(_extract_patterns_from_string(data))
     elif isinstance(data, dict):
         for val in data.values():
-            # Add key-value pairs for common fields
             if isinstance(val, str) and val:
                 values.add(val.lower())
                 values.update(_extract_patterns_from_string(val))
@@ -176,7 +173,6 @@ def _extract_patterns_from_string(text: str) -> set[str]:  # noqa: PLR0912
             if match and len(match) > 1:
                 patterns.add(match.lower())
 
-    # Process names
     process_patterns = [
         r'"(?:ProcessName|NewProcessName|ParentProcessName|Image)":\s*"([^"]+)"',
         r"(?:ProcessName|Process)=([^\s,;}\]]+)",
@@ -209,6 +205,23 @@ def _extract_patterns_from_string(text: str) -> set[str]:  # noqa: PLR0912
     return patterns
 
 
+def _is_mitre_technique_description(value: str) -> bool:
+    """Check if value is a MITRE technique description that shouldn't be validated.
+
+    MITRE technique descriptions (e.g., "T1003.006 - DCSync") don't appear in
+    query results, so they cannot be validated and should be skipped.
+
+    Args:
+        value: The evidence value to check
+
+    Returns:
+        True if value looks like a MITRE technique description
+    """
+    # Match patterns like "T1003", "T1003.006", "T1003.006 - DCSync", etc.
+    mitre_pattern = r"^T\d{4}(\.\d{3})?\s*(-\s*.+)?$"
+    return bool(re.match(mitre_pattern, value.strip(), re.IGNORECASE))
+
+
 def validate_evidence_value(value: str) -> tuple[bool, str | None]:
     """Validate an evidence value against recent query results.
 
@@ -221,11 +234,13 @@ def validate_evidence_value(value: str) -> tuple[bool, str | None]:
     if not value:
         return False, None
 
+    if _is_mitre_technique_description(value):
+        logger.debug(f"Skipping validation for MITRE technique: {value}")
+        return True, None
+
     normalized_value = value.lower().strip()
 
-    # Search through recent results
-    for stored in reversed(_recent_results):  # Most recent first
-        # Check if value appears in extracted values
+    for stored in reversed(_recent_results):
         if normalized_value in stored.extracted_values:
             logger.info(f"Evidence '{value[:50]}...' validated against query {stored.query_id}")
             return True, stored.query_id
@@ -387,7 +402,6 @@ def auto_extract_evidence_from_query(
     evidence_items: list[dict] = []
     seen_values: set[str] = set()
 
-    # Extract searchable values from the query result
     extracted = _extract_searchable_values(query_result)
 
     for value in extracted:
