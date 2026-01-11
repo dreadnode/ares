@@ -72,6 +72,8 @@ class Evidence:
         mitre_techniques: Associated MITRE ATT&CK technique IDs.
         confidence: Confidence score between 0.0 and 1.0.
         metadata: Additional context about this evidence.
+        source_query_id: ID of the query that produced this evidence (for provenance).
+        validated: Whether this evidence was validated against query results.
     """
 
     id: str
@@ -83,6 +85,8 @@ class Evidence:
     mitre_techniques: list[str] = field(default_factory=list)
     confidence: float = 0.5
     metadata: dict[str, Any] = field(default_factory=dict)
+    source_query_id: str | None = None
+    validated: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -95,6 +99,8 @@ class Evidence:
             "mitre_techniques": self.mitre_techniques,
             "confidence": self.confidence,
             "metadata": self.metadata,
+            "source_query_id": self.source_query_id,
+            "validated": self.validated,
         }
 
 

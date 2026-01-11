@@ -21,6 +21,7 @@ from ares.core.persistence import (
 )
 from ares.core.templates import get_template_loader
 from ares.integrations.mitre import MITREAttackClient
+from ares.tools.blue.grafana import GrafanaTools
 
 
 class InvestigationTimeoutError(Exception):
@@ -172,6 +173,11 @@ class InvestigationOrchestrator:
         self.max_steps = max_steps
         self._mcp_client = None
         self._mcp_tools = None
+        # Grafana tools for annotations
+        self._grafana_tools = GrafanaTools(
+            base_url=grafana_url,
+            api_key=grafana_api_key,
+        )
 
     async def _ensure_mcp_connection(self) -> None:
         """Ensure MCP connection is established (with 60s timeout)."""
@@ -271,6 +277,9 @@ class InvestigationOrchestrator:
             # Ensure MCP connection is ready
             await self._ensure_mcp_connection()
 
+            # Post "investigation started" annotation to Grafana
+            await self._post_started_annotation(investigation_id, alert)
+
             # Auto-extract and record MITRE technique from alert
             labels = alert.get("labels", {})
             annotations = alert.get("annotations", {})
@@ -357,6 +366,11 @@ class InvestigationOrchestrator:
                     # Persist investigation for learning
                     self._persist_investigation(state, status)
 
+                    # Post "investigation completed" annotation to Grafana
+                    await self._post_completed_annotation(
+                        investigation_id, alert_name, status, state
+                    )
+
                     dn.log_output("report_path", str(report_path))
                     dn.log_metric("investigation_success", 1)
 
@@ -383,6 +397,11 @@ class InvestigationOrchestrator:
                     # Persist investigation for learning (even on timeout)
                     self._persist_investigation(state, "timeout")
 
+                    # Post "investigation timeout" annotation to Grafana
+                    await self._post_completed_annotation(
+                        investigation_id, alert_name, "timeout", state
+                    )
+
                     return {
                         "investigation_id": investigation_id,
                         "status": "timeout",
@@ -398,11 +417,73 @@ class InvestigationOrchestrator:
 
                     # Persist failed investigation
                     self._persist_investigation(state, "failed")
+
+                    # Post "investigation failed" annotation to Grafana
+                    await self._post_completed_annotation(
+                        investigation_id, alert_name, "failed", state
+                    )
                     raise
 
         finally:
             # Always cancel the watchdog on normal completion
             watchdog.cancel()
+
+    async def _post_started_annotation(self, investigation_id: str, alert: dict) -> None:
+        """Post investigation started annotation to Grafana.
+
+        Args:
+            investigation_id: Unique investigation identifier.
+            alert: Alert dictionary.
+        """
+        try:
+            labels = alert.get("labels", {})
+            alert_name = labels.get("alertname", "unknown")
+            severity = labels.get("severity", "unknown")
+
+            await self._grafana_tools.post_investigation_started(
+                investigation_id=investigation_id,
+                alert_name=alert_name,
+                severity=severity,
+            )
+        except Exception as e:
+            # Don't fail the investigation if annotation fails
+            logger.warning(f"Failed to post started annotation: {e}")
+
+    async def _post_completed_annotation(
+        self,
+        investigation_id: str,
+        alert_name: str,
+        status: str,
+        state: InvestigationState,
+    ) -> None:
+        """Post investigation completed annotation to Grafana.
+
+        Args:
+            investigation_id: Unique investigation identifier.
+            alert_name: Name of the alert investigated.
+            status: Final status.
+            state: Investigation state.
+        """
+        try:
+            # Get summary from state if available
+            summary = None
+            if state.attack_synopsis:
+                summary = state.attack_synopsis
+            elif state.recommendations:
+                summary = f"Recommendations: {', '.join(state.recommendations[:3])}"
+
+            await self._grafana_tools.post_investigation_completed(
+                investigation_id=investigation_id,
+                alert_name=alert_name,
+                status=status,
+                evidence_count=len(state.evidence),
+                techniques=list(state.identified_techniques),
+                pyramid_level=state.highest_pyramid_level,
+                summary=summary,
+            )
+        except Exception as e:
+            # Don't fail the investigation if annotation fails
+            logger.warning(f"Failed to post completed annotation: {e}")
 
     def _create_alert_timeline_event(self, state: InvestigationState, alert: dict) -> None:
         """Create an initial timeline event from the alert."""
