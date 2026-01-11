@@ -54,11 +54,12 @@ _BROAD_SELECTOR_PATTERNS = [
     '{deployment=~".+"}',
     '{namespace=~".+"}',
     '{app=~".+"}',
+    '{hostname=~".+"}',
 ]
 
 
 def _optimize_logql_query(query: str) -> tuple[str, bool]:
-    """Optimize a LogQL query by warning about or fixing broad patterns.
+    """Optimize a LogQL query by rewriting broad selectors to prevent timeouts.
 
     Per Grafana Loki best practices:
     - Label selectors are the most important filter
@@ -74,16 +75,18 @@ def _optimize_logql_query(query: str) -> tuple[str, bool]:
     was_modified = False
     optimized = query
 
+    # Auto-rewrite broad selectors to use specific label
     for pattern in _BROAD_SELECTOR_PATTERNS:
         if pattern in query:
             logger.warning(
-                f"Query contains broad selector '{pattern}' which may cause timeouts. "
-                'Consider using specific labels like {{job="eventlog"}} for better performance.'
+                f"Query contains broad selector '{pattern}' - auto-rewriting to "
+                '{{job="eventlog"}} to prevent timeout.'
             )
-            # Don't modify the query - just warn
-            break
+            optimized = optimized.replace(pattern, '{job="eventlog"}')
+            was_modified = True
+            # Continue checking for other broad patterns
 
-    if "|~" in query and "|=" not in query:
+    if "|~" in optimized and "|=" not in optimized:
         # Query only uses regex, no simple contains
         logger.debug(
             "Query uses only regex filters (|~). Consider using contains (|=) "
@@ -409,7 +412,12 @@ def create_rate_limited_mcp_tool(
 
         query_str = kwargs.get("logql") or kwargs.get("expr") or ""
         if query_str:
-            _optimize_logql_query(query_str)
+            optimized_query, was_modified = _optimize_logql_query(query_str)
+            if was_modified:
+                # Update kwargs with optimized query
+                query_key = "logql" if "logql" in kwargs else "expr"
+                kwargs[query_key] = optimized_query
+                query_str = optimized_query
 
             dup_msg = _check_duplicate_query(query_str)
             if dup_msg:
