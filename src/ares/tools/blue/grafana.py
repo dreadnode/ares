@@ -26,6 +26,11 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
     timeout: int = 30
 
     def _headers(self) -> dict:
+        if not self.api_key:
+            logger.warning(
+                "Grafana API key is empty. Set GRAFANA_SERVICE_ACCOUNT_TOKEN "
+                "environment variable or use --args.grafana-api-key CLI argument."
+            )
         return {"Authorization": f"Bearer {self.api_key}"}
 
     @dn.tool_method  # type: ignore[untyped-decorator]

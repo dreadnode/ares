@@ -26,7 +26,7 @@ class Args:
     Attributes:
         model: LLM model to use (supports litellm format).
         grafana_url: Grafana URL for alert polling and MCP connection.
-        grafana_api_key: Grafana API key (or set GRAFANA_API_KEY env var).
+        grafana_api_key: Grafana API key (or set GRAFANA_SERVICE_ACCOUNT_TOKEN env var).
         poll_interval: Seconds between alert polling cycles.
         max_steps: Maximum agent steps per investigation.
         report_dir: Directory for markdown reports.
@@ -80,14 +80,20 @@ async def main(
         uv run python -m ares --model claude-sonnet-4-20250514 --grafana-url http://grafana:3000
 
     Environment Variables:
-        GRAFANA_API_KEY: Grafana API key
+        GRAFANA_SERVICE_ACCOUNT_TOKEN: Grafana service account token (preferred)
+        GRAFANA_API_KEY: Grafana API key (deprecated, use GRAFANA_SERVICE_ACCOUNT_TOKEN)
         DREADNODE_API_KEY: Dreadnode platform token
         OPENAI_API_KEY / ANTHROPIC_API_KEY: LLM provider keys
     """
     args = args or Args()
     dn_args = dn_args or DreadnodeArgs()
 
-    grafana_api_key = args.grafana_api_key or os.getenv("GRAFANA_API_KEY", "")
+    # Prefer GRAFANA_SERVICE_ACCOUNT_TOKEN, fallback to GRAFANA_API_KEY for compatibility
+    grafana_api_key = (
+        args.grafana_api_key
+        or os.getenv("GRAFANA_SERVICE_ACCOUNT_TOKEN", "")
+        or os.getenv("GRAFANA_API_KEY", "")
+    )
     dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
 
     # Configure Dreadnode
@@ -100,12 +106,22 @@ async def main(
         console=dn_args.console,
     )
 
+    # Validate required credentials
+    if not grafana_api_key:
+        logger.warning("=" * 60)
+        logger.warning("WARNING: No Grafana API key configured!")
+        logger.warning("Set GRAFANA_SERVICE_ACCOUNT_TOKEN environment variable,")
+        logger.warning("or use --args.grafana-api-key CLI argument.")
+        logger.warning("The agent will not be able to retrieve alerts.")
+        logger.warning("=" * 60)
+
     # Log startup
     logger.info("=" * 60)
     logger.info("ARES SOC INVESTIGATION AGENT")
     logger.info("=" * 60)
     logger.info(f"Model: {args.model}")
     logger.info(f"Grafana: {args.grafana_url}")
+    logger.info(f"API Key: {'configured' if grafana_api_key else 'MISSING'}")
     logger.info(f"Poll Interval: {args.poll_interval}s")
     logger.info(f"Max Steps: {args.max_steps}")
     logger.info(f"Report Dir: {args.report_dir}")
@@ -258,8 +274,12 @@ async def investigate_alert(
     else:
         alert = json.loads(Path(alert_json).read_text())
 
-    # Configure Dreadnode
-    grafana_api_key = args.grafana_api_key or os.getenv("GRAFANA_API_KEY", "")
+    # Prefer GRAFANA_SERVICE_ACCOUNT_TOKEN, fallback to GRAFANA_API_KEY for compatibility
+    grafana_api_key = (
+        args.grafana_api_key
+        or os.getenv("GRAFANA_SERVICE_ACCOUNT_TOKEN", "")
+        or os.getenv("GRAFANA_API_KEY", "")
+    )
     dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
 
     dn.configure(

@@ -23,7 +23,7 @@ ls $(go env GOPATH)/bin/mcp-grafana
 ```bash
 claude mcp add grafana mcp-grafana \
   -e GRAFANA_URL=https://grafana.dev.plundr.ai \
-  -e GRAFANA_API_KEY=<your-token>
+  -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<your-token>
 ```
 
 ### Option 2: Using full path (recommended for reliability)
@@ -38,7 +38,7 @@ GRAFANA_BIN=$(go env GOPATH)/bin/mcp-grafana
 # Add using full path
 claude mcp add grafana $GRAFANA_BIN \
   -e GRAFANA_URL=https://grafana.dev.plundr.ai \
-  -e GRAFANA_API_KEY=<your-token>
+  -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<your-token>
 ```
 
 ## Create Service Account Token
@@ -53,7 +53,7 @@ claude mcp add grafana $GRAFANA_BIN \
 claude mcp remove grafana
 claude mcp add grafana mcp-grafana \
   -e GRAFANA_URL=<url> \
-  -e GRAFANA_API_KEY=<token>
+  -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<token>
 ```
 
 ## Config Location
