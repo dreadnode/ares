@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
 # Tool assignments per agent role
 ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
-    AgentRole.ORCHESTRATOR: [
+    AgentRole.ENUM: [
         NetworkEnumerationTools,
         CredentialDiscoveryTools,
         RedTeamReportingTools,
@@ -52,7 +52,7 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
         CrackingTools,
         # CrackerCallbackTools added separately
     ],
-    AgentRole.ACL_EXPLOITER: [
+    AgentRole.ACL: [
         BloodHoundTools,
         ACLExploitTools,
         # ACLCallbackTools added separately
@@ -71,7 +71,7 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
         SharePilferingTools,
         # LateralCallbackTools added separately
     ],
-    AgentRole.POISONER: [
+    AgentRole.POISONING: [
         CoercionTools,
         # PoisoningTools, PoisonCallbackTools added separately
     ],
@@ -83,24 +83,24 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
 
 # System instruction templates per role
 ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
-    AgentRole.ORCHESTRATOR: "redteam/agents/orchestrator.md.jinja",
+    AgentRole.ENUM: "redteam/agents/enum.md.jinja",
     AgentRole.CRACKER: "redteam/agents/cracker.md.jinja",
-    AgentRole.ACL_EXPLOITER: "redteam/agents/acl_exploiter.md.jinja",
+    AgentRole.ACL: "redteam/agents/acl.md.jinja",
     AgentRole.PRIVESC: "redteam/agents/privesc.md.jinja",
     AgentRole.LATERAL: "redteam/agents/lateral.md.jinja",
-    AgentRole.POISONER: "redteam/agents/poisoner.md.jinja",
+    AgentRole.POISONING: "redteam/agents/poisoning.md.jinja",
     AgentRole.ATOMIC: "redteam/agents/atomic.md.jinja",
 }
 
 
 # Default max steps per role
 ROLE_MAX_STEPS: dict[AgentRole, int] = {
-    AgentRole.ORCHESTRATOR: 200,
+    AgentRole.ENUM: 200,
     AgentRole.CRACKER: 50,
-    AgentRole.ACL_EXPLOITER: 100,
+    AgentRole.ACL: 100,
     AgentRole.PRIVESC: 100,
     AgentRole.LATERAL: 100,
-    AgentRole.POISONER: 30,
+    AgentRole.POISONING: 30,
     AgentRole.ATOMIC: 50,
 }
 
@@ -166,7 +166,7 @@ def create_role_hooks(
     hooks.extend([log_tool_usage, log_tool_result])
 
     # Role-specific hooks
-    if role == AgentRole.ORCHESTRATOR:
+    if role == AgentRole.ENUM:
         # Orchestrator monitors for domain admin achievement
         async def check_domain_admin(event: ToolEnd):
             if not isinstance(event, ToolEnd):
@@ -244,7 +244,7 @@ def create_role_hooks(
 
     # Unstall hook for all roles
     role_feedback = {
-        AgentRole.ORCHESTRATOR: (
+        AgentRole.ENUM: (
             "You seem stuck. As orchestrator, focus on:\n"
             "1. Check pending tasks with get_pending_tasks()\n"
             "2. Review unexploited vulnerabilities with get_exploitation_status()\n"
@@ -257,7 +257,7 @@ def create_role_hooks(
             "2. Try different wordlists or rules\n"
             "3. Report results back to orchestrator"
         ),
-        AgentRole.ACL_EXPLOITER: (
+        AgentRole.ACL: (
             "You seem stuck. As ACL exploiter, focus on:\n"
             "1. Run BloodHound collection if not done\n"
             "2. Find shortest paths to Domain Admins\n"
@@ -277,7 +277,7 @@ def create_role_hooks(
             "3. Run secretsdump on successful access\n"
             "4. Report new credentials back"
         ),
-        AgentRole.POISONER: (
+        AgentRole.POISONING: (
             "You seem stuck. As poisoner, focus on:\n"
             "1. Start responder/mitm6 if not running\n"
             "2. Use coercion techniques (petitpotam, coercer)\n"
@@ -355,7 +355,7 @@ def create_specialized_agent(
 
     # Determine stop conditions based on role
     stop_conditions = []
-    if role == AgentRole.ORCHESTRATOR:
+    if role == AgentRole.ENUM:
         stop_conditions.append(tool_use("complete_operation"))
     else:
         # Worker agents stop when task is complete or they need assistance
@@ -399,7 +399,7 @@ def create_agent_info(
     """
     # Define capabilities per role
     role_capabilities: dict[AgentRole, set[str]] = {
-        AgentRole.ORCHESTRATOR: {
+        AgentRole.ENUM: {
             "enumeration",
             "coordination",
             "task_dispatch",
@@ -410,7 +410,7 @@ def create_agent_info(
             "hashcat",
             "john",
         },
-        AgentRole.ACL_EXPLOITER: {
+        AgentRole.ACL: {
             "bloodhound",
             "acl_abuse",
             "shadow_credentials",
@@ -428,7 +428,7 @@ def create_agent_info(
             "psexec",
             "evil_winrm",
         },
-        AgentRole.POISONER: {
+        AgentRole.POISONING: {
             "network_poisoning",
             "coercion",
             "responder",
@@ -479,9 +479,9 @@ async def create_multi_agent_ensemble(
     # Default roles if not specified
     if roles is None:
         roles = [
-            AgentRole.ORCHESTRATOR,
+            AgentRole.ENUM,
             AgentRole.CRACKER,
-            AgentRole.ACL_EXPLOITER,
+            AgentRole.ACL,
             AgentRole.PRIVESC,
             AgentRole.LATERAL,
         ]
@@ -499,7 +499,7 @@ async def create_multi_agent_ensemble(
 
     for role in roles:
         # Determine model for this role
-        if role == AgentRole.ORCHESTRATOR:
+        if role == AgentRole.ENUM:
             agent_model = orchestrator_model or model
         else:
             agent_model = worker_model or model

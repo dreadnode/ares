@@ -216,7 +216,7 @@ class RedTeamDispatcher:
 
         # Role-specific subscriptions
         role_subscriptions = {
-            AgentRole.ORCHESTRATOR: {
+            AgentRole.ENUM: {
                 MessageType.TASK_COMPLETE,
                 MessageType.TASK_FAILED,
                 MessageType.VULNERABILITY_FOUND,
@@ -227,7 +227,7 @@ class RedTeamDispatcher:
                 MessageType.CRACK_REQUEST,
                 MessageType.HASH_DISCOVERED,
             },
-            AgentRole.ACL_EXPLOITER: {
+            AgentRole.ACL: {
                 MessageType.ACL_ANALYSIS_REQUEST,
                 MessageType.VULNERABILITY_FOUND,
             },
@@ -239,7 +239,7 @@ class RedTeamDispatcher:
                 MessageType.LATERAL_REQUEST,
                 MessageType.HOST_DISCOVERED,
             },
-            AgentRole.POISONER: {
+            AgentRole.POISONING: {
                 MessageType.POISON_REQUEST,
             },
             AgentRole.ATOMIC: {
@@ -605,7 +605,7 @@ class RedTeamDispatcher:
             Task ID for tracking.
         """
         task_id = generate_task_id()
-        acl_agent = self._role_queues.get(AgentRole.ACL_EXPLOITER)
+        acl_agent = self._role_queues.get(AgentRole.ACL)
 
         if not acl_agent:
             logger.warning("No ACL agent registered, cannot route ACL request")
@@ -713,7 +713,7 @@ class RedTeamDispatcher:
             Task ID for tracking.
         """
         task_id = generate_task_id()
-        poison_agent = self._role_queues.get(AgentRole.POISONER)
+        poison_agent = self._role_queues.get(AgentRole.POISONING)
 
         if not poison_agent:
             logger.warning("No poison agent registered, cannot route poison request")

@@ -518,12 +518,12 @@ class RedTeamState:
 class AgentRole(Enum):
     """Specialized roles for multi-agent red team operations."""
 
-    ORCHESTRATOR = "orchestrator"
+    ENUM = "enum"
     CRACKER = "cracker"
-    ACL_EXPLOITER = "acl_exploiter"
+    ACL = "acl"
     PRIVESC = "privesc"
     LATERAL = "lateral"
-    POISONER = "poisoner"
+    POISONING = "poisoning"
     ATOMIC = "atomic"
 
 
