@@ -34,6 +34,11 @@ from rigging.parsing import (
 )
 
 __all__ = [
+    # Multi-Agent Models
+    "AgentInfo",
+    "AgentLocalState",
+    "AgentRole",
+    # Core Models
     "Credential",
     "Evidence",
     "Hash",
@@ -47,9 +52,15 @@ __all__ = [
     "QuestionState",
     "RedTeamState",
     "Share",
+    "SharedRedTeamState",
     "Target",
+    "TaskInfo",
+    "TaskResult",
+    "TaskStatus",
     "TimelineEvent",
     "User",
+    "VulnerabilityInfo",
+    # Parsing utilities
     "parse",
     "parse_many",
     "parse_set",
@@ -499,3 +510,249 @@ class RedTeamState:
     def get_credential_key(self, username: str, password: str, domain: str = "") -> str:
         """Generate unique key for credential tracking."""
         return f"{domain}:{username}:{password}".lower()
+
+
+# Multi-Agent Shared State Models
+
+
+class AgentRole(Enum):
+    """Specialized roles for multi-agent red team operations."""
+
+    ORCHESTRATOR = "orchestrator"
+    CRACKER = "cracker"
+    ACL_EXPLOITER = "acl_exploiter"
+    PRIVESC = "privesc"
+    LATERAL = "lateral"
+    POISONER = "poisoner"
+    ATOMIC = "atomic"
+
+
+class TaskStatus(Enum):
+    """Status of a dispatched task."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+@dataclass
+class TaskInfo:
+    """Information about a dispatched task."""
+
+    task_id: str
+    task_type: str
+    assigned_agent: str
+    status: TaskStatus = TaskStatus.PENDING
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    params: dict[str, Any] = field(default_factory=dict)
+    result: Any = None
+    error: str | None = None
+
+
+@dataclass
+class TaskResult:
+    """Result of a completed task."""
+
+    task_id: str
+    success: bool
+    result: Any = None
+    error: str | None = None
+    completed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
+class VulnerabilityInfo:
+    """Information about a discovered vulnerability."""
+
+    vuln_id: str
+    vuln_type: str  # ADCS_ESC1, UNCONSTRAINED_DELEGATION, ACL_ABUSE, etc.
+    target: str
+    discovered_by: str
+    discovered_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    details: dict[str, Any] = field(default_factory=dict)
+    recommended_agent: str = ""  # Which agent should exploit this
+    priority: int = 5  # 1=highest, 10=lowest
+
+
+@dataclass
+class AgentInfo:
+    """Metadata about a registered agent."""
+
+    name: str
+    pod_name: str
+    role: AgentRole
+    capabilities: set[str] = field(default_factory=set)
+    status: str = "idle"  # idle, busy, offline
+    current_task: str | None = None
+    registered_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_heartbeat: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
+class SharedRedTeamState:
+    """
+    Cluster-wide state shared across all agents.
+
+    Stored in Redis/etcd for pod crash recovery. This extends the
+    single-agent RedTeamState with multi-agent coordination features.
+
+    Attributes:
+        operation_id: Unique identifier for this operation.
+        target: Primary target information.
+        all_credentials: Credentials discovered by any agent.
+        all_hashes: Hashes discovered by any agent.
+        all_hosts: Hosts discovered by any agent.
+        all_users: Users discovered by any agent.
+        all_shares: Shares discovered by any agent.
+        discovered_vulnerabilities: Vulnerabilities found but not yet exploited.
+        exploited_vulnerabilities: Set of vuln_ids that have been exploited.
+        pending_tasks: Tasks dispatched but not completed.
+        completed_tasks: Results of completed tasks.
+        has_domain_admin: Whether domain admin access achieved.
+        has_golden_ticket: Whether golden ticket has been forged.
+        domain_admin_path: The attack path that led to domain admin.
+        registered_agents: Agents registered with the dispatcher.
+    """
+
+    operation_id: str
+    target: Target | None = None
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # Global discoveries (aggregated from all agents)
+    all_credentials: list[Credential] = field(default_factory=list)
+    all_hashes: list[Hash] = field(default_factory=list)
+    all_hosts: list[Host] = field(default_factory=list)
+    all_users: list[User] = field(default_factory=list)
+    all_shares: list[Share] = field(default_factory=list)
+
+    # Vulnerability registry
+    discovered_vulnerabilities: dict[str, VulnerabilityInfo] = field(default_factory=dict)
+    exploited_vulnerabilities: set[str] = field(default_factory=set)
+
+    # Task tracking
+    pending_tasks: dict[str, TaskInfo] = field(default_factory=dict)
+    completed_tasks: dict[str, TaskResult] = field(default_factory=dict)
+
+    # Success flags
+    has_domain_admin: bool = False
+    has_golden_ticket: bool = False
+    domain_admin_path: str | None = None
+
+    # Agent registry
+    registered_agents: dict[str, AgentInfo] = field(default_factory=dict)
+
+    # Timeline for cross-agent correlation
+    operation_timeline: list[TimelineEvent] = field(default_factory=list)
+    identified_techniques: set[str] = field(default_factory=set)
+
+    def add_credential(self, credential: Credential, source_agent: str) -> bool:
+        """Add credential if not duplicate. Returns True if added."""
+        key = f"{credential.domain}:{credential.username}:{credential.password}".lower()
+        for existing in self.all_credentials:
+            existing_key = f"{existing.domain}:{existing.username}:{existing.password}".lower()
+            if key == existing_key:
+                return False
+        credential.source = f"{source_agent}:{credential.source}"
+        self.all_credentials.append(credential)
+        return True
+
+    def add_hash(self, hash_obj: Hash, source_agent: str) -> bool:
+        """Add hash if not duplicate. Returns True if added."""
+        for existing in self.all_hashes:
+            if existing.hash_value == hash_obj.hash_value:
+                return False
+        self.all_hashes.append(hash_obj)
+        return True
+
+    def add_host(self, host: Host) -> bool:
+        """Add host if not duplicate. Returns True if added."""
+        for existing in self.all_hosts:
+            if existing.ip == host.ip:
+                return False
+        self.all_hosts.append(host)
+        return True
+
+    def add_vulnerability(self, vuln: VulnerabilityInfo) -> bool:
+        """Add vulnerability if not duplicate. Returns True if added."""
+        if vuln.vuln_id in self.discovered_vulnerabilities:
+            return False
+        self.discovered_vulnerabilities[vuln.vuln_id] = vuln
+        return True
+
+    def mark_exploited(self, vuln_id: str) -> None:
+        """Mark a vulnerability as exploited."""
+        self.exploited_vulnerabilities.add(vuln_id)
+
+    def get_unexploited_vulnerabilities(self) -> list[VulnerabilityInfo]:
+        """Get vulnerabilities that haven't been exploited yet."""
+        return [
+            v
+            for vid, v in self.discovered_vulnerabilities.items()
+            if vid not in self.exploited_vulnerabilities
+        ]
+
+    def get_agent_credentials(self, agent_name: str) -> list[Credential]:
+        """Get credentials discovered by a specific agent."""
+        return [c for c in self.all_credentials if c.source.startswith(f"{agent_name}:")]
+
+    def to_summary(self) -> dict[str, Any]:
+        """Generate summary for reporting."""
+        return {
+            "operation_id": self.operation_id,
+            "host_count": len(self.all_hosts),
+            "credential_count": len(self.all_credentials),
+            "hash_count": len(self.all_hashes),
+            "vulnerability_count": len(self.discovered_vulnerabilities),
+            "exploited_count": len(self.exploited_vulnerabilities),
+            "pending_tasks": len(self.pending_tasks),
+            "completed_tasks": len(self.completed_tasks),
+            "has_domain_admin": self.has_domain_admin,
+            "has_golden_ticket": self.has_golden_ticket,
+            "registered_agents": list(self.registered_agents.keys()),
+        }
+
+    def to_bytes(self) -> bytes:
+        """Serialize state for Redis storage."""
+        import pickle  # nosec B403
+
+        return pickle.dumps(self)  # nosec B301
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> SharedRedTeamState:
+        """Deserialize state from Redis."""
+        import pickle  # nosec B403
+
+        return pickle.loads(data)  # noqa: S301  # nosec B301
+
+
+@dataclass
+class AgentLocalState:
+    """
+    Per-agent local state (not shared across cluster).
+
+    Tracks agent-specific progress and context that doesn't need
+    to be shared with other agents.
+    """
+
+    agent_name: str
+    agent_role: AgentRole
+    current_task: str | None = None
+    tools_executed: list[str] = field(default_factory=list)
+    errors_encountered: list[str] = field(default_factory=list)
+    last_checkpoint: datetime | None = None
+
+    # Agent-specific discoveries before broadcasting
+    local_credentials: list[Credential] = field(default_factory=list)
+    local_hashes: list[Hash] = field(default_factory=list)
+
+    def record_tool_execution(self, tool_name: str) -> None:
+        """Record a tool execution."""
+        self.tools_executed.append(tool_name)
+
+    def record_error(self, error: str) -> None:
+        """Record an error."""
+        self.errors_encountered.append(error)

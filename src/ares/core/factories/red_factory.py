@@ -26,6 +26,7 @@ from ares.tools.red.network import (
     CertipyTools,
     CoercionTools,
     CrackingTools,
+    CredentialDiscoveryTools,
     CredentialHarvestingTools,
     CVEExploitTools,
     DelegationTools,
@@ -154,13 +155,17 @@ async def log_tool_usage(event: ToolStart):
 
 async def log_tool_result(event: ToolEnd):
     """Log tool results."""
+    # Only process ToolEnd events
+    if not isinstance(event, ToolEnd):
+        return
+
     if hasattr(event, "tool_call") and event.tool_call:
         if hasattr(event, "error") and event.error:
             logger.warning(f"❌ Tool {event.tool_call.name} failed: {event.error}")
             dn.log_metric("redteam_tool_errors", 1, mode="count")
         else:
-            result = getattr(event, "result", None)
-            result_preview = str(result)[:200] if result else "None"
+            result = str(event.message.content) if event.message and event.message.content else None
+            result_preview = result[:200] if result else "None"
             logger.info(f"✅ Tool {event.tool_call.name} completed: {result_preview}")
 
 
@@ -168,27 +173,36 @@ unstall_hook = retry_with_feedback(
     event_type=AgentStalled,
     feedback=(
         "You seem stuck. Remember the priority workflow:\n"
+        "0. LOW-HANGING FRUIT: ldap_search_descriptions, username_as_password, password_spray\n"
         "1. PRIORITY 1: krbtgt hash found? → Use golden_ticket tool immediately\n"
         "2. PRIORITY 2: Administrator hash found? → domain_admin_checker on ALL targets\n"
         "3. PRIORITY 3: New password found? → Re-enumerate users, shares, kerberoast, asrep_roast\n"
-        "4. PRIORITY 4: Share access found? → Pilfer shares for credentials\n"
-        "5. Use record_finding to report EVERY discovery\n"
-        "6. Continue autonomous execution - don't stop for direction"
+        "4. ACL ABUSE: GenericAll/GenericWrite? → certipy_shadow_auto, targeted_kerberoast, force_change_password\n"
+        "5. DELEGATION: Constrained? → constrained_delegation_s4u. Unconstrained? → petitpotam/coercer\n"
+        "6. MSSQL: Linked servers? → mssql_enum_linked_servers, mssql_exec_linked\n"
+        "7. ADCS: ESC4? → certipy_template_esc4. ESC8? → certipy_relay_esc8 + petitpotam\n"
+        "8. LAPS: Try laps_dump for local admin passwords\n"
+        "9. Use record_finding to report EVERY discovery\n"
+        "10. Continue autonomous execution - don't stop for direction"
     ),
 )
 
 
-async def vulnerability_discovery_hook(event: ToolEnd):
+async def vulnerability_discovery_hook(event: ToolEnd):  # noqa: PLR0912
     """
     Redirect agent to exploit when vulnerabilities are discovered.
 
     This hook monitors tool results for vulnerability indicators and
     injects feedback to force immediate exploitation.
     """
-    if not hasattr(event, "result") or not event.result:
+    # Only process ToolEnd events
+    if not isinstance(event, ToolEnd):
         return None
 
-    result = str(event.result)
+    if not event.message or not event.message.content:
+        return None
+
+    result = str(event.message.content)
     tool_name = event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
 
     redirects = []
@@ -198,14 +212,39 @@ async def vulnerability_discovery_hook(event: ToolEnd):
     if "ESC1" in result and (esc1_indicators or "exploitable" in result.lower()):
         redirects.append(
             "🚨 ESC1 ADCS VULNERABILITY FOUND!\n"
-            "→ IMMEDIATELY run certipy_req_esc1 with the CA name and template from above\n"
+            "→ Try certipy_req_esc1 first with the CA name and template from above\n"
+            "→ If RPC fails (ept_s_not_registered), use ESC8 relay instead:\n"
+            "   1. certipy_relay_esc8 to start relay listener on web enrollment\n"
+            "   2. petitpotam to coerce DC authentication to your relay\n"
             "→ Then run certipy_auth to get Administrator NTLM hash\n"
-            "→ DO NOT proceed to other tasks until ESC1 is exploited!"
+            "→ DO NOT proceed to other tasks until ESC1/ESC8 is exploited!"
         )
 
-    if any(esc in result for esc in ["ESC2", "ESC3", "ESC4", "ESC6"]):
+    if "ESC4" in result and ("exploitable" in result.lower() or "vulnerable" in result.lower()):
         redirects.append(
-            "⚠️ ADCS vulnerability found (ESC2/3/4/6)!\n"
+            "🚨 ESC4 ADCS VULNERABILITY FOUND (Template Modification)!\n"
+            "→ Use certipy_template_esc4 to modify the template (enable Enrollee Supplies Subject)\n"
+            "→ Then run certipy_req_esc1 with the modified template\n"
+            "→ Then run certipy_auth to get Administrator NTLM hash\n"
+            "→ Remember to restore the template after exploitation!"
+        )
+
+    # ESC8 requires explicit ESC8 marker from certipy or specific web enrollment vulnerability context
+    is_esc8 = "ESC8" in result and (
+        "exploitable" in result.lower() or "vulnerable" in result.lower()
+    )
+    if is_esc8:
+        redirects.append(
+            "🚨 ESC8 ADCS VULNERABILITY FOUND (Web Enrollment)!\n"
+            "→ Use certipy_relay_esc8 to set up relay listener\n"
+            "→ Then use petitpotam to coerce DC authentication\n"
+            "→ Relay will capture DC certificate\n"
+            "→ Use certipy_auth with the captured certificate!"
+        )
+
+    if any(esc in result for esc in ["ESC2", "ESC3", "ESC6"]):
+        redirects.append(
+            "⚠️ ADCS vulnerability found (ESC2/3/6)!\n"
             "→ Investigate this path - may require relay attack or additional enumeration"
         )
 
@@ -217,10 +256,20 @@ async def vulnerability_discovery_hook(event: ToolEnd):
     if has_acl_indicator and is_acl_discovery_tool:
         redirects.append(
             "🎯 ACL ABUSE PATH FOUND!\n"
-            "→ Use pywhisker to add shadow credentials on the vulnerable account\n"
-            "→ OR use bloodyad_set_password to reset their password\n"
-            "→ OR use bloodyad_add_group_member to add yourself to privileged groups\n"
+            "→ BEST: Use certipy_shadow_auto for one-step shadow credentials → NTLM hash\n"
+            "→ OR: Use targeted_kerberoast if GenericWrite on user → TGS hash to crack\n"
+            "→ OR: Use force_change_password / bloodyad_set_password to reset their password\n"
+            "→ OR: Use dacl_edit to grant yourself more permissions (if WriteDacl)\n"
+            "→ OR: Use bloodyad_add_group_member to add yourself to privileged groups\n"
             "→ DO NOT summarize until ACL path is exploited!"
+        )
+
+    # ForceChangePassword specific
+    if "forcechangepassword" in result.lower():
+        redirects.append(
+            "🔐 FORCECHANGEPASSWORD ACL FOUND!\n"
+            "→ Use force_change_password or bloodyad_set_password to reset target's password\n"
+            "→ Then use the new credentials for further enumeration!"
         )
 
     # Delegation
@@ -233,6 +282,15 @@ async def vulnerability_discovery_hook(event: ToolEnd):
             "→ This is a CRITICAL path to Domain Admin!"
         )
 
+    # Constrained delegation
+    if "constrained" in result.lower() and is_delegation_context:
+        redirects.append(
+            "🔗 CONSTRAINED DELEGATION FOUND!\n"
+            "→ Use constrained_delegation_s4u to impersonate Administrator to the allowed SPN\n"
+            "→ Check msDS-AllowedToDelegateTo for the target SPN\n"
+            "→ Use alt_service parameter to access different services (SPN modification)"
+        )
+
     # MSSQL
     is_mssql_context = "mssql" in tool_name.lower() or "sql" in result.lower()
     if "impersonate" in result.lower() and is_mssql_context:
@@ -241,6 +299,53 @@ async def vulnerability_discovery_hook(event: ToolEnd):
             "→ Use mssql_xp_cmdshell with impersonate='sa' to get command execution\n"
             "→ Execute credential harvesting commands"
         )
+
+    # MSSQL Linked Servers - require explicit linked server indicators
+    has_linked_server = (
+        "linked server" in result.lower()
+        or "srv_name" in result.lower()
+        or "is_linked" in result.lower()
+        or "sp_linkedservers" in result.lower()
+    )
+    if has_linked_server and is_mssql_context:
+        redirects.append(
+            "💾 MSSQL LINKED SERVERS FOUND!\n"
+            "→ Use mssql_exec_linked to execute queries on linked servers\n"
+            "→ Chain across servers for cross-domain/forest pivoting\n"
+            "→ Try enabling xp_cmdshell on remote servers: sp_configure 'xp_cmdshell', 1"
+        )
+
+    # LAPS passwords - only when actual password attribute/value found
+    # Avoid false positives from "no LAPS" or "LAPS not configured" messages
+    has_laps_data = (
+        "ms-mcs-admpwd" in result.lower()
+        and "no laps" not in result.lower()
+        and "not configured" not in result.lower()
+        and "not found" not in result.lower()
+    )
+    if has_laps_data:
+        redirects.append(
+            "🔐 LAPS PASSWORDS AVAILABLE!\n"
+            "→ These are local Administrator passwords for specific computers\n"
+            "→ Use with evil_winrm or psexec against the target computer\n"
+            "→ Then run secretsdump on that target!"
+        )
+
+    # Password in description - only if non-empty descriptions returned
+    # Avoid false positives from "0 entries" or empty results
+    if tool_name == "ldap_search_descriptions":
+        has_real_description = (
+            "description:" in result.lower()
+            and "# numEntries: 0" not in result
+            and "0 entries" not in result.lower()
+        )
+        if has_real_description:
+            redirects.append(
+                "🔐 USER DESCRIPTIONS FOUND - CHECK FOR PASSWORDS!\n"
+                "→ Review descriptions for password patterns\n"
+                "→ Passwords are sometimes stored in description fields\n"
+                "→ Test any found credentials immediately!"
+            )
 
     # Krbtgt hash
     if "krbtgt" in result.lower() and (":::" in result or "hash" in result.lower()):
@@ -282,16 +387,35 @@ def _track_discovery(vuln_id: str, vuln_type: str, tool: str, step: int) -> None
 def _track_exploitation(tool_name: str) -> None:
     """Helper to track exploitation attempts."""
     exploitation_tools = {
+        # ADCS
         "certipy_req_esc1": "esc1_adcs",
         "certipy_auth": "esc1_adcs",
+        "certipy_template_esc4": "esc4_adcs",
+        "certipy_relay_esc8": "esc8_adcs",
+        "certipy_shadow_auto": "acl_abuse",
+        # ACL abuse
         "pywhisker": "acl_abuse",
         "bloodyad_set_password": "acl_abuse",  # pragma: allowlist secret
         "bloodyad_add_group_member": "acl_abuse",
+        "force_change_password": "acl_abuse",  # pragma: allowlist secret
+        "dacl_edit": "acl_abuse",
+        "targeted_kerberoast": "acl_abuse",
+        # Delegation
         "petitpotam": "unconstrained_delegation",
         "coercer": "unconstrained_delegation",
+        "constrained_delegation_s4u": "constrained_delegation",
+        # MSSQL
         "mssql_xp_cmdshell": "mssql_impersonation",
+        "mssql_enum_linked_servers": "mssql_linked",
+        "mssql_exec_linked": "mssql_linked",
+        # Golden ticket
         "golden_ticket": "krbtgt_hash",
         "generate_golden_ticket": "krbtgt_hash",
+        # Low-hanging fruit
+        "ldap_search_descriptions": "ldap_description",
+        "username_as_password": "username_password",  # pragma: allowlist secret
+        "password_spray": "password_spray",  # pragma: allowlist secret
+        "laps_dump": "laps",
     }
     if tool_name in exploitation_tools:
         vuln_type = exploitation_tools[tool_name]
@@ -307,10 +431,14 @@ async def track_vulnerability_discoveries(event: ToolEnd):
     This hook monitors tool results to maintain state of what's been
     discovered vs exploited for the periodic priority check.
     """
-    if not hasattr(event, "result") or not event.result:
+    # Only process ToolEnd events
+    if not isinstance(event, ToolEnd):
         return
 
-    result = str(event.result)
+    if not event.message or not event.message.content:
+        return
+
+    result = str(event.message.content)
     tool_name = event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
     step = _last_step_number or 0
     result_lower = result.lower()
@@ -320,14 +448,34 @@ async def track_vulnerability_discoveries(event: ToolEnd):
     if is_esc1:
         _track_discovery("esc1_adcs", "ADCS ESC1", "certipy_req_esc1 → certipy_auth", step)
 
+    # Track ESC4 ADCS vulnerability
+    is_esc4 = "ESC4" in result and ("exploitable" in result_lower or "vulnerable" in result_lower)
+    if is_esc4:
+        _track_discovery(
+            "esc4_adcs",
+            "ADCS ESC4 (Template Modification)",
+            "certipy_template_esc4 → certipy_req_esc1",
+            step,
+        )
+
+    # Track ESC8 ADCS vulnerability - require explicit ESC8 marker
+    is_esc8 = "ESC8" in result and ("exploitable" in result_lower or "vulnerable" in result_lower)
+    if is_esc8:
+        _track_discovery(
+            "esc8_adcs", "ADCS ESC8 (Web Enrollment)", "certipy_relay_esc8 + petitpotam", step
+        )
+
     # Track ACL abuse paths
-    has_acl = any(acl in result_lower for acl in ["genericall", "genericwrite", "writedacl"])
+    has_acl = any(
+        acl in result_lower
+        for acl in ["genericall", "genericwrite", "writedacl", "forcechangepassword"]
+    )
     is_acl_tool = tool_name in ["run_bloodhound", "enumerate_users"]
     if has_acl and is_acl_tool:
         _track_discovery(
             "acl_abuse",
             "ACL Abuse Path",
-            "pywhisker / bloodyad_set_password / bloodyad_add_group_member",
+            "certipy_shadow_auto / targeted_kerberoast / force_change_password / dacl_edit",
             step,
         )
 
@@ -337,12 +485,41 @@ async def track_vulnerability_discoveries(event: ToolEnd):
             "unconstrained_delegation", "Unconstrained Delegation", "petitpotam / coercer", step
         )
 
+    # Track constrained delegation
+    if (
+        "constrained" in result_lower
+        and "delegation" in result_lower
+        and "unconstrained" not in result_lower
+    ):
+        _track_discovery(
+            "constrained_delegation", "Constrained Delegation", "constrained_delegation_s4u", step
+        )
+
     # Track MSSQL impersonation
     is_mssql = "mssql" in tool_name.lower() or "sql" in result_lower
     if "impersonate" in result_lower and is_mssql:
         _track_discovery(
             "mssql_impersonation", "MSSQL Impersonation", "mssql_xp_cmdshell with impersonate", step
         )
+
+    # Track MSSQL linked servers - require explicit indicators
+    has_linked_server = (
+        "linked server" in result_lower
+        or "srv_name" in result_lower
+        or "is_linked" in result_lower
+        or "sp_linkedservers" in result_lower
+    )
+    if has_linked_server and is_mssql:
+        _track_discovery("mssql_linked", "MSSQL Linked Servers", "mssql_exec_linked", step)
+
+    # Track LAPS - only when actual attribute found, not just the word "laps"
+    has_laps_data = (
+        "ms-mcs-admpwd" in result_lower
+        and "no laps" not in result_lower
+        and "not found" not in result_lower
+    )
+    if has_laps_data:
+        _track_discovery("laps", "LAPS Passwords", "Use with evil_winrm / psexec", step)
 
     # Track krbtgt hash
     if "krbtgt" in result_lower and (":::" in result or "hash" in result_lower):
@@ -452,6 +629,10 @@ def create_redteam_agent(
     network_tools = NetworkEnumerationTools()
     network_tools.set_state(state)
 
+    # LOW-HANGING FRUIT TOOLS (run these first!)
+    credential_discovery_tools = CredentialDiscoveryTools()
+    credential_discovery_tools.set_state(state)
+
     credential_tools = CredentialHarvestingTools()
     credential_tools.set_state(state)
 
@@ -498,6 +679,8 @@ def create_redteam_agent(
 
     tools: list = [
         network_tools,
+        # LOW-HANGING FRUIT (prioritize these for quick wins)
+        credential_discovery_tools,
         credential_tools,
         cracking_tools,
         share_tools,
@@ -505,7 +688,7 @@ def create_redteam_agent(
         bloodhound_tools,
         certipy_tools,
         delegation_tools,
-        # New exploitation tools (CAP-838)
+        # Exploitation tools
         coercion_tools,
         mssql_tools,
         acl_tools,
