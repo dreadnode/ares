@@ -155,7 +155,7 @@ The agent uses these LogQL patterns:
 **MCP tools not available:**
 
 - Ensure Grafana MCP server is configured
-- Verify `GRAFANA_URL` and `GRAFANA_API_KEY` are set
+- Verify `GRAFANA_URL` and `GRAFANA_SERVICE_ACCOUNT_TOKEN` are set
 - Check MCP server is running and accessible
 
 ### Next Steps

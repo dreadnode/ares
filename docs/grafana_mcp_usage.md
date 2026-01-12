@@ -322,7 +322,7 @@ grafana_mcp_tools = GrafanaMCPTools(datasource_uid="custom-loki-ds")
 To use these capabilities:
 
 1. Ensure the Grafana MCP server is configured and running
-2. Set the `GRAFANA_URL` and `GRAFANA_API_KEY` environment variables
+2. Set the `GRAFANA_URL` and `GRAFANA_SERVICE_ACCOUNT_TOKEN` environment variables
 3. Run an investigation: `ares investigate`
 4. The agent will automatically have access to the GrafanaMCPTools
 
