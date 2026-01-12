@@ -21,15 +21,21 @@ from ares.core.models import RedTeamState
 from ares.core.templates import get_template_loader
 from ares.integrations.mitre import MITREAttackClient
 from ares.tools.red.network import (
+    ACLExploitTools,
     BloodHoundTools,
     CertipyTools,
+    CoercionTools,
     CrackingTools,
     CredentialHarvestingTools,
+    CVEExploitTools,
     DelegationTools,
     GoldenTicketTools,
+    LateralMovementTools,
+    MSSQLTools,
     NetworkEnumerationTools,
     RedTeamReportingTools,
     SharePilferingTools,
+    TrustAttackTools,
 )
 
 # Load system instructions from template
@@ -162,6 +168,100 @@ unstall_hook = retry_with_feedback(
 )
 
 
+async def vulnerability_discovery_hook(event: ToolEnd):
+    """
+    Redirect agent to exploit when vulnerabilities are discovered.
+
+    This hook monitors tool results for vulnerability indicators and
+    injects feedback to force immediate exploitation.
+    """
+    if not hasattr(event, "result") or not event.result:
+        return None
+
+    result = str(event.result)
+    tool_name = event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
+
+    redirects = []
+
+    # ADCS Vulnerabilities
+    esc1_indicators = "recommended_actions" in result or "ACTIONABLE" in result
+    if "ESC1" in result and (esc1_indicators or "exploitable" in result.lower()):
+        redirects.append(
+            "🚨 ESC1 ADCS VULNERABILITY FOUND!\n"
+            "→ IMMEDIATELY run certipy_req_esc1 with the CA name and template from above\n"
+            "→ Then run certipy_auth to get Administrator NTLM hash\n"
+            "→ DO NOT proceed to other tasks until ESC1 is exploited!"
+        )
+
+    if any(esc in result for esc in ["ESC2", "ESC3", "ESC4", "ESC6"]):
+        redirects.append(
+            "⚠️ ADCS vulnerability found (ESC2/3/4/6)!\n"
+            "→ Investigate this path - may require relay attack or additional enumeration"
+        )
+
+    # ACL Abuse Paths
+    has_acl_indicator = any(
+        acl in result.lower() for acl in ["genericall", "genericwrite", "writedacl"]
+    )
+    is_acl_discovery_tool = tool_name in ["run_bloodhound", "enumerate_users"]
+    if has_acl_indicator and is_acl_discovery_tool:
+        redirects.append(
+            "🎯 ACL ABUSE PATH FOUND!\n"
+            "→ Use pywhisker to add shadow credentials on the vulnerable account\n"
+            "→ OR use bloodyad_set_password to reset their password\n"
+            "→ OR use bloodyad_add_group_member to add yourself to privileged groups\n"
+            "→ DO NOT summarize until ACL path is exploited!"
+        )
+
+    # Delegation
+    is_delegation_context = "delegation" in result.lower() or tool_name == "find_delegation"
+    if "unconstrained" in result.lower() and is_delegation_context:
+        redirects.append(
+            "🔗 UNCONSTRAINED DELEGATION FOUND!\n"
+            "→ Use petitpotam or coercer to force DC authentication to this machine\n"
+            "→ Capture TGT and perform DCSync\n"
+            "→ This is a CRITICAL path to Domain Admin!"
+        )
+
+    # MSSQL
+    is_mssql_context = "mssql" in tool_name.lower() or "sql" in result.lower()
+    if "impersonate" in result.lower() and is_mssql_context:
+        redirects.append(
+            "💾 MSSQL IMPERSONATION POSSIBLE!\n"
+            "→ Use mssql_xp_cmdshell with impersonate='sa' to get command execution\n"
+            "→ Execute credential harvesting commands"
+        )
+
+    # Krbtgt hash
+    if "krbtgt" in result.lower() and (":::" in result or "hash" in result.lower()):
+        redirects.append(
+            "👑 KRBTGT HASH FOUND!\n"
+            "→ IMMEDIATELY use generate_golden_ticket to forge Enterprise Admin ticket\n"
+            "→ Then use secretsdump on ALL domain controllers\n"
+            "→ Use raise_child if there are parent domains"
+        )
+
+    # Admin hash
+    has_admin_indicator = "administrator" in result.lower() and (
+        ":::" in result or "ntlm" in result.lower()
+    )
+    has_hash_pattern = "aad3b435" in result or result.count(":") >= 3
+    if has_admin_indicator and has_hash_pattern:
+        redirects.append(
+            "🔑 ADMINISTRATOR HASH FOUND!\n"
+            "→ Use domain_admin_checker with this hash on ALL targets\n"
+            "→ Use secretsdump with this hash on ALL targets\n"
+            "→ DO NOT summarize - credential pivoting required!"
+        )
+
+    if redirects:
+        logger.warning("[!] Vulnerability discovery hook triggered - injecting exploit guidance")
+        header = "\n\n" + "=" * 50 + "\n⚡ IMMEDIATE ACTION REQUIRED ⚡\n" + "=" * 50 + "\n"
+        return header + "\n\n".join(redirects)
+
+    return None
+
+
 @dn.tool
 def complete_operation(summary: str) -> str:
     """
@@ -242,6 +342,25 @@ def create_redteam_agent(
     reporting_tools = RedTeamReportingTools()
     reporting_tools.set_state(state)
 
+    # New exploitation toolsets (CAP-838)
+    coercion_tools = CoercionTools()
+    coercion_tools.set_state(state)
+
+    mssql_tools = MSSQLTools()
+    mssql_tools.set_state(state)
+
+    acl_tools = ACLExploitTools()
+    acl_tools.set_state(state)
+
+    cve_tools = CVEExploitTools()
+    cve_tools.set_state(state)
+
+    trust_tools = TrustAttackTools()
+    trust_tools.set_state(state)
+
+    lateral_tools = LateralMovementTools()
+    lateral_tools.set_state(state)
+
     tools: list = [
         network_tools,
         credential_tools,
@@ -251,6 +370,14 @@ def create_redteam_agent(
         bloodhound_tools,
         certipy_tools,
         delegation_tools,
+        # New exploitation tools (CAP-838)
+        coercion_tools,
+        mssql_tools,
+        acl_tools,
+        cve_tools,
+        trust_tools,
+        lateral_tools,
+        # Reporting and completion
         reporting_tools,
         complete_operation,
     ]
@@ -270,6 +397,7 @@ def create_redteam_agent(
             log_agent_end,
             log_tool_usage,
             log_tool_result,
+            vulnerability_discovery_hook,  # Force exploitation when vulns found
             unstall_hook,
         ],
         stop_conditions=[

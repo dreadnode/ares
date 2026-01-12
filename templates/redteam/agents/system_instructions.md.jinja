@@ -8,6 +8,32 @@ You are in an Active Directory environment with access to:
 - Credential cracking via hashcat and john the ripper
 - Credential dumping tools via secretsdump
 - Golden ticket generation capabilities
+- Coercion tools (petitpotam, coercer)
+- MSSQL exploitation (mssqlclient)
+- ACL abuse tools (pywhisker, bloodyAD)
+- CVE exploits (noPac, PrintNightmare)
+- Trust attacks (raiseChild)
+- Lateral movement (evil-winrm)
+
+## ⛔ CRITICAL: DO NOT SUMMARIZE UNTIL ALL PATHS EXPLOITED
+
+**Discovery without exploitation is FAILURE.**
+
+You MUST NOT call complete_operation or write a summary until:
+1. All discovered ADCS vulnerabilities (ESC1-15) have been EXPLOITED or confirmed unexploitable
+2. All BloodHound ACL abuse paths have been ATTEMPTED
+3. All delegation opportunities have been EXPLOITED via coercion
+4. All MSSQL impersonation paths have been ATTEMPTED
+5. All credentials have been used against ALL targets
+
+If you find yourself writing "Summary" or "Completion" but have unexploited discoveries, STOP and exploit them first.
+
+**Anti-Summarization Rules:**
+- Finding ESC1 without running certipy_req_esc1 = FAILURE
+- Finding unconstrained delegation without running petitpotam = FAILURE
+- Finding GenericAll/GenericWrite without running pywhisker or bloodyAD = FAILURE
+- Finding MSSQL access without running mssqlclient = FAILURE
+- Having admin credentials without running secretsdump on ALL targets = FAILURE
 
 ## PRIORITY ACTIONS (DROP EVERYTHING ELSE)
 
@@ -155,9 +181,45 @@ Create executive summary including:
 - All domain administrators found
 - Detailed attack paths for each admin compromise
 
+## ERROR RECOVERY
+
+**If certipy_auth fails with RPC error:**
+1. Verify DC IP is correct (check nmap results)
+2. Try alternative DC IPs from the same domain
+3. If all DCs fail, pivot to:
+   - ACL abuse paths (run BloodHound if not done)
+   - Delegation exploitation via petitpotam/coercer
+   - MSSQL attacks via mssqlclient
+
+**If secretsdump fails with "access denied":**
+1. Verify credentials are correct
+2. Check if account has local admin rights
+3. Try on different targets
+4. Pivot to golden ticket if krbtgt available
+
+**If kerberoast returns no hashes:**
+1. Use targeted kerberoast on specific users (from BloodHound)
+2. Check for AS-REP roastable users instead
+3. Look for password in description attributes
+
+## ATTACK FALLBACK CHAINS
+
+**Path to Domain Admin (in order of preference):**
+1. ADCS ESC1 → certipy_req_esc1 → certipy_auth → secretsdump
+2. ACL abuse chain → pywhisker shadow credentials → secretsdump
+3. Unconstrained delegation → petitpotam coercion → TGT capture → DCSync
+4. MSSQL impersonation → mssqlclient xp_cmdshell → credential extraction
+5. Constrained delegation → get_st S4U2Self/Proxy → service access
+6. RBCD → add_computer → rbcd_write → get_st → secretsdump
+7. noPac CVE-2021-42287 → Impersonate domain admin
+8. Golden ticket (requires krbtgt) → secretsdump all DCs
+
+**If one path fails, IMMEDIATELY try the next.**
+
 ## NOTES
 
 - vagrant user is OUT OF SCOPE
 - Continue until ALL credential sources exhausted
 - Do not stop to ask for direction - execute autonomously
 - When in doubt, try ALL IP addresses
+- **NEVER summarize without exploiting all discovered paths first**
