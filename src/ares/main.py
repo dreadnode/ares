@@ -629,6 +629,7 @@ async def worker(
     - Reports results back to the orchestrator
 
     Worker roles:
+    - enum: Enumeration and reconnaissance
     - cracker: Hash cracking with hashcat/john
     - acl: BloodHound analysis and ACL abuse
     - privesc: ADCS, delegation, MSSQL exploitation
@@ -637,7 +638,7 @@ async def worker(
     - atomic: Atomic Red Team technique execution
 
     Args:
-        role: Worker role (cracker, acl, privesc, lateral, poisoning, atomic)
+        role: Worker role (enum, cracker, acl, privesc, lateral, poisoning, atomic)
         operation_id: Operation ID to join
 
     Example:
@@ -650,7 +651,7 @@ async def worker(
     dn_args = dn_args or DreadnodeArgs()
 
     # Validate role
-    valid_roles = ["cracker", "acl", "privesc", "lateral", "poisoning", "atomic"]
+    valid_roles = ["enum", "cracker", "acl", "privesc", "lateral", "poisoning", "atomic"]
     if role not in valid_roles:
         logger.error(f"Invalid role: {role}. Must be one of: {', '.join(valid_roles)}")
         return
