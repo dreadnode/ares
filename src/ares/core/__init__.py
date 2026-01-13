@@ -25,8 +25,9 @@ from ares.core.models import (
 )
 from ares.core.orchestrator import run_multi_agent_operation
 from ares.core.recovery import OperationRecoveryManager
+from ares.core.task_queue import RedisTaskQueue, TaskMessage, TaskResult
 from ares.core.templates import get_template_loader
-from ares.core.worker import WorkerAgent, run_worker
+from ares.core.worker import RedisWorkerAgent, WorkerAgent, run_worker
 from ares.core.workflows import (
     CredentialTestingTracker,
     credential_expansion_loop,
@@ -49,7 +50,12 @@ __all__ = [
     "OperationRecoveryManager",
     "RedTeamDispatcher",
     "RedTeamState",
+    # Redis task queue
+    "RedisTaskQueue",
+    "RedisWorkerAgent",
     "SharedRedTeamState",
+    "TaskMessage",
+    "TaskResult",
     "WorkerAgent",
     # Factories
     "create_investigation_agent",

@@ -156,12 +156,24 @@ def create_role_hooks(
             if hasattr(event, "error") and event.error:
                 logger.warning(f"❌ [{role.value}] {event.tool_call.name} failed: {event.error}")
             else:
-                result = (
-                    str(event.message.content)[:100]
-                    if event.message and event.message.content
-                    else "None"
+                content = (
+                    str(event.message.content) if event.message and event.message.content else ""
                 )
-                logger.info(f"✅ [{role.value}] {event.tool_call.name}: {result}...")
+                if not content:
+                    logger.info(f"✅ [{role.value}] {event.tool_call.name}: (empty)")
+                else:
+                    # Show first 5 lines, max 500 chars
+                    lines = content.split("\n")[:5]
+                    result = "\n".join(lines)
+                    truncated = len(lines) < len(content.split("\n")) or len(content) > 500
+                    if len(result) > 500:
+                        result = result[:500]
+                        truncated = True
+                    suffix = " ..." if truncated else ""
+                    if "\n" in result:
+                        logger.info(f"✅ [{role.value}] {event.tool_call.name}:\n{result}{suffix}")
+                    else:
+                        logger.info(f"✅ [{role.value}] {event.tool_call.name}: {result}{suffix}")
 
     hooks.extend([log_tool_usage, log_tool_result])
 

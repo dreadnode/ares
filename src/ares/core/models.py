@@ -699,6 +699,61 @@ class SharedRedTeamState:
         """Get credentials discovered by a specific agent."""
         return [c for c in self.all_credentials if c.source.startswith(f"{agent_name}:")]
 
+    # =========================================================================
+    # Compatibility aliases for RedTeamState interface
+    # These allow tools expecting RedTeamState to work with SharedRedTeamState
+    # =========================================================================
+
+    @property
+    def hosts(self) -> list[Host]:
+        """Alias for all_hosts (RedTeamState compatibility)."""
+        return self.all_hosts
+
+    @property
+    def users(self) -> list[User]:
+        """Alias for all_users (RedTeamState compatibility)."""
+        return self.all_users
+
+    @property
+    def credentials(self) -> list[Credential]:
+        """Alias for all_credentials (RedTeamState compatibility)."""
+        return self.all_credentials
+
+    @property
+    def hashes(self) -> list[Hash]:
+        """Alias for all_hashes (RedTeamState compatibility)."""
+        return self.all_hashes
+
+    @property
+    def shares(self) -> list[Share]:
+        """Alias for all_shares (RedTeamState compatibility)."""
+        return self.all_shares
+
+    @property
+    def queried_hosts(self) -> set[str]:
+        """Compatibility property - tracks queried hosts."""
+        # SharedRedTeamState tracks this via pending_tasks, but provide empty set for compatibility
+        return getattr(self, "_queried_hosts", set())
+
+    @queried_hosts.setter
+    def queried_hosts(self, value: set[str]) -> None:
+        """Set queried hosts."""
+        object.__setattr__(self, "_queried_hosts", value)
+
+    @property
+    def tested_credentials(self) -> set[str]:
+        """Compatibility property - tracks tested credentials."""
+        return getattr(self, "_tested_credentials", set())
+
+    @tested_credentials.setter
+    def tested_credentials(self, value: set[str]) -> None:
+        """Set tested credentials."""
+        object.__setattr__(self, "_tested_credentials", value)
+
+    def get_credential_key(self, username: str, password: str, domain: str = "") -> str:
+        """Generate unique key for credential tracking (RedTeamState compatibility)."""
+        return f"{domain}:{username}:{password}".lower()
+
     def to_summary(self) -> dict[str, Any]:
         """Generate summary for reporting."""
         return {

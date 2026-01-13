@@ -47,6 +47,8 @@ from ares.core.models import (
     TaskStatus,
     VulnerabilityInfo,
 )
+from ares.core.task_queue import RedisTaskQueue
+from ares.core.task_queue import TaskResult as QueueTaskResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -81,8 +83,8 @@ class RedTeamDispatcher:
         Initialize the dispatcher.
 
         Args:
-            redis_url: Optional Redis URL for state persistence.
-                       If not provided, uses in-memory state.
+            redis_url: Optional Redis URL for state persistence and task queuing.
+                       If not provided, uses in-memory state only.
         """
         self._agents: dict[str, AgentInfo] = {}
         self._message_queues: dict[str, Queue[AgentMessage]] = {}
@@ -94,6 +96,11 @@ class RedTeamDispatcher:
         self._redis_client = None
         self._heartbeat_task: asyncio.Task | None = None
         self._message_processor_task: asyncio.Task | None = None
+
+        # Redis task queue for cross-pod communication
+        self._task_queue: RedisTaskQueue | None = None
+        if redis_url:
+            self._task_queue = RedisTaskQueue(redis_url)
 
         # Role-based routing
         self._role_queues: dict[AgentRole, str] = {}  # role -> agent_name
@@ -144,6 +151,14 @@ class RedTeamDispatcher:
             except Exception as e:
                 logger.warning(f"Failed to connect to Redis: {e}, using in-memory state")
 
+        # Connect task queue for cross-pod communication
+        if self._task_queue:
+            try:
+                await self._task_queue.connect()
+                logger.info("Task queue connected for cross-pod messaging")
+            except Exception as e:
+                logger.warning(f"Failed to connect task queue: {e}")
+
         # Start background tasks
         self._heartbeat_task = asyncio.create_task(self._heartbeat_monitor())
 
@@ -159,6 +174,13 @@ class RedTeamDispatcher:
                 await self._heartbeat_task
             except asyncio.CancelledError:
                 pass
+
+        # Disconnect task queue
+        if self._task_queue:
+            try:
+                await self._task_queue.disconnect()
+            except Exception as e:
+                logger.warning(f"Error disconnecting task queue: {e}")
 
         if self._redis_client:
             await self._redis_client.close()
@@ -495,6 +517,9 @@ class RedTeamDispatcher:
         """
         Route hash to CrackerAgent for cracking.
 
+        Uses Redis task queue for cross-pod communication when available,
+        falls back to in-memory queue for same-process communication.
+
         Args:
             hash_value: The hash to crack.
             hash_type: Type (NTLM, NetNTLMv2, Kerberos, etc.).
@@ -507,6 +532,37 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        payload = {
+            "hash_value": hash_value,
+            "hash_type": hash_type,
+            "username": username,
+            "domain": domain,
+            "wordlist": wordlist,
+        }
+
+        # Use Redis task queue if available (Kubernetes multi-pod mode)
+        if self._task_queue:
+            task_id = await self._task_queue.submit_task(
+                task_type="crack",
+                target_role="cracker",
+                payload=payload,
+                source_agent=source_agent,
+                priority=priority,
+            )
+
+            # Track in shared state
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type="crack",
+                assigned_agent="cracker",
+                params=payload,
+            )
+            self.shared_state.pending_tasks[task_id] = task_info
+
+            logger.info(f"Crack task {task_id} submitted to Redis queue")
+            return task_id
+
+        # Fallback to in-memory queue (single-process mode)
         task_id = generate_task_id()
         cracker_agent = self._role_queues.get(AgentRole.CRACKER)
 
@@ -519,17 +575,11 @@ class RedTeamDispatcher:
             task_id=task_id,
             task_type="crack",
             assigned_agent=cracker_agent,
-            params={
-                "hash_value": hash_value,
-                "hash_type": hash_type,
-                "username": username,
-                "domain": domain,
-                "wordlist": wordlist,
-            },
+            params=payload,
         )
         self.shared_state.pending_tasks[task_id] = task_info
 
-        # Send request to cracker
+        # Send request to cracker via in-memory queue
         await self._message_queues[cracker_agent].put(
             CrackRequest(
                 source_agent=source_agent,
@@ -560,6 +610,8 @@ class RedTeamDispatcher:
         """
         Route lateral movement request to LateralAgent.
 
+        Uses Redis task queue for cross-pod communication when available.
+
         Args:
             target_host: IP or hostname to move to.
             username: Username to authenticate.
@@ -572,6 +624,36 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        payload = {
+            "target_host": target_host,
+            "username": username,
+            "password": password,
+            "hash_value": hash_value,
+            "domain": domain,
+            "method": method,
+        }
+
+        # Use Redis task queue if available (Kubernetes multi-pod mode)
+        if self._task_queue:
+            task_id = await self._task_queue.submit_task(
+                task_type="lateral",
+                target_role="lateral",
+                payload=payload,
+                source_agent=source_agent,
+            )
+
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type="lateral_movement",
+                assigned_agent="lateral",
+                params=payload,
+            )
+            self.shared_state.pending_tasks[task_id] = task_info
+
+            logger.info(f"Lateral movement task {task_id} submitted to Redis queue")
+            return task_id
+
+        # Fallback to in-memory queue (single-process mode)
         task_id = generate_task_id()
         lateral_agent = self._role_queues.get(AgentRole.LATERAL)
 
@@ -583,12 +665,7 @@ class RedTeamDispatcher:
             task_id=task_id,
             task_type="lateral_movement",
             assigned_agent=lateral_agent,
-            params={
-                "target_host": target_host,
-                "username": username,
-                "domain": domain,
-                "method": method,
-            },
+            params=payload,
         )
         self.shared_state.pending_tasks[task_id] = task_info
 
@@ -619,6 +696,8 @@ class RedTeamDispatcher:
         """
         Request ACLAgent to analyze attack paths for target.
 
+        Uses Redis task queue for cross-pod communication when available.
+
         Args:
             target_user: User to find paths to.
             domain: Target domain.
@@ -628,6 +707,33 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        payload = {
+            "target_user": target_user,
+            "domain": domain,
+            "find_path_to": find_path_to,
+        }
+
+        # Use Redis task queue if available (Kubernetes multi-pod mode)
+        if self._task_queue:
+            task_id = await self._task_queue.submit_task(
+                task_type="acl_analysis",
+                target_role="acl",
+                payload=payload,
+                source_agent=source_agent,
+            )
+
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type="acl_analysis",
+                assigned_agent="acl",
+                params=payload,
+            )
+            self.shared_state.pending_tasks[task_id] = task_info
+
+            logger.info(f"ACL analysis task {task_id} submitted to Redis queue")
+            return task_id
+
+        # Fallback to in-memory queue (single-process mode)
         task_id = generate_task_id()
         acl_agent = self._role_queues.get(AgentRole.ACL)
 
@@ -639,11 +745,7 @@ class RedTeamDispatcher:
             task_id=task_id,
             task_type="acl_analysis",
             assigned_agent=acl_agent,
-            params={
-                "target_user": target_user,
-                "domain": domain,
-                "find_path_to": find_path_to,
-            },
+            params=payload,
         )
         self.shared_state.pending_tasks[task_id] = task_info
 
@@ -672,6 +774,8 @@ class RedTeamDispatcher:
         """
         Request PrivEscAgent to exploit vulnerability.
 
+        Uses Redis task queue for cross-pod communication when available.
+
         Args:
             vuln_type: ADCS_ESC1, DELEGATION_UNCONSTRAINED, etc.
             vuln_id: Vulnerability ID.
@@ -682,6 +786,34 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        payload = {
+            "vuln_type": vuln_type,
+            "vuln_id": vuln_id,
+            "target": target,
+            **(params or {}),
+        }
+
+        # Use Redis task queue if available (Kubernetes multi-pod mode)
+        if self._task_queue:
+            task_id = await self._task_queue.submit_task(
+                task_type="exploit",
+                target_role="privesc",
+                payload=payload,
+                source_agent=source_agent,
+            )
+
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type="exploit",
+                assigned_agent="privesc",
+                params=payload,
+            )
+            self.shared_state.pending_tasks[task_id] = task_info
+
+            logger.info(f"Exploit task {task_id} for {vuln_type} submitted to Redis queue")
+            return task_id
+
+        # Fallback to in-memory queue (single-process mode)
         task_id = generate_task_id()
         privesc_agent = self._role_queues.get(AgentRole.PRIVESC)
 
@@ -693,12 +825,7 @@ class RedTeamDispatcher:
             task_id=task_id,
             task_type="exploit",
             assigned_agent=privesc_agent,
-            params={
-                "vuln_type": vuln_type,
-                "vuln_id": vuln_id,
-                "target": target,
-                **(params or {}),
-            },
+            params=payload,
         )
         self.shared_state.pending_tasks[task_id] = task_info
 
@@ -727,6 +854,8 @@ class RedTeamDispatcher:
         """
         Request PoisonAgent to start network poisoning.
 
+        Uses Redis task queue for cross-pod communication when available.
+
         Args:
             source_agent: Agent making the request.
             interface: Network interface.
@@ -736,6 +865,35 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        techniques = techniques or ["LLMNR", "NBT-NS", "mDNS"]
+
+        payload = {
+            "interface": interface,
+            "techniques": techniques,
+            "duration": duration,
+        }
+
+        # Use Redis task queue if available (Kubernetes multi-pod mode)
+        if self._task_queue:
+            task_id = await self._task_queue.submit_task(
+                task_type="poison",
+                target_role="poisoning",
+                payload=payload,
+                source_agent=source_agent,
+            )
+
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type="poisoning",
+                assigned_agent="poisoning",
+                params=payload,
+            )
+            self.shared_state.pending_tasks[task_id] = task_info
+
+            logger.info(f"Poisoning task {task_id} submitted to Redis queue")
+            return task_id
+
+        # Fallback to in-memory queue (single-process mode)
         task_id = generate_task_id()
         poison_agent = self._role_queues.get(AgentRole.POISONING)
 
@@ -743,17 +901,11 @@ class RedTeamDispatcher:
             logger.warning("No poison agent registered, cannot route poison request")
             return ""
 
-        techniques = techniques or ["LLMNR", "NBT-NS", "mDNS"]
-
         task_info = TaskInfo(
             task_id=task_id,
             task_type="poisoning",
             assigned_agent=poison_agent,
-            params={
-                "interface": interface,
-                "techniques": techniques,
-                "duration": duration,
-            },
+            params=payload,
         )
         self.shared_state.pending_tasks[task_id] = task_info
 
@@ -957,7 +1109,8 @@ class RedTeamDispatcher:
                 # Check if heartbeat is stale (> 60 seconds)
                 elapsed = (now - agent_info.last_heartbeat).total_seconds()
                 if elapsed > 60 and agent_info.status != "offline":
-                    logger.warning(f"Agent {agent_name} heartbeat stale ({elapsed:.0f}s)")
+                    # Debug level - workers not deployed yet so this is expected
+                    logger.debug(f"Agent {agent_name} heartbeat stale ({elapsed:.0f}s)")
                     agent_info.status = "offline"
 
             await asyncio.sleep(15)
@@ -1274,6 +1427,71 @@ class RedTeamDispatcher:
                         "error": error,
                     }
                 )
+
+    # Redis Task Queue Methods
+
+    @property
+    def task_queue(self) -> RedisTaskQueue | None:
+        """Get the Redis task queue for direct access if needed."""
+        return self._task_queue
+
+    async def dispatch_and_wait(
+        self,
+        task_type: str,
+        target_role: str,
+        payload: dict[str, Any],
+        timeout: float = 300.0,
+    ) -> QueueTaskResult | None:
+        """
+        Submit task and wait for result.
+
+        Convenience method for synchronous-style task dispatch when using
+        Redis task queues in Kubernetes multi-pod mode.
+
+        Args:
+            task_type: Type of task (crack, lateral, exploit, etc.)
+            target_role: Role to handle the task (cracker, lateral, privesc, etc.)
+            payload: Task-specific data
+            timeout: Maximum wait time in seconds
+
+        Returns:
+            QueueTaskResult or None if timeout/not available
+        """
+        if not self._task_queue:
+            logger.error("Task queue not initialized - Redis URL required for dispatch_and_wait")
+            return None
+
+        task_id = await self._task_queue.submit_task(
+            task_type=task_type,
+            target_role=target_role,
+            payload=payload,
+        )
+
+        return await self._task_queue.wait_for_result(task_id, timeout=timeout)
+
+    async def wait_for_redis_result(
+        self,
+        task_id: str,
+        timeout: float = 300.0,
+    ) -> QueueTaskResult | None:
+        """
+        Wait for a task result via Redis queue.
+
+        Use this when you've submitted a task via Redis and want to wait
+        for the worker to complete it.
+
+        Args:
+            task_id: Task ID to wait for
+            timeout: Maximum wait time in seconds
+
+        Returns:
+            QueueTaskResult or None if timeout/not available
+        """
+        if not self._task_queue:
+            logger.error("Task queue not initialized - cannot wait for Redis result")
+            return None
+
+        return await self._task_queue.wait_for_result(task_id, timeout=timeout)
 
 
 __all__ = ["RedTeamDispatcher"]

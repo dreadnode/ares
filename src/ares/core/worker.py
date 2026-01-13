@@ -1,9 +1,10 @@
 """Worker agent loop for multi-agent red team operations.
 
 This module provides the worker loop that specialized agents use to:
-- Poll the dispatcher for assigned tasks
+- Poll the Redis task queue for assigned tasks (Kubernetes multi-pod mode)
+- Poll the dispatcher for assigned tasks (single-process fallback mode)
 - Process tasks using their specialized toolsets
-- Report results back to the orchestrator
+- Report results back to the orchestrator via Redis
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from ares.core.messages import (
     OperationComplete,
 )
 from ares.core.models import AgentRole  # noqa: TC001 - used at runtime
+from ares.core.task_queue import RedisTaskQueue, TaskMessage
 
 if TYPE_CHECKING:
     from dreadnode.agent import Agent
@@ -103,7 +105,7 @@ async def discover_active_operation(redis_url: str, max_wait: int = 300) -> str 
             await asyncio.sleep(5)
 
 
-# Mapping of message types to task prompt generators
+# Mapping of message types to task prompt generators (for dispatcher-based messaging)
 TASK_PROMPTS: dict[MessageType, callable] = {
     MessageType.CRACK_REQUEST: lambda msg: (
         f"Crack this hash for user {msg.username}@{msg.domain}:\n"
@@ -160,6 +162,287 @@ TASK_PROMPTS: dict[MessageType, callable] = {
         "Execute the atomic test and report results using task_complete."
     ),
 }
+
+
+def generate_prompt_from_task(task: TaskMessage) -> str | None:
+    """
+    Generate agent prompt from Redis TaskMessage.
+
+    This is used when polling tasks from Redis queue instead of dispatcher.
+
+    Args:
+        task: TaskMessage from Redis queue
+
+    Returns:
+        Prompt string for the agent
+    """
+    payload = task.payload
+
+    if task.task_type == "crack":
+        return (
+            f"Crack this hash for user {payload.get('username', 'unknown')}"
+            f"@{payload.get('domain', '')}:\n"
+            f"Hash: {payload['hash_value']}\n"
+            f"Type: {payload['hash_type']}\n"
+            f"Wordlist: {payload.get('wordlist', 'rockyou.txt')}\n"
+            f"Task ID: {task.task_id}\n\n"
+            "Use hashcat or john to crack. Report when done."
+        )
+
+    if task.task_type == "lateral":
+        cred_type = "password" if payload.get("password") else "hash"
+        return (
+            f"Perform lateral movement to {payload['target_host']}:\n"
+            f"Username: {payload.get('domain', '')}\\{payload['username']}\n"
+            f"Credential: {cred_type}\n"
+            f"Method: {payload.get('method') or 'auto-select'}\n"
+            f"Task ID: {task.task_id}\n\n"
+            "Establish access and run secretsdump if successful."
+        )
+
+    if task.task_type == "acl_analysis":
+        return (
+            f"Analyze ACLs and find attack paths:\n"
+            f"Target User: {payload['target_user']}\n"
+            f"Domain: {payload['domain']}\n"
+            f"Find Path To: {payload.get('find_path_to', 'Domain Admins')}\n"
+            f"Task ID: {task.task_id}\n\n"
+            "Run BloodHound collection if needed. Execute viable ACL abuse attacks."
+        )
+
+    if task.task_type == "exploit":
+        return (
+            f"Exploit vulnerability:\n"
+            f"Type: {payload['vuln_type']}\n"
+            f"Target: {payload['target']}\n"
+            f"Vuln ID: {payload.get('vuln_id', 'unknown')}\n"
+            f"Params: {payload}\n"
+            f"Task ID: {task.task_id}\n\n"
+            "Execute the exploitation technique. Report credentials obtained."
+        )
+
+    if task.task_type == "poison":
+        techniques = payload.get("techniques", ["LLMNR", "NBT-NS"])
+        return (
+            f"Start network poisoning:\n"
+            f"Interface: {payload.get('interface', 'eth0')}\n"
+            f"Techniques: {', '.join(techniques)}\n"
+            f"Duration: {payload.get('duration', 300)}s\n"
+            f"Task ID: {task.task_id}\n\n"
+            "Start responder/mitm6 and capture hashes."
+        )
+
+    if task.task_type == "atomic":
+        return (
+            f"Execute Atomic Red Team test:\n"
+            f"Technique: {payload.get('technique_id', 'unknown')}\n"
+            f"Test Number: {payload.get('test_number', 1)}\n"
+            f"Input Args: {payload.get('input_args', {})}\n"
+            f"Task ID: {task.task_id}\n\n"
+            "Execute the atomic test and report results."
+        )
+
+    # "command" tasks are handled specially - executed directly, not via agent
+    if task.task_type == "command":
+        # Return None to signal direct execution
+        return None
+
+    # Generic fallback
+    return f"Execute task: {task.task_type}\nPayload: {payload}\nTask ID: {task.task_id}"
+
+
+class RedisWorkerAgent:
+    """
+    Worker agent that polls Redis task queue for work.
+
+    This is the preferred worker mode for Kubernetes multi-pod deployments
+    where in-memory queues cannot be shared across pods.
+    """
+
+    def __init__(
+        self,
+        role: AgentRole,
+        task_queue: RedisTaskQueue,
+        agent: Agent,
+        agent_name: str,
+        pod_name: str | None = None,
+    ):
+        self.role = role
+        self.task_queue = task_queue
+        self.agent = agent
+        self.agent_name = agent_name
+        self.pod_name = pod_name or os.environ.get("HOSTNAME", "unknown")
+        self._running = False
+        self._current_task: str | None = None
+        self._tasks_completed = 0
+
+    async def start(self) -> None:
+        """Start the Redis worker loop."""
+        self._running = True
+        logger.info(f"Redis worker {self.agent_name} starting...")
+
+        # Start heartbeat task
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+        try:
+            await self._worker_loop()
+        finally:
+            self._running = False
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
+    async def stop(self) -> None:
+        """Stop the worker loop."""
+        self._running = False
+        logger.info(f"Redis worker {self.agent_name} stopping...")
+
+    async def _worker_loop(self) -> None:
+        """Main worker loop - poll Redis for tasks."""
+        logger.info(f"Worker {self.agent_name} polling Redis for {self.role.value} tasks")
+
+        while self._running:
+            try:
+                # Poll Redis queue (blocks up to 5 seconds)
+                task = await self.task_queue.poll_task(
+                    role=self.role.value,
+                    timeout=5.0,
+                )
+
+                if task:
+                    await self._process_task(task)
+
+            except asyncio.CancelledError:  # noqa: PERF203
+                break
+            except Exception as e:
+                logger.error(f"Worker loop error: {e}")
+                await asyncio.sleep(5)
+
+    async def _process_task(self, task: TaskMessage) -> None:
+        """Process a task from the Redis queue."""
+        self._current_task = task.task_id
+        logger.info(f"[{self.agent_name}] Processing task {task.task_id}")
+
+        try:
+            # Handle "command" tasks directly via subprocess (no agent needed)
+            if task.task_type == "command":
+                await self._execute_command_task(task)
+                return
+
+            # Generate prompt from task
+            prompt = generate_prompt_from_task(task)
+
+            if prompt is None:
+                # Task type not supported for agent execution
+                await self.task_queue.send_result(
+                    task_id=task.task_id,
+                    success=False,
+                    error=f"Unsupported task type: {task.task_type}",
+                    worker_pod=self.pod_name,
+                )
+                return
+
+            # Run agent
+            logger.info(f"[{self.agent_name}] Running agent for task {task.task_id}")
+            result = await self.agent.run(prompt)
+            result_text = self._extract_result(result)
+
+            # Send success result via Redis
+            await self.task_queue.send_result(
+                task_id=task.task_id,
+                success=True,
+                result={"output": result_text, "task_type": task.task_type},
+                worker_pod=self.pod_name,
+            )
+            self._tasks_completed += 1
+            logger.success(f"[{self.agent_name}] Task {task.task_id} completed")
+
+        except Exception as e:
+            logger.error(f"[{self.agent_name}] Task {task.task_id} failed: {e}")
+            await self.task_queue.send_result(
+                task_id=task.task_id,
+                success=False,
+                error=str(e),
+                worker_pod=self.pod_name,
+            )
+        finally:
+            self._current_task = None
+
+    async def _execute_command_task(self, task: TaskMessage) -> None:
+        """Execute a command task directly via subprocess."""
+        import subprocess
+
+        payload = task.payload
+        command = payload.get("command", "")
+        working_dir = payload.get("working_directory", "/tmp")  # noqa: S108  # nosec B108
+        timeout = payload.get("timeout_seconds", 300)
+
+        logger.info(f"[{self.agent_name}] Executing command: {command[:100]}...")
+
+        try:
+            result = subprocess.run(  # noqa: S602, ASYNC221  # nosec B602
+                command,
+                shell=True,  # nosec B602
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=working_dir,
+                check=False,
+            )
+
+            await self.task_queue.send_result(
+                task_id=task.task_id,
+                success=True,
+                result={
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "return_code": result.returncode,
+                },
+                worker_pod=self.pod_name,
+            )
+            self._tasks_completed += 1
+            logger.success(f"[{self.agent_name}] Command completed: exit code {result.returncode}")
+
+        except subprocess.TimeoutExpired:
+            await self.task_queue.send_result(
+                task_id=task.task_id,
+                success=False,
+                error=f"Command timed out after {timeout}s",
+                worker_pod=self.pod_name,
+            )
+        except Exception as e:
+            await self.task_queue.send_result(
+                task_id=task.task_id,
+                success=False,
+                error=str(e),
+                worker_pod=self.pod_name,
+            )
+
+    def _extract_result(self, result: Any) -> str:
+        """Extract text result from agent output."""
+        if hasattr(result, "output"):
+            return str(result.output)
+        if hasattr(result, "content"):
+            return str(result.content)
+        return str(result)
+
+    async def _heartbeat_loop(self) -> None:
+        """Send heartbeats to Redis."""
+        while self._running:
+            try:
+                status = "busy" if self._current_task else "idle"
+                await self.task_queue.send_heartbeat(
+                    agent_name=self.agent_name,
+                    status=status,
+                    current_task=self._current_task,
+                    pod_name=self.pod_name,
+                )
+            except Exception as e:
+                logger.warning(f"Heartbeat failed: {e}")
+
+            await asyncio.sleep(15)
 
 
 class WorkerAgent:
@@ -345,18 +628,24 @@ async def run_worker(
     max_steps: int | None = None,
     discover_operation: bool = True,
     discovery_timeout: int = 300,
+    use_redis_queue: bool = True,
 ) -> None:
     """
     Run a specialized worker agent.
 
+    In Kubernetes multi-pod mode (use_redis_queue=True), uses Redis task queues
+    for cross-pod communication. In single-process mode (use_redis_queue=False),
+    uses in-memory dispatcher queues.
+
     Args:
         role: The agent role (cracker, acl, privesc, lateral, poisoning, atomic).
         operation_id: The operation ID to join (optional - will discover if not provided).
-        redis_url: Redis URL for dispatcher connection.
+        redis_url: Redis URL for task queue and state.
         model: LLM model to use.
         max_steps: Override default max steps for role.
         discover_operation: If True and operation_id is None/empty, discover from Redis.
         discovery_timeout: Max seconds to wait for operation discovery.
+        use_redis_queue: If True, poll Redis queue for tasks (Kubernetes mode).
     """
     pod_name = os.environ.get("HOSTNAME", f"local-{role.value}")
 
@@ -378,9 +667,16 @@ async def run_worker(
         return
 
     logger.info(f"Starting {role.value} worker for operation {operation_id}")
-    logger.info(f"Pod: {pod_name}, Redis: {redis_url}")
+    logger.info(f"Pod: {pod_name}, Redis: {redis_url}, Redis Queue: {use_redis_queue}")
 
-    # Create dispatcher and connect to Redis
+    # Create Redis task queue for direct polling (Kubernetes mode)
+    task_queue: RedisTaskQueue | None = None
+    if use_redis_queue:
+        task_queue = RedisTaskQueue(redis_url)
+        await task_queue.connect()
+        logger.info("Worker connected to Redis task queue")
+
+    # Create dispatcher for state management and fallback messaging
     dispatcher = RedTeamDispatcher(redis_url=redis_url)
     await dispatcher.start(operation_id)
 
@@ -391,7 +687,7 @@ async def run_worker(
 
     shared_state = dispatcher.shared_state
 
-    # Create agent info and register
+    # Create agent info and register (even in Redis mode for state tracking)
     agent_info = create_agent_info(role, pod_name=pod_name)
     await dispatcher.register(agent_info)
 
@@ -405,23 +701,40 @@ async def run_worker(
         max_steps=max_steps,
     )
 
-    # Create and run worker
-    worker = WorkerAgent(
-        role=role,
-        dispatcher=dispatcher,
-        agent=agent,
-        agent_name=agent_info.name,
-    )
-
     try:
+        worker: RedisWorkerAgent | WorkerAgent
+        if use_redis_queue and task_queue:
+            # Kubernetes multi-pod mode: poll Redis queue directly
+            worker = RedisWorkerAgent(
+                role=role,
+                task_queue=task_queue,
+                agent=agent,
+                agent_name=agent_info.name,
+                pod_name=pod_name,
+            )
+            logger.info(f"Starting Redis worker for role {role.value}")
+        else:
+            # Single-process mode: use dispatcher in-memory queues
+            worker = WorkerAgent(
+                role=role,
+                dispatcher=dispatcher,
+                agent=agent,
+                agent_name=agent_info.name,
+            )
+            logger.info(f"Starting dispatcher worker for role {role.value}")
+
         await worker.start()
     finally:
+        if task_queue:
+            await task_queue.disconnect()
         await dispatcher.stop()
         logger.info(f"Worker {agent_info.name} shutdown complete")
 
 
 __all__ = [
+    "RedisWorkerAgent",
     "WorkerAgent",
     "discover_active_operation",
+    "generate_prompt_from_task",
     "run_worker",
 ]

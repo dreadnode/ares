@@ -61,6 +61,8 @@ class OrchestratorTools(Toolset):
         username: str = "",
         domain: str = "",
         wordlist: str = "rockyou.txt",
+        wait_for_result: bool = False,
+        timeout: float = 300.0,
     ) -> str:
         """
         Send hash to CrackerAgent for cracking.
@@ -75,9 +77,11 @@ class OrchestratorTools(Toolset):
             username: Associated username (helps prioritization)
             domain: Associated domain
             wordlist: Wordlist to use (default: rockyou.txt)
+            wait_for_result: If True, wait for cracking to complete
+            timeout: Max time to wait if wait_for_result=True (seconds)
 
         Returns:
-            Task ID for tracking, or error message
+            Task ID for tracking, or cracked result if wait_for_result=True
 
         Example:
             # Crack admin hash with high priority
@@ -98,10 +102,23 @@ class OrchestratorTools(Toolset):
             wordlist=wordlist,
         )
 
-        if task_id:
-            logger.info(f"Dispatched crack request: {task_id}")
+        if not task_id:
+            return "✗ Failed to dispatch crack request - no cracker agent available"
+
+        logger.info(f"Dispatched crack request: {task_id}")
+
+        if not wait_for_result:
             return f"✓ Crack request submitted: {task_id}\nHash type: {hash_type}, Priority: {priority}"
-        return "✗ Failed to dispatch crack request - no cracker agent available"
+
+        # Wait for result via Redis queue
+        result = await self.dispatcher.wait_for_redis_result(task_id, timeout=timeout)
+
+        if result is None:
+            return f"⏳ Crack task {task_id} timed out after {timeout}s"
+
+        if result.success:
+            return f"✓ Cracked: {result.result}"
+        return f"✗ Cracking failed: {result.error}"
 
     @dn.tool_method
     async def dispatch_acl_analysis(
@@ -109,6 +126,8 @@ class OrchestratorTools(Toolset):
         target_user: str,
         domain: str,
         find_path_to: str = "Domain Admins",
+        wait_for_result: bool = False,
+        timeout: float = 300.0,
     ) -> str:
         """
         Request ACLAgent to analyze attack paths for target.
@@ -120,9 +139,11 @@ class OrchestratorTools(Toolset):
             target_user: User to find paths FROM (usually current compromised user)
             domain: Target domain
             find_path_to: Target group/user to find paths TO (default: Domain Admins)
+            wait_for_result: If True, wait for analysis to complete
+            timeout: Max time to wait if wait_for_result=True (seconds)
 
         Returns:
-            Task ID for tracking, or error message
+            Task ID for tracking, or analysis result if wait_for_result=True
 
         Example:
             >>> dispatch_acl_analysis(
@@ -138,10 +159,23 @@ class OrchestratorTools(Toolset):
             find_path_to=find_path_to,
         )
 
-        if task_id:
-            logger.info(f"Dispatched ACL analysis: {task_id}")
+        if not task_id:
+            return "✗ Failed to dispatch ACL analysis - no ACL agent available"
+
+        logger.info(f"Dispatched ACL analysis: {task_id}")
+
+        if not wait_for_result:
             return f"✓ ACL analysis requested: {task_id}\nFinding paths from {target_user} to {find_path_to}"
-        return "✗ Failed to dispatch ACL analysis - no ACL agent available"
+
+        # Wait for result via Redis queue
+        result = await self.dispatcher.wait_for_redis_result(task_id, timeout=timeout)
+
+        if result is None:
+            return f"⏳ ACL analysis {task_id} timed out after {timeout}s"
+
+        if result.success:
+            return f"✓ ACL analysis complete: {result.result}"
+        return f"✗ ACL analysis failed: {result.error}"
 
     @dn.tool_method
     async def dispatch_lateral_movement(
@@ -152,6 +186,8 @@ class OrchestratorTools(Toolset):
         hash_value: str = "",
         domain: str = "",
         method: str = "",
+        wait_for_result: bool = False,
+        timeout: float = 300.0,
     ) -> str:
         """
         Request LateralAgent to move to target host.
@@ -166,9 +202,11 @@ class OrchestratorTools(Toolset):
             hash_value: NTLM hash for pass-the-hash (if available)
             domain: Domain for authentication
             method: Specific method (psexec/winrm/wmi) or empty for auto
+            wait_for_result: If True, wait for movement to complete
+            timeout: Max time to wait if wait_for_result=True (seconds)
 
         Returns:
-            Task ID for tracking, or error message
+            Task ID for tracking, or result if wait_for_result=True
 
         Example:
             # Move to target using hash
@@ -189,14 +227,27 @@ class OrchestratorTools(Toolset):
             method=method or None,
         )
 
-        if task_id:
-            logger.info(f"Dispatched lateral movement: {task_id}")
-            auth_method = "password" if password else "hash" if hash_value else "unknown"
+        if not task_id:
+            return "✗ Failed to dispatch lateral movement - no lateral agent available"
+
+        logger.info(f"Dispatched lateral movement: {task_id}")
+        auth_method = "password" if password else "hash" if hash_value else "unknown"
+
+        if not wait_for_result:
             return (
                 f"✓ Lateral movement requested: {task_id}\n"
                 f"Target: {target_host}, User: {domain}\\{username}, Auth: {auth_method}"
             )
-        return "✗ Failed to dispatch lateral movement - no lateral agent available"
+
+        # Wait for result via Redis queue
+        result = await self.dispatcher.wait_for_redis_result(task_id, timeout=timeout)
+
+        if result is None:
+            return f"⏳ Lateral movement {task_id} timed out after {timeout}s"
+
+        if result.success:
+            return f"✓ Lateral movement to {target_host} succeeded: {result.result}"
+        return f"✗ Lateral movement to {target_host} failed: {result.error}"
 
     @dn.tool_method
     async def dispatch_privesc_exploit(
@@ -204,6 +255,8 @@ class OrchestratorTools(Toolset):
         vuln_type: str,
         target: str,
         vuln_id: str = "",
+        wait_for_result: bool = False,
+        timeout: float = 300.0,
         **kwargs,
     ) -> str:
         """
@@ -216,10 +269,12 @@ class OrchestratorTools(Toolset):
                       DELEGATION_UNCONSTRAINED, DELEGATION_CONSTRAINED, MSSQL_IMPERSONATION
             target: Target to exploit (CA name, server, etc.)
             vuln_id: Optional vulnerability ID for tracking
+            wait_for_result: If True, wait for exploitation to complete
+            timeout: Max time to wait if wait_for_result=True (seconds)
             **kwargs: Vulnerability-specific parameters
 
         Returns:
-            Task ID for tracking, or error message
+            Task ID for tracking, or result if wait_for_result=True
 
         Example:
             # Exploit ADCS ESC1
@@ -241,10 +296,23 @@ class OrchestratorTools(Toolset):
             params=kwargs,
         )
 
-        if task_id:
-            logger.info(f"Dispatched exploitation: {task_id}")
+        if not task_id:
+            return "✗ Failed to dispatch exploitation - no privesc agent available"
+
+        logger.info(f"Dispatched exploitation: {task_id}")
+
+        if not wait_for_result:
             return f"✓ Exploitation requested: {task_id}\nType: {vuln_type}, Target: {target}"
-        return "✗ Failed to dispatch exploitation - no privesc agent available"
+
+        # Wait for result via Redis queue
+        result = await self.dispatcher.wait_for_redis_result(task_id, timeout=timeout)
+
+        if result is None:
+            return f"⏳ Exploitation {task_id} timed out after {timeout}s"
+
+        if result.success:
+            return f"✓ Exploitation of {vuln_type} on {target} succeeded: {result.result}"
+        return f"✗ Exploitation failed: {result.error}"
 
     @dn.tool_method
     async def start_poisoning(
@@ -252,6 +320,8 @@ class OrchestratorTools(Toolset):
         interface: str = "eth0",
         techniques: str = "LLMNR,NBT-NS,mDNS",
         duration: int = 300,
+        wait_for_result: bool = False,
+        timeout: float = 600.0,
     ) -> str:
         """
         Request PoisonAgent to start network poisoning.
@@ -262,9 +332,11 @@ class OrchestratorTools(Toolset):
             interface: Network interface to use
             techniques: Comma-separated poisoning techniques (LLMNR, NBT-NS, mDNS)
             duration: How long to run in seconds (default: 300)
+            wait_for_result: If True, wait for poisoning to complete
+            timeout: Max time to wait if wait_for_result=True (seconds)
 
         Returns:
-            Task ID for tracking, or error message
+            Task ID for tracking, or result if wait_for_result=True
 
         Example:
             >>> start_poisoning(
@@ -282,13 +354,26 @@ class OrchestratorTools(Toolset):
             duration=duration,
         )
 
-        if task_id:
-            logger.info(f"Dispatched poisoning: {task_id}")
+        if not task_id:
+            return "✗ Failed to start poisoning - no poison agent available"
+
+        logger.info(f"Dispatched poisoning: {task_id}")
+
+        if not wait_for_result:
             return (
                 f"✓ Poisoning started: {task_id}\n"
                 f"Techniques: {', '.join(tech_list)}, Duration: {duration}s"
             )
-        return "✗ Failed to start poisoning - no poison agent available"
+
+        # Wait for result via Redis queue (longer timeout for poisoning)
+        result = await self.dispatcher.wait_for_redis_result(task_id, timeout=timeout)
+
+        if result is None:
+            return f"⏳ Poisoning {task_id} timed out after {timeout}s"
+
+        if result.success:
+            return f"✓ Poisoning complete: {result.result}"
+        return f"✗ Poisoning failed: {result.error}"
 
     @dn.tool_method
     def get_pending_tasks(self) -> str:
@@ -681,6 +766,55 @@ class OrchestratorTools(Toolset):
             lines.append(f"\n✓ Exploited: {len(status['exploited'])} vulnerabilities")
 
         return "\n".join(lines)
+
+    @dn.tool_method
+    async def register_discovered_host(
+        self,
+        ip: str,
+        hostname: str = "",
+        os: str = "",
+        roles: list[str] | None = None,
+        services: list[str] | None = None,
+    ) -> str:
+        """
+        Register a newly discovered host with all agents.
+
+        Use this when network enumeration discovers new systems.
+
+        Args:
+            ip: IP address of the host
+            hostname: Hostname if known
+            os: Operating system detected (Windows Server 2019, Ubuntu 20.04, etc.)
+            roles: Server roles (["DC", "SQL"], ["Exchange"], etc.)
+            services: Running services detected (["SMB", "RDP", "WinRM"], etc.)
+
+        Returns:
+            Confirmation message
+
+        Example:
+            >>> register_discovered_host(
+            ...     ip="192.168.1.10",
+            ...     hostname="DC01",
+            ...     os="Windows Server 2019",
+            ...     roles=["DC"],
+            ...     services=["SMB", "LDAP", "Kerberos"]
+            ... )
+        """
+        from ares.core.models import Host
+
+        host = Host(
+            ip=ip,
+            hostname=hostname,
+            os=os,
+            roles=roles or [],
+            services=services or [],
+        )
+
+        added = await self.dispatcher.publish_host(host, self._agent_name)
+
+        if added:
+            return f"✓ Host registered: {hostname or ip} ({os})"
+        return f"[i] Host already known: {hostname or ip}"
 
 
 class CrackerCallbackTools(Toolset):

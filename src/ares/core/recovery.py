@@ -330,6 +330,14 @@ class OperationRecoveryManager:
 
         logger.info(f"Starting periodic checkpoint every {interval} seconds")
 
+        # Immediate checkpoint on start so workers can discover the operation
+        if dispatcher._shared_state:
+            success = await self.checkpoint(dispatcher.shared_state)
+            if success:
+                logger.info("Initial checkpoint saved - workers can now discover operation")
+            else:
+                logger.warning("Failed to save initial checkpoint")
+
         while self._running:
             await asyncio.sleep(interval)
             if self._running and dispatcher._shared_state:

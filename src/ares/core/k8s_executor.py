@@ -1,7 +1,21 @@
 """Kubernetes pod execution for multi-agent red team operations.
 
+DEPRECATED: For task dispatch to worker pods, use RedisTaskQueue instead.
+
 This module provides the KubernetesPodExecutor class for executing
 commands in Kubernetes pods, handling ephemeral pod lifecycle gracefully.
+
+For multi-agent task coordination, prefer:
+    from ares.core.task_queue import RedisTaskQueue
+
+    queue = RedisTaskQueue(redis_url)
+    await queue.submit_task(task_type="crack", target_role="cracker", payload={...})
+
+KubernetesPodExecutor is retained for:
+- One-off debugging commands
+- Log retrieval
+- Pod health checks
+- Direct command execution when needed
 """
 
 from __future__ import annotations
@@ -27,12 +41,22 @@ class KubernetesPodExecutor:
     """
     Execute commands in Kubernetes pods.
 
-    Handles ephemeral pod lifecycle gracefully, including:
-    - Pod discovery by role labels
-    - Automatic retry on pod restart
-    - Cached pod name for performance
+    DEPRECATED for task dispatch: Use RedisTaskQueue for multi-agent task coordination.
+    This class uses kubectl exec which is slow (WebSocket per command), fragile (breaks
+    on pod restarts), and synchronous (blocks orchestrator).
 
-    Usage:
+    This class is kept for:
+    - One-off debugging commands
+    - Log retrieval
+    - Pod health checks
+    - Direct command execution when kubectl exec is appropriate
+
+    For task dispatch, use instead:
+        from ares.core.task_queue import RedisTaskQueue
+        queue = RedisTaskQueue(redis_url)
+        await queue.submit_task(...)
+
+    Usage (for debugging/one-off commands):
         executor = KubernetesPodExecutor(namespace="ares")
         stdout, stderr, code = await executor.execute(
             role="cracker",
@@ -140,8 +164,9 @@ class KubernetesPodExecutor:
     async def execute(
         self,
         role: str,
-        command: list[str],
-        timeout: int = 300,
+        command: list[str] | str,
+        container: str = "tools",
+        timeout_seconds: int = 300,
         stdin_data: str | None = None,
     ) -> tuple[str, str, int]:
         """
@@ -149,8 +174,9 @@ class KubernetesPodExecutor:
 
         Args:
             role: The agent role (enum, cracker, acl, privesc, lateral, poisoning).
-            command: Command to execute as list of strings.
-            timeout: Execution timeout in seconds.
+            command: Command to execute as list of strings or shell command string.
+            container: Container name to execute in (default: tools).
+            timeout_seconds: Execution timeout in seconds.
             stdin_data: Optional data to send to stdin.
 
         Returns:
@@ -166,11 +192,16 @@ class KubernetesPodExecutor:
         if not pod_name:
             raise PodNotAvailableError(f"No running pod for role: {role}")
 
+        # Convert string command to shell execution
+        if isinstance(command, str):
+            command = ["/bin/bash", "-c", command]
+
         try:
             return await self._execute_in_pod(
                 pod_name=pod_name,
                 command=command,
-                timeout=timeout,
+                container=container,
+                timeout=timeout_seconds,
                 stdin_data=stdin_data,
             )
         except Exception as e:
@@ -183,7 +214,8 @@ class KubernetesPodExecutor:
                     return await self._execute_in_pod(
                         pod_name=pod_name,
                         command=command,
-                        timeout=timeout,
+                        container=container,
+                        timeout=timeout_seconds,
                         stdin_data=stdin_data,
                     )
             raise PodExecutionError(f"Command execution failed: {e}") from e
@@ -192,10 +224,11 @@ class KubernetesPodExecutor:
         self,
         pod_name: str,
         command: list[str],
+        container: str,
         timeout: int,
         stdin_data: str | None = None,
     ) -> tuple[str, str, int]:
-        """Execute command in a specific pod."""
+        """Execute command in a specific pod container."""
         from kubernetes.stream import stream
 
         assert self._v1 is not None  # noqa: S101
@@ -210,6 +243,7 @@ class KubernetesPodExecutor:
                     v1.connect_get_namespaced_pod_exec,
                     pod_name,
                     self.namespace,
+                    container=container,
                     command=command,
                     stderr=True,
                     stdin=bool(stdin_data),

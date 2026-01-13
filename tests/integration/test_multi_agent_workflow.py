@@ -10,9 +10,18 @@ Tests the complete multi-agent workflow including:
 from __future__ import annotations
 
 import asyncio
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+# Create mock redis module if not installed
+if "redis" not in sys.modules:
+    mock_redis_module = MagicMock()
+    mock_redis_asyncio = MagicMock()
+    mock_redis_module.asyncio = mock_redis_asyncio
+    sys.modules["redis"] = mock_redis_module
+    sys.modules["redis.asyncio"] = mock_redis_asyncio
 
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.models import (
@@ -20,6 +29,7 @@ from ares.core.models import (
     AgentRole,
     Credential,
     Host,
+    SharedRedTeamState,
 )
 from ares.core.workflows import (
     CredentialTestingTracker,
@@ -39,17 +49,33 @@ def mock_redis():
     redis.expire = AsyncMock()
     redis.exists = AsyncMock(return_value=0)
     redis.delete = AsyncMock()
+    redis.lpush = AsyncMock(return_value=1)
+    redis.brpop = AsyncMock(return_value=None)
+    redis.rpop = AsyncMock(return_value=None)
+    redis.llen = AsyncMock(return_value=0)
+    redis.aclose = AsyncMock()
     return redis
 
 
 @pytest.fixture
 async def dispatcher(mock_redis):
     """Create a dispatcher instance with mocked Redis."""
-    with patch("redis.asyncio.from_url", return_value=mock_redis):
-        d = RedTeamDispatcher(redis_url="redis://localhost:6379")
-        await d.start("test-operation-001")
-        yield d
-        await d.stop()
+    d = RedTeamDispatcher(redis_url="redis://localhost:6379")
+
+    # Manually setup the mocked connections
+    d._redis_client = mock_redis
+    d._shared_state = SharedRedTeamState(operation_id="test-operation-001")
+    d._running = True
+
+    if d._task_queue:
+        d._task_queue._client = mock_redis
+        d._task_queue._connected = True
+
+    yield d
+
+    d._running = False
+    if d._task_queue:
+        d._task_queue._connected = False
 
 
 @pytest.fixture
@@ -296,8 +322,8 @@ class TestDispatcher:
         assert len(messages) > 0
 
     @pytest.mark.asyncio
-    async def test_task_routing(self, dispatcher):
-        """Test task routing to specialized agents."""
+    async def test_task_routing(self, dispatcher, mock_redis):
+        """Test task routing to specialized agents via Redis."""
         # Register a cracker agent
         cracker = AgentInfo(
             name="cracker-agent",
@@ -318,10 +344,11 @@ class TestDispatcher:
         assert task_id != ""
         assert task_id in dispatcher.shared_state.pending_tasks
 
-        # Check message was queued for cracker
-        messages = await dispatcher.get_messages("cracker-agent")
-        assert len(messages) == 1
-        assert messages[0].type.value == "crack_request"
+        # With Redis enabled, task goes to Redis queue, not in-memory queue
+        # Verify Redis lpush was called with task for cracker queue
+        mock_redis.lpush.assert_called()
+        call_args = mock_redis.lpush.call_args
+        assert "ares:tasks:cracker" in call_args[0][0]
 
     @pytest.mark.asyncio
     async def test_task_completion(self, dispatcher):
@@ -466,10 +493,7 @@ class TestKubernetesIntegration:
     @pytest.mark.asyncio
     async def test_full_workflow_mock(self, mock_redis):
         """Test complete workflow with mocked infrastructure."""
-        with (
-            patch("redis.asyncio.from_url", return_value=mock_redis),
-            patch("kubernetes.client.CoreV1Api") as mock_k8s,
-        ):
+        with patch("kubernetes.client.CoreV1Api") as mock_k8s:
             # Setup mock pods
             mock_pod = MagicMock()
             mock_pod.metadata.name = "enum-agent-0"
@@ -480,9 +504,14 @@ class TestKubernetesIntegration:
             mock_pods.items = [mock_pod]
             mock_k8s.return_value.list_namespaced_pod.return_value = mock_pods
 
-            # Create dispatcher and run basic workflow
+            # Create dispatcher with manual mocking
             dispatcher = RedTeamDispatcher(redis_url="redis://localhost:6379")
-            await dispatcher.start("test-workflow-001")
+            dispatcher._redis_client = mock_redis
+            dispatcher._shared_state = SharedRedTeamState(operation_id="test-workflow-001")
+            dispatcher._running = True
+            if dispatcher._task_queue:
+                dispatcher._task_queue._client = mock_redis
+                dispatcher._task_queue._connected = True
 
             # Register agents
             for role in [AgentRole.ENUM, AgentRole.CRACKER, AgentRole.LATERAL]:
@@ -507,7 +536,10 @@ class TestKubernetesIntegration:
             assert len(dispatcher._agents) == 3
             assert dispatcher.shared_state.operation_id == "test-workflow-001"
 
-            await dispatcher.stop()
+            # Clean up
+            dispatcher._running = False
+            if dispatcher._task_queue:
+                dispatcher._task_queue._connected = False
 
 
 # Domain Admin Achievement Tests

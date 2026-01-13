@@ -1118,7 +1118,7 @@ class BloodHoundTools(Toolset):
         """Set the operation state for this toolset."""
         self.state = state
 
-    def _parse_bloodhound_output(self, raw_output: str) -> dict[str, Any]:
+    def _parse_bloodhound_output(self, raw_output: str) -> dict[str, Any]:  # noqa: PLR0912
         """Parse BloodHound collection output for actionable attack paths.
 
         Returns:
@@ -1128,6 +1128,7 @@ class BloodHoundTools(Toolset):
             - acl_abuse_targets: Accounts vulnerable to ACL abuse
             - high_value_targets: High-value target accounts
             - recommended_actions: Specific next steps
+            - discovered_hosts: List of discovered computer hostnames
         """
         result: dict[str, Any] = {
             "attack_paths": [],
@@ -1137,6 +1138,8 @@ class BloodHoundTools(Toolset):
             "recommended_actions": [],
             "collection_successful": False,
             "json_files_created": [],
+            "discovered_hosts": [],  # Computer hostnames from collection
+            "computers_found": 0,
             "raw_output": raw_output,
         }
 
@@ -1203,6 +1206,34 @@ class BloodHoundTools(Toolset):
                     }
                 )
 
+        # Parse discovered computers/hosts
+        # BloodHound outputs: "INFO     Found X computers" or "Found X computers"
+        for line in raw_output.split("\n"):
+            # Match "Found X computers" patterns
+            computer_count_match = re.search(r"Found\s+(\d+)\s+computers?", line, re.IGNORECASE)
+            if computer_count_match:
+                result["computers_found"] = int(computer_count_match.group(1))
+
+            # Match connecting to host: "Connecting to host: HOSTNAME.domain"
+            host_connect_match = re.search(
+                r"Connecting\s+to\s+host:\s+([A-Za-z0-9\-\.]+)", line, re.IGNORECASE
+            )
+            if host_connect_match:
+                hostname = host_connect_match.group(1)
+                if hostname not in result["discovered_hosts"]:
+                    result["discovered_hosts"].append(hostname)
+
+            # Match domain references like "DC01.domain.local" or computer names in output
+            # Look for FQDN patterns that appear to be computer names
+            fqdn_matches = re.findall(r"\b([A-Za-z0-9\-]+\.[A-Za-z0-9\-\.]+\.local)\b", line)
+            for fqdn in fqdn_matches:
+                # Skip if it looks like a user principal name (contains @)
+                if "@" not in fqdn and fqdn not in result["discovered_hosts"]:
+                    # Check if it's a computer-like name (uppercase or ends with $)
+                    hostname_part = fqdn.split(".")[0]
+                    if hostname_part.isupper() or len(hostname_part) <= 15:
+                        result["discovered_hosts"].append(fqdn)
+
         # Standard recommendations for BloodHound output
         if result["collection_successful"]:
             # Always recommend analyzing for ADCS
@@ -1227,7 +1258,7 @@ class BloodHoundTools(Toolset):
         return result
 
     @dn.tool_method
-    def run_bloodhound(
+    def run_bloodhound(  # noqa: PLR0912
         self,
         domain: str,
         username: str,
@@ -1284,6 +1315,30 @@ class BloodHoundTools(Toolset):
 
             # Parse output for actionable intelligence
             parsed = self._parse_bloodhound_output(raw_output)
+
+            # Register discovered hosts in state if available
+            if self.state and parsed.get("discovered_hosts"):
+                for hostname in parsed["discovered_hosts"]:
+                    # Extract short hostname from FQDN
+                    short_hostname = hostname.split(".")[0] if "." in hostname else hostname
+                    host = Host(
+                        ip="",  # IP not available from BloodHound output
+                        hostname=short_hostname,
+                        os="Windows",  # Assume Windows for AD computers
+                        roles=["DC"] if "DC" in short_hostname.upper() else [],
+                        services=[],
+                    )
+                    # Use add_host if available (SharedRedTeamState), else append
+                    if hasattr(self.state, "add_host"):
+                        self.state.add_host(host)
+                    # RedTeamState uses hosts list directly
+                    elif not any(h.hostname == short_hostname for h in self.state.hosts):
+                        self.state.hosts.append(host)
+                    logger.debug(f"Registered host from BloodHound: {short_hostname}")
+
+                logger.info(
+                    f"[+] Registered {len(parsed['discovered_hosts'])} hosts from BloodHound collection"
+                )
 
             logger.info("[+] BloodHound collection completed")
 

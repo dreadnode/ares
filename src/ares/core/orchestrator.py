@@ -141,9 +141,11 @@ async def run_multi_agent_operation(
         await dispatcher.register(agent_info)
 
     # Start background tasks
+    # NOTE: health_monitor disabled until worker pods are actually deployed
+    # It just spams "Offline agents detected" since workers don't heartbeat yet
     tasks = [
         asyncio.create_task(recovery.start_periodic_checkpoint(dispatcher), name="checkpoint"),
-        asyncio.create_task(_monitor_agent_health(dispatcher), name="health_monitor"),
+        # asyncio.create_task(_monitor_agent_health(dispatcher), name="health_monitor"),
         asyncio.create_task(exploitation_workflow(dispatcher), name="exploitation_workflow"),
     ]
 
@@ -252,13 +254,22 @@ async def _create_orchestrator_agent(
     orchestrator_tools.set_shared_state(shared_state)
 
     # Enumeration tools for initial recon
-    # Note: These tools use RedTeamState internally, but work without it.
-    # The dispatcher handles state coordination for multi-agent operations.
+    # Note: These tools use RedTeamState internally. SharedRedTeamState provides
+    # compatibility aliases (hosts, credentials, etc.) so they work in multi-agent mode.
     network_tools = NetworkEnumerationTools()
     cred_discovery_tools = CredentialDiscoveryTools()
     certipy_tools = CertipyTools()
     bloodhound_tools = BloodHoundTools()
     reporting_tools = RedTeamReportingTools()
+
+    # Set shared state on all toolsets for state tracking
+    # SharedRedTeamState has compatibility properties (hosts, credentials, etc.)
+    # that map to all_hosts, all_credentials, etc. for backward compatibility
+    network_tools.set_state(shared_state)  # type: ignore[arg-type]
+    cred_discovery_tools.set_state(shared_state)  # type: ignore[arg-type]
+    certipy_tools.set_state(shared_state)  # type: ignore[arg-type]
+    bloodhound_tools.set_state(shared_state)  # type: ignore[arg-type]
+    reporting_tools.set_state(shared_state)  # type: ignore[arg-type]
 
     tools = [
         orchestrator_tools,  # Coordination tools (dispatch_*, get_*, broadcast_*)
