@@ -1,10 +1,12 @@
-"""Remote command execution via AWS SSM.
+"""Command execution for red team tools.
 
-This module provides functionality to execute commands on remote EC2 instances
-(specifically the Kali attack box) using AWS Systems Manager (SSM).
+This module provides functionality to execute commands either:
+- Via subprocess (in K8s pods) - set ARES_EXECUTION_MODE=k8s
+- Via AWS SSM (for local dev with EC2) - default
 """
 
 import os
+import subprocess
 import time
 from dataclasses import dataclass
 from typing import Any, NoReturn
@@ -13,6 +15,9 @@ import boto3
 from botocore.exceptions import ClientError, SSOTokenLoadError, TokenRetrievalError
 from loguru import logger
 
+# Execution mode: "k8s" for K8s pods, "ssm" for EC2
+EXECUTION_MODE = os.environ.get("ARES_EXECUTION_MODE", "ssm").lower()
+
 
 class SSOTokenExpiredError(Exception):
     """Raised when AWS SSO token has expired and needs refresh."""
@@ -20,7 +25,7 @@ class SSOTokenExpiredError(Exception):
 
 @dataclass
 class CommandResult:
-    """Result of a remote command execution."""
+    """Result of command execution."""
 
     stdout: str
     stderr: str
@@ -33,6 +38,55 @@ class CommandResult:
         if self.stderr:
             return f"{self.stdout}\n{self.stderr}"
         return self.stdout
+
+
+class K8sExecutor:
+    """Execute commands via subprocess.
+
+    Used in K8s pods where tools are available in the shared process namespace.
+    """
+
+    def run_command(
+        self,
+        command: str | list[str],
+        timeout_seconds: int = 300,
+        working_directory: str = "/tmp",  # noqa: S108  # nosec B108
+    ) -> CommandResult:
+        """Execute a command via subprocess."""
+        command_str = " ".join(command) if isinstance(command, list) else command
+
+        logger.debug(f"Executing: {command_str[:100]}...")
+
+        try:
+            result = subprocess.run(  # noqa: S602  # nosec B602
+                command_str,
+                shell=True,  # nosec B602
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=working_directory,
+                check=False,
+            )
+            return CommandResult(
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+                success=result.returncode == 0,
+            )
+        except subprocess.TimeoutExpired:
+            return CommandResult(
+                stdout="",
+                stderr=f"Command timed out after {timeout_seconds}s",
+                return_code=124,
+                success=False,
+            )
+        except Exception as e:
+            return CommandResult(
+                stdout="",
+                stderr=str(e),
+                return_code=1,
+                success=False,
+            )
 
 
 class SSMExecutor:
@@ -320,14 +374,23 @@ exit $EXIT_CODE
 
 
 # Global executor instance (lazy-loaded)
-_executor: SSMExecutor | None = None
+_executor: SSMExecutor | K8sExecutor | None = None
 
 
-def get_executor() -> SSMExecutor:
-    """Get or create the global SSM executor instance."""
+def get_executor() -> SSMExecutor | K8sExecutor:
+    """Get or create the global executor instance.
+
+    Returns K8sExecutor when ARES_EXECUTION_MODE=k8s,
+    otherwise returns SSMExecutor (EC2).
+    """
     global _executor
     if _executor is None:
-        _executor = SSMExecutor()
+        if EXECUTION_MODE == "k8s":
+            logger.info("Using K8s executor (subprocess)")
+            _executor = K8sExecutor()
+        else:
+            logger.info("Using SSM executor (EC2)")
+            _executor = SSMExecutor()
     return _executor
 
 
@@ -336,6 +399,8 @@ def validate_sso_credentials(profile: str = "lab") -> bool:
 
     Call this at the start of an operation to fail fast if credentials
     are invalid, rather than failing mid-operation.
+
+    Skipped when ARES_EXECUTION_MODE=k8s.
 
     Args:
         profile: AWS profile name to validate
@@ -346,6 +411,9 @@ def validate_sso_credentials(profile: str = "lab") -> bool:
     Raises:
         SSOTokenExpiredError: If SSO token is expired or invalid
     """
+    if EXECUTION_MODE == "k8s":
+        return True
+
     try:
         session = boto3.Session(profile_name=profile)
         credentials = session.get_credentials()

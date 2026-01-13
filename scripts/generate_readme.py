@@ -50,7 +50,10 @@ def main() -> None:
 
     # Setup Jinja environment
     env = Environment(
-        loader=FileSystemLoader("templates"), trim_blocks=True, lstrip_blocks=True, autoescape=True
+        loader=FileSystemLoader("src/ares/templates"),
+        trim_blocks=True,
+        lstrip_blocks=True,
+        autoescape=True,
     )
     template = env.get_template("README.md.j2")
 

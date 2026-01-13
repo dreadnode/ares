@@ -4,9 +4,41 @@ This module provides utilities for loading and rendering Markdown-based
 Jinja2 templates used throughout the Ares codebase.
 """
 
+from __future__ import annotations
+
+import sys
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+if sys.version_info >= (3, 11):
+    import importlib.resources as importlib_resources
+else:
+    import importlib_resources  # type: ignore[import-not-found,no-redef]
+
+
+def get_templates_path() -> Path:
+    """Get the path to the templates directory.
+
+    Uses importlib.resources for proper package resource access,
+    which works correctly both in development and when installed.
+
+    Returns:
+        Path to the templates directory.
+    """
+    try:
+        # Use importlib.resources for installed packages
+        files = importlib_resources.files("ares")
+        templates_traversable = files.joinpath("templates")
+        # For Python 3.9+, as_file() returns a context manager but we can
+        # also just use the path directly if it's a real filesystem path
+        if hasattr(templates_traversable, "_path"):
+            return Path(templates_traversable._path)
+        # Fallback: try to get the path directly
+        return Path(str(templates_traversable))
+    except (TypeError, AttributeError):
+        # Fallback for edge cases - use __file__ based resolution
+        return Path(__file__).parent.parent / "templates"
 
 
 class TemplateLoader:
@@ -34,12 +66,10 @@ class TemplateLoader:
 
         Args:
             template_dir: Optional path to templates directory.
-                         Defaults to PROJECT_ROOT/templates/.
+                         Defaults to ares/templates/ (inside the package).
         """
         if template_dir is None:
-            # Get project root (from src/ares/core/templates.py -> ../../..)
-            project_root = Path(__file__).parent.parent.parent.parent
-            template_dir = project_root / "templates"
+            template_dir = get_templates_path()
 
         self.template_dir = Path(template_dir)
 

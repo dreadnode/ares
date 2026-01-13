@@ -566,6 +566,122 @@ class OrchestratorTools(Toolset):
 
         return f"🎉 DOMAIN ADMIN ANNOUNCED!\nUser: {domain}\\{username}\nPath: {attack_path}"
 
+    @dn.tool_method
+    async def trigger_credential_expansion(self, max_iterations: int = 10) -> str:
+        """
+        Automatically test all credentials against all hosts.
+
+        This initiates a recursive workflow:
+        1. Test each credential against each host
+        2. Successful access -> run secretsdump
+        3. New credentials -> repeat process
+
+        Use after discovering new credentials to maximize access.
+
+        Args:
+            max_iterations: Maximum expansion iterations (default: 10)
+
+        Returns:
+            Summary of expansion results
+        """
+        from ares.core.workflows import credential_expansion_loop
+
+        tracker = await credential_expansion_loop(
+            self.dispatcher,
+            max_iterations=max_iterations,
+        )
+
+        stats = tracker.get_stats()
+
+        # Get updated state
+        state = self.shared_state
+
+        return (
+            f"Credential expansion complete!\n"
+            f"→ Tested {stats['total_tested']} credential/host combinations\n"
+            f"→ Successful: {stats['successful']}\n"
+            f"→ Failed: {stats['failed']}\n"
+            f"→ Current access: {len(state.all_hosts)} hosts\n"
+            f"→ Total credentials: {len(state.all_credentials)}\n"
+            f"→ Check get_all_credentials() for details"
+        )
+
+    @dn.tool_method
+    async def queue_vulnerability_for_exploitation(
+        self,
+        vuln_type: str,
+        target: str,
+        details: str = "{}",
+    ) -> str:
+        """
+        Queue a discovered vulnerability for priority-based exploitation.
+
+        Vulnerabilities are automatically prioritized (ADCS > krbtgt > delegation > etc.)
+        and processed by the exploitation workflow.
+
+        Args:
+            vuln_type: Type of vulnerability (ADCS_ESC1, ADCS_ESC4, ADCS_ESC8,
+                      krbtgt_hash, domain_admin_hash, acl_abuse,
+                      unconstrained_delegation, constrained_delegation, etc.)
+            target: Target to exploit (CA name, server, user, etc.)
+            details: JSON string with vulnerability-specific details
+
+        Returns:
+            Confirmation with vulnerability ID and priority
+        """
+        import json
+
+        try:
+            details_dict = json.loads(details) if details else {}
+        except json.JSONDecodeError:
+            details_dict = {"raw": details}
+
+        vuln_id = await self.dispatcher.queue_vulnerability(
+            vuln_type=vuln_type,
+            target=target,
+            details=details_dict,
+            discovered_by=self._agent_name,
+        )
+
+        # Get the priority for reporting
+        priority = self.dispatcher._vulnerability_priorities.get(vuln_type, 99)
+
+        return (
+            f"✓ Vulnerability queued for exploitation\n"
+            f"→ ID: {vuln_id}\n"
+            f"→ Type: {vuln_type}\n"
+            f"→ Target: {target}\n"
+            f"→ Priority: {priority} (lower = higher priority)"
+        )
+
+    @dn.tool_method
+    async def get_vulnerability_queue_status(self) -> str:
+        """
+        Get status of the vulnerability exploitation queue.
+
+        Shows queued, in-progress, and completed vulnerability exploitations.
+
+        Returns:
+            Formatted queue status
+        """
+        status = self.dispatcher.get_exploitation_status()
+
+        lines = ["🎯 Vulnerability Queue Status:"]
+        lines.append(f"  Total discovered: {status['total_discovered']}")
+        lines.append(f"  Total exploited: {status['total_exploited']}")
+
+        if status["pending"]:
+            lines.append("\n⏳ Pending exploitation:")
+            for vuln in status["pending"]:
+                lines.append(f"  • [{vuln['type']}] {vuln['target']} (ID: {vuln['id']})")
+        else:
+            lines.append("\n✓ No vulnerabilities pending exploitation")
+
+        if status["exploited"]:
+            lines.append(f"\n✓ Exploited: {len(status['exploited'])} vulnerabilities")
+
+        return "\n".join(lines)
+
 
 class CrackerCallbackTools(Toolset):
     """Callback tools for the cracker agent to report results."""

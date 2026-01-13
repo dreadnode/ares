@@ -8,7 +8,8 @@ running in Kubernetes pods.
 from __future__ import annotations
 
 import asyncio
-from asyncio import Queue
+import uuid
+from asyncio import PriorityQueue, Queue
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -96,6 +97,29 @@ class RedTeamDispatcher:
 
         # Role-based routing
         self._role_queues: dict[AgentRole, str] = {}  # role -> agent_name
+
+        # Priority-based vulnerability queue
+        self._vulnerability_queue: PriorityQueue[tuple[int, str, dict[str, Any]]] = PriorityQueue()
+        self._vulnerability_priorities: dict[str, int] = {
+            "ADCS_ESC1": 1,
+            "ADCS_ESC4": 2,
+            "ADCS_ESC8": 3,
+            "krbtgt_hash": 4,
+            "domain_admin_hash": 5,
+            "acl_abuse": 6,
+            "unconstrained_delegation": 7,
+            "constrained_delegation": 8,
+            "rbcd": 9,
+            "mssql_impersonation": 10,
+            "mssql_linked": 11,
+            "gpo_abuse": 12,
+            "laps_abuse": 13,
+            "dcsync": 14,
+            "shadow_credentials": 15,
+        }
+
+        # Task completion futures for wait_for_task
+        self._task_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
     async def start(self, operation_id: str) -> None:
         """
@@ -803,6 +827,9 @@ class RedTeamDispatcher:
                 )
             )
 
+        # Resolve any waiting futures
+        self._resolve_task_future(task_id, success, result, error)
+
         await self._checkpoint()
         logger.info(f"Task {task_id} completed: success={success}")
 
@@ -1008,6 +1035,245 @@ class RedTeamDispatcher:
             ],
             "exploited": list(exploited),
         }
+
+    # Priority Vulnerability Queue Methods
+
+    async def queue_vulnerability(
+        self,
+        vuln_type: str,
+        target: str,
+        details: dict[str, Any],
+        discovered_by: str,
+    ) -> str:
+        """
+        Queue vulnerability for exploitation with priority.
+
+        Args:
+            vuln_type: Type of vulnerability (ADCS_ESC1, krbtgt_hash, etc.)
+            target: Target to exploit
+            details: Vulnerability-specific details
+            discovered_by: Agent that discovered this vulnerability
+
+        Returns:
+            Vulnerability ID for tracking
+        """
+        priority = self._vulnerability_priorities.get(vuln_type, 99)
+        vuln_id = f"{vuln_type}_{target}_{uuid.uuid4().hex[:8]}"
+
+        vuln_data = {
+            "type": vuln_type,
+            "target": target,
+            "details": details,
+            "discovered_by": discovered_by,
+            "queued_at": datetime.now(timezone.utc),
+        }
+
+        await self._vulnerability_queue.put((priority, vuln_id, vuln_data))
+
+        # Also add to shared state for tracking
+        vuln_info = VulnerabilityInfo(
+            vuln_id=vuln_id,
+            vuln_type=vuln_type,
+            target=target,
+            discovered_by=discovered_by,
+            details=details,
+            priority=priority,
+        )
+        self.shared_state.add_vulnerability(vuln_info)
+
+        # Persist to Redis
+        await self._save_vulnerability_to_redis(vuln_id, vuln_data)
+
+        logger.info(f"Queued vulnerability {vuln_id} with priority {priority}")
+        return vuln_id
+
+    async def get_next_vulnerability(self) -> dict[str, Any] | None:
+        """
+        Get highest priority unexploited vulnerability.
+
+        Returns:
+            Vulnerability data dict or None if queue empty
+        """
+        while not self._vulnerability_queue.empty():
+            try:
+                priority, vuln_id, vuln_data = self._vulnerability_queue.get_nowait()
+
+                # Check if already exploited
+                if await self._is_vulnerability_exploited(vuln_id):
+                    continue  # Skip and get next
+
+                return {"id": vuln_id, "priority": priority, **vuln_data}
+
+            except asyncio.QueueEmpty:
+                break
+
+        return None
+
+    async def mark_vulnerability_exploited(
+        self,
+        vuln_id: str,
+        success: bool,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Mark vulnerability as exploited.
+
+        Args:
+            vuln_id: The vulnerability ID
+            success: Whether exploitation was successful
+            result: Exploitation result (credentials, hashes, etc.)
+        """
+        self.shared_state.mark_exploited(vuln_id)
+
+        if success and result:
+            # Update state with exploitation results
+            if "credential" in result:
+                cred_data = result["credential"]
+                credential = Credential(
+                    username=cred_data.get("username", ""),
+                    password=cred_data.get("password", ""),
+                    domain=cred_data.get("domain", ""),
+                    source=f"exploit:{vuln_id}",
+                    is_admin=cred_data.get("is_admin", False),
+                )
+                self.shared_state.add_credential(credential, "exploitation")
+
+            if "hash" in result:
+                hash_data = result["hash"]
+                hash_obj = Hash(
+                    username=hash_data.get("username", ""),
+                    hash_value=hash_data.get("hash_value", ""),
+                    hash_type=hash_data.get("hash_type", "NTLM"),
+                    domain=hash_data.get("domain", ""),
+                )
+                self.shared_state.add_hash(hash_obj, "exploitation")
+
+        # Update Redis
+        await self._mark_exploited_in_redis(vuln_id, success, result)
+        await self._checkpoint()
+
+        logger.info(f"Marked vulnerability {vuln_id} as exploited (success={success})")
+
+    async def _save_vulnerability_to_redis(self, vuln_id: str, vuln_data: dict[str, Any]) -> None:
+        """Save vulnerability to Redis for persistence."""
+        if self._redis_client is None:
+            return
+
+        try:
+            import json
+
+            key = f"ares:operation:{self.shared_state.operation_id}:vulns:{vuln_id}"
+            # Convert datetime to ISO string for JSON serialization
+            serializable_data = {
+                **vuln_data,
+                "queued_at": vuln_data["queued_at"].isoformat()
+                if isinstance(vuln_data.get("queued_at"), datetime)
+                else vuln_data.get("queued_at"),
+            }
+            await self._redis_client.set(key, json.dumps(serializable_data))
+            await self._redis_client.expire(key, 86400)  # 24 hour TTL
+        except Exception as e:
+            logger.warning(f"Failed to save vulnerability to Redis: {e}")
+
+    async def _is_vulnerability_exploited(self, vuln_id: str) -> bool:
+        """Check if vulnerability has been exploited."""
+        # Check in-memory state first
+        if vuln_id in self.shared_state.exploited_vulnerabilities:
+            return True
+
+        # Check Redis if available
+        if self._redis_client is not None:
+            try:
+                key = f"ares:operation:{self.shared_state.operation_id}:exploited:{vuln_id}"
+                result = await self._redis_client.exists(key)
+                return bool(result)
+            except Exception as e:
+                logger.warning(f"Failed to check Redis for exploited vuln: {e}")
+
+        return False
+
+    async def _mark_exploited_in_redis(
+        self,
+        vuln_id: str,
+        success: bool,
+        result: dict[str, Any] | None,
+    ) -> None:
+        """Mark vulnerability as exploited in Redis."""
+        if self._redis_client is None:
+            return
+
+        try:
+            import json
+
+            key = f"ares:operation:{self.shared_state.operation_id}:exploited:{vuln_id}"
+            data = {
+                "success": success,
+                "result": result,
+                "exploited_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await self._redis_client.set(key, json.dumps(data))
+            await self._redis_client.expire(key, 86400)
+        except Exception as e:
+            logger.warning(f"Failed to mark exploited in Redis: {e}")
+
+    # Task Completion Waiting
+
+    async def wait_for_task(
+        self,
+        task_id: str,
+        timeout: float = 300.0,
+    ) -> dict[str, Any]:
+        """
+        Wait for a task to complete.
+
+        Args:
+            task_id: The task ID to wait for
+            timeout: Maximum time to wait in seconds
+
+        Returns:
+            Task result dict with success, result, and error fields
+
+        Raises:
+            asyncio.TimeoutError: If task doesn't complete within timeout
+        """
+        # Check if already completed
+        if task_id in self.shared_state.completed_tasks:
+            result = self.shared_state.completed_tasks[task_id]
+            return {
+                "success": result.success,
+                "result": result.result,
+                "error": result.error,
+            }
+
+        # Create future if not exists
+        if task_id not in self._task_futures:
+            future: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+            self._task_futures[task_id] = future
+
+        try:
+            return await asyncio.wait_for(self._task_futures[task_id], timeout=timeout)
+        finally:
+            # Cleanup future
+            self._task_futures.pop(task_id, None)
+
+    def _resolve_task_future(
+        self,
+        task_id: str,
+        success: bool,
+        result: Any = None,
+        error: str | None = None,
+    ) -> None:
+        """Resolve a task future when task completes."""
+        if task_id in self._task_futures:
+            future = self._task_futures[task_id]
+            if not future.done():
+                future.set_result(
+                    {
+                        "success": success,
+                        "result": result,
+                        "error": error,
+                    }
+                )
 
 
 __all__ = ["RedTeamDispatcher"]

@@ -688,6 +688,284 @@ tasks:
           --dn-args.project {{.REDTEAM_PROJECT}} \
           2>&1 | tee -a "$LOGFILE"
 
+  # ===========================================================================
+  # Ares Multi-Agent Red Team Tasks
+  # ===========================================================================
+
+  ares:red:multi:
+    desc: "Run multi-agent red team operation (usage: task ares:red:multi TARGET=dreadgoad [DOMAIN=sevenkingdoms.local])"
+    vars:
+      TARGET: '{{.TARGET | default ""}}'
+      DOMAIN: '{{.DOMAIN | default "sevenkingdoms.local"}}'
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      RESUME: '{{.RESUME | default "false"}}'
+      # Target resolution (where the AD targets live)
+      TARGET_PROFILE: '{{.TARGET_PROFILE | default "lab"}}'
+      TARGET_REGION: '{{.TARGET_REGION | default "us-west-2"}}'
+      # K8s cluster (where the agents run)
+      K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
+      REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
+    preconditions:
+      - sh: test -n "{{.TARGET}}"
+        msg: "TARGET variable is required. Usage: task ares:red:multi TARGET=dreadgoad"
+    cmds:
+      - |
+        export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
+        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
+
+        TARGET="{{.TARGET}}"
+
+        # Check if TARGET is an IP address (simple regex check)
+        if echo "$TARGET" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "🎯 Using direct IP(s): $TARGET"
+            RESOLVED_TARGETS="$TARGET"
+        else
+            # Resolve TARGET via AWS EC2 Name tag filter (from lab account)
+            echo "🔍 Resolving '$TARGET' via AWS EC2 ({{.TARGET_PROFILE}}/{{.TARGET_REGION}})..."
+
+            RESOLVED_TARGETS=$(aws ec2 describe-instances \
+                --profile "{{.TARGET_PROFILE}}" \
+                --region "{{.TARGET_REGION}}" \
+                --filters "Name=instance-state-name,Values=running" \
+                --query "Reservations[*].Instances[?contains(Tags[?Key==\`Name\`].Value|[0], \`$TARGET\`)].PrivateIpAddress" \
+                --output text | tr '\t\n' ',' | sed 's/,$//')
+
+            if [ -z "$RESOLVED_TARGETS" ]; then
+                echo "❌ No running EC2 instances found matching Name tag filter: $TARGET"
+                exit 1
+            fi
+
+            TARGET_COUNT=$(echo "$RESOLVED_TARGETS" | tr ',' '\n' | wc -l | xargs)
+            echo "✅ Resolved $TARGET_COUNT target(s): $RESOLVED_TARGETS"
+        fi
+
+        # Generate operation ID if not provided
+        OPERATION_ID="{{.OPERATION_ID}}"
+        if [ -z "$OPERATION_ID" ]; then
+          OPERATION_ID="op-$(date +%Y%m%d-%H%M%S)"
+        fi
+
+        mkdir -p {{.LOG_DIR}}
+        LOGFILE="{{.LOG_DIR}}/red-multi-$(date +%Y%m%d-%H%M%S).log"
+        echo "📝 Logging to: $LOGFILE"
+        echo "🎯 Operation ID: $OPERATION_ID"
+        echo "🌐 Target domain: {{.DOMAIN}}"
+        echo "🖥️  Target IPs: $RESOLVED_TARGETS"
+        echo "🔌 K8s namespace: {{.K8S_NAMESPACE}}"
+
+        # Set up Redis port-forward in background
+        echo "📡 Setting up Redis port-forward..."
+        pkill -f "port-forward.*redis" 2>/dev/null || true
+        sleep 1
+
+        # Get Redis password if using auth
+        REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+
+        kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 6379:6379 &
+        PF_PID=$!
+        sleep 2
+
+        # Build Redis URL
+        if [ -n "$REDIS_PASS" ]; then
+          REDIS_URL="redis://:${REDIS_PASS}@localhost:6379"
+        else
+          REDIS_URL="redis://localhost:6379"
+        fi
+        echo "📡 Redis URL: redis://localhost:6379 (port-forwarded)"
+
+        # Convert comma-separated targets to Python list format
+        TARGETS_LIST=$(echo "$RESOLVED_TARGETS" | sed 's/,/","/g' | sed 's/^/"/;s/$/"/')
+
+        if [ "{{.RESUME}}" = "true" ]; then
+          echo "🔄 Resuming from checkpoint"
+        fi
+
+        # Cleanup function
+        cleanup() {
+          echo ""
+          echo "🧹 Cleaning up port-forward..."
+          kill $PF_PID 2>/dev/null || true
+        }
+        trap cleanup EXIT
+
+        uv run python -m ares multi-agent "{{.DOMAIN}}" "$RESOLVED_TARGETS" \
+          --args.model {{.MODEL}} \
+          --args.max-steps {{.MAX_STEPS_RED}} \
+          --multi-args.redis-url "$REDIS_URL" \
+          --multi-args.namespace "{{.K8S_NAMESPACE}}" \
+          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.token "$DREADNODE_API_KEY" \
+          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
+          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
+          --dn-args.project {{.REDTEAM_PROJECT}} \
+          2>&1 | tee -a "$LOGFILE"
+
+  ares:red:multi:status:
+    desc: "Check multi-agent operation status (usage: task ares:red:multi:status OPERATION_ID=op-xxx)"
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      REDIS_URL: '{{.REDIS_URL | default "redis://redis.ares.svc:6379"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required. Usage: task ares:red:multi:status OPERATION_ID=op-xxx"
+    cmds:
+      - |
+        uv run python -c "
+        import asyncio
+        from ares.core.recovery import OperationRecoveryManager
+
+        async def main():
+            recovery = OperationRecoveryManager(redis_url='{{.REDIS_URL}}')
+            await recovery.start()
+
+            has_checkpoint = await recovery.has_checkpoint('{{.OPERATION_ID}}')
+            if not has_checkpoint:
+                print('❌ No checkpoint found for operation: {{.OPERATION_ID}}')
+                return
+
+            checkpoint_time = await recovery.get_checkpoint_time('{{.OPERATION_ID}}')
+            print(f'✅ Checkpoint found')
+            print(f'   Last checkpoint: {checkpoint_time}')
+
+            # Recover state to show details
+            state = await recovery.recover_operation('{{.OPERATION_ID}}')
+            print(f'\\n📊 Operation Status:')
+            print(f'   Domain Admin: {\"YES ✅\" if state.has_domain_admin else \"NO ⏳\"}')
+            print(f'   Credentials: {len(state.all_credentials)}')
+            print(f'   Hashes: {len(state.all_hashes)}')
+            print(f'   Hosts: {len(state.all_hosts)}')
+            print(f'   Vulnerabilities: {len(state.discovered_vulnerabilities)}')
+            print(f'   Exploited: {len(state.exploited_vulnerabilities)}')
+            print(f'   Pending tasks: {len(state.pending_tasks)}')
+            print(f'   Completed tasks: {len(state.completed_tasks)}')
+
+            await recovery.stop()
+
+        asyncio.run(main())
+        "
+
+  ares:red:multi:list:
+    desc: "List all multi-agent operations with checkpoints"
+    vars:
+      REDIS_URL: '{{.REDIS_URL | default "redis://redis.ares.svc:6379"}}'
+    cmds:
+      - |
+        uv run python -c "
+        import asyncio
+        from ares.core.recovery import OperationRecoveryManager
+
+        async def main():
+            recovery = OperationRecoveryManager(redis_url='{{.REDIS_URL}}')
+            await recovery.start()
+
+            operations = await recovery.list_operations()
+
+            if not operations:
+                print('No operations found')
+                return
+
+            print('📋 Multi-Agent Operations:')
+            print('='*60)
+            for op in operations:
+                print(f\"  {op['operation_id']}: checkpoint at {op['checkpoint_time']}\")
+
+            await recovery.stop()
+
+        asyncio.run(main())
+        "
+
+  ares:red:multi:resume:
+    desc: "Resume a multi-agent operation from checkpoint (usage: task ares:red:multi:resume OPERATION_ID=op-xxx DOMAIN=target.local TARGETS=192.168.1.10)"
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      DOMAIN: '{{.DOMAIN | default ""}}'
+      TARGETS: '{{.TARGETS | default ""}}'
+      REDIS_URL: '{{.REDIS_URL | default "redis://redis.ares.svc:6379"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.DOMAIN}}"
+        msg: "DOMAIN variable is required"
+      - sh: test -n "{{.TARGETS}}"
+        msg: "TARGETS variable is required"
+    cmds:
+      - task: ares:red:multi
+        vars:
+          OPERATION_ID: "{{.OPERATION_ID}}"
+          DOMAIN: "{{.DOMAIN}}"
+          TARGETS: "{{.TARGETS}}"
+          RESUME: "true"
+          REDIS_URL: "{{.REDIS_URL}}"
+
+  ares:red:multi:cleanup:
+    desc: "Clean up old multi-agent operation checkpoints (usage: task ares:red:multi:cleanup [MAX_AGE_HOURS=24])"
+    vars:
+      MAX_AGE_HOURS: '{{.MAX_AGE_HOURS | default "24"}}'
+      REDIS_URL: '{{.REDIS_URL | default "redis://redis.ares.svc:6379"}}'
+    cmds:
+      - |
+        uv run python -c "
+        import asyncio
+        from ares.core.recovery import OperationRecoveryManager
+
+        async def main():
+            recovery = OperationRecoveryManager(redis_url='{{.REDIS_URL}}')
+            await recovery.start()
+
+            removed = await recovery.cleanup_old_checkpoints(max_age_hours={{.MAX_AGE_HOURS}})
+            print(f'🧹 Cleaned up {removed} old checkpoints (older than {{.MAX_AGE_HOURS}} hours)')
+
+            await recovery.stop()
+
+        asyncio.run(main())
+        "
+
+  ares:red:k8s:check:
+    desc: "Check Kubernetes infrastructure for multi-agent operations"
+    vars:
+      NAMESPACE: '{{.NAMESPACE | default "ares"}}'
+    cmds:
+      - |
+        echo "🔍 Checking Kubernetes infrastructure for multi-agent operations"
+        echo "=================================================================="
+        echo ""
+
+        # Check namespace
+        echo "📦 Namespace: {{.NAMESPACE}}"
+        if kubectl get namespace {{.NAMESPACE}} >/dev/null 2>&1; then
+          echo "   ✅ Namespace exists"
+        else
+          echo "   ❌ Namespace not found"
+        fi
+        echo ""
+
+        # Check Redis
+        echo "💾 Redis:"
+        REDIS_PODS=$(kubectl get pods -n {{.NAMESPACE}} -l app=redis -o name 2>/dev/null | wc -l | xargs)
+        if [ "$REDIS_PODS" -gt 0 ]; then
+          echo "   ✅ Redis pods found: $REDIS_PODS"
+          kubectl exec -n {{.NAMESPACE}} $(kubectl get pods -n {{.NAMESPACE}} -l app=redis -o name | head -1) -- redis-cli ping 2>/dev/null && echo "   ✅ Redis responding" || echo "   ❌ Redis not responding"
+        else
+          echo "   ❌ No Redis pods found"
+        fi
+        echo ""
+
+        # Check agent pods
+        echo "🤖 Agent Pods:"
+        for role in enum cracker acl privesc lateral poisoning atomic; do
+          POD_COUNT=$(kubectl get pods -n {{.NAMESPACE}} -l ares.dreadnode.io/role=$role -o name 2>/dev/null | wc -l | xargs)
+          if [ "$POD_COUNT" -gt 0 ]; then
+            STATUS=$(kubectl get pods -n {{.NAMESPACE}} -l ares.dreadnode.io/role=$role -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
+            echo "   ✅ $role: $POD_COUNT pod(s) - $STATUS"
+          else
+            echo "   ⚠️  $role: No pods found"
+          fi
+        done
+        echo ""
+
+        echo "📊 All pods in {{.NAMESPACE}}:"
+        kubectl get pods -n {{.NAMESPACE}} -o wide 2>/dev/null || echo "   Unable to list pods"
+
   ares:red:logs:
     desc: "Tail red team agent logs from Kali via SSM (usage: task ares:red:logs [KALI=instance-name] [LINES=100] [FOLLOW=true])"
     vars:

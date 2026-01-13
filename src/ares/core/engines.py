@@ -9,7 +9,6 @@ These engines generate investigative questions based on:
 """
 
 import uuid
-from pathlib import Path
 from typing import Any, TypedDict
 
 import yaml
@@ -22,7 +21,7 @@ from .models import (
     PyramidLevel,
     QuestionSource,
 )
-from .templates import get_template_loader
+from .templates import get_template_loader, get_templates_path
 
 
 # Type definitions for attack chain data
@@ -60,8 +59,8 @@ class AttackChainEntry(TypedDict, total=False):
 
 def _load_attack_chains() -> dict[str, AttackChainEntry]:
     """Load attack chain definitions from YAML."""
-    project_root = Path(__file__).parent.parent.parent.parent
-    chains_path = project_root / "templates" / "engines" / "attack_chains.yaml"
+    templates_dir = get_templates_path()
+    chains_path = templates_dir / "engines" / "attack_chains.yaml"
 
     if not chains_path.exists():
         return {}
@@ -75,8 +74,8 @@ def _load_attack_chains() -> dict[str, AttackChainEntry]:
 
 def _load_detection_recipes() -> dict[str, Any]:
     """Load detection recipes from YAML."""
-    project_root = Path(__file__).parent.parent.parent.parent
-    recipes_path = project_root / "templates" / "engines" / "detection_recipes.yaml"
+    templates_dir = get_templates_path()
+    recipes_path = templates_dir / "engines" / "detection_recipes.yaml"
 
     if not recipes_path.exists():
         return {}
@@ -489,9 +488,8 @@ class MITRENavigator:
 # Load Pyramid of Pain climbing strategies from YAML
 def _load_climb_strategies() -> dict[PyramidLevel, list[ClimbStrategy]]:
     """Load climb strategies from YAML configuration file."""
-    # Get project root (from src/ares/core/engines.py -> ../../..)
-    project_root = Path(__file__).parent.parent.parent.parent
-    strategies_path = project_root / "templates" / "engines" / "climb_strategies.yaml"
+    templates_dir = get_templates_path()
+    strategies_path = templates_dir / "engines" / "climb_strategies.yaml"
 
     with strategies_path.open() as f:
         data = yaml.safe_load(f)

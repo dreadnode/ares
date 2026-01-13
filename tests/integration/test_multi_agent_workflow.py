@@ -1,0 +1,575 @@
+"""Integration tests for multi-agent workflow orchestration.
+
+Tests the complete multi-agent workflow including:
+- Priority-based vulnerability queue
+- Credential expansion loop
+- Exploitation workflow orchestration
+- Dispatcher message flow
+"""
+
+from __future__ import annotations
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from ares.core.dispatcher import RedTeamDispatcher
+from ares.core.models import (
+    AgentInfo,
+    AgentRole,
+    Credential,
+    Host,
+)
+from ares.core.workflows import (
+    CredentialTestingTracker,
+    credential_expansion_loop,
+)
+
+# Test fixtures
+
+
+@pytest.fixture
+def mock_redis():
+    """Create a mock Redis client."""
+    redis = AsyncMock()
+    redis.ping = AsyncMock(return_value=True)
+    redis.get = AsyncMock(return_value=None)
+    redis.set = AsyncMock()
+    redis.expire = AsyncMock()
+    redis.exists = AsyncMock(return_value=0)
+    redis.delete = AsyncMock()
+    return redis
+
+
+@pytest.fixture
+async def dispatcher(mock_redis):
+    """Create a dispatcher instance with mocked Redis."""
+    with patch("redis.asyncio.from_url", return_value=mock_redis):
+        d = RedTeamDispatcher(redis_url="redis://localhost:6379")
+        await d.start("test-operation-001")
+        yield d
+        await d.stop()
+
+
+@pytest.fixture
+def sample_credentials():
+    """Create sample credentials for testing."""
+    return [
+        Credential(
+            username="user1",
+            password="Password123",  # pragma: allowlist secret
+            domain="testlab.local",
+            source="test",
+        ),
+        Credential(
+            username="admin",
+            password="AdminPass!",  # pragma: allowlist secret
+            domain="testlab.local",
+            source="test",
+            is_admin=True,
+        ),
+    ]
+
+
+@pytest.fixture
+def sample_hosts():
+    """Create sample hosts for testing."""
+    return [
+        Host(ip="192.168.1.10", hostname="DC01", os="Windows Server 2019"),
+        Host(ip="192.168.1.20", hostname="WEB01", os="Windows Server 2016"),
+        Host(ip="192.168.1.30", hostname="DB01", os="Windows Server 2019"),
+    ]
+
+
+# CredentialTestingTracker Tests
+
+
+class TestCredentialTestingTracker:
+    """Tests for CredentialTestingTracker."""
+
+    def test_empty_tracker(self):
+        """Test empty tracker initialization."""
+        tracker = CredentialTestingTracker()
+        assert len(tracker.tested_pairs) == 0
+        assert len(tracker.successful_pairs) == 0
+        assert len(tracker.failed_pairs) == 0
+
+    def test_has_tested_false_initially(self, sample_credentials, sample_hosts):
+        """Test that untested pairs return False."""
+        tracker = CredentialTestingTracker()
+        cred = sample_credentials[0]
+        host = sample_hosts[0]
+
+        assert not tracker.has_tested(cred, host)
+
+    def test_mark_tested(self, sample_credentials, sample_hosts):
+        """Test marking a pair as tested."""
+        tracker = CredentialTestingTracker()
+        cred = sample_credentials[0]
+        host = sample_hosts[0]
+
+        tracker.mark_tested(cred, host)
+
+        assert tracker.has_tested(cred, host)
+        assert len(tracker.tested_pairs) == 1
+
+    def test_mark_tested_success(self, sample_credentials, sample_hosts):
+        """Test marking a pair as tested with success."""
+        tracker = CredentialTestingTracker()
+        cred = sample_credentials[0]
+        host = sample_hosts[0]
+
+        tracker.mark_tested(cred, host, success=True)
+
+        assert tracker.has_tested(cred, host)
+        assert len(tracker.successful_pairs) == 1
+        assert len(tracker.failed_pairs) == 0
+
+    def test_get_stats(self, sample_credentials, sample_hosts):
+        """Test statistics calculation."""
+        tracker = CredentialTestingTracker()
+
+        # Mark some pairs
+        tracker.mark_tested(sample_credentials[0], sample_hosts[0], success=True)
+        tracker.mark_tested(sample_credentials[0], sample_hosts[1], success=False)
+        tracker.mark_tested(sample_credentials[1], sample_hosts[0], success=True)
+
+        stats = tracker.get_stats()
+
+        assert stats["total_tested"] == 3
+        assert stats["successful"] == 2
+        assert stats["failed"] == 1
+
+
+# Priority Vulnerability Queue Tests
+
+
+class TestPriorityVulnerabilityQueue:
+    """Tests for priority-based vulnerability queue."""
+
+    @pytest.mark.asyncio
+    async def test_queue_vulnerability(self, dispatcher):
+        """Test queuing a vulnerability."""
+        vuln_id = await dispatcher.queue_vulnerability(
+            vuln_type="ADCS_ESC1",
+            target="dc01.testlab.local",
+            details={"template": "VulnerableTemplate"},
+            discovered_by="enum-agent",
+        )
+
+        assert vuln_id is not None
+        assert "ADCS_ESC1" in vuln_id
+        assert vuln_id in dispatcher.shared_state.discovered_vulnerabilities
+
+    @pytest.mark.asyncio
+    async def test_vulnerability_priority_order(self, dispatcher):
+        """Test that vulnerabilities are returned in priority order."""
+        # Queue vulnerabilities in random order
+        await dispatcher.queue_vulnerability(
+            vuln_type="acl_abuse",
+            target="user1",
+            details={},
+            discovered_by="acl-agent",
+        )
+        await dispatcher.queue_vulnerability(
+            vuln_type="ADCS_ESC1",
+            target="dc01",
+            details={},
+            discovered_by="privesc-agent",
+        )
+        await dispatcher.queue_vulnerability(
+            vuln_type="krbtgt_hash",
+            target="dc01",
+            details={},
+            discovered_by="lateral-agent",
+        )
+
+        # Get vulnerabilities in priority order
+        vuln1 = await dispatcher.get_next_vulnerability()
+        assert vuln1 is not None
+        assert vuln1["type"] == "ADCS_ESC1"  # Priority 1
+
+        vuln2 = await dispatcher.get_next_vulnerability()
+        assert vuln2 is not None
+        assert vuln2["type"] == "krbtgt_hash"  # Priority 4
+
+        vuln3 = await dispatcher.get_next_vulnerability()
+        assert vuln3 is not None
+        assert vuln3["type"] == "acl_abuse"  # Priority 6
+
+    @pytest.mark.asyncio
+    async def test_mark_vulnerability_exploited(self, dispatcher):
+        """Test marking vulnerability as exploited."""
+        vuln_id = await dispatcher.queue_vulnerability(
+            vuln_type="ADCS_ESC1",
+            target="dc01",
+            details={},
+            discovered_by="privesc-agent",
+        )
+
+        # Mark as exploited with credential result
+        await dispatcher.mark_vulnerability_exploited(
+            vuln_id,
+            success=True,
+            result={
+                "credential": {
+                    "username": "admin",
+                    "password": "AdminPass!",  # pragma: allowlist secret
+                    "domain": "testlab.local",
+                    "is_admin": True,
+                }
+            },
+        )
+
+        # Verify it's marked as exploited
+        assert vuln_id in dispatcher.shared_state.exploited_vulnerabilities
+
+        # Verify credential was added
+        assert len(dispatcher.shared_state.all_credentials) == 1
+        cred = dispatcher.shared_state.all_credentials[0]
+        assert cred.username == "admin"
+
+    @pytest.mark.asyncio
+    async def test_exploited_vulnerabilities_skipped(self, dispatcher):
+        """Test that exploited vulnerabilities are skipped in queue."""
+        vuln_id = await dispatcher.queue_vulnerability(
+            vuln_type="ADCS_ESC1",
+            target="dc01",
+            details={},
+            discovered_by="privesc-agent",
+        )
+
+        # Mark as exploited
+        dispatcher.shared_state.mark_exploited(vuln_id)
+
+        # Try to get next vulnerability
+        result = await dispatcher.get_next_vulnerability()
+
+        # Should return None since only vuln was exploited
+        assert result is None
+
+
+# Dispatcher Tests
+
+
+class TestDispatcher:
+    """Tests for RedTeamDispatcher."""
+
+    @pytest.mark.asyncio
+    async def test_agent_registration(self, dispatcher):
+        """Test agent registration."""
+        agent = AgentInfo(
+            name="enum-agent",
+            pod_name="enum-agent-0",
+            role=AgentRole.ENUM,
+            capabilities={"nmap", "crackmapexec"},
+        )
+
+        await dispatcher.register(agent)
+
+        assert "enum-agent" in dispatcher._agents
+        assert dispatcher.get_agent_for_role(AgentRole.ENUM) is not None
+
+    @pytest.mark.asyncio
+    async def test_credential_publishing(self, dispatcher, sample_credentials):
+        """Test credential broadcasting."""
+        cred = sample_credentials[0]
+
+        # Register an agent to receive messages
+        agent = AgentInfo(
+            name="lateral-agent",
+            pod_name="lateral-agent-0",
+            role=AgentRole.LATERAL,
+            capabilities={"psexec"},
+        )
+        await dispatcher.register(agent)
+
+        # Publish credential
+        added = await dispatcher.publish_credential(cred, "enum-agent")
+
+        assert added is True
+        assert len(dispatcher.shared_state.all_credentials) == 1
+
+        # Check message was queued for lateral agent
+        messages = await dispatcher.get_messages("lateral-agent")
+        assert len(messages) > 0
+
+    @pytest.mark.asyncio
+    async def test_task_routing(self, dispatcher):
+        """Test task routing to specialized agents."""
+        # Register a cracker agent
+        cracker = AgentInfo(
+            name="cracker-agent",
+            pod_name="cracker-agent-0",
+            role=AgentRole.CRACKER,
+            capabilities={"hashcat"},
+        )
+        await dispatcher.register(cracker)
+
+        # Request crack
+        task_id = await dispatcher.request_crack(
+            hash_value="aad3b435b51404eeaad3b435b51404ee:500",
+            hash_type="NTLM",
+            source_agent="orchestrator",
+            username="admin",
+        )
+
+        assert task_id != ""
+        assert task_id in dispatcher.shared_state.pending_tasks
+
+        # Check message was queued for cracker
+        messages = await dispatcher.get_messages("cracker-agent")
+        assert len(messages) == 1
+        assert messages[0].type.value == "crack_request"
+
+    @pytest.mark.asyncio
+    async def test_task_completion(self, dispatcher):
+        """Test task completion handling."""
+        # Register a cracker agent
+        cracker = AgentInfo(
+            name="cracker-agent",
+            pod_name="cracker-agent-0",
+            role=AgentRole.CRACKER,
+            capabilities={"hashcat"},
+        )
+        await dispatcher.register(cracker)
+
+        # Request crack
+        task_id = await dispatcher.request_crack(
+            hash_value="aad3b435b51404ee:test",
+            hash_type="NTLM",
+            source_agent="orchestrator",
+        )
+
+        # Complete task
+        await dispatcher.complete_task(
+            task_id=task_id,
+            success=True,
+            result={"cracked_password": "Password123"},  # pragma: allowlist secret
+            source_agent="cracker-agent",
+        )
+
+        # Verify task moved to completed
+        assert task_id not in dispatcher.shared_state.pending_tasks
+        assert task_id in dispatcher.shared_state.completed_tasks
+
+    @pytest.mark.asyncio
+    async def test_wait_for_task(self, dispatcher):
+        """Test waiting for task completion."""
+        # Register a cracker agent
+        cracker = AgentInfo(
+            name="cracker-agent",
+            pod_name="cracker-agent-0",
+            role=AgentRole.CRACKER,
+            capabilities={"hashcat"},
+        )
+        await dispatcher.register(cracker)
+
+        # Request crack
+        task_id = await dispatcher.request_crack(
+            hash_value="test:hash",
+            hash_type="NTLM",
+            source_agent="orchestrator",
+        )
+
+        # Complete task in background
+        async def complete_later():
+            await asyncio.sleep(0.1)
+            await dispatcher.complete_task(
+                task_id=task_id,
+                success=True,
+                result={"password": "cracked"},  # pragma: allowlist secret
+                source_agent="cracker-agent",
+            )
+
+        background_task = asyncio.create_task(complete_later())
+        assert background_task is not None  # Keep reference to prevent garbage collection
+
+        # Wait for task
+        result = await dispatcher.wait_for_task(task_id, timeout=5.0)
+
+        assert result["success"] is True
+        assert result["result"]["password"] == "cracked"  # pragma: allowlist secret
+
+
+# Credential Expansion Loop Tests
+
+
+class TestCredentialExpansionLoop:
+    """Tests for credential expansion loop."""
+
+    @pytest.mark.asyncio
+    async def test_expansion_no_credentials(self, dispatcher):
+        """Test expansion with no credentials returns immediately."""
+        tracker = await credential_expansion_loop(
+            dispatcher,
+            max_iterations=1,
+            delay_between_tests=0.01,
+        )
+
+        assert tracker.get_stats()["total_tested"] == 0
+
+    @pytest.mark.asyncio
+    async def test_expansion_no_hosts(self, dispatcher, sample_credentials):
+        """Test expansion with no hosts returns immediately."""
+        # Add credentials but no hosts
+        for cred in sample_credentials:
+            dispatcher.shared_state.add_credential(cred, "test")
+
+        tracker = await credential_expansion_loop(
+            dispatcher,
+            max_iterations=1,
+            delay_between_tests=0.01,
+        )
+
+        assert tracker.get_stats()["total_tested"] == 0
+
+    @pytest.mark.asyncio
+    async def test_expansion_with_credentials_and_hosts(
+        self, dispatcher, sample_credentials, sample_hosts
+    ):
+        """Test expansion with credentials and hosts."""
+        # Register lateral agent
+        lateral = AgentInfo(
+            name="lateral-agent",
+            pod_name="lateral-agent-0",
+            role=AgentRole.LATERAL,
+            capabilities={"psexec"},
+        )
+        await dispatcher.register(lateral)
+
+        # Add credentials and hosts
+        for cred in sample_credentials:
+            dispatcher.shared_state.add_credential(cred, "test")
+        for host in sample_hosts:
+            dispatcher.shared_state.add_host(host)
+
+        # Run expansion (will dispatch tasks but not wait for completion in test)
+        tracker = await credential_expansion_loop(
+            dispatcher,
+            max_iterations=1,
+            delay_between_tests=0.01,
+        )
+
+        # Should have tested all combinations
+        expected_tests = len(sample_credentials) * len(sample_hosts)
+        assert tracker.get_stats()["total_tested"] == expected_tests
+
+
+# Mock Kubernetes Tests
+
+
+class TestKubernetesIntegration:
+    """Tests for Kubernetes integration."""
+
+    @pytest.mark.asyncio
+    async def test_full_workflow_mock(self, mock_redis):
+        """Test complete workflow with mocked infrastructure."""
+        with (
+            patch("redis.asyncio.from_url", return_value=mock_redis),
+            patch("kubernetes.client.CoreV1Api") as mock_k8s,
+        ):
+            # Setup mock pods
+            mock_pod = MagicMock()
+            mock_pod.metadata.name = "enum-agent-0"
+            mock_pod.metadata.labels = {"ares.dreadnode.io/role": "enum"}
+            mock_pod.status.phase = "Running"
+
+            mock_pods = MagicMock()
+            mock_pods.items = [mock_pod]
+            mock_k8s.return_value.list_namespaced_pod.return_value = mock_pods
+
+            # Create dispatcher and run basic workflow
+            dispatcher = RedTeamDispatcher(redis_url="redis://localhost:6379")
+            await dispatcher.start("test-workflow-001")
+
+            # Register agents
+            for role in [AgentRole.ENUM, AgentRole.CRACKER, AgentRole.LATERAL]:
+                agent = AgentInfo(
+                    name=f"{role.value}-agent",
+                    pod_name=f"{role.value}-agent-0",
+                    role=role,
+                    capabilities=set(),
+                )
+                await dispatcher.register(agent)
+
+            # Queue vulnerability
+            vuln_id = await dispatcher.queue_vulnerability(
+                vuln_type="ADCS_ESC1",
+                target="dc01",
+                details={},
+                discovered_by="enum-agent",
+            )
+
+            # Verify state
+            assert vuln_id is not None
+            assert len(dispatcher._agents) == 3
+            assert dispatcher.shared_state.operation_id == "test-workflow-001"
+
+            await dispatcher.stop()
+
+
+# Domain Admin Achievement Tests
+
+
+class TestDomainAdminAchievement:
+    """Tests for domain admin achievement handling."""
+
+    @pytest.mark.asyncio
+    async def test_domain_admin_announcement(self, dispatcher):
+        """Test domain admin announcement."""
+        # Register agent to receive broadcast
+        agent = AgentInfo(
+            name="lateral-agent",
+            pod_name="lateral-agent-0",
+            role=AgentRole.LATERAL,
+            capabilities={"psexec"},
+        )
+        await dispatcher.register(agent)
+
+        # Announce domain admin
+        await dispatcher.announce_domain_admin(
+            username="Administrator",
+            domain="testlab.local",
+            attack_path="ADCS ESC1 -> Admin Certificate -> DCSync",
+            credential_type="password",
+            source_agent="orchestrator",
+        )
+
+        # Verify state updated
+        assert dispatcher.shared_state.has_domain_admin is True
+        assert dispatcher.shared_state.domain_admin_path is not None
+
+        # Verify message broadcast
+        messages = await dispatcher.get_messages("lateral-agent")
+        assert any(m.type.value == "domain_admin_achieved" for m in messages)
+
+
+# Recovery Tests
+
+
+class TestRecovery:
+    """Tests for operation recovery."""
+
+    @pytest.mark.asyncio
+    async def test_state_checkpoint(self, dispatcher, mock_redis):
+        """Test state checkpointing."""
+        # Add some state
+        cred = Credential(
+            username="test",
+            password="pass",  # pragma: allowlist secret
+            domain="testlab.local",
+            source="test",
+        )
+        dispatcher.shared_state.add_credential(cred, "test")
+
+        # Checkpoint should be called
+        await dispatcher._checkpoint()
+
+        # Verify Redis was called
+        mock_redis.set.assert_called()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

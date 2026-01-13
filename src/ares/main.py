@@ -427,6 +427,300 @@ async def redteam(
         raise
 
 
+@dataclass
+class MultiAgentArgs:
+    """Multi-agent red team arguments.
+
+    Attributes:
+        target_domain: Target domain (e.g., sevenkingdoms.local).
+        target_ips: Comma-separated list of target IPs.
+        config_file: Path to config file (auto-detected if not specified).
+        redis_url: Redis URL for state persistence (from config if not specified).
+        initial_user: Optional initial username.
+        initial_password: Optional initial password.
+        initial_domain: Optional initial domain for credentials.
+        namespace: Kubernetes namespace for agent pods (from config if not specified).
+    """
+
+    target_domain: str = ""
+    target_ips: str = ""  # Comma-separated
+    config_file: str = ""  # Path to config file (auto-detected if empty)
+    redis_url: str = ""  # Empty = use config file
+    initial_user: str = ""
+    initial_password: str = ""  # pragma: allowlist secret
+    initial_domain: str = ""
+    namespace: str = ""  # Empty = use config file
+
+
+# Cyclopts decorator typing not yet fully supported by type checkers
+@app.command(name="multi-agent")  # type: ignore[untyped-decorator]
+async def multi_agent(
+    target_domain: str,
+    target_ips: str,
+    *,
+    multi_args: MultiAgentArgs | None = None,
+    args: Args | None = None,
+    dn_args: DreadnodeArgs | None = None,
+) -> None:
+    """
+    Execute a multi-agent red team operation.
+
+    This command coordinates multiple specialized agents:
+    - Orchestrator (enum-agent): Coordinates operation, does initial recon
+    - Cracker: Hash cracking with hashcat/john
+    - ACL: BloodHound analysis and ACL abuse
+    - PrivEsc: ADCS, delegation, MSSQL exploitation
+    - Lateral: Lateral movement and credential harvesting
+    - Poisoning: Network poisoning (responder, mitm6)
+
+    Args:
+        target_domain: Target domain (e.g., sevenkingdoms.local)
+        target_ips: Comma-separated list of target IPs
+
+    Example:
+        uv run ares multi-agent sevenkingdoms.local "192.168.56.10,192.168.56.11"
+        uv run ares multi-agent corp.local "10.0.0.1" --multi-args.redis-url redis://redis:6379
+    """
+    import uuid
+
+    from ares.core.config import load_config
+
+    args = args or Args()
+    dn_args = dn_args or DreadnodeArgs()
+    multi_args = multi_args or MultiAgentArgs()
+
+    # Load config file for defaults
+    config = load_config(multi_args.config_file or None)
+
+    # Use config values if CLI args not specified
+    redis_url = multi_args.redis_url or config.redis_url
+    namespace = multi_args.namespace or config.namespace
+
+    # Parse target IPs
+    ips = [ip.strip() for ip in target_ips.split(",") if ip.strip()]
+    if not ips:
+        logger.error("No target IPs provided")
+        return
+
+    # Configure Dreadnode (optional - don't fail if platform unavailable)
+    dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
+
+    try:
+        dn.configure(
+            server=dn_args.server,
+            token=dreadnode_token,
+            organization=dn_args.organization,
+            workspace=dn_args.workspace,
+            project=dn_args.project,
+            console=dn_args.console,
+        )
+    except Exception as e:
+        logger.warning(f"Dreadnode platform unavailable, continuing without telemetry: {e}")
+
+    # Log startup
+    logger.info("=" * 60)
+    logger.info("ARES MULTI-AGENT RED TEAM OPERATION")
+    logger.info("=" * 60)
+    logger.info(f"Config: {multi_args.config_file or 'auto-detected'}")
+    logger.info(f"Target Domain: {target_domain}")
+    logger.info(f"Target IPs: {ips}")
+    logger.info(f"Model: {args.model}")
+    logger.info(f"Max Steps: {args.max_steps}")
+    logger.info(f"Redis: {redis_url}")
+    logger.info(f"Namespace: {namespace}")
+    logger.info("=" * 60)
+
+    from ares.core.models import Credential
+    from ares.core.orchestrator import run_multi_agent_operation
+
+    # Build initial credential if provided
+    initial_cred = None
+    if multi_args.initial_user and multi_args.initial_password:
+        initial_cred = Credential(
+            username=multi_args.initial_user,
+            password=multi_args.initial_password,
+            domain=multi_args.initial_domain or target_domain,
+            source="cli_provided",
+        )
+        logger.info(f"Initial credential: {initial_cred.domain}\\{initial_cred.username}")
+
+    operation_id = f"multiagent-{uuid.uuid4().hex[:8]}"
+
+    logger.info("")
+    logger.info(f"Starting multi-agent operation {operation_id}...")
+    logger.info("")
+
+    try:
+        result = await run_multi_agent_operation(
+            operation_id=operation_id,
+            target_domain=target_domain,
+            target_ips=ips,
+            initial_credential=initial_cred,
+            redis_url=redis_url,
+            namespace=namespace,
+            model=args.model,
+            max_steps=args.max_steps,
+        )
+
+        logger.success("")
+        logger.success("=" * 60)
+        logger.success("MULTI-AGENT OPERATION COMPLETE")
+        logger.success("=" * 60)
+        logger.success(f"  Operation ID: {result['operation_id']}")
+        logger.success(f"  Success: {result['success']}")
+        logger.success(f"  Duration: {result['duration_seconds']:.1f}s")
+        logger.success(f"  Hosts Discovered: {result['hosts_discovered']}")
+        logger.success(f"  Credentials Found: {result['credentials_discovered']}")
+        logger.success(f"  Hashes Captured: {result['hashes_discovered']}")
+        logger.success(f"  Vulnerabilities: {result['vulnerabilities_discovered']}")
+        logger.success(f"  Exploited: {result['vulnerabilities_exploited']}")
+
+        if result.get("domain_admin_achieved"):
+            logger.success("  🎯 DOMAIN ADMIN: ACHIEVED")
+            logger.success(f"  Attack Path: {result.get('domain_admin_path', 'N/A')}")
+        if result.get("golden_ticket_forged"):
+            logger.success("  🎫 GOLDEN TICKET: FORGED")
+
+        logger.success("")
+
+    except Exception as e:
+        logger.error("")
+        logger.error(f"Multi-agent operation failed: {e}")
+        raise
+
+
+@dataclass
+class WorkerArgs:
+    """Worker agent arguments.
+
+    Attributes:
+        role: Worker role (cracker, acl, privesc, lateral, poisoning, atomic).
+        operation_id: Operation ID to join (required).
+        config_file: Path to config file (auto-detected if not specified).
+        redis_url: Redis URL for dispatcher connection (from config if not specified).
+        model: LLM model to use (from config if not specified).
+        max_steps: Maximum agent steps per task.
+    """
+
+    role: str = ""
+    operation_id: str = ""
+    config_file: str = ""  # Path to config file (auto-detected if empty)
+    redis_url: str = ""  # Empty = use config file
+    model: str = ""  # Empty = use config file
+    max_steps: int = 0  # 0 = use role default from config
+
+
+# Cyclopts decorator typing not yet fully supported by type checkers
+@app.command(name="worker")  # type: ignore[untyped-decorator]
+async def worker(
+    role: str,
+    operation_id: str,
+    *,
+    worker_args: WorkerArgs | None = None,
+    dn_args: DreadnodeArgs | None = None,
+) -> None:
+    """
+    Run a specialized worker agent that processes tasks from the dispatcher.
+
+    This command starts a worker agent that:
+    - Connects to Redis and registers with the dispatcher
+    - Polls for assigned tasks based on its role
+    - Processes tasks using specialized toolsets
+    - Reports results back to the orchestrator
+
+    Worker roles:
+    - cracker: Hash cracking with hashcat/john
+    - acl: BloodHound analysis and ACL abuse
+    - privesc: ADCS, delegation, MSSQL exploitation
+    - lateral: Lateral movement and credential harvesting
+    - poisoning: Network poisoning (responder, mitm6)
+    - atomic: Atomic Red Team technique execution
+
+    Args:
+        role: Worker role (cracker, acl, privesc, lateral, poisoning, atomic)
+        operation_id: Operation ID to join
+
+    Example:
+        uv run ares worker cracker op-12345678 --worker-args.redis-url redis://redis:6379
+        uv run ares worker lateral op-12345678 --worker-args.model claude-sonnet-4-20250514
+    """
+    from ares.core.config import get_agent_config, load_config
+
+    worker_args = worker_args or WorkerArgs()
+    dn_args = dn_args or DreadnodeArgs()
+
+    # Validate role
+    valid_roles = ["cracker", "acl", "privesc", "lateral", "poisoning", "atomic"]
+    if role not in valid_roles:
+        logger.error(f"Invalid role: {role}. Must be one of: {', '.join(valid_roles)}")
+        return
+
+    # Load config file for defaults
+    config = load_config(worker_args.config_file or None)
+    agent_config = get_agent_config(role)
+
+    # Use config values if CLI args not specified
+    redis_url = worker_args.redis_url or config.redis_url
+    model = worker_args.model or agent_config.model
+    max_steps = worker_args.max_steps if worker_args.max_steps > 0 else agent_config.max_steps
+
+    # Configure Dreadnode (optional - don't fail if platform unavailable)
+    dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
+
+    try:
+        dn.configure(
+            server=dn_args.server,
+            token=dreadnode_token,
+            organization=dn_args.organization,
+            workspace=dn_args.workspace,
+            project=dn_args.project,
+            console=dn_args.console,
+        )
+    except Exception as e:
+        logger.warning(f"Dreadnode platform unavailable, continuing without telemetry: {e}")
+
+    # Log startup
+    logger.info("=" * 60)
+    logger.info(f"ARES WORKER AGENT: {role.upper()}")
+    logger.info("=" * 60)
+    logger.info(f"Config: {worker_args.config_file or 'auto-detected'}")
+    logger.info(f"Operation ID: {operation_id}")
+    logger.info(f"Role: {role}")
+    logger.info(f"Model: {model}")
+    logger.info(f"Max Steps: {max_steps}")
+    logger.info(f"Redis: {redis_url}")
+    logger.info(f"Pod: {os.environ.get('HOSTNAME', 'local')}")
+    logger.info("=" * 60)
+
+    from ares.core.models import AgentRole
+    from ares.core.worker import run_worker
+
+    # Convert string role to AgentRole enum
+    role_mapping = {
+        "cracker": AgentRole.CRACKER,
+        "acl": AgentRole.ACL,
+        "privesc": AgentRole.PRIVESC,
+        "lateral": AgentRole.LATERAL,
+        "poisoning": AgentRole.POISONING,
+        "atomic": AgentRole.ATOMIC,
+    }
+    agent_role = role_mapping[role]
+
+    try:
+        await run_worker(
+            role=agent_role,
+            operation_id=operation_id,
+            redis_url=redis_url,
+            model=model,
+            max_steps=max_steps if max_steps > 0 else None,
+        )
+    except KeyboardInterrupt:
+        logger.info("Worker interrupted by user")
+    except Exception as e:
+        logger.error(f"Worker failed: {e}")
+        raise
+
+
 # Cyclopts decorator typing not yet fully supported by type checkers
 @app.command  # type: ignore[untyped-decorator]
 def version() -> None:

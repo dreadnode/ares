@@ -15,6 +15,7 @@ from loguru import logger
 from ares.core.models import SharedRedTeamState, TaskStatus
 
 if TYPE_CHECKING:
+    from ares.core.dispatcher import RedTeamDispatcher
     from ares.core.k8s_executor import KubernetesPodExecutor
 
 
@@ -308,6 +309,35 @@ class OperationRecoveryManager:
             self._checkpoint_task = None
 
         logger.info("Stopped auto checkpoint")
+
+    async def start_periodic_checkpoint(
+        self,
+        dispatcher: RedTeamDispatcher,
+        interval: int | None = None,
+    ) -> None:
+        """
+        Start automatic periodic checkpointing using dispatcher's shared state.
+
+        This method runs as a coroutine and should be used with asyncio.create_task().
+
+        Args:
+            dispatcher: The RedTeamDispatcher to checkpoint state from.
+            interval: Checkpoint interval in seconds (uses default if None).
+        """
+
+        interval = interval or self._checkpoint_interval
+        self._running = True
+
+        logger.info(f"Starting periodic checkpoint every {interval} seconds")
+
+        while self._running:
+            await asyncio.sleep(interval)
+            if self._running and dispatcher._shared_state:
+                success = await self.checkpoint(dispatcher.shared_state)
+                if success:
+                    logger.debug("Periodic checkpoint saved")
+                else:
+                    logger.warning("Failed to save periodic checkpoint")
 
     async def list_operations(self) -> list[dict]:
         """
