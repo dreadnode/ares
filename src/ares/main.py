@@ -698,6 +698,7 @@ async def worker(
 
     # Convert string role to AgentRole enum
     role_mapping = {
+        "enum": AgentRole.ENUM,
         "cracker": AgentRole.CRACKER,
         "acl": AgentRole.ACL,
         "privesc": AgentRole.PRIVESC,
