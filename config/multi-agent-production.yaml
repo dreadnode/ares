@@ -1,0 +1,178 @@
+---
+# Multi-Agent Red Team Production Configuration
+# This configuration defines the operational parameters for multi-agent
+# red team operations in a Kubernetes environment.
+
+operation:
+  name: "ares-multi-agent"
+  namespace: "ares"
+  redis_url: "redis://redis.ares.svc:6379"
+  checkpoint_interval: 60  # seconds
+
+# Agent configurations
+agents:
+  orchestrator:
+    model: "claude-sonnet-4-20250514"
+    max_steps: 200
+    pod_selector: "ares.dreadnode.io/role=enum"
+    tools:
+      - dispatch_crack_hash
+      - dispatch_acl_analysis
+      - dispatch_lateral_movement
+      - dispatch_privesc_exploit
+      - start_poisoning
+      - trigger_credential_expansion
+      - queue_vulnerability_for_exploitation
+      - get_pending_tasks
+      - get_all_credentials
+      - get_all_hashes
+      - get_exploitation_status
+      - get_agent_status
+      - get_operation_summary
+      - broadcast_credential
+      - announce_domain_admin
+
+  enum:
+    model: "claude-sonnet-4-20250514"
+    max_steps: 100
+    pod_selector: "ares.dreadnode.io/role=enum"
+    capabilities:
+      - nmap
+      - crackmapexec
+      - ldapsearch
+      - certipy
+      - bloodhound
+      - secretsdump
+      - enum4linux
+
+  cracker:
+    model: "claude-sonnet-4-20250514"
+    max_steps: 50
+    pod_selector: "ares.dreadnode.io/role=cracker"
+    capabilities:
+      - hashcat
+      - john
+      - ntlmrelayx
+
+  acl:
+    model: "claude-sonnet-4-20250514"
+    max_steps: 50
+    pod_selector: "ares.dreadnode.io/role=acl"
+    capabilities:
+      - bloodhound
+      - dacledit
+      - owneredit
+      - genericall_abuse
+      - writedacl_abuse
+
+  privesc:
+    model: "claude-sonnet-4-20250514"
+    max_steps: 100
+    pod_selector: "ares.dreadnode.io/role=privesc"
+    capabilities:
+      - certipy
+      - kerberoast
+      - asreproast
+      - constrained_delegation
+      - unconstrained_delegation
+      - rbcd
+      - shadow_credentials
+
+  lateral:
+    model: "claude-sonnet-4-20250514"
+    max_steps: 100
+    pod_selector: "ares.dreadnode.io/role=lateral"
+    capabilities:
+      - psexec
+      - wmiexec
+      - smbexec
+      - winrm
+      - secretsdump
+      - pass_the_hash
+      - pass_the_ticket
+
+  poisoning:
+    model: "claude-sonnet-4-20250514"
+    max_steps: 30
+    pod_selector: "ares.dreadnode.io/role=poison"
+    capabilities:
+      - responder
+      - mitm6
+      - ntlmrelayx
+
+  atomic:
+    model: "claude-sonnet-4-20250514"
+    max_steps: 50
+    pod_selector: "ares.dreadnode.io/role=atomic"
+    capabilities:
+      - atomic_red_team
+      - invoke_atomicredteam
+
+# Timeout configurations
+timeouts:
+  agent_heartbeat: 30  # seconds - agent considered offline after this
+  task_timeout: 300  # seconds - default task timeout
+  operation_timeout: 7200  # seconds - 2 hours max operation time
+  lateral_movement: 60  # seconds
+  hash_cracking: 600  # seconds - 10 minutes
+  exploitation: 300  # seconds
+
+# Recovery configuration
+recovery:
+  enabled: true
+  max_retries: 3
+  retry_delay: 10  # seconds
+  checkpoint_on_credential: true
+  checkpoint_on_vulnerability: true
+
+# Vulnerability priorities (lower = higher priority)
+vulnerability_priorities:
+  ADCS_ESC1: 1
+  ADCS_ESC4: 2
+  ADCS_ESC8: 3
+  krbtgt_hash: 4
+  domain_admin_hash: 5
+  acl_abuse: 6
+  unconstrained_delegation: 7
+  constrained_delegation: 8
+  rbcd: 9
+  mssql_impersonation: 10
+  mssql_linked: 11
+  gpo_abuse: 12
+  laps_abuse: 13
+  dcsync: 14
+  shadow_credentials: 15
+  kerberoast: 20
+  asreproast: 21
+  password_spray: 50
+
+# Logging configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+  file: "/var/log/ares/operation.log"
+  max_size_mb: 100
+  backup_count: 5
+
+# Resource limits
+resources:
+  max_concurrent_tasks: 10
+  max_credentials_per_expansion: 100
+  max_hosts_per_scan: 50
+  credential_cache_ttl: 3600  # seconds
+
+# Security settings
+security:
+  verify_ssl: true
+  encrypted_state: false  # Enable for sensitive operations
+  audit_logging: true
+  rate_limiting:
+    enabled: true
+    max_requests_per_minute: 60
+
+# Grafana integration (for alerting)
+grafana:
+  enabled: true
+  base_url: "${GRAFANA_URL}"
+  api_key: "${GRAFANA_API_KEY}"
+  dashboard_uid: "ares-redteam"

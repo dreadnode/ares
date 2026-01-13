@@ -4,6 +4,7 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
+from dreadnode.agent.events import ToolEnd
 
 from ares.core.factories.red_factory import (
     _should_log_event,
@@ -131,8 +132,9 @@ class TestTrackVulnerabilityDiscoveries:
         from ares.core.factories import red_factory
         from ares.core.factories.red_factory import track_vulnerability_discoveries
 
-        event = MagicMock()
-        event.result = "ESC1 vulnerable template found - exploitable"
+        event = MagicMock(spec=ToolEnd)
+        event.message = MagicMock()
+        event.message.content = "ESC1 vulnerable template found - exploitable"
         event.tool_call = MagicMock()
         event.tool_call.name = "certipy_find"
 
@@ -146,8 +148,9 @@ class TestTrackVulnerabilityDiscoveries:
         from ares.core.factories import red_factory
         from ares.core.factories.red_factory import track_vulnerability_discoveries
 
-        event = MagicMock()
-        event.result = "GenericAll permission found on target"
+        event = MagicMock(spec=ToolEnd)
+        event.message = MagicMock()
+        event.message.content = "GenericAll permission found on target"
         event.tool_call = MagicMock()
         event.tool_call.name = "run_bloodhound"
 
@@ -161,8 +164,9 @@ class TestTrackVulnerabilityDiscoveries:
         from ares.core.factories import red_factory
         from ares.core.factories.red_factory import track_vulnerability_discoveries
 
-        event = MagicMock()
-        event.result = "Found unconstrained delegation on SERVER01"
+        event = MagicMock(spec=ToolEnd)
+        event.message = MagicMock()
+        event.message.content = "Found unconstrained delegation on SERVER01"
         event.tool_call = MagicMock()
         event.tool_call.name = "find_delegation"
 
@@ -176,8 +180,9 @@ class TestTrackVulnerabilityDiscoveries:
         from ares.core.factories import red_factory
         from ares.core.factories.red_factory import track_vulnerability_discoveries
 
-        event = MagicMock()
-        event.result = "Can impersonate sa user"
+        event = MagicMock(spec=ToolEnd)
+        event.message = MagicMock()
+        event.message.content = "Can impersonate sa user"
         event.tool_call = MagicMock()
         event.tool_call.name = "mssql_login"
 
@@ -191,8 +196,9 @@ class TestTrackVulnerabilityDiscoveries:
         from ares.core.factories import red_factory
         from ares.core.factories.red_factory import track_vulnerability_discoveries
 
-        event = MagicMock()
-        event.result = "krbtgt:::aad3b435b51404ee"
+        event = MagicMock(spec=ToolEnd)
+        event.message = MagicMock()
+        event.message.content = "krbtgt:::aad3b435b51404ee"
         event.tool_call = MagicMock()
         event.tool_call.name = "secretsdump"
 
@@ -206,8 +212,9 @@ class TestTrackVulnerabilityDiscoveries:
         from ares.core.factories import red_factory
         from ares.core.factories.red_factory import track_vulnerability_discoveries
 
-        event = MagicMock()
-        event.result = "Shadow credentials added"
+        event = MagicMock(spec=ToolEnd)
+        event.message = MagicMock()
+        event.message.content = "Shadow credentials added"
         event.tool_call = MagicMock()
         event.tool_call.name = "pywhisker"
 
@@ -216,13 +223,42 @@ class TestTrackVulnerabilityDiscoveries:
         assert "acl_abuse" in red_factory._exploited_vulnerabilities
 
     @pytest.mark.asyncio
+    async def test_ignores_non_toolend_events(self):
+        """Test that non-ToolEnd events are ignored."""
+        from ares.core.factories import red_factory
+        from ares.core.factories.red_factory import track_vulnerability_discoveries
+
+        # Use a plain MagicMock (not spec=ToolEnd) to simulate a different event type
+        event = MagicMock()
+        event.message = MagicMock()
+        event.message.content = "ESC1 vulnerable"
+
+        await track_vulnerability_discoveries(event)
+
+        assert len(red_factory._discovered_vulnerabilities) == 0
+
+    @pytest.mark.asyncio
     async def test_ignores_empty_result(self):
         """Test that empty results are ignored."""
         from ares.core.factories import red_factory
         from ares.core.factories.red_factory import track_vulnerability_discoveries
 
-        event = MagicMock()
-        event.result = None
+        event = MagicMock(spec=ToolEnd)
+        event.message = None
+
+        await track_vulnerability_discoveries(event)
+
+        assert len(red_factory._discovered_vulnerabilities) == 0
+
+    @pytest.mark.asyncio
+    async def test_ignores_empty_message_content(self):
+        """Test that empty message content is ignored."""
+        from ares.core.factories import red_factory
+        from ares.core.factories.red_factory import track_vulnerability_discoveries
+
+        event = MagicMock(spec=ToolEnd)
+        event.message = MagicMock()
+        event.message.content = None
 
         await track_vulnerability_discoveries(event)
 

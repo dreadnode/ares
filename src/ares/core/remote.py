@@ -1,10 +1,15 @@
-"""Remote command execution via AWS SSM.
+"""Command execution for red team tools.
 
-This module provides functionality to execute commands on remote EC2 instances
-(specifically the Kali attack box) using AWS Systems Manager (SSM).
+This module provides functionality to execute commands either:
+- Via kubectl exec (in K8s orchestrator) - set ARES_EXECUTION_MODE=k8s
+- Via subprocess (in K8s worker pods) - set ARES_EXECUTION_MODE=local
+- Via AWS SSM (for local dev with EC2) - default
 """
 
+import asyncio
 import os
+import shlex
+import subprocess
 import time
 from dataclasses import dataclass
 from typing import Any, NoReturn
@@ -13,6 +18,9 @@ import boto3
 from botocore.exceptions import ClientError, SSOTokenLoadError, TokenRetrievalError
 from loguru import logger
 
+# Execution mode: "k8s" for kubectl exec, "local" for subprocess, "ssm" for EC2
+EXECUTION_MODE = os.environ.get("ARES_EXECUTION_MODE", "ssm").lower()
+
 
 class SSOTokenExpiredError(Exception):
     """Raised when AWS SSO token has expired and needs refresh."""
@@ -20,7 +28,7 @@ class SSOTokenExpiredError(Exception):
 
 @dataclass
 class CommandResult:
-    """Result of a remote command execution."""
+    """Result of command execution."""
 
     stdout: str
     stderr: str
@@ -33,6 +41,179 @@ class CommandResult:
         if self.stderr:
             return f"{self.stdout}\n{self.stderr}"
         return self.stdout
+
+
+class K8sExecutor:
+    """Execute commands via Redis task queue on the enum worker pod.
+
+    Uses Redis-based task dispatch instead of kubectl exec to avoid needing
+    pods/exec RBAC permissions. The orchestrator submits commands to Redis,
+    worker pods poll and execute locally, then return results via Redis.
+    """
+
+    def __init__(self):
+        self._redis_url = os.environ.get("REDIS_URL", "redis://redis.ares.svc:6379")
+        self._task_queue = None
+
+    def _get_task_queue(self):
+        """Lazy-load the RedisTaskQueue."""
+        if self._task_queue is None:
+            from ares.core.task_queue import RedisTaskQueue
+
+            self._task_queue = RedisTaskQueue(self._redis_url)
+        return self._task_queue
+
+    def run_command(
+        self,
+        command: str | list[str],
+        timeout_seconds: int = 300,
+        working_directory: str = "/tmp",  # noqa: S108  # nosec B108
+    ) -> CommandResult:
+        """Execute a command via Redis task queue on the enum worker pod."""
+        import concurrent.futures
+
+        # Use shlex.join for proper shell quoting (handles parentheses, spaces, etc.)
+        command_str = shlex.join(command) if isinstance(command, list) else command
+
+        logger.debug(f"K8s executing via Redis queue: {command_str[:100]}...")
+
+        def _run_in_thread():
+            """Run the async task queue call in a new thread with its own event loop."""
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(
+                    self._dispatch_command(command_str, timeout_seconds, working_directory)
+                )
+            finally:
+                loop.close()
+
+        try:
+            # Run in a separate thread to avoid event loop conflicts
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_run_in_thread)
+                return future.result(timeout=timeout_seconds + 30)
+
+        except concurrent.futures.TimeoutError:
+            logger.error("K8s execution timed out")
+            return CommandResult(
+                stdout="",
+                stderr=f"Command timed out after {timeout_seconds}s",
+                return_code=124,
+                success=False,
+            )
+        except Exception as e:
+            logger.error(f"K8s execution failed: {e}")
+            return CommandResult(
+                stdout="",
+                stderr=str(e),
+                return_code=1,
+                success=False,
+            )
+
+    async def _dispatch_command(
+        self,
+        command: str,
+        timeout_seconds: int,
+        working_directory: str,
+    ) -> CommandResult:
+        """Dispatch command via Redis and wait for result."""
+        task_queue = self._get_task_queue()
+        await task_queue.connect()
+
+        try:
+            # Submit command task to enum worker
+            task_id = await task_queue.submit_task(
+                task_type="command",
+                target_role="enum",
+                payload={
+                    "command": command,
+                    "working_directory": working_directory,
+                    "timeout_seconds": timeout_seconds,
+                },
+                source_agent="orchestrator",
+            )
+
+            logger.debug(f"Command task {task_id} submitted to enum worker")
+
+            # Wait for result
+            result = await task_queue.wait_for_result(task_id, timeout=float(timeout_seconds))
+
+            if result is None:
+                return CommandResult(
+                    stdout="",
+                    stderr=f"Command timed out after {timeout_seconds}s",
+                    return_code=124,
+                    success=False,
+                )
+
+            # Extract result
+            if result.success:
+                output = result.result or {}
+                return CommandResult(
+                    stdout=output.get("stdout", ""),
+                    stderr=output.get("stderr", ""),
+                    return_code=output.get("return_code", 0),
+                    success=output.get("return_code", 0) == 0,
+                )
+            return CommandResult(
+                stdout="",
+                stderr=result.error or "Unknown error",
+                return_code=1,
+                success=False,
+            )
+        finally:
+            await task_queue.disconnect()
+
+
+class LocalExecutor:
+    """Execute commands via subprocess.
+
+    Used in K8s worker pods where tools are available in the shared process namespace.
+    """
+
+    def run_command(
+        self,
+        command: str | list[str],
+        timeout_seconds: int = 300,
+        working_directory: str = "/tmp",  # noqa: S108  # nosec B108
+    ) -> CommandResult:
+        """Execute a command via subprocess."""
+        # Use shlex.join for proper shell quoting (handles parentheses, spaces, etc.)
+        command_str = shlex.join(command) if isinstance(command, list) else command
+
+        logger.debug(f"Executing locally: {command_str[:100]}...")
+
+        try:
+            result = subprocess.run(  # noqa: S602  # nosec B602
+                command_str,
+                shell=True,  # nosec B602
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=working_directory,
+                check=False,
+            )
+            return CommandResult(
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+                success=result.returncode == 0,
+            )
+        except subprocess.TimeoutExpired:
+            return CommandResult(
+                stdout="",
+                stderr=f"Command timed out after {timeout_seconds}s",
+                return_code=124,
+                success=False,
+            )
+        except Exception as e:
+            return CommandResult(
+                stdout="",
+                stderr=str(e),
+                return_code=1,
+                success=False,
+            )
 
 
 class SSMExecutor:
@@ -197,7 +378,8 @@ class SSMExecutor:
         Returns:
             CommandResult with stdout, stderr, and return code
         """
-        command_str = " ".join(command) if isinstance(command, list) else command
+        # Use shlex.join for proper shell quoting (handles parentheses, spaces, etc.)
+        command_str = shlex.join(command) if isinstance(command, list) else command
 
         # Wrap command to capture exit code and handle errors
         wrapped_command = f"""
@@ -320,14 +502,28 @@ exit $EXIT_CODE
 
 
 # Global executor instance (lazy-loaded)
-_executor: SSMExecutor | None = None
+_executor: SSMExecutor | K8sExecutor | LocalExecutor | None = None
 
 
-def get_executor() -> SSMExecutor:
-    """Get or create the global SSM executor instance."""
+def get_executor() -> SSMExecutor | K8sExecutor | LocalExecutor:
+    """Get or create the global executor instance.
+
+    Returns:
+        - K8sExecutor when ARES_EXECUTION_MODE=k8s (kubectl exec to enum pod)
+        - LocalExecutor when ARES_EXECUTION_MODE=local (subprocess in pod)
+        - SSMExecutor otherwise (AWS SSM for EC2)
+    """
     global _executor
     if _executor is None:
-        _executor = SSMExecutor()
+        if EXECUTION_MODE == "k8s":
+            logger.info("Using K8s executor (kubectl exec to enum pod)")
+            _executor = K8sExecutor()
+        elif EXECUTION_MODE == "local":
+            logger.info("Using local executor (subprocess)")
+            _executor = LocalExecutor()
+        else:
+            logger.info("Using SSM executor (EC2)")
+            _executor = SSMExecutor()
     return _executor
 
 
@@ -336,6 +532,8 @@ def validate_sso_credentials(profile: str = "lab") -> bool:
 
     Call this at the start of an operation to fail fast if credentials
     are invalid, rather than failing mid-operation.
+
+    Skipped when ARES_EXECUTION_MODE=k8s or local.
 
     Args:
         profile: AWS profile name to validate
@@ -346,6 +544,9 @@ def validate_sso_credentials(profile: str = "lab") -> bool:
     Raises:
         SSOTokenExpiredError: If SSO token is expired or invalid
     """
+    if EXECUTION_MODE in ("k8s", "local"):
+        return True
+
     try:
         session = boto3.Session(profile_name=profile)
         credentials = session.get_credentials()

@@ -1,0 +1,543 @@
+"""Main orchestrator for multi-agent red team operations.
+
+This module provides the entry point for coordinating multi-agent
+red team operations in a Kubernetes environment.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+from typing import Any
+
+import dreadnode as dn
+from dreadnode.agent import Agent, Thread
+from dreadnode.agent.stop import tool_use
+from loguru import logger
+
+from ares.core.dispatcher import RedTeamDispatcher
+from ares.core.factories.red_agents import (
+    create_role_hooks,
+    load_agent_instructions,
+)
+from ares.core.models import (
+    AgentInfo,
+    AgentRole,
+    Credential,
+    Target,
+)
+from ares.core.recovery import OperationRecoveryManager
+from ares.core.workflows import exploitation_workflow
+from ares.tools.red.network import (
+    BloodHoundTools,
+    CertipyTools,
+    CredentialDiscoveryTools,
+    NetworkEnumerationTools,
+    RedTeamReportingTools,
+)
+from ares.tools.red.orchestrator import OrchestratorTools
+
+
+@dn.tool
+def complete_operation(summary: str) -> str:
+    """
+    Mark the multi-agent red team operation as complete.
+
+    Use this tool when you have:
+    - Achieved domain admin access OR exhausted all attack paths
+    - Coordinated with all specialized agents
+    - Collected all available credentials and hashes
+    - Generated golden ticket (if krbtgt hash was found)
+
+    Args:
+        summary: Executive summary of the operation including:
+            - All domain administrators compromised
+            - Attack paths used
+            - Total credentials obtained
+            - Hosts compromised
+            - Key vulnerabilities exploited
+
+    Returns:
+        Confirmation message
+
+    Example:
+        >>> complete_operation("Domain admin achieved via ADCS ESC1...")
+    """
+    logger.success(f"🎯 Multi-agent operation completed: {summary}")
+    return f"✓ Operation marked as complete. Summary: {summary}"
+
+
+async def run_multi_agent_operation(
+    operation_id: str,
+    target_domain: str,
+    target_ips: list[str],
+    initial_credential: Credential | None = None,
+    resume_from_checkpoint: bool = False,
+    redis_url: str = "redis://redis.ares.svc:6379",
+    namespace: str = "ares",
+    model: str = "claude-sonnet-4-20250514",
+    max_steps: int = 200,
+    checkpoint_interval: int = 60,
+) -> dict[str, Any]:
+    """
+    Main entry point for multi-agent red team operations.
+
+    Args:
+        operation_id: Unique identifier for this operation
+        target_domain: Target domain (e.g., "sevenkingdoms.local")
+        target_ips: List of target IPs to scan
+        initial_credential: Optional initial credential
+        resume_from_checkpoint: Resume from previous checkpoint
+        redis_url: Redis URL for state persistence
+        namespace: Kubernetes namespace
+        model: LLM model to use
+        max_steps: Maximum agent steps
+        checkpoint_interval: Seconds between checkpoints
+
+    Returns:
+        Operation results summary
+    """
+    start_time = datetime.now(timezone.utc)
+
+    # Initialize infrastructure
+    dispatcher = RedTeamDispatcher(redis_url=redis_url)
+    await dispatcher.start(operation_id)
+
+    recovery = OperationRecoveryManager(
+        redis_url=redis_url,
+        checkpoint_interval=checkpoint_interval,
+    )
+    await recovery.start()
+
+    # Resume or create new operation
+    if resume_from_checkpoint:
+        state = await recovery.recover_operation(operation_id)
+        if state:
+            dispatcher._shared_state = state
+            logger.info(f"Resumed operation {operation_id} from checkpoint")
+        else:
+            logger.warning(f"No checkpoint found for {operation_id}, starting fresh")
+            resume_from_checkpoint = False
+
+    if not resume_from_checkpoint:
+        state = dispatcher.shared_state
+        state.target = Target(
+            ip=target_ips[0] if target_ips else "",
+            domain=target_domain,
+        )
+        if initial_credential:
+            state.add_credential(initial_credential, "initial")
+
+    # Create agent ensemble
+    agents = await _create_agent_ensemble(
+        dispatcher=dispatcher,
+        model=model,
+        max_steps=max_steps,
+        namespace=namespace,
+    )
+
+    # Register all agents with dispatcher
+    for agent_info in agents.values():
+        await dispatcher.register(agent_info)
+
+    # Start background tasks
+    # NOTE: health_monitor disabled until worker pods are actually deployed
+    # It just spams "Offline agents detected" since workers don't heartbeat yet
+    tasks = [
+        asyncio.create_task(recovery.start_periodic_checkpoint(dispatcher), name="checkpoint"),
+        # asyncio.create_task(_monitor_agent_health(dispatcher), name="health_monitor"),
+        asyncio.create_task(exploitation_workflow(dispatcher), name="exploitation_workflow"),
+    ]
+
+    # Build initial prompt for orchestrator
+    initial_prompt = _build_orchestrator_prompt(
+        target_domain=target_domain,
+        target_ips=target_ips,
+        initial_credential=initial_credential,
+    )
+
+    try:
+        # Create the orchestrator agent with tools
+        orchestrator_agent = await _create_orchestrator_agent(
+            dispatcher=dispatcher,
+            model=model,
+            max_steps=max_steps,
+        )
+
+        logger.info(f"Starting orchestrator for {target_domain}")
+        logger.info(f"Initial prompt:\n{initial_prompt}")
+
+        # Run the orchestrator agent - this drives the entire operation
+        with dn.run(tags=["multi-agent-operation", target_domain]):
+            dn.log_params(
+                model=model,
+                operation_id=operation_id,
+                target_domain=target_domain,
+                target_ips=target_ips,
+                max_steps=max_steps,
+            )
+
+            # Run the orchestrator agent
+            result = await orchestrator_agent.run(initial_prompt)
+
+            logger.success(f"Orchestrator completed: {result.steps} steps, {result.stop_reason}")
+
+        # Wait for any remaining background tasks
+        await _wait_for_completion(dispatcher, tasks, max_runtime=300.0)
+
+        # Get final state
+        final_state = dispatcher.shared_state
+        end_time = datetime.now(timezone.utc)
+
+        return {
+            "operation_id": operation_id,
+            "success": final_state.has_domain_admin,
+            "domain_admin_achieved": final_state.has_domain_admin,
+            "domain_admin_path": final_state.domain_admin_path,
+            "golden_ticket_forged": final_state.has_golden_ticket,
+            "credentials_discovered": len(final_state.all_credentials),
+            "hashes_discovered": len(final_state.all_hashes),
+            "hosts_discovered": len(final_state.all_hosts),
+            "vulnerabilities_discovered": len(final_state.discovered_vulnerabilities),
+            "vulnerabilities_exploited": len(final_state.exploited_vulnerabilities),
+            "tasks_completed": len(final_state.completed_tasks),
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "duration_seconds": (end_time - start_time).total_seconds(),
+        }
+
+    except Exception as e:
+        logger.error(f"Operation failed: {e}")
+        raise
+
+    finally:
+        # Cleanup
+        for task in tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        await dispatcher.stop()
+        logger.info("Operation cleanup complete")
+
+
+async def _create_orchestrator_agent(
+    dispatcher: RedTeamDispatcher,
+    model: str,
+    max_steps: int,
+) -> Agent:
+    """
+    Create the orchestrator agent that coordinates the multi-agent operation.
+
+    The orchestrator has:
+    - OrchestratorTools for dispatching tasks to specialized agents
+    - NetworkEnumerationTools for initial reconnaissance
+    - CredentialDiscoveryTools for finding quick wins
+    - CertipyTools for ADCS enumeration
+    - RedTeamReportingTools for recording findings
+
+    Args:
+        dispatcher: The dispatcher for inter-agent communication
+        model: LLM model to use
+        max_steps: Maximum agent steps
+
+    Returns:
+        Configured orchestrator agent
+    """
+    shared_state = dispatcher.shared_state
+
+    # Create orchestrator tools with dispatcher wired in
+    orchestrator_tools = OrchestratorTools()
+    orchestrator_tools.set_dispatcher(dispatcher)
+    orchestrator_tools.set_shared_state(shared_state)
+
+    # Enumeration tools for initial recon
+    # Note: These tools use RedTeamState internally. SharedRedTeamState provides
+    # compatibility aliases (hosts, credentials, etc.) so they work in multi-agent mode.
+    network_tools = NetworkEnumerationTools()
+    cred_discovery_tools = CredentialDiscoveryTools()
+    certipy_tools = CertipyTools()
+    bloodhound_tools = BloodHoundTools()
+    reporting_tools = RedTeamReportingTools()
+
+    # Set shared state on all toolsets for state tracking
+    # SharedRedTeamState has compatibility properties (hosts, credentials, etc.)
+    # that map to all_hosts, all_credentials, etc. for backward compatibility
+    network_tools.set_state(shared_state)  # type: ignore[arg-type]
+    cred_discovery_tools.set_state(shared_state)  # type: ignore[arg-type]
+    certipy_tools.set_state(shared_state)  # type: ignore[arg-type]
+    bloodhound_tools.set_state(shared_state)  # type: ignore[arg-type]
+    reporting_tools.set_state(shared_state)  # type: ignore[arg-type]
+
+    tools = [
+        orchestrator_tools,  # Coordination tools (dispatch_*, get_*, broadcast_*)
+        network_tools,  # nmap, enum4linux, crackmapexec
+        cred_discovery_tools,  # ldap_search_descriptions, password_spray, etc.
+        certipy_tools,  # certipy_find for ADCS enumeration
+        bloodhound_tools,  # run_bloodhound for attack path discovery
+        reporting_tools,  # record_finding, generate_report
+        complete_operation,  # Stop condition tool
+    ]
+
+    # Load orchestrator-specific instructions
+    instructions = load_agent_instructions(AgentRole.ENUM)
+
+    # Create hooks for monitoring and guidance
+    hooks = create_role_hooks(AgentRole.ENUM, dispatcher, shared_state)
+
+    logger.info(f"Creating orchestrator agent with {len(tools)} toolsets, max_steps={max_steps}")
+
+    return dn.Agent(
+        name="ares-orchestrator",
+        model=model,
+        instructions=instructions,
+        max_steps=max_steps,
+        tools=tools,
+        hooks=hooks,
+        stop_conditions=[
+            tool_use("complete_operation"),
+            tool_use("announce_domain_admin"),
+        ],
+        thread=Thread(),  # type: ignore[call-arg]
+    )
+
+
+async def _create_agent_ensemble(
+    dispatcher: RedTeamDispatcher,
+    model: str,
+    max_steps: int,
+    namespace: str,
+) -> dict[AgentRole, AgentInfo]:
+    """
+    Create the agent ensemble with role-specific configurations.
+
+    Args:
+        dispatcher: The dispatcher instance
+        model: LLM model to use
+        max_steps: Maximum agent steps
+        namespace: Kubernetes namespace
+
+    Returns:
+        Dict mapping roles to agent info
+    """
+    agents: dict[AgentRole, AgentInfo] = {}
+
+    # Define agent configurations
+    agent_configs: list[dict[str, AgentRole | str | set[str]]] = [
+        {
+            "role": AgentRole.ENUM,
+            "name": "enum-agent",
+            "pod_selector": "ares.dreadnode.io/role=enum",
+            "capabilities": {
+                "nmap",
+                "crackmapexec",
+                "ldapsearch",
+                "certipy",
+                "bloodhound",
+                "secretsdump",
+                "enum4linux",
+            },
+        },
+        {
+            "role": AgentRole.CRACKER,
+            "name": "cracker-agent",
+            "pod_selector": "ares.dreadnode.io/role=cracker",
+            "capabilities": {"hashcat", "john", "ntlmrelayx"},
+        },
+        {
+            "role": AgentRole.ACL,
+            "name": "acl-agent",
+            "pod_selector": "ares.dreadnode.io/role=acl",
+            "capabilities": {"bloodhound", "dacledit", "owneredit"},
+        },
+        {
+            "role": AgentRole.PRIVESC,
+            "name": "privesc-agent",
+            "pod_selector": "ares.dreadnode.io/role=privesc",
+            "capabilities": {
+                "certipy",
+                "kerberoast",
+                "asreproast",
+                "constrained_delegation",
+                "unconstrained_delegation",
+            },
+        },
+        {
+            "role": AgentRole.LATERAL,
+            "name": "lateral-agent",
+            "pod_selector": "ares.dreadnode.io/role=lateral",
+            "capabilities": {
+                "psexec",
+                "wmiexec",
+                "smbexec",
+                "winrm",
+                "secretsdump",
+                "pass_the_hash",
+            },
+        },
+        {
+            "role": AgentRole.POISONING,
+            "name": "poison-agent",
+            "pod_selector": "ares.dreadnode.io/role=poison",
+            "capabilities": {"responder", "mitm6", "ntlmrelayx"},
+        },
+        {
+            "role": AgentRole.ATOMIC,
+            "name": "atomic-agent",
+            "pod_selector": "ares.dreadnode.io/role=atomic",
+            "capabilities": {"atomic_red_team", "invoke_atomicredteam"},
+        },
+    ]
+
+    for config in agent_configs:
+        role = config["role"]
+        name = config["name"]
+        capabilities = config["capabilities"]
+        # Type narrowing for mypy
+        if not isinstance(role, AgentRole):
+            continue
+        if not isinstance(name, str):
+            continue
+        if not isinstance(capabilities, set):
+            continue
+        agent_info = AgentInfo(
+            name=name,
+            pod_name=f"{name}-0",  # Will be updated by K8s discovery
+            role=role,
+            capabilities=capabilities,
+            status="idle",
+        )
+        agents[role] = agent_info
+
+    return agents
+
+
+async def _monitor_agent_health(
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 30.0,
+) -> None:
+    """
+    Background task to monitor agent health.
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between health checks
+    """
+    while True:
+        try:
+            agent_status = dispatcher.get_agent_status()
+
+            offline_agents = [
+                name for name, status in agent_status.items() if status["status"] == "offline"
+            ]
+
+            if offline_agents:
+                logger.warning(f"Offline agents detected: {offline_agents}")
+
+            await asyncio.sleep(check_interval)
+
+        except asyncio.CancelledError:  # noqa: PERF203
+            break
+        except Exception as e:
+            logger.error(f"Health monitor error: {e}")
+            await asyncio.sleep(check_interval)
+
+
+async def _wait_for_completion(
+    dispatcher: RedTeamDispatcher,
+    background_tasks: list[asyncio.Task],
+    max_runtime: float = 7200.0,
+    check_interval: float = 10.0,
+) -> None:
+    """
+    Wait for operation completion or domain admin achievement.
+
+    Args:
+        dispatcher: The dispatcher instance
+        background_tasks: Background tasks to monitor
+        max_runtime: Maximum runtime in seconds
+        check_interval: Seconds between completion checks
+    """
+    start_time = asyncio.get_event_loop().time()
+
+    while True:
+        elapsed = asyncio.get_event_loop().time() - start_time
+
+        # Check runtime limit
+        if elapsed > max_runtime:
+            logger.warning(f"Operation reached max runtime ({max_runtime}s)")
+            break
+
+        # Check for domain admin
+        if dispatcher.shared_state.has_domain_admin:
+            logger.success("Domain Admin achieved! Operation complete.")
+            break
+
+        # Check for failed background tasks
+        for task in background_tasks:
+            if task.done() and not task.cancelled():
+                exc = task.exception()
+                if exc:
+                    logger.error(f"Background task {task.get_name()} failed: {exc}")
+
+        await asyncio.sleep(check_interval)
+
+
+def _build_orchestrator_prompt(
+    target_domain: str,
+    target_ips: list[str],
+    initial_credential: Credential | None = None,
+) -> str:
+    """
+    Build the initial prompt for the orchestrator agent.
+
+    Args:
+        target_domain: Target domain
+        target_ips: Target IPs
+        initial_credential: Initial credential if available
+
+    Returns:
+        Formatted prompt string
+    """
+    cred_info = "None (start with unauthenticated enumeration)"
+    if initial_credential:
+        cred_info = f"{initial_credential.domain}\\{initial_credential.username}"
+
+    return f"""Begin red team operation for {target_domain}.
+
+Target IPs: {", ".join(target_ips)}
+Initial credential: {cred_info}
+
+Your objectives:
+1. Run nmap_scan on all targets to discover services
+2. Enumerate users and shares with enum4linux/crackmapexec
+3. Run certipy_find to discover ADCS vulnerabilities
+4. Run run_bloodhound for ACL analysis and attack path discovery
+5. Coordinate with specialized agents to exploit discovered vulnerabilities
+6. Use trigger_credential_expansion after getting new credentials
+7. Continue until Domain Admin access achieved
+
+Priority vulnerabilities to look for:
+- ADCS ESC1-ESC8 (highest priority)
+- Kerberoastable accounts
+- AS-REP roastable accounts
+- Unconstrained/Constrained delegation
+- ACL abuse paths (GenericAll, WriteDACL, etc.)
+- MSSQL linked servers
+
+Remember:
+- Use dispatch_* tools to route tasks to specialized agents
+- Use queue_vulnerability_for_exploitation to queue discovered vulnerabilities
+- Use trigger_credential_expansion after finding new credentials
+- Monitor progress with get_operation_summary
+- Announce domain admin when achieved with announce_domain_admin
+
+Let's begin the operation!
+"""
+
+
+__all__ = [
+    "run_multi_agent_operation",
+]

