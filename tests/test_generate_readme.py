@@ -58,9 +58,9 @@ def temp_project() -> Generator[Path, None, None]:
         # Create temporary project structure
         project_dir = Path(tmpdir)
 
-        # Create templates directory
-        template_dir = project_dir / "templates"
-        template_dir.mkdir()
+        # Create templates directory (matching src/ares/templates path expected by script)
+        template_dir = project_dir / "src" / "ares" / "templates"
+        template_dir.mkdir(parents=True)
 
         # Create template file
         with open(template_dir / "README.md.j2", "w") as f:
