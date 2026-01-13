@@ -614,7 +614,7 @@ class WorkerArgs:
 @app.command(name="worker")  # type: ignore[untyped-decorator]
 async def worker(
     role: str,
-    operation_id: str,
+    operation_id: str = "",
     *,
     worker_args: WorkerArgs | None = None,
     dn_args: DreadnodeArgs | None = None,
@@ -623,7 +623,8 @@ async def worker(
     Run a specialized worker agent that processes tasks from the dispatcher.
 
     This command starts a worker agent that:
-    - Connects to Redis and registers with the dispatcher
+    - Connects to Redis and discovers active operations (if operation_id not provided)
+    - Registers with the dispatcher
     - Polls for assigned tasks based on its role
     - Processes tasks using specialized toolsets
     - Reports results back to the orchestrator
@@ -639,11 +640,14 @@ async def worker(
 
     Args:
         role: Worker role (enum, cracker, acl, privesc, lateral, poisoning, atomic)
-        operation_id: Operation ID to join
+        operation_id: Operation ID to join (optional - will auto-discover if not provided)
 
     Example:
+        # Join specific operation
         uv run ares worker cracker op-12345678 --worker-args.redis-url redis://redis:6379
-        uv run ares worker lateral op-12345678 --worker-args.model claude-sonnet-4-20250514
+
+        # Auto-discover active operation
+        uv run ares worker lateral --worker-args.redis-url redis://redis:6379
     """
     from ares.core.config import get_agent_config, load_config
 
@@ -685,7 +689,7 @@ async def worker(
     logger.info(f"ARES WORKER AGENT: {role.upper()}")
     logger.info("=" * 60)
     logger.info(f"Config: {worker_args.config_file or 'auto-detected'}")
-    logger.info(f"Operation ID: {operation_id}")
+    logger.info(f"Operation ID: {operation_id or '(auto-discover)'}")
     logger.info(f"Role: {role}")
     logger.info(f"Model: {model}")
     logger.info(f"Max Steps: {max_steps}")
@@ -711,7 +715,7 @@ async def worker(
     try:
         await run_worker(
             role=agent_role,
-            operation_id=operation_id,
+            operation_id=operation_id if operation_id else None,
             redis_url=redis_url,
             model=model,
             max_steps=max_steps if max_steps > 0 else None,

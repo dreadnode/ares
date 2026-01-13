@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -27,6 +28,79 @@ from ares.core.models import AgentRole  # noqa: TC001 - used at runtime
 
 if TYPE_CHECKING:
     from dreadnode.agent import Agent
+
+
+async def discover_active_operation(redis_url: str, max_wait: int = 300) -> str | None:
+    """
+    Discover an active operation from Redis by scanning for operation keys.
+
+    Waits up to max_wait seconds for an operation to appear.
+    Returns the most recently checkpointed operation ID.
+
+    Args:
+        redis_url: Redis connection URL
+        max_wait: Maximum seconds to wait for an operation (default: 300 = 5 minutes)
+
+    Returns:
+        Operation ID if found, None otherwise
+    """
+    try:
+        import redis.asyncio as redis_async
+    except ImportError:
+        logger.error("redis package not installed, cannot discover operations")
+        return None
+
+    start_time = asyncio.get_event_loop().time()
+
+    while True:
+        client = None
+        try:
+            client = redis_async.from_url(redis_url)
+            await client.ping()
+
+            # Scan for operation state keys
+            operations: list[tuple[str, datetime]] = []
+            async for key in client.scan_iter("ares:operation:*:state"):
+                # Extract operation ID from key: ares:operation:<op_id>:state
+                parts = key.decode().split(":")
+                if len(parts) >= 3:
+                    op_id = parts[2]
+
+                    # Get checkpoint time to find most recent operation
+                    time_key = f"ares:operation:{op_id}:checkpoint_time"
+                    checkpoint_data = await client.get(time_key)
+
+                    if checkpoint_data:
+                        checkpoint_time = datetime.fromisoformat(checkpoint_data.decode())
+                        operations.append((op_id, checkpoint_time))
+
+            await client.aclose()
+
+            if operations:
+                # Return the most recently checkpointed operation
+                operations.sort(key=lambda x: x[1], reverse=True)
+                operation_id = operations[0][0]
+                logger.info(f"Discovered active operation: {operation_id}")
+                return operation_id
+
+            # Check if we've exceeded max wait time
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed >= max_wait:
+                logger.warning(f"No active operations found after {max_wait}s")
+                return None
+
+            # Wait before retrying
+            logger.debug("No operations found, waiting 10s before retry...")
+            await asyncio.sleep(10)
+
+        except Exception as e:
+            logger.warning(f"Failed to scan for operations: {e}")
+            if client:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+            await asyncio.sleep(5)
 
 
 # Mapping of message types to task prompt generators
@@ -265,22 +339,43 @@ class WorkerAgent:
 
 async def run_worker(
     role: AgentRole,
-    operation_id: str,
+    operation_id: str | None = None,
     redis_url: str = "redis://localhost:6379",
     model: str = "claude-sonnet-4-20250514",
     max_steps: int | None = None,
+    discover_operation: bool = True,
+    discovery_timeout: int = 300,
 ) -> None:
     """
     Run a specialized worker agent.
 
     Args:
         role: The agent role (cracker, acl, privesc, lateral, poisoning, atomic).
-        operation_id: The operation ID to join.
+        operation_id: The operation ID to join (optional - will discover if not provided).
         redis_url: Redis URL for dispatcher connection.
         model: LLM model to use.
         max_steps: Override default max steps for role.
+        discover_operation: If True and operation_id is None/empty, discover from Redis.
+        discovery_timeout: Max seconds to wait for operation discovery.
     """
     pod_name = os.environ.get("HOSTNAME", f"local-{role.value}")
+
+    # Handle empty string operation IDs from k8s configmaps
+    if operation_id == "":
+        operation_id = None
+
+    # Discover operation if not provided
+    if operation_id is None and discover_operation:
+        logger.info("No operation ID provided, scanning Redis for active operations...")
+        operation_id = await discover_active_operation(redis_url, max_wait=discovery_timeout)
+
+        if operation_id is None:
+            logger.error("No active operation found and none specified")
+            return
+
+    if operation_id is None:
+        logger.error("Operation ID required but not provided and discovery disabled")
+        return
 
     logger.info(f"Starting {role.value} worker for operation {operation_id}")
     logger.info(f"Pod: {pod_name}, Redis: {redis_url}")
@@ -327,5 +422,6 @@ async def run_worker(
 
 __all__ = [
     "WorkerAgent",
+    "discover_active_operation",
     "run_worker",
 ]
