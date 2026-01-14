@@ -175,6 +175,7 @@ dependencies = [
     { name = "kubernetes" },
     { name = "loguru" },
     { name = "redis" },
+    { name = "rigging" },
 ]
 
 [package.optional-dependencies]
@@ -220,6 +221,7 @@ requires-dist = [
     { name = "pygments", marker = "extra == 'docs'", specifier = ">=2.18.0" },
     { name = "pymdown-extensions", marker = "extra == 'docs'", specifier = ">=10.8.1" },
     { name = "redis", specifier = ">=7.1.0,<8.0.0" },
+    { name = "rigging", git = "https://github.com/dreadnode/rigging.git?rev=5f9b33da3f5546ed2a65166b97b2f5efae824015" },
 ]
 provides-extras = ["docs"]
 
@@ -2944,7 +2946,7 @@ wheels = [
 [[package]]
 name = "rigging"
 version = "3.3.5"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/dreadnode/rigging.git?rev=5f9b33da3f5546ed2a65166b97b2f5efae824015#5f9b33da3f5546ed2a65166b97b2f5efae824015" }
 dependencies = [
     { name = "colorama" },
     { name = "dreadnode" },
@@ -2957,10 +2959,6 @@ dependencies = [
     { name = "pydantic-xml" },
     { name = "ruamel-yaml" },
     { name = "xmltodict" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/5c/b2/4deaacda6b4237d9c5f8324b3458929e98b51158ed3eb3e6574a3ee31fa6/rigging-3.3.5.tar.gz", hash = "sha256:3f24ef62155f1049f0d485cf24649b4ded70a2771e49410da71b6c3d0fd626b4", size = 112840, upload-time = "2025-11-14T04:29:15.463Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/97/82/35c80126ba849b0c06529e2184e6e7c7a6bf6b0887ff95f041a7d7758554/rigging-3.3.5-py3-none-any.whl", hash = "sha256:e3cba9dca540488b71ded5e491ecdea1037b76e6e0501145079885aafc7a2bbf", size = 130701, upload-time = "2025-11-14T04:29:13.91Z" },
 ]
 
 [[package]]
