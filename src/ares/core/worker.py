@@ -370,8 +370,48 @@ class RedisWorkerAgent:
         finally:
             self._current_task = None
 
+    def _find_tools_container_pid(self) -> int | None:
+        """Find the PID of the tools sidecar container.
+
+        With shareProcessNamespace: true, we can see all processes in the pod.
+        The tools container runs 'sleep infinity' as its main process.
+
+        Returns:
+            PID of tools container if found, None otherwise.
+        """
+        import subprocess
+
+        try:
+            result = subprocess.run(  # nosec B607
+                ["ps", "aux"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            for line in result.stdout.splitlines():
+                if "sleep infinity" in line and "grep" not in line:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            pid = int(parts[1])
+                            logger.debug(f"Found tools container at PID {pid}")
+                            return pid
+                        except ValueError:
+                            continue
+        except Exception as e:
+            logger.warning(f"Failed to find tools container PID: {e}")
+
+        return None
+
     async def _execute_command_task(self, task: TaskMessage) -> None:
-        """Execute a command task directly via subprocess."""
+        """Execute a command task in the tools sidecar container.
+
+        Uses nsenter to execute commands in the tools container's mount namespace.
+        Requires:
+        - shareProcessNamespace: true (pod-level)
+        - CAP_SYS_ADMIN capability (ares-worker container)
+        """
         import subprocess
 
         payload = task.payload
@@ -382,15 +422,57 @@ class RedisWorkerAgent:
         logger.info(f"[{self.agent_name}] Executing command: {command[:100]}...")
 
         try:
-            result = subprocess.run(  # noqa: S602, ASYNC221  # nosec B602
-                command,
-                shell=True,  # nosec B602
+            if not hasattr(self, "_tools_pid"):
+                self._tools_pid = self._find_tools_container_pid()
+
+            if not self._tools_pid:
+                error_msg = (
+                    "Cannot find tools container. The pod must have shareProcessNamespace: true "
+                    "and the tools container must run 'sleep infinity'."
+                )
+                logger.error(error_msg)
+                await self.task_queue.send_result(
+                    task_id=task.task_id,
+                    success=False,
+                    error=error_msg,
+                    worker_pod=self.pod_name,
+                )
+                return
+
+            nsenter_cmd = [
+                "nsenter",
+                "-t",
+                str(self._tools_pid),
+                "-m",
+                "-w",
+                "/bin/bash",
+                "-c",
+                f"cd {working_dir} && {command}",
+            ]
+
+            logger.debug(f"Executing via nsenter into PID {self._tools_pid}")
+            result = subprocess.run(  # noqa: ASYNC221
+                nsenter_cmd,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                cwd=working_dir,
                 check=False,
             )
+
+            if result.returncode != 0 and "Operation not permitted" in result.stderr:
+                error_msg = (
+                    "nsenter failed: Operation not permitted. "
+                    "The ares-worker container needs CAP_SYS_ADMIN capability. "
+                    "Add to pod spec: securityContext.capabilities.add: [SYS_ADMIN]"
+                )
+                logger.error(error_msg)
+                await self.task_queue.send_result(
+                    task_id=task.task_id,
+                    success=False,
+                    error=error_msg,
+                    worker_pod=self.pod_name,
+                )
+                return
 
             await self.task_queue.send_result(
                 task_id=task.task_id,
@@ -413,6 +495,7 @@ class RedisWorkerAgent:
                 worker_pod=self.pod_name,
             )
         except Exception as e:
+            logger.error(f"Command execution failed: {e}")
             await self.task_queue.send_result(
                 task_id=task.task_id,
                 success=False,
