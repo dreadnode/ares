@@ -422,7 +422,8 @@ class RedisWorkerAgent:
         logger.info(f"[{self.agent_name}] Executing command: {command[:100]}...")
 
         try:
-            if not hasattr(self, "_tools_pid"):
+            # Retry finding tools PID if not found previously (handles timing issues)
+            if not getattr(self, "_tools_pid", None):
                 self._tools_pid = self._find_tools_container_pid()
 
             if not self._tools_pid:

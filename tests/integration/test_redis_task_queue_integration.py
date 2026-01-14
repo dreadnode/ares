@@ -1118,6 +1118,46 @@ class TestExecuteCommandTaskNsenter:
         assert worker._tools_pid == 42
 
     @pytest.mark.asyncio
+    async def test_execute_command_retries_pid_lookup_when_none(
+        self, task_queue, mock_agent, mock_redis_client
+    ):
+        """Test that tools PID lookup is retried if previously None."""
+        worker = RedisWorkerAgent(
+            role=AgentRole.CRACKER,
+            task_queue=task_queue,
+            agent=mock_agent,
+            agent_name="cracker-agent",
+            pod_name="cracker-0",
+        )
+
+        # Simulate first lookup returning None (timing issue)
+        worker._tools_pid = None
+
+        task = TaskMessage(
+            task_id="cmd_retry",
+            task_type="command",
+            source_agent="orchestrator",
+            target_agent="worker",
+            payload={"command": "echo retry"},
+        )
+
+        mock_result = MagicMock()
+        mock_result.stdout = "retry\n"
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+
+        with (
+            patch.object(worker, "_find_tools_container_pid", return_value=99) as mock_find,
+            patch("subprocess.run", return_value=mock_result),
+        ):
+            await worker._execute_command_task(task)
+            # Should retry lookup since _tools_pid was None
+            assert mock_find.call_count == 1
+
+        # PID should now be cached
+        assert worker._tools_pid == 99
+
+    @pytest.mark.asyncio
     async def test_execute_command_with_nonzero_exit(
         self, task_queue, mock_agent, mock_redis_client
     ):

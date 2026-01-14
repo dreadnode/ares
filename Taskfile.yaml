@@ -968,6 +968,16 @@ tasks:
         echo "📊 All pods in {{.NAMESPACE}}:"
         kubectl get pods -n {{.NAMESPACE}} -o wide 2>/dev/null || echo "   Unable to list pods"
 
+  ares:red:redeploy:
+    desc: "Restart all red team deployments in the cluster"
+    vars:
+      NAMESPACE: '{{.NAMESPACE | default "attack-simulation"}}'
+    cmds:
+      - |
+        echo "🔄 Restarting red team deployments in namespace: {{.NAMESPACE}}"
+        kubectl rollout restart deployment -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team
+        echo "✅ Red team deployments restarted"
+
   ares:red:logs:
     desc: "Tail red team agent logs from Kali via SSM (usage: task ares:red:logs [KALI=instance-name] [LINES=100] [FOLLOW=true])"
     vars:
