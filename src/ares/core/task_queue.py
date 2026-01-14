@@ -85,9 +85,11 @@ class RedisTaskQueue:
     TASK_QUEUE_PREFIX = "ares:tasks"
     RESULT_QUEUE_PREFIX = "ares:results"
     HEARTBEAT_PREFIX = "ares:heartbeat"
+    LOCK_PREFIX = "ares:lock"
 
     # TTLs
-    RESULT_TTL = 3600  # 1 hour
+    # Task results kept 24 hours for long operations, recovery, and debugging
+    RESULT_TTL = 86400  # 24 hours
     HEARTBEAT_TTL = 60  # 60 seconds
 
     def __init__(self, redis_url: str = "redis://redis.ares.svc:6379"):
@@ -385,6 +387,68 @@ class RedisTaskQueue:
             stats[role] = await self.get_queue_length(role)
 
         return stats
+
+    # === Operation Locking ===
+
+    async def acquire_operation_lock(
+        self,
+        operation_id: str,
+        ttl_seconds: int = 7200,
+    ) -> bool:
+        """
+        Acquire exclusive lock for an operation using SETNX.
+
+        Args:
+            operation_id: The operation to lock
+            ttl_seconds: Lock expiry time (default: 2 hours)
+
+        Returns:
+            True if lock acquired, False if already held by another process
+        """
+        if not self._connected:
+            await self.connect()
+
+        key = f"{self.LOCK_PREFIX}:{operation_id}"
+        # SETNX-style: only set if not exists
+        result = await self._client.set(key, "locked", nx=True, ex=ttl_seconds)
+
+        if result:
+            logger.info(f"Acquired operation lock for {operation_id}")
+            return True
+
+        logger.warning(f"Failed to acquire lock for {operation_id} - already held")
+        return False
+
+    async def release_operation_lock(self, operation_id: str) -> None:
+        """Release the operation lock."""
+        if not self._connected:
+            await self.connect()
+
+        key = f"{self.LOCK_PREFIX}:{operation_id}"
+        await self._client.delete(key)
+        logger.info(f"Released operation lock for {operation_id}")
+
+    async def extend_operation_lock(
+        self,
+        operation_id: str,
+        ttl_seconds: int = 7200,
+    ) -> bool:
+        """
+        Extend the lock TTL to prevent expiry during long operations.
+
+        Args:
+            operation_id: The operation ID
+            ttl_seconds: New TTL in seconds
+
+        Returns:
+            True if lock was extended, False if lock not held
+        """
+        if not self._connected:
+            await self.connect()
+
+        key = f"{self.LOCK_PREFIX}:{operation_id}"
+        result = await self._client.expire(key, ttl_seconds)
+        return bool(result)
 
 
 __all__ = [

@@ -1105,11 +1105,30 @@ class RedTeamDispatcher:
         while self._running:
             now = datetime.now(timezone.utc)
 
+            # For cross-pod workers, read heartbeats from Redis
+            if self._task_queue:
+                for agent_name in list(self._agents.keys()):
+                    try:
+                        heartbeat_data = await self._task_queue.get_heartbeat(agent_name)
+                        if heartbeat_data:
+                            # Update in-memory state from Redis heartbeat
+                            timestamp_str = heartbeat_data.get("timestamp")
+                            if timestamp_str:
+                                timestamp = datetime.fromisoformat(timestamp_str)
+                                self._agents[agent_name].last_heartbeat = timestamp
+                                self._agents[agent_name].status = heartbeat_data.get(
+                                    "status", "idle"
+                                )
+                                self._agents[agent_name].current_task = heartbeat_data.get(
+                                    "current_task"
+                                )
+                    except Exception as e:  # noqa: PERF203
+                        logger.debug(f"Failed to get heartbeat for {agent_name}: {e}")
+
+            # Check for stale heartbeats
             for agent_name, agent_info in list(self._agents.items()):
-                # Check if heartbeat is stale (> 60 seconds)
                 elapsed = (now - agent_info.last_heartbeat).total_seconds()
                 if elapsed > 60 and agent_info.status != "offline":
-                    # Debug level - workers not deployed yet so this is expected
                     logger.debug(f"Agent {agent_name} heartbeat stale ({elapsed:.0f}s)")
                     agent_info.status = "offline"
 
