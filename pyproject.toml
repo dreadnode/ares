@@ -18,7 +18,6 @@ classifiers = [
 
 dependencies = [
     "dreadnode>=1.17.0",
-    "rigging @ git+https://github.com/dreadnode/rigging.git@5f9b33da3f5546ed2a65166b97b2f5efae824015",
     "cyclopts>=4.2.0",
     "loguru>=0.7.3",
     "httpx>=0.28.0,<1.0.0",
