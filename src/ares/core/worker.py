@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -275,11 +276,15 @@ class RedisWorkerAgent:
         self._running = False
         self._current_task: str | None = None
         self._tasks_completed = 0
+        self._tools_pid: int | None = None
 
     async def start(self) -> None:
         """Start the Redis worker loop."""
         self._running = True
         logger.info(f"Redis worker {self.agent_name} starting...")
+
+        # Validate pod prerequisites before starting
+        self._validate_pod_prerequisites()
 
         # Start heartbeat task
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -380,29 +385,146 @@ class RedisWorkerAgent:
             PID of tools container if found, None otherwise.
         """
         import subprocess
+        from pathlib import Path
 
+        # Method 1: Try using /proc filesystem directly (most reliable)
+        try:
+            for pid_entry in Path("/proc").iterdir():
+                pid_dir = pid_entry.name
+                if not pid_dir.isdigit():
+                    continue
+
+                cmdline_path = pid_entry / "cmdline"
+                try:
+                    with open(cmdline_path) as f:
+                        cmdline = f.read().replace("\x00", " ")
+                        if "sleep infinity" in cmdline or "sleep infinit" in cmdline:
+                            pid = int(pid_dir)
+                            logger.debug(f"Found tools container at PID {pid} via /proc")
+                            return pid
+                except (FileNotFoundError, PermissionError, ProcessLookupError):
+                    # Process died or no permission - skip
+                    continue
+        except Exception as e:
+            logger.debug(f"Failed to scan /proc: {e}, falling back to ps")
+
+        # Method 2: Fallback to ps aux
         try:
             result = subprocess.run(  # nosec B607
                 ["ps", "aux"],
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=5,
             )
 
-            for line in result.stdout.splitlines():
-                if "sleep infinity" in line and "grep" not in line:
+            lines = result.stdout.splitlines()
+            for line in lines:
+                # Match "sleep infinity" or truncated "sleep infinit" from ps output
+                if ("sleep infinity" in line or "sleep infinit" in line) and "grep" not in line:
                     parts = line.split()
                     if len(parts) >= 2:
                         try:
                             pid = int(parts[1])
-                            logger.debug(f"Found tools container at PID {pid}")
+                            logger.debug(f"Found tools container at PID {pid} via ps")
                             return pid
                         except ValueError:
                             continue
+
+            # Log what we saw if we didn't find the tools container
+            logger.debug(
+                f"ps aux output ({len(lines)} lines, {len(result.stdout)} bytes): "
+                f"First 500 chars: {result.stdout[:500]}"
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("ps aux timed out")
         except Exception as e:
-            logger.warning(f"Failed to find tools container PID: {e}")
+            logger.warning(f"Failed to run ps aux: {e}")
 
         return None
+
+    def _validate_pod_prerequisites(self) -> None:  # noqa: PLR0912
+        """Validate that the pod is configured correctly for nsenter execution.
+
+        Checks:
+        1. shareProcessNamespace: true - can see other container processes
+        2. Tools container running with 'sleep infinity'
+        3. CAP_SYS_ADMIN capability - can use nsenter
+
+        Raises:
+            RuntimeError: If prerequisites are not met with clear error messages.
+        """
+        import subprocess
+
+        errors: list[str] = []
+
+        # Check 1: Can we see other container processes?
+        # This validates shareProcessNamespace: true
+        # With shared namespace, we should see at least: pause container + tools + worker processes
+        try:
+            proc_contents = [p.name for p in Path("/proc").iterdir()]
+            pid_count = sum(1 for p in proc_contents if p.isdigit())
+            if pid_count < 3:
+                errors.append(
+                    f"Cannot see other container processes (found only {pid_count} PIDs). "
+                    "Pod spec must have 'shareProcessNamespace: true'"
+                )
+        except Exception as e:
+            errors.append(f"Cannot read /proc: {e}")
+
+        # Check 2: Can we find the tools container?
+        # Retry a few times in case of startup timing issues
+        tools_pid = None
+        for attempt in range(3):
+            tools_pid = self._find_tools_container_pid()
+            if tools_pid:
+                break
+            if attempt < 2:
+                import time
+
+                logger.debug(f"Tools container not found, retrying in 2s (attempt {attempt + 1}/3)")
+                time.sleep(2)
+
+        if not tools_pid:
+            errors.append(
+                "Cannot find tools container PID. Ensure the tools container "
+                "is running 'sleep infinity' as its command."
+            )
+        else:
+            self._tools_pid = tools_pid
+            logger.info(f"Found tools container at PID {tools_pid}")
+
+            # Check 3: Can we actually use nsenter? (test with a simple command)
+            try:
+                result = subprocess.run(  # nosec B607
+                    ["nsenter", "-t", str(tools_pid), "-m", "/bin/true"],
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    stderr = result.stderr.decode() if result.stderr else ""
+                    if "Operation not permitted" in stderr:
+                        errors.append(
+                            "nsenter permission denied. The ares-worker container needs "
+                            "CAP_SYS_ADMIN capability. Add to securityContext: "
+                            "capabilities.add: ['SYS_ADMIN']"
+                        )
+                    else:
+                        errors.append(f"nsenter test failed: {stderr}")
+            except subprocess.TimeoutExpired:
+                errors.append("nsenter test command timed out")
+            except FileNotFoundError:
+                errors.append("nsenter binary not found in worker container")
+
+        if errors:
+            error_msg = "Pod prerequisite validation failed:\n" + "\n".join(
+                f"  - {e}" for e in errors
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        logger.success("Pod prerequisites validated successfully")
 
     async def _execute_command_task(self, task: TaskMessage) -> None:
         """Execute a command task in the tools sidecar container.

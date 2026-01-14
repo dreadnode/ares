@@ -18,8 +18,54 @@ import boto3
 from botocore.exceptions import ClientError, SSOTokenLoadError, TokenRetrievalError
 from loguru import logger
 
-# Execution mode: "k8s" for kubectl exec, "local" for subprocess, "ssm" for EC2
-EXECUTION_MODE = os.environ.get("ARES_EXECUTION_MODE", "ssm").lower()
+# Cached execution mode (lazy-detected)
+_execution_mode: str | None = None
+
+
+def _detect_execution_mode() -> str:
+    """
+    Auto-detect the correct execution mode based on environment.
+
+    Detection logic:
+    1. If ARES_EXECUTION_MODE is explicitly set, use it
+    2. If in a Kubernetes pod (service account exists):
+       a. If ARES_ROLE is set (worker pod), use "local"
+       b. Otherwise (orchestrator pod), use "k8s"
+    3. Default to "ssm" for local development
+
+    Returns:
+        One of: "ssm", "k8s", "local"
+    """
+    # Explicit override takes precedence
+    explicit = os.environ.get("ARES_EXECUTION_MODE", "").lower()
+    if explicit in ("ssm", "k8s", "local"):
+        logger.debug(f"Using explicit execution mode: {explicit}")
+        return explicit
+
+    # Check if we're in Kubernetes
+    k8s_sa_path = "/var/run/secrets/kubernetes.io/serviceaccount"
+    if os.path.exists(k8s_sa_path):
+        # In K8s - are we a worker or orchestrator?
+        role = os.environ.get("ARES_ROLE", "")
+        worker_roles = {"enum", "cracker", "acl", "privesc", "lateral", "poisoning", "atomic"}
+
+        if role.lower() in worker_roles:
+            logger.info(f"Detected K8s worker pod (role={role}), using local execution")
+            return "local"
+        logger.info("Detected K8s orchestrator pod, using k8s execution")
+        return "k8s"
+
+    # Not in K8s - default to SSM
+    logger.debug("Not in Kubernetes, using SSM execution (default)")
+    return "ssm"
+
+
+def get_execution_mode() -> str:
+    """Get the current execution mode (cached after first call)."""
+    global _execution_mode
+    if _execution_mode is None:
+        _execution_mode = _detect_execution_mode()
+    return _execution_mode
 
 
 class SSOTokenExpiredError(Exception):
@@ -509,20 +555,21 @@ def get_executor() -> SSMExecutor | K8sExecutor | LocalExecutor:
     """Get or create the global executor instance.
 
     Returns:
-        - K8sExecutor when ARES_EXECUTION_MODE=k8s (kubectl exec to enum pod)
-        - LocalExecutor when ARES_EXECUTION_MODE=local (subprocess in pod)
-        - SSMExecutor otherwise (AWS SSM for EC2)
+        - K8sExecutor when in K8s orchestrator mode (Redis task queue)
+        - LocalExecutor when in K8s worker mode (subprocess in pod)
+        - SSMExecutor for local development (AWS SSM)
     """
     global _executor
     if _executor is None:
-        if EXECUTION_MODE == "k8s":
-            logger.info("Using K8s executor (kubectl exec to enum pod)")
+        mode = get_execution_mode()
+        if mode == "k8s":
+            logger.info("Using K8s executor (Redis task queue)")
             _executor = K8sExecutor()
-        elif EXECUTION_MODE == "local":
-            logger.info("Using local executor (subprocess)")
+        elif mode == "local":
+            logger.info("Using local executor (subprocess in pod)")
             _executor = LocalExecutor()
         else:
-            logger.info("Using SSM executor (EC2)")
+            logger.info("Using SSM executor (AWS Systems Manager)")
             _executor = SSMExecutor()
     return _executor
 
@@ -533,7 +580,7 @@ def validate_sso_credentials(profile: str = "lab") -> bool:
     Call this at the start of an operation to fail fast if credentials
     are invalid, rather than failing mid-operation.
 
-    Skipped when ARES_EXECUTION_MODE=k8s or local.
+    Skipped when execution mode is k8s or local.
 
     Args:
         profile: AWS profile name to validate
@@ -544,7 +591,7 @@ def validate_sso_credentials(profile: str = "lab") -> bool:
     Raises:
         SSOTokenExpiredError: If SSO token is expired or invalid
     """
-    if EXECUTION_MODE in ("k8s", "local"):
+    if get_execution_mode() in ("k8s", "local"):
         return True
 
     try:
@@ -574,13 +621,15 @@ def validate_sso_credentials(profile: str = "lab") -> bool:
 
 
 def reset_executor() -> None:
-    """Reset the global executor instance.
+    """Reset the global executor instance and execution mode cache.
 
-    Call this after SSO token refresh to force re-authentication.
+    Call this after SSO token refresh to force re-authentication,
+    or to re-detect execution mode.
     """
-    global _executor
+    global _executor, _execution_mode
     _executor = None
-    logger.info("SSM executor reset - will re-authenticate on next use")
+    _execution_mode = None
+    logger.info("Executor reset - will re-detect mode on next use")
 
 
 def run_remote(

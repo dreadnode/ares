@@ -27,6 +27,7 @@ from ares.core.models import (
     Target,
 )
 from ares.core.recovery import OperationRecoveryManager
+from ares.core.task_queue import RedisTaskQueue
 from ares.core.workflows import exploitation_workflow
 from ares.tools.red.network import (
     BloodHoundTools,
@@ -36,6 +37,50 @@ from ares.tools.red.network import (
     RedTeamReportingTools,
 )
 from ares.tools.red.orchestrator import OrchestratorTools
+
+
+async def _wait_for_required_workers(
+    dispatcher: RedTeamDispatcher,
+    required_roles: list[str],
+    timeout: float = 120.0,
+) -> bool:
+    """
+    Wait for required worker agents to come online.
+
+    Args:
+        dispatcher: The dispatcher instance
+        required_roles: List of roles that must be online (e.g., ["enum"])
+        timeout: Maximum time to wait in seconds
+
+    Returns:
+        True if all required workers came online, False if timeout
+    """
+    import time
+
+    start = time.time()
+
+    logger.info(f"Waiting for required workers: {required_roles}")
+
+    while time.time() - start < timeout:
+        status = dispatcher.get_agent_status()
+        online_roles = {
+            info["role"] for name, info in status.items() if info["status"] != "offline"
+        }
+
+        missing = set(required_roles) - online_roles
+        if not missing:
+            logger.success(f"All required workers online: {required_roles}")
+            return True
+
+        elapsed = time.time() - start
+        logger.debug(f"Waiting for workers: {missing} (elapsed: {elapsed:.0f}s)")
+        await asyncio.sleep(5)
+
+    logger.error(
+        f"Timeout waiting for workers after {timeout}s. "
+        f"Missing: {set(required_roles) - online_roles}"
+    )
+    return False
 
 
 @dn.tool
@@ -103,6 +148,17 @@ async def run_multi_agent_operation(
     dispatcher = RedTeamDispatcher(redis_url=redis_url)
     await dispatcher.start(operation_id)
 
+    # Acquire exclusive operation lock
+    task_queue = RedisTaskQueue(redis_url)
+    await task_queue.connect()
+
+    if not await task_queue.acquire_operation_lock(operation_id):
+        await task_queue.disconnect()
+        raise RuntimeError(
+            f"Operation {operation_id} is already running by another orchestrator. "
+            "Use a different operation_id or wait for the existing operation to complete."
+        )
+
     recovery = OperationRecoveryManager(
         redis_url=redis_url,
         checkpoint_interval=checkpoint_interval,
@@ -140,13 +196,19 @@ async def run_multi_agent_operation(
     for agent_info in agents.values():
         await dispatcher.register(agent_info)
 
+    # Wait for required workers before starting
+    if not await _wait_for_required_workers(dispatcher, ["enum"], timeout=120.0):
+        raise RuntimeError(
+            "Required workers (enum) did not come online within 120 seconds. "
+            "Ensure worker pods are deployed and running."
+        )
+
     # Start background tasks
-    # NOTE: health_monitor disabled until worker pods are actually deployed
-    # It just spams "Offline agents detected" since workers don't heartbeat yet
     tasks = [
         asyncio.create_task(recovery.start_periodic_checkpoint(dispatcher), name="checkpoint"),
-        # asyncio.create_task(_monitor_agent_health(dispatcher), name="health_monitor"),
+        asyncio.create_task(_monitor_agent_health(dispatcher), name="health_monitor"),
         asyncio.create_task(exploitation_workflow(dispatcher), name="exploitation_workflow"),
+        asyncio.create_task(_extend_operation_lock(task_queue, operation_id), name="lock_extender"),
     ]
 
     # Build initial prompt for orchestrator
@@ -173,7 +235,7 @@ async def run_multi_agent_operation(
                 model=model,
                 operation_id=operation_id,
                 target_domain=target_domain,
-                target_ips=target_ips,
+                target_ips=target_ips,  # type: ignore[arg-type]
                 max_steps=max_steps,
             )
 
@@ -218,6 +280,10 @@ async def run_multi_agent_operation(
                 await task
             except asyncio.CancelledError:
                 pass
+
+        # Release operation lock
+        await task_queue.release_operation_lock(operation_id)
+        await task_queue.disconnect()
 
         await dispatcher.stop()
         logger.info("Operation cleanup complete")
@@ -294,7 +360,7 @@ async def _create_orchestrator_agent(
         model=model,
         instructions=instructions,
         max_steps=max_steps,
-        tools=tools,
+        tools=tools,  # type: ignore[arg-type]
         hooks=hooks,
         stop_conditions=[
             tool_use("complete_operation"),
@@ -443,6 +509,29 @@ async def _monitor_agent_health(
         except Exception as e:
             logger.error(f"Health monitor error: {e}")
             await asyncio.sleep(check_interval)
+
+
+async def _extend_operation_lock(
+    task_queue: RedisTaskQueue,
+    operation_id: str,
+    interval: float = 600.0,
+) -> None:
+    """
+    Periodically extend the operation lock to prevent expiry during long operations.
+
+    Args:
+        task_queue: The task queue with lock methods
+        operation_id: Operation ID to extend lock for
+        interval: Seconds between lock extensions (default: 10 minutes)
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            success = await task_queue.extend_operation_lock(operation_id)
+            if not success:
+                logger.warning(f"Failed to extend lock for operation {operation_id}")
+        except Exception as e:
+            logger.error(f"Error extending operation lock: {e}")
 
 
 async def _wait_for_completion(

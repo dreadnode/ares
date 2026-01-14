@@ -1,0 +1,397 @@
+---
+# Remote development tasks - sync code to running K8s pods
+version: "3"
+
+vars:
+  INFO: '\033[0;34m[INFO]\033[0m'
+  SUCCESS: '\033[0;32m[SUCCESS]\033[0m'
+  ERROR: '\033[0;31m[ERROR]\033[0m'
+  WARN: '\033[1;33m[WARN]\033[0m'
+  # Defaults
+  NAMESPACE: '{{.NAMESPACE | default "attack-simulation"}}'
+  ORCH_CONTAINER: '{{.ORCH_CONTAINER | default "orchestrator"}}'
+  WORKER_CONTAINER: '{{.WORKER_CONTAINER | default "worker"}}'
+  SITE_PACKAGES: '/usr/local/lib/python3.12/site-packages'
+
+tasks:
+  # ============================================================================
+  # HOT RELOAD: Watch and Sync
+  # ============================================================================
+  hot:
+    desc: "Watch for code changes and auto-sync to pods"
+    silent: true
+    vars:
+      WATCH_DIR: '{{.WATCH_DIR | default "src/ares"}}'
+    preconditions:
+      - sh: command -v fswatch >/dev/null 2>&1
+        msg: "fswatch is required. Install with: brew install fswatch"
+      - sh: command -v kubectl >/dev/null 2>&1
+        msg: "kubectl is required"
+    cmds:
+      - |
+        echo -e "{{.INFO}} Validating environment..."
+
+        # Check kubectl connectivity
+        if ! kubectl cluster-info &> /dev/null; then
+          echo -e "{{.ERROR}} Cannot connect to Kubernetes cluster"
+          exit 1
+        fi
+
+        # Check if ares pods exist
+        POD_COUNT=$(kubectl get pods -n {{.NAMESPACE}} \
+          -l ares.dreadnode.io/component=red-team \
+          --field-selector=status.phase=Running \
+          -o json 2>/dev/null | jq '.items | length')
+
+        if [ "$POD_COUNT" = "0" ] || [ -z "$POD_COUNT" ]; then
+          echo -e "{{.ERROR}} No running ares pods found in namespace {{.NAMESPACE}}"
+          echo -e "{{.INFO}} Check with: kubectl get pods -n {{.NAMESPACE}}"
+          exit 1
+        fi
+
+        echo -e "{{.SUCCESS}} Found $POD_COUNT running agent pod(s)"
+
+      - |
+        echo ""
+        echo -e "{{.INFO}} Starting hot-reload development"
+        echo -e "{{.INFO}} Namespace: {{.NAMESPACE}}"
+        echo -e "{{.INFO}} Watching: {{.WATCH_DIR}}/**/*.py"
+        echo ""
+        echo -e "{{.SUCCESS}} File sync active! Edit files and save to trigger sync."
+        echo -e "{{.INFO}} Press Ctrl+C to stop"
+        echo ""
+
+        # Watch for changes and sync
+        fswatch -r -e ".*" -i "\\.py$" "{{.WATCH_DIR}}" | while read -r changed_file; do
+          # Extract relative path from src/ares/
+          relative_path="${changed_file#*src/ares/}"
+
+          echo -e "{{.INFO}} [$(date +%H:%M:%S)] Detected: $relative_path"
+
+          # Get all running pods and sync to each
+          PODS=$(kubectl get pods -n {{.NAMESPACE}} \
+            -l ares.dreadnode.io/component=red-team \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[*].metadata.name}')
+
+          # Also get orchestrator
+          ORCH_POD=$(kubectl get pods -n {{.NAMESPACE}} \
+            -l app.kubernetes.io/name=ares-orchestrator \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+          # Sync to worker pods
+          for pod in $PODS; do
+            if kubectl cp "$changed_file" "$pod:{{.SITE_PACKAGES}}/ares/$relative_path" \
+                -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
+              echo -e "{{.SUCCESS}}   -> $pod (worker)"
+            elif kubectl cp "$changed_file" "$pod:{{.SITE_PACKAGES}}/ares/$relative_path" \
+                -n {{.NAMESPACE}} 2>/dev/null; then
+              echo -e "{{.SUCCESS}}   -> $pod"
+            else
+              echo -e "{{.WARN}}   x $pod (failed)"
+            fi
+          done
+
+          # Sync to orchestrator separately (different container name)
+          if [ -n "$ORCH_POD" ]; then
+            if kubectl cp "$changed_file" "$ORCH_POD:{{.SITE_PACKAGES}}/ares/$relative_path" \
+                -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
+              echo -e "{{.SUCCESS}}   -> $ORCH_POD (orchestrator)"
+            else
+              echo -e "{{.WARN}}   x $ORCH_POD (failed)"
+            fi
+          fi
+          echo ""
+        done
+
+  # ============================================================================
+  # SYNC: Copy files to pods
+  # ============================================================================
+  sync:
+    desc: "Sync local code to pods (usage: task remote:sync [FILES=src/ares/core/worker.py])"
+    silent: true
+    vars:
+      FILES: '{{.FILES | default ""}}'
+    cmds:
+      - |
+        echo -e "{{.INFO}} Syncing code to pods in {{.NAMESPACE}}"
+
+        # Get all target pods
+        PODS=$(kubectl get pods -n {{.NAMESPACE}} \
+          -l ares.dreadnode.io/component=red-team \
+          --field-selector=status.phase=Running \
+          -o jsonpath='{.items[*].metadata.name}')
+
+        ORCH_POD=$(kubectl get pods -n {{.NAMESPACE}} \
+          -l app.kubernetes.io/name=ares-orchestrator \
+          --field-selector=status.phase=Running \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+        if [ -z "$PODS" ] && [ -z "$ORCH_POD" ]; then
+          echo -e "{{.ERROR}} No running pods found"
+          exit 1
+        fi
+
+        # Determine files to sync
+        if [ -n "{{.FILES}}" ]; then
+          FILES_TO_SYNC="{{.FILES}}"
+        else
+          # Default: sync all ares source files
+          FILES_TO_SYNC=$(find src/ares -name "*.py" -type f)
+        fi
+
+        for f in $FILES_TO_SYNC; do
+          if [ ! -f "$f" ]; then
+            echo -e "{{.WARN}} Skipping (not found): $f"
+            continue
+          fi
+
+          relative_path="${f#src/ares/}"
+          echo -e "{{.INFO}} $relative_path"
+
+          # Sync to worker pods
+          for pod in $PODS; do
+            if kubectl cp "$f" "$pod:{{.SITE_PACKAGES}}/ares/$relative_path" \
+                -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
+              echo -e "{{.SUCCESS}}   -> $pod (worker)"
+            elif kubectl cp "$f" "$pod:{{.SITE_PACKAGES}}/ares/$relative_path" \
+                -n {{.NAMESPACE}} 2>/dev/null; then
+              echo -e "{{.SUCCESS}}   -> $pod"
+            else
+              echo -e "{{.WARN}}   x $pod"
+            fi
+          done
+
+          # Sync to orchestrator
+          if [ -n "$ORCH_POD" ]; then
+            if kubectl cp "$f" "$ORCH_POD:{{.SITE_PACKAGES}}/ares/$relative_path" \
+                -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
+              echo -e "{{.SUCCESS}}   -> $ORCH_POD (orchestrator)"
+            else
+              echo -e "{{.WARN}}   x $ORCH_POD"
+            fi
+          fi
+        done
+
+        echo ""
+        echo -e "{{.SUCCESS}} Sync complete"
+
+  # ============================================================================
+  # SYNC:BRANCH: Sync only files changed on current branch
+  # ============================================================================
+  sync:branch:
+    desc: "Sync only files changed on current branch (vs main)"
+    silent: true
+    vars:
+      BASE_BRANCH: '{{.BASE_BRANCH | default "main"}}'
+    cmds:
+      - |
+        echo -e "{{.INFO}} Finding files changed on branch vs {{.BASE_BRANCH}}..."
+
+        # Get changed Python files in src/ares
+        CHANGED_FILES=$(git diff --name-only {{.BASE_BRANCH}}...HEAD -- 'src/ares/*.py' 'src/ares/**/*.py' 2>/dev/null | grep -E '\.py$' || true)
+
+        # Also include uncommitted changes (staged + unstaged)
+        UNCOMMITTED=$(git diff --name-only HEAD -- 'src/ares/*.py' 'src/ares/**/*.py' 2>/dev/null | grep -E '\.py$' || true)
+        STAGED=$(git diff --name-only --cached -- 'src/ares/*.py' 'src/ares/**/*.py' 2>/dev/null | grep -E '\.py$' || true)
+
+        # Combine and dedupe
+        ALL_CHANGED=$(echo -e "$CHANGED_FILES\n$UNCOMMITTED\n$STAGED" | grep -v '^$' | sort -u)
+
+        if [ -z "$ALL_CHANGED" ]; then
+          echo -e "{{.WARN}} No Python files changed in src/ares/ on this branch"
+          exit 0
+        fi
+
+        FILE_COUNT=$(echo "$ALL_CHANGED" | wc -l | tr -d ' ')
+        echo -e "{{.SUCCESS}} Found $FILE_COUNT changed file(s)"
+        echo ""
+
+        # Get all target pods
+        PODS=$(kubectl get pods -n {{.NAMESPACE}} \
+          -l ares.dreadnode.io/component=red-team \
+          --field-selector=status.phase=Running \
+          -o jsonpath='{.items[*].metadata.name}')
+
+        ORCH_POD=$(kubectl get pods -n {{.NAMESPACE}} \
+          -l app.kubernetes.io/name=ares-orchestrator \
+          --field-selector=status.phase=Running \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+        if [ -z "$PODS" ] && [ -z "$ORCH_POD" ]; then
+          echo -e "{{.ERROR}} No running pods found"
+          exit 1
+        fi
+
+        # Sync each changed file
+        for f in $ALL_CHANGED; do
+          if [ ! -f "$f" ]; then
+            echo -e "{{.WARN}} Skipping (deleted/not found): $f"
+            continue
+          fi
+
+          relative_path="${f#src/ares/}"
+          echo -e "{{.INFO}} $relative_path"
+
+          # Sync to worker pods
+          for pod in $PODS; do
+            if kubectl cp "$f" "$pod:{{.SITE_PACKAGES}}/ares/$relative_path" \
+                -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
+              echo -e "{{.SUCCESS}}   -> $pod (worker)"
+            elif kubectl cp "$f" "$pod:{{.SITE_PACKAGES}}/ares/$relative_path" \
+                -n {{.NAMESPACE}} 2>/dev/null; then
+              echo -e "{{.SUCCESS}}   -> $pod"
+            else
+              echo -e "{{.WARN}}   x $pod"
+            fi
+          done
+
+          # Sync to orchestrator
+          if [ -n "$ORCH_POD" ]; then
+            if kubectl cp "$f" "$ORCH_POD:{{.SITE_PACKAGES}}/ares/$relative_path" \
+                -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
+              echo -e "{{.SUCCESS}}   -> $ORCH_POD (orchestrator)"
+            else
+              echo -e "{{.WARN}}   x $ORCH_POD"
+            fi
+          fi
+        done
+
+        echo ""
+        echo -e "{{.SUCCESS}} Branch sync complete ($FILE_COUNT files)"
+
+  # ============================================================================
+  # ROLLOUT: Restart pods
+  # ============================================================================
+  rollout:
+    desc: "Restart pods to pick up code changes"
+    silent: true
+    cmds:
+      - |
+        echo -e "{{.INFO}} Restarting deployments in {{.NAMESPACE}}..."
+
+        kubectl rollout restart deployment -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team 2>/dev/null || true
+
+        echo -e "{{.SUCCESS}} Rollout initiated"
+        echo -e "{{.INFO}} Checking status..."
+
+        kubectl rollout status deployment -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team --timeout=60s 2>/dev/null || true
+
+        echo ""
+        echo -e "{{.SUCCESS}} Pods restarted"
+
+  # ============================================================================
+  # STATUS: Check pod status
+  # ============================================================================
+  status:
+    desc: "Show remote pod status"
+    silent: true
+    cmds:
+      - |
+        echo ""
+        echo -e "{{.INFO}} Pod Status in {{.NAMESPACE}}"
+        echo "========================================"
+        kubectl get pods -n {{.NAMESPACE}} -o wide 2>/dev/null || echo -e "{{.ERROR}} Failed to get pods"
+
+        echo ""
+        echo -e "{{.INFO}} Deployments"
+        echo "========================================"
+        kubectl get deployments -n {{.NAMESPACE}} 2>/dev/null || echo -e "{{.ERROR}} Failed to get deployments"
+
+  # ============================================================================
+  # LOGS: Tail pod logs
+  # ============================================================================
+  logs:
+    desc: "Tail logs from pods (usage: task remote:logs [ROLE=enum] [FOLLOW=true])"
+    silent: true
+    vars:
+      ROLE: '{{.ROLE | default ""}}'
+      FOLLOW: '{{.FOLLOW | default "true"}}'
+      LINES: '{{.LINES | default "100"}}'
+    cmds:
+      - |
+        if [ -n "{{.ROLE}}" ]; then
+          SELECTOR="-l ares.dreadnode.io/role={{.ROLE}}"
+          echo -e "{{.INFO}} Logs from {{.ROLE}} agent:"
+        else
+          SELECTOR="-l ares.dreadnode.io/component=red-team"
+          echo -e "{{.INFO}} Logs from all agents:"
+        fi
+        echo "========================================"
+
+        if [ "{{.FOLLOW}}" = "true" ]; then
+          kubectl logs -n {{.NAMESPACE}} $SELECTOR -c {{.WORKER_CONTAINER}} --tail={{.LINES}} -f --prefix=true 2>/dev/null || \
+            kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} -f --prefix=true
+        else
+          kubectl logs -n {{.NAMESPACE}} $SELECTOR -c {{.WORKER_CONTAINER}} --tail={{.LINES}} --prefix=true 2>/dev/null || \
+            kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} --prefix=true
+        fi
+
+  logs:orchestrator:
+    desc: "Tail orchestrator logs"
+    silent: true
+    vars:
+      FOLLOW: '{{.FOLLOW | default "true"}}'
+      LINES: '{{.LINES | default "100"}}'
+    cmds:
+      - |
+        echo -e "{{.INFO}} Orchestrator logs:"
+        echo "========================================"
+
+        if [ "{{.FOLLOW}}" = "true" ]; then
+          kubectl logs -n {{.NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -c {{.ORCH_CONTAINER}} --tail={{.LINES}} -f
+        else
+          kubectl logs -n {{.NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -c {{.ORCH_CONTAINER}} --tail={{.LINES}}
+        fi
+
+  # ============================================================================
+  # EXEC: Run commands in pods
+  # ============================================================================
+  exec:
+    desc: "Execute command in pod (usage: task remote:exec ROLE=enum CMD=bash)"
+    silent: true
+    vars:
+      ROLE: '{{.ROLE | default "enum"}}'
+      CMD: '{{.CMD | default "bash"}}'
+    cmds:
+      - |
+        POD=$(kubectl get pods -n {{.NAMESPACE}} -l ares.dreadnode.io/role={{.ROLE}} -o name 2>/dev/null | head -1)
+
+        if [ -z "$POD" ]; then
+          echo -e "{{.ERROR}} No pod found with role: {{.ROLE}}"
+          echo -e "{{.INFO}} Available roles:"
+          kubectl get pods -n {{.NAMESPACE}} -o json 2>/dev/null | \
+            jq -r '.items[].metadata.labels["ares.dreadnode.io/role"] // empty' | sort -u | sed 's/^/  - /'
+          exit 1
+        fi
+
+        echo -e "{{.INFO}} Executing in $POD..."
+        kubectl exec -it -n {{.NAMESPACE}} $POD -c {{.WORKER_CONTAINER}} -- {{.CMD}} 2>/dev/null || \
+          kubectl exec -it -n {{.NAMESPACE}} $POD -- {{.CMD}}
+
+  # ============================================================================
+  # VERIFY: Check synced code
+  # ============================================================================
+  verify:
+    desc: "Verify synced code in pod (usage: task remote:verify ROLE=enum FILE=core/worker.py)"
+    silent: true
+    vars:
+      ROLE: '{{.ROLE | default "enum"}}'
+      FILE: '{{.FILE | default "core/worker.py"}}'
+    cmds:
+      - |
+        echo -e "{{.INFO}} Verifying {{.FILE}} in {{.ROLE}} agent..."
+        echo "========================================"
+
+        POD=$(kubectl get pods -n {{.NAMESPACE}} -l ares.dreadnode.io/role={{.ROLE}} -o name 2>/dev/null | head -1)
+
+        if [ -z "$POD" ]; then
+          echo -e "{{.ERROR}} No pod found with role: {{.ROLE}}"
+          exit 1
+        fi
+
+        kubectl exec -n {{.NAMESPACE}} $POD -c {{.WORKER_CONTAINER}} -- \
+          head -50 {{.SITE_PACKAGES}}/ares/{{.FILE}} 2>/dev/null || \
+          kubectl exec -n {{.NAMESPACE}} $POD -- \
+            head -50 {{.SITE_PACKAGES}}/ares/{{.FILE}}

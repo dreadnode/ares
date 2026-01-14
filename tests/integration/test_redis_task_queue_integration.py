@@ -754,8 +754,8 @@ class TestStatePersistence:
             result={},
         )
 
-        # Verify expire was called with correct TTL
-        mock_redis_client.expire.assert_called_with("ares:results:test_task", 3600)
+        # Verify expire was called with correct TTL (24 hours)
+        mock_redis_client.expire.assert_called_with("ares:results:test_task", 86400)
 
 
 # ============================================================================

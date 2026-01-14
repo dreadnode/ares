@@ -388,7 +388,7 @@ class TestRedisTaskQueueResults:
         mock_redis_client.lpush.assert_called_once()
         mock_redis_client.expire.assert_called_once_with(
             "ares:results:task_123",
-            3600,  # RESULT_TTL
+            86400,  # RESULT_TTL (24 hours)
         )
 
     @pytest.mark.asyncio
