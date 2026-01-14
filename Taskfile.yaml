@@ -8,6 +8,9 @@ includes:
   pre-commit: "https://raw.githubusercontent.com/CowDogMoo/taskfile-templates/main/pre-commit/Taskfile.yaml"
   renovate: "https://raw.githubusercontent.com/CowDogMoo/taskfile-templates/main/renovate/Taskfile.yaml"
   secrets: "https://raw.githubusercontent.com/CowDogMoo/taskfile-templates/main/secrets/Taskfile.yaml"  # pragma: allowlist secret
+  remote:
+    taskfile: .taskfiles/remote/Taskfile.yaml
+    optional: true
 
 vars:
   API_DIR: "."
