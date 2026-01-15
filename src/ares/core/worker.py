@@ -379,67 +379,42 @@ class RedisWorkerAgent:
         """Find the PID of the tools sidecar container.
 
         With shareProcessNamespace: true, we can see all processes in the pod.
-        The tools container runs 'sleep infinity' as its main process.
+        The tools container is identified by the ARES_CONTAINER_TYPE=tools
+        environment variable, which is the idiomatic way to identify containers
+        in a shared process namespace.
+
+        See: https://kubernetes.io/docs/tasks/configure-pod-container/share-process-namespace/
 
         Returns:
             PID of tools container if found, None otherwise.
         """
-        import subprocess
         from pathlib import Path
 
-        # Method 1: Try using /proc filesystem directly (most reliable)
+        # Identify the tools container by its ARES_CONTAINER_TYPE=tools env var.
+        # This is the idiomatic approach for container identification in K8s pods
+        # with shareProcessNamespace: true. We scan /proc/[pid]/environ for each
+        # process to find the one with our marker environment variable.
         try:
             for pid_entry in Path("/proc").iterdir():
                 pid_dir = pid_entry.name
                 if not pid_dir.isdigit():
                     continue
 
-                cmdline_path = pid_entry / "cmdline"
+                environ_path = pid_entry / "environ"
                 try:
-                    with open(cmdline_path) as f:
-                        cmdline = f.read().replace("\x00", " ")
-                        if "sleep infinity" in cmdline or "sleep infinit" in cmdline:
+                    with open(environ_path, "rb") as f:
+                        # environ is null-byte separated key=value pairs
+                        environ_data = f.read()
+                        # Check for our marker environment variable
+                        if b"ARES_CONTAINER_TYPE=tools" in environ_data:
                             pid = int(pid_dir)
-                            logger.debug(f"Found tools container at PID {pid} via /proc")
+                            logger.debug(f"Found tools container at PID {pid} via /proc/environ")
                             return pid
                 except (FileNotFoundError, PermissionError, ProcessLookupError):
                     # Process died or no permission - skip
                     continue
         except Exception as e:
-            logger.debug(f"Failed to scan /proc: {e}, falling back to ps")
-
-        # Method 2: Fallback to ps aux
-        try:
-            result = subprocess.run(  # nosec B607
-                ["ps", "aux"],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
-            )
-
-            lines = result.stdout.splitlines()
-            for line in lines:
-                # Match "sleep infinity" or truncated "sleep infinit" from ps output
-                if ("sleep infinity" in line or "sleep infinit" in line) and "grep" not in line:
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        try:
-                            pid = int(parts[1])
-                            logger.debug(f"Found tools container at PID {pid} via ps")
-                            return pid
-                        except ValueError:
-                            continue
-
-            # Log what we saw if we didn't find the tools container
-            logger.debug(
-                f"ps aux output ({len(lines)} lines, {len(result.stdout)} bytes): "
-                f"First 500 chars: {result.stdout[:500]}"
-            )
-        except subprocess.TimeoutExpired:
-            logger.warning("ps aux timed out")
-        except Exception as e:
-            logger.warning(f"Failed to run ps aux: {e}")
+            logger.debug(f"Failed to scan /proc for tools container: {e}")
 
         return None
 
@@ -448,7 +423,7 @@ class RedisWorkerAgent:
 
         Checks:
         1. shareProcessNamespace: true - can see other container processes
-        2. Tools container running with 'sleep infinity'
+        2. Tools container identifiable via ARES_CONTAINER_TYPE=tools env var
         3. CAP_SYS_ADMIN capability - can use nsenter
 
         Raises:
@@ -488,7 +463,7 @@ class RedisWorkerAgent:
         if not tools_pid:
             errors.append(
                 "Cannot find tools container PID. Ensure the tools container "
-                "is running 'sleep infinity' as its command."
+                "has ARES_CONTAINER_TYPE=tools environment variable set."
             )
         else:
             self._tools_pid = tools_pid
@@ -551,7 +526,7 @@ class RedisWorkerAgent:
             if not self._tools_pid:
                 error_msg = (
                     "Cannot find tools container. The pod must have shareProcessNamespace: true "
-                    "and the tools container must run 'sleep infinity'."
+                    "and the tools container must have ARES_CONTAINER_TYPE=tools env var."
                 )
                 logger.error(error_msg)
                 await self.task_queue.send_result(

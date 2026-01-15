@@ -767,8 +767,8 @@ class TestFindToolsContainerPid:
     """Tests for _find_tools_container_pid method."""
 
     @pytest.mark.asyncio
-    async def test_find_tools_container_pid_success(self, task_queue, mock_agent):
-        """Test successful discovery of tools container PID."""
+    async def test_find_tools_container_pid_success(self, task_queue, mock_agent, tmp_path):
+        """Test successful discovery of tools container PID via /proc/[pid]/environ."""
         worker = RedisWorkerAgent(
             role=AgentRole.CRACKER,
             task_queue=task_queue,
@@ -777,23 +777,34 @@ class TestFindToolsContainerPid:
             pod_name="cracker-0",
         )
 
-        # Mock ps aux output with sleep infinity process
-        mock_ps_output = """USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
-root         1  0.0  0.0   4240   728 ?        Ss   10:00   0:00 /pause
-root        15  0.0  0.0   2392   752 ?        Ss   10:00   0:00 sleep infinity
-root       100  0.5  1.0 123456 12345 ?        Sl   10:00   0:05 python worker.py"""
+        proc_dir = tmp_path / "proc"
+        proc_dir.mkdir()
 
-        mock_result = MagicMock()
-        mock_result.stdout = mock_ps_output
-        mock_result.returncode = 0
+        (proc_dir / "1").mkdir()
+        (proc_dir / "15").mkdir()
+        (proc_dir / "100").mkdir()
+        (proc_dir / "self").mkdir()
 
-        with patch("subprocess.run", return_value=mock_result):
+        (proc_dir / "1" / "environ").write_bytes(b"PATH=/usr/bin\x00HOME=/root\x00")
+        (proc_dir / "15" / "environ").write_bytes(
+            b"ARES_CONTAINER_TYPE=tools\x00AGENT_ROLE=enum\x00PATH=/usr/bin\x00"  # pragma: allowlist secret
+        )
+        (proc_dir / "100" / "environ").write_bytes(b"ARES_ROLE=worker\x00PATH=/usr/bin\x00")
+
+        def mock_path(path_str):
+            if path_str == "/proc":
+                return proc_dir
+            from pathlib import Path
+
+            return Path(path_str)
+
+        with patch("pathlib.Path", side_effect=mock_path):
             pid = worker._find_tools_container_pid()
 
         assert pid == 15
 
     @pytest.mark.asyncio
-    async def test_find_tools_container_pid_not_found(self, task_queue, mock_agent):
+    async def test_find_tools_container_pid_not_found(self, task_queue, mock_agent, tmp_path):
         """Test when tools container is not running."""
         worker = RedisWorkerAgent(
             role=AgentRole.CRACKER,
@@ -803,23 +814,32 @@ root       100  0.5  1.0 123456 12345 ?        Sl   10:00   0:05 python worker.p
             pod_name="cracker-0",
         )
 
-        # Mock ps aux output without sleep infinity process
-        mock_ps_output = """USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
-root         1  0.0  0.0   4240   728 ?        Ss   10:00   0:00 /pause
-root       100  0.5  1.0 123456 12345 ?        Sl   10:00   0:05 python worker.py"""
+        proc_dir = tmp_path / "proc"
+        proc_dir.mkdir()
 
-        mock_result = MagicMock()
-        mock_result.stdout = mock_ps_output
-        mock_result.returncode = 0
+        (proc_dir / "1").mkdir()
+        (proc_dir / "100").mkdir()
 
-        with patch("subprocess.run", return_value=mock_result):
+        (proc_dir / "1" / "environ").write_bytes(b"PATH=/usr/bin\x00HOME=/root\x00")
+        (proc_dir / "100" / "environ").write_bytes(b"ARES_ROLE=worker\x00PATH=/usr/bin\x00")
+
+        def mock_path(path_str):
+            if path_str == "/proc":
+                return proc_dir
+            from pathlib import Path
+
+            return Path(path_str)
+
+        with patch("pathlib.Path", side_effect=mock_path):
             pid = worker._find_tools_container_pid()
 
         assert pid is None
 
     @pytest.mark.asyncio
-    async def test_find_tools_container_pid_excludes_grep(self, task_queue, mock_agent):
-        """Test that grep processes are excluded from results."""
+    async def test_find_tools_container_pid_handles_permission_error(
+        self, task_queue, mock_agent, tmp_path
+    ):
+        """Test graceful handling of permission errors when reading /proc."""
         worker = RedisWorkerAgent(
             role=AgentRole.CRACKER,
             task_queue=task_queue,
@@ -828,25 +848,34 @@ root       100  0.5  1.0 123456 12345 ?        Sl   10:00   0:05 python worker.p
             pod_name="cracker-0",
         )
 
-        # Mock ps aux output with grep sleep infinity (should be excluded)
-        mock_ps_output = """USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
-root         1  0.0  0.0   4240   728 ?        Ss   10:00   0:00 /pause
-root        50  0.0  0.0   2392   752 ?        S    10:00   0:00 grep sleep infinity
-root        15  0.0  0.0   2392   752 ?        Ss   10:00   0:00 sleep infinity"""
+        proc_dir = tmp_path / "proc"
+        proc_dir.mkdir()
 
-        mock_result = MagicMock()
-        mock_result.stdout = mock_ps_output
-        mock_result.returncode = 0
+        (proc_dir / "1").mkdir()
+        (proc_dir / "15").mkdir()
 
-        with patch("subprocess.run", return_value=mock_result):
-            pid = worker._find_tools_container_pid()
+        (proc_dir / "1" / "environ").write_bytes(b"PATH=/usr/bin\x00")
+        (proc_dir / "15" / "environ").write_bytes(b"ARES_CONTAINER_TYPE=tools\x00")
+        (proc_dir / "1" / "environ").chmod(0o000)
 
-        # Should return 15 (actual sleep infinity), not 50 (grep)
-        assert pid == 15
+        def mock_path(path_str):
+            if path_str == "/proc":
+                return proc_dir
+            from pathlib import Path
+
+            return Path(path_str)
+
+        try:
+            with patch("pathlib.Path", side_effect=mock_path):
+                pid = worker._find_tools_container_pid()
+
+            assert pid == 15
+        finally:
+            (proc_dir / "1" / "environ").chmod(0o644)
 
     @pytest.mark.asyncio
     async def test_find_tools_container_pid_handles_exception(self, task_queue, mock_agent):
-        """Test graceful handling of subprocess failure."""
+        """Test graceful handling of filesystem scan failure."""
         worker = RedisWorkerAgent(
             role=AgentRole.CRACKER,
             task_queue=task_queue,
@@ -855,14 +884,16 @@ root        15  0.0  0.0   2392   752 ?        Ss   10:00   0:00 sleep infinity"
             pod_name="cracker-0",
         )
 
-        with patch("subprocess.run", side_effect=Exception("ps command failed")):
+        with patch("pathlib.Path", side_effect=Exception("/proc scan failed")):
             pid = worker._find_tools_container_pid()
 
         assert pid is None
 
     @pytest.mark.asyncio
-    async def test_find_tools_container_pid_invalid_pid_format(self, task_queue, mock_agent):
-        """Test handling of malformed PID in ps output."""
+    async def test_find_tools_container_pid_invalid_pid_format(
+        self, task_queue, mock_agent, tmp_path
+    ):
+        """Test handling of non-numeric directory names in /proc."""
         worker = RedisWorkerAgent(
             role=AgentRole.CRACKER,
             task_queue=task_queue,
@@ -871,18 +902,24 @@ root        15  0.0  0.0   2392   752 ?        Ss   10:00   0:00 sleep infinity"
             pod_name="cracker-0",
         )
 
-        # Mock ps aux output with invalid PID format
-        mock_ps_output = """USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
-root       abc  0.0  0.0   2392   752 ?        Ss   10:00   0:00 sleep infinity"""
+        proc_dir = tmp_path / "proc"
+        proc_dir.mkdir()
 
-        mock_result = MagicMock()
-        mock_result.stdout = mock_ps_output
-        mock_result.returncode = 0
+        (proc_dir / "self").mkdir()
+        (proc_dir / "15").mkdir()
+        (proc_dir / "15" / "environ").write_bytes(b"ARES_CONTAINER_TYPE=tools\x00")
 
-        with patch("subprocess.run", return_value=mock_result):
+        def mock_path(path_str):
+            if path_str == "/proc":
+                return proc_dir
+            from pathlib import Path
+
+            return Path(path_str)
+
+        with patch("pathlib.Path", side_effect=mock_path):
             pid = worker._find_tools_container_pid()
 
-        assert pid is None
+        assert pid == 15
 
 
 # ============================================================================
