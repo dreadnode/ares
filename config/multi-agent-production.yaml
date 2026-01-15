@@ -5,7 +5,7 @@
 
 operation:
   name: "ares-multi-agent"
-  namespace: "ares"
+  namespace: "attack-simulation"
   redis_url: "redis://redis.attack-simulation.svc.cluster.local:6379"
   checkpoint_interval: 60  # seconds
 
