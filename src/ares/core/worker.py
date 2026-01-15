@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -33,16 +33,22 @@ if TYPE_CHECKING:
     from dreadnode.agent import Agent
 
 
-async def discover_active_operation(redis_url: str, max_wait: int = 300) -> str | None:
+async def discover_active_operation(  # noqa: PLR0912
+    redis_url: str, max_wait: int = 300, max_operation_age: int = 300
+) -> str | None:
     """
     Discover an active operation from Redis by scanning for operation keys.
 
     Waits up to max_wait seconds for an operation to appear.
-    Returns the most recently checkpointed operation ID.
+    Returns the most recently checkpointed operation ID, only if it was
+    checkpointed within max_operation_age seconds.
 
     Args:
         redis_url: Redis connection URL
         max_wait: Maximum seconds to wait for an operation (default: 300 = 5 minutes)
+        max_operation_age: Maximum age in seconds for an operation to be considered
+            active (default: 300 = 5 minutes). Operations with older checkpoints
+            are ignored to prevent workers from joining stale operations.
 
     Returns:
         Operation ID if found, None otherwise
@@ -61,6 +67,8 @@ async def discover_active_operation(redis_url: str, max_wait: int = 300) -> str 
             client = redis_async.from_url(redis_url)
             await client.ping()
 
+            now = datetime.now(timezone.utc)
+
             # Scan for operation state keys
             operations: list[tuple[str, datetime]] = []
             async for key in client.scan_iter("ares:operation:*:state"):
@@ -75,7 +83,19 @@ async def discover_active_operation(redis_url: str, max_wait: int = 300) -> str 
 
                     if checkpoint_data:
                         checkpoint_time = datetime.fromisoformat(checkpoint_data.decode())
-                        operations.append((op_id, checkpoint_time))
+                        # Ensure checkpoint_time is timezone-aware for comparison
+                        if checkpoint_time.tzinfo is None:
+                            checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
+
+                        # Only consider operations checkpointed within max_operation_age
+                        age_seconds = (now - checkpoint_time).total_seconds()
+                        if age_seconds <= max_operation_age:
+                            operations.append((op_id, checkpoint_time))
+                        else:
+                            logger.debug(
+                                f"Ignoring stale operation {op_id} "
+                                f"(checkpoint age: {age_seconds:.0f}s > {max_operation_age}s)"
+                            )
 
             await client.aclose()
 
