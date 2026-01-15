@@ -394,7 +394,7 @@ async def _create_agent_ensemble(
     agent_configs: list[dict[str, AgentRole | str | set[str]]] = [
         {
             "role": AgentRole.ENUM,
-            "name": "enum-agent",
+            "name": "ares-enum",
             "pod_selector": "ares.dreadnode.io/role=enum",
             "capabilities": {
                 "nmap",
@@ -408,19 +408,19 @@ async def _create_agent_ensemble(
         },
         {
             "role": AgentRole.CRACKER,
-            "name": "cracker-agent",
+            "name": "ares-cracker",
             "pod_selector": "ares.dreadnode.io/role=cracker",
             "capabilities": {"hashcat", "john", "ntlmrelayx"},
         },
         {
             "role": AgentRole.ACL,
-            "name": "acl-agent",
+            "name": "ares-acl",
             "pod_selector": "ares.dreadnode.io/role=acl",
             "capabilities": {"bloodhound", "dacledit", "owneredit"},
         },
         {
             "role": AgentRole.PRIVESC,
-            "name": "privesc-agent",
+            "name": "ares-privesc",
             "pod_selector": "ares.dreadnode.io/role=privesc",
             "capabilities": {
                 "certipy",
@@ -432,7 +432,7 @@ async def _create_agent_ensemble(
         },
         {
             "role": AgentRole.LATERAL,
-            "name": "lateral-agent",
+            "name": "ares-lateral",
             "pod_selector": "ares.dreadnode.io/role=lateral",
             "capabilities": {
                 "psexec",
@@ -445,13 +445,13 @@ async def _create_agent_ensemble(
         },
         {
             "role": AgentRole.POISONING,
-            "name": "poison-agent",
+            "name": "ares-poisoning",
             "pod_selector": "ares.dreadnode.io/role=poison",
             "capabilities": {"responder", "mitm6", "ntlmrelayx"},
         },
         {
             "role": AgentRole.ATOMIC,
-            "name": "atomic-agent",
+            "name": "ares-atomic",
             "pod_selector": "ares.dreadnode.io/role=atomic",
             "capabilities": {"atomic_red_team", "invoke_atomicredteam"},
         },
