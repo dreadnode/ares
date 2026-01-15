@@ -32,8 +32,8 @@ class OperationRecoveryManager:
 
     Usage:
         manager = OperationRecoveryManager(
-            redis_url="redis://redis.attack-simulation.svc.cluster.local:6379",
             k8s_executor=executor,
+            # redis_url defaults to config value from ares.core.config
         )
 
         # Regular checkpoints during operation

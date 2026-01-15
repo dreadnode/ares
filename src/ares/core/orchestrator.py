@@ -15,6 +15,7 @@ from dreadnode.agent import Agent, Thread
 from dreadnode.agent.stop import tool_use
 from loguru import logger
 
+from ares.core.config import get_namespace, get_redis_url
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.factories.red_agents import (
     create_role_hooks,
@@ -118,8 +119,8 @@ async def run_multi_agent_operation(
     target_ips: list[str],
     initial_credential: Credential | None = None,
     resume_from_checkpoint: bool = False,
-    redis_url: str = "redis://redis.attack-simulation.svc.cluster.local:6379",
-    namespace: str = "attack-simulation",
+    redis_url: str | None = None,
+    namespace: str | None = None,
     model: str = "claude-sonnet-4-20250514",
     max_steps: int = 200,
     checkpoint_interval: int = 60,
@@ -133,8 +134,8 @@ async def run_multi_agent_operation(
         target_ips: List of target IPs to scan
         initial_credential: Optional initial credential
         resume_from_checkpoint: Resume from previous checkpoint
-        redis_url: Redis URL for state persistence
-        namespace: Kubernetes namespace
+        redis_url: Redis URL for state persistence (default: derived from config)
+        namespace: Kubernetes namespace (default: from config)
         model: LLM model to use
         max_steps: Maximum agent steps
         checkpoint_interval: Seconds between checkpoints
@@ -142,6 +143,10 @@ async def run_multi_agent_operation(
     Returns:
         Operation results summary
     """
+    # Resolve config defaults
+    redis_url = redis_url or get_redis_url()
+    namespace = namespace or get_namespace()
+
     start_time = datetime.now(timezone.utc)
 
     # Initialize infrastructure
