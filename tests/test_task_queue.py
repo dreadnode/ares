@@ -268,6 +268,130 @@ class TestRedisTaskQueueConnection:
         mock_redis_client.aclose.assert_called_once()
 
 
+class TestRedisTaskQueueConnectionErrorHandling:
+    """Tests for connection error handling in RedisTaskQueue."""
+
+    def test_handle_connection_error_resets_state(self, mock_redis_client):
+        """Test that _handle_connection_error resets connection state."""
+        queue = RedisTaskQueue("redis://localhost:6379")
+        queue._client = mock_redis_client
+        queue._connected = True
+
+        error = Exception("Connection closed")
+        queue._handle_connection_error(error)
+
+        assert queue._connected is False
+        assert queue._client is None
+
+    def test_handle_connection_error_logs_warning(self, mock_redis_client):
+        """Test that _handle_connection_error logs a warning."""
+        queue = RedisTaskQueue("redis://localhost:6379")
+        queue._client = mock_redis_client
+        queue._connected = True
+
+        with patch("ares.core.task_queue.logger") as mock_logger:
+            error = Exception("Connection reset by peer")
+            queue._handle_connection_error(error)
+
+            mock_logger.warning.assert_called_once()
+            call_args = mock_logger.warning.call_args[0][0]
+            assert "Redis connection error" in call_args
+            assert "will retry" in call_args
+
+    @pytest.mark.asyncio
+    async def test_poll_task_connection_error_resets_state(self, task_queue, mock_redis_client):
+        """Test poll_task handles connection errors and resets state."""
+        mock_redis_client.brpop.side_effect = Exception("Connection closed unexpectedly")
+
+        with pytest.raises(Exception, match="Connection closed"):
+            await task_queue.poll_task(role="cracker", timeout=1.0)
+
+        # Connection state should be reset
+        assert task_queue._connected is False
+        assert task_queue._client is None
+
+    @pytest.mark.asyncio
+    async def test_poll_task_connection_timeout_resets_state(self, task_queue, mock_redis_client):
+        """Test poll_task handles timeout errors and resets state."""
+        mock_redis_client.brpop.side_effect = Exception("Connection timeout")
+
+        with pytest.raises(Exception, match="timeout"):
+            await task_queue.poll_task(role="cracker", timeout=1.0)
+
+        assert task_queue._connected is False
+
+    @pytest.mark.asyncio
+    async def test_poll_task_broken_pipe_resets_state(self, task_queue, mock_redis_client):
+        """Test poll_task handles broken pipe errors and resets state."""
+        mock_redis_client.brpop.side_effect = Exception("Broken pipe")
+
+        with pytest.raises(Exception, match="Broken pipe"):
+            await task_queue.poll_task(role="cracker", timeout=1.0)
+
+        assert task_queue._connected is False
+
+    @pytest.mark.asyncio
+    async def test_poll_task_non_connection_error_preserves_state(
+        self, task_queue, mock_redis_client
+    ):
+        """Test poll_task preserves state for non-connection errors."""
+        mock_redis_client.brpop.side_effect = ValueError("Invalid data format")
+
+        with pytest.raises(ValueError, match="Invalid data format"):
+            await task_queue.poll_task(role="cracker", timeout=1.0)
+
+        # Connection state should be preserved for non-connection errors
+        assert task_queue._connected is True
+        assert task_queue._client is not None
+
+    @pytest.mark.asyncio
+    async def test_send_result_connection_error_resets_state(self, task_queue, mock_redis_client):
+        """Test send_result handles connection errors and resets state."""
+        mock_redis_client.lpush.side_effect = Exception("Connection reset by peer")
+
+        with pytest.raises(Exception, match="Connection reset"):
+            await task_queue.send_result(
+                task_id="task_123",
+                success=True,
+                result={"data": "test"},
+            )
+
+        assert task_queue._connected is False
+        assert task_queue._client is None
+
+    @pytest.mark.asyncio
+    async def test_send_result_closed_connection_resets_state(self, task_queue, mock_redis_client):
+        """Test send_result handles closed connection errors."""
+        mock_redis_client.lpush.side_effect = Exception("Connection closed")
+
+        with pytest.raises(Exception, match="closed"):
+            await task_queue.send_result(
+                task_id="task_456",
+                success=False,
+                error="Task failed",
+            )
+
+        assert task_queue._connected is False
+
+    @pytest.mark.asyncio
+    async def test_send_result_non_connection_error_preserves_state(
+        self, task_queue, mock_redis_client
+    ):
+        """Test send_result preserves state for non-connection errors."""
+        mock_redis_client.lpush.side_effect = TypeError("Serialization error")
+
+        with pytest.raises(TypeError, match="Serialization error"):
+            await task_queue.send_result(
+                task_id="task_789",
+                success=True,
+                result={"data": "test"},
+            )
+
+        # Connection state should be preserved for non-connection errors
+        assert task_queue._connected is True
+        assert task_queue._client is not None
+
+
 class TestRedisTaskQueueKeyGeneration:
     """Tests for queue key generation methods."""
 

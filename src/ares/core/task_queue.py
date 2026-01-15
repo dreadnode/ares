@@ -125,6 +125,19 @@ class RedisTaskQueue:
             self._connected = False
             logger.info("TaskQueue disconnected")
 
+    def _handle_connection_error(self, error: Exception) -> None:
+        """
+        Handle Redis connection errors by resetting connection state.
+
+        This allows the next operation to attempt reconnection.
+        """
+        self._connected = False
+        if self._client:
+            # Don't await here since we're in a sync context
+            # The client will be recreated on next connect()
+            self._client = None
+        logger.warning(f"Redis connection error, will retry: {error}")
+
     def _task_queue_key(self, role: str) -> str:
         """Get task queue key for a role."""
         return f"{self.TASK_QUEUE_PREFIX}:{role}"
@@ -161,6 +174,9 @@ class RedisTaskQueue:
 
         Returns:
             Task ID for tracking
+
+        Raises:
+            Exception: Re-raises connection errors after marking connection as failed
         """
         if not self._connected:
             await self.connect()
@@ -179,11 +195,28 @@ class RedisTaskQueue:
 
         queue_key = self._task_queue_key(target_role)
 
-        # LPUSH for FIFO (workers use BRPOP from right)
-        await self._client.lpush(queue_key, task.model_dump_json())
+        try:
+            # LPUSH for FIFO (workers use BRPOP from right)
+            await self._client.lpush(queue_key, task.model_dump_json())
 
-        logger.info(f"Task {task_id} submitted to {queue_key}")
-        return task_id
+            logger.info(f"Task {task_id} submitted to {queue_key}")
+            return task_id
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(
+                keyword in error_str
+                for keyword in [
+                    "connection",
+                    "connect",
+                    "closed",
+                    "timeout",
+                    "broken pipe",
+                    "reset",
+                ]
+            ):
+                self._handle_connection_error(e)
+            raise
 
     async def wait_for_result(
         self,
@@ -199,22 +232,42 @@ class RedisTaskQueue:
 
         Returns:
             TaskResult or None if timeout
+
+        Raises:
+            Exception: Re-raises connection errors after marking connection as failed
         """
         if not self._connected:
             await self.connect()
 
         result_key = self._result_queue_key(task_id)
 
-        # BRPOP blocks until result available or timeout
-        result = await self._client.brpop(result_key, timeout=int(timeout))
+        try:
+            # BRPOP blocks until result available or timeout
+            result = await self._client.brpop(result_key, timeout=int(timeout))
 
-        if result is None:
-            logger.warning(f"Timeout waiting for task {task_id}")
-            return None
+            if result is None:
+                logger.warning(f"Timeout waiting for task {task_id}")
+                return None
 
-        # result is (key, value) tuple
-        _, data = result
-        return TaskResult.model_validate_json(data)
+            # result is (key, value) tuple
+            _, data = result
+            return TaskResult.model_validate_json(data)
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(
+                keyword in error_str
+                for keyword in [
+                    "connection",
+                    "connect",
+                    "closed",
+                    "timeout",
+                    "broken pipe",
+                    "reset",
+                ]
+            ):
+                self._handle_connection_error(e)
+            raise
 
     async def check_result(self, task_id: str) -> TaskResult | None:
         """
@@ -253,20 +306,41 @@ class RedisTaskQueue:
 
         Returns:
             TaskMessage or None if timeout
+
+        Raises:
+            Exception: Re-raises connection errors after marking connection as failed
         """
         if not self._connected:
             await self.connect()
 
         queue_key = self._task_queue_key(role)
 
-        # BRPOP from right for FIFO order
-        result = await self._client.brpop(queue_key, timeout=int(timeout))
+        try:
+            # BRPOP from right for FIFO order
+            result = await self._client.brpop(queue_key, timeout=int(timeout))
 
-        if result is None:
-            return None
+            if result is None:
+                return None
 
-        _, data = result
-        return TaskMessage.model_validate_json(data)
+            _, data = result
+            return TaskMessage.model_validate_json(data)
+
+        except Exception as e:
+            # Check if it's a connection error
+            error_str = str(e).lower()
+            if any(
+                keyword in error_str
+                for keyword in [
+                    "connection",
+                    "connect",
+                    "closed",
+                    "timeout",
+                    "broken pipe",
+                    "reset",
+                ]
+            ):
+                self._handle_connection_error(e)
+            raise
 
     async def send_result(
         self,
@@ -285,6 +359,9 @@ class RedisTaskQueue:
             result: Task result data
             error: Error message if failed
             worker_pod: Pod that processed the task
+
+        Raises:
+            Exception: Re-raises connection errors after marking connection as failed
         """
         if not self._connected:
             await self.connect()
@@ -299,11 +376,28 @@ class RedisTaskQueue:
 
         result_key = self._result_queue_key(task_id)
 
-        # Push result and set TTL
-        await self._client.lpush(result_key, task_result.model_dump_json())
-        await self._client.expire(result_key, self.RESULT_TTL)
+        try:
+            # Push result and set TTL
+            await self._client.lpush(result_key, task_result.model_dump_json())
+            await self._client.expire(result_key, self.RESULT_TTL)
 
-        logger.info(f"Result sent for task {task_id}: success={success}")
+            logger.info(f"Result sent for task {task_id}: success={success}")
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(
+                keyword in error_str
+                for keyword in [
+                    "connection",
+                    "connect",
+                    "closed",
+                    "timeout",
+                    "broken pipe",
+                    "reset",
+                ]
+            ):
+                self._handle_connection_error(e)
+            raise
 
     # === Health/Heartbeat Methods ===
 
@@ -322,6 +416,9 @@ class RedisTaskQueue:
             status: Current status (idle, busy, offline)
             current_task: Current task ID if busy
             pod_name: Kubernetes pod name
+
+        Raises:
+            Exception: Re-raises connection errors after marking connection as failed
         """
         if not self._connected:
             await self.connect()
@@ -336,20 +433,59 @@ class RedisTaskQueue:
             }
         )
 
-        await self._client.set(heartbeat_key, data, ex=self.HEARTBEAT_TTL)
+        try:
+            await self._client.set(heartbeat_key, data, ex=self.HEARTBEAT_TTL)
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(
+                keyword in error_str
+                for keyword in [
+                    "connection",
+                    "connect",
+                    "closed",
+                    "timeout",
+                    "broken pipe",
+                    "reset",
+                ]
+            ):
+                self._handle_connection_error(e)
+            raise
 
     async def get_heartbeat(self, agent_name: str) -> dict[str, Any] | None:
-        """Get agent heartbeat data."""
+        """
+        Get agent heartbeat data.
+
+        Raises:
+            Exception: Re-raises connection errors after marking connection as failed
+        """
         if not self._connected:
             await self.connect()
 
         heartbeat_key = self._heartbeat_key(agent_name)
-        data = await self._client.get(heartbeat_key)
 
-        if data is None:
-            return None
+        try:
+            data = await self._client.get(heartbeat_key)
 
-        return json.loads(data)
+            if data is None:
+                return None
+
+            return json.loads(data)
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(
+                keyword in error_str
+                for keyword in [
+                    "connection",
+                    "connect",
+                    "closed",
+                    "timeout",
+                    "broken pipe",
+                    "reset",
+                ]
+            ):
+                self._handle_connection_error(e)
+            raise
 
     async def get_all_heartbeats(self, pattern: str = "*") -> dict[str, dict]:
         """Get all agent heartbeats matching pattern."""

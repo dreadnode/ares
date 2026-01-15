@@ -308,6 +308,10 @@ class RedisWorkerAgent:
         """Main worker loop - poll Redis for tasks."""
         logger.info(f"Worker {self.agent_name} polling Redis for {self.role.value} tasks")
 
+        # Exponential backoff for connection errors
+        retry_delay = 1.0  # Start with 1 second
+        max_retry_delay = 60.0  # Cap at 60 seconds
+
         while self._running:
             try:
                 # Poll Redis queue (blocks up to 5 seconds)
@@ -319,11 +323,38 @@ class RedisWorkerAgent:
                 if task:
                     await self._process_task(task)
 
+                # Reset retry delay on successful poll
+                retry_delay = 1.0
+
             except asyncio.CancelledError:  # noqa: PERF203
                 break
             except Exception as e:
-                logger.error(f"Worker loop error: {e}")
-                await asyncio.sleep(5)
+                # Check if it's a connection error
+                error_str = str(e).lower()
+                is_connection_error = any(
+                    keyword in error_str
+                    for keyword in [
+                        "connection",
+                        "connect",
+                        "closed",
+                        "timeout",
+                        "broken pipe",
+                        "reset",
+                    ]
+                )
+
+                if is_connection_error:
+                    logger.warning(
+                        f"Worker loop connection error, retrying in {retry_delay:.1f}s: {e}"
+                    )
+                    await asyncio.sleep(retry_delay)
+                    # Exponential backoff
+                    retry_delay = min(retry_delay * 2, max_retry_delay)
+                else:
+                    # Non-connection error, log and continue with short delay
+                    logger.error(f"Worker loop error: {e}")
+                    await asyncio.sleep(5)
+                    retry_delay = 1.0  # Reset backoff for non-connection errors
 
     async def _process_task(self, task: TaskMessage) -> None:
         """Process a task from the Redis queue."""
@@ -610,7 +641,10 @@ class RedisWorkerAgent:
         return str(result)
 
     async def _heartbeat_loop(self) -> None:
-        """Send heartbeats to Redis."""
+        """Send heartbeats to Redis with automatic reconnection on failure."""
+        retry_delay = 1.0
+        max_retry_delay = 60.0
+
         while self._running:
             try:
                 status = "busy" if self._current_task else "idle"
@@ -620,7 +654,28 @@ class RedisWorkerAgent:
                     current_task=self._current_task,
                     pod_name=self.pod_name,
                 )
+                # Reset retry delay on success
+                retry_delay = 1.0
+
             except Exception as e:
+                error_str = str(e).lower()
+                is_connection_error = any(
+                    keyword in error_str
+                    for keyword in [
+                        "connection",
+                        "connect",
+                        "closed",
+                        "timeout",
+                        "broken pipe",
+                        "reset",
+                    ]
+                )
+
+                if is_connection_error:
+                    logger.warning(f"Heartbeat connection error, will retry: {e}")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, max_retry_delay)
+                    continue  # Skip the regular sleep and retry immediately
                 logger.warning(f"Heartbeat failed: {e}")
 
             await asyncio.sleep(15)
@@ -786,7 +841,10 @@ class WorkerAgent:
         return str(result)
 
     async def _heartbeat_loop(self) -> None:
-        """Send periodic heartbeats to dispatcher."""
+        """Send periodic heartbeats to dispatcher with automatic reconnection on failure."""
+        retry_delay = 1.0
+        max_retry_delay = 60.0
+
         while self._running:
             try:
                 status = "busy" if self._current_task else "idle"
@@ -795,7 +853,28 @@ class WorkerAgent:
                     status=status,
                     current_task=self._current_task,
                 )
+                # Reset retry delay on success
+                retry_delay = 1.0
+
             except Exception as e:
+                error_str = str(e).lower()
+                is_connection_error = any(
+                    keyword in error_str
+                    for keyword in [
+                        "connection",
+                        "connect",
+                        "closed",
+                        "timeout",
+                        "broken pipe",
+                        "reset",
+                    ]
+                )
+
+                if is_connection_error:
+                    logger.warning(f"Heartbeat connection error, will retry: {e}")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, max_retry_delay)
+                    continue  # Skip the regular sleep and retry immediately
                 logger.warning(f"Heartbeat failed: {e}")
 
             await asyncio.sleep(15)
