@@ -449,12 +449,6 @@ async def _create_agent_ensemble(
             "pod_selector": "ares.dreadnode.io/role=poison",
             "capabilities": {"responder", "mitm6", "ntlmrelayx"},
         },
-        {
-            "role": AgentRole.ATOMIC,
-            "name": "ares-atomic",
-            "pod_selector": "ares.dreadnode.io/role=atomic",
-            "capabilities": {"atomic_red_team", "invoke_atomicredteam"},
-        },
     ]
 
     for config in agent_configs:
