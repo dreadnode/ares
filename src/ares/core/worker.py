@@ -903,7 +903,7 @@ class WorkerAgent:
 async def run_worker(
     role: AgentRole,
     operation_id: str | None = None,
-    redis_url: str = "redis://localhost:6379",
+    redis_url: str = "redis://redis.attack-simulation.svc.cluster.local:6379",
     model: str = "claude-sonnet-4-20250514",
     max_steps: int | None = None,
     discover_operation: bool = True,

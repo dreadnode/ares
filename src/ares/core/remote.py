@@ -98,7 +98,16 @@ class K8sExecutor:
     """
 
     def __init__(self):
-        self._redis_url = os.environ.get("REDIS_URL", "redis://redis.ares.svc:6379")
+        redis_url = os.environ.get("REDIS_URL")
+        if not redis_url:
+            redis_password = os.environ.get("REDIS_PASSWORD", "")
+            redis_host = os.environ.get("REDIS_SERVICE_HOST", "redis")
+            redis_port = os.environ.get("REDIS_SERVICE_PORT", "6379")
+            if redis_password:
+                redis_url = f"redis://:{redis_password}@{redis_host}:{redis_port}"
+            else:
+                redis_url = f"redis://{redis_host}:{redis_port}"
+        self._redis_url = redis_url
         self._task_queue = None
 
     def _get_task_queue(self):

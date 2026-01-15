@@ -92,7 +92,7 @@ class RedisTaskQueue:
     RESULT_TTL = 86400  # 24 hours
     HEARTBEAT_TTL = 60  # 60 seconds
 
-    def __init__(self, redis_url: str = "redis://redis.ares.svc:6379"):
+    def __init__(self, redis_url: str = "redis://redis.attack-simulation.svc.cluster.local:6379"):
         self.redis_url = redis_url
         self._client = None
         self._connected = False

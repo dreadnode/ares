@@ -57,7 +57,7 @@ class KubernetesPodExecutor:
         await queue.submit_task(...)
 
     Usage (for debugging/one-off commands):
-        executor = KubernetesPodExecutor(namespace="ares")
+        executor = KubernetesPodExecutor(namespace="attack-simulation")
         stdout, stderr, code = await executor.execute(
             role="cracker",
             command=["hashcat", "-m", "1000", "hash.txt"]

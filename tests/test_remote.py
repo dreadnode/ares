@@ -8,6 +8,7 @@ from botocore.exceptions import TokenRetrievalError
 
 from ares.core.remote import (
     CommandResult,
+    K8sExecutor,
     SSMExecutor,
     SSOTokenExpiredError,
     get_executor,
@@ -451,3 +452,40 @@ class TestRunRemote:
 
         # Clean up
         reset_executor()
+
+
+class TestK8sExecutorInit:
+    """Tests for K8sExecutor initialization."""
+
+    def test_init_uses_redis_url_env(self):
+        """Test initialization uses REDIS_URL when set."""
+        with patch.dict(os.environ, {"REDIS_URL": "redis://custom:6380"}, clear=False):
+            executor = K8sExecutor()
+            assert executor._redis_url == "redis://custom:6380"
+
+    def test_init_builds_url_from_components(self):
+        """Test initialization builds URL from component env vars."""
+        env = {
+            "REDIS_SERVICE_HOST": "myredis",
+            "REDIS_SERVICE_PORT": "6380",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            executor = K8sExecutor()
+            assert executor._redis_url == "redis://myredis:6380"
+
+    def test_init_builds_url_with_password(self):
+        """Test initialization builds URL with password."""
+        env = {
+            "REDIS_PASSWORD": "secret",  # pragma: allowlist secret
+            "REDIS_SERVICE_HOST": "myredis",
+            "REDIS_SERVICE_PORT": "6380",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            executor = K8sExecutor()
+            assert executor._redis_url == "redis://:secret@myredis:6380"
+
+    def test_init_uses_defaults_when_no_env(self):
+        """Test initialization uses defaults when env vars not set."""
+        with patch.dict(os.environ, {}, clear=True):
+            executor = K8sExecutor()
+            assert executor._redis_url == "redis://redis:6379"

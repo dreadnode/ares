@@ -72,7 +72,7 @@ class RedTeamDispatcher:
         await dispatcher.register(agent_info)
 
         # Publish discoveries to all agents
-        await dispatcher.publish_credential(credential, "enum-agent")
+        await dispatcher.publish_credential(credential, "ares-enum")
 
         # Route tasks to specialized agents
         task_id = await dispatcher.request_crack(hash_data, "orchestrator")

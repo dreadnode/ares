@@ -466,7 +466,7 @@ async def multi_agent(
     Execute a multi-agent red team operation.
 
     This command coordinates multiple specialized agents:
-    - Orchestrator (enum-agent): Coordinates operation, does initial recon
+    - Orchestrator (ares-enum): Coordinates operation, does initial recon
     - Cracker: Hash cracking with hashcat/john
     - ACL: BloodHound analysis and ACL abuse
     - PrivEsc: ADCS, delegation, MSSQL exploitation

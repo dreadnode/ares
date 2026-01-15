@@ -32,8 +32,8 @@ class OperationConfig:
 
     # Operation settings
     name: str = "ares-multi-agent"
-    namespace: str = "ares"
-    redis_url: str = "redis://localhost:6379"
+    namespace: str = "attack-simulation"
+    redis_url: str = "redis://redis.attack-simulation.svc.cluster.local:6379"
     checkpoint_interval: int = 60
 
     # Agent configurations
@@ -143,8 +143,10 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
 
     return OperationConfig(
         name=operation.get("name", "ares-multi-agent"),
-        namespace=operation.get("namespace", "ares"),
-        redis_url=operation.get("redis_url", "redis://localhost:6379"),
+        namespace=operation.get("namespace", "attack-simulation"),
+        redis_url=operation.get(
+            "redis_url", "redis://redis.attack-simulation.svc.cluster.local:6379"
+        ),
         checkpoint_interval=operation.get("checkpoint_interval", 60),
         agents=agents,
         agent_heartbeat_timeout=timeouts.get("agent_heartbeat", 30),

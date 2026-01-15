@@ -32,7 +32,7 @@ class OperationRecoveryManager:
 
     Usage:
         manager = OperationRecoveryManager(
-            redis_url="redis://redis.ares.svc:6379",
+            redis_url="redis://redis.attack-simulation.svc.cluster.local:6379",
             k8s_executor=executor,
         )
 
