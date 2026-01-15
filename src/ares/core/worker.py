@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from ares.core.config import get_redis_url
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.factories.red_agents import create_agent_info, create_specialized_agent
 from ares.core.messages import (
@@ -903,7 +904,7 @@ class WorkerAgent:
 async def run_worker(
     role: AgentRole,
     operation_id: str | None = None,
-    redis_url: str = "redis://redis.attack-simulation.svc.cluster.local:6379",
+    redis_url: str | None = None,
     model: str = "claude-sonnet-4-20250514",
     max_steps: int | None = None,
     discover_operation: bool = True,
@@ -920,13 +921,16 @@ async def run_worker(
     Args:
         role: The agent role (cracker, acl, privesc, lateral, poisoning, atomic).
         operation_id: The operation ID to join (optional - will discover if not provided).
-        redis_url: Redis URL for task queue and state.
+        redis_url: Redis URL for task queue and state (default: from config).
         model: LLM model to use.
         max_steps: Override default max steps for role.
         discover_operation: If True and operation_id is None/empty, discover from Redis.
         discovery_timeout: Max seconds to wait for operation discovery.
         use_redis_queue: If True, poll Redis queue for tasks (Kubernetes mode).
     """
+    # Resolve config defaults
+    redis_url = redis_url or get_redis_url()
+
     pod_name = os.environ.get("HOSTNAME", f"local-{role.value}")
 
     # Handle empty string operation IDs from k8s configmaps

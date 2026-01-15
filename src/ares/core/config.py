@@ -14,6 +14,23 @@ from typing import Any
 import yaml
 from loguru import logger
 
+# Default namespace - single source of truth
+DEFAULT_NAMESPACE = "attack-simulation"
+
+
+def derive_redis_url(namespace: str, host: str = "redis", port: int = 6379) -> str:
+    """Derive Redis URL from namespace using K8s service DNS.
+
+    Args:
+        namespace: Kubernetes namespace where Redis is deployed.
+        host: Redis service name (default: "redis").
+        port: Redis port (default: 6379).
+
+    Returns:
+        Redis URL in format redis://{host}.{namespace}.svc.cluster.local:{port}
+    """
+    return f"redis://{host}.{namespace}.svc.cluster.local:{port}"
+
 
 @dataclass
 class AgentConfig:
@@ -32,9 +49,14 @@ class OperationConfig:
 
     # Operation settings
     name: str = "ares-multi-agent"
-    namespace: str = "attack-simulation"
-    redis_url: str = "redis://redis.attack-simulation.svc.cluster.local:6379"
+    namespace: str = DEFAULT_NAMESPACE
+    redis_url: str = ""  # Derived from namespace if not explicitly set
     checkpoint_interval: int = 60
+
+    def __post_init__(self) -> None:
+        """Derive redis_url from namespace if not explicitly set."""
+        if not self.redis_url:
+            self.redis_url = derive_redis_url(self.namespace)
 
     # Agent configurations
     agents: dict[str, AgentConfig] = field(default_factory=dict)
@@ -141,12 +163,14 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
                 tools=agent_data.get("tools", []),
             )
 
+    namespace = operation.get("namespace", DEFAULT_NAMESPACE)
+    # Only use explicit redis_url from config, otherwise derive from namespace
+    redis_url = operation.get("redis_url") or derive_redis_url(namespace)
+
     return OperationConfig(
         name=operation.get("name", "ares-multi-agent"),
-        namespace=operation.get("namespace", "attack-simulation"),
-        redis_url=operation.get(
-            "redis_url", "redis://redis.attack-simulation.svc.cluster.local:6379"
-        ),
+        namespace=namespace,
+        redis_url=redis_url,
         checkpoint_interval=operation.get("checkpoint_interval", 60),
         agents=agents,
         agent_heartbeat_timeout=timeouts.get("agent_heartbeat", 30),
@@ -173,13 +197,16 @@ def _resolve_env(value: str) -> str:
 
 def _apply_env_overrides(config: OperationConfig) -> OperationConfig:
     """Apply environment variable overrides to config."""
-    # Redis URL override
-    if redis_url := os.environ.get("ARES_REDIS_URL") or os.environ.get("REDIS_URL"):
-        config.redis_url = redis_url
+    # Check for explicit Redis URL override
+    explicit_redis_url = os.environ.get("ARES_REDIS_URL") or os.environ.get("REDIS_URL")
+    if explicit_redis_url:
+        config.redis_url = explicit_redis_url
 
-    # Namespace override
+    # Namespace override - re-derive redis_url if namespace changes and no explicit URL
     if namespace := os.environ.get("ARES_NAMESPACE"):
         config.namespace = namespace
+        if not explicit_redis_url:
+            config.redis_url = derive_redis_url(namespace)
 
     # Grafana overrides
     if grafana_url := os.environ.get("GRAFANA_URL"):
@@ -223,9 +250,11 @@ def clear_config_cache() -> None:
 
 
 __all__ = [
+    "DEFAULT_NAMESPACE",
     "AgentConfig",
     "OperationConfig",
     "clear_config_cache",
+    "derive_redis_url",
     "get_agent_config",
     "get_namespace",
     "get_redis_url",

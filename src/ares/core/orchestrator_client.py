@@ -9,6 +9,7 @@ from typing import Any
 
 from loguru import logger
 
+from ares.core.config import get_redis_url
 from ares.core.task_queue import RedisTaskQueue
 
 
@@ -21,7 +22,7 @@ async def submit_operation(
     model: str = "claude-sonnet-4-20250514",
     max_steps: int = 200,
     checkpoint_interval: int = 60,
-    redis_url: str = "redis://redis.attack-simulation.svc.cluster.local:6379",
+    redis_url: str | None = None,
     operations_queue: str = "ares:operations",
     wait_for_completion: bool = False,
     poll_interval: float = 10.0,
@@ -41,7 +42,7 @@ async def submit_operation(
         model: LLM model to use
         max_steps: Maximum agent steps
         checkpoint_interval: Seconds between checkpoints
-        redis_url: Redis connection URL
+        redis_url: Redis connection URL (default: from config)
         operations_queue: Redis queue name for operations
         wait_for_completion: If True, wait for operation to complete
         poll_interval: Seconds between status polls when waiting
@@ -52,6 +53,9 @@ async def submit_operation(
         - status: "submitted", "running", "completed", or "failed"
         - Additional status data if wait_for_completion=True
     """
+    # Resolve config defaults
+    redis_url = redis_url or get_redis_url()
+
     # Build operation request
     request = {
         "operation_id": operation_id,
@@ -162,17 +166,18 @@ async def wait_for_operation_completion(
 
 async def get_operation_status(
     operation_id: str,
-    redis_url: str = "redis://redis.attack-simulation.svc.cluster.local:6379",
+    redis_url: str | None = None,
 ) -> dict[str, Any] | None:
     """Get the current status of an operation.
 
     Args:
         operation_id: Operation ID
-        redis_url: Redis connection URL
+        redis_url: Redis connection URL (default: from config)
 
     Returns:
         Operation status dict or None if not found
     """
+    redis_url = redis_url or get_redis_url()
     task_queue = RedisTaskQueue(redis_url)
     await task_queue.connect()
 

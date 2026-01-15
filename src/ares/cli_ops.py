@@ -7,6 +7,7 @@ from typing import Annotated
 import cyclopts
 from loguru import logger
 
+from ares.core.config import get_redis_url
 from ares.core.orchestrator_client import (
     get_operation_status,
     submit_operation,
@@ -38,15 +39,16 @@ async def submit(
     wait: Annotated[bool, cyclopts.Parameter(help="Wait for operation to complete")] = False,
     model: Annotated[str, cyclopts.Parameter(help="LLM model to use")] = "claude-sonnet-4-20250514",
     max_steps: Annotated[int, cyclopts.Parameter(help="Maximum agent steps")] = 200,
-    redis_url: Annotated[
-        str, cyclopts.Parameter(help="Redis URL")
-    ] = "redis://redis.attack-simulation.svc.cluster.local:6379",
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
 ) -> None:
     """Submit a multi-agent red team operation to the orchestrator service.
 
     Example:
         ares-ops submit dreadgoad sevenkingdoms.local --ips 10.0.4.90 10.0.4.129 --wait
     """
+    # Resolve config defaults
+    resolved_redis_url = redis_url or get_redis_url()
+
     # Generate operation ID if not provided
     if not operation_id:
         operation_id = f"multiagent-{uuid.uuid4().hex[:8]}"
@@ -80,7 +82,7 @@ async def submit(
             resume_from_checkpoint=resume,
             model=model,
             max_steps=max_steps,
-            redis_url=redis_url,
+            redis_url=resolved_redis_url,
             wait_for_completion=wait,
         )
 
@@ -101,19 +103,19 @@ async def submit(
 async def status(
     operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
     *,
-    redis_url: Annotated[
-        str, cyclopts.Parameter(help="Redis URL")
-    ] = "redis://redis.attack-simulation.svc.cluster.local:6379",
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
 ) -> None:
     """Get the status of an operation.
 
     Example:
         ares-ops status multiagent-abc123
     """
+    resolved_redis_url = redis_url or get_redis_url()
+
     try:
         result = await get_operation_status(
             operation_id=operation_id,
-            redis_url=redis_url,
+            redis_url=resolved_redis_url,
         )
 
         if result:
@@ -138,21 +140,21 @@ async def wait_for(
     operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
     *,
     timeout: Annotated[float, cyclopts.Parameter(help="Timeout in seconds")] = 3600.0,
-    redis_url: Annotated[
-        str, cyclopts.Parameter(help="Redis URL")
-    ] = "redis://redis.attack-simulation.svc.cluster.local:6379",
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
 ) -> None:
     """Wait for an operation to complete.
 
     Example:
         ares-ops wait-for multiagent-abc123 --timeout 7200
     """
+    resolved_redis_url = redis_url or get_redis_url()
+
     logger.info(f"Waiting for operation: {operation_id}")
 
     try:
         result = await wait_for_operation_completion(
             operation_id=operation_id,
-            redis_url=redis_url,
+            redis_url=resolved_redis_url,
             timeout=timeout,
         )
 

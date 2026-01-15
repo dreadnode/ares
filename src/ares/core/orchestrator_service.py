@@ -17,6 +17,7 @@ from typing import Any
 
 from loguru import logger
 
+from ares.core.config import get_namespace, get_redis_url
 from ares.core.models import Credential
 from ares.core.orchestrator import run_multi_agent_operation
 from ares.core.task_queue import RedisTaskQueue
@@ -61,19 +62,19 @@ class OrchestratorService:
 
     def __init__(
         self,
-        redis_url: str = "redis://redis.attack-simulation.svc.cluster.local:6379",
-        namespace: str = "attack-simulation",
+        redis_url: str | None = None,
+        namespace: str | None = None,
         operations_queue: str = "ares:operations",
     ):
         """Initialize orchestrator service.
 
         Args:
-            redis_url: Redis connection URL
-            namespace: Kubernetes namespace
+            redis_url: Redis connection URL (default: from config)
+            namespace: Kubernetes namespace (default: from config)
             operations_queue: Redis queue for operation requests
         """
-        self.redis_url = redis_url
-        self.namespace = namespace
+        self.redis_url = redis_url or get_redis_url()
+        self.namespace = namespace or get_namespace()
         self.operations_queue = operations_queue
         self.task_queue: RedisTaskQueue | None = None
         self.running = False
@@ -263,9 +264,7 @@ class OrchestratorService:
 
 async def main() -> None:
     """Main entry point for orchestrator service."""
-    # Get configuration from environment
-    redis_url = os.getenv("REDIS_URL", "redis://redis.attack-simulation.svc.cluster.local:6379")
-    namespace = os.getenv("NAMESPACE", "attack-simulation")
+    # Get configuration from environment (operations_queue not in config system)
     operations_queue = os.getenv("OPERATIONS_QUEUE", "ares:operations")
 
     # Setup logging
@@ -276,10 +275,8 @@ async def main() -> None:
         level=os.getenv("LOG_LEVEL", "INFO"),
     )
 
-    # Create and start service
+    # Create and start service (redis_url and namespace from config system)
     service = OrchestratorService(
-        redis_url=redis_url,
-        namespace=namespace,
         operations_queue=operations_queue,
     )
 

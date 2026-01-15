@@ -13,6 +13,8 @@ from typing import Any
 from loguru import logger
 from pydantic import BaseModel
 
+from ares.core.config import get_redis_url
+
 
 class TaskMessage(BaseModel):
     """Task message structure for Redis queues."""
@@ -92,8 +94,8 @@ class RedisTaskQueue:
     RESULT_TTL = 86400  # 24 hours
     HEARTBEAT_TTL = 60  # 60 seconds
 
-    def __init__(self, redis_url: str = "redis://redis.attack-simulation.svc.cluster.local:6379"):
-        self.redis_url = redis_url
+    def __init__(self, redis_url: str | None = None):
+        self.redis_url = redis_url or get_redis_url()
         self._client = None
         self._connected = False
 
