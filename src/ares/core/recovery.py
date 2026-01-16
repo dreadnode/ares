@@ -173,18 +173,23 @@ class OperationRecoveryManager:
 
             try:
                 for task_id, task in list(state.pending_tasks.items()):
-                    if task.status == TaskStatus.IN_PROGRESS:
+                    # PENDING tasks may have been submitted to Redis but not yet picked up
+                    # when pods restarted, so they need to be requeued
+                    if task.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
                         interrupted_count += 1
-                        task.retry_count += 1
 
-                        # Check if we can retry
+                        # PENDING tasks were never started, so they shouldn't count as a retry
+                        if task.status == TaskStatus.IN_PROGRESS:
+                            task.retry_count += 1
+
                         max_retries = getattr(task, "max_retries", DEFAULT_MAX_RETRIES)
                         if auto_requeue and task.retry_count <= max_retries:
-                            # Mark for retry and requeue
                             task.status = TaskStatus.RETRYING
-                            task.error = f"Pod restart during execution (retry {task.retry_count}/{max_retries})"
+                            if task.retry_count > 0:
+                                task.error = f"Pod restart during execution (retry {task.retry_count}/{max_retries})"
+                            else:
+                                task.error = "Requeued after pod restart (task was pending)"
 
-                            # Requeue the task
                             if task_queue:
                                 await task_queue.requeue_task(
                                     task_type=task.task_type,
@@ -199,7 +204,6 @@ class OperationRecoveryManager:
                                     f"({task.retry_count}/{max_retries})"
                                 )
                         else:
-                            # Max retries exceeded - mark permanently failed
                             task.status = TaskStatus.FAILED
                             task.error = (
                                 f"Pod restart during execution (max retries {max_retries} exceeded)"

@@ -399,6 +399,67 @@ class OrchestratorTools(Toolset):
         return "\n".join(lines)
 
     @dn.tool_method
+    async def cleanup_orphaned_tasks(self, task_ids: list[str] | None = None) -> str:
+        """
+        Clean up orphaned or stale tasks that are stuck in pending state.
+
+        Orphaned tasks can occur when:
+        - Tasks were dispatched but pods restarted before processing
+        - Redis queues were cleared but shared_state still tracks them
+        - Workers failed to pick up tasks due to connectivity issues
+
+        Args:
+            task_ids: Optional list of specific task IDs to clean up.
+                     If None, cleans up ALL pending tasks older than 5 minutes.
+
+        Returns:
+            Summary of cleaned up tasks
+
+        Example:
+            # Clean up specific orphaned tasks
+            >>> cleanup_orphaned_tasks(["poison_ab0056ff310a", "exploit_fe7b6d76ce4b"])
+
+            # Clean up all stale tasks
+            >>> cleanup_orphaned_tasks()
+        """
+        from datetime import datetime, timezone
+
+        cleaned = []
+        pending = self.shared_state.pending_tasks
+
+        if not pending:
+            return "No pending tasks to clean up"
+
+        if task_ids:
+            for task_id in task_ids:
+                if task_id in pending:
+                    task = pending.pop(task_id)
+                    cleaned.append(f"{task_id} ({task.task_type})")
+                    logger.info(f"Manually cleaned orphaned task: {task_id}")
+        else:
+            now = datetime.now(timezone.utc)
+            stale_threshold = 300  # 5 minutes
+
+            for task_id, task in list(pending.items()):
+                if task.status.value == "pending":
+                    age_seconds = (now - task.created_at).total_seconds()
+                    if age_seconds > stale_threshold:
+                        pending.pop(task_id)
+                        cleaned.append(f"{task_id} ({task.task_type}, age: {int(age_seconds)}s)")
+                        logger.info(
+                            f"Auto-cleaned stale pending task: {task_id} (age: {int(age_seconds)}s)"
+                        )
+
+        if not cleaned:
+            return "No orphaned tasks found to clean up"
+
+        lines = ["🧹 Cleaned up orphaned tasks:"]
+        for item in cleaned:
+            lines.append(f"  • {item}")
+
+        return "\n".join(lines)
+
+    @dn.tool_method
     def get_all_credentials(self) -> str:
         """
         Get all credentials discovered by any agent.

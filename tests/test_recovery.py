@@ -87,7 +87,17 @@ def state_with_in_progress_tasks():
         task_id="task_003",
         task_type="enum",
         assigned_agent="enum",
-        status=TaskStatus.PENDING,  # Not in progress - should not be touched
+        status=TaskStatus.PENDING,  # Pending tasks are also requeued
+        created_at=datetime.now(timezone.utc),
+        params={},
+        retry_count=0,
+        max_retries=3,
+    )
+    state.pending_tasks["task_004"] = TaskInfo(
+        task_id="task_004",
+        task_type="acl",
+        assigned_agent="acl",
+        status=TaskStatus.COMPLETED,  # Completed tasks should not be touched
         created_at=datetime.now(timezone.utc),
         params={},
     )
@@ -305,7 +315,7 @@ class TestOperationRecoveryManagerRecovery:
     async def test_recover_operation_requeues_tasks(
         self, mock_redis_client, state_with_in_progress_tasks
     ):
-        """Test recovery requeues in-progress tasks."""
+        """Test recovery requeues in-progress and pending tasks."""
         manager = OperationRecoveryManager(redis_url="redis://localhost:6379")
         manager._redis_client = mock_redis_client
 
@@ -325,8 +335,8 @@ class TestOperationRecoveryManagerRecovery:
 
             recovered = await manager.recover_operation(state_with_in_progress_tasks.operation_id)
 
-            # Verify tasks were requeued
-            assert mock_queue.requeue_task.call_count == 2  # task_001 and task_002
+            # Verify tasks were requeued (task_001, task_002, task_003)
+            assert mock_queue.requeue_task.call_count == 3  # All IN_PROGRESS and PENDING tasks
 
             # Verify task statuses were updated
             task_001 = recovered.pending_tasks["task_001"]
@@ -337,9 +347,14 @@ class TestOperationRecoveryManagerRecovery:
             assert task_002.status == TaskStatus.RETRYING
             assert task_002.retry_count == 3
 
-            # Pending task should not be touched
+            # Pending task should also be requeued as RETRYING (but retry_count stays 0 since it never started)
             task_003 = recovered.pending_tasks["task_003"]
-            assert task_003.status == TaskStatus.PENDING
+            assert task_003.status == TaskStatus.RETRYING
+            assert task_003.retry_count == 0  # PENDING tasks don't increment retry count
+
+            # Completed task should not be touched
+            task_004 = recovered.pending_tasks["task_004"]
+            assert task_004.status == TaskStatus.COMPLETED
 
     @pytest.mark.asyncio
     async def test_recover_operation_marks_max_retries_failed(
