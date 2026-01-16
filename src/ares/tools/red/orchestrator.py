@@ -401,7 +401,7 @@ class OrchestratorTools(Toolset):
     @dn.tool_method
     async def cleanup_orphaned_tasks(self, task_ids: list[str] | None = None) -> str:
         """
-        Clean up orphaned or stale tasks that are stuck in pending state.
+        Clean up orphaned or stale tasks that are stuck in pending/retrying/in-progress state.
 
         Orphaned tasks can occur when:
         - Tasks were dispatched but pods restarted before processing
@@ -410,7 +410,7 @@ class OrchestratorTools(Toolset):
 
         Args:
             task_ids: Optional list of specific task IDs to clean up.
-                     If None, cleans up ALL pending tasks older than 5 minutes.
+                     If None, cleans up ALL pending/retrying/in-progress tasks older than 5 minutes.
 
         Returns:
             Summary of cleaned up tasks
@@ -439,9 +439,10 @@ class OrchestratorTools(Toolset):
         else:
             now = datetime.now(timezone.utc)
             stale_threshold = 300  # 5 minutes
+            stale_statuses = {"pending", "retrying", "in_progress"}
 
             for task_id, task in list(pending.items()):
-                if task.status.value == "pending":
+                if task.status.value in stale_statuses:
                     age_seconds = (now - task.created_at).total_seconds()
                     if age_seconds > stale_threshold:
                         pending.pop(task_id)

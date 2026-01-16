@@ -101,6 +101,16 @@ def state_with_in_progress_tasks():
         created_at=datetime.now(timezone.utc),
         params={},
     )
+    state.pending_tasks["task_005"] = TaskInfo(
+        task_id="task_005",
+        task_type="poison",
+        assigned_agent="poisoning",
+        status=TaskStatus.RETRYING,  # Retrying tasks are requeued without incrementing
+        created_at=datetime.now(timezone.utc),
+        params={},
+        retry_count=1,
+        max_retries=3,
+    )
 
     return state
 
@@ -315,7 +325,7 @@ class TestOperationRecoveryManagerRecovery:
     async def test_recover_operation_requeues_tasks(
         self, mock_redis_client, state_with_in_progress_tasks
     ):
-        """Test recovery requeues in-progress and pending tasks."""
+        """Test recovery requeues in-progress, pending, and retrying tasks."""
         manager = OperationRecoveryManager(redis_url="redis://localhost:6379")
         manager._redis_client = mock_redis_client
 
@@ -335,8 +345,8 @@ class TestOperationRecoveryManagerRecovery:
 
             recovered = await manager.recover_operation(state_with_in_progress_tasks.operation_id)
 
-            # Verify tasks were requeued (task_001, task_002, task_003)
-            assert mock_queue.requeue_task.call_count == 3  # All IN_PROGRESS and PENDING tasks
+            # Verify tasks were requeued (task_001, task_002, task_003, task_005)
+            assert mock_queue.requeue_task.call_count == 4  # IN_PROGRESS, PENDING, RETRYING tasks
 
             # Verify task statuses were updated
             task_001 = recovered.pending_tasks["task_001"]
@@ -355,6 +365,11 @@ class TestOperationRecoveryManagerRecovery:
             # Completed task should not be touched
             task_004 = recovered.pending_tasks["task_004"]
             assert task_004.status == TaskStatus.COMPLETED
+
+            # Retrying task should be requeued without incrementing retry_count
+            task_005 = recovered.pending_tasks["task_005"]
+            assert task_005.status == TaskStatus.RETRYING
+            assert task_005.retry_count == 1
 
     @pytest.mark.asyncio
     async def test_recover_operation_marks_max_retries_failed(

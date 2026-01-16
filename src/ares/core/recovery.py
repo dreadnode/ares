@@ -173,12 +173,17 @@ class OperationRecoveryManager:
 
             try:
                 for task_id, task in list(state.pending_tasks.items()):
-                    # PENDING tasks may have been submitted to Redis but not yet picked up
-                    # when pods restarted, so they need to be requeued
-                    if task.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+                    # PENDING/RETRYING tasks may have been submitted to Redis but not yet picked up
+                    # when pods restarted, so they need to be requeued.
+                    if task.status in (
+                        TaskStatus.PENDING,
+                        TaskStatus.IN_PROGRESS,
+                        TaskStatus.RETRYING,
+                    ):
                         interrupted_count += 1
 
-                        # PENDING tasks were never started, so they shouldn't count as a retry
+                        # IN_PROGRESS tasks were running, so they count as a retry. PENDING/RETRYING
+                        # tasks were never started, so they shouldn't increment.
                         if task.status == TaskStatus.IN_PROGRESS:
                             task.retry_count += 1
 

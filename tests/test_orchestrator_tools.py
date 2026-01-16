@@ -110,7 +110,7 @@ class TestCleanupOrphanedTasks:
 
     @pytest.mark.asyncio
     async def test_cleanup_all_stale_tasks(self, orchestrator_tools, shared_state):
-        """Test automatic cleanup of all stale pending tasks (>5 minutes old)."""
+        """Test automatic cleanup of all stale pending/retrying/in-progress tasks (>5 minutes old)."""
         now = datetime.now(timezone.utc)
 
         # Add tasks with different ages
@@ -138,6 +138,14 @@ class TestCleanupOrphanedTasks:
             created_at=now - timedelta(minutes=2),
             params={},
         )
+        shared_state.pending_tasks["task_retrying"] = TaskInfo(
+            task_id="task_retrying",
+            task_type="lateral",
+            assigned_agent="lateral",
+            status=TaskStatus.RETRYING,
+            created_at=now - timedelta(minutes=9),
+            params={},
+        )
         shared_state.pending_tasks["task_in_progress"] = TaskInfo(
             task_id="task_in_progress",
             task_type="acl",
@@ -150,26 +158,26 @@ class TestCleanupOrphanedTasks:
         # Cleanup all stale tasks (no task_ids specified)
         result = await orchestrator_tools.cleanup_orphaned_tasks()
 
-        # Verify stale pending tasks were cleaned
+        # Verify stale pending/retrying/in-progress tasks were cleaned
         assert "task_old_1" in result
         assert "task_old_2" in result
+        assert "task_retrying" in result
+        assert "task_in_progress" in result
         assert "600s" in result or "360s" in result  # Age should be mentioned
 
         # Verify recent task was NOT cleaned
         assert "task_recent" not in result
         assert "task_recent" in shared_state.pending_tasks
 
-        # Verify IN_PROGRESS task was NOT cleaned (not PENDING)
-        assert "task_in_progress" not in result
-        assert "task_in_progress" in shared_state.pending_tasks
-
         # Verify old tasks removed from shared state
         assert "task_old_1" not in shared_state.pending_tasks
         assert "task_old_2" not in shared_state.pending_tasks
+        assert "task_retrying" not in shared_state.pending_tasks
+        assert "task_in_progress" not in shared_state.pending_tasks
 
     @pytest.mark.asyncio
     async def test_cleanup_respects_status_filter(self, orchestrator_tools, shared_state):
-        """Test that only PENDING status tasks are auto-cleaned, not other statuses."""
+        """Test that pending/retrying/in-progress are auto-cleaned, not other statuses."""
         now = datetime.now(timezone.utc)
 
         # Add tasks with different statuses but all old
@@ -186,6 +194,14 @@ class TestCleanupOrphanedTasks:
             task_type="lateral",
             assigned_agent="lateral",
             status=TaskStatus.RETRYING,
+            created_at=now - timedelta(minutes=10),
+            params={},
+        )
+        shared_state.pending_tasks["task_in_progress"] = TaskInfo(
+            task_id="task_in_progress",
+            task_type="acl",
+            assigned_agent="acl",
+            status=TaskStatus.IN_PROGRESS,
             created_at=now - timedelta(minutes=10),
             params={},
         )
@@ -209,15 +225,17 @@ class TestCleanupOrphanedTasks:
         # Cleanup all stale tasks
         result = await orchestrator_tools.cleanup_orphaned_tasks()
 
-        # Only PENDING task should be cleaned
+        # Only pending/retrying/in-progress tasks should be cleaned
         assert "task_pending" in result
-        assert "task_retrying" not in result
+        assert "task_retrying" in result
+        assert "task_in_progress" in result
         assert "task_completed" not in result
         assert "task_failed" not in result
 
-        # Verify only pending task was removed
+        # Verify only pending/retrying/in-progress tasks were removed
         assert "task_pending" not in shared_state.pending_tasks
-        assert "task_retrying" in shared_state.pending_tasks
+        assert "task_retrying" not in shared_state.pending_tasks
+        assert "task_in_progress" not in shared_state.pending_tasks
         assert "task_completed" in shared_state.pending_tasks
         assert "task_failed" in shared_state.pending_tasks
 
