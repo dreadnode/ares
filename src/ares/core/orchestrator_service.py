@@ -20,6 +20,7 @@ from loguru import logger
 from ares.core.config import get_namespace, get_redis_url
 from ares.core.models import Credential
 from ares.core.orchestrator import run_multi_agent_operation
+from ares.core.recovery import OperationRecoveryManager
 from ares.core.task_queue import RedisTaskQueue
 
 
@@ -79,6 +80,160 @@ class OrchestratorService:
         self.task_queue: RedisTaskQueue | None = None
         self.running = False
         self._shutdown_event = asyncio.Event()
+        # Max age in seconds for an operation to be considered recoverable
+        self._max_operation_age = int(os.getenv("MAX_OPERATION_AGE", "300"))  # 5 minutes default
+
+    async def _discover_orphaned_operations(self) -> list[str]:
+        """
+        Discover orphaned operations in Redis that can be recovered.
+
+        Scans Redis for operation state keys and returns operation IDs that:
+        - Have a recent checkpoint (within _max_operation_age seconds)
+        - Don't have an active lock held by another orchestrator
+
+        Returns:
+            List of recoverable operation IDs, sorted by most recent first.
+        """
+        if not self.task_queue or not self.task_queue._client:
+            return []
+
+        recoverable: list[tuple[str, datetime]] = []
+        now = datetime.now(timezone.utc)
+
+        try:
+            # Scan for operation state keys
+            async for key in self.task_queue._client.scan_iter("ares:operation:*:state"):
+                # Extract operation ID from key: ares:operation:<op_id>:state
+                parts = key.decode().split(":")
+                if len(parts) < 3:
+                    continue
+
+                op_id = parts[2]
+
+                # Get checkpoint time to check if operation is recent
+                time_key = f"ares:operation:{op_id}:checkpoint_time"
+                checkpoint_data = await self.task_queue._client.get(time_key)
+
+                if not checkpoint_data:
+                    logger.debug(f"Operation {op_id} has no checkpoint time, skipping")
+                    continue
+
+                checkpoint_time = datetime.fromisoformat(checkpoint_data.decode())
+                # Ensure timezone-aware
+                if checkpoint_time.tzinfo is None:
+                    checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
+
+                age_seconds = (now - checkpoint_time).total_seconds()
+                if age_seconds > self._max_operation_age:
+                    logger.debug(
+                        f"Operation {op_id} checkpoint is stale "
+                        f"({age_seconds:.0f}s > {self._max_operation_age}s)"
+                    )
+                    continue
+
+                # Check if operation is already locked by another orchestrator
+                lock_key = f"ares:lock:{op_id}"
+                lock_held = await self.task_queue._client.exists(lock_key)
+                if lock_held:
+                    logger.debug(f"Operation {op_id} is locked by another orchestrator")
+                    continue
+
+                # Check operation status - don't recover completed/failed operations
+                status_key = f"ares:operations:{op_id}:status"
+                status_data = await self.task_queue._client.get(status_key)
+                if status_data:
+                    status = json.loads(status_data)
+                    if status.get("status") in ("completed", "failed"):
+                        logger.debug(f"Operation {op_id} is already {status.get('status')}")
+                        continue
+
+                recoverable.append((op_id, checkpoint_time))
+                logger.info(
+                    f"Found recoverable operation: {op_id} (checkpoint age: {age_seconds:.0f}s)"
+                )
+
+        except Exception as e:
+            logger.error(f"Error scanning for orphaned operations: {e}")
+            return []
+
+        # Sort by most recent checkpoint first
+        recoverable.sort(key=lambda x: x[1], reverse=True)
+        return [op_id for op_id, _ in recoverable]
+
+    async def _recover_orphaned_operation(self, operation_id: str) -> None:
+        """
+        Recover and resume an orphaned operation.
+
+        Args:
+            operation_id: The operation ID to recover
+        """
+        logger.info(f"Attempting to recover orphaned operation: {operation_id}")
+
+        try:
+            # Use recovery manager to get operation state
+            recovery_manager = OperationRecoveryManager(redis_url=self.redis_url)
+            await recovery_manager.start()
+
+            try:
+                state = await recovery_manager.recover_operation(operation_id, auto_requeue=True)
+            finally:
+                await recovery_manager.stop()
+
+            # Publish status update
+            await self._publish_operation_status(
+                operation_id,
+                "running",
+                {
+                    "resumed_at": datetime.now(timezone.utc).isoformat(),
+                    "recovered": True,
+                },
+            )
+
+            # Resume the operation using stored state
+            target_domain = state.target.domain if state.target else ""
+            target_ips = [h.ip for h in state.all_hosts if h.ip]
+            if not target_ips and state.target and state.target.ip:
+                target_ips = [state.target.ip]
+            logger.info(
+                f"Resuming operation {operation_id}: "
+                f"target={target_domain}, "
+                f"credentials={len(state.all_credentials)}, "
+                f"hosts={len(state.all_hosts)}"
+            )
+
+            result = await run_multi_agent_operation(
+                operation_id=operation_id,
+                target_domain=target_domain,
+                target_ips=target_ips,
+                initial_credential=state.all_credentials[0] if state.all_credentials else None,
+                resume_from_checkpoint=True,
+                redis_url=self.redis_url,
+                namespace=self.namespace,
+            )
+
+            # Publish completion status
+            await self._publish_operation_status(
+                operation_id,
+                "completed",
+                {
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "result": result,
+                    "recovered": True,
+                },
+            )
+            logger.success(f"Recovered operation {operation_id} completed successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to recover operation {operation_id}: {e}")
+            await self._publish_operation_status(
+                operation_id,
+                "failed",
+                {
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                    "error": str(e),
+                    "recovered": True,
+                },
+            )
 
     async def start(self) -> None:
         """Start the orchestrator service."""
@@ -98,6 +253,17 @@ class OrchestratorService:
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
+
+        # Check for orphaned operations that need recovery
+        orphaned_ops = await self._discover_orphaned_operations()
+        if orphaned_ops:
+            logger.warning(f"Found {len(orphaned_ops)} orphaned operation(s) to recover")
+            for op_id in orphaned_ops:
+                if not self.running:
+                    break
+                await self._recover_orphaned_operation(op_id)
+        else:
+            logger.info("No orphaned operations found")
 
         logger.info("Orchestrator service started, waiting for operation requests...")
 
