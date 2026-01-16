@@ -1131,13 +1131,20 @@ class RedTeamDispatcher:
                                     "current_task"
                                 )
                     except Exception as e:  # noqa: PERF203
-                        logger.debug(f"Failed to get heartbeat for {agent_name}: {e}")
+                        # Heartbeat failures could indicate auth issues - log at ERROR level
+                        logger.error(
+                            f"Failed to get heartbeat for {agent_name}: {e}. "
+                            "This may indicate authentication failure or misconfiguration.",
+                            exc_info=True,
+                        )
 
             # Check for stale heartbeats
             for agent_name, agent_info in list(self._agents.items()):
                 elapsed = (now - agent_info.last_heartbeat).total_seconds()
                 if elapsed > 60 and agent_info.status != "offline":
-                    logger.debug(f"Agent {agent_name} heartbeat stale ({elapsed:.0f}s)")
+                    logger.warning(
+                        f"Agent {agent_name} heartbeat stale ({elapsed:.0f}s) - marking offline"
+                    )
                     agent_info.status = "offline"
 
             await asyncio.sleep(15)

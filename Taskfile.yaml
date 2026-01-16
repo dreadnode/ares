@@ -28,6 +28,16 @@ vars:
   DREADNODE_ORGANIZATION: '{{.DREADNODE_ORGANIZATION | default "ares"}}'
   DREADNODE_WORKSPACE: '{{.DREADNODE_WORKSPACE | default "ares-protocol"}}'
   DREADNODE_PROJECT: '{{.DREADNODE_PROJECT | default "ares-soc"}}'
+  MODEL_ORCHESTRATOR: '{{.MODEL_ORCHESTRATOR | default ""}}'
+  MODEL_WORKER: '{{.MODEL_WORKER | default ""}}'
+  MODEL_ALL: '{{.MODEL_ALL | default ""}}'
+  MODEL_ENUM: '{{.MODEL_ENUM | default ""}}'
+  MODEL_CRACKER: '{{.MODEL_CRACKER | default ""}}'
+  MODEL_ACL: '{{.MODEL_ACL | default ""}}'
+  MODEL_PRIVESC: '{{.MODEL_PRIVESC | default ""}}'
+  MODEL_LATERAL: '{{.MODEL_LATERAL | default ""}}'
+  MODEL_POISONING: '{{.MODEL_POISONING | default ""}}'
+  MODEL_ATOMIC: '{{.MODEL_ATOMIC | default ""}}'
 
 tasks:
   default:
@@ -167,13 +177,17 @@ tasks:
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
         export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
         export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
+        MODEL_ARG="{{.MODEL}}"
+        if [ -n "{{.MODEL_ALL}}" ]; then
+          MODEL_ARG="{{.MODEL_ALL}}"
+        fi
 
         mkdir -p {{.LOG_DIR}}
         LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
         echo "📝 Logging to: $LOGFILE"
 
         uv run python -m ares \
-          --args.model {{.MODEL}} \
+          --args.model "$MODEL_ARG" \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
           --args.max-steps {{.MAX_STEPS_BLUE}} \
@@ -198,13 +212,17 @@ tasks:
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
         export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
         export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
+        MODEL_ARG="{{.MODEL}}"
+        if [ -n "{{.MODEL_ALL}}" ]; then
+          MODEL_ARG="{{.MODEL_ALL}}"
+        fi
 
         mkdir -p {{.LOG_DIR}}
         LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
         echo "📝 Logging to: $LOGFILE"
 
         uv run python -m ares \
-          --args.model {{.MODEL}} \
+          --args.model "$MODEL_ARG" \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
           --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
@@ -234,13 +252,17 @@ tasks:
         set -a
         . ./.env
         set +a
+        MODEL_ARG="{{.MODEL}}"
+        if [ -n "{{.MODEL_ALL}}" ]; then
+          MODEL_ARG="{{.MODEL_ALL}}"
+        fi
 
         mkdir -p {{.LOG_DIR}}
         LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
         echo "📝 Logging to: $LOGFILE"
 
         uv run python -m ares \
-          --args.model {{.MODEL}} \
+          --args.model "$MODEL_ARG" \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
           --args.max-steps {{.MAX_STEPS_BLUE}} \
@@ -268,13 +290,17 @@ tasks:
         set -a
         . ./.env
         set +a
+        MODEL_ARG="{{.MODEL}}"
+        if [ -n "{{.MODEL_ALL}}" ]; then
+          MODEL_ARG="{{.MODEL_ALL}}"
+        fi
 
         mkdir -p {{.LOG_DIR}}
         LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
         echo "📝 Logging to: $LOGFILE"
 
         uv run python -m ares \
-          --args.model {{.MODEL}} \
+          --args.model "$MODEL_ARG" \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.poll-interval {{.POLL_INTERVAL}} \
           --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
@@ -306,9 +332,13 @@ tasks:
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
         export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
         export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
+        MODEL_ARG="{{.MODEL}}"
+        if [ -n "{{.MODEL_ALL}}" ]; then
+          MODEL_ARG="{{.MODEL_ALL}}"
+        fi
 
         uv run python -m ares investigate-alert {{.ALERT}} \
-          --args.model {{.MODEL}} \
+          --args.model "$MODEL_ARG" \
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
@@ -331,7 +361,11 @@ tasks:
         echo "Configuration:"
         echo "  Platform: {{.DREADNODE_SERVER}}"
         echo "  Project: {{.DREADNODE_PROJECT}}"
-        echo "  Model: {{.MODEL}}"
+        if [ -n "{{.MODEL_ALL}}" ]; then
+          echo "  Model: {{.MODEL_ALL}}"
+        else
+          echo "  Model: {{.MODEL}}"
+        fi
         echo "  Grafana: {{.GRAFANA_URL}}"
         echo "  Loki: {{.LOKI_URL}}"
         echo "  Prometheus: {{.PROMETHEUS_URL}}"
@@ -621,6 +655,10 @@ tasks:
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
         export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
         export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
+        MODEL_ARG="{{.MODEL}}"
+        if [ -n "{{.MODEL_ALL}}" ]; then
+          MODEL_ARG="{{.MODEL_ALL}}"
+        fi
 
         TARGET="{{.TARGET}}"
 
@@ -653,7 +691,7 @@ tasks:
         echo "📝 Logging to: $LOGFILE"
 
         uv run python -m ares red-team "$RESOLVED_TARGET" \
-          --args.model {{.MODEL}} \
+          --args.model "$MODEL_ARG" \
           --args.max-steps {{.MAX_STEPS_RED}} \
           --args.report-dir {{.REPORT_DIR}} \
           --dn-args.server {{.DREADNODE_SERVER}} \
@@ -681,13 +719,17 @@ tasks:
         set -a
         . ./.env
         set +a
+        MODEL_ARG="{{.MODEL}}"
+        if [ -n "{{.MODEL_ALL}}" ]; then
+          MODEL_ARG="{{.MODEL_ALL}}"
+        fi
 
         mkdir -p {{.LOG_DIR}}
         LOGFILE="{{.LOG_DIR}}/red-$(date +%Y%m%d-%H%M%S).log"
         echo "📝 Logging to: $LOGFILE"
 
         uv run python -m ares red-team {{.TARGET}} \
-          --args.model {{.MODEL}} \
+          --args.model "$MODEL_ARG" \
           --args.max-steps {{.MAX_STEPS_RED}} \
           --args.report-dir {{.REPORT_DIR}} \
           --dn-args.server {{.DREADNODE_SERVER}} \
@@ -722,6 +764,23 @@ tasks:
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
         export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
         export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
+        export ARES_MODEL="{{.MODEL}}"
+        if [ -n "{{.MODEL_ALL}}" ]; then
+          export ARES_MODEL="{{.MODEL_ALL}}"
+        fi
+        export ARES_ORCHESTRATOR_MODEL="{{.MODEL_ORCHESTRATOR}}"
+        export ARES_WORKER_MODEL="{{.MODEL_WORKER}}"
+        export ARES_AGENT_ENUM_MODEL="{{.MODEL_ENUM}}"
+        export ARES_AGENT_CRACKER_MODEL="{{.MODEL_CRACKER}}"
+        export ARES_AGENT_ACL_MODEL="{{.MODEL_ACL}}"
+        export ARES_AGENT_PRIVESC_MODEL="{{.MODEL_PRIVESC}}"
+        export ARES_AGENT_LATERAL_MODEL="{{.MODEL_LATERAL}}"
+        export ARES_AGENT_POISONING_MODEL="{{.MODEL_POISONING}}"
+        export ARES_AGENT_ATOMIC_MODEL="{{.MODEL_ATOMIC}}"
+        MODEL_ARG="$ARES_MODEL"
+        if [ -n "$ARES_ORCHESTRATOR_MODEL" ]; then
+          MODEL_ARG="$ARES_ORCHESTRATOR_MODEL"
+        fi
 
         TARGET="{{.TARGET}}"
 
@@ -785,9 +844,19 @@ tasks:
           ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
           DREADNODE_API_KEY="$DREADNODE_API_KEY" \
           GRAFANA_SERVICE_ACCOUNT_TOKEN="$GRAFANA_SERVICE_ACCOUNT_TOKEN" \
+          ARES_MODEL="$ARES_MODEL" \
+          ARES_ORCHESTRATOR_MODEL="$ARES_ORCHESTRATOR_MODEL" \
+          ARES_WORKER_MODEL="$ARES_WORKER_MODEL" \
+          ARES_AGENT_ENUM_MODEL="$ARES_AGENT_ENUM_MODEL" \
+          ARES_AGENT_CRACKER_MODEL="$ARES_AGENT_CRACKER_MODEL" \
+          ARES_AGENT_ACL_MODEL="$ARES_AGENT_ACL_MODEL" \
+          ARES_AGENT_PRIVESC_MODEL="$ARES_AGENT_PRIVESC_MODEL" \
+          ARES_AGENT_LATERAL_MODEL="$ARES_AGENT_LATERAL_MODEL" \
+          ARES_AGENT_POISONING_MODEL="$ARES_AGENT_POISONING_MODEL" \
+          ARES_AGENT_ATOMIC_MODEL="$ARES_AGENT_ATOMIC_MODEL" \
           GRAFANA_URL="{{.GRAFANA_URL}}" \
           python -m ares multi-agent "{{.DOMAIN}}" "$RESOLVED_TARGETS" \
-          --args.model {{.MODEL}} \
+          --args.model "$MODEL_ARG" \
           --args.max-steps {{.MAX_STEPS_RED}} \
           --multi-args.redis-url "$REDIS_URL" \
           --multi-args.namespace "{{.K8S_NAMESPACE}}" \
@@ -892,6 +961,17 @@ tasks:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       DOMAIN: '{{.DOMAIN | default ""}}'
       TARGETS: '{{.TARGETS | default ""}}'
+      MODEL: '{{.MODEL | default ""}}'
+      MODEL_ALL: '{{.MODEL_ALL | default ""}}'
+      MODEL_ORCHESTRATOR: '{{.MODEL_ORCHESTRATOR | default ""}}'
+      MODEL_WORKER: '{{.MODEL_WORKER | default ""}}'
+      MODEL_ENUM: '{{.MODEL_ENUM | default ""}}'
+      MODEL_CRACKER: '{{.MODEL_CRACKER | default ""}}'
+      MODEL_ACL: '{{.MODEL_ACL | default ""}}'
+      MODEL_PRIVESC: '{{.MODEL_PRIVESC | default ""}}'
+      MODEL_LATERAL: '{{.MODEL_LATERAL | default ""}}'
+      MODEL_POISONING: '{{.MODEL_POISONING | default ""}}'
+      MODEL_ATOMIC: '{{.MODEL_ATOMIC | default ""}}'
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
@@ -906,6 +986,17 @@ tasks:
           DOMAIN: "{{.DOMAIN}}"
           TARGET: "{{.TARGETS}}"
           RESUME: "true"
+          MODEL: "{{.MODEL}}"
+          MODEL_ALL: "{{.MODEL_ALL}}"
+          MODEL_ORCHESTRATOR: "{{.MODEL_ORCHESTRATOR}}"
+          MODEL_WORKER: "{{.MODEL_WORKER}}"
+          MODEL_ENUM: "{{.MODEL_ENUM}}"
+          MODEL_CRACKER: "{{.MODEL_CRACKER}}"
+          MODEL_ACL: "{{.MODEL_ACL}}"
+          MODEL_PRIVESC: "{{.MODEL_PRIVESC}}"
+          MODEL_LATERAL: "{{.MODEL_LATERAL}}"
+          MODEL_POISONING: "{{.MODEL_POISONING}}"
+          MODEL_ATOMIC: "{{.MODEL_ATOMIC}}"
 
   ares:red:multi:cleanup:
     desc: "Clean up old multi-agent operation checkpoints (usage: task ares:red:multi:cleanup [MAX_AGE_HOURS=24])"

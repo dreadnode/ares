@@ -495,10 +495,17 @@ async def _monitor_agent_health(
     """
     Background task to monitor agent health.
 
+    Monitors agent heartbeats and alerts on:
+    - Agents going offline
+    - Agents reporting errors in heartbeat data
+    - Agents persistently offline (3+ consecutive checks)
+
     Args:
         dispatcher: The dispatcher instance
         check_interval: Seconds between health checks
     """
+    offline_counts: dict[str, int] = {}  # Track consecutive offline counts
+
     while True:
         try:
             agent_status = dispatcher.get_agent_status()
@@ -507,15 +514,40 @@ async def _monitor_agent_health(
                 name for name, status in agent_status.items() if status["status"] == "offline"
             ]
 
+            # Track consecutive offline counts
+            for agent_name in agent_status:
+                if agent_name in offline_agents:
+                    offline_counts[agent_name] = offline_counts.get(agent_name, 0) + 1
+                else:
+                    offline_counts[agent_name] = 0
+
+            # Alert on newly offline agents
             if offline_agents:
-                logger.warning(f"Offline agents detected: {offline_agents}")
+                for agent_name in offline_agents:
+                    count = offline_counts.get(agent_name, 0)
+                    if count == 1:
+                        # First time offline - ERROR level
+                        logger.error(f"Agent {agent_name} is now OFFLINE")
+                    elif count == 3:
+                        # Persistently offline - CRITICAL level
+                        logger.critical(
+                            f"Agent {agent_name} has been offline for {count} consecutive checks "
+                            f"({count * check_interval:.0f}s). This may indicate a fatal error "
+                            "such as authentication failure or misconfiguration."
+                        )
+                    elif count > 3 and count % 10 == 0:
+                        # Remind every 10 checks if still offline
+                        logger.critical(
+                            f"Agent {agent_name} still offline after {count} checks "
+                            f"({count * check_interval:.0f}s)"
+                        )
 
             await asyncio.sleep(check_interval)
 
         except asyncio.CancelledError:  # noqa: PERF203
             break
         except Exception as e:
-            logger.error(f"Health monitor error: {e}")
+            logger.error(f"Health monitor error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
 
 

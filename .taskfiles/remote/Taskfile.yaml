@@ -12,6 +12,7 @@ vars:
   ORCH_CONTAINER: '{{.ORCH_CONTAINER | default "orchestrator"}}'
   WORKER_CONTAINER: '{{.WORKER_CONTAINER | default "ares-worker"}}'
   SITE_PACKAGES: '/usr/local/lib/python3.12/site-packages'
+  PARALLELISM: '{{.PARALLELISM | default "4"}}'
 
 tasks:
   # ============================================================================
@@ -72,7 +73,7 @@ tasks:
           PODS=$(kubectl get pods -n {{.NAMESPACE}} \
             -l ares.dreadnode.io/component=red-team \
             --field-selector=status.phase=Running \
-            -o jsonpath='{.items[*].metadata.name}')
+            -o json | jq -r '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | .metadata.name' | tr '\n' ' ')
 
           # Also get orchestrator
           ORCH_POD=$(kubectl get pods -n {{.NAMESPACE}} \
@@ -81,17 +82,22 @@ tasks:
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
           # Sync to worker pods
-          for pod in $PODS; do
-            if kubectl cp "$changed_file" "$pod:{{.SITE_PACKAGES}}/ares/$relative_path" \
-                -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $pod (worker)"
-            elif kubectl cp "$changed_file" "$pod:{{.SITE_PACKAGES}}/ares/$relative_path" \
-                -n {{.NAMESPACE}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $pod"
-            else
-              echo -e "{{.WARN}}   x $pod (failed)"
-            fi
-          done
+          if [ -n "$PODS" ]; then
+            printf '%s\n' $PODS | xargs -n1 -P {{.PARALLELISM}} -I{} bash -c '
+              pod="$1"
+              file="$2"
+              rel="$3"
+              if kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+                  -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
+                echo -e "{{.SUCCESS}}   -> $pod (worker)"
+              elif kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+                  -n {{.NAMESPACE}} 2>/dev/null; then
+                echo -e "{{.SUCCESS}}   -> $pod"
+              else
+                echo -e "{{.WARN}}   x $pod (failed)"
+              fi
+            ' _ {} "$changed_file" "$relative_path"
+          fi
 
           # Sync to orchestrator separately (different container name)
           if [ -n "$ORCH_POD" ]; then
@@ -121,7 +127,7 @@ tasks:
         PODS=$(kubectl get pods -n {{.NAMESPACE}} \
           -l ares.dreadnode.io/component=red-team \
           --field-selector=status.phase=Running \
-          -o jsonpath='{.items[*].metadata.name}')
+          -o json | jq -r '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | .metadata.name' | tr '\n' ' ')
 
         ORCH_POD=$(kubectl get pods -n {{.NAMESPACE}} \
           -l app.kubernetes.io/name=ares-orchestrator \
@@ -151,17 +157,22 @@ tasks:
           echo -e "{{.INFO}} $relative_path"
 
           # Sync to worker pods
-          for pod in $PODS; do
-            if kubectl cp "$f" "$pod:{{.SITE_PACKAGES}}/ares/$relative_path" \
-                -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $pod (worker)"
-            elif kubectl cp "$f" "$pod:{{.SITE_PACKAGES}}/ares/$relative_path" \
-                -n {{.NAMESPACE}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $pod"
-            else
-              echo -e "{{.WARN}}   x $pod"
-            fi
-          done
+          if [ -n "$PODS" ]; then
+            printf '%s\n' $PODS | xargs -n1 -P {{.PARALLELISM}} -I{} bash -c '
+              pod="$1"
+              file="$2"
+              rel="$3"
+              if kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+                  -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
+                echo -e "{{.SUCCESS}}   -> $pod (worker)"
+              elif kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+                  -n {{.NAMESPACE}} 2>/dev/null; then
+                echo -e "{{.SUCCESS}}   -> $pod"
+              else
+                echo -e "{{.WARN}}   x $pod"
+              fi
+            ' _ {} "$f" "$relative_path"
+          fi
 
           # Sync to orchestrator
           if [ -n "$ORCH_POD" ]; then
@@ -212,7 +223,7 @@ tasks:
         PODS=$(kubectl get pods -n {{.NAMESPACE}} \
           -l ares.dreadnode.io/component=red-team \
           --field-selector=status.phase=Running \
-          -o jsonpath='{.items[*].metadata.name}')
+          -o json | jq -r '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | .metadata.name' | tr '\n' ' ')
 
         ORCH_POD=$(kubectl get pods -n {{.NAMESPACE}} \
           -l app.kubernetes.io/name=ares-orchestrator \
@@ -235,17 +246,22 @@ tasks:
           echo -e "{{.INFO}} $relative_path"
 
           # Sync to worker pods
-          for pod in $PODS; do
-            if kubectl cp "$f" "$pod:{{.SITE_PACKAGES}}/ares/$relative_path" \
-                -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $pod (worker)"
-            elif kubectl cp "$f" "$pod:{{.SITE_PACKAGES}}/ares/$relative_path" \
-                -n {{.NAMESPACE}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $pod"
-            else
-              echo -e "{{.WARN}}   x $pod"
-            fi
-          done
+          if [ -n "$PODS" ]; then
+            printf '%s\n' $PODS | xargs -n1 -P {{.PARALLELISM}} -I{} bash -c '
+              pod="$1"
+              file="$2"
+              rel="$3"
+              if kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+                  -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
+                echo -e "{{.SUCCESS}}   -> $pod (worker)"
+              elif kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+                  -n {{.NAMESPACE}} 2>/dev/null; then
+                echo -e "{{.SUCCESS}}   -> $pod"
+              else
+                echo -e "{{.WARN}}   x $pod"
+              fi
+            ' _ {} "$f" "$relative_path"
+          fi
 
           # Sync to orchestrator
           if [ -n "$ORCH_POD" ]; then

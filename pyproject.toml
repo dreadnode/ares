@@ -190,7 +190,9 @@ ignore = [
     "S607",    # partial executable path (intentional for kubectl/zarf)
     "PERF401", # use list comprehension - many false positives when code is clearer as is
     "TRY300",  # consider moving to else block - often less readable
+    "TRY301",  # abstract raise to inner function - style preference
     "BLE001",  # blind exception catching - acceptable in top-level handlers
+    "PT017",   # assert on exception in except block - valid test pattern
     "PLR0915", # too many statements - acceptable for main functions
     "G004",    # f-strings in logging - we use loguru, not stdlib logging
     "TRY400",  # logging.exception vs logging.error - we use loguru

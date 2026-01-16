@@ -14,6 +14,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ares.core.exceptions import (
+    AuthenticationError,
+    ConfigurationError,
+    CriticalWorkerError,
+)
+
 # ============================================================================
 # Fixtures
 # ============================================================================
@@ -651,6 +657,54 @@ class TestDiscoverActiveOperationConnectionReuse:
         assert mock_redis_async.from_url.call_count == 2
         # Client should have been closed after error
         assert mock_client.aclose.call_count >= 1
+
+
+class TestWorkerFatalErrorHandling:
+    """Tests for fatal error handling in RedisWorkerAgent.
+
+    Note: These tests verify error handling behavior conceptually.
+    Full integration testing requires actual worker loop execution.
+    """
+
+    def test_authentication_error_hierarchy(self):
+        """Test that AuthenticationError is properly defined."""
+        # Verify the exception can be created and caught
+        try:
+            raise AuthenticationError("test", service="grafana", status_code=401)
+        except AuthenticationError as e:
+            assert e.service == "grafana"
+            assert e.status_code == 401
+            assert "grafana" in str(e)
+
+    def test_configuration_error_hierarchy(self):
+        """Test that ConfigurationError is properly defined."""
+        try:
+            raise ConfigurationError("Missing config")
+        except ConfigurationError as e:
+            assert str(e) == "Missing config"
+
+    def test_critical_worker_error_hierarchy(self):
+        """Test that CriticalWorkerError is properly defined."""
+        try:
+            raise CriticalWorkerError("Fatal error")
+        except CriticalWorkerError as e:
+            assert str(e) == "Fatal error"
+
+    def test_fatal_exceptions_caught_by_ares_exception(self):
+        """Test that all fatal errors can be caught as AresError."""
+        from ares.core.exceptions import AresError
+
+        fatal_errors = [
+            AuthenticationError("test"),
+            ConfigurationError("test"),
+            CriticalWorkerError("test"),
+        ]
+
+        for error in fatal_errors:
+            try:
+                raise error
+            except AresError:
+                pass  # Successfully caught as base error
 
 
 if __name__ == "__main__":
