@@ -245,9 +245,21 @@ async def run_multi_agent_operation(
             )
 
             # Run the orchestrator agent
+            logger.info(f"🤖 Connecting to {model}...")
             result = await orchestrator_agent.run(initial_prompt)
 
-            logger.success(f"Orchestrator completed: {result.steps} steps, {result.stop_reason}")
+            # Log model connection and completion status
+            logger.success(
+                f"✅ Model connection successful: {model} "
+                f"(messages: {len(result.messages)}, tokens: {result.usage})"
+            )
+            log_fn = logger.error if result.stop_reason == "error" else logger.success
+            log_msg = (
+                f"Orchestrator failed after {result.steps} steps: {result.error}"
+                if result.stop_reason == "error"
+                else f"Orchestrator completed: {result.steps} steps, {result.stop_reason}"
+            )
+            log_fn(log_msg)
 
         # Wait for any remaining background tasks
         await _wait_for_completion(dispatcher, tasks, max_runtime=300.0)
@@ -278,13 +290,10 @@ async def run_multi_agent_operation(
         raise
 
     finally:
-        # Cleanup
+        # Cleanup - cancel all tasks and suppress CancelledError
         for task in tasks:
             task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         # Release operation lock
         await task_queue.release_operation_lock(operation_id)

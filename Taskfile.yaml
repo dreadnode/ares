@@ -15,7 +15,8 @@ includes:
 vars:
   API_DIR: "."
   # Ares configuration
-  MODEL: '{{.MODEL | default "claude-sonnet-4-20250514"}}'
+  # MODEL: '{{.MODEL | default "claude-sonnet-4-20250514"}}'
+  MODEL: '{{.MODEL | default "gpt-5.2"}}'
   GRAFANA_URL: '{{.GRAFANA_URL | default "https://grafana.dev.plundr.ai"}}'
   POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
   MAX_STEPS_BLUE: '{{.MAX_STEPS_BLUE | default "50"}}'
@@ -159,12 +160,13 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-1"}}'
+          REGION: '{{.REGION | default "us-west-2"}}'
     cmds:
       - |
-        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
-        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
         export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
+        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
+        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
+        export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
 
         mkdir -p {{.LOG_DIR}}
         LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
@@ -189,12 +191,13 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-1"}}'
+          REGION: '{{.REGION | default "us-west-2"}}'
     cmds:
       - |
-        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
-        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
         export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
+        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
+        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
+        export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
 
         mkdir -p {{.LOG_DIR}}
         LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
@@ -220,7 +223,7 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-1"}}'
+          REGION: '{{.REGION | default "us-west-2"}}'
     cmds:
       - |
         if [ ! -f .env ]; then
@@ -254,7 +257,7 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-1"}}'
+          REGION: '{{.REGION | default "us-west-2"}}'
     cmds:
       - |
         if [ ! -f .env ]; then
@@ -296,12 +299,13 @@ tasks:
       - task: check-aws-auth
         vars:
           PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-1"}}'
+          REGION: '{{.REGION | default "us-west-2"}}'
     cmds:
       - |
-        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal)
-        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
         export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
+        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
+        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
+        export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
 
         uv run python -m ares investigate-alert {{.ALERT}} \
           --args.model {{.MODEL}} \
@@ -571,7 +575,7 @@ tasks:
     internal: true
     vars:
       PROFILE: '{{.PROFILE | default "lab"}}'
-      REGION: '{{.REGION | default "us-west-1"}}'
+      REGION: '{{.REGION | default "us-west-2"}}'
     cmds:
       - |
         # Check if AWS CLI is installed
@@ -606,16 +610,17 @@ tasks:
     vars:
       TARGET: '{{.TARGET | default ""}}'
       PROFILE: '{{.PROFILE | default "lab"}}'
-      REGION: '{{.REGION | default "us-west-1"}}'
+      REGION: '{{.REGION | default "us-west-2"}}'
       REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
     preconditions:
       - sh: test -n "{{.TARGET}}"
         msg: "TARGET variable is required. Usage: task ares:red TARGET=dreadgoad"
     cmds:
       - |
-        export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
-        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
         export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
+        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
+        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
+        export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
 
         TARGET="{{.TARGET}}"
 
@@ -704,7 +709,7 @@ tasks:
       RESUME: '{{.RESUME | default "false"}}'
       # Target resolution (where the AD targets live)
       TARGET_PROFILE: '{{.TARGET_PROFILE | default "lab"}}'
-      TARGET_REGION: '{{.TARGET_REGION | default "us-west-1"}}'
+      TARGET_REGION: '{{.TARGET_REGION | default "us-west-2"}}'
       # K8s cluster (where the agents run)
       K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
       REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
@@ -715,6 +720,8 @@ tasks:
       - |
         export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
+        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
+        export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
 
         TARGET="{{.TARGET}}"
 
@@ -774,6 +781,11 @@ tasks:
         # Run orchestrator inside the K8s cluster via kubectl exec
         echo "🚀 Starting orchestrator in K8s cluster..."
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
+          env OPENAI_API_KEY="$OPENAI_API_KEY" \
+          ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+          DREADNODE_API_KEY="$DREADNODE_API_KEY" \
+          GRAFANA_SERVICE_ACCOUNT_TOKEN="$GRAFANA_SERVICE_ACCOUNT_TOKEN" \
+          GRAFANA_URL="{{.GRAFANA_URL}}" \
           python -m ares multi-agent "{{.DOMAIN}}" "$RESOLVED_TARGETS" \
           --args.model {{.MODEL}} \
           --args.max-steps {{.MAX_STEPS_RED}} \
@@ -988,7 +1000,7 @@ tasks:
       LINES: '{{.LINES | default "100"}}'
       FOLLOW: '{{.FOLLOW | default "false"}}'
       PROFILE: '{{.PROFILE | default "lab"}}'
-      REGION: '{{.REGION | default "us-west-1"}}'
+      REGION: '{{.REGION | default "us-west-2"}}'
     deps:
       - task: check-aws-auth
         vars:
