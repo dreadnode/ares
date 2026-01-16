@@ -35,24 +35,25 @@ if TYPE_CHECKING:
 
 
 async def discover_active_operation(  # noqa: PLR0912
-    redis_url: str, max_wait: int = 300, max_operation_age: int = 300
+    redis_url: str, max_wait: int | None = None, max_operation_age: int = 300
 ) -> str | None:
     """
     Discover an active operation from Redis by scanning for operation keys.
 
-    Waits up to max_wait seconds for an operation to appear.
+    Waits indefinitely (by default) for an operation to appear.
     Returns the most recently checkpointed operation ID, only if it was
     checkpointed within max_operation_age seconds.
 
     Args:
         redis_url: Redis connection URL
-        max_wait: Maximum seconds to wait for an operation (default: 300 = 5 minutes)
+        max_wait: Maximum seconds to wait for an operation (default: None = wait forever).
+            Set to a positive integer to timeout after that many seconds.
         max_operation_age: Maximum age in seconds for an operation to be considered
             active (default: 300 = 5 minutes). Operations with older checkpoints
             are ignored to prevent workers from joining stale operations.
 
     Returns:
-        Operation ID if found, None otherwise
+        Operation ID if found, None only if max_wait is set and exceeded
     """
     try:
         import redis.asyncio as redis_async
@@ -107,14 +108,17 @@ async def discover_active_operation(  # noqa: PLR0912
                 logger.info(f"Discovered active operation: {operation_id}")
                 return operation_id
 
-            # Check if we've exceeded max wait time
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed >= max_wait:
-                logger.warning(f"No active operations found after {max_wait}s")
-                return None
+            # Check if we've exceeded max wait time (only if max_wait is set)
+            if max_wait is not None:
+                elapsed = asyncio.get_event_loop().time() - start_time
+                if elapsed >= max_wait:
+                    logger.warning(f"No active operations found after {max_wait}s")
+                    return None
 
-            # Wait before retrying
-            logger.debug("No operations found, waiting 10s before retry...")
+            # Wait before retrying (log less frequently to reduce noise)
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if int(elapsed) % 60 < 10:  # Log once per minute
+                logger.debug(f"No operations found, waiting... ({int(elapsed)}s elapsed)")
             await asyncio.sleep(10)
 
         except Exception as e:
@@ -908,7 +912,7 @@ async def run_worker(
     model: str = "claude-sonnet-4-20250514",
     max_steps: int | None = None,
     discover_operation: bool = True,
-    discovery_timeout: int = 300,
+    discovery_timeout: int | None = None,
     use_redis_queue: bool = True,
 ) -> None:
     """
@@ -925,7 +929,7 @@ async def run_worker(
         model: LLM model to use.
         max_steps: Override default max steps for role.
         discover_operation: If True and operation_id is None/empty, discover from Redis.
-        discovery_timeout: Max seconds to wait for operation discovery.
+        discovery_timeout: Max seconds to wait for operation discovery (default: None = wait forever).
         use_redis_queue: If True, poll Redis queue for tasks (Kubernetes mode).
     """
     # Resolve config defaults
@@ -939,11 +943,16 @@ async def run_worker(
 
     # Discover operation if not provided
     if operation_id is None and discover_operation:
-        logger.info("No operation ID provided, scanning Redis for active operations...")
+        if discovery_timeout is None:
+            logger.info("No operation ID provided, waiting indefinitely for an active operation...")
+        else:
+            logger.info(
+                f"No operation ID provided, waiting up to {discovery_timeout}s for an active operation..."
+            )
         operation_id = await discover_active_operation(redis_url, max_wait=discovery_timeout)
 
         if operation_id is None:
-            logger.error("No active operation found and none specified")
+            logger.error("No active operation found within timeout and none specified")
             return
 
     if operation_id is None:
