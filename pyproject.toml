@@ -171,44 +171,44 @@ extend-exclude = [
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-    "E501",    # line too long (we make best effort)
-    "TRY003",  # long messages in exception classes
-    "EM",      # picky message construction for exceptions
-    "C90",     # mccabe complexity
-    "A002",    # shadowing built-in
-    "D",       # docstrings
-    "ANN",     # annotations (handled by mypy)
-    "PLR0913", # too many arguments
-    "ERA001",  # commented out code
-    "FIX002",  # contains todo, consider fixing
+    "E501",    # we make best effort on line length
+    "TRY003",
+    "EM",
+    "C90",
+    "A002",
+    "D",
+    "ANN",     # handled by mypy
+    "PLR0913",
+    "ERA001",
+    "FIX002",
     "COM812",  # disabled for formatting
     "ISC001",  # disabled for formatting
-    "PLC0415", # import should be at the top of the file
-    "TD003",   # missing issue link on todos
-    "PLR2004", # magic values - too many false positives
-    "S603",    # subprocess call without shell=True (intentional for airgap CLI tools)
-    "S607",    # partial executable path (intentional for kubectl/zarf)
-    "PERF401", # use list comprehension - many false positives when code is clearer as is
-    "TRY300",  # consider moving to else block - often less readable
-    "TRY301",  # abstract raise to inner function - style preference
-    "BLE001",  # blind exception catching - acceptable in top-level handlers
-    "PT017",   # assert on exception in except block - valid test pattern
-    "PLR0915", # too many statements - acceptable for main functions
-    "G004",    # f-strings in logging - we use loguru, not stdlib logging
-    "TRY400",  # logging.exception vs logging.error - we use loguru
-    "PLR0911", # too many return statements - acceptable for tool methods
-    "ARG001",  # unused function argument - tools API requires specific signatures
-    "ARG002",  # unused method argument - tools API requires specific signatures
-    "PLW0603", # global statement - acceptable for module-level caching
-    "SLF001",  # private member access - intentional for internal APIs
-    "SIM105",  # contextlib.suppress - style preference
-    "S110",    # try-except-pass - acceptable in cleanup code
-    "PTH108",  # os.unlink vs Path.unlink - compatibility
-    "PTH110",  # os.path.exists vs Path.exists - compatibility
-    "PTH123",  # open() vs Path.open() - style preference
-    "RUF005",  # list concatenation - style preference
-    "FBT001",  # boolean positional argument - acceptable for tool methods
-    "FBT002",  # boolean default positional argument - acceptable for tool methods
+    "PLC0415",
+    "TD003",
+    "PLR2004", # too many false positives
+    "S603",    # intentional for airgap CLI tools
+    "S607",    # intentional for kubectl/zarf
+    "PERF401", # many false positives when code is clearer
+    "TRY300",  # often less readable
+    "TRY301",  # style preference
+    "BLE001",  # acceptable in top-level handlers
+    "PT017",   # valid test pattern
+    "PLR0915", # acceptable for main functions
+    "G004",    # we use loguru, not stdlib logging
+    "TRY400",  # we use loguru
+    "PLR0911", # acceptable for tool methods
+    "ARG001",  # tools API requires specific signatures
+    "ARG002",  # tools API requires specific signatures
+    "PLW0603", # acceptable for module-level caching
+    "SLF001",  # intentional for internal APIs
+    "SIM105",  # style preference
+    "S110",    # acceptable in cleanup code
+    "PTH108",  # style preference
+    "PTH110",  # style preference
+    "PTH123",  # style preference
+    "RUF005",  # style preference
+    "FBT001",  # acceptable for tool methods
+    "FBT002",  # acceptable for tool methods
 ]
 
 [tool.ruff.format]
