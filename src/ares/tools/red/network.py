@@ -58,11 +58,9 @@ class NetworkEnumerationTools(Toolset):
         """
         Scans target IPs to discover services, ports, and host information.
 
-        This tool performs a comprehensive network scan to identify:
-        - Open ports and running services
-        - Service versions
-        - Operating system information
-        - Domain Controller vs Member Server classification
+        This tool performs a two-phase network scan for speed and accuracy:
+        1. Fast port discovery (no version detection)
+        2. Service version detection only on discovered open ports
 
         Args:
             target: IP addresses to scan (space-separated for multiple targets)
@@ -74,24 +72,53 @@ class NetworkEnumerationTools(Toolset):
             >>> result = nmap_scan("192.168.1.2")
             >>> result = nmap_scan("192.168.1.2 192.168.1.3 192.168.1.4")
         """
-        cmd = ["nmap", "-T4", "-sV", "--open"] + target.split(" ")
+        import re
+
+        targets = target.split()
 
         try:
-            logger.info(f"[*] Scanning targets: {target}")
-            stdout, stderr, returncode = _run_tool(cmd, timeout_seconds=300)
+            logger.info(f"[*] Phase 1: Fast port discovery on {len(targets)} target(s)")
+
+            # Phase 1: Fast port scan without version detection
+            port_scan_cmd = ["nmap", "-Pn", "-sT", "-T4", "--open", "--top-ports", "100"] + targets
+            stdout, stderr, returncode = _run_tool(port_scan_cmd, timeout_seconds=120)
 
             if returncode != 0:
-                logger.error(f"[!] Nmap scan failed: {stderr}")
-                return stderr or f"Nmap scan failed with code {returncode}"
+                logger.error(f"[!] Port scan failed: {stderr}")
+                return stderr or f"Port scan failed with code {returncode}"
 
-            logger.info(f"[*] Nmap scan completed for target {target}")
+            # Parse open ports from output (format: "22/tcp open ssh")
+            open_ports = set()
+            for match in re.finditer(r"(\d+)/tcp\s+open", stdout):
+                open_ports.add(match.group(1))
+
+            if not open_ports:
+                logger.info("[*] No open ports found")
+                if self.state:
+                    for ip in targets:
+                        self.state.queried_hosts.add(ip)
+                return stdout
+
+            ports_str = ",".join(sorted(open_ports, key=int))
+            logger.info(f"[*] Phase 2: Service detection on {len(open_ports)} ports: {ports_str}")
+
+            # Phase 2: Service version detection only on discovered ports
+            svc_scan_cmd = ["nmap", "-Pn", "-sT", "-T4", "--open", "-sV", "-p", ports_str] + targets
+            svc_stdout, svc_stderr, svc_returncode = _run_tool(svc_scan_cmd, timeout_seconds=300)
+
+            if svc_returncode != 0:
+                logger.warning(f"[!] Service scan had issues: {svc_stderr}")
+                # Return port scan results if service scan fails
+                return stdout
+
+            logger.info(f"[*] Nmap scan completed for {len(targets)} target(s)")
 
             # Track the scanned hosts
             if self.state:
-                for ip in target.split():
+                for ip in targets:
                     self.state.queried_hosts.add(ip)
 
-            return stdout
+            return svc_stdout
 
         except Exception as e:
             logger.error(f"Scan failed: {e!s}")

@@ -704,7 +704,7 @@ tasks:
       RESUME: '{{.RESUME | default "false"}}'
       # Target resolution (where the AD targets live)
       TARGET_PROFILE: '{{.TARGET_PROFILE | default "lab"}}'
-      TARGET_REGION: '{{.TARGET_REGION | default "us-west-2"}}'
+      TARGET_REGION: '{{.TARGET_REGION | default "us-west-1"}}'
       # K8s cluster (where the agents run)
       K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
       REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
