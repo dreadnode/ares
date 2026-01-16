@@ -34,6 +34,7 @@ from rigging.parsing import (
 )
 
 __all__ = [
+    "DEFAULT_MAX_RETRIES",
     # Multi-Agent Models
     "AgentInfo",
     "AgentLocalState",
@@ -535,6 +536,11 @@ class TaskStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    RETRYING = "retrying"  # Marked for retry after pod restart
+
+
+# Default max retries for tasks interrupted by pod restarts
+DEFAULT_MAX_RETRIES = 3
 
 
 @dataclass
@@ -551,6 +557,8 @@ class TaskInfo:
     params: dict[str, Any] = field(default_factory=dict)
     result: Any = None
     error: str | None = None
+    retry_count: int = 0
+    max_retries: int = DEFAULT_MAX_RETRIES
 
 
 @dataclass

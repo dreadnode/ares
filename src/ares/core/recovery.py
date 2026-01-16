@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from ares.core.models import SharedRedTeamState, TaskStatus
+from ares.core.models import DEFAULT_MAX_RETRIES, SharedRedTeamState, TaskStatus
+from ares.core.task_queue import RedisTaskQueue
 
 if TYPE_CHECKING:
     from ares.core.dispatcher import RedTeamDispatcher
@@ -127,14 +128,20 @@ class OperationRecoveryManager:
             logger.error(f"Failed to save checkpoint: {e}")
             return False
 
-    async def recover_operation(self, operation_id: str) -> SharedRedTeamState:
+    async def recover_operation(  # noqa: PLR0912
+        self,
+        operation_id: str,
+        auto_requeue: bool = True,
+    ) -> SharedRedTeamState:
         """
         Recover state from last checkpoint.
 
-        Marks in-progress tasks as failed since they were interrupted.
+        By default, automatically requeues interrupted tasks for retry.
+        Tasks that exceed max_retries are marked as permanently failed.
 
         Args:
             operation_id: The operation ID to recover.
+            auto_requeue: If True, automatically requeue interrupted tasks.
 
         Returns:
             Recovered SharedRedTeamState.
@@ -154,17 +161,64 @@ class OperationRecoveryManager:
 
             state = SharedRedTeamState.from_bytes(data)
 
-            # Mark in-progress tasks as failed (they were interrupted)
+            # Handle in-progress tasks that were interrupted
             interrupted_count = 0
-            for _task_id, task in list(state.pending_tasks.items()):
-                if task.status == TaskStatus.IN_PROGRESS:
-                    task.status = TaskStatus.FAILED
-                    task.error = "Pod restart during execution"
-                    task.completed_at = datetime.now(timezone.utc)
-                    interrupted_count += 1
+            requeued_count = 0
+            failed_count = 0
+
+            # Create task queue for requeuing
+            task_queue = RedisTaskQueue(self._redis_url) if auto_requeue else None
+            if task_queue:
+                await task_queue.connect()
+
+            try:
+                for task_id, task in list(state.pending_tasks.items()):
+                    if task.status == TaskStatus.IN_PROGRESS:
+                        interrupted_count += 1
+                        task.retry_count += 1
+
+                        # Check if we can retry
+                        max_retries = getattr(task, "max_retries", DEFAULT_MAX_RETRIES)
+                        if auto_requeue and task.retry_count <= max_retries:
+                            # Mark for retry and requeue
+                            task.status = TaskStatus.RETRYING
+                            task.error = f"Pod restart during execution (retry {task.retry_count}/{max_retries})"
+
+                            # Requeue the task
+                            if task_queue:
+                                await task_queue.requeue_task(
+                                    task_type=task.task_type,
+                                    target_role=task.assigned_agent,
+                                    payload=task.params,
+                                    task_id=task_id,
+                                    retry_count=task.retry_count,
+                                )
+                                requeued_count += 1
+                                logger.info(
+                                    f"Task {task_id} requeued for retry "
+                                    f"({task.retry_count}/{max_retries})"
+                                )
+                        else:
+                            # Max retries exceeded - mark permanently failed
+                            task.status = TaskStatus.FAILED
+                            task.error = (
+                                f"Pod restart during execution (max retries {max_retries} exceeded)"
+                            )
+                            task.completed_at = datetime.now(timezone.utc)
+                            failed_count += 1
+                            logger.error(
+                                f"Task {task_id} permanently failed after "
+                                f"{task.retry_count} retries"
+                            )
+            finally:
+                if task_queue:
+                    await task_queue.disconnect()
 
             if interrupted_count:
-                logger.warning(f"Marked {interrupted_count} in-progress tasks as failed")
+                logger.warning(
+                    f"Recovery: {interrupted_count} interrupted tasks - "
+                    f"{requeued_count} requeued, {failed_count} permanently failed"
+                )
 
             # Get checkpoint time for logging
             time_key = f"ares:operation:{operation_id}:checkpoint_time"
@@ -435,25 +489,55 @@ class OperationResumeHelper:
 
     def get_interrupted_tasks(self) -> list[dict]:
         """
-        Get tasks that were interrupted during recovery.
+        Get tasks that were interrupted during recovery and permanently failed.
+
+        Note: Tasks with RETRYING status are being auto-requeued and don't need
+        manual intervention.
 
         Returns:
-            List of task info for tasks that need to be retried.
+            List of task info for permanently failed tasks.
         """
         interrupted = []
 
         for task_id, task in self.state.pending_tasks.items():
-            if task.status == TaskStatus.FAILED and task.error == "Pod restart during execution":
+            # Only return permanently failed tasks (max retries exceeded)
+            if task.status == TaskStatus.FAILED and task.error and "Pod restart" in task.error:
                 interrupted.append(
                     {
                         "task_id": task_id,
                         "task_type": task.task_type,
                         "params": task.params,
                         "assigned_agent": task.assigned_agent,
+                        "retry_count": getattr(task, "retry_count", 0),
+                        "error": task.error,
                     }
                 )
 
         return interrupted
+
+    def get_retrying_tasks(self) -> list[dict]:
+        """
+        Get tasks that are currently being retried.
+
+        Returns:
+            List of task info for tasks being auto-retried.
+        """
+        retrying = []
+
+        for task_id, task in self.state.pending_tasks.items():
+            if task.status == TaskStatus.RETRYING:
+                retrying.append(
+                    {
+                        "task_id": task_id,
+                        "task_type": task.task_type,
+                        "params": task.params,
+                        "assigned_agent": task.assigned_agent,
+                        "retry_count": getattr(task, "retry_count", 0),
+                        "max_retries": getattr(task, "max_retries", DEFAULT_MAX_RETRIES),
+                    }
+                )
+
+        return retrying
 
     def get_unexploited_vulnerabilities(self) -> list[dict]:
         """
@@ -504,49 +588,57 @@ class OperationResumeHelper:
             Formatted prompt for the orchestrator.
         """
         lines = [
-            "🔄 OPERATION RESUMED AFTER RECOVERY",
+            "OPERATION RESUMED AFTER RECOVERY",
             "=" * 50,
             "",
             f"Operation ID: {self.state.operation_id}",
             f"Credentials found: {len(self.state.all_credentials)}",
             f"Hosts discovered: {len(self.state.all_hosts)}",
-            f"Domain admin: {'YES ✅' if self.state.has_domain_admin else 'NO ⏳'}",
+            f"Domain admin: {'YES' if self.state.has_domain_admin else 'NO'}",
             "",
         ]
 
-        # Interrupted tasks
+        # Retrying tasks (auto-handled)
+        retrying = self.get_retrying_tasks()
+        if retrying:
+            lines.append(f"[RETRYING] {len(retrying)} tasks auto-requeued:")
+            for task in retrying[:5]:
+                lines.append(
+                    f"  - {task['task_type']} -> {task['assigned_agent']} "
+                    f"(retry {task['retry_count']}/{task['max_retries']})"
+                )
+            lines.append("")
+
+        # Permanently failed tasks (need manual attention)
         interrupted = self.get_interrupted_tasks()
         if interrupted:
-            lines.append(f"⚠️ {len(interrupted)} INTERRUPTED TASKS (may need retry):")
+            lines.append(f"[FAILED] {len(interrupted)} tasks exceeded max retries:")
             for task in interrupted[:5]:
-                lines.append(f"  • {task['task_type']} -> {task['assigned_agent']}")
+                lines.append(
+                    f"  - {task['task_type']} -> {task['assigned_agent']} "
+                    f"(retried {task['retry_count']}x)"
+                )
             lines.append("")
 
         # Unexploited vulnerabilities
         unexploited = self.get_unexploited_vulnerabilities()
         if unexploited:
-            lines.append(f"🎯 {len(unexploited)} UNEXPLOITED VULNERABILITIES:")
+            lines.append(f"[PENDING] {len(unexploited)} unexploited vulnerabilities:")
             for vuln in unexploited[:5]:
                 lines.append(
-                    f"  • {vuln['vuln_type']}: {vuln['target']} (priority {vuln['priority']})"
+                    f"  - {vuln['vuln_type']}: {vuln['target']} (priority {vuln['priority']})"
                 )
             lines.append("")
 
         # Uncracked hashes
         uncracked = self.get_uncracked_hashes()
         if uncracked:
-            lines.append(f"#️⃣ {len(uncracked)} UNCRACKED HASHES")
+            lines.append(f"[PENDING] {len(uncracked)} uncracked hashes")
             lines.append("")
 
-        lines.extend(
-            [
-                "📋 RECOMMENDED ACTIONS:",
-                "1. Review agent status with get_agent_status()",
-                "2. Check pending tasks with get_pending_tasks()",
-                "3. Continue exploitation of pending vulnerabilities",
-                "4. Dispatch crack requests for any new hashes",
-            ]
-        )
+        if not retrying and not interrupted:
+            lines.append("[OK] No interrupted tasks - clean recovery")
+            lines.append("")
 
         return "\n".join(lines)
 

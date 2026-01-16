@@ -271,15 +271,22 @@ tasks:
       - |
         echo -e "{{.INFO}} Restarting deployments in {{.NAMESPACE}}..."
 
+        # Restart worker agents
         kubectl rollout restart deployment -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team 2>/dev/null || true
 
+        # Restart orchestrator (has different label)
+        kubectl rollout restart deployment -n {{.NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator 2>/dev/null || true
+
         echo -e "{{.SUCCESS}} Rollout initiated"
-        echo -e "{{.INFO}} Checking status..."
+        echo -e "{{.INFO}} Checking worker status..."
 
         kubectl rollout status deployment -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team --timeout=60s 2>/dev/null || true
 
+        echo -e "{{.INFO}} Checking orchestrator status..."
+        kubectl rollout status deployment -n {{.NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator --timeout=60s 2>/dev/null || true
+
         echo ""
-        echo -e "{{.SUCCESS}} Pods restarted"
+        echo -e "{{.SUCCESS}} All pods restarted"
 
   # ============================================================================
   # STATUS: Check pod status
