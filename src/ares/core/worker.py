@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -44,6 +46,9 @@ async def discover_active_operation(  # noqa: PLR0912
     Returns the most recently checkpointed operation ID, only if it was
     checkpointed within max_operation_age seconds.
 
+    This function is cancellation-safe and will clean up resources properly
+    when cancelled (e.g., during graceful shutdown).
+
     Args:
         redis_url: Redis connection URL
         max_wait: Maximum seconds to wait for an operation (default: None = wait forever).
@@ -54,6 +59,9 @@ async def discover_active_operation(  # noqa: PLR0912
 
     Returns:
         Operation ID if found, None only if max_wait is set and exceeded
+
+    Raises:
+        asyncio.CancelledError: Re-raised after cleanup when the task is cancelled
     """
     try:
         import redis.asyncio as redis_async
@@ -61,74 +69,106 @@ async def discover_active_operation(  # noqa: PLR0912
         logger.error("redis package not installed, cannot discover operations")
         return None
 
-    start_time = asyncio.get_event_loop().time()
+    start_time = time.monotonic()
+    last_log_time = start_time
+    consecutive_errors = 0
+    client = None
 
-    while True:
-        client = None
-        try:
-            client = redis_async.from_url(redis_url)
-            await client.ping()
+    async def _cleanup_client() -> None:
+        """Close Redis client if open."""
+        nonlocal client
+        if client:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+            client = None
 
-            now = datetime.now(timezone.utc)
+    try:
+        while True:
+            try:
+                # Reuse existing connection or create new one
+                if client is None:
+                    client = redis_async.from_url(redis_url)
+                await client.ping()
 
-            # Scan for operation state keys
-            operations: list[tuple[str, datetime]] = []
-            async for key in client.scan_iter("ares:operation:*:state"):
-                # Extract operation ID from key: ares:operation:<op_id>:state
-                parts = key.decode().split(":")
-                if len(parts) >= 3:
-                    op_id = parts[2]
+                now = datetime.now(timezone.utc)
 
-                    # Get checkpoint time to find most recent operation
-                    time_key = f"ares:operation:{op_id}:checkpoint_time"
-                    checkpoint_data = await client.get(time_key)
+                # Scan for operation state keys
+                operations: list[tuple[str, datetime]] = []
+                async for key in client.scan_iter("ares:operation:*:state"):
+                    # Extract operation ID from key: ares:operation:<op_id>:state
+                    parts = key.decode().split(":")
+                    if len(parts) >= 3:
+                        op_id = parts[2]
 
-                    if checkpoint_data:
-                        checkpoint_time = datetime.fromisoformat(checkpoint_data.decode())
-                        # Ensure checkpoint_time is timezone-aware for comparison
-                        if checkpoint_time.tzinfo is None:
-                            checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
+                        # Get checkpoint time to find most recent operation
+                        time_key = f"ares:operation:{op_id}:checkpoint_time"
+                        checkpoint_data = await client.get(time_key)
 
-                        # Only consider operations checkpointed within max_operation_age
-                        age_seconds = (now - checkpoint_time).total_seconds()
-                        if age_seconds <= max_operation_age:
-                            operations.append((op_id, checkpoint_time))
-                        else:
-                            logger.debug(
-                                f"Ignoring stale operation {op_id} "
-                                f"(checkpoint age: {age_seconds:.0f}s > {max_operation_age}s)"
-                            )
+                        if checkpoint_data:
+                            checkpoint_time = datetime.fromisoformat(checkpoint_data.decode())
+                            # Ensure checkpoint_time is timezone-aware for comparison
+                            if checkpoint_time.tzinfo is None:
+                                checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
 
-            await client.aclose()
+                            # Only consider operations checkpointed within max_operation_age
+                            age_seconds = (now - checkpoint_time).total_seconds()
+                            if age_seconds <= max_operation_age:
+                                operations.append((op_id, checkpoint_time))
+                            else:
+                                logger.debug(
+                                    f"Ignoring stale operation {op_id} "
+                                    f"(checkpoint age: {age_seconds:.0f}s > "
+                                    f"{max_operation_age}s)"
+                                )
 
-            if operations:
-                # Return the most recently checkpointed operation
-                operations.sort(key=lambda x: x[1], reverse=True)
-                operation_id = operations[0][0]
-                logger.info(f"Discovered active operation: {operation_id}")
-                return operation_id
+                if operations:
+                    # Return the most recently checkpointed operation
+                    operations.sort(key=lambda x: x[1], reverse=True)
+                    operation_id = operations[0][0]
+                    logger.info(f"Discovered active operation: {operation_id}")
+                    await _cleanup_client()
+                    return operation_id
 
-            # Check if we've exceeded max wait time (only if max_wait is set)
-            if max_wait is not None:
-                elapsed = asyncio.get_event_loop().time() - start_time
-                if elapsed >= max_wait:
+                # Calculate elapsed time once for both timeout check and logging
+                elapsed = time.monotonic() - start_time
+
+                # Check if we've exceeded max wait time (only if max_wait is set)
+                if max_wait is not None and elapsed >= max_wait:
                     logger.warning(f"No active operations found after {max_wait}s")
+                    await _cleanup_client()
                     return None
 
-            # Wait before retrying (log less frequently to reduce noise)
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if int(elapsed) % 60 < 10:  # Log once per minute
-                logger.debug(f"No operations found, waiting... ({int(elapsed)}s elapsed)")
-            await asyncio.sleep(10)
+                # Successful iteration (no errors) - reset backoff counter
+                consecutive_errors = 0
 
-        except Exception as e:
-            logger.warning(f"Failed to scan for operations: {e}")
-            if client:
-                try:
-                    await client.aclose()
-                except Exception:
-                    pass
-            await asyncio.sleep(5)
+                # Wait before retrying (log once per minute to reduce noise)
+                if elapsed - last_log_time >= 60:
+                    logger.debug(f"No operations found, waiting... ({int(elapsed)}s elapsed)")
+                    last_log_time = time.monotonic()
+                await asyncio.sleep(10)
+
+            except asyncio.CancelledError:  # noqa: PERF203
+                # Graceful shutdown - clean up and re-raise
+                logger.info("Operation discovery cancelled, cleaning up")
+                raise
+
+            except Exception as e:
+                consecutive_errors += 1
+                logger.warning(f"Failed to scan for operations: {e}")
+
+                # Close broken connection so we reconnect next iteration
+                await _cleanup_client()
+
+                # Exponential backoff with jitter, capped at 60s
+                backoff = min(5 * (2 ** (consecutive_errors - 1)), 60)
+                jitter = random.uniform(0, 1)  # nosec B311 # noqa: S311 - jitter for backoff
+                await asyncio.sleep(backoff + jitter)
+
+    finally:
+        # Ensure cleanup on any exit path
+        await _cleanup_client()
 
 
 # Mapping of message types to task prompt generators (for dispatcher-based messaging)
