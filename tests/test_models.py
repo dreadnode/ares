@@ -521,6 +521,97 @@ class TestInvestigationStateHelpers:
         assert result == []
 
 
+class TestTaskStatusAndTaskInfo:
+    """Tests for TaskStatus enum and TaskInfo dataclass."""
+
+    def test_task_status_retrying_value(self) -> None:
+        """Test TaskStatus has RETRYING status."""
+        from ares.core.models import TaskStatus
+
+        assert TaskStatus.RETRYING.value == "retrying"
+        assert TaskStatus.RETRYING in TaskStatus
+
+    def test_task_status_all_values(self) -> None:
+        """Test all TaskStatus enum values exist."""
+        from ares.core.models import TaskStatus
+
+        expected_statuses = {
+            "pending",
+            "in_progress",
+            "completed",
+            "failed",
+            "cancelled",
+            "retrying",
+        }
+        actual_statuses = {status.value for status in TaskStatus}
+        assert actual_statuses == expected_statuses
+
+    def test_default_max_retries_exported(self) -> None:
+        """Test DEFAULT_MAX_RETRIES is exported and has correct value."""
+        from ares.core.models import DEFAULT_MAX_RETRIES
+
+        assert DEFAULT_MAX_RETRIES == 3
+
+    def test_task_info_default_retry_fields(self) -> None:
+        """Test TaskInfo has retry fields with correct defaults."""
+        from datetime import datetime, timezone
+
+        from ares.core.models import DEFAULT_MAX_RETRIES, TaskInfo, TaskStatus
+
+        task = TaskInfo(
+            task_id="test-task-001",
+            task_type="crack",
+            assigned_agent="cracker",
+            status=TaskStatus.PENDING,
+            created_at=datetime.now(timezone.utc),
+        )
+
+        assert task.retry_count == 0
+        assert task.max_retries == DEFAULT_MAX_RETRIES
+
+    def test_task_info_custom_retry_fields(self) -> None:
+        """Test TaskInfo with custom retry values."""
+        from datetime import datetime, timezone
+
+        from ares.core.models import TaskInfo, TaskStatus
+
+        task = TaskInfo(
+            task_id="test-task-002",
+            task_type="lateral",
+            assigned_agent="lateral",
+            status=TaskStatus.RETRYING,
+            created_at=datetime.now(timezone.utc),
+            retry_count=2,
+            max_retries=5,
+        )
+
+        assert task.retry_count == 2
+        assert task.max_retries == 5
+        assert task.status == TaskStatus.RETRYING
+
+    def test_task_info_with_error(self) -> None:
+        """Test TaskInfo with error message after retry."""
+        from datetime import datetime, timezone
+
+        from ares.core.models import TaskInfo, TaskStatus
+
+        task = TaskInfo(
+            task_id="test-task-003",
+            task_type="enum",
+            assigned_agent="enum",
+            status=TaskStatus.FAILED,
+            created_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            retry_count=3,
+            max_retries=3,
+            error="Pod restart during execution (max retries 3 exceeded)",
+        )
+
+        assert task.status == TaskStatus.FAILED
+        assert task.retry_count == task.max_retries
+        assert "Pod restart" in task.error
+
+
 class TestRedTeamStateHelpers:
     """Tests for RedTeamState helper methods."""
 

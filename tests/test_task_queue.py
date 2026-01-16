@@ -192,6 +192,7 @@ def mock_redis_client():
     client = AsyncMock()
     client.ping = AsyncMock(return_value=True)
     client.lpush = AsyncMock(return_value=1)
+    client.rpush = AsyncMock(return_value=1)
     client.brpop = AsyncMock(return_value=None)
     client.rpop = AsyncMock(return_value=None)
     client.llen = AsyncMock(return_value=0)
@@ -636,6 +637,137 @@ class TestRedisTaskQueueHeartbeat:
         assert heartbeat is not None
         assert heartbeat["status"] == "idle"
         assert heartbeat["pod_name"] == "lateral-0"
+
+
+class TestRedisTaskQueueRequeue:
+    """Tests for task requeuing functionality."""
+
+    @pytest.mark.asyncio
+    async def test_requeue_task_basic(self, task_queue, mock_redis_client):
+        """Test basic requeue of a task."""
+        task_id = await task_queue.requeue_task(
+            task_type="crack",
+            target_role="cracker",
+            payload={"hash_value": "abc123", "hash_type": "NTLM"},
+            task_id="original_task_123",
+            retry_count=1,
+        )
+
+        assert task_id == "original_task_123"
+        mock_redis_client.rpush.assert_called_once()
+
+        # Verify the pushed data
+        call_args = mock_redis_client.rpush.call_args
+        assert call_args[0][0] == "ares:tasks:cracker"
+
+    @pytest.mark.asyncio
+    async def test_requeue_task_preserves_task_id(self, task_queue, mock_redis_client):
+        """Test that requeue preserves the original task ID."""
+        original_id = "task_to_retry_456"
+
+        returned_id = await task_queue.requeue_task(
+            task_type="lateral",
+            target_role="lateral",
+            payload={"target_host": "192.168.1.10"},
+            task_id=original_id,
+            retry_count=2,
+        )
+
+        assert returned_id == original_id
+
+        # Verify the task message contains the original ID
+        call_args = mock_redis_client.rpush.call_args
+        pushed_json = call_args[0][1]
+        pushed_data = json.loads(pushed_json)
+        assert pushed_data["task_id"] == original_id
+
+    @pytest.mark.asyncio
+    async def test_requeue_task_adds_retry_metadata(self, task_queue, mock_redis_client):
+        """Test that requeue adds retry metadata to payload."""
+        await task_queue.requeue_task(
+            task_type="crack",
+            target_role="cracker",
+            payload={"hash_value": "xyz789"},
+            task_id="retry_task_001",
+            retry_count=3,
+        )
+
+        call_args = mock_redis_client.rpush.call_args
+        pushed_json = call_args[0][1]
+        pushed_data = json.loads(pushed_json)
+
+        assert pushed_data["payload"]["_retry_count"] == 3
+        assert pushed_data["payload"]["_is_retry"] is True
+        assert pushed_data["payload"]["hash_value"] == "xyz789"
+
+    @pytest.mark.asyncio
+    async def test_requeue_task_uses_high_priority(self, task_queue, mock_redis_client):
+        """Test that requeued tasks have high priority by default."""
+        await task_queue.requeue_task(
+            task_type="enum",
+            target_role="enum",
+            payload={"target": "192.168.1.0/24"},
+            task_id="enum_retry_001",
+            retry_count=1,
+        )
+
+        call_args = mock_redis_client.rpush.call_args
+        pushed_json = call_args[0][1]
+        pushed_data = json.loads(pushed_json)
+
+        assert pushed_data["priority"] == 1  # High priority for retries
+
+    @pytest.mark.asyncio
+    async def test_requeue_task_uses_rpush_for_priority(self, task_queue, mock_redis_client):
+        """Test that requeue uses RPUSH to prioritize retried tasks."""
+        await task_queue.requeue_task(
+            task_type="crack",
+            target_role="cracker",
+            payload={},
+            task_id="priority_task",
+            retry_count=1,
+        )
+
+        # Should use rpush (not lpush) to put at front of queue
+        mock_redis_client.rpush.assert_called_once()
+        mock_redis_client.lpush.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_requeue_task_connection_error_resets_state(self, task_queue, mock_redis_client):
+        """Test requeue handles connection errors and resets state."""
+        mock_redis_client.rpush.side_effect = Exception("Connection closed")
+
+        with pytest.raises(Exception, match="Connection closed"):
+            await task_queue.requeue_task(
+                task_type="crack",
+                target_role="cracker",
+                payload={},
+                task_id="task_123",
+                retry_count=1,
+            )
+
+        assert task_queue._connected is False
+        assert task_queue._client is None
+
+    @pytest.mark.asyncio
+    async def test_requeue_task_non_connection_error_preserves_state(
+        self, task_queue, mock_redis_client
+    ):
+        """Test requeue preserves state for non-connection errors."""
+        mock_redis_client.rpush.side_effect = TypeError("Serialization error")
+
+        with pytest.raises(TypeError, match="Serialization error"):
+            await task_queue.requeue_task(
+                task_type="crack",
+                target_role="cracker",
+                payload={},
+                task_id="task_456",
+                retry_count=1,
+            )
+
+        # Connection state should be preserved for non-connection errors
+        assert task_queue._connected is True
+        assert task_queue._client is not None
 
 
 class TestRedisTaskQueueStats:

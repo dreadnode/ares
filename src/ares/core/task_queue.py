@@ -588,6 +588,84 @@ class RedisTaskQueue:
         result = await self._client.expire(key, ttl_seconds)
         return bool(result)
 
+    # === Task Retry ===
+
+    async def requeue_task(
+        self,
+        task_type: str,
+        target_role: str,
+        payload: dict[str, Any],
+        task_id: str,
+        retry_count: int = 0,
+        source_agent: str = "orchestrator",
+        priority: int = 1,  # High priority for retries
+    ) -> str:
+        """
+        Requeue a failed task for retry.
+
+        Unlike submit_task, this pushes to the front of the queue (RPUSH)
+        to prioritize retries over new tasks. The task_id is preserved
+        so results are correctly tracked.
+
+        Args:
+            task_type: Type of task
+            target_role: Role to handle the task
+            payload: Task-specific data
+            task_id: Original task ID (preserved for tracking)
+            retry_count: Current retry count
+            source_agent: Agent requeuing the task
+            priority: Task priority (default 1 = high for retries)
+
+        Returns:
+            Task ID (same as input task_id)
+        """
+        if not self._connected:
+            await self.connect()
+
+        # Add retry metadata to payload so workers know this is a retry
+        payload_with_retry = {
+            **payload,
+            "_retry_count": retry_count,
+            "_is_retry": True,
+        }
+
+        # Keep the same task_id so results are tracked correctly
+        task = TaskMessage(
+            task_id=task_id,
+            task_type=task_type,
+            source_agent=source_agent,
+            target_agent=target_role,
+            payload=payload_with_retry,
+            priority=priority,
+            callback_queue=self._result_queue_key(task_id),
+        )
+
+        queue_key = self._task_queue_key(target_role)
+
+        try:
+            # RPUSH to front of queue (workers use BRPOP from right)
+            # This prioritizes retried tasks over new ones
+            await self._client.rpush(queue_key, task.model_dump_json())
+
+            logger.info(f"Task {task_id} requeued to {queue_key} (retry {retry_count})")
+            return task_id
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(
+                keyword in error_str
+                for keyword in [
+                    "connection",
+                    "connect",
+                    "closed",
+                    "timeout",
+                    "broken pipe",
+                    "reset",
+                ]
+            ):
+                self._handle_connection_error(e)
+            raise
+
 
 __all__ = [
     "RedisTaskQueue",

@@ -948,10 +948,18 @@ class RedTeamDispatcher:
             return
 
         task_info = self.shared_state.pending_tasks.pop(task_id)
+        was_retry = task_info.status == TaskStatus.RETRYING
+
         task_info.status = TaskStatus.COMPLETED if success else TaskStatus.FAILED
         task_info.completed_at = datetime.now(timezone.utc)
         task_info.result = result
         task_info.error = error
+
+        if was_retry:
+            logger.info(
+                f"Retried task {task_id} completed after {task_info.retry_count} retries: "
+                f"success={success}"
+            )
 
         task_result = TaskResult(
             task_id=task_id,
