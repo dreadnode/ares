@@ -180,7 +180,10 @@ Success:
 ```
 task_complete(
     task_id="task-xxx",
-    result="Obtained Administrator hash via ADCS ESC1: aad3b435..."
+    result="Obtained Administrator hash via ADCS ESC1: aad3b435...\n"
+           "```json\n"
+           "{\"hash\": {\"username\": \"Administrator\", \"hash_value\": \"aad3b435...\", \"hash_type\": \"NTLM\", \"domain\": \"domain.com\"}}\n"
+           "```"
 )
 ```
 

@@ -11,7 +11,6 @@ vars:
   NAMESPACE: '{{.NAMESPACE | default "attack-simulation"}}'
   ORCH_CONTAINER: '{{.ORCH_CONTAINER | default "orchestrator"}}'
   WORKER_CONTAINER: '{{.WORKER_CONTAINER | default "ares-worker"}}'
-  SITE_PACKAGES: '/usr/local/lib/python3.13/site-packages'
   PARALLELISM: '{{.PARALLELISM | default "10"}}'
   PVC_PATH: '/ares'
 
@@ -82,16 +81,16 @@ tasks:
             --field-selector=status.phase=Running \
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
-          # Sync to worker pods
+          # Sync to worker pods (PVC only - PYTHONPATH=/ares/src handles imports)
           if [ -n "$PODS" ]; then
             printf '%s\n' $PODS | xargs -n1 -P {{.PARALLELISM}} -I{} bash -c '
               pod="$1"
               file="$2"
               rel="$3"
-              if kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+              if kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
-                echo -e "{{.SUCCESS}}   -> $pod (worker)"
-              elif kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+                echo -e "{{.SUCCESS}}   -> $pod"
+              elif kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} 2>/dev/null; then
                 echo -e "{{.SUCCESS}}   -> $pod"
               else
@@ -100,17 +99,14 @@ tasks:
             ' _ {} "$changed_file" "$relative_path"
           fi
 
-          # Sync to orchestrator separately (different container name)
+          # Sync to orchestrator (PVC only)
           if [ -n "$ORCH_POD" ]; then
-            if kubectl cp "$changed_file" "$ORCH_POD:{{.SITE_PACKAGES}}/ares/$relative_path" \
+            if kubectl cp "$changed_file" "$ORCH_POD:{{.PVC_PATH}}/src/ares/$relative_path" \
                 -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $ORCH_POD (orchestrator)"
+              echo -e "{{.SUCCESS}}   -> $ORCH_POD"
             else
               echo -e "{{.WARN}}   x $ORCH_POD (failed)"
             fi
-            kubectl cp "$changed_file" "$ORCH_POD:{{.PVC_PATH}}/ares/$relative_path" \
-                -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null && \
-              echo -e "{{.SUCCESS}}   -> $ORCH_POD (pvc)"
           fi
           echo ""
         done
@@ -160,16 +156,16 @@ tasks:
           relative_path="${f#src/ares/}"
           echo -e "{{.INFO}} $relative_path"
 
-          # Sync to worker pods
+          # Sync to worker pods (PVC only - PYTHONPATH=/ares/src handles imports)
           if [ -n "$PODS" ]; then
             printf '%s\n' $PODS | xargs -n1 -P {{.PARALLELISM}} -I{} bash -c '
               pod="$1"
               file="$2"
               rel="$3"
-              if kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+              if kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
-                echo -e "{{.SUCCESS}}   -> $pod (worker)"
-              elif kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+                echo -e "{{.SUCCESS}}   -> $pod"
+              elif kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} 2>/dev/null; then
                 echo -e "{{.SUCCESS}}   -> $pod"
               else
@@ -178,17 +174,14 @@ tasks:
             ' _ {} "$f" "$relative_path"
           fi
 
-          # Sync to orchestrator
+          # Sync to orchestrator (PVC only)
           if [ -n "$ORCH_POD" ]; then
-            if kubectl cp "$f" "$ORCH_POD:{{.SITE_PACKAGES}}/ares/$relative_path" \
+            if kubectl cp "$f" "$ORCH_POD:{{.PVC_PATH}}/src/ares/$relative_path" \
                 -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $ORCH_POD (orchestrator)"
+              echo -e "{{.SUCCESS}}   -> $ORCH_POD"
             else
               echo -e "{{.WARN}}   x $ORCH_POD"
             fi
-            kubectl cp "$f" "$ORCH_POD:{{.PVC_PATH}}/ares/$relative_path" \
-                -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null && \
-              echo -e "{{.SUCCESS}}   -> $ORCH_POD (pvc)"
           fi
         done
 
@@ -252,16 +245,16 @@ tasks:
           relative_path="${f#src/ares/}"
           echo -e "{{.INFO}} $relative_path"
 
-          # Sync to worker pods
+          # Sync to worker pods (PVC only - PYTHONPATH=/ares/src handles imports)
           if [ -n "$PODS" ]; then
             printf '%s\n' $PODS | xargs -n1 -P {{.PARALLELISM}} -I{} bash -c '
               pod="$1"
               file="$2"
               rel="$3"
-              if kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+              if kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
-                echo -e "{{.SUCCESS}}   -> $pod (worker)"
-              elif kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+                echo -e "{{.SUCCESS}}   -> $pod"
+              elif kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} 2>/dev/null; then
                 echo -e "{{.SUCCESS}}   -> $pod"
               else
@@ -270,17 +263,14 @@ tasks:
             ' _ {} "$f" "$relative_path"
           fi
 
-          # Sync to orchestrator
+          # Sync to orchestrator (PVC only)
           if [ -n "$ORCH_POD" ]; then
-            if kubectl cp "$f" "$ORCH_POD:{{.SITE_PACKAGES}}/ares/$relative_path" \
+            if kubectl cp "$f" "$ORCH_POD:{{.PVC_PATH}}/src/ares/$relative_path" \
                 -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $ORCH_POD (orchestrator)"
+              echo -e "{{.SUCCESS}}   -> $ORCH_POD"
             else
               echo -e "{{.WARN}}   x $ORCH_POD"
             fi
-            kubectl cp "$f" "$ORCH_POD:{{.PVC_PATH}}/ares/$relative_path" \
-                -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null && \
-              echo -e "{{.SUCCESS}}   -> $ORCH_POD (pvc)"
           fi
         done
 
@@ -425,6 +415,6 @@ tasks:
         fi
 
         kubectl exec -n {{.NAMESPACE}} $POD -c {{.WORKER_CONTAINER}} -- \
-          head -50 {{.SITE_PACKAGES}}/ares/{{.FILE}} 2>/dev/null || \
+          head -50 {{.PVC_PATH}}/src/ares/{{.FILE}} 2>/dev/null || \
           kubectl exec -n {{.NAMESPACE}} $POD -- \
-            head -50 {{.SITE_PACKAGES}}/ares/{{.FILE}}
+            head -50 {{.PVC_PATH}}/src/ares/{{.FILE}}

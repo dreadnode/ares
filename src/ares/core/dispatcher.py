@@ -1388,9 +1388,13 @@ class RedTeamDispatcher:
         self.shared_state.mark_exploited(vuln_id)
 
         if success and result:
+            result_payload = result
+            if isinstance(result, dict) and isinstance(result.get("result"), dict):
+                result_payload = result["result"]
+
             # Update state with exploitation results
-            if "credential" in result:
-                cred_data = result["credential"]
+            if isinstance(result_payload, dict) and "credential" in result_payload:
+                cred_data = result_payload["credential"]
                 credential = Credential(
                     username=cred_data.get("username", ""),
                     password=cred_data.get("password", ""),
@@ -1400,8 +1404,8 @@ class RedTeamDispatcher:
                 )
                 self.shared_state.add_credential(credential, "exploitation")
 
-            if "hash" in result:
-                hash_data = result["hash"]
+            if isinstance(result_payload, dict) and "hash" in result_payload:
+                hash_data = result_payload["hash"]
                 hash_obj = Hash(
                     username=hash_data.get("username", ""),
                     hash_value=hash_data.get("hash_value", ""),

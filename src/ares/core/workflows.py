@@ -261,7 +261,17 @@ async def exploitation_workflow(
         exploited_count += 1
 
         # If exploitation yielded credentials, trigger expansion
-        if result.get("success") and (result.get("credential") or result.get("hash")):
+        result_payload: dict[str, Any] | None = None
+        if isinstance(result, dict):
+            result_payload = (
+                result.get("result") if isinstance(result.get("result"), dict) else result
+            )
+
+        if (
+            result.get("success")
+            and isinstance(result_payload, dict)
+            and (result_payload.get("credential") or result_payload.get("hash"))
+        ):
             credentials_gained += 1
             logger.info("Exploitation yielded credentials, triggering expansion loop")
             await credential_expansion_loop(dispatcher, max_iterations=5)
