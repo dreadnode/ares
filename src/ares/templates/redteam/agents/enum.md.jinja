@@ -103,6 +103,7 @@ Use `complete_operation(summary)` when finished.
 
 ```
 1. Run initial enumeration (nmap, users, shares, domain info)
+2. If no creds, run pre-creds enumeration (SMB null sessions, RPC, SYSVOL/NETLOGON, Kerberos user enum)
 2. Review discovered assets
 3. Dispatch ACL analysis for attack paths
 4. As vulnerabilities are found:
