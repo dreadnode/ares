@@ -314,7 +314,7 @@ class SSMExecutor:
             # Force credential resolution to catch SSO errors early
             credentials = session.get_credentials()
             if credentials is None:
-                raise SSOTokenExpiredError(  # noqa: TRY301
+                raise SSOTokenExpiredError(
                     f"No credentials available for profile '{self.profile}'. "
                     f"Run: aws sso login --profile {self.profile}"
                 )
@@ -400,7 +400,7 @@ class SSMExecutor:
                         )
                         return instance_id
 
-            raise RuntimeError(f"No running instance found with name '{self._instance_name}'")  # noqa: TRY301
+            raise RuntimeError(f"No running instance found with name '{self._instance_name}'")
 
         except SSOTokenExpiredError:
             raise
@@ -607,7 +607,7 @@ def validate_sso_credentials(profile: str = "lab") -> bool:
         session = boto3.Session(profile_name=profile)
         credentials = session.get_credentials()
         if credentials is None:
-            raise SSOTokenExpiredError(  # noqa: TRY301
+            raise SSOTokenExpiredError(
                 f"No credentials available for profile '{profile}'. "
                 f"Run: aws sso login --profile {profile}"
             )

@@ -15,6 +15,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytest.importorskip("kubernetes")
+
 # Create mock redis module if not installed
 if "redis" not in sys.modules:
     mock_redis_module = MagicMock()

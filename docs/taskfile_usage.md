@@ -80,6 +80,9 @@ task ares:blue: GRAFANA_URL=http://grafana.example.com:3000
 # Custom model
 task ares:blue: MODEL=gpt-4o
 
+# Override all agents with one value (single- or multi-agent)
+task ares:blue: MODEL_ALL=gpt-4o
+
 # Custom poll interval (60 seconds)
 task ares:blue: POLL_INTERVAL=60
 ```
@@ -132,6 +135,9 @@ task -y ares:red TARGET=dreadgoad
 
 # Custom model and max steps
 task -y ares:red TARGET=dreadgoad MODEL=claude-sonnet-4-20250514 MAX_STEPS=300
+
+# Override all agents with one value
+task -y ares:red TARGET=dreadgoad MODEL_ALL=gpt-5.2 MAX_STEPS=300
 
 # Custom AWS profile and region
 task -y ares:red TARGET=dreadgoad PROFILE=production REGION=us-east-1
@@ -301,16 +307,35 @@ All tasks support the following configuration variables:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MODEL` | `claude-sonnet-4-20250514` | LLM model to use |
+| `MODEL` | `gpt-5.2` | LLM model to use |
+| `MODEL_ALL` | `""` | Override all agents with one model value |
+| `MODEL_ORCHESTRATOR` | `""` | Override multi-agent orchestrator model |
+| `MODEL_WORKER` | `""` | Override multi-agent worker models |
+| `MODEL_ENUM` | `""` | Override enum agent model |
+| `MODEL_CRACKER` | `""` | Override cracker agent model |
+| `MODEL_ACL` | `""` | Override ACL agent model |
+| `MODEL_PRIVESC` | `""` | Override PrivEsc agent model |
+| `MODEL_LATERAL` | `""` | Override lateral agent model |
+| `MODEL_POISONING` | `""` | Override poisoning agent model |
+| `MODEL_ATOMIC` | `""` | Override atomic agent model |
 | `GRAFANA_URL` | `https://grafana.dev.plundr.ai` | Grafana URL for alerts |
 | `POLL_INTERVAL` | `30` | Seconds between alert polls |
 | `MAX_STEPS` | `50` | Maximum agent steps for polling mode (Taskfile override, code default is 30) |
 | `MAX_STEPS_ONCE` | `15` | Maximum agent steps for once/investigate modes |
 | `REPORT_DIR` | `./reports` | Directory for markdown reports |
-| `DREADNODE_SERVER` | `https://platform.dev.plundr.ai/` | Dreadnode platform URL |
+| `DREADNODE_SERVER_URL` | `https://platform.dev.plundr.ai/` | Dreadnode platform URL |
 | `DREADNODE_ORGANIZATION` | `ares` | Dreadnode organization name |
 | `DREADNODE_WORKSPACE` | `ares-protocol` | Dreadnode workspace name |
 | `DREADNODE_PROJECT` | `ares-soc` | Dreadnode project name |
+
+**Model precedence (multi-agent):**
+
+1. `MODEL_ENUM` / `MODEL_CRACKER` / `MODEL_ACL` / `MODEL_PRIVESC` /
+   `MODEL_LATERAL` / `MODEL_POISONING` / `MODEL_ATOMIC`
+2. `MODEL_ORCHESTRATOR` (orchestrator only)
+3. `MODEL_WORKER` (all non-orchestrator agents)
+4. `MODEL_ALL`
+5. `MODEL`
 
 **Stop Conditions:**
 

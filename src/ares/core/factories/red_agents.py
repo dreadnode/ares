@@ -6,6 +6,7 @@ that work together in a distributed Kubernetes environment.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 import dreadnode as dn
@@ -463,7 +464,7 @@ def create_agent_info(
 async def create_multi_agent_ensemble(
     operation_id: str,
     target_ip: str,
-    model: str = "claude-sonnet-4-20250514",
+    model: str | None = None,
     orchestrator_model: str | None = None,
     worker_model: str | None = None,
     dispatcher: RedTeamDispatcher | None = None,
@@ -509,12 +510,27 @@ async def create_multi_agent_ensemble(
 
     agents: dict[AgentRole, Agent] = {}
 
+    base_model = model or os.getenv("ARES_MODEL")
+    orch_model = orchestrator_model or os.getenv("ARES_ORCHESTRATOR_MODEL")
+    work_model = worker_model or os.getenv("ARES_WORKER_MODEL")
+
+    if not (base_model or orch_model or work_model):
+        raise ValueError(
+            "No model specified for multi-agent ensemble. Provide model args or set "
+            "ARES_MODEL/ARES_ORCHESTRATOR_MODEL/ARES_WORKER_MODEL in the environment."
+        )
+
     for role in roles:
         # Determine model for this role
         if role == AgentRole.ENUM:
-            agent_model = orchestrator_model or model
+            agent_model = orch_model or base_model
         else:
-            agent_model = worker_model or model
+            agent_model = work_model or base_model
+        if not agent_model:
+            raise ValueError(
+                f"No model specified for role {role.value}. "
+                "Provide model args or set ARES_MODEL/ARES_ORCHESTRATOR_MODEL/ARES_WORKER_MODEL."
+            )
 
         # Create agent
         agent = create_specialized_agent(

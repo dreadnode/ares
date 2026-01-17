@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from ares.core.exceptions import AuthenticationError, ConfigurationError
 from ares.tools.blue.grafana import (
     GrafanaTools,
     connect_grafana_mcp,
@@ -49,6 +50,23 @@ class TestGrafanaToolsHeaders:
         headers = tools._headers()
         assert "Authorization" in headers
         assert headers["Authorization"] == "Bearer my-secret-key"  # pragma: allowlist secret
+
+    def test_headers_raises_configuration_error_when_api_key_empty(self):
+        """Test that empty API key raises ConfigurationError."""
+        tools = GrafanaTools(
+            base_url="http://grafana:3000",
+            api_key="",
+        )
+        with pytest.raises(ConfigurationError, match="GRAFANA_SERVICE_ACCOUNT_TOKEN"):
+            tools._headers()
+
+    def test_headers_raises_configuration_error_when_api_key_none(self):
+        """Test that None API key fails validation."""
+        with pytest.raises(ValueError, match="api_key"):
+            GrafanaTools(
+                base_url="http://grafana:3000",
+                api_key=None,
+            )
 
 
 class TestGetFiringAlerts:
@@ -156,6 +174,60 @@ class TestGetFiringAlerts:
             alerts = await grafana_tools.get_firing_alerts()
             assert alerts == []
 
+    @pytest.mark.asyncio
+    async def test_get_firing_alerts_raises_authentication_error_on_401(
+        self, grafana_tools: GrafanaTools
+    ):
+        """Test that 401 status raises AuthenticationError."""
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 401
+            mock_response.text = "Unauthorized"
+            mock_client.get.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_class.return_value = mock_client
+
+            with pytest.raises(AuthenticationError) as exc_info:
+                await grafana_tools.get_firing_alerts()
+
+            assert exc_info.value.service == "grafana"
+            assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_get_firing_alerts_raises_authentication_error_on_403(
+        self, grafana_tools: GrafanaTools
+    ):
+        """Test that 403 status raises AuthenticationError."""
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 403
+            mock_response.text = "Forbidden"
+            mock_client.get.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_class.return_value = mock_client
+
+            with pytest.raises(AuthenticationError) as exc_info:
+                await grafana_tools.get_firing_alerts()
+
+            assert exc_info.value.service == "grafana"
+            assert exc_info.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_get_firing_alerts_no_api_key_returns_empty(self):
+        """Test missing API key returns empty list without HTTP calls."""
+        tools = GrafanaTools(
+            base_url="http://grafana:3000",
+            api_key="",
+        )
+        with patch("httpx.AsyncClient") as mock_client_class:
+            alerts = await tools.get_firing_alerts()
+            assert alerts == []
+            mock_client_class.assert_not_called()
+
 
 class TestGetAlertHistory:
     """Tests for get_alert_history method."""
@@ -198,6 +270,39 @@ class TestGetAlertHistory:
 
             history = await grafana_tools.get_alert_history()
             assert history == []
+
+    @pytest.mark.asyncio
+    async def test_get_alert_history_raises_authentication_error_on_401(
+        self, grafana_tools: GrafanaTools
+    ):
+        """Test that 401 status raises AuthenticationError."""
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 401
+            mock_response.text = "Invalid token"
+            mock_client.get.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_class.return_value = mock_client
+
+            with pytest.raises(AuthenticationError) as exc_info:
+                await grafana_tools.get_alert_history()
+
+            assert exc_info.value.service == "grafana"
+            assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_get_alert_history_no_api_key_returns_empty(self):
+        """Test missing API key returns empty list without HTTP calls."""
+        tools = GrafanaTools(
+            base_url="http://grafana:3000",
+            api_key="",
+        )
+        with patch("httpx.AsyncClient") as mock_client_class:
+            history = await tools.get_alert_history()
+            assert history == []
+            mock_client_class.assert_not_called()
 
 
 class TestCreateAnnotation:
@@ -284,6 +389,60 @@ class TestCreateAnnotation:
 
             result = await grafana_tools.create_annotation(text="Test")
             assert result is None
+
+    @pytest.mark.asyncio
+    async def test_create_annotation_no_api_key_returns_none(self):
+        """Test missing API key returns None without HTTP calls."""
+        tools = GrafanaTools(
+            base_url="http://grafana:3000",
+            api_key="",
+        )
+        with patch("httpx.AsyncClient") as mock_client_class:
+            result = await tools.create_annotation(text="Test annotation")
+            assert result is None
+            mock_client_class.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_annotation_raises_authentication_error_on_401(
+        self, grafana_tools: GrafanaTools
+    ):
+        """Test that 401 status raises AuthenticationError."""
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 401
+            mock_response.text = "Authentication required"
+            mock_client.post.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_class.return_value = mock_client
+
+            with pytest.raises(AuthenticationError) as exc_info:
+                await grafana_tools.create_annotation(text="Test")
+
+            assert exc_info.value.service == "grafana"
+            assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_create_annotation_raises_authentication_error_on_403(
+        self, grafana_tools: GrafanaTools
+    ):
+        """Test that 403 status raises AuthenticationError."""
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 403
+            mock_response.text = "Insufficient permissions"
+            mock_client.post.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_class.return_value = mock_client
+
+            with pytest.raises(AuthenticationError) as exc_info:
+                await grafana_tools.create_annotation(text="Test")
+
+            assert exc_info.value.service == "grafana"
+            assert exc_info.value.status_code == 403
 
 
 class TestPostInvestigationStarted:

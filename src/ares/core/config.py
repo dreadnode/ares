@@ -36,7 +36,7 @@ def derive_redis_url(namespace: str, host: str = "redis", port: int = 6379) -> s
 class AgentConfig:
     """Configuration for a specific agent role."""
 
-    model: str = "claude-sonnet-4-20250514"
+    model: str = ""
     max_steps: int = 100
     pod_selector: str = ""
     capabilities: list[str] = field(default_factory=list)
@@ -156,7 +156,7 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
     for role, agent_data in data.get("agents", {}).items():
         if isinstance(agent_data, dict):
             agents[role] = AgentConfig(
-                model=agent_data.get("model", "claude-sonnet-4-20250514"),
+                model=_resolve_env(agent_data.get("model", "")),
                 max_steps=agent_data.get("max_steps", 100),
                 pod_selector=agent_data.get("pod_selector", ""),
                 capabilities=agent_data.get("capabilities", []),
@@ -215,6 +215,44 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:
         "GRAFANA_SERVICE_ACCOUNT_TOKEN"
     ):
         config.grafana_api_key = grafana_key
+
+    # Model overrides (Viper-style precedence: role-specific > orchestrator/worker > global)
+    global_model = os.environ.get("ARES_MODEL")
+    orchestrator_model = os.environ.get("ARES_ORCHESTRATOR_MODEL")
+    worker_model = os.environ.get("ARES_WORKER_MODEL")
+
+    def resolve_role_model(role: str) -> str | None:
+        role_env = os.environ.get(f"ARES_AGENT_{role.upper()}_MODEL")
+        if role_env:
+            return role_env
+        if role == "orchestrator" and orchestrator_model:
+            return orchestrator_model
+        if role != "orchestrator" and worker_model:
+            return worker_model
+        if global_model:
+            return global_model
+        return None
+
+    # Apply overrides to configured agents
+    for role, agent_config in config.agents.items():
+        if not isinstance(agent_config, AgentConfig):
+            continue
+        if override := resolve_role_model(role):
+            agent_config.model = override
+
+    # If a role-specific env override exists without a config entry, add it
+    for env_key, value in os.environ.items():
+        if not env_key.startswith("ARES_AGENT_") or not env_key.endswith("_MODEL"):
+            continue
+        if not value:
+            continue
+        role = env_key[len("ARES_AGENT_") : -len("_MODEL")].lower()
+        if role and role not in config.agents:
+            logger.warning(
+                f"Creating agent config for role '{role}' from env override without "
+                "configured capabilities/tools."
+            )
+            config.agents[role] = AgentConfig(model=value)
 
     return config
 

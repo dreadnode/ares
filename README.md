@@ -433,6 +433,18 @@ pytest --cov=src tests/
 | `ANTHROPIC_API_KEY` | Yes      | Anthropic API key for Claude models        |
 | `DREADNODE_API_KEY` | No       | Dreadnode platform token for observability |
 
+**Multi-Agent Model Overrides:**
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `ARES_MODEL` | No | Default model for all multi-agent roles |
+| `ARES_ORCHESTRATOR_MODEL` | No | Override orchestrator model |
+| `ARES_WORKER_MODEL` | No | Override all worker models |
+| `ARES_AGENT_<ROLE>_MODEL` | No | Role-specific model override (e.g., `ARES_AGENT_ENUM_MODEL`) |
+
+Precedence (highest first): `ARES_AGENT_<ROLE>_MODEL` >
+`ARES_ORCHESTRATOR_MODEL`/`ARES_WORKER_MODEL` > `ARES_MODEL` > config file.
+
 **Note:** `GRAFANA_API_KEY` is deprecated. Use `GRAFANA_SERVICE_ACCOUNT_TOKEN`
 instead. See [Grafana's service account
 documentation](https://grafana.com/docs/grafana/latest/administration/service-accounts/)

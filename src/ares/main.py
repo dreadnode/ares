@@ -33,7 +33,7 @@ class Args:
         once: Process current alerts once and exit (default: run forever).
     """
 
-    model: str = "claude-sonnet-4-20250514"
+    model: str = ""
     grafana_url: str = "https://grafana.dev.plundr.ai"
     grafana_api_key: str = ""
     poll_interval: int = 30
@@ -63,9 +63,17 @@ class DreadnodeArgs:
     console: bool = True
 
 
+def _resolve_model(cli_model: str, *, prefer_orchestrator: bool = False) -> str:
+    if cli_model:
+        return cli_model
+    if prefer_orchestrator:
+        return os.getenv("ARES_ORCHESTRATOR_MODEL", "") or os.getenv("ARES_MODEL", "")
+    return os.getenv("ARES_MODEL", "")
+
+
 # Cyclopts decorator typing not yet fully supported by type checkers
 @app.default  # type: ignore[untyped-decorator]
-async def main(
+async def main(  # noqa: PLR0912
     *,
     args: Args | None = None,
     dn_args: DreadnodeArgs | None = None,
@@ -77,7 +85,7 @@ async def main(
     producing threat intelligence reports.
 
     Example:
-        uv run python -m ares --model claude-sonnet-4-20250514 --grafana-url http://grafana:3000
+        uv run python -m ares --model YOUR_MODEL --grafana-url http://grafana:3000
 
     Environment Variables:
         GRAFANA_SERVICE_ACCOUNT_TOKEN: Grafana service account token (preferred)
@@ -87,6 +95,16 @@ async def main(
     """
     args = args or Args()
     dn_args = dn_args or DreadnodeArgs()
+
+    model = _resolve_model(args.model)
+    if not model:
+        logger.error("No model specified. Set ARES_MODEL or pass --args.model.")
+        return
+
+    model = _resolve_model(args.model)
+    if not model:
+        logger.error("No model specified. Set ARES_MODEL or pass --args.model.")
+        return
 
     # Prefer GRAFANA_SERVICE_ACCOUNT_TOKEN, fallback to GRAFANA_API_KEY for compatibility
     grafana_api_key = (
@@ -115,11 +133,16 @@ async def main(
         logger.warning("The agent will not be able to retrieve alerts.")
         logger.warning("=" * 60)
 
+    model = _resolve_model(args.model)
+    if not model:
+        logger.error("No model specified. Set ARES_MODEL or pass --args.model.")
+        return
+
     # Log startup
     logger.info("=" * 60)
     logger.info("ARES SOC INVESTIGATION AGENT")
     logger.info("=" * 60)
-    logger.info(f"Model: {args.model}")
+    logger.info(f"Model: {model}")
     logger.info(f"Grafana: {args.grafana_url}")
     logger.info(f"API Key: {'configured' if grafana_api_key else 'MISSING'}")
     logger.info(f"Poll Interval: {args.poll_interval}s")
@@ -145,7 +168,7 @@ async def main(
     logger.info(f"Reports: {report_dir}")
 
     orchestrator = InvestigationOrchestrator(
-        model=args.model,
+        model=model,
         grafana_url=args.grafana_url,
         grafana_api_key=grafana_api_key,
         mitre_client=mitre_client,
@@ -269,6 +292,11 @@ async def investigate_alert(
     args = args or Args()
     dn_args = dn_args or DreadnodeArgs()
 
+    model = _resolve_model(args.model)
+    if not model:
+        logger.error("No model specified. Set ARES_MODEL or pass --args.model.")
+        return
+
     if alert_json.startswith("{"):
         alert = json.loads(alert_json)
     else:
@@ -302,7 +330,7 @@ async def investigate_alert(
     report_dir.mkdir(parents=True, exist_ok=True)
 
     orchestrator = InvestigationOrchestrator(
-        model=args.model,
+        model=model,
         grafana_url=args.grafana_url,
         grafana_api_key=grafana_api_key,
         mitre_client=mitre_client,
@@ -347,10 +375,15 @@ async def redteam(
 
     Example:
         uv run python -m src.main redteam 192.168.1.100
-        uv run python -m src.main redteam 192.168.1.100 --args.model claude-sonnet-4-20250514
+        uv run python -m src.main redteam 192.168.1.100 --args.model YOUR_MODEL
     """
     args = args or Args()
     dn_args = dn_args or DreadnodeArgs()
+
+    model = _resolve_model(args.model)
+    if not model:
+        logger.error("No model specified. Set ARES_MODEL or pass --args.model.")
+        return
 
     # Configure Dreadnode
     dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
@@ -369,7 +402,7 @@ async def redteam(
     logger.info("ARES RED TEAM AGENT")
     logger.info("=" * 60)
     logger.info(f"Target: {target_ip}")
-    logger.info(f"Model: {args.model}")
+    logger.info(f"Model: {model}")
     logger.info(f"Max Steps: {args.max_steps}")
     logger.info(f"Report Dir: {args.report_dir}")
     logger.info("=" * 60)
@@ -390,7 +423,7 @@ async def redteam(
     logger.info(f"Reports: {report_dir}")
 
     orchestrator = RedTeamOrchestrator(
-        model=args.model,
+        model=model,
         mitre_client=mitre_client,
         report_dir=report_dir,
         max_steps=args.max_steps,
@@ -489,6 +522,13 @@ async def multi_agent(
     dn_args = dn_args or DreadnodeArgs()
     multi_args = multi_args or MultiAgentArgs()
 
+    model = _resolve_model(args.model, prefer_orchestrator=True)
+    if not model:
+        logger.error(
+            "No model specified. Set ARES_ORCHESTRATOR_MODEL/ARES_MODEL or pass --args.model."
+        )
+        return
+
     # Load config file for defaults
     config = load_config(multi_args.config_file or None)
 
@@ -524,7 +564,7 @@ async def multi_agent(
     logger.info(f"Config: {multi_args.config_file or 'auto-detected'}")
     logger.info(f"Target Domain: {target_domain}")
     logger.info(f"Target IPs: {ips}")
-    logger.info(f"Model: {args.model}")
+    logger.info(f"Model: {model}")
     logger.info(f"Max Steps: {args.max_steps}")
     logger.info(f"Redis: {redis_url}")
     logger.info(f"Namespace: {namespace}")
@@ -558,7 +598,7 @@ async def multi_agent(
             initial_credential=initial_cred,
             redis_url=redis_url,
             namespace=namespace,
-            model=args.model,
+            model=model,
             max_steps=args.max_steps,
         )
 
@@ -666,7 +706,19 @@ async def worker(
 
     # Use config values if CLI args not specified
     redis_url = worker_args.redis_url or config.redis_url
-    model = worker_args.model or agent_config.model
+    model = (
+        worker_args.model
+        or agent_config.model
+        or os.getenv(f"ARES_AGENT_{role.upper()}_MODEL")
+        or os.getenv("ARES_WORKER_MODEL")
+        or os.getenv("ARES_MODEL")
+    )
+    if not model:
+        logger.error(
+            "No model specified. Set ARES_AGENT_<ROLE>_MODEL/ARES_WORKER_MODEL/ARES_MODEL "
+            "or pass --worker-args.model."
+        )
+        return
     max_steps = worker_args.max_steps if worker_args.max_steps > 0 else agent_config.max_steps
 
     # Configure Dreadnode (optional - don't fail if platform unavailable)

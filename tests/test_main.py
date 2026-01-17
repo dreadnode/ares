@@ -6,7 +6,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ares.main import Args, DreadnodeArgs, app, investigate_alert, main, redteam, version
+from ares.main import (
+    Args,
+    DreadnodeArgs,
+    _resolve_model,
+    app,
+    investigate_alert,
+    main,
+    redteam,
+    version,
+)
 
 
 class TestArgsDataclass:
@@ -15,7 +24,7 @@ class TestArgsDataclass:
     def test_default_values(self):
         """Test Args has correct default values."""
         args = Args()
-        assert args.model == "claude-sonnet-4-20250514"
+        assert args.model == ""
         assert args.grafana_url == "https://grafana.dev.plundr.ai"
         assert args.grafana_api_key == ""
         assert args.poll_interval == 30
@@ -84,6 +93,33 @@ class TestVersionCommand:
         assert result is None
 
 
+class TestResolveModel:
+    """Tests for model resolution helper."""
+
+    def test_prefers_cli_model(self):
+        """CLI model should override environment defaults."""
+        with patch.dict("os.environ", {"ARES_MODEL": "env-model"}):
+            assert _resolve_model("cli-model") == "cli-model"
+
+    def test_uses_ares_model_by_default(self):
+        """ARES_MODEL should be used when CLI model is empty."""
+        with patch.dict("os.environ", {"ARES_MODEL": "env-model"}):
+            assert _resolve_model("") == "env-model"
+
+    def test_prefers_orchestrator_model_when_requested(self):
+        """ARES_ORCHESTRATOR_MODEL should win when prefer_orchestrator=True."""
+        with patch.dict(
+            "os.environ",
+            {"ARES_ORCHESTRATOR_MODEL": "orch-model", "ARES_MODEL": "env-model"},
+        ):
+            assert _resolve_model("", prefer_orchestrator=True) == "orch-model"
+
+    def test_falls_back_to_ares_model_for_orchestrator(self):
+        """Orchestrator model should fall back to ARES_MODEL."""
+        with patch.dict("os.environ", {"ARES_MODEL": "env-model"}):
+            assert _resolve_model("", prefer_orchestrator=True) == "env-model"
+
+
 class TestMainFunction:
     """Tests for main() function."""
 
@@ -116,6 +152,7 @@ class TestMainFunction:
             mock_correlator_class.return_value = mock_correlator
 
             args = Args(
+                model="test-model",
                 once=True,
                 report_dir=str(tmp_path),
             )
@@ -174,6 +211,7 @@ class TestMainFunction:
             mock_correlator_class.return_value = mock_correlator
 
             args = Args(
+                model="test-model",
                 once=True,
                 report_dir=str(tmp_path),
             )
@@ -209,7 +247,7 @@ class TestInvestigateAlertCommand:
             mock_orchestrator_class.return_value = mock_orchestrator
 
             alert_json = json.dumps({"labels": {"alertname": "TestAlert"}})
-            args = Args(report_dir=str(tmp_path))
+            args = Args(model="test-model", report_dir=str(tmp_path))
 
             await investigate_alert(alert_json, args=args)
 
@@ -241,7 +279,7 @@ class TestInvestigateAlertCommand:
             )
             mock_orchestrator_class.return_value = mock_orchestrator
 
-            args = Args(report_dir=str(tmp_path))
+            args = Args(model="test-model", report_dir=str(tmp_path))
 
             await investigate_alert(str(alert_file), args=args)
 
@@ -279,7 +317,7 @@ class TestRedteamCommand:
             )
             mock_orchestrator_class.return_value = mock_orchestrator
 
-            args = Args(report_dir=str(tmp_path))
+            args = Args(model="test-model", report_dir=str(tmp_path))
 
             await redteam("192.168.1.100", args=args)
 
@@ -313,7 +351,7 @@ class TestRedteamCommand:
             )
             mock_orchestrator_class.return_value = mock_orchestrator
 
-            args = Args(report_dir=str(tmp_path))
+            args = Args(model="test-model", report_dir=str(tmp_path))
 
             await redteam("192.168.1.100", args=args)
 

@@ -7,10 +7,12 @@ red team operations in a Kubernetes environment.
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timezone
 from typing import Any
 
 import dreadnode as dn
+import rigging as rg
 from dreadnode.agent import Agent, Thread
 from dreadnode.agent.stop import tool_use
 from loguru import logger
@@ -38,6 +40,20 @@ from ares.tools.red.network import (
     RedTeamReportingTools,
 )
 from ares.tools.red.orchestrator import OrchestratorTools
+
+
+def _resolve_model_generator(model: str, openai_api_key: str | None) -> str | rg.Generator:
+    if not openai_api_key:
+        return model
+    if not model.startswith(("gpt-", "openai/")):
+        return model
+    try:
+        generator = rg.get_generator(model)
+    except Exception:
+        return model
+    if hasattr(generator, "api_key"):
+        generator.api_key = openai_api_key
+    return generator
 
 
 async def _wait_for_required_workers(
@@ -121,9 +137,10 @@ async def run_multi_agent_operation(
     resume_from_checkpoint: bool = False,
     redis_url: str | None = None,
     namespace: str | None = None,
-    model: str = "claude-sonnet-4-20250514",
+    model: str | None = None,
     max_steps: int = 200,
     checkpoint_interval: int = 60,
+    openai_api_key: str | None = None,
 ) -> dict[str, Any]:
     """
     Main entry point for multi-agent red team operations.
@@ -139,6 +156,7 @@ async def run_multi_agent_operation(
         model: LLM model to use
         max_steps: Maximum agent steps
         checkpoint_interval: Seconds between checkpoints
+        openai_api_key: Optional OpenAI API key to bind directly to the generator
 
     Returns:
         Operation results summary
@@ -146,6 +164,12 @@ async def run_multi_agent_operation(
     # Resolve config defaults
     redis_url = redis_url or get_redis_url()
     namespace = namespace or get_namespace()
+    model = model or os.getenv("ARES_ORCHESTRATOR_MODEL") or os.getenv("ARES_MODEL")
+    if not model:
+        raise ValueError(
+            "No model specified for operation. Provide a model argument or set "
+            "ARES_ORCHESTRATOR_MODEL/ARES_MODEL in the environment."
+        )
 
     start_time = datetime.now(timezone.utc)
 
@@ -229,6 +253,7 @@ async def run_multi_agent_operation(
             dispatcher=dispatcher,
             model=model,
             max_steps=max_steps,
+            openai_api_key=openai_api_key,
         )
 
         logger.info(f"Starting orchestrator for {target_domain}")
@@ -307,6 +332,7 @@ async def _create_orchestrator_agent(
     dispatcher: RedTeamDispatcher,
     model: str,
     max_steps: int,
+    openai_api_key: str | None = None,
 ) -> Agent:
     """
     Create the orchestrator agent that coordinates the multi-agent operation.
@@ -322,6 +348,7 @@ async def _create_orchestrator_agent(
         dispatcher: The dispatcher for inter-agent communication
         model: LLM model to use
         max_steps: Maximum agent steps
+        openai_api_key: Optional OpenAI API key to bind directly to the generator
 
     Returns:
         Configured orchestrator agent
@@ -369,9 +396,10 @@ async def _create_orchestrator_agent(
 
     logger.info(f"Creating orchestrator agent with {len(tools)} toolsets, max_steps={max_steps}")
 
+    resolved_model = _resolve_model_generator(model, openai_api_key)
     return dn.Agent(
         name="ares-orchestrator",
-        model=model,
+        model=resolved_model,
         instructions=instructions,
         max_steps=max_steps,
         tools=tools,  # type: ignore[arg-type]
@@ -495,10 +523,17 @@ async def _monitor_agent_health(
     """
     Background task to monitor agent health.
 
+    Monitors agent heartbeats and alerts on:
+    - Agents going offline
+    - Agents reporting errors in heartbeat data
+    - Agents persistently offline (3+ consecutive checks)
+
     Args:
         dispatcher: The dispatcher instance
         check_interval: Seconds between health checks
     """
+    offline_counts: dict[str, int] = {}  # Track consecutive offline counts
+
     while True:
         try:
             agent_status = dispatcher.get_agent_status()
@@ -507,15 +542,40 @@ async def _monitor_agent_health(
                 name for name, status in agent_status.items() if status["status"] == "offline"
             ]
 
+            # Track consecutive offline counts
+            for agent_name in agent_status:
+                if agent_name in offline_agents:
+                    offline_counts[agent_name] = offline_counts.get(agent_name, 0) + 1
+                else:
+                    offline_counts[agent_name] = 0
+
+            # Alert on newly offline agents
             if offline_agents:
-                logger.warning(f"Offline agents detected: {offline_agents}")
+                for agent_name in offline_agents:
+                    count = offline_counts.get(agent_name, 0)
+                    if count == 1:
+                        # First time offline - ERROR level
+                        logger.error(f"Agent {agent_name} is now OFFLINE")
+                    elif count == 3:
+                        # Persistently offline - CRITICAL level
+                        logger.critical(
+                            f"Agent {agent_name} has been offline for {count} consecutive checks "
+                            f"({count * check_interval:.0f}s). This may indicate a fatal error "
+                            "such as authentication failure or misconfiguration."
+                        )
+                    elif count > 3 and count % 10 == 0:
+                        # Remind every 10 checks if still offline
+                        logger.critical(
+                            f"Agent {agent_name} still offline after {count} checks "
+                            f"({count * check_interval:.0f}s)"
+                        )
 
             await asyncio.sleep(check_interval)
 
         except asyncio.CancelledError:  # noqa: PERF203
             break
         except Exception as e:
-            logger.error(f"Health monitor error: {e}")
+            logger.error(f"Health monitor error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
 
 

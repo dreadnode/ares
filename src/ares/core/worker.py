@@ -21,6 +21,7 @@ from loguru import logger
 
 from ares.core.config import get_redis_url
 from ares.core.dispatcher import RedTeamDispatcher
+from ares.core.exceptions import AuthenticationError, ConfigurationError, CriticalWorkerError
 from ares.core.factories.red_agents import create_agent_info, create_specialized_agent
 from ares.core.messages import (
     AgentMessage,
@@ -393,6 +394,23 @@ class RedisWorkerAgent:
 
             except asyncio.CancelledError:  # noqa: PERF203
                 break
+            except (AuthenticationError, ConfigurationError, CriticalWorkerError) as e:
+                # Fatal errors that should stop the worker immediately
+                logger.critical(
+                    f"FATAL ERROR in worker loop - stopping execution: {type(e).__name__}: {e}",
+                    exc_info=True,
+                )
+                # Send an offline heartbeat to notify orchestrator
+                try:
+                    if self.task_queue:
+                        await self.task_queue.send_heartbeat(
+                            agent_name=self.agent_name,
+                            status="offline",
+                            pod_name=self.pod_name,
+                        )
+                except Exception as hb_error:
+                    logger.error(f"Failed to send offline heartbeat: {hb_error}")
+                raise  # Re-raise to stop the worker
             except Exception as e:
                 # Check if it's a connection error
                 error_str = str(e).lower()
@@ -416,8 +434,8 @@ class RedisWorkerAgent:
                     # Exponential backoff
                     retry_delay = min(retry_delay * 2, max_retry_delay)
                 else:
-                    # Non-connection error, log and continue with short delay
-                    logger.error(f"Worker loop error: {e}")
+                    # Non-connection error, log with stack trace and continue with short delay
+                    logger.error(f"Worker loop error: {e}", exc_info=True)
                     await asyncio.sleep(5)
                     retry_delay = 1.0  # Reset backoff for non-connection errors
 
@@ -460,12 +478,37 @@ class RedisWorkerAgent:
             self._tasks_completed += 1
             logger.success(f"[{self.agent_name}] Task {task.task_id} completed")
 
+        except (AuthenticationError, ConfigurationError, CriticalWorkerError) as e:
+            # Fatal errors - log with full context and re-raise to stop worker
+            logger.critical(
+                f"[{self.agent_name}] FATAL ERROR during task {task.task_id}: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
+            try:
+                await self.task_queue.send_result(
+                    task_id=task.task_id,
+                    success=False,
+                    error=f"FATAL: {type(e).__name__}: {e!s}",
+                    worker_pod=self.pod_name,
+                )
+            except Exception as send_error:
+                logger.error(
+                    f"[{self.agent_name}] Failed to send fatal result for task {task.task_id}: "
+                    f"{type(send_error).__name__}: {send_error}",
+                    exc_info=True,
+                )
+            self._current_task = None
+            raise  # Re-raise to stop worker
         except Exception as e:
-            logger.error(f"[{self.agent_name}] Task {task.task_id} failed: {e}")
+            # Non-fatal task errors - log with stack trace and continue
+            logger.error(
+                f"[{self.agent_name}] Task {task.task_id} failed: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
             await self.task_queue.send_result(
                 task_id=task.task_id,
                 success=False,
-                error=str(e),
+                error=f"{type(e).__name__}: {e!s}",
                 worker_pod=self.pod_name,
             )
         finally:
@@ -945,11 +988,11 @@ class WorkerAgent:
             await asyncio.sleep(15)
 
 
-async def run_worker(
+async def run_worker(  # noqa: PLR0912
     role: AgentRole,
     operation_id: str | None = None,
     redis_url: str | None = None,
-    model: str = "claude-sonnet-4-20250514",
+    model: str | None = None,
     max_steps: int | None = None,
     discover_operation: bool = True,
     discovery_timeout: int | None = None,
@@ -974,6 +1017,18 @@ async def run_worker(
     """
     # Resolve config defaults
     redis_url = redis_url or get_redis_url()
+    model = (
+        model
+        or os.getenv(f"ARES_AGENT_{role.value.upper()}_MODEL")
+        or os.getenv("ARES_WORKER_MODEL")
+        or os.getenv("ARES_MODEL")
+    )
+    if not model:
+        logger.error(
+            "No model specified for worker. Provide a model argument or set "
+            "ARES_AGENT_<ROLE>_MODEL/ARES_WORKER_MODEL/ARES_MODEL."
+        )
+        return
 
     pod_name = os.environ.get("HOSTNAME", f"local-{role.value}")
 
