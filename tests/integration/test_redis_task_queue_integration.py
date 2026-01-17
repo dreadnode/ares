@@ -785,180 +785,16 @@ class TestStatePersistence:
 
 
 # ============================================================================
-# Tools Container PID Discovery Tests
+# Command Task Execution Tests
 # ============================================================================
 
 
-class TestFindToolsContainerPid:
-    """Tests for _find_tools_container_pid method."""
-
-    @pytest.mark.asyncio
-    async def test_find_tools_container_pid_success(self, task_queue, mock_agent, tmp_path):
-        """Test successful discovery of tools container PID via /proc/[pid]/environ."""
-        worker = RedisWorkerAgent(
-            role=AgentRole.CRACKER,
-            task_queue=task_queue,
-            agent=mock_agent,
-            agent_name="cracker-agent",
-            pod_name="cracker-0",
-        )
-
-        proc_dir = tmp_path / "proc"
-        proc_dir.mkdir()
-
-        (proc_dir / "1").mkdir()
-        (proc_dir / "15").mkdir()
-        (proc_dir / "100").mkdir()
-        (proc_dir / "self").mkdir()
-
-        (proc_dir / "1" / "environ").write_bytes(b"PATH=/usr/bin\x00HOME=/root\x00")
-        (proc_dir / "15" / "environ").write_bytes(
-            b"ARES_CONTAINER_TYPE=tools\x00AGENT_ROLE=enum\x00PATH=/usr/bin\x00"  # pragma: allowlist secret
-        )
-        (proc_dir / "100" / "environ").write_bytes(b"ARES_ROLE=worker\x00PATH=/usr/bin\x00")
-
-        def mock_path(path_str):
-            if path_str == "/proc":
-                return proc_dir
-            from pathlib import Path
-
-            return Path(path_str)
-
-        with patch("pathlib.Path", side_effect=mock_path):
-            pid = worker._find_tools_container_pid()
-
-        assert pid == 15
-
-    @pytest.mark.asyncio
-    async def test_find_tools_container_pid_not_found(self, task_queue, mock_agent, tmp_path):
-        """Test when tools container is not running."""
-        worker = RedisWorkerAgent(
-            role=AgentRole.CRACKER,
-            task_queue=task_queue,
-            agent=mock_agent,
-            agent_name="cracker-agent",
-            pod_name="cracker-0",
-        )
-
-        proc_dir = tmp_path / "proc"
-        proc_dir.mkdir()
-
-        (proc_dir / "1").mkdir()
-        (proc_dir / "100").mkdir()
-
-        (proc_dir / "1" / "environ").write_bytes(b"PATH=/usr/bin\x00HOME=/root\x00")
-        (proc_dir / "100" / "environ").write_bytes(b"ARES_ROLE=worker\x00PATH=/usr/bin\x00")
-
-        def mock_path(path_str):
-            if path_str == "/proc":
-                return proc_dir
-            from pathlib import Path
-
-            return Path(path_str)
-
-        with patch("pathlib.Path", side_effect=mock_path):
-            pid = worker._find_tools_container_pid()
-
-        assert pid is None
-
-    @pytest.mark.asyncio
-    async def test_find_tools_container_pid_handles_permission_error(
-        self, task_queue, mock_agent, tmp_path
-    ):
-        """Test graceful handling of permission errors when reading /proc."""
-        worker = RedisWorkerAgent(
-            role=AgentRole.CRACKER,
-            task_queue=task_queue,
-            agent=mock_agent,
-            agent_name="cracker-agent",
-            pod_name="cracker-0",
-        )
-
-        proc_dir = tmp_path / "proc"
-        proc_dir.mkdir()
-
-        (proc_dir / "1").mkdir()
-        (proc_dir / "15").mkdir()
-
-        (proc_dir / "1" / "environ").write_bytes(b"PATH=/usr/bin\x00")
-        (proc_dir / "15" / "environ").write_bytes(b"ARES_CONTAINER_TYPE=tools\x00")
-        (proc_dir / "1" / "environ").chmod(0o000)
-
-        def mock_path(path_str):
-            if path_str == "/proc":
-                return proc_dir
-            from pathlib import Path
-
-            return Path(path_str)
-
-        try:
-            with patch("pathlib.Path", side_effect=mock_path):
-                pid = worker._find_tools_container_pid()
-
-            assert pid == 15
-        finally:
-            (proc_dir / "1" / "environ").chmod(0o644)
-
-    @pytest.mark.asyncio
-    async def test_find_tools_container_pid_handles_exception(self, task_queue, mock_agent):
-        """Test graceful handling of filesystem scan failure."""
-        worker = RedisWorkerAgent(
-            role=AgentRole.CRACKER,
-            task_queue=task_queue,
-            agent=mock_agent,
-            agent_name="cracker-agent",
-            pod_name="cracker-0",
-        )
-
-        with patch("pathlib.Path", side_effect=Exception("/proc scan failed")):
-            pid = worker._find_tools_container_pid()
-
-        assert pid is None
-
-    @pytest.mark.asyncio
-    async def test_find_tools_container_pid_invalid_pid_format(
-        self, task_queue, mock_agent, tmp_path
-    ):
-        """Test handling of non-numeric directory names in /proc."""
-        worker = RedisWorkerAgent(
-            role=AgentRole.CRACKER,
-            task_queue=task_queue,
-            agent=mock_agent,
-            agent_name="cracker-agent",
-            pod_name="cracker-0",
-        )
-
-        proc_dir = tmp_path / "proc"
-        proc_dir.mkdir()
-
-        (proc_dir / "self").mkdir()
-        (proc_dir / "15").mkdir()
-        (proc_dir / "15" / "environ").write_bytes(b"ARES_CONTAINER_TYPE=tools\x00")
-
-        def mock_path(path_str):
-            if path_str == "/proc":
-                return proc_dir
-            from pathlib import Path
-
-            return Path(path_str)
-
-        with patch("pathlib.Path", side_effect=mock_path):
-            pid = worker._find_tools_container_pid()
-
-        assert pid == 15
-
-
-# ============================================================================
-# Command Task Execution with nsenter Tests
-# ============================================================================
-
-
-class TestExecuteCommandTaskNsenter:
-    """Tests for _execute_command_task with nsenter namespace execution."""
+class TestExecuteCommandTask:
+    """Tests for _execute_command_task local execution."""
 
     @pytest.mark.asyncio
     async def test_execute_command_success(self, task_queue, mock_agent, mock_redis_client):
-        """Test successful command execution via nsenter."""
+        """Test successful command execution locally."""
         worker = RedisWorkerAgent(
             role=AgentRole.CRACKER,
             task_queue=task_queue,
@@ -966,9 +802,6 @@ class TestExecuteCommandTaskNsenter:
             agent_name="cracker-agent",
             pod_name="cracker-0",
         )
-
-        # Set cached tools PID
-        worker._tools_pid = 15
 
         task = TaskMessage(
             task_id="cmd_001",
@@ -989,16 +822,8 @@ class TestExecuteCommandTaskNsenter:
 
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             await worker._execute_command_task(task)
+            mock_run.assert_called_once()
 
-            call_args = mock_run.call_args
-            nsenter_cmd = call_args[0][0]
-            assert nsenter_cmd[0] == "nsenter"
-            assert "-t" in nsenter_cmd
-            assert "15" in nsenter_cmd
-            assert "-m" in nsenter_cmd
-            assert "/bin/bash" in nsenter_cmd
-
-        mock_redis_client.lpush.assert_called()
         call_args = mock_redis_client.lpush.call_args
         result_json = call_args[0][1]
         result_data = json.loads(result_json)
@@ -1007,10 +832,10 @@ class TestExecuteCommandTaskNsenter:
         assert result_data["result"]["return_code"] == 0
 
     @pytest.mark.asyncio
-    async def test_execute_command_tools_container_not_found(
+    async def test_execute_command_uses_working_directory(
         self, task_queue, mock_agent, mock_redis_client
     ):
-        """Test error when tools container cannot be found."""
+        """Test command execution respects working directory."""
         worker = RedisWorkerAgent(
             role=AgentRole.CRACKER,
             task_queue=task_queue,
@@ -1024,56 +849,24 @@ class TestExecuteCommandTaskNsenter:
             task_type="command",
             source_agent="orchestrator",
             target_agent="worker",
-            payload={"command": "whoami"},
-        )
-
-        with patch.object(worker, "_find_tools_container_pid", return_value=None):
-            await worker._execute_command_task(task)
-
-        call_args = mock_redis_client.lpush.call_args
-        result_json = call_args[0][1]
-        result_data = json.loads(result_json)
-        assert result_data["success"] is False
-        assert "Cannot find tools container" in result_data["error"]
-        assert "shareProcessNamespace" in result_data["error"]
-
-    @pytest.mark.asyncio
-    async def test_execute_command_nsenter_permission_denied(
-        self, task_queue, mock_agent, mock_redis_client
-    ):
-        """Test handling of nsenter permission error (missing CAP_SYS_ADMIN)."""
-        worker = RedisWorkerAgent(
-            role=AgentRole.CRACKER,
-            task_queue=task_queue,
-            agent=mock_agent,
-            agent_name="cracker-agent",
-            pod_name="cracker-0",
-        )
-
-        worker._tools_pid = 15
-
-        task = TaskMessage(
-            task_id="cmd_003",
-            task_type="command",
-            source_agent="orchestrator",
-            target_agent="worker",
-            payload={"command": "whoami"},
+            payload={
+                "command": "pwd",
+                "working_directory": "/tmp",
+                "timeout_seconds": 10,
+            },
         )
 
         mock_result = MagicMock()
-        mock_result.stdout = ""
-        mock_result.stderr = "nsenter: cannot open /proc/15/ns/mnt: Operation not permitted"
-        mock_result.returncode = 1
+        mock_result.stdout = "/tmp\n"
+        mock_result.stderr = ""
+        mock_result.returncode = 0
 
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
             await worker._execute_command_task(task)
 
-        call_args = mock_redis_client.lpush.call_args
-        result_json = call_args[0][1]
-        result_data = json.loads(result_json)
-        assert result_data["success"] is False
-        assert "Operation not permitted" in result_data["error"]
-        assert "CAP_SYS_ADMIN" in result_data["error"]
+        _, kwargs = mock_run.call_args
+        assert kwargs["cwd"] == "/tmp"
+        assert kwargs["shell"] is True
 
     @pytest.mark.asyncio
     async def test_execute_command_timeout(self, task_queue, mock_agent, mock_redis_client):
@@ -1088,8 +881,6 @@ class TestExecuteCommandTaskNsenter:
             pod_name="cracker-0",
         )
 
-        worker._tools_pid = 15
-
         task = TaskMessage(
             task_id="cmd_004",
             task_type="command",
@@ -1101,7 +892,7 @@ class TestExecuteCommandTaskNsenter:
             },
         )
 
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("nsenter", 5)):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("command", 5)):
             await worker._execute_command_task(task)
 
         call_args = mock_redis_client.lpush.call_args
@@ -1123,8 +914,6 @@ class TestExecuteCommandTaskNsenter:
             pod_name="cracker-0",
         )
 
-        worker._tools_pid = 15
-
         task = TaskMessage(
             task_id="cmd_005",
             task_type="command",
@@ -1143,88 +932,10 @@ class TestExecuteCommandTaskNsenter:
         assert "Unexpected error" in result_data["error"]
 
     @pytest.mark.asyncio
-    async def test_execute_command_caches_tools_pid(
-        self, task_queue, mock_agent, mock_redis_client
-    ):
-        """Test that tools PID is cached after first lookup."""
-        worker = RedisWorkerAgent(
-            role=AgentRole.CRACKER,
-            task_queue=task_queue,
-            agent=mock_agent,
-            agent_name="cracker-agent",
-            pod_name="cracker-0",
-        )
-
-        task = TaskMessage(
-            task_id="cmd_006",
-            task_type="command",
-            source_agent="orchestrator",
-            target_agent="worker",
-            payload={"command": "echo test"},
-        )
-
-        mock_result = MagicMock()
-        mock_result.stdout = "test\n"
-        mock_result.stderr = ""
-        mock_result.returncode = 0
-
-        with (
-            patch.object(worker, "_find_tools_container_pid", return_value=42) as mock_find,
-            patch("subprocess.run", return_value=mock_result),
-        ):
-            await worker._execute_command_task(task)
-            assert mock_find.call_count == 1
-
-            await worker._execute_command_task(task)
-            assert mock_find.call_count == 1
-
-        assert worker._tools_pid == 42
-
-    @pytest.mark.asyncio
-    async def test_execute_command_retries_pid_lookup_when_none(
-        self, task_queue, mock_agent, mock_redis_client
-    ):
-        """Test that tools PID lookup is retried if previously None."""
-        worker = RedisWorkerAgent(
-            role=AgentRole.CRACKER,
-            task_queue=task_queue,
-            agent=mock_agent,
-            agent_name="cracker-agent",
-            pod_name="cracker-0",
-        )
-
-        # Simulate first lookup returning None (timing issue)
-        worker._tools_pid = None
-
-        task = TaskMessage(
-            task_id="cmd_retry",
-            task_type="command",
-            source_agent="orchestrator",
-            target_agent="worker",
-            payload={"command": "echo retry"},
-        )
-
-        mock_result = MagicMock()
-        mock_result.stdout = "retry\n"
-        mock_result.stderr = ""
-        mock_result.returncode = 0
-
-        with (
-            patch.object(worker, "_find_tools_container_pid", return_value=99) as mock_find,
-            patch("subprocess.run", return_value=mock_result),
-        ):
-            await worker._execute_command_task(task)
-            # Should retry lookup since _tools_pid was None
-            assert mock_find.call_count == 1
-
-        # PID should now be cached
-        assert worker._tools_pid == 99
-
-    @pytest.mark.asyncio
     async def test_execute_command_with_nonzero_exit(
         self, task_queue, mock_agent, mock_redis_client
     ):
-        """Test command that returns non-zero exit code (but not permission error)."""
+        """Test command that returns non-zero exit code."""
         worker = RedisWorkerAgent(
             role=AgentRole.CRACKER,
             task_queue=task_queue,
@@ -1232,8 +943,6 @@ class TestExecuteCommandTaskNsenter:
             agent_name="cracker-agent",
             pod_name="cracker-0",
         )
-
-        worker._tools_pid = 15
 
         task = TaskMessage(
             task_id="cmd_007",

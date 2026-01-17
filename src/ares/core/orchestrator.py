@@ -673,12 +673,13 @@ Your objectives:
    - ldap_search_descriptions: Find passwords stored in user description fields
    - password_spray with common passwords (Password1, Welcome1, Summer2024, etc.)
    - username_as_password: Test if users have username as password (e.g., hodor:hodor)
-3. Enumerate users and shares with enum4linux/crackmapexec
-4. Run certipy_find to discover ADCS vulnerabilities
-5. Run run_bloodhound for ACL analysis and attack path discovery
-6. Coordinate with specialized agents to exploit discovered vulnerabilities
-7. Use trigger_credential_expansion after getting new credentials
-8. Continue until Domain Admin access achieved
+3. Enumerate users and shares with netexec/enum4linux-ng/rpcclient/smbclient
+4. If no creds, run Kerberos user enumeration with GetNPUsers.py
+5. Run certipy_find to discover ADCS vulnerabilities
+6. Run run_bloodhound for ACL analysis and attack path discovery
+7. Coordinate with specialized agents to exploit discovered vulnerabilities
+8. Use trigger_credential_expansion after getting new credentials
+9. Continue until Domain Admin access achieved
 
 Priority vulnerabilities to look for:
 - Passwords in LDAP description fields (QUICK WIN - check first!)

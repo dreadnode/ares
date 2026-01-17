@@ -165,7 +165,7 @@ class KubernetesPodExecutor:
         self,
         role: str,
         command: list[str] | str,
-        container: str = "tools",
+        container: str | None = None,
         timeout_seconds: int = 300,
         stdin_data: str | None = None,
     ) -> tuple[str, str, int]:
@@ -175,7 +175,7 @@ class KubernetesPodExecutor:
         Args:
             role: The agent role (enum, cracker, acl, privesc, lateral, poisoning).
             command: Command to execute as list of strings or shell command string.
-            container: Container name to execute in (default: tools).
+            container: Container name to execute in (default: first container).
             timeout_seconds: Execution timeout in seconds.
             stdin_data: Optional data to send to stdin.
 
@@ -224,7 +224,7 @@ class KubernetesPodExecutor:
         self,
         pod_name: str,
         command: list[str],
-        container: str,
+        container: str | None,
         timeout: int,
         stdin_data: str | None = None,
     ) -> tuple[str, str, int]:
@@ -239,17 +239,21 @@ class KubernetesPodExecutor:
             loop = asyncio.get_event_loop()
 
             def _exec():
+                exec_kwargs = {
+                    "command": command,
+                    "stderr": True,
+                    "stdin": bool(stdin_data),
+                    "stdout": True,
+                    "tty": False,
+                    "_preload_content": False,
+                }
+                if container:
+                    exec_kwargs["container"] = container
                 resp = stream(
                     v1.connect_get_namespaced_pod_exec,
                     pod_name,
                     self.namespace,
-                    container=container,
-                    command=command,
-                    stderr=True,
-                    stdin=bool(stdin_data),
-                    stdout=True,
-                    tty=False,
-                    _preload_content=False,
+                    **exec_kwargs,
                 )
 
                 stdout_chunks = []

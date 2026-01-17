@@ -9,6 +9,7 @@ from botocore.exceptions import TokenRetrievalError
 from ares.core.remote import (
     CommandResult,
     K8sExecutor,
+    LocalExecutor,
     SSMExecutor,
     SSOTokenExpiredError,
     get_executor,
@@ -339,6 +340,47 @@ class TestSSMExecutorWaitForCommand:
 
         assert result.success is False
         assert result.return_code == 1
+
+
+class TestLocalExecutorRunCommand:
+    """Tests for LocalExecutor.run_command method."""
+
+    def test_run_command_success(self):
+        """Test successful command execution."""
+        executor = LocalExecutor()
+
+        mock_result = MagicMock()
+        mock_result.stdout = "output"
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+
+        with patch("ares.core.remote.subprocess.run", return_value=mock_result) as mock_run:
+            result = executor.run_command("echo test", working_directory="/tmp")
+
+        assert result.success is True
+        assert result.stdout == "output"
+        mock_run.assert_called_once()
+        args, kwargs = mock_run.call_args
+        assert args[0] == "echo test"
+        assert kwargs["shell"] is True
+        assert kwargs["cwd"] == "/tmp"
+
+    def test_run_command_list_input(self):
+        """Test command execution with list input."""
+        executor = LocalExecutor()
+
+        mock_result = MagicMock()
+        mock_result.stdout = "output"
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+
+        with patch("ares.core.remote.subprocess.run", return_value=mock_result) as mock_run:
+            result = executor.run_command(["echo", "test"], working_directory="/workdir")
+
+        assert result.success is True
+        args, kwargs = mock_run.call_args
+        assert args[0] == "echo test"
+        assert kwargs["cwd"] == "/workdir"
 
 
 class TestGetExecutor:

@@ -10,7 +10,7 @@ vars:
   # Defaults
   NAMESPACE: '{{.NAMESPACE | default "attack-simulation"}}'
   ORCH_CONTAINER: '{{.ORCH_CONTAINER | default "orchestrator"}}'
-  WORKER_CONTAINER: '{{.WORKER_CONTAINER | default "ares-worker"}}'
+  WORKER_CONTAINER: '{{.WORKER_CONTAINER | default ""}}'
   PARALLELISM: '{{.PARALLELISM | default "10"}}'
   PVC_PATH: '/ares'
   VERIFY_PVC_DIFF: '{{.VERIFY_PVC_DIFF | default "false"}}'
@@ -89,8 +89,18 @@ tasks:
               file="$2"
               rel="$3"
               verify="{{.VERIFY_PVC_DIFF}}"
+              worker_container="{{.WORKER_CONTAINER}}"
+              if [ -z "$worker_container" ]; then
+                worker_container=$(kubectl get pod -n {{.NAMESPACE}} "$pod" \
+                  -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
+              fi
+              if [ -n "$worker_container" ]; then
+                container_flag=(-c "$worker_container")
+              else
+                container_flag=()
+              fi
               if kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
-                  -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
+                  -n {{.NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
                 echo -e "{{.SUCCESS}}   -> $pod"
               elif kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} 2>/dev/null; then
@@ -100,7 +110,7 @@ tasks:
               fi
               if [ "$verify" = "true" ]; then
                 local_hash=$(shasum -a 256 "$file" 2>/dev/null | awk "{print \$1}")
-                remote_hash=$(kubectl exec -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} "$pod" -- \
+                remote_hash=$(kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
                   sha256sum "/ares/src/ares/$rel" 2>/dev/null | awk "{print \$1}")
                 if [ -z "$remote_hash" ]; then
                   remote_hash="MISSING"
@@ -201,8 +211,18 @@ tasks:
               file="$2"
               rel="$3"
               verify="{{.VERIFY_PVC_DIFF}}"
+              worker_container="{{.WORKER_CONTAINER}}"
+              if [ -z "$worker_container" ]; then
+                worker_container=$(kubectl get pod -n {{.NAMESPACE}} "$pod" \
+                  -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
+              fi
+              if [ -n "$worker_container" ]; then
+                container_flag=(-c "$worker_container")
+              else
+                container_flag=()
+              fi
               if kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
-                  -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
+                  -n {{.NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
                 echo -e "{{.SUCCESS}}   -> $pod"
               elif kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} 2>/dev/null; then
@@ -212,7 +232,7 @@ tasks:
               fi
               if [ "$verify" = "true" ]; then
                 local_hash=$(shasum -a 256 "$file" 2>/dev/null | awk "{print \$1}")
-                remote_hash=$(kubectl exec -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} "$pod" -- \
+                remote_hash=$(kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
                   sha256sum "/ares/src/ares/$rel" 2>/dev/null | awk "{print \$1}")
                 if [ -z "$remote_hash" ]; then
                   remote_hash="MISSING"
@@ -327,8 +347,18 @@ tasks:
               file="$2"
               rel="$3"
               verify="{{.VERIFY_PVC_DIFF}}"
+              worker_container="{{.WORKER_CONTAINER}}"
+              if [ -z "$worker_container" ]; then
+                worker_container=$(kubectl get pod -n {{.NAMESPACE}} "$pod" \
+                  -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
+              fi
+              if [ -n "$worker_container" ]; then
+                container_flag=(-c "$worker_container")
+              else
+                container_flag=()
+              fi
               if kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
-                  -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
+                  -n {{.NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
                 echo -e "{{.SUCCESS}}   -> $pod"
               elif kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} 2>/dev/null; then
@@ -338,7 +368,7 @@ tasks:
               fi
               if [ "$verify" = "true" ]; then
                 local_hash=$(shasum -a 256 "$file" 2>/dev/null | awk "{print \$1}")
-                remote_hash=$(kubectl exec -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} "$pod" -- \
+                remote_hash=$(kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
                   sha256sum "/ares/src/ares/$rel" 2>/dev/null | awk "{print \$1}")
                 if [ -z "$remote_hash" ]; then
                   remote_hash="MISSING"
@@ -455,11 +485,19 @@ tasks:
         echo "========================================"
 
         if [ "{{.FOLLOW}}" = "true" ]; then
-          kubectl logs -n {{.NAMESPACE}} $SELECTOR -c {{.WORKER_CONTAINER}} --tail={{.LINES}} -f --prefix=true 2>/dev/null || \
+          if [ -n "{{.WORKER_CONTAINER}}" ]; then
+            kubectl logs -n {{.NAMESPACE}} $SELECTOR -c {{.WORKER_CONTAINER}} --tail={{.LINES}} -f --prefix=true 2>/dev/null || \
+              kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} -f --prefix=true
+          else
             kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} -f --prefix=true
+          fi
         else
-          kubectl logs -n {{.NAMESPACE}} $SELECTOR -c {{.WORKER_CONTAINER}} --tail={{.LINES}} --prefix=true 2>/dev/null || \
+          if [ -n "{{.WORKER_CONTAINER}}" ]; then
+            kubectl logs -n {{.NAMESPACE}} $SELECTOR -c {{.WORKER_CONTAINER}} --tail={{.LINES}} --prefix=true 2>/dev/null || \
+              kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} --prefix=true
+          else
             kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} --prefix=true
+          fi
         fi
 
   logs:orchestrator:
@@ -501,8 +539,12 @@ tasks:
         fi
 
         echo -e "{{.INFO}} Executing in $POD..."
-        kubectl exec -it -n {{.NAMESPACE}} $POD -c {{.WORKER_CONTAINER}} -- {{.CMD}} 2>/dev/null || \
+        if [ -n "{{.WORKER_CONTAINER}}" ]; then
+          kubectl exec -it -n {{.NAMESPACE}} $POD -c {{.WORKER_CONTAINER}} -- {{.CMD}} 2>/dev/null || \
+            kubectl exec -it -n {{.NAMESPACE}} $POD -- {{.CMD}}
+        else
           kubectl exec -it -n {{.NAMESPACE}} $POD -- {{.CMD}}
+        fi
 
   # ============================================================================
   # VERIFY: Check synced code
@@ -525,7 +567,12 @@ tasks:
           exit 1
         fi
 
-        kubectl exec -n {{.NAMESPACE}} $POD -c {{.WORKER_CONTAINER}} -- \
-          head -50 {{.PVC_PATH}}/src/ares/{{.FILE}} 2>/dev/null || \
+        if [ -n "{{.WORKER_CONTAINER}}" ]; then
+          kubectl exec -n {{.NAMESPACE}} $POD -c {{.WORKER_CONTAINER}} -- \
+            head -50 {{.PVC_PATH}}/src/ares/{{.FILE}} 2>/dev/null || \
+            kubectl exec -n {{.NAMESPACE}} $POD -- \
+              head -50 {{.PVC_PATH}}/src/ares/{{.FILE}}
+        else
           kubectl exec -n {{.NAMESPACE}} $POD -- \
             head -50 {{.PVC_PATH}}/src/ares/{{.FILE}}
+        fi

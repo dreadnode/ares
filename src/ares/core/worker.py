@@ -16,7 +16,6 @@ import random
 import re
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -374,15 +373,11 @@ class RedisWorkerAgent:
         self._running = False
         self._current_task: str | None = None
         self._tasks_completed = 0
-        self._tools_pid: int | None = None
 
     async def start(self) -> None:
         """Start the Redis worker loop."""
         self._running = True
         logger.info(f"Redis worker {self.agent_name} starting...")
-
-        # Validate pod prerequisites before starting
-        self._validate_pod_prerequisites()
 
         # Start heartbeat task
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -553,140 +548,8 @@ class RedisWorkerAgent:
         finally:
             self._current_task = None
 
-    def _find_tools_container_pid(self) -> int | None:
-        """Find the PID of the tools sidecar container.
-
-        With shareProcessNamespace: true, we can see all processes in the pod.
-        The tools container is identified by the ARES_CONTAINER_TYPE=tools
-        environment variable, which is the idiomatic way to identify containers
-        in a shared process namespace.
-
-        See: https://kubernetes.io/docs/tasks/configure-pod-container/share-process-namespace/
-
-        Returns:
-            PID of tools container if found, None otherwise.
-        """
-        from pathlib import Path
-
-        # Identify the tools container by its ARES_CONTAINER_TYPE=tools env var.
-        # This is the idiomatic approach for container identification in K8s pods
-        # with shareProcessNamespace: true. We scan /proc/[pid]/environ for each
-        # process to find the one with our marker environment variable.
-        try:
-            for pid_entry in Path("/proc").iterdir():
-                pid_dir = pid_entry.name
-                if not pid_dir.isdigit():
-                    continue
-
-                environ_path = pid_entry / "environ"
-                try:
-                    with open(environ_path, "rb") as f:
-                        # environ is null-byte separated key=value pairs
-                        environ_data = f.read()
-                        # Check for our marker environment variable
-                        if b"ARES_CONTAINER_TYPE=tools" in environ_data:
-                            pid = int(pid_dir)
-                            logger.debug(f"Found tools container at PID {pid} via /proc/environ")
-                            return pid
-                except (FileNotFoundError, PermissionError, ProcessLookupError):
-                    # Process died or no permission - skip
-                    continue
-        except Exception as e:
-            logger.debug(f"Failed to scan /proc for tools container: {e}")
-
-        return None
-
-    def _validate_pod_prerequisites(self) -> None:  # noqa: PLR0912
-        """Validate that the pod is configured correctly for nsenter execution.
-
-        Checks:
-        1. shareProcessNamespace: true - can see other container processes
-        2. Tools container identifiable via ARES_CONTAINER_TYPE=tools env var
-        3. CAP_SYS_ADMIN capability - can use nsenter
-
-        Raises:
-            RuntimeError: If prerequisites are not met with clear error messages.
-        """
-        import subprocess
-
-        errors: list[str] = []
-
-        # Check 1: Can we see other container processes?
-        # This validates shareProcessNamespace: true
-        # With shared namespace, we should see at least: pause container + tools + worker processes
-        try:
-            proc_contents = [p.name for p in Path("/proc").iterdir()]
-            pid_count = sum(1 for p in proc_contents if p.isdigit())
-            if pid_count < 3:
-                errors.append(
-                    f"Cannot see other container processes (found only {pid_count} PIDs). "
-                    "Pod spec must have 'shareProcessNamespace: true'"
-                )
-        except Exception as e:
-            errors.append(f"Cannot read /proc: {e}")
-
-        # Check 2: Can we find the tools container?
-        # Retry a few times in case of startup timing issues
-        tools_pid = None
-        for attempt in range(3):
-            tools_pid = self._find_tools_container_pid()
-            if tools_pid:
-                break
-            if attempt < 2:
-                import time
-
-                logger.debug(f"Tools container not found, retrying in 2s (attempt {attempt + 1}/3)")
-                time.sleep(2)
-
-        if not tools_pid:
-            errors.append(
-                "Cannot find tools container PID. Ensure the tools container "
-                "has ARES_CONTAINER_TYPE=tools environment variable set."
-            )
-        else:
-            self._tools_pid = tools_pid
-            logger.info(f"Found tools container at PID {tools_pid}")
-
-            # Check 3: Can we actually use nsenter? (test with a simple command)
-            try:
-                result = subprocess.run(  # nosec B607
-                    ["nsenter", "-t", str(tools_pid), "-m", "/bin/true"],
-                    capture_output=True,
-                    timeout=5,
-                    check=False,
-                )
-                if result.returncode != 0:
-                    stderr = result.stderr.decode() if result.stderr else ""
-                    if "Operation not permitted" in stderr:
-                        errors.append(
-                            "nsenter permission denied. The ares-worker container needs "
-                            "CAP_SYS_ADMIN capability. Add to securityContext: "
-                            "capabilities.add: ['SYS_ADMIN']"
-                        )
-                    else:
-                        errors.append(f"nsenter test failed: {stderr}")
-            except subprocess.TimeoutExpired:
-                errors.append("nsenter test command timed out")
-            except FileNotFoundError:
-                errors.append("nsenter binary not found in worker container")
-
-        if errors:
-            error_msg = "Pod prerequisite validation failed:\n" + "\n".join(
-                f"  - {e}" for e in errors
-            )
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
-
-        logger.success("Pod prerequisites validated successfully")
-
     async def _execute_command_task(self, task: TaskMessage) -> None:
-        """Execute a command task in the tools sidecar container.
-
-        Uses nsenter to execute commands in the tools container's mount namespace.
-        Requires:
-        - shareProcessNamespace: true (pod-level)
-        - CAP_SYS_ADMIN capability (ares-worker container)
-        """
+        """Execute a command task locally."""
         import subprocess
 
         payload = task.payload
@@ -697,58 +560,16 @@ class RedisWorkerAgent:
         logger.info(f"[{self.agent_name}] Executing command: {command[:100]}...")
 
         try:
-            # Retry finding tools PID if not found previously (handles timing issues)
-            if not getattr(self, "_tools_pid", None):
-                self._tools_pid = self._find_tools_container_pid()
-
-            if not self._tools_pid:
-                error_msg = (
-                    "Cannot find tools container. The pod must have shareProcessNamespace: true "
-                    "and the tools container must have ARES_CONTAINER_TYPE=tools env var."
-                )
-                logger.error(error_msg)
-                await self.task_queue.send_result(
-                    task_id=task.task_id,
-                    success=False,
-                    error=error_msg,
-                    worker_pod=self.pod_name,
-                )
-                return
-
-            nsenter_cmd = [
-                "nsenter",
-                "-t",
-                str(self._tools_pid),
-                "-m",
-                "-w",
-                "/bin/bash",
-                "-c",
-                f"cd {working_dir} && {command}",
-            ]
-
-            logger.debug(f"Executing via nsenter into PID {self._tools_pid}")
-            result = subprocess.run(  # noqa: ASYNC221
-                nsenter_cmd,
+            result = await asyncio.to_thread(  # noqa: S604  # nosec B602
+                subprocess.run,
+                command,
+                shell=True,  # nosec B602 B604
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                cwd=working_dir,
                 check=False,
             )
-
-            if result.returncode != 0 and "Operation not permitted" in result.stderr:
-                error_msg = (
-                    "nsenter failed: Operation not permitted. "
-                    "The ares-worker container needs CAP_SYS_ADMIN capability. "
-                    "Add to pod spec: securityContext.capabilities.add: [SYS_ADMIN]"
-                )
-                logger.error(error_msg)
-                await self.task_queue.send_result(
-                    task_id=task.task_id,
-                    success=False,
-                    error=error_msg,
-                    worker_pod=self.pod_name,
-                )
-                return
 
             await self.task_queue.send_result(
                 task_id=task.task_id,
@@ -1077,6 +898,12 @@ async def run_worker(  # noqa: PLR0912
         return
 
     pod_name = os.environ.get("HOSTNAME", f"local-{role.value}")
+    if not os.environ.get("ARES_ROLE"):
+        os.environ["ARES_ROLE"] = role.value
+    if not os.environ.get("ARES_EXECUTION_MODE") and os.path.exists(
+        "/var/run/secrets/kubernetes.io/serviceaccount"
+    ):
+        os.environ["ARES_EXECUTION_MODE"] = "local"
 
     # Handle empty string operation IDs from k8s configmaps
     if operation_id == "":

@@ -38,7 +38,7 @@ For structural changes (new files, new imports), run `task remote:rollout`.
 | Variable           | Default              | Description             |
 | ------------------ | -------------------- | ----------------------- |
 | `NAMESPACE`        | `attack-simulation`  | Kubernetes namespace    |
-| `WORKER_CONTAINER` | `ares-worker`        | Container name in pods  |
+| `WORKER_CONTAINER` | *(auto)*             | Container name in pods  |
 | `FILES`            | `src/ares/core/*.py` | Files to sync           |
 
 ## Examples

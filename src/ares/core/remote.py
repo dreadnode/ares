@@ -224,7 +224,7 @@ class K8sExecutor:
 class LocalExecutor:
     """Execute commands via subprocess.
 
-    Used in K8s worker pods where tools are available in the shared process namespace.
+    Used in K8s worker pods where tools are available locally.
     """
 
     def run_command(
