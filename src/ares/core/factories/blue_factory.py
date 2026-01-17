@@ -255,8 +255,8 @@ def _check_duplicate_query(query: str) -> str | None:
             "4. **Then try a DIFFERENT query** or call complete_investigation()\n\n"
             "Example extraction from previous results:\n"
             "```\n"
-            "record_evidence(evidence_type='hostname', value='winterfell.north.sevenkingdoms.local', ...)\n"
-            "record_evidence(evidence_type='user', value='robb.stark', ...)\n"
+            "record_evidence(evidence_type='hostname', value='dc01.child.example.local', ...)\n"
+            "record_evidence(evidence_type='user', value='bob.jones', ...)\n"
             "```"
         )
 

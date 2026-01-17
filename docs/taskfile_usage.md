@@ -159,6 +159,21 @@ Run Red Team using `.env` file instead of 1Password.
 task ares:red:local: TARGET=192.168.1.100
 ```
 
+#### Multi-Agent Operations
+
+Tail logs for a specific multi-agent operation:
+
+```bash
+task ares:logs:operation OPERATION_ID=op-xxx
+task ares:logs:operation OPERATION_ID=op-xxx FOLLOW=true LINES=200
+```
+
+List multi-agent operations and their Redis queue state:
+
+```bash
+task ares:red:multi:queue
+```
+
 #### `task ares:investigate`
 
 Investigate a specific alert from a JSON file.

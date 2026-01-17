@@ -1,8 +1,12 @@
 """CLI for submitting operations to the orchestrator service."""
 
+import asyncio
 import os
+import shutil
 import sys
 import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated
 
 import cyclopts
@@ -19,6 +23,55 @@ app = cyclopts.App(
     name="ares-ops",
     help="Submit and manage operations with the Ares orchestrator service",
 )
+
+
+async def _stream_orchestrator_logs(
+    namespace: str,
+    log_path: Path | None,
+    filter_token: str | None = None,
+) -> None:
+    command = ["kubectl", "logs", "-f", "-n", namespace, "deploy/ares-orchestrator"]
+    proc = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    log_handle = None
+    if log_path:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_handle = log_path.open("a", encoding="utf-8")
+
+    try:
+        while True:
+            if not proc.stdout:
+                break
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode(errors="replace")
+            if filter_token and filter_token not in text:
+                continue
+            sys.stdout.write(text)
+            sys.stdout.flush()
+            if log_handle:
+                log_handle.write(text)
+                log_handle.flush()
+    except KeyboardInterrupt:
+        logger.info("Stopping orchestrator log follow...")
+        proc.terminate()
+        await proc.wait()
+    finally:
+        if log_handle:
+            log_handle.close()
+
+
+def _resolve_log_path(log_file: str | None, operation_id: str) -> Path:
+    if log_file is not None:
+        return Path(log_file)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    log_dir = Path(os.environ.get("LOG_DIR", "./logs"))
+    return log_dir / f"orchestrator-{operation_id}-{timestamp}.log"
 
 
 @app.command
@@ -41,6 +94,19 @@ async def submit(
     ] = None,
     resume: Annotated[bool, cyclopts.Parameter(help="Resume from checkpoint")] = False,
     wait: Annotated[bool, cyclopts.Parameter(help="Wait for operation to complete")] = False,
+    follow_logs: Annotated[
+        bool, cyclopts.Parameter(help="Follow orchestrator logs after submit")
+    ] = False,
+    k8s_namespace: Annotated[
+        str, cyclopts.Parameter(help="K8s namespace for orchestrator logs")
+    ] = "attack-simulation",
+    log_file: Annotated[
+        str | None, cyclopts.Parameter(help="Write orchestrator logs to this file")
+    ] = None,
+    filter_logs: Annotated[
+        bool,
+        cyclopts.Parameter(help="Only print orchestrator lines containing the operation ID"),
+    ] = False,
     model: Annotated[
         str | None, cyclopts.Parameter(help="LLM model to use (defaults to env)")
     ] = None,
@@ -50,7 +116,7 @@ async def submit(
     """Submit a multi-agent red team operation to the orchestrator service.
 
     Example:
-        ares-ops submit dreadgoad sevenkingdoms.local --ips 10.0.4.90 10.0.4.129 --wait
+        ares-ops submit dreadgoad example.local --ips 10.0.4.90 10.0.4.129 --wait
     """
     # Resolve config defaults
     resolved_redis_url = redis_url or get_redis_url()
@@ -149,6 +215,22 @@ async def submit(
     except Exception as e:
         logger.error(f"Failed to submit operation: {e}")
         sys.exit(1)
+
+    if follow_logs:
+        if not shutil.which("kubectl"):
+            logger.error("kubectl not found. Install kubectl or disable --follow-logs.")
+            sys.exit(1)
+
+        resolved_log_path = _resolve_log_path(log_file, operation_id)
+
+        logger.info("Following orchestrator logs (Ctrl+C to stop)...")
+        logger.info(f"Namespace: {k8s_namespace}")
+        logger.info(f"Log file: {resolved_log_path}")
+        await _stream_orchestrator_logs(
+            namespace=k8s_namespace,
+            log_path=resolved_log_path,
+            filter_token=operation_id if filter_logs else None,
+        )
 
 
 @app.command

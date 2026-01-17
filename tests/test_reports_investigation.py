@@ -168,14 +168,14 @@ class TestExecutiveSummary:
     ):
         """Test summary includes investigated hosts."""
         summary = generator._executive_summary(populated_investigation_state)
-        assert "dc01" in summary or "winterfell" in summary
+        assert "dc01" in summary or "dc01" in summary
 
     def test_summary_with_users(
         self, generator: MarkdownReportGenerator, populated_investigation_state: InvestigationState
     ):
         """Test summary includes investigated users."""
         summary = generator._executive_summary(populated_investigation_state)
-        assert "eddard.stark" in summary or "robb.stark" in summary
+        assert "alice.smith" in summary or "bob.jones" in summary
 
     def test_summary_escalated_assessment(
         self, generator: MarkdownReportGenerator, escalated_investigation_state: InvestigationState

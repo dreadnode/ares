@@ -33,7 +33,7 @@ async def submit_operation(
 
     Args:
         operation_id: Unique identifier for this operation
-        target_domain: Target domain (e.g., "sevenkingdoms.local")
+        target_domain: Target domain (e.g., "example.local")
         target_ips: List of target IPs to scan
         initial_credential: Optional initial credential dict with keys:
             - username: Username

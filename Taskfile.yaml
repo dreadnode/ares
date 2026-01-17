@@ -512,6 +512,35 @@ tasks:
           tail -n {{.LINES}} "$LATEST"
         fi
 
+  ares:logs:operation:
+    desc: "Tail logs for a multi-agent operation (usage: task ares:logs:operation OPERATION_ID=op-xxx [LINES=100] [FOLLOW=true])"
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LINES: '{{.LINES | default "100"}}'
+      FOLLOW: '{{.FOLLOW | default "false"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required. Usage: task ares:logs:operation OPERATION_ID=op-xxx"
+    cmds:
+      - |
+        LATEST=$(ls -t {{.LOG_DIR}}/red-multi-{{.OPERATION_ID}}-*.log 2>/dev/null | head -1)
+        if [ -z "$LATEST" ]; then
+          LATEST=$(ls -t {{.LOG_DIR}}/orchestrator-{{.OPERATION_ID}}-*.log 2>/dev/null | head -1)
+        fi
+        if [ -z "$LATEST" ]; then
+          echo "No logs found for operation {{.OPERATION_ID}} in {{.LOG_DIR}}"
+          exit 1
+        fi
+
+        echo "📋 Operation log: $LATEST"
+        echo "======================================================================"
+
+        if [ "{{.FOLLOW}}" = "true" ]; then
+          tail -f "$LATEST"
+        else
+          tail -n {{.LINES}} "$LATEST"
+        fi
+
   ares:logs:blue:
     desc: "Tail the latest blue team log (usage: task ares:logs:blue [LINES=100] [FOLLOW=true])"
     vars:
@@ -743,10 +772,10 @@ tasks:
   # ===========================================================================
 
   ares:red:multi:
-    desc: "Run multi-agent red team operation (usage: task ares:red:multi TARGET=dreadgoad [DOMAIN=sevenkingdoms.local])"
+    desc: "Run multi-agent red team operation (usage: task ares:red:multi TARGET=dreadgoad [DOMAIN=example.local])"
     vars:
       TARGET: '{{.TARGET | default ""}}'
-      DOMAIN: '{{.DOMAIN | default "sevenkingdoms.local"}}'
+      DOMAIN: '{{.DOMAIN | default "example.local"}}'
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       RESUME: '{{.RESUME | default "false"}}'
       # Target resolution (where the AD targets live)
@@ -834,7 +863,7 @@ tasks:
         fi
 
         mkdir -p {{.LOG_DIR}}
-        LOGFILE="{{.LOG_DIR}}/red-multi-$(date +%Y%m%d-%H%M%S).log"
+        LOGFILE="{{.LOG_DIR}}/red-multi-${OPERATION_ID}-$(date +%Y%m%d-%H%M%S).log"
         echo "📝 Logging to: $LOGFILE"
 
         RESOLVED_TARGETS_LIST=$(echo "$RESOLVED_TARGETS" | tr ',' ' ')
@@ -973,6 +1002,100 @@ tasks:
         asyncio.run(main())
         "
 
+  ares:red:multi:queue:
+    desc: "List multi-agent operations and state from the Redis queue"
+    vars:
+      K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
+    cmds:
+      - |
+        REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+        if [ -n "$REDIS_PASS" ]; then
+          REDIS_URL="redis://:${REDIS_PASS}@redis:6379"
+        else
+          REDIS_URL="redis://redis:6379"
+        fi
+
+        kubectl exec -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -c "
+        import asyncio
+        from collections import Counter
+
+        import redis.asyncio as redis
+
+        from ares.core.models import SharedRedTeamState
+        from ares.core.task_queue import RedisTaskQueue
+
+        async def main():
+            client = redis.from_url('$REDIS_URL', decode_responses=False)
+            await client.ping()
+
+            operations = []
+            async for key in client.scan_iter('ares:operation:*:state'):
+                key_str = key.decode()
+                parts = key_str.split(':')
+                if len(parts) < 3:
+                    continue
+                op_id = parts[2]
+                data = await client.get(key)
+                if not data:
+                    continue
+
+                state = SharedRedTeamState.from_bytes(data)
+                checkpoint_key = f'ares:operation:{op_id}:checkpoint_time'
+                checkpoint = await client.get(checkpoint_key)
+                checkpoint_time = checkpoint.decode() if checkpoint else 'unknown'
+                lock_key = f'{RedisTaskQueue.LOCK_PREFIX}:{op_id}'
+                is_running = await client.exists(lock_key) > 0
+                status_counts = Counter(
+                    task.status.value for task in state.pending_tasks.values()
+                )
+
+                operations.append(
+                    {
+                        'operation_id': op_id,
+                        'checkpoint_time': checkpoint_time,
+                        'running': is_running,
+                        'pending_total': len(state.pending_tasks),
+                        'completed_total': len(state.completed_tasks),
+                        'status_counts': status_counts,
+                        'has_domain_admin': state.has_domain_admin,
+                        'vuln_total': len(state.discovered_vulnerabilities),
+                        'exploited_total': len(state.exploited_vulnerabilities),
+                    }
+                )
+
+            if not operations:
+                print('No operations found')
+                return
+
+            print('📋 Multi-Agent Operations (Redis)')
+            print('='*70)
+            for op in sorted(operations, key=lambda item: item['operation_id']):
+                running = 'running' if op['running'] else 'idle'
+                status_counts = op['status_counts']
+                print(
+                    f\"  {op['operation_id']} [{running}] checkpoint: {op['checkpoint_time']}\"
+                )
+                print(
+                    \"    pending: {pending_total} (pending {pending}, in_progress {in_progress}, retrying {retrying}) \"
+                    \"completed: {completed_total}\".format(
+                        pending_total=op['pending_total'],
+                        pending=status_counts.get('pending', 0),
+                        in_progress=status_counts.get('in_progress', 0),
+                        retrying=status_counts.get('retrying', 0),
+                        completed_total=op['completed_total'],
+                    )
+                )
+                print(
+                    \"    domain_admin: {da}  vulns: {vuln_total}  exploited: {exploited_total}\".format(
+                        da='yes' if op['has_domain_admin'] else 'no',
+                        vuln_total=op['vuln_total'],
+                        exploited_total=op['exploited_total'],
+                    )
+                )
+
+        asyncio.run(main())
+        "
+
   ares:red:multi:resume:
     desc: "Resume a multi-agent operation from checkpoint (usage: task ares:red:multi:resume OPERATION_ID=op-xxx DOMAIN=target.local TARGETS=192.168.1.10)"
     vars:
@@ -1045,6 +1168,38 @@ tasks:
 
         asyncio.run(main())
         "
+
+  ares:red:multi:redis:clear:
+    desc: "Clear multi-agent Redis operation cache (DANGEROUS: drops ops/locks/status)"
+    vars:
+      K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
+    cmds:
+      - |
+        set -euo pipefail
+        echo "⚠️  Clearing Redis operation cache in namespace {{.K8S_NAMESPACE}}"
+
+        REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
+        if [ -z "$REDIS_POD" ]; then
+          echo "❌ No Redis pod found in namespace {{.K8S_NAMESPACE}}"
+          exit 1
+        fi
+
+        REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+        REDIS_AUTH=()
+        if [ -n "$REDIS_PASS" ]; then
+          REDIS_AUTH=(-a "$REDIS_PASS")
+        fi
+
+        for pattern in "ares:operation:*:state" "ares:operation:*:checkpoint_time" "ares:operations:*:status" "ares:lock:*"; do
+          keys=$(kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- redis-cli "${REDIS_AUTH[@]}" --scan --pattern "$pattern")
+          if [ -n "$keys" ]; then
+            echo "$keys" | kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- redis-cli "${REDIS_AUTH[@]}" del >/dev/null
+          fi
+          echo "✅ Cleared $pattern"
+        done
+
+        kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- redis-cli "${REDIS_AUTH[@]}" del ares:operations >/dev/null
+        echo "✅ Cleared ares:operations queue"
 
   ares:red:k8s:check:
     desc: "Check Kubernetes infrastructure for multi-agent operations"

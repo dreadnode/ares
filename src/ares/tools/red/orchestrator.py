@@ -221,7 +221,7 @@ class OrchestratorTools(Toolset):
         if not username or not username.strip():
             return (
                 "✗ Invalid lateral movement request: username cannot be empty. "
-                "Please provide a valid username (e.g., 'Administrator', 'hodor')."
+                "Please provide a valid username (e.g., 'Administrator', 'user1')."
             )
 
         # Detect common mistake: domain contains "domain\username" format

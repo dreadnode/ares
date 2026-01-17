@@ -454,7 +454,7 @@ record_evidence(
 # Record the attacking user (level 4)
 record_evidence(
     evidence_type="user",
-    value="robb.stark",
+    value="bob.jones",
     source="Event 4662 SubjectUserName field",
     timestamp="2026-01-10T14:30:00Z",
     pyramid_level=4,
@@ -464,7 +464,7 @@ record_evidence(
 # Record the source host (level 4)
 record_evidence(
     evidence_type="hostname",
-    value="winterfell.north.sevenkingdoms.local",
+    value="dc01.child.example.local",
     source="Event 4662 SubjectLogonId correlated with 4624",
     timestamp="2026-01-10T14:30:00Z",
     pyramid_level=4,
@@ -503,7 +503,7 @@ Each result contains:
 
 **Step 1: Parse the `line` field as JSON**
 The `line` field contains the actual log entry with:
-- `computer`: The hostname (e.g., "winterfell.north.sevenkingdoms.local")
+- `computer`: The hostname (e.g., "dc01.child.example.local")
 - `event_id`: Windows Event ID
 - `event_data`: XML containing user/IP/SID data
 - `message`: Human-readable event description
@@ -526,15 +526,15 @@ Look for these XML patterns:
 
 If query returns:
 ```
-computer: winterfell.north.sevenkingdoms.local
-event_data: <Data Name='TargetUserName'>robb.stark</Data>
+computer: dc01.child.example.local
+event_data: <Data Name='TargetUserName'>bob.jones</Data>
             <Data Name='IpAddress'>10.0.4.186</Data>
 ```
 
 You MUST call:
 ```python
-record_evidence(evidence_type="hostname", value="winterfell.north.sevenkingdoms.local", ...)
-record_evidence(evidence_type="user", value="robb.stark", ...)
+record_evidence(evidence_type="hostname", value="dc01.child.example.local", ...)
+record_evidence(evidence_type="user", value="bob.jones", ...)
 record_evidence(evidence_type="ip", value="10.0.4.186", ...)
 ```
 
@@ -578,7 +578,7 @@ The **attack_synopsis** is a narrative describing the attack chain. It should:
 ```
 "On 2026-01-10 at 14:30 UTC, attacker from IP 10.0.4.186 began password spraying
 against domain accounts. After 47 failed attempts, they successfully authenticated
-as arya.stark at 14:45. Using these credentials, they accessed SYSVOL share on
+as carol.ng at 14:45. Using these credentials, they accessed SYSVOL share on
 DC01 at 14:52 to harvest GPP passwords. At 15:10, they executed DCSync from
 workstation WS-042, extracting the krbtgt hash. Total time from initial access
 to domain compromise: 40 minutes."
@@ -604,17 +604,17 @@ The **recommendations** list should include:
 Example with all three parameters:
 ```
 complete_investigation(
-    summary="Detected DCSync attack. User robb.stark executed replication requests "
-            "from winterfell.north.sevenkingdoms.local. NTLM hashes exfiltrated for "
+    summary="Detected DCSync attack. User bob.jones executed replication requests "
+            "from dc01.child.example.local. NTLM hashes exfiltrated for "
             "multiple domain accounts. Confidence: High based on Event 4662 correlation.",
     attack_synopsis="Initial access occurred via password spray at 14:30 UTC with "
                    "47 failed logons against 12 accounts. Successful authentication "
-                   "as robb.stark at 14:45. SYSVOL accessed at 14:52. DCSync executed "
+                   "as bob.jones at 14:45. SYSVOL accessed at 14:52. DCSync executed "
                    "at 15:10 targeting krbtgt and Administrator accounts.",
     recommendations=[
         "IMMEDIATE: Reset krbtgt password twice (10 hours apart)",
         "IMMEDIATE: Reset all compromised account passwords",
-        "Isolate source host winterfell.north.sevenkingdoms.local",
+        "Isolate source host dc01.child.example.local",
         "Block source IP at network perimeter",
         "Hunt for golden ticket usage (Event 4769 with RC4)",
         "Review all privileged account access in past 24 hours"

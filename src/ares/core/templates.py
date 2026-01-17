@@ -6,6 +6,7 @@ Jinja2 templates used throughout the Ares codebase.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -17,6 +18,44 @@ else:
     import importlib_resources  # type: ignore[import-not-found,no-redef]
 
 
+def _has_redteam_templates(path: Path) -> bool:
+    if not path.exists():
+        return False
+    return (path / "redteam" / "agents" / "system_instructions.md.jinja").exists()
+
+
+def _templates_exist(path: Path) -> bool:
+    if not path.exists():
+        return False
+    sentinel_paths = [path / "agent" / "system_instructions.md.jinja"]
+    if any(p.exists() for p in sentinel_paths):
+        return True
+    return any(path.glob("**/*.jinja"))
+
+
+def _candidate_template_paths() -> list[Path]:
+    candidates: list[Path] = []
+
+    env_override = os.getenv("ARES_TEMPLATES_PATH")
+    if env_override:
+        candidates.append(Path(env_override))
+
+    try:
+        files = importlib_resources.files("ares")
+        candidates.append(Path(str(files.joinpath("templates"))))
+    except (TypeError, AttributeError):
+        pass
+
+    module_root = Path(__file__).resolve().parent.parent
+    candidates.append(module_root / "templates")
+
+    for parent in Path(__file__).resolve().parents:
+        candidates.append(parent / "src" / "ares" / "templates")
+        candidates.append(parent / "templates")
+
+    return candidates
+
+
 def get_templates_path() -> Path:
     """Get the path to the templates directory.
 
@@ -26,19 +65,18 @@ def get_templates_path() -> Path:
     Returns:
         Path to the templates directory.
     """
-    try:
-        # Use importlib.resources for installed packages
-        files = importlib_resources.files("ares")
-        templates_traversable = files.joinpath("templates")
-        # For Python 3.9+, as_file() returns a context manager but we can
-        # also just use the path directly if it's a real filesystem path
-        if hasattr(templates_traversable, "_path"):
-            return Path(templates_traversable._path)
-        # Fallback: try to get the path directly
-        return Path(str(templates_traversable))
-    except (TypeError, AttributeError):
-        # Fallback for edge cases - use __file__ based resolution
-        return Path(__file__).parent.parent / "templates"
+    fallback: Path | None = None
+    for candidate in _candidate_template_paths():
+        if _has_redteam_templates(candidate):
+            return candidate
+        if fallback is None and _templates_exist(candidate):
+            fallback = candidate
+
+    if fallback is not None:
+        return fallback
+
+    # Fallback for edge cases - use __file__ based resolution
+    return Path(__file__).resolve().parent.parent / "templates"
 
 
 class TemplateLoader:

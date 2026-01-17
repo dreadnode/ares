@@ -18,6 +18,8 @@ That's it. Edit files, save, they sync to all pods instantly via `kubectl cp`.
 | -------------------------- | ---------------------------------------- |
 | `remote:hot`               | Watch for changes and auto-sync to pods  |
 | `remote:sync`              | One-time sync of files to pods           |
+| `remote:sync:full`         | Sync full src/ares tree to pods          |
+| `remote:sync:branch`       | Sync only files changed on current branch|
 | `remote:rollout`           | Restart pods (for structural changes)    |
 | `remote:status`            | Check pod and deployment status          |
 | `remote:logs`              | Tail logs from agent pods                |
@@ -47,6 +49,18 @@ For structural changes (new files, new imports), run `task remote:rollout`.
 
 ```bash
 task remote:sync FILES="src/ares/core/worker.py"
+```
+
+### Full tree sync (faster for many changes)
+
+```bash
+task remote:sync:full
+```
+
+### Sync only branch changes
+
+```bash
+task remote:sync:branch
 ```
 
 ### Check logs while developing

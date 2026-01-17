@@ -66,7 +66,7 @@ def critical_alert() -> dict[str, Any]:
         "labels": {
             "alertname": "DCSync_Attack_Detected",
             "severity": "critical",
-            "instance": "dc01.north.sevenkingdoms.local",
+            "instance": "dc01.child.example.local",
             "job": "windows_events",
         },
         "annotations": {
@@ -88,13 +88,13 @@ def kerberoasting_alert() -> dict[str, Any]:
         "labels": {
             "alertname": "Kerberoasting_Detected",
             "severity": "high",
-            "instance": "dc01.north.sevenkingdoms.local",
+            "instance": "dc01.child.example.local",
             "job": "windows_events",
             "event_id": "4769",
         },
         "annotations": {
             "summary": "Multiple TGS requests with RC4 encryption detected",
-            "description": "User samwell.tarly requested 12 TGS tickets in 5 minutes",
+            "description": "User dave.lee requested 12 TGS tickets in 5 minutes",
             "mitre_technique": "T1558.003",
         },
     }
@@ -251,8 +251,8 @@ def populated_investigation_state(
         identified_tactics={"TA0006", "TA0003"},
         technique_names={"T1003.006": "DCSync", "T1078": "Valid Accounts"},
         technique_to_tactic={"T1003.006": "credential-access", "T1078": "persistence"},
-        queried_hosts={"dc01.north.sevenkingdoms.local", "winterfell.north.sevenkingdoms.local"},
-        queried_users={"eddard.stark", "robb.stark"},
+        queried_hosts={"dc01.child.example.local"},
+        queried_users={"alice.smith", "bob.jones"},
         executed_queries=[
             {"type": "loki", "query": '{job="windows"} |= "4662"', "result_count": 5}
         ],
@@ -286,8 +286,8 @@ def sample_target() -> Target:
     """Create a sample target."""
     return Target(
         ip="192.168.1.100",
-        hostname="dc01.north.sevenkingdoms.local",
-        domain="north.sevenkingdoms.local",
+        hostname="dc01.child.example.local",
+        domain="child.example.local",
         os="Windows Server 2019",
     )
 
@@ -324,15 +324,15 @@ def populated_red_team_state(sample_target: Target) -> RedTeamState:
         stage=InvestigationStage.CAUSATION,
         hosts=[
             Host(ip="192.168.1.100", hostname="dc01", os="Windows Server 2019"),
-            Host(ip="192.168.1.101", hostname="winterfell", os="Windows 10"),
+            Host(ip="192.168.1.101", hostname="dc01", os="Windows 10"),
         ],
         users=[
-            User(username="eddard.stark", domain="north", is_admin=True),
-            User(username="robb.stark", domain="north", is_admin=False),
+            User(username="alice.smith", domain="north", is_admin=True),
+            User(username="bob.jones", domain="north", is_admin=False),
         ],
         credentials=[
             Credential(
-                username="eddard.stark",
+                username="alice.smith",
                 password="",
                 domain="north",
                 source="mimikatz",
@@ -341,7 +341,7 @@ def populated_red_team_state(sample_target: Target) -> RedTeamState:
         ],
         hashes=[
             Hash(
-                username="eddard.stark",
+                username="alice.smith",
                 hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
                 hash_type="NTLM",
                 domain="north",
@@ -469,7 +469,7 @@ def mock_grafana_response() -> dict[str, Any]:
                 {
                     "stream": {
                         "job": "windows",
-                        "computer": "dc01.north.sevenkingdoms.local",
+                        "computer": "dc01.child.example.local",
                     },
                     "values": [
                         ["1704105000000000000", "Event 4662: Directory Service Access"],
@@ -487,12 +487,12 @@ def mock_loki_logs() -> list[dict[str, Any]]:
     return [
         {
             "timestamp": "2024-01-15T10:30:00Z",
-            "line": '{"event_id": 4662, "computer": "dc01", "user": "eddard.stark"}',
+            "line": '{"event_id": 4662, "computer": "dc01", "user": "alice.smith"}',
             "labels": {"job": "windows", "level": "info"},
         },
         {
             "timestamp": "2024-01-15T10:30:01Z",
-            "line": '{"event_id": 4624, "computer": "dc01", "user": "robb.stark"}',
+            "line": '{"event_id": 4624, "computer": "dc01", "user": "bob.jones"}',
             "labels": {"job": "windows", "level": "info"},
         },
     ]
@@ -543,13 +543,13 @@ def loki_query_result() -> dict[str, Any]:
                 {
                     "stream": {
                         "job": "windows",
-                        "computer": "dc01.north.sevenkingdoms.local",
+                        "computer": "dc01.child.example.local",
                         "event_id": "4662",
                     },
                     "values": [
                         [
                             "1704105000000000000",
-                            '{"event_id": 4662, "event_data": {"SubjectUserName": "eddard.stark"}}',
+                            '{"event_id": 4662, "event_data": {"SubjectUserName": "alice.smith"}}',
                         ],
                     ],
                 }
@@ -586,7 +586,7 @@ def correlation_context() -> dict[str, Any]:
     return {
         "cluster_id": "cluster-123",
         "related_alerts": 3,
-        "shared_indicators": ["192.168.1.100", "eddard.stark"],
+        "shared_indicators": ["192.168.1.100", "alice.smith"],
         "common_techniques": ["T1003.006"],
         "time_window_minutes": 30,
     }

@@ -36,6 +36,7 @@ from ares.tools.red.network import (
     BloodHoundTools,
     CertipyTools,
     CredentialDiscoveryTools,
+    CredentialHarvestingTools,
     NetworkEnumerationTools,
     RedTeamReportingTools,
 )
@@ -147,7 +148,7 @@ async def run_multi_agent_operation(
 
     Args:
         operation_id: Unique identifier for this operation
-        target_domain: Target domain (e.g., "sevenkingdoms.local")
+        target_domain: Target domain (e.g., "example.local")
         target_ips: List of target IPs to scan
         initial_credential: Optional initial credential
         resume_from_checkpoint: Resume from previous checkpoint
@@ -365,6 +366,7 @@ async def _create_orchestrator_agent(
     # compatibility aliases (hosts, credentials, etc.) so they work in multi-agent mode.
     network_tools = NetworkEnumerationTools()
     cred_discovery_tools = CredentialDiscoveryTools()
+    credential_tools = CredentialHarvestingTools()
     certipy_tools = CertipyTools()
     bloodhound_tools = BloodHoundTools()
     reporting_tools = RedTeamReportingTools()
@@ -374,6 +376,7 @@ async def _create_orchestrator_agent(
     # that map to all_hosts, all_credentials, etc. for backward compatibility
     network_tools.set_state(shared_state)  # type: ignore[arg-type]
     cred_discovery_tools.set_state(shared_state)  # type: ignore[arg-type]
+    credential_tools.set_state(shared_state)  # type: ignore[arg-type]
     certipy_tools.set_state(shared_state)  # type: ignore[arg-type]
     bloodhound_tools.set_state(shared_state)  # type: ignore[arg-type]
     reporting_tools.set_state(shared_state)  # type: ignore[arg-type]
@@ -382,6 +385,7 @@ async def _create_orchestrator_agent(
         orchestrator_tools,  # Coordination tools (dispatch_*, get_*, broadcast_*)
         network_tools,  # nmap, enum4linux, crackmapexec
         cred_discovery_tools,  # ldap_search_descriptions, password_spray, etc.
+        credential_tools,  # kerberos_user_enum_noauth, secretsdump, etc.
         certipy_tools,  # certipy_find for ADCS enumeration
         bloodhound_tools,  # run_bloodhound for attack path discovery
         reporting_tools,  # record_finding, generate_report
@@ -672,9 +676,9 @@ Your objectives:
 2. LOW-HANGING FRUIT (do these early!):
    - ldap_search_descriptions: Find passwords stored in user description fields
    - password_spray with common passwords (Password1, Welcome1, Summer2024, etc.)
-   - username_as_password: Test if users have username as password (e.g., hodor:hodor)
+   - username_as_password: Test if users have username as password (e.g., user1:user1)
 3. Enumerate users and shares with netexec/enum4linux-ng/rpcclient/smbclient
-4. If no creds, run Kerberos user enumeration with GetNPUsers.py
+4. If no creds, run Kerberos user enumeration with kerberos_user_enum_noauth
 5. Run certipy_find to discover ADCS vulnerabilities
 6. Run run_bloodhound for ACL analysis and attack path discovery
 7. Coordinate with specialized agents to exploit discovered vulnerabilities

@@ -114,12 +114,12 @@ If no results, try broader queries but ALWAYS use the time range above.
 
 Loki returns JSON like this:
 ```json
-{"line": "{\"computer\":\"winterfell.north.sevenkingdoms.local\", \"event_data\":\"<Data Name='TargetUserName'>robb.stark</Data><Data Name='IpAddress'>10.0.4.186</Data>\"}"}
+{"line": "{\"computer\":\"dc01.child.example.local\", \"event_data\":\"<Data Name='TargetUserName'>bob.jones</Data><Data Name='IpAddress'>10.0.4.186</Data>\"}"}
 ```
 
 **EXTRACT AND RECORD:**
-- `computer` field → record_evidence(evidence_type="hostname", value="winterfell...")
-- `TargetUserName` from event_data → record_evidence(evidence_type="user", value="robb.stark")
+- `computer` field → record_evidence(evidence_type="hostname", value="dc01...")
+- `TargetUserName` from event_data → record_evidence(evidence_type="user", value="bob.jones")
 - `IpAddress` from event_data → record_evidence(evidence_type="ip", value="10.0.4.186")
 
 **DO NOT** re-run the same query. **DO** parse results and extract IOCs.
