@@ -89,6 +89,25 @@ class OrchestratorService:
         # Max age in seconds for an operation to be considered recoverable
         self._max_operation_age = int(os.getenv("MAX_OPERATION_AGE", "300"))  # 5 minutes default
 
+    @staticmethod
+    def _decode_redis_value(value: str | bytes) -> str:
+        return value.decode() if isinstance(value, bytes) else str(value)
+
+    async def _get_checkpoint_time(self, op_id: str) -> datetime | None:
+        time_key = f"ares:operation:{op_id}:checkpoint_time"
+        if self.task_queue is None:
+            return None
+        checkpoint_data = await self.task_queue._client.get(time_key)
+        if not checkpoint_data:
+            logger.debug(f"Operation {op_id} has no checkpoint time, skipping")
+            return None
+
+        checkpoint_str = self._decode_redis_value(checkpoint_data)
+        checkpoint_time = datetime.fromisoformat(checkpoint_str)
+        if checkpoint_time.tzinfo is None:
+            checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
+        return checkpoint_time
+
     async def _discover_orphaned_operations(self) -> list[str]:
         """
         Discover orphaned operations in Redis that can be recovered.
@@ -110,24 +129,17 @@ class OrchestratorService:
             # Scan for operation state keys
             async for key in self.task_queue._client.scan_iter("ares:operation:*:state"):
                 # Extract operation ID from key: ares:operation:<op_id>:state
-                parts = key.decode().split(":")
+                key_str = key.decode() if isinstance(key, bytes) else str(key)
+                parts = key_str.split(":")
                 if len(parts) < 3:
                     continue
 
                 op_id = parts[2]
 
                 # Get checkpoint time to check if operation is recent
-                time_key = f"ares:operation:{op_id}:checkpoint_time"
-                checkpoint_data = await self.task_queue._client.get(time_key)
-
-                if not checkpoint_data:
-                    logger.debug(f"Operation {op_id} has no checkpoint time, skipping")
+                checkpoint_time = await self._get_checkpoint_time(op_id)
+                if not checkpoint_time:
                     continue
-
-                checkpoint_time = datetime.fromisoformat(checkpoint_data.decode())
-                # Ensure timezone-aware
-                if checkpoint_time.tzinfo is None:
-                    checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
 
                 age_seconds = (now - checkpoint_time).total_seconds()
                 if age_seconds > self._max_operation_age:
@@ -148,7 +160,8 @@ class OrchestratorService:
                 status_key = f"ares:operations:{op_id}:status"
                 status_data = await self.task_queue._client.get(status_key)
                 if status_data:
-                    status = json.loads(status_data)
+                    status_str = self._decode_redis_value(status_data)
+                    status = json.loads(status_str)
                     if status.get("status") in ("completed", "failed"):
                         logger.debug(f"Operation {op_id} is already {status.get('status')}")
                         continue
@@ -323,7 +336,7 @@ class OrchestratorService:
         elif isinstance(raw_env_vars, dict):
             raw_keys = sorted(k for k, v in raw_env_vars.items() if v)
             if raw_keys:
-                logger.info("Request env_vars keys (raw): %s", ", ".join(raw_keys))
+                logger.info("Request env_vars keys (raw): {}", ", ".join(raw_keys))
             else:
                 logger.warning("Request env_vars present but empty")
         else:
@@ -335,7 +348,7 @@ class OrchestratorService:
         if request_env_vars:
             present_keys = sorted(k for k, v in request_env_vars.items() if v)
             if present_keys:
-                logger.info("Request env keys present: %s", ", ".join(present_keys))
+                logger.info("Request env keys present: {}", ", ".join(present_keys))
         if not openai_api_key:
             openai_api_key = os.environ.get("OPENAI_API_KEY")
             if openai_api_key:
@@ -396,7 +409,7 @@ class OrchestratorService:
                     "ARES_ORCHESTRATOR_MODEL/ARES_MODEL in the orchestrator environment."
                 )
             logger.info(
-                "Runtime env presence: OPENAI_API_KEY=%s DREADNODE_API_KEY=%s",
+                "Runtime env presence: OPENAI_API_KEY={} DREADNODE_API_KEY={}",
                 "set" if os.environ.get("OPENAI_API_KEY") else "missing",
                 "set" if os.environ.get("DREADNODE_API_KEY") else "missing",
             )

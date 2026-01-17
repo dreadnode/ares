@@ -13,6 +13,7 @@ vars:
   WORKER_CONTAINER: '{{.WORKER_CONTAINER | default "ares-worker"}}'
   SITE_PACKAGES: '/usr/local/lib/python3.13/site-packages'
   PARALLELISM: '{{.PARALLELISM | default "10"}}'
+  PVC_PATH: '/ares'
 
 tasks:
   # ============================================================================
@@ -107,6 +108,9 @@ tasks:
             else
               echo -e "{{.WARN}}   x $ORCH_POD (failed)"
             fi
+            kubectl cp "$changed_file" "$ORCH_POD:{{.PVC_PATH}}/ares/$relative_path" \
+                -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null && \
+              echo -e "{{.SUCCESS}}   -> $ORCH_POD (pvc)"
           fi
           echo ""
         done
@@ -182,6 +186,9 @@ tasks:
             else
               echo -e "{{.WARN}}   x $ORCH_POD"
             fi
+            kubectl cp "$f" "$ORCH_POD:{{.PVC_PATH}}/ares/$relative_path" \
+                -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null && \
+              echo -e "{{.SUCCESS}}   -> $ORCH_POD (pvc)"
           fi
         done
 
@@ -271,6 +278,9 @@ tasks:
             else
               echo -e "{{.WARN}}   x $ORCH_POD"
             fi
+            kubectl cp "$f" "$ORCH_POD:{{.PVC_PATH}}/ares/$relative_path" \
+                -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null && \
+              echo -e "{{.SUCCESS}}   -> $ORCH_POD (pvc)"
           fi
         done
 

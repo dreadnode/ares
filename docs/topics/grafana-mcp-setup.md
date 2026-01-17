@@ -35,10 +35,10 @@ errors:
 # Find the full path first
 GRAFANA_BIN=$(go env GOPATH)/bin/mcp-grafana
 
-# Add using full path
+# Add using full path and onepassword token retrieval
 claude mcp add grafana $GRAFANA_BIN \
   -e GRAFANA_URL=https://grafana.dev.plundr.ai \
-  -e GRAFANA_SERVICE_ACCOUNT_TOKEN=<your-token>
+  -e GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Dev Grafana" --fields api-token --reveal 2>/dev/null)
 ```
 
 ## Create Service Account Token

@@ -33,6 +33,7 @@ from ares.tools.red.network import (
     LateralMovementTools,
     MSSQLTools,
     NetworkEnumerationTools,
+    PoisoningTools,
     RedTeamReportingTools,
     SharePilferingTools,
 )
@@ -74,7 +75,8 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
     ],
     AgentRole.POISONING: [
         CoercionTools,
-        # PoisoningTools, PoisonCallbackTools added separately
+        PoisoningTools,
+        # PoisonCallbackTools added separately
     ],
     AgentRole.ATOMIC: [
         # AtomicRedTeamTools, AtomicCallbackTools added separately

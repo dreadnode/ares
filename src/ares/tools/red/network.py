@@ -146,6 +146,17 @@ class NetworkEnumerationTools(Toolset):
             >>> enumerate_users("192.168.1.100", "user", "pass", "DOMAIN")
             >>> enumerate_users("192.168.1.100", "", "", "")  # null session
         """
+
+        def _has_user_entries(output: str) -> bool:
+            if not output or not output.strip():
+                return False
+            for line in output.splitlines():
+                if re.search(r"\\[^:\\s]+", line):
+                    return True
+                if re.search(r"\buser(name)?:\s*\S+", line, re.IGNORECASE):
+                    return True
+            return False
+
         try:
             cmd = ["netexec", "smb", target]
 
@@ -159,11 +170,19 @@ class NetworkEnumerationTools(Toolset):
             cmd.append("--users")
 
             stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
+            output = stdout or stderr
             logger.info(
                 f"[*] User enumeration completed for {target} (user:{username}, domain:{domain})"
             )
 
-            return stdout or stderr
+            if not (username and password) and not _has_user_entries(output):
+                rpc_cmd = ["rpcclient", "-U", "", "-N", target, "-c", "enumdomusers"]
+                rpc_stdout, rpc_stderr, _ = _run_tool(rpc_cmd, timeout_seconds=120)
+                if rpc_stdout or rpc_stderr:
+                    logger.info(f"[*] Null session user enumeration fallback used for {target}")
+                    return rpc_stdout or rpc_stderr
+
+            return output
 
         except Exception as e:
             logger.error(f"User enumeration failed: {e}")
@@ -2655,6 +2674,108 @@ class CoercionTools(Toolset):
 
         except Exception as e:
             return f"Coercer failed: {e}"
+
+
+class PoisoningTools(Toolset):
+    """Tools for network poisoning (Responder, mitm6)."""
+
+    state: RedTeamState | None = None
+
+    def set_state(self, state: RedTeamState) -> None:
+        """Set the operation state for this toolset."""
+        self.state = state
+
+    @dn.tool_method
+    def responder(
+        self,
+        interface: str = "eth0",
+        analyze: bool = False,
+        duration_seconds: int = 600,
+    ) -> str:
+        """
+        Run Responder to capture LLMNR/NBT-NS/mDNS hashes.
+
+        Args:
+            interface: Network interface to bind to (default: eth0)
+            analyze: Run in analyze (passive) mode (default: False)
+            duration_seconds: How long to run before stopping (default: 600)
+
+        Returns:
+            Responder output and status
+
+        Example:
+            >>> responder(interface="eth0", analyze=False, duration_seconds=900)
+        """
+        cmd = ["responder", "-I", interface]
+        if analyze:
+            cmd.append("-A")
+
+        if duration_seconds > 0:
+            cmd = ["timeout", str(duration_seconds)] + cmd
+
+        try:
+            logger.info(f"[*] Starting Responder on {interface} (analyze={analyze})")
+            timeout_seconds = max(30, duration_seconds + 30)
+            stdout, stderr, returncode = _run_tool(cmd, timeout_seconds=timeout_seconds)
+            output = stdout + "\n" + (stderr or "")
+
+            if returncode == 124:
+                return (
+                    "⏱️ Responder stopped after timeout.\n"
+                    "→ Review captured hashes on the attack box.\n\n" + output
+                )
+            if returncode != 0:
+                return f"[!] Responder exited with code {returncode}\n\n{output}"
+            return "✓ Responder completed.\n\n" + output
+
+        except Exception as e:
+            return f"Responder failed: {e}"
+
+    @dn.tool_method
+    def mitm6(
+        self,
+        interface: str = "eth0",
+        domain: str | None = None,
+        duration_seconds: int = 600,
+    ) -> str:
+        """
+        Run mitm6 to perform IPv6 DNS takeover and capture hashes.
+
+        Args:
+            interface: Network interface to bind to (default: eth0)
+            domain: Target domain to spoof (optional)
+            duration_seconds: How long to run before stopping (default: 600)
+
+        Returns:
+            mitm6 output and status
+
+        Example:
+            >>> mitm6(interface="eth0", domain="corp.local", duration_seconds=900)
+        """
+        cmd = ["mitm6", "-i", interface]
+        if domain:
+            cmd.extend(["-d", domain])
+
+        if duration_seconds > 0:
+            cmd = ["timeout", str(duration_seconds)] + cmd
+
+        try:
+            logger.info(f"[*] Starting mitm6 on {interface} (domain={domain or 'auto'})")
+            timeout_seconds = max(30, duration_seconds + 30)
+            stdout, stderr, returncode = _run_tool(cmd, timeout_seconds=timeout_seconds)
+            output = stdout + "\n" + (stderr or "")
+
+            if returncode == 124:
+                return (
+                    "⏱️ mitm6 stopped after timeout.\n"
+                    "→ Review captured hashes on the attack box.\n\n" + output
+                )
+            if returncode != 0:
+                return f"[!] mitm6 exited with code {returncode}\n\n{output}"
+            return "✓ mitm6 completed.\n\n" + output
+
+        except Exception as e:
+            return f"mitm6 failed: {e}"
 
 
 class MSSQLTools(Toolset):
