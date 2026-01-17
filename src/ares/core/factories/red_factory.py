@@ -173,7 +173,7 @@ unstall_hook = retry_with_feedback(
     event_type=AgentStalled,
     feedback=(
         "You seem stuck. Remember the priority workflow:\n"
-        "0. LOW-HANGING FRUIT: ldap_search_descriptions, username_as_password, password_spray\n"
+        "0. LOW-HANGING FRUIT: ldap_search_descriptions, username_as_password, password_spray, password_policy\n"
         "1. PRIORITY 1: krbtgt hash found? → Use golden_ticket tool immediately\n"
         "2. PRIORITY 2: Administrator hash found? → domain_admin_checker on ALL targets\n"
         "3. PRIORITY 3: New password found? → Re-enumerate users, shares, kerberoast, asrep_roast\n"
