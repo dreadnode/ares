@@ -13,6 +13,7 @@ from ares.tools.red.network import (
     LateralMovementTools,
     MSSQLTools,
     NetworkEnumerationTools,
+    PoisoningTools,
     RedTeamReportingTools,
     SharePilferingTools,
     TrustAttackTools,
@@ -24,13 +25,11 @@ from ares.tools.red.orchestrator import (
 )
 
 __all__ = [
-    # Existing toolsets
     "ACLExploitTools",
     "BloodHoundTools",
     "CVEExploitTools",
     "CertipyTools",
     "CoercionTools",
-    # Multi-agent orchestration tools
     "CrackerCallbackTools",
     "CrackingTools",
     "CredentialHarvestingTools",
@@ -41,6 +40,7 @@ __all__ = [
     "MSSQLTools",
     "NetworkEnumerationTools",
     "OrchestratorTools",
+    "PoisoningTools",
     "RedTeamReportingTools",
     "SharePilferingTools",
     "TrustAttackTools",

@@ -78,9 +78,14 @@
 
 ## Vulnerabilities and Weaknesses
 
+{% if weaknesses %}
 {% for weakness in weaknesses %}
-- {{ weakness }}
+{{ weakness }}
+
 {% endfor %}
+{% else %}
+No significant weaknesses recorded.
+{% endif %}
 
 ---
 

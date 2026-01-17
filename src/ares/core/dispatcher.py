@@ -128,6 +128,10 @@ class RedTeamDispatcher:
         # Task completion futures for wait_for_task
         self._task_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
+        # Track task IDs submitted via Redis for result consumption
+        self._redis_task_ids: set[str] = set()
+        self._result_consumer_task: asyncio.Task | None = None
+
     async def start(self, operation_id: str) -> None:
         """
         Start the dispatcher for an operation.
@@ -162,6 +166,11 @@ class RedTeamDispatcher:
         # Start background tasks
         self._heartbeat_task = asyncio.create_task(self._heartbeat_monitor())
 
+        # Start result consumer for Redis-based task completion
+        if self._task_queue:
+            self._result_consumer_task = asyncio.create_task(self._result_consumer())
+            logger.info("Result consumer started for Redis task completion")
+
         logger.info(f"Dispatcher started for operation {operation_id}")
 
     async def stop(self) -> None:
@@ -172,6 +181,13 @@ class RedTeamDispatcher:
             self._heartbeat_task.cancel()
             try:
                 await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._result_consumer_task:
+            self._result_consumer_task.cancel()
+            try:
+                await self._result_consumer_task
             except asyncio.CancelledError:
                 pass
 
@@ -558,6 +574,7 @@ class RedTeamDispatcher:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
+            self._redis_task_ids.add(task_id)
 
             logger.info(f"Crack task {task_id} submitted to Redis queue")
             return task_id
@@ -649,6 +666,7 @@ class RedTeamDispatcher:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
+            self._redis_task_ids.add(task_id)
 
             logger.info(f"Lateral movement task {task_id} submitted to Redis queue")
             return task_id
@@ -729,6 +747,7 @@ class RedTeamDispatcher:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
+            self._redis_task_ids.add(task_id)
 
             logger.info(f"ACL analysis task {task_id} submitted to Redis queue")
             return task_id
@@ -809,6 +828,7 @@ class RedTeamDispatcher:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
+            self._redis_task_ids.add(task_id)
 
             logger.info(f"Exploit task {task_id} for {vuln_type} submitted to Redis queue")
             return task_id
@@ -889,6 +909,7 @@ class RedTeamDispatcher:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
+            self._redis_task_ids.add(task_id)
 
             logger.info(f"Poisoning task {task_id} submitted to Redis queue")
             return task_id
@@ -1149,6 +1170,60 @@ class RedTeamDispatcher:
 
             await asyncio.sleep(15)
 
+    async def _result_consumer(self) -> None:
+        """
+        Background task to consume results from Redis for completed tasks.
+
+        This bridges the gap between Redis-based workers (which send results via
+        task_queue.send_result()) and the dispatcher's in-memory pending_tasks
+        tracking. Without this, tasks complete on workers but the orchestrator
+        never knows about it.
+        """
+        logger.info("Result consumer started")
+
+        try:
+            while self._running:
+                await self._consume_pending_results()
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            logger.info("Result consumer cancelled")
+        except Exception as e:
+            logger.error(f"Result consumer fatal error: {e}", exc_info=True)
+
+        logger.info("Result consumer stopped")
+
+    async def _consume_pending_results(self) -> None:
+        """Check and consume results for all pending Redis tasks."""
+        if not self._task_queue:
+            logger.warning("Result consumer has no task queue; skipping result checks")
+            return
+
+        task_ids_to_check = list(self._redis_task_ids)
+
+        for task_id in task_ids_to_check:
+            try:
+                result = await self._task_queue.check_result(task_id)
+                if result:
+                    # Result found - process it
+                    logger.info(
+                        f"Result consumer received result for task {task_id}: "
+                        f"success={result.success}"
+                    )
+
+                    # Remove from tracking set
+                    self._redis_task_ids.discard(task_id)
+
+                    # Call complete_task to update dispatcher state
+                    await self.complete_task(
+                        task_id=task_id,
+                        success=result.success,
+                        result=result.result,
+                        error=result.error,
+                        source_agent=result.worker_pod or "unknown",
+                    )
+            except Exception as e:  # noqa: PERF203
+                logger.warning(f"Error checking result for task {task_id}: {e}")
+
     # State Persistence
 
     async def _checkpoint(self) -> None:
@@ -1313,9 +1388,13 @@ class RedTeamDispatcher:
         self.shared_state.mark_exploited(vuln_id)
 
         if success and result:
+            result_payload = result
+            if isinstance(result, dict) and isinstance(result.get("result"), dict):
+                result_payload = result["result"]
+
             # Update state with exploitation results
-            if "credential" in result:
-                cred_data = result["credential"]
+            if isinstance(result_payload, dict) and "credential" in result_payload:
+                cred_data = result_payload["credential"]
                 credential = Credential(
                     username=cred_data.get("username", ""),
                     password=cred_data.get("password", ""),
@@ -1325,8 +1404,8 @@ class RedTeamDispatcher:
                 )
                 self.shared_state.add_credential(credential, "exploitation")
 
-            if "hash" in result:
-                hash_data = result["hash"]
+            if isinstance(result_payload, dict) and "hash" in result_payload:
+                hash_data = result_payload["hash"]
                 hash_obj = Hash(
                     username=hash_data.get("username", ""),
                     hash_value=hash_data.get("hash_value", ""),

@@ -178,11 +178,17 @@ class TestNetworkEnumerationTools:
         tools.set_state(red_team_state)
 
         with patch("ares.tools.red.network.run_remote") as mock_run:
-            mock_run.return_value = MockRunResult(stdout="Anonymous\n", return_code=0)
-            tools.enumerate_users(target="192.168.1.100", username="", password="")
+            mock_run.side_effect = [
+                MockRunResult(
+                    stdout="SMB 192.168.1.100 445 HOST [+] test.local\\:\n", return_code=0
+                ),
+                MockRunResult(stdout="user:[Administrator] rid:[0x1f4]\n", return_code=0),
+            ]
+            result = tools.enumerate_users(target="192.168.1.100", username="", password="")
 
         # Should work without credentials
-        mock_run.assert_called_once()
+        assert "Administrator" in result
+        assert mock_run.call_count == 2
 
     def test_enumerate_users_exception(self, red_team_state: RedTeamState):
         """Test user enumeration handles exceptions."""

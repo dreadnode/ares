@@ -11,8 +11,9 @@ vars:
   NAMESPACE: '{{.NAMESPACE | default "attack-simulation"}}'
   ORCH_CONTAINER: '{{.ORCH_CONTAINER | default "orchestrator"}}'
   WORKER_CONTAINER: '{{.WORKER_CONTAINER | default "ares-worker"}}'
-  SITE_PACKAGES: '/usr/local/lib/python3.13/site-packages'
   PARALLELISM: '{{.PARALLELISM | default "10"}}'
+  PVC_PATH: '/ares'
+  VERIFY_PVC_DIFF: '{{.VERIFY_PVC_DIFF | default "false"}}'
 
 tasks:
   # ============================================================================
@@ -81,31 +82,67 @@ tasks:
             --field-selector=status.phase=Running \
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
-          # Sync to worker pods
+          # Sync to worker pods (PVC only - PYTHONPATH=/ares/src handles imports)
           if [ -n "$PODS" ]; then
             printf '%s\n' $PODS | xargs -n1 -P {{.PARALLELISM}} -I{} bash -c '
               pod="$1"
               file="$2"
               rel="$3"
-              if kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+              verify="{{.VERIFY_PVC_DIFF}}"
+              if kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
-                echo -e "{{.SUCCESS}}   -> $pod (worker)"
-              elif kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+                echo -e "{{.SUCCESS}}   -> $pod"
+              elif kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} 2>/dev/null; then
                 echo -e "{{.SUCCESS}}   -> $pod"
               else
                 echo -e "{{.WARN}}   x $pod (failed)"
               fi
+              if [ "$verify" = "true" ]; then
+                local_hash=$(shasum -a 256 "$file" 2>/dev/null | awk "{print \$1}")
+                remote_hash=$(kubectl exec -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} "$pod" -- \
+                  sha256sum "/ares/src/ares/$rel" 2>/dev/null | awk "{print \$1}")
+                if [ -z "$remote_hash" ]; then
+                  remote_hash="MISSING"
+                fi
+                if [ "$remote_hash" = "__ERR__" ] || [ "$local_hash" = "__ERR__" ]; then
+                  echo -e "{{.WARN}}   x $pod (pvc-verify failed)"
+                elif [ "$remote_hash" = "MISSING" ]; then
+                  echo -e "{{.WARN}}   x $pod (pvc missing)"
+                elif [ "$remote_hash" = "$local_hash" ]; then
+                  echo -e "{{.SUCCESS}}   -> $pod (pvc verified)"
+                else
+                  echo -e "{{.WARN}}   x $pod (pvc differs)"
+                fi
+              fi
+              exit 0
             ' _ {} "$changed_file" "$relative_path"
           fi
 
-          # Sync to orchestrator separately (different container name)
+          # Sync to orchestrator (PVC only)
           if [ -n "$ORCH_POD" ]; then
-            if kubectl cp "$changed_file" "$ORCH_POD:{{.SITE_PACKAGES}}/ares/$relative_path" \
+            if kubectl cp "$changed_file" "$ORCH_POD:{{.PVC_PATH}}/src/ares/$relative_path" \
                 -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $ORCH_POD (orchestrator)"
+              echo -e "{{.SUCCESS}}   -> $ORCH_POD"
             else
               echo -e "{{.WARN}}   x $ORCH_POD (failed)"
+            fi
+            if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
+              local_hash=$(shasum -a 256 "$changed_file" 2>/dev/null | awk "{print \$1}")
+              remote_hash=$(kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+                sha256sum "/ares/src/ares/$relative_path" 2>/dev/null | awk "{print \$1}")
+              if [ -z "$remote_hash" ]; then
+                remote_hash="MISSING"
+              fi
+              if [ "$remote_hash" = "__ERR__" ] || [ "$local_hash" = "__ERR__" ]; then
+                echo -e "{{.WARN}}   x $ORCH_POD (pvc-verify failed)"
+              elif [ "$remote_hash" = "MISSING" ]; then
+                echo -e "{{.WARN}}   x $ORCH_POD (pvc missing)"
+              elif [ "$remote_hash" = "$local_hash" ]; then
+                echo -e "{{.SUCCESS}}   -> $ORCH_POD (pvc verified)"
+              else
+                echo -e "{{.WARN}}   x $ORCH_POD (pvc differs)"
+              fi
             fi
           fi
           echo ""
@@ -123,16 +160,17 @@ tasks:
       - |
         echo -e "{{.INFO}} Syncing code to pods in {{.NAMESPACE}}"
 
-        # Get all target pods
-        PODS=$(kubectl get pods -n {{.NAMESPACE}} \
-          -l ares.dreadnode.io/component=red-team \
-          --field-selector=status.phase=Running \
-          -o json | jq -r '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | .metadata.name' | tr '\n' ' ')
-
+        # Get orchestrator pod first (so we can exclude it from workers)
         ORCH_POD=$(kubectl get pods -n {{.NAMESPACE}} \
           -l app.kubernetes.io/name=ares-orchestrator \
           --field-selector=status.phase=Running \
           -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+        # Get worker pods, excluding atomic role and orchestrator (orchestrator synced separately below)
+        PODS=$(kubectl get pods -n {{.NAMESPACE}} \
+          -l ares.dreadnode.io/component=red-team \
+          --field-selector=status.phase=Running \
+          -o json | jq -r --arg orch "$ORCH_POD" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
 
         if [ -z "$PODS" ] && [ -z "$ORCH_POD" ]; then
           echo -e "{{.ERROR}} No running pods found"
@@ -156,31 +194,67 @@ tasks:
           relative_path="${f#src/ares/}"
           echo -e "{{.INFO}} $relative_path"
 
-          # Sync to worker pods
+          # Sync to worker pods (PVC only - PYTHONPATH=/ares/src handles imports)
           if [ -n "$PODS" ]; then
             printf '%s\n' $PODS | xargs -n1 -P {{.PARALLELISM}} -I{} bash -c '
               pod="$1"
               file="$2"
               rel="$3"
-              if kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+              verify="{{.VERIFY_PVC_DIFF}}"
+              if kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
-                echo -e "{{.SUCCESS}}   -> $pod (worker)"
-              elif kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+                echo -e "{{.SUCCESS}}   -> $pod"
+              elif kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} 2>/dev/null; then
                 echo -e "{{.SUCCESS}}   -> $pod"
               else
                 echo -e "{{.WARN}}   x $pod"
               fi
+              if [ "$verify" = "true" ]; then
+                local_hash=$(shasum -a 256 "$file" 2>/dev/null | awk "{print \$1}")
+                remote_hash=$(kubectl exec -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} "$pod" -- \
+                  sha256sum "/ares/src/ares/$rel" 2>/dev/null | awk "{print \$1}")
+                if [ -z "$remote_hash" ]; then
+                  remote_hash="MISSING"
+                fi
+                if [ "$remote_hash" = "__ERR__" ] || [ "$local_hash" = "__ERR__" ]; then
+                  echo -e "{{.WARN}}   x $pod (pvc-verify failed)"
+                elif [ "$remote_hash" = "MISSING" ]; then
+                  echo -e "{{.WARN}}   x $pod (pvc missing)"
+                elif [ "$remote_hash" = "$local_hash" ]; then
+                  echo -e "{{.SUCCESS}}   -> $pod (pvc verified)"
+                else
+                  echo -e "{{.WARN}}   x $pod (pvc differs)"
+                fi
+              fi
+              exit 0
             ' _ {} "$f" "$relative_path"
           fi
 
-          # Sync to orchestrator
+          # Sync to orchestrator (PVC only)
           if [ -n "$ORCH_POD" ]; then
-            if kubectl cp "$f" "$ORCH_POD:{{.SITE_PACKAGES}}/ares/$relative_path" \
+            if kubectl cp "$f" "$ORCH_POD:{{.PVC_PATH}}/src/ares/$relative_path" \
                 -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $ORCH_POD (orchestrator)"
+              echo -e "{{.SUCCESS}}   -> $ORCH_POD"
             else
               echo -e "{{.WARN}}   x $ORCH_POD"
+            fi
+            if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
+              local_hash=$(shasum -a 256 "$f" 2>/dev/null | awk "{print \$1}")
+              remote_hash=$(kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+                sha256sum "/ares/src/ares/$relative_path" 2>/dev/null | awk "{print \$1}")
+              if [ -z "$remote_hash" ]; then
+                remote_hash="MISSING"
+              fi
+              if [ "$remote_hash" = "__ERR__" ] || [ "$local_hash" = "__ERR__" ]; then
+                echo -e "{{.WARN}}   x $ORCH_POD (pvc-verify failed)"
+              elif [ "$remote_hash" = "MISSING" ]; then
+                echo -e "{{.WARN}}   x $ORCH_POD (pvc missing)"
+              elif [ "$remote_hash" = "$local_hash" ]; then
+                echo -e "{{.SUCCESS}}   -> $ORCH_POD (pvc verified)"
+              else
+                echo -e "{{.WARN}}   x $ORCH_POD (pvc differs)"
+              fi
             fi
           fi
         done
@@ -219,16 +293,17 @@ tasks:
         echo -e "{{.SUCCESS}} Found $FILE_COUNT changed file(s)"
         echo ""
 
-        # Get all target pods
-        PODS=$(kubectl get pods -n {{.NAMESPACE}} \
-          -l ares.dreadnode.io/component=red-team \
-          --field-selector=status.phase=Running \
-          -o json | jq -r '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | .metadata.name' | tr '\n' ' ')
-
+        # Get orchestrator pod first (so we can exclude it from workers)
         ORCH_POD=$(kubectl get pods -n {{.NAMESPACE}} \
           -l app.kubernetes.io/name=ares-orchestrator \
           --field-selector=status.phase=Running \
           -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+        # Get worker pods, excluding atomic role and orchestrator (orchestrator synced separately below)
+        PODS=$(kubectl get pods -n {{.NAMESPACE}} \
+          -l ares.dreadnode.io/component=red-team \
+          --field-selector=status.phase=Running \
+          -o json | jq -r --arg orch "$ORCH_POD" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
 
         if [ -z "$PODS" ] && [ -z "$ORCH_POD" ]; then
           echo -e "{{.ERROR}} No running pods found"
@@ -245,31 +320,67 @@ tasks:
           relative_path="${f#src/ares/}"
           echo -e "{{.INFO}} $relative_path"
 
-          # Sync to worker pods
+          # Sync to worker pods (PVC only - PYTHONPATH=/ares/src handles imports)
           if [ -n "$PODS" ]; then
             printf '%s\n' $PODS | xargs -n1 -P {{.PARALLELISM}} -I{} bash -c '
               pod="$1"
               file="$2"
               rel="$3"
-              if kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+              verify="{{.VERIFY_PVC_DIFF}}"
+              if kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} 2>/dev/null; then
-                echo -e "{{.SUCCESS}}   -> $pod (worker)"
-              elif kubectl cp "$file" "$pod:{{.SITE_PACKAGES}}/ares/$rel" \
+                echo -e "{{.SUCCESS}}   -> $pod"
+              elif kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
                   -n {{.NAMESPACE}} 2>/dev/null; then
                 echo -e "{{.SUCCESS}}   -> $pod"
               else
                 echo -e "{{.WARN}}   x $pod"
               fi
+              if [ "$verify" = "true" ]; then
+                local_hash=$(shasum -a 256 "$file" 2>/dev/null | awk "{print \$1}")
+                remote_hash=$(kubectl exec -n {{.NAMESPACE}} -c {{.WORKER_CONTAINER}} "$pod" -- \
+                  sha256sum "/ares/src/ares/$rel" 2>/dev/null | awk "{print \$1}")
+                if [ -z "$remote_hash" ]; then
+                  remote_hash="MISSING"
+                fi
+                if [ "$remote_hash" = "__ERR__" ] || [ "$local_hash" = "__ERR__" ]; then
+                  echo -e "{{.WARN}}   x $pod (pvc-verify failed)"
+                elif [ "$remote_hash" = "MISSING" ]; then
+                  echo -e "{{.WARN}}   x $pod (pvc missing)"
+                elif [ "$remote_hash" = "$local_hash" ]; then
+                  echo -e "{{.SUCCESS}}   -> $pod (pvc verified)"
+                else
+                  echo -e "{{.WARN}}   x $pod (pvc differs)"
+                fi
+              fi
+              exit 0
             ' _ {} "$f" "$relative_path"
           fi
 
-          # Sync to orchestrator
+          # Sync to orchestrator (PVC only)
           if [ -n "$ORCH_POD" ]; then
-            if kubectl cp "$f" "$ORCH_POD:{{.SITE_PACKAGES}}/ares/$relative_path" \
+            if kubectl cp "$f" "$ORCH_POD:{{.PVC_PATH}}/src/ares/$relative_path" \
                 -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $ORCH_POD (orchestrator)"
+              echo -e "{{.SUCCESS}}   -> $ORCH_POD"
             else
               echo -e "{{.WARN}}   x $ORCH_POD"
+            fi
+            if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
+              local_hash=$(shasum -a 256 "$f" 2>/dev/null | awk "{print \$1}")
+              remote_hash=$(kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+                sha256sum "/ares/src/ares/$relative_path" 2>/dev/null | awk "{print \$1}")
+              if [ -z "$remote_hash" ]; then
+                remote_hash="MISSING"
+              fi
+              if [ "$remote_hash" = "__ERR__" ] || [ "$local_hash" = "__ERR__" ]; then
+                echo -e "{{.WARN}}   x $ORCH_POD (pvc-verify failed)"
+              elif [ "$remote_hash" = "MISSING" ]; then
+                echo -e "{{.WARN}}   x $ORCH_POD (pvc missing)"
+              elif [ "$remote_hash" = "$local_hash" ]; then
+                echo -e "{{.SUCCESS}}   -> $ORCH_POD (pvc verified)"
+              else
+                echo -e "{{.WARN}}   x $ORCH_POD (pvc differs)"
+              fi
             fi
           fi
         done
@@ -415,6 +526,6 @@ tasks:
         fi
 
         kubectl exec -n {{.NAMESPACE}} $POD -c {{.WORKER_CONTAINER}} -- \
-          head -50 {{.SITE_PACKAGES}}/ares/{{.FILE}} 2>/dev/null || \
+          head -50 {{.PVC_PATH}}/src/ares/{{.FILE}} 2>/dev/null || \
           kubectl exec -n {{.NAMESPACE}} $POD -- \
-            head -50 {{.SITE_PACKAGES}}/ares/{{.FILE}}
+            head -50 {{.PVC_PATH}}/src/ares/{{.FILE}}

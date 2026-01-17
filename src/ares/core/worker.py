@@ -10,8 +10,10 @@ This module provides the worker loop that specialized agents use to:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -209,7 +211,15 @@ TASK_PROMPTS: dict[MessageType, callable] = {
         f"Params: {msg.params}\n"
         f"Task ID: {msg.task_id}\n\n"
         "Execute the appropriate exploitation technique. "
-        "Report any credentials or access obtained using task_complete."
+        "Report any credentials or access obtained using task_complete.\n"
+        "If you obtain credentials or hashes, include a JSON block:\n"
+        "```json\n"
+        '{"credential": {"username": "", "password": "", "domain": "", "is_admin": false}}\n'
+        "```\n"
+        "or\n"
+        "```json\n"
+        '{"hash": {"username": "", "hash_value": "", "hash_type": "NTLM", "domain": ""}}\n'
+        "```"
     ),
     MessageType.POISON_REQUEST: lambda msg: (
         f"Start network poisoning:\n"
@@ -285,7 +295,15 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:
             f"Vuln ID: {payload.get('vuln_id', 'unknown')}\n"
             f"Params: {payload}\n"
             f"Task ID: {task.task_id}\n\n"
-            "Execute the exploitation technique. Report credentials obtained."
+            "Execute the exploitation technique. Report credentials obtained.\n"
+            "If you obtain credentials or hashes, include a JSON block:\n"
+            "```json\n"
+            '{"credential": {"username": "", "password": "", "domain": "", "is_admin": false}}\n'
+            "```\n"
+            "or\n"
+            "```json\n"
+            '{"hash": {"username": "", "hash_value": "", "hash_type": "NTLM", "domain": ""}}\n'
+            "```"
         )
 
     if task.task_type == "poison":
@@ -316,6 +334,20 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:
 
     # Generic fallback
     return f"Execute task: {task.task_type}\nPayload: {payload}\nTask ID: {task.task_id}"
+
+
+def _extract_structured_payload(result_text: str) -> dict[str, Any] | None:
+    """Extract structured JSON payload from agent output if present."""
+    match = re.search(r"```json\\s*(\\{.*?\\})\\s*```", result_text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
 
 
 class RedisWorkerAgent:
@@ -468,11 +500,18 @@ class RedisWorkerAgent:
             result = await self.agent.run(prompt)
             result_text = self._extract_result(result)
 
+            result_payload = {"output": result_text, "task_type": task.task_type}
+            structured = _extract_structured_payload(result_text)
+            if structured:
+                for key in ("credential", "hash"):
+                    if key in structured:
+                        result_payload[key] = structured[key]
+
             # Send success result via Redis
             await self.task_queue.send_result(
                 task_id=task.task_id,
                 success=True,
-                result={"output": result_text, "task_type": task.task_type},
+                result=result_payload,
                 worker_pod=self.pod_name,
             )
             self._tasks_completed += 1
@@ -911,11 +950,18 @@ class WorkerAgent:
             # Extract result from agent output
             result_text = self._extract_result(result)
 
+            result_payload = {"output": result_text, "task_type": msg.type.value}
+            structured = _extract_structured_payload(result_text)
+            if structured:
+                for key in ("credential", "hash"):
+                    if key in structured:
+                        result_payload[key] = structured[key]
+
             # Report completion
             await self.dispatcher.complete_task(
                 task_id=task_id,
                 success=True,
-                result={"output": result_text, "task_type": msg.type.value},
+                result=result_payload,
                 source_agent=self.agent_name,
             )
             self._tasks_completed += 1

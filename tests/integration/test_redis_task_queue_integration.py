@@ -361,6 +361,32 @@ class TestDispatcherRedisIntegration:
         assert result is not None
         assert result.success is True
 
+    @pytest.mark.asyncio
+    async def test_result_consumer_completes_task(self, dispatcher_with_redis):
+        """Test result consumer updates dispatcher state from Redis results."""
+        task_id = await dispatcher_with_redis.request_crack(
+            hash_value="aad3b435b51404ee:test",
+            hash_type="NTLM",
+            source_agent="orchestrator",
+            username="admin",
+            domain="testlab.local",
+        )
+
+        task_result = TaskResult(
+            task_id=task_id,
+            success=True,
+            result={"output": "done"},
+            worker_pod="cracker-0",
+        )
+        dispatcher_with_redis._task_queue.check_result = AsyncMock(return_value=task_result)
+
+        await dispatcher_with_redis._consume_pending_results()
+
+        assert task_id not in dispatcher_with_redis._redis_task_ids
+        assert task_id not in dispatcher_with_redis.shared_state.pending_tasks
+        assert task_id in dispatcher_with_redis.shared_state.completed_tasks
+        assert dispatcher_with_redis.shared_state.completed_tasks[task_id].success is True
+
 
 # ============================================================================
 # RedisWorkerAgent Tests

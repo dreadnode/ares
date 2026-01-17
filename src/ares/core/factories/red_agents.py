@@ -33,6 +33,7 @@ from ares.tools.red.network import (
     LateralMovementTools,
     MSSQLTools,
     NetworkEnumerationTools,
+    PoisoningTools,
     RedTeamReportingTools,
     SharePilferingTools,
 )
@@ -74,7 +75,8 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
     ],
     AgentRole.POISONING: [
         CoercionTools,
-        # PoisoningTools, PoisonCallbackTools added separately
+        PoisoningTools,
+        # PoisonCallbackTools added separately
     ],
     AgentRole.ATOMIC: [
         # AtomicRedTeamTools, AtomicCallbackTools added separately
@@ -163,12 +165,12 @@ def create_role_hooks(
                 if not content:
                     logger.info(f"✅ [{role.value}] {event.tool_call.name}: (empty)")
                 else:
-                    # Show first 5 lines, max 500 chars
-                    lines = content.split("\n")[:5]
+                    # Show first 50 lines, max 5000 chars
+                    lines = content.split("\n")[:50]
                     result = "\n".join(lines)
-                    truncated = len(lines) < len(content.split("\n")) or len(content) > 500
-                    if len(result) > 500:
-                        result = result[:500]
+                    truncated = len(lines) < len(content.split("\n")) or len(content) > 5000
+                    if len(result) > 5000:
+                        result = result[:5000]
                         truncated = True
                     suffix = " ..." if truncated else ""
                     if "\n" in result:
