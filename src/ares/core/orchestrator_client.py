@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -19,13 +20,14 @@ async def submit_operation(
     target_ips: list[str],
     initial_credential: dict[str, str] | None = None,
     resume_from_checkpoint: bool = False,
-    model: str = "claude-sonnet-4-20250514",
+    model: str | None = None,
     max_steps: int = 200,
     checkpoint_interval: int = 60,
     redis_url: str | None = None,
     operations_queue: str = "ares:operations",
     wait_for_completion: bool = False,
     poll_interval: float = 10.0,
+    env_vars: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Submit an operation request to the orchestrator service.
 
@@ -46,6 +48,7 @@ async def submit_operation(
         operations_queue: Redis queue name for operations
         wait_for_completion: If True, wait for operation to complete
         poll_interval: Seconds between status polls when waiting
+        env_vars: Environment variables to pass to orchestrator (API keys, etc.)
 
     Returns:
         Operation status dict with keys:
@@ -63,11 +66,21 @@ async def submit_operation(
         "target_ips": target_ips,
         "initial_credential": initial_credential,
         "resume_from_checkpoint": resume_from_checkpoint,
-        "model": model,
+        "model": model or os.environ.get("ARES_ORCHESTRATOR_MODEL") or os.environ.get("ARES_MODEL"),
         "max_steps": max_steps,
         "checkpoint_interval": checkpoint_interval,
         "submitted_at": datetime.now(timezone.utc).isoformat(),
+        "env_vars": env_vars,
     }
+    if env_vars:
+        redacted = {k: ("<set>" if v else "") for k, v in env_vars.items()}
+        logger.info(f"Submitting operation with env_vars: {redacted}")
+
+    if not request["model"]:
+        raise ValueError(
+            "No model specified. Provide a model or set "
+            "ARES_ORCHESTRATOR_MODEL/ARES_MODEL in the environment."
+        )
 
     # Connect to Redis
     task_queue = RedisTaskQueue(redis_url)

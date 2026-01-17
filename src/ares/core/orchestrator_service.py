@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+import dreadnode as dn
 from loguru import logger
 
 from ares.core.config import get_namespace, get_redis_url
@@ -33,9 +34,11 @@ class OperationRequest:
     target_ips: list[str]
     initial_credential: dict[str, str] | None = None
     resume_from_checkpoint: bool = False
-    model: str = "claude-sonnet-4-20250514"
+    model: str | None = None
     max_steps: int = 200
     checkpoint_interval: int = 60
+    # API keys passed from client (set as env vars before running)
+    env_vars: dict[str, str] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OperationRequest:
@@ -52,9 +55,12 @@ class OperationRequest:
             target_ips=data["target_ips"],
             initial_credential=initial_cred,
             resume_from_checkpoint=data.get("resume_from_checkpoint", False),
-            model=data.get("model", "claude-sonnet-4-20250514"),
+            model=data.get("model")
+            or os.environ.get("ARES_ORCHESTRATOR_MODEL")
+            or os.environ.get("ARES_MODEL"),
             max_steps=data.get("max_steps", 200),
             checkpoint_interval=data.get("checkpoint_interval", 60),
+            env_vars=data.get("env_vars"),
         )
 
 
@@ -310,6 +316,32 @@ class OrchestratorService:
             return json.loads(value)
         return None
 
+    def _log_env_vars(self, raw_env_vars: Any) -> None:
+        """Log environment variables from request."""
+        if raw_env_vars is None:
+            logger.warning("Request missing env_vars")
+        elif isinstance(raw_env_vars, dict):
+            raw_keys = sorted(k for k, v in raw_env_vars.items() if v)
+            if raw_keys:
+                logger.info("Request env_vars keys (raw): %s", ", ".join(raw_keys))
+            else:
+                logger.warning("Request env_vars present but empty")
+        else:
+            logger.warning(f"Request env_vars not a dict: {type(raw_env_vars)}")
+
+    def _resolve_openai_api_key(self, request_env_vars: dict[str, str] | None) -> str | None:
+        """Resolve OpenAI API key from request or environment."""
+        openai_api_key = request_env_vars.get("OPENAI_API_KEY") if request_env_vars else None
+        if request_env_vars:
+            present_keys = sorted(k for k, v in request_env_vars.items() if v)
+            if present_keys:
+                logger.info("Request env keys present: %s", ", ".join(present_keys))
+        if not openai_api_key:
+            openai_api_key = os.environ.get("OPENAI_API_KEY")
+            if openai_api_key:
+                logger.warning("OPENAI_API_KEY missing in request env vars; using process env")
+        return openai_api_key
+
     async def _process_operation_request(self, request_data: dict[str, Any]) -> None:
         """Process an operation request.
 
@@ -317,10 +349,26 @@ class OrchestratorService:
             request_data: Operation request data from Redis
         """
         try:
+            self._log_env_vars(request_data.get("env_vars"))
+
             # Parse request
             request = OperationRequest.from_dict(request_data)
             logger.info(f"Processing operation request: {request.operation_id}")
             logger.info(f"Target: {request.target_domain} ({len(request.target_ips)} IPs)")
+
+            # Set environment variables from request (API keys, etc.)
+            if request.env_vars:
+                for key, value in request.env_vars.items():
+                    if value:  # Only set non-empty values
+                        os.environ[key] = value
+                        logger.debug(f"Set environment variable: {key}")
+
+            openai_api_key = self._resolve_openai_api_key(request.env_vars)
+
+            try:
+                dn.configure()
+            except Exception as e:
+                logger.warning(f"Dreadnode configure failed, continuing without telemetry: {e}")
 
             # Publish operation status: started
             await self._publish_operation_status(
@@ -342,6 +390,21 @@ class OrchestratorService:
 
             # Run the operation
             logger.info(f"Starting multi-agent operation: {request.operation_id}")
+            if not request.model:
+                raise ValueError(
+                    "No model specified for operation. Provide --model at submit time or set "
+                    "ARES_ORCHESTRATOR_MODEL/ARES_MODEL in the orchestrator environment."
+                )
+            logger.info(
+                "Runtime env presence: OPENAI_API_KEY=%s DREADNODE_API_KEY=%s",
+                "set" if os.environ.get("OPENAI_API_KEY") else "missing",
+                "set" if os.environ.get("DREADNODE_API_KEY") else "missing",
+            )
+            if request.model.startswith("gpt-") and not os.environ.get("OPENAI_API_KEY"):
+                raise ValueError(
+                    "OPENAI_API_KEY is required for OpenAI models. Ensure it is set in the "
+                    "orchestrator environment or passed via env_vars."
+                )
             result = await run_multi_agent_operation(
                 operation_id=request.operation_id,
                 target_domain=request.target_domain,
@@ -353,6 +416,7 @@ class OrchestratorService:
                 model=request.model,
                 max_steps=request.max_steps,
                 checkpoint_interval=request.checkpoint_interval,
+                openai_api_key=openai_api_key,
             )
 
             # Publish operation status: completed

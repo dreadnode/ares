@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -148,3 +149,57 @@ async def test_recover_orphaned_operation_publishes_failed_on_error():
     assert calls[0].args[0] == "op-err"
     assert calls[0].args[1] == "failed"
     assert calls[0].args[2]["recovered"] is True
+
+
+@pytest.mark.asyncio
+async def test_process_operation_request_sets_env_vars():
+    service = OrchestratorService(redis_url="redis://", namespace="test")
+    service._publish_operation_status = AsyncMock()
+
+    request_data = {
+        "operation_id": "op-env",
+        "target_domain": "example.com",
+        "target_ips": ["10.0.0.1"],
+        "model": "test-model",
+        "env_vars": {"OPENAI_API_KEY": "test-key", "EMPTY": ""},  # pragma: allowlist secret
+    }
+
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch(
+            "ares.core.orchestrator_service.run_multi_agent_operation",
+            new=AsyncMock(return_value={"ok": True}),
+        ) as mock_run,
+    ):
+        await service._process_operation_request(request_data)
+        assert os.environ["OPENAI_API_KEY"] == "test-key"  # pragma: allowlist secret
+        assert "EMPTY" not in os.environ
+        mock_run.assert_awaited_once()
+        _, kwargs = mock_run.call_args
+        assert kwargs["model"] == "test-model"
+
+
+@pytest.mark.asyncio
+async def test_process_operation_request_missing_model_publishes_failed():
+    service = OrchestratorService(redis_url="redis://", namespace="test")
+    service._publish_operation_status = AsyncMock()
+
+    request_data = {
+        "operation_id": "op-missing-model",
+        "target_domain": "example.com",
+        "target_ips": ["10.0.0.2"],
+    }
+
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch(
+            "ares.core.orchestrator_service.run_multi_agent_operation",
+            new=AsyncMock(),
+        ) as mock_run,
+    ):
+        await service._process_operation_request(request_data)
+
+    mock_run.assert_not_awaited()
+    calls = service._publish_operation_status.await_args_list
+    assert calls[-1].args[1] == "failed"
+    assert "No model specified" in calls[-1].args[2]["error"]

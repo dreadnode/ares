@@ -157,7 +157,7 @@ class OperationRecoveryManager:
             data = await self._redis_client.get(key)
 
             if not data:
-                raise RecoveryError(f"No checkpoint found for operation {operation_id}")  # noqa: TRY301
+                raise RecoveryError(f"No checkpoint found for operation {operation_id}")
 
             state = SharedRedTeamState.from_bytes(data)
 

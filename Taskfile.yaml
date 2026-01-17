@@ -24,7 +24,7 @@ vars:
   MAX_STEPS_RED: '{{.MAX_STEPS_RED | default "150"}}'
   REPORT_DIR: '{{.REPORT_DIR | default "./reports"}}'
   LOG_DIR: '{{.LOG_DIR | default "./logs"}}'
-  DREADNODE_SERVER: '{{.DREADNODE_SERVER | default "https://platform.dev.plundr.ai/"}}'
+  DREADNODE_SERVER_URL: '{{.DREADNODE_SERVER_URL | default "https://platform.dev.plundr.ai/"}}'
   DREADNODE_ORGANIZATION: '{{.DREADNODE_ORGANIZATION | default "ares"}}'
   DREADNODE_WORKSPACE: '{{.DREADNODE_WORKSPACE | default "ares-protocol"}}'
   DREADNODE_PROJECT: '{{.DREADNODE_PROJECT | default "ares-soc"}}'
@@ -192,7 +192,7 @@ tasks:
           --args.poll-interval {{.POLL_INTERVAL}} \
           --args.max-steps {{.MAX_STEPS_BLUE}} \
           --args.report-dir {{.REPORT_DIR}} \
-          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.server {{.DREADNODE_SERVER_URL}} \
           --dn-args.token "$DREADNODE_API_KEY" \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
@@ -228,7 +228,7 @@ tasks:
           --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --args.once \
-          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.server {{.DREADNODE_SERVER_URL}} \
           --dn-args.token "$DREADNODE_API_KEY" \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
@@ -267,7 +267,7 @@ tasks:
           --args.poll-interval {{.POLL_INTERVAL}} \
           --args.max-steps {{.MAX_STEPS_BLUE}} \
           --args.report-dir {{.REPORT_DIR}} \
-          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.server {{.DREADNODE_SERVER_URL}} \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
           --dn-args.project {{.DREADNODE_PROJECT}} \
@@ -306,7 +306,7 @@ tasks:
           --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --args.once \
-          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.server {{.DREADNODE_SERVER_URL}} \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
           --dn-args.project {{.DREADNODE_PROJECT}} \
@@ -342,7 +342,7 @@ tasks:
           --args.grafana-url {{.GRAFANA_URL}} \
           --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
-          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.server {{.DREADNODE_SERVER_URL}} \
           --dn-args.token "$DREADNODE_API_KEY" \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
@@ -359,7 +359,7 @@ tasks:
         echo "  uv: $(uv --version 2>/dev/null || echo 'not installed')"
         echo ""
         echo "Configuration:"
-        echo "  Platform: {{.DREADNODE_SERVER}}"
+        echo "  Platform: {{.DREADNODE_SERVER_URL}}"
         echo "  Project: {{.DREADNODE_PROJECT}}"
         if [ -n "{{.MODEL_ALL}}" ]; then
           echo "  Model: {{.MODEL_ALL}}"
@@ -421,7 +421,7 @@ tasks:
         echo "Ares Configuration:"
         echo "===================="
         echo "Platform Settings:"
-        echo "  Server: {{.DREADNODE_SERVER}}"
+        echo "  Server: {{.DREADNODE_SERVER_URL}}"
         echo "  Project: {{.DREADNODE_PROJECT}}"
         echo ""
         echo "Agent Settings:"
@@ -694,7 +694,7 @@ tasks:
           --args.model "$MODEL_ARG" \
           --args.max-steps {{.MAX_STEPS_RED}} \
           --args.report-dir {{.REPORT_DIR}} \
-          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.server {{.DREADNODE_SERVER_URL}} \
           --dn-args.token "$DREADNODE_API_KEY" \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
@@ -732,7 +732,7 @@ tasks:
           --args.model "$MODEL_ARG" \
           --args.max-steps {{.MAX_STEPS_RED}} \
           --args.report-dir {{.REPORT_DIR}} \
-          --dn-args.server {{.DREADNODE_SERVER}} \
+          --dn-args.server {{.DREADNODE_SERVER_URL}} \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
           --dn-args.project {{.REDTEAM_PROJECT}} \
@@ -837,12 +837,26 @@ tasks:
         LOGFILE="{{.LOG_DIR}}/red-multi-$(date +%Y%m%d-%H%M%S).log"
         echo "📝 Logging to: $LOGFILE"
 
-        # Run orchestrator inside the K8s cluster via kubectl exec
-        echo "🚀 Starting orchestrator in K8s cluster..."
+        RESOLVED_TARGETS_LIST=$(echo "$RESOLVED_TARGETS" | tr ',' ' ')
+        IPS_ARGS=""
+        for ip in $RESOLVED_TARGETS_LIST; do
+          IPS_ARGS="$IPS_ARGS --ips $ip"
+        done
+        RESUME_FLAG=""
+        if [ "{{.RESUME}}" = "true" ]; then
+          RESUME_FLAG="--resume"
+        fi
+
+        # Submit operation to orchestrator service inside the K8s cluster
+        echo "🚀 Submitting operation to orchestrator service..."
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
           env OPENAI_API_KEY="$OPENAI_API_KEY" \
           ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
           DREADNODE_API_KEY="$DREADNODE_API_KEY" \
+          DREADNODE_SERVER_URL="{{.DREADNODE_SERVER_URL}}" \
+          DREADNODE_ORGANIZATION="{{.DREADNODE_ORGANIZATION}}" \
+          DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
+          DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
           GRAFANA_SERVICE_ACCOUNT_TOKEN="$GRAFANA_SERVICE_ACCOUNT_TOKEN" \
           ARES_MODEL="$ARES_MODEL" \
           ARES_ORCHESTRATOR_MODEL="$ARES_ORCHESTRATOR_MODEL" \
@@ -855,17 +869,21 @@ tasks:
           ARES_AGENT_POISONING_MODEL="$ARES_AGENT_POISONING_MODEL" \
           ARES_AGENT_ATOMIC_MODEL="$ARES_AGENT_ATOMIC_MODEL" \
           GRAFANA_URL="{{.GRAFANA_URL}}" \
-          python -m ares multi-agent "{{.DOMAIN}}" "$RESOLVED_TARGETS" \
-          --args.model "$MODEL_ARG" \
-          --args.max-steps {{.MAX_STEPS_RED}} \
-          --multi-args.redis-url "$REDIS_URL" \
-          --multi-args.namespace "{{.K8S_NAMESPACE}}" \
-          --dn-args.server {{.DREADNODE_SERVER}} \
-          --dn-args.token "$DREADNODE_API_KEY" \
-          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
-          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.REDTEAM_PROJECT}} \
+          python -m ares.cli_ops submit "$TARGET" "{{.DOMAIN}}" \
+          $IPS_ARGS \
+          --operation-id "$OPERATION_ID" \
+          --model "$MODEL_ARG" \
+          --max-steps {{.MAX_STEPS_RED}} \
+          --redis-url "$REDIS_URL" \
+          $RESUME_FLAG \
           2>&1 | tee -a "$LOGFILE"
+
+        # Follow orchestrator logs to stream operation progress
+        echo ""
+        echo "📺 Following orchestrator logs (Ctrl+C to stop)..."
+        echo "   Operation ID: $OPERATION_ID"
+        echo ""
+        kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | tee -a "$LOGFILE"
 
   ares:red:multi:status:
     desc: "Check multi-agent operation status (usage: task ares:red:multi:status OPERATION_ID=op-xxx)"

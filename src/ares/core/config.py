@@ -36,7 +36,7 @@ def derive_redis_url(namespace: str, host: str = "redis", port: int = 6379) -> s
 class AgentConfig:
     """Configuration for a specific agent role."""
 
-    model: str = "claude-sonnet-4-20250514"
+    model: str = ""
     max_steps: int = 100
     pod_selector: str = ""
     capabilities: list[str] = field(default_factory=list)
@@ -156,7 +156,7 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
     for role, agent_data in data.get("agents", {}).items():
         if isinstance(agent_data, dict):
             agents[role] = AgentConfig(
-                model=_resolve_env(agent_data.get("model", "claude-sonnet-4-20250514")),
+                model=_resolve_env(agent_data.get("model", "")),
                 max_steps=agent_data.get("max_steps", 100),
                 pod_selector=agent_data.get("pod_selector", ""),
                 capabilities=agent_data.get("capabilities", []),
@@ -248,6 +248,10 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:
             continue
         role = env_key[len("ARES_AGENT_") : -len("_MODEL")].lower()
         if role and role not in config.agents:
+            logger.warning(
+                f"Creating agent config for role '{role}' from env override without "
+                "configured capabilities/tools."
+            )
             config.agents[role] = AgentConfig(model=value)
 
     return config

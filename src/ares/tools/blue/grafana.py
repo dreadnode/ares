@@ -33,7 +33,7 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
                 "Grafana API key is empty. Set GRAFANA_SERVICE_ACCOUNT_TOKEN "
                 "environment variable or use --args.grafana-api-key CLI argument."
             )
-            logger.error(msg)
+            logger.warning(msg)
             raise ConfigurationError(msg)
         return {"Authorization": f"Bearer {self.api_key}"}
 
@@ -51,12 +51,17 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
             "/api/prometheus/grafana/api/v1/alerts",  # Older format
         ]
 
+        try:
+            headers = self._headers()
+        except ConfigurationError:
+            return []
+
         for endpoint in endpoints:
             try:
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
                     response = await client.get(
                         f"{self.base_url}{endpoint}",
-                        headers=self._headers(),
+                        headers=headers,
                         params={"active": "true"},
                     )
                     if response.status_code == 200:
@@ -74,6 +79,8 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
 
             except AuthenticationError:
                 raise  # Re-raise auth errors immediately
+            except ConfigurationError:
+                return []
             except httpx.HTTPError as e:
                 if "404" not in str(e):
                     logger.error(f"Failed to get alerts from {endpoint}: {e}")
@@ -96,10 +103,14 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
             List of historical alert instances.
         """
         try:
+            try:
+                headers = self._headers()
+            except ConfigurationError:
+                return []
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.get(
                     f"{self.base_url}/api/v1/provisioning/alert-rules",
-                    headers=self._headers(),
+                    headers=headers,
                 )
                 if response.status_code in (401, 403):
                     msg = f"Authentication failed for Grafana: {response.text}"
@@ -111,6 +122,8 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
                 return response.json()
         except AuthenticationError:
             raise  # Re-raise auth errors immediately
+        except ConfigurationError:
+            return []
         except httpx.HTTPError as e:
             logger.error(f"Failed to get alert history: {e}")
             return []
@@ -150,10 +163,14 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
             payload["timeEnd"] = time_end
 
         try:
+            try:
+                headers = self._headers()
+            except ConfigurationError:
+                return None
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
                     f"{self.base_url}/api/annotations",
-                    headers=self._headers(),
+                    headers=headers,
                     json=payload,
                 )
                 if response.status_code in (401, 403):
@@ -168,6 +185,8 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
                 return result
         except AuthenticationError:
             raise  # Re-raise auth errors immediately
+        except ConfigurationError:
+            return None
         except httpx.HTTPError as e:
             logger.warning(f"Failed to create annotation: {e}")
             return None
@@ -284,10 +303,15 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
         try:
             await self._ensure_alert_folder()
 
+            try:
+                headers = self._headers()
+            except ConfigurationError as e:
+                return {"status": "error", "error": str(e)}
+
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
                     f"{self.base_url}/api/v1/provisioning/alert-rules",
-                    headers=self._headers(),
+                    headers=headers,
                     json=rule_payload,
                 )
 
@@ -320,6 +344,8 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
 
         except AuthenticationError:
             raise  # Re-raise auth errors immediately
+        except ConfigurationError as e:
+            return {"status": "error", "error": str(e)}
         except httpx.HTTPError as e:
             logger.error(f"HTTP error creating alert rule: {e}")
             return {"status": "error", "error": str(e)}
@@ -327,10 +353,14 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
     async def _ensure_alert_folder(self) -> None:
         """Ensure the ares-security folder exists for alert rules."""
         try:
+            try:
+                headers = self._headers()
+            except ConfigurationError:
+                return
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.get(
                     f"{self.base_url}/api/folders/ares-security",
-                    headers=self._headers(),
+                    headers=headers,
                 )
                 if response.status_code in (401, 403):
                     msg = f"Authentication failed for Grafana: {response.text}"
@@ -343,7 +373,7 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
 
                 response = await client.post(
                     f"{self.base_url}/api/folders",
-                    headers=self._headers(),
+                    headers=headers,
                     json={"uid": "ares-security", "title": "ARES Security Detections"},
                 )
                 if response.status_code in (401, 403):

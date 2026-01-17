@@ -29,7 +29,7 @@ That's it. Edit files, save, they sync to all pods instantly via `kubectl cp`.
 
 1. `fswatch` monitors `src/ares/**/*.py` for changes
 2. On file save, `kubectl cp` copies the file directly into each running pod
-3. Changes are live immediately (no restart needed for most changes)
+3. Orchestrator pods receive a graceful Python restart (SIGTERM) after sync
 
 For structural changes (new files, new imports), run `task remote:rollout`.
 

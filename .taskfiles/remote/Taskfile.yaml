@@ -11,8 +11,8 @@ vars:
   NAMESPACE: '{{.NAMESPACE | default "attack-simulation"}}'
   ORCH_CONTAINER: '{{.ORCH_CONTAINER | default "orchestrator"}}'
   WORKER_CONTAINER: '{{.WORKER_CONTAINER | default "ares-worker"}}'
-  SITE_PACKAGES: '/usr/local/lib/python3.12/site-packages'
-  PARALLELISM: '{{.PARALLELISM | default "4"}}'
+  SITE_PACKAGES: '/usr/local/lib/python3.13/site-packages'
+  PARALLELISM: '{{.PARALLELISM | default "10"}}'
 
 tasks:
   # ============================================================================

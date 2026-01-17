@@ -323,7 +323,7 @@ All tasks support the following configuration variables:
 | `MAX_STEPS` | `50` | Maximum agent steps for polling mode (Taskfile override, code default is 30) |
 | `MAX_STEPS_ONCE` | `15` | Maximum agent steps for once/investigate modes |
 | `REPORT_DIR` | `./reports` | Directory for markdown reports |
-| `DREADNODE_SERVER` | `https://platform.dev.plundr.ai/` | Dreadnode platform URL |
+| `DREADNODE_SERVER_URL` | `https://platform.dev.plundr.ai/` | Dreadnode platform URL |
 | `DREADNODE_ORGANIZATION` | `ares` | Dreadnode organization name |
 | `DREADNODE_WORKSPACE` | `ares-protocol` | Dreadnode workspace name |
 | `DREADNODE_PROJECT` | `ares-soc` | Dreadnode project name |

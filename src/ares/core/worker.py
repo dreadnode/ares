@@ -484,12 +484,19 @@ class RedisWorkerAgent:
                 f"[{self.agent_name}] FATAL ERROR during task {task.task_id}: {type(e).__name__}: {e}",
                 exc_info=True,
             )
-            await self.task_queue.send_result(
-                task_id=task.task_id,
-                success=False,
-                error=f"FATAL: {type(e).__name__}: {e!s}",
-                worker_pod=self.pod_name,
-            )
+            try:
+                await self.task_queue.send_result(
+                    task_id=task.task_id,
+                    success=False,
+                    error=f"FATAL: {type(e).__name__}: {e!s}",
+                    worker_pod=self.pod_name,
+                )
+            except Exception as send_error:
+                logger.error(
+                    f"[{self.agent_name}] Failed to send fatal result for task {task.task_id}: "
+                    f"{type(send_error).__name__}: {send_error}",
+                    exc_info=True,
+                )
             self._current_task = None
             raise  # Re-raise to stop worker
         except Exception as e:
@@ -981,11 +988,11 @@ class WorkerAgent:
             await asyncio.sleep(15)
 
 
-async def run_worker(
+async def run_worker(  # noqa: PLR0912
     role: AgentRole,
     operation_id: str | None = None,
     redis_url: str | None = None,
-    model: str = "claude-sonnet-4-20250514",
+    model: str | None = None,
     max_steps: int | None = None,
     discover_operation: bool = True,
     discovery_timeout: int | None = None,
@@ -1010,6 +1017,18 @@ async def run_worker(
     """
     # Resolve config defaults
     redis_url = redis_url or get_redis_url()
+    model = (
+        model
+        or os.getenv(f"ARES_AGENT_{role.value.upper()}_MODEL")
+        or os.getenv("ARES_WORKER_MODEL")
+        or os.getenv("ARES_MODEL")
+    )
+    if not model:
+        logger.error(
+            "No model specified for worker. Provide a model argument or set "
+            "ARES_AGENT_<ROLE>_MODEL/ARES_WORKER_MODEL/ARES_MODEL."
+        )
+        return
 
     pod_name = os.environ.get("HOSTNAME", f"local-{role.value}")
 

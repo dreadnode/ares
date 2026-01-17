@@ -1,5 +1,6 @@
 """CLI for submitting operations to the orchestrator service."""
 
+import os
 import sys
 import uuid
 from typing import Annotated
@@ -25,7 +26,10 @@ async def submit(
     target: Annotated[str, cyclopts.Parameter(help="Target name or identifier")],
     domain: Annotated[str, cyclopts.Parameter(help="Target domain")],
     *,
-    ips: Annotated[list[str] | None, cyclopts.Parameter(help="Target IP addresses")] = None,
+    ips: Annotated[
+        list[str] | None,
+        cyclopts.Parameter(help="Target IP addresses", consume_multiple=True),
+    ] = None,
     operation_id: Annotated[
         str | None,
         cyclopts.Parameter(help="Operation ID (auto-generated if not provided)"),
@@ -37,7 +41,9 @@ async def submit(
     ] = None,
     resume: Annotated[bool, cyclopts.Parameter(help="Resume from checkpoint")] = False,
     wait: Annotated[bool, cyclopts.Parameter(help="Wait for operation to complete")] = False,
-    model: Annotated[str, cyclopts.Parameter(help="LLM model to use")] = "claude-sonnet-4-20250514",
+    model: Annotated[
+        str | None, cyclopts.Parameter(help="LLM model to use (defaults to env)")
+    ] = None,
     max_steps: Annotated[int, cyclopts.Parameter(help="Maximum agent steps")] = 200,
     redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
 ) -> None:
@@ -73,6 +79,51 @@ async def submit(
     logger.info(f"Target: {target} ({domain})")
     logger.info(f"IPs: {', '.join(ips)}")
 
+    # Collect environment variables to pass to orchestrator service
+    # These are API keys and model config that need to be available at runtime
+    env_var_names = [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "DREADNODE_API_KEY",
+        "DREADNODE_API_TOKEN",
+        "DREADNODE_SERVER_URL",
+        "DREADNODE_SERVER",
+        "DREADNODE_ORGANIZATION",
+        "DREADNODE_WORKSPACE",
+        "DREADNODE_PROJECT",
+        "GRAFANA_SERVICE_ACCOUNT_TOKEN",
+        "GRAFANA_URL",
+        "ARES_MODEL",
+        "ARES_ORCHESTRATOR_MODEL",
+        "ARES_WORKER_MODEL",
+        "ARES_AGENT_ENUM_MODEL",
+        "ARES_AGENT_CRACKER_MODEL",
+        "ARES_AGENT_ACL_MODEL",
+        "ARES_AGENT_PRIVESC_MODEL",
+        "ARES_AGENT_LATERAL_MODEL",
+        "ARES_AGENT_POISONING_MODEL",
+        "ARES_AGENT_ATOMIC_MODEL",
+    ]
+    env_vars = {name: os.environ.get(name, "") for name in env_var_names if os.environ.get(name)}
+    if env_vars:
+        present_keys = sorted(env_vars.keys())
+        logger.info(f"Submitting with env vars: {', '.join(present_keys)}")
+    else:
+        logger.warning("No env vars found to submit with operation request")
+
+    effective_model = (
+        model or os.environ.get("ARES_ORCHESTRATOR_MODEL") or os.environ.get("ARES_MODEL")
+    )
+    if (
+        effective_model
+        and effective_model.startswith("gpt-")
+        and not os.environ.get("OPENAI_API_KEY")
+    ):
+        raise ValueError(
+            "OPENAI_API_KEY is required for OpenAI models. Set it in the environment "
+            "before submitting the operation."
+        )
+
     try:
         result = await submit_operation(
             operation_id=operation_id,
@@ -84,6 +135,7 @@ async def submit(
             max_steps=max_steps,
             redis_url=resolved_redis_url,
             wait_for_completion=wait,
+            env_vars=env_vars if env_vars else None,
         )
 
         logger.success(f"Operation submitted: {operation_id}")

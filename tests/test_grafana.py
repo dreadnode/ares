@@ -61,13 +61,12 @@ class TestGrafanaToolsHeaders:
             tools._headers()
 
     def test_headers_raises_configuration_error_when_api_key_none(self):
-        """Test that None API key raises ConfigurationError."""
-        tools = GrafanaTools(
-            base_url="http://grafana:3000",
-            api_key=None,
-        )
-        with pytest.raises(ConfigurationError, match="GRAFANA_SERVICE_ACCOUNT_TOKEN"):
-            tools._headers()
+        """Test that None API key fails validation."""
+        with pytest.raises(ValueError, match="api_key"):
+            GrafanaTools(
+                base_url="http://grafana:3000",
+                api_key=None,
+            )
 
 
 class TestGetFiringAlerts:
@@ -217,6 +216,18 @@ class TestGetFiringAlerts:
             assert exc_info.value.service == "grafana"
             assert exc_info.value.status_code == 403
 
+    @pytest.mark.asyncio
+    async def test_get_firing_alerts_no_api_key_returns_empty(self):
+        """Test missing API key returns empty list without HTTP calls."""
+        tools = GrafanaTools(
+            base_url="http://grafana:3000",
+            api_key="",
+        )
+        with patch("httpx.AsyncClient") as mock_client_class:
+            alerts = await tools.get_firing_alerts()
+            assert alerts == []
+            mock_client_class.assert_not_called()
+
 
 class TestGetAlertHistory:
     """Tests for get_alert_history method."""
@@ -280,6 +291,18 @@ class TestGetAlertHistory:
 
             assert exc_info.value.service == "grafana"
             assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_get_alert_history_no_api_key_returns_empty(self):
+        """Test missing API key returns empty list without HTTP calls."""
+        tools = GrafanaTools(
+            base_url="http://grafana:3000",
+            api_key="",
+        )
+        with patch("httpx.AsyncClient") as mock_client_class:
+            history = await tools.get_alert_history()
+            assert history == []
+            mock_client_class.assert_not_called()
 
 
 class TestCreateAnnotation:
@@ -366,6 +389,18 @@ class TestCreateAnnotation:
 
             result = await grafana_tools.create_annotation(text="Test")
             assert result is None
+
+    @pytest.mark.asyncio
+    async def test_create_annotation_no_api_key_returns_none(self):
+        """Test missing API key returns None without HTTP calls."""
+        tools = GrafanaTools(
+            base_url="http://grafana:3000",
+            api_key="",
+        )
+        with patch("httpx.AsyncClient") as mock_client_class:
+            result = await tools.create_annotation(text="Test annotation")
+            assert result is None
+            mock_client_class.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_annotation_raises_authentication_error_on_401(
