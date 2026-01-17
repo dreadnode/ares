@@ -669,15 +669,22 @@ Initial credential: {cred_info}
 
 Your objectives:
 1. Run nmap_scan on all targets to discover services
-2. Enumerate users and shares with enum4linux/crackmapexec
-3. Run certipy_find to discover ADCS vulnerabilities
-4. Run run_bloodhound for ACL analysis and attack path discovery
-5. Coordinate with specialized agents to exploit discovered vulnerabilities
-6. Use trigger_credential_expansion after getting new credentials
-7. Continue until Domain Admin access achieved
+2. LOW-HANGING FRUIT (do these early!):
+   - ldap_search_descriptions: Find passwords stored in user description fields
+   - password_spray with common passwords (Password1, Welcome1, Summer2024, etc.)
+   - username_as_password: Test if users have username as password (e.g., hodor:hodor)
+3. Enumerate users and shares with enum4linux/crackmapexec
+4. Run certipy_find to discover ADCS vulnerabilities
+5. Run run_bloodhound for ACL analysis and attack path discovery
+6. Coordinate with specialized agents to exploit discovered vulnerabilities
+7. Use trigger_credential_expansion after getting new credentials
+8. Continue until Domain Admin access achieved
 
 Priority vulnerabilities to look for:
-- ADCS ESC1-ESC8 (highest priority)
+- Passwords in LDAP description fields (QUICK WIN - check first!)
+- Username=password combinations (QUICK WIN)
+- Weak/common passwords via spraying (QUICK WIN)
+- ADCS ESC1-ESC8
 - Kerberoastable accounts
 - AS-REP roastable accounts
 - Unconstrained/Constrained delegation
