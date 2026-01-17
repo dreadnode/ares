@@ -217,6 +217,21 @@ class OrchestratorTools(Toolset):
             ...     domain="corp.local"
             ... )
         """
+        # Validate username is not empty
+        if not username or not username.strip():
+            return (
+                "✗ Invalid lateral movement request: username cannot be empty. "
+                "Please provide a valid username (e.g., 'Administrator', 'hodor')."
+            )
+
+        # Detect common mistake: domain contains "domain\username" format
+        if domain and "\\" in domain:
+            return (
+                f"✗ Invalid lateral movement request: domain field contains backslash ('{domain}'). "
+                "The domain and username must be separate parameters. "
+                f"Please use domain='{domain.split(chr(92))[0]}' and username='{domain.split(chr(92))[1]}' separately."
+            )
+
         task_id = await self.dispatcher.request_lateral_movement(
             target_host=target_host,
             username=username,
