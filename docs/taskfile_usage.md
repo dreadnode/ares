@@ -174,6 +174,18 @@ List multi-agent operations and their Redis queue state:
 task ares:red:multi:queue
 ```
 
+Clear multi-agent Redis operation cache (drops ops/locks/status):
+
+```bash
+task ares:red:multi:redis:clear
+```
+
+List multi-agent Redis operations, statuses, and locks:
+
+```bash
+task ares:red:multi:redis:list
+```
+
 #### `task ares:investigate`
 
 Investigate a specific alert from a JSON file.
