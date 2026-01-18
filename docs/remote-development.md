@@ -21,6 +21,7 @@ That's it. Edit files, save, they sync to all pods instantly via `kubectl cp`.
 | `remote:sync:full`         | Sync full src/ares tree to pods          |
 | `remote:sync:branch`       | Sync only files changed on current branch|
 | `remote:rollout`           | Restart pods (for structural changes)    |
+| `remote:pvc:clear`         | Delete dev PVCs for a fresh deploy       |
 | `remote:status`            | Check pod and deployment status          |
 | `remote:logs`              | Tail logs from agent pods                |
 | `remote:logs:orchestrator` | Tail orchestrator logs                   |
@@ -82,6 +83,12 @@ task remote:sync:full
 
 ```bash
 task remote:sync:branch
+```
+
+### Clear dev PVC code (fresh deploy)
+
+```bash
+task remote:pvc:clear CONFIRM=true
 ```
 
 **Output example:**

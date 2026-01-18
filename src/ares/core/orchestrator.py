@@ -58,6 +58,16 @@ def _resolve_model_generator(model: str, openai_api_key: str | None) -> str | rg
     return generator
 
 
+def _resolve_orchestrator_model(model: str | None) -> str:
+    resolved = model or os.getenv("ARES_ORCHESTRATOR_MODEL") or os.getenv("ARES_MODEL")
+    if not resolved:
+        raise ValueError(
+            "No model specified for operation. Provide a model argument or set "
+            "ARES_ORCHESTRATOR_MODEL/ARES_MODEL in the environment."
+        )
+    return resolved
+
+
 async def _wait_for_required_workers(
     dispatcher: RedTeamDispatcher,
     required_roles: list[str],
@@ -100,6 +110,80 @@ async def _wait_for_required_workers(
         f"Missing: {set(required_roles) - online_roles}"
     )
     return False
+
+
+async def _load_or_initialize_state(
+    dispatcher: RedTeamDispatcher,
+    recovery: OperationRecoveryManager,
+    operation_id: str,
+    resume_from_checkpoint: bool,
+    target_domain: str,
+    target_ips: list[str],
+    initial_credential: Credential | None,
+) -> None:
+    if resume_from_checkpoint:
+        state = await recovery.recover_operation(operation_id)
+        if state:
+            dispatcher._shared_state = state
+            logger.info(f"Resumed operation {operation_id} from checkpoint")
+            return
+        logger.warning(f"No checkpoint found for {operation_id}, starting fresh")
+
+    state = dispatcher.shared_state
+    state.target = Target(
+        ip=target_ips[0] if target_ips else "",
+        domain=target_domain,
+    )
+    if initial_credential:
+        state.add_credential(initial_credential, "initial")
+
+
+async def _register_agents(
+    dispatcher: RedTeamDispatcher,
+    agents: dict[AgentRole, AgentInfo],
+) -> None:
+    for agent_info in agents.values():
+        await dispatcher.register(agent_info)
+
+
+async def _ensure_required_workers(
+    dispatcher: RedTeamDispatcher,
+    required_roles: list[str],
+    timeout: float = 120.0,
+) -> None:
+    if not await _wait_for_required_workers(dispatcher, required_roles, timeout=timeout):
+        raise RuntimeError(
+            f"Required workers ({', '.join(required_roles)}) did not come online within "
+            f"{timeout:.0f} seconds. Ensure worker pods are deployed and running."
+        )
+
+
+async def _prime_operation(
+    recovery: OperationRecoveryManager,
+    dispatcher: RedTeamDispatcher,
+    target_ips: list[str],
+    target_domain: str,
+) -> None:
+    success = await recovery.checkpoint(dispatcher.shared_state)
+    if success:
+        logger.info("Initial checkpoint saved - workers can now discover operation")
+    else:
+        logger.warning("Failed to save initial checkpoint - workers may not discover operation")
+    _run_mandatory_user_enum(target_ips, target_domain, dispatcher.shared_state)
+
+
+def _log_orchestrator_result(result: rg.RunResult, model: str) -> None:
+    logger.success(
+        f"✅ Model connection successful: {model} "
+        f"(messages: {len(result.messages)}, tokens: {result.usage})"
+    )
+    log_fn = logger.error if result.stop_reason == "error" else logger.success
+    log_msg = (
+        f"Orchestrator failed after {result.steps} steps: {result.error}"
+        if result.stop_reason == "error"
+        else f"Orchestrator completed: {result.steps} steps, {result.stop_reason}"
+    )
+    log_fn(log_msg)
 
 
 @dn.tool
@@ -166,12 +250,7 @@ async def run_multi_agent_operation(
     # Resolve config defaults
     redis_url = redis_url or get_redis_url()
     namespace = namespace or get_namespace()
-    model = model or os.getenv("ARES_ORCHESTRATOR_MODEL") or os.getenv("ARES_MODEL")
-    if not model:
-        raise ValueError(
-            "No model specified for operation. Provide a model argument or set "
-            "ARES_ORCHESTRATOR_MODEL/ARES_MODEL in the environment."
-        )
+    model = _resolve_orchestrator_model(model)
 
     start_time = datetime.now(timezone.utc)
 
@@ -197,23 +276,15 @@ async def run_multi_agent_operation(
     await recovery.start()
 
     # Resume or create new operation
-    if resume_from_checkpoint:
-        state = await recovery.recover_operation(operation_id)
-        if state:
-            dispatcher._shared_state = state
-            logger.info(f"Resumed operation {operation_id} from checkpoint")
-        else:
-            logger.warning(f"No checkpoint found for {operation_id}, starting fresh")
-            resume_from_checkpoint = False
-
-    if not resume_from_checkpoint:
-        state = dispatcher.shared_state
-        state.target = Target(
-            ip=target_ips[0] if target_ips else "",
-            domain=target_domain,
-        )
-        if initial_credential:
-            state.add_credential(initial_credential, "initial")
+    await _load_or_initialize_state(
+        dispatcher=dispatcher,
+        recovery=recovery,
+        operation_id=operation_id,
+        resume_from_checkpoint=resume_from_checkpoint,
+        target_domain=target_domain,
+        target_ips=target_ips,
+        initial_credential=initial_credential,
+    )
 
     # Create agent ensemble
     agents = await _create_agent_ensemble(
@@ -224,15 +295,10 @@ async def run_multi_agent_operation(
     )
 
     # Register all agents with dispatcher
-    for agent_info in agents.values():
-        await dispatcher.register(agent_info)
+    await _register_agents(dispatcher, agents)
 
     # Wait for required workers before starting
-    if not await _wait_for_required_workers(dispatcher, ["enum"], timeout=120.0):
-        raise RuntimeError(
-            "Required workers (enum) did not come online within 120 seconds. "
-            "Ensure worker pods are deployed and running."
-        )
+    await _ensure_required_workers(dispatcher, ["enum"], timeout=120.0)
 
     # Start background tasks
     tasks = [
@@ -250,7 +316,11 @@ async def run_multi_agent_operation(
     )
 
     try:
-        _run_mandatory_user_enum(target_ips, target_domain, dispatcher.shared_state)
+        # Do initial checkpoint so workers can discover the operation BEFORE
+        # calling _run_mandatory_user_enum (which is synchronous and blocks the event loop).
+        # The background checkpoint task won't get a chance to run until after
+        # _run_mandatory_user_enum returns.
+        await _prime_operation(recovery, dispatcher, target_ips, target_domain)
 
         # Create the orchestrator agent with tools
         orchestrator_agent = await _create_orchestrator_agent(
@@ -277,18 +347,7 @@ async def run_multi_agent_operation(
             logger.info(f"🤖 Connecting to {model}...")
             result = await orchestrator_agent.run(initial_prompt)
 
-            # Log model connection and completion status
-            logger.success(
-                f"✅ Model connection successful: {model} "
-                f"(messages: {len(result.messages)}, tokens: {result.usage})"
-            )
-            log_fn = logger.error if result.stop_reason == "error" else logger.success
-            log_msg = (
-                f"Orchestrator failed after {result.steps} steps: {result.error}"
-                if result.stop_reason == "error"
-                else f"Orchestrator completed: {result.steps} steps, {result.stop_reason}"
-            )
-            log_fn(log_msg)
+            _log_orchestrator_result(result, model)
 
         # Wait for any remaining background tasks
         await _wait_for_completion(dispatcher, tasks, max_runtime=300.0)

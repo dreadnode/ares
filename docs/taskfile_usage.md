@@ -591,6 +591,21 @@ task ares:red: TARGET=192.168.1.100
 task ares:reports:latest
 ```
 
+### Remote Dev Workflow
+
+Use remote tasks to sync code to running pods and manage dev PVCs.
+
+```bash
+# One-time sync of current branch changes
+task remote:sync:branch
+
+# Full sync of src/ares tree
+task remote:sync:full
+
+# Clear dev code from PVCs (wipes /ares/src/ares in pods)
+task remote:pvc:clear CONFIRM=true
+```
+
 ## Troubleshooting
 
 ### 1Password CLI Not Found

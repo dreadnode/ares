@@ -569,6 +569,86 @@ tasks:
         echo -e "{{.SUCCESS}} All pods restarted"
 
   # ============================================================================
+  # PVC: Clear dev PVCs
+  # ============================================================================
+  pvc:clear:
+    desc: "Clear dev code from PVCs for a fresh deploy (usage: task remote:pvc:clear [CONFIRM=true] [ROLLOUT=true])"
+    silent: true
+    vars:
+      CONFIRM: '{{.CONFIRM | default "false"}}'
+      ROLLOUT: '{{.ROLLOUT | default "true"}}'
+    cmds:
+      - |
+        set -euo pipefail
+
+        if [ "{{.CONFIRM}}" != "true" ]; then
+          echo -e "{{.WARN}} This will delete {{.PVC_PATH}}/src/ares from pods."
+          echo -e "{{.WARN}} Re-run with CONFIRM=true to proceed."
+          exit 1
+        fi
+
+        ORCH_POD=$(kubectl get pods -n {{.NAMESPACE}} \
+          -l app.kubernetes.io/name=ares-orchestrator \
+          --field-selector=status.phase=Running \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+        PODS=$(kubectl get pods -n {{.NAMESPACE}} \
+          -l ares.dreadnode.io/component=red-team \
+          --field-selector=status.phase=Running \
+          -o json | jq -r --arg orch "$ORCH_POD" \
+          '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
+
+        if [ -z "$PODS" ] && [ -z "$ORCH_POD" ]; then
+          echo -e "{{.ERROR}} No running pods found"
+          exit 1
+        fi
+
+        echo -e "{{.INFO}} Clearing {{.PVC_PATH}}/src/ares in pods..."
+
+        if [ -n "$PODS" ]; then
+          printf '%s\n' $PODS | xargs -n1 -P {{.PARALLELISM}} -I{} bash -c '
+            pod="$1"
+            worker_container="{{.WORKER_CONTAINER}}"
+            if [ -z "$worker_container" ]; then
+              worker_container=$(kubectl get pod -n {{.NAMESPACE}} "$pod" \
+                -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
+            fi
+            if [ -n "$worker_container" ]; then
+              container_flag=(-c "$worker_container")
+            else
+              container_flag=()
+            fi
+            if kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
+                rm -rf {{.PVC_PATH}}/src/ares 2>/dev/null && \
+              kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
+                mkdir -p {{.PVC_PATH}}/src/ares 2>/dev/null; then
+              echo -e "{{.SUCCESS}}   -> $pod"
+            else
+              echo -e "{{.WARN}}   x $pod"
+            fi
+            exit 0
+          ' _ {}
+        fi
+
+        if [ -n "$ORCH_POD" ]; then
+          if kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+              rm -rf {{.PVC_PATH}}/src/ares 2>/dev/null && \
+            kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+              mkdir -p {{.PVC_PATH}}/src/ares 2>/dev/null; then
+            echo -e "{{.SUCCESS}}   -> $ORCH_POD"
+          else
+            echo -e "{{.WARN}}   x $ORCH_POD"
+          fi
+        fi
+
+        if [ "{{.ROLLOUT}}" = "true" ]; then
+          echo -e "{{.INFO}} Restarting deployments after PVC clear..."
+          kubectl rollout restart deployment -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team 2>/dev/null || true
+          kubectl rollout restart deployment -n {{.NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator 2>/dev/null || true
+          echo -e "{{.SUCCESS}} Rollout initiated"
+        fi
+
+  # ============================================================================
   # STATUS: Check pod status
   # ============================================================================
   status:
