@@ -3,6 +3,7 @@
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -532,8 +533,19 @@ class TestEdgeCases:
 class TestGetStoreInitialization:
     """Tests for lazy store initialization."""
 
-    def test_get_store_initializes_when_none(self) -> None:
+    def test_get_store_initializes_when_none(self, tmp_path: Path, monkeypatch: Any) -> None:
         """Test that get_store initializes a store when none is provided."""
+        import ares.tools.blue.learning as learning_module
+        from ares.core.persistence import get_investigation_store, reset_investigation_store
+
+        reset_investigation_store()
+        db_path = tmp_path / "investigations.db"
+
+        def _get_store() -> InvestigationStore:
+            return get_investigation_store(db_path)
+
+        monkeypatch.setattr(learning_module, "get_investigation_store", _get_store)
+
         tools = LearningTools(store=None)
         assert tools.store is None
 

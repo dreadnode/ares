@@ -111,6 +111,18 @@ class NetworkEnumerationTools(Toolset):
     def _run_user_enum_commands(
         self, target: str, username: str, password: str, domain: str
     ) -> list[tuple[str, str]]:
+        def _has_user_entries(output: str) -> bool:
+            if not output or not output.strip():
+                return False
+            for line in output.splitlines():
+                if re.search(r"\\[^:\\s]+", line):
+                    return True
+                if re.search(r"\buser(name)?:\s*\S+", line, re.IGNORECASE):
+                    return True
+                if re.search(r"user:\[[^\]]+\]", line, re.IGNORECASE):
+                    return True
+            return False
+
         outputs: list[tuple[str, str]] = []
 
         cmd = ["netexec", "smb", target]
@@ -144,15 +156,17 @@ class NetworkEnumerationTools(Toolset):
                 )
             )
 
-            nmap_cmd = ["nmap", "-Pn", "-p", "445", "--script", "smb-enum-users", target]
-            nmap_stdout, nmap_stderr, _ = _run_tool(nmap_cmd, timeout_seconds=180)
-            nmap_output = nmap_stdout or nmap_stderr or ""
-            outputs.append(("nmap smb-enum-users", nmap_output))
+            combined_output = "\n".join(content for _, content in outputs)
+            if not _has_user_entries(combined_output):
+                nmap_cmd = ["nmap", "-Pn", "-p", "445", "--script", "smb-enum-users", target]
+                nmap_stdout, nmap_stderr, _ = _run_tool(nmap_cmd, timeout_seconds=180)
+                nmap_output = nmap_stdout or nmap_stderr or ""
+                outputs.append(("nmap smb-enum-users", nmap_output))
 
-            rid_cmd = ["netexec", "smb", target, "-u", "", "-p", "", "--rid-brute"]
-            rid_stdout, rid_stderr, _ = _run_tool(rid_cmd, timeout_seconds=120)
-            rid_output = rid_stdout or rid_stderr or ""
-            outputs.append(("netexec smb --rid-brute", rid_output))
+                rid_cmd = ["netexec", "smb", target, "-u", "", "-p", "", "--rid-brute"]
+                rid_stdout, rid_stderr, _ = _run_tool(rid_cmd, timeout_seconds=120)
+                rid_output = rid_stdout or rid_stderr or ""
+                outputs.append(("netexec smb --rid-brute", rid_output))
 
         return outputs
 

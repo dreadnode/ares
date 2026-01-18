@@ -183,12 +183,13 @@ class TestNetworkEnumerationTools:
                     stdout="SMB 192.168.1.100 445 HOST [+] test.local\\:\n", return_code=0
                 ),
                 MockRunResult(stdout="user:[Administrator] rid:[0x1f4]\n", return_code=0),
+                MockRunResult(stdout="", return_code=0),
             ]
             result = tools.enumerate_users(target="192.168.1.100", username="", password="")
 
         # Should work without credentials
         assert "Administrator" in result
-        assert mock_run.call_count == 2
+        assert mock_run.call_count == 3
 
     def test_enumerate_users_exception(self, red_team_state: RedTeamState):
         """Test user enumeration handles exceptions."""
