@@ -325,10 +325,10 @@ tasks:
             fi
             if kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
                 mkdir -p {{.PVC_PATH}}/src/ares 2>/dev/null && \
-              kubectl cp src/ares "$pod":{{.PVC_PATH}}/src/ares \
+              kubectl cp src/ares/. "$pod":{{.PVC_PATH}}/src/ares \
                 -n {{.NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
               echo -e "{{.SUCCESS}}   -> $pod"
-            elif kubectl cp src/ares "$pod":{{.PVC_PATH}}/src/ares \
+            elif kubectl cp src/ares/. "$pod":{{.PVC_PATH}}/src/ares \
                 -n {{.NAMESPACE}} 2>/dev/null; then
               echo -e "{{.SUCCESS}}   -> $pod"
             else
@@ -342,7 +342,7 @@ tasks:
         if [ -n "$ORCH_POD" ]; then
           if kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
               mkdir -p {{.PVC_PATH}}/src/ares 2>/dev/null && \
-            kubectl cp src/ares "$ORCH_POD":{{.PVC_PATH}}/src/ares \
+            kubectl cp src/ares/. "$ORCH_POD":{{.PVC_PATH}}/src/ares \
               -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
             echo -e "{{.SUCCESS}}   -> $ORCH_POD"
           else
