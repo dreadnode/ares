@@ -27,6 +27,7 @@ from ares.core.models import (
     AgentInfo,
     AgentRole,
     Credential,
+    SharedRedTeamState,
     Target,
 )
 from ares.core.recovery import OperationRecoveryManager
@@ -249,6 +250,8 @@ async def run_multi_agent_operation(
     )
 
     try:
+        _run_mandatory_user_enum(target_ips, target_domain, dispatcher.shared_state)
+
         # Create the orchestrator agent with tools
         orchestrator_agent = await _create_orchestrator_agent(
             dispatcher=dispatcher,
@@ -705,6 +708,30 @@ Remember:
 
 Let's begin the operation!
 """
+
+
+def _run_mandatory_user_enum(
+    target_ips: list[str],
+    target_domain: str,
+    shared_state: SharedRedTeamState,
+) -> None:
+    if not target_ips:
+        logger.warning("No target IPs provided for mandatory user enumeration")
+        return
+
+    network_tools = NetworkEnumerationTools()
+    network_tools.set_state(shared_state)  # type: ignore[arg-type]
+    logger.info("Running mandatory user enumeration on all targets")
+
+    for target in target_ips:
+        try:
+            output = network_tools.enumerate_users(target, "", "", target_domain)
+            if output:
+                logger.info(f"Mandatory user enumeration output for {target}:\n{output}")
+            else:
+                logger.info(f"Mandatory user enumeration produced no output for {target}")
+        except Exception as exc:  # noqa: PERF203
+            logger.warning(f"Mandatory user enumeration failed for {target}: {exc}")
 
 
 __all__ = [

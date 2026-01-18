@@ -161,11 +161,77 @@ task ares:red:local: TARGET=192.168.1.100
 
 #### Multi-Agent Operations
 
+##### `task ares:red:multi TARGET=<target>`
+
+Run multi-agent red team operation with clean, sequential output.
+
+**Example:**
+
+```bash
+# Run against dreadgoad in us-west-1
+task ares:red:multi TARGET=dreadgoad DOMAIN=sevenkingdoms.local \
+  MODEL_ALL=gpt-5.2 \
+  TARGET_REGION=us-west-1 \
+  TARGET_PROFILE=lab
+```
+
+**Output:**
+
+```text
+🔍 Resolved 'dreadgoad' via AWS EC2 (lab/us-west-1)
+✅ Found 5 target(s): 10.1.2.183,10.1.2.240,10.1.2.239,10.1.2.146,10.1.2.92
+
+🎯 Operation ID: op-20260117-182705
+🌐 Target domain: sevenkingdoms.local
+🖥️  Target IPs: 10.1.2.183,10.1.2.240,10.1.2.239,10.1.2.146,10.1.2.92
+🔌 K8s namespace: attack-simulation
+📡 Redis: authenticated connection
+📝 Logging to: ./logs/red-multi-op-20260117-182705-20260117-182707.log
+
+🚀 Submitting operation to orchestrator service...
+```
+
+**Key Features:**
+
+- **Sequential output**: All status information appears in proper order
+- **Computed variables**: AWS lookups, Redis passwords, and operation IDs
+  calculated before output
+- **Clean structure**: Each phase (resolution → configuration → submission →
+  logs) runs sequentially
+- **Auto-logging**: All output captured to timestamped log files in `./logs/`
+
+**Variables:**
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `TARGET` | *(required)* | EC2 Name tag filter or IP address |
+| `DOMAIN` | `example.local` | Active Directory domain name |
+| `OPERATION_ID` | `op-YYYYMMDD-HHMMSS` | Custom operation ID (auto-generated) |
+| `RESUME` | `false` | Resume from checkpoint (`true`/`false`) |
+| `TARGET_PROFILE` | `lab` | AWS profile for EC2 discovery |
+| `TARGET_REGION` | `us-west-2` | AWS region for EC2 discovery |
+| `K8S_NAMESPACE` | `attack-simulation` | Kubernetes namespace for agents |
+| `MODEL_ALL` | *(see below)* | Override all agent models |
+
+**Managing Operations:**
+
 Tail logs for a specific multi-agent operation:
 
 ```bash
 task ares:logs:operation OPERATION_ID=op-xxx
 task ares:logs:operation OPERATION_ID=op-xxx FOLLOW=true LINES=200
+```
+
+Check operation status:
+
+```bash
+task ares:red:multi:status OPERATION_ID=op-xxx
+```
+
+List all multi-agent operations:
+
+```bash
+task ares:red:multi:list
 ```
 
 List multi-agent operations and their Redis queue state:
