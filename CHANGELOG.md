@@ -10,14 +10,16 @@ and this project adheres to
 
 ### Added
 
-- Initial release of Ares autonomous SOC investigation agent
-- MITRE ATT&CK Navigator question engine
-- Pyramid of Pain Climber question engine
-- Integration with Grafana, Loki, and Prometheus
-- Four-stage investigation workflow (Triage, Causation, Lateral Movement,
-  Synthesis)
-- Markdown report generation
-- Parallel query execution
-- Dreadnode Agent SDK integration
+- Modern Python project template with batteries included
+- pyproject.toml configuration
+- Testing setup with pytest
+- Code quality tools (Black, Ruff, mypy)
+- Pre-commit hooks configuration
+- GitHub Actions workflows
+- Documentation template with MkDocs
+- Security policy template
+- CODEOWNERS template
+- Taskfile for common commands
+- VSCode workspace configuration
 
-[Unreleased]: https://github.com/dreadnode/ares/compare/v0.0.0...HEAD
+[Unreleased]: https://github.com/dreadnode/python-template/compare/v0.0.0...HEAD

@@ -8,8 +8,8 @@ This guide will help you get started with contributing effectively.
 1. Fork the repository and clone your fork:
 
    ```bash
-   gh repo clone dreadnode/ares
-   cd ares
+   gh repo clone dreadnode/python-template
+   cd python-template
    ```
 
 1. Set up your development environment with your preferred package manager:
@@ -58,7 +58,8 @@ task types   # Type checking with mypy
 task test    # Run tests with pytest
 ```
 
-The pre-commit hooks will automatically run most checks when you commit changes.
+The pre-commit hooks will automatically run most checks when you commit
+changes.
 
 ### Documentation
 
