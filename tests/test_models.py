@@ -15,7 +15,7 @@ class TestEvidenceModel:
         evidence = Evidence(
             id="test-001",
             type="ip",
-            value="192.168.1.100",
+            value="192.168.56.100",
             source="loki_query",
             timestamp=datetime.now(timezone.utc),
             pyramid_level=PyramidLevel.IP_ADDRESSES,
@@ -23,7 +23,7 @@ class TestEvidenceModel:
 
         assert evidence.id == "test-001"
         assert evidence.type == "ip"
-        assert evidence.value == "192.168.1.100"
+        assert evidence.value == "192.168.56.100"
         assert evidence.pyramid_level == PyramidLevel.IP_ADDRESSES
         assert evidence.confidence == 0.5  # default
         assert evidence.validated is False  # default
@@ -82,7 +82,7 @@ class TestEvidenceModel:
         evidence = Evidence(
             id="test-004",
             type="ip",
-            value="10.0.0.1",
+            value="192.168.56.1",
             source="firewall",
             timestamp=None,
             pyramid_level=PyramidLevel.IP_ADDRESSES,
@@ -260,9 +260,9 @@ class TestRedTeamModels:
         """Test Target model."""
         from ares.core.models import Target
 
-        target = Target(ip="10.0.0.50", hostname="dc01", domain="corp.local")
+        target = Target(ip="192.168.56.50", hostname="dc01", domain="corp.local")
 
-        assert target.ip == "10.0.0.50"
+        assert target.ip == "192.168.56.50"
         assert target.hostname == "dc01"
         assert target.domain == "corp.local"
 
@@ -271,14 +271,14 @@ class TestRedTeamModels:
         from ares.core.models import Host
 
         host = Host(
-            ip="10.0.0.100",
+            ip="192.168.56.100",
             hostname="web01",
             os="Windows Server 2019",
             roles=["web", "app"],
             services=["http", "https", "rdp"],
         )
 
-        assert host.ip == "10.0.0.100"
+        assert host.ip == "192.168.56.100"
         assert host.roles == ["web", "app"]
         assert host.services == ["http", "https", "rdp"]
 
@@ -341,7 +341,7 @@ class TestParsingUtilities:
         """Test that models can be serialized to XML."""
         from ares.core.models import Target
 
-        target = Target(ip="192.168.1.1", hostname="test-host")
+        target = Target(ip="192.168.56.1", hostname="test-host")
         xml = target.to_xml()
 
         # Verify XML structure exists (pydantic-xml may use attributes for simple models)
@@ -374,7 +374,7 @@ class TestModelValidation:
             Evidence(
                 id="test",
                 type="ip",
-                value="192.168.1.1",
+                value="192.168.56.1",
                 source="test",
                 timestamp=None,
                 pyramid_level="not-an-int",  # should be PyramidLevel
@@ -433,7 +433,7 @@ class TestInvestigationStateHelpers:
         evidence1 = Evidence(
             id="ev-001",
             type="ip",
-            value="192.168.1.1",
+            value="192.168.56.1",
             source="test",
             timestamp=None,
             pyramid_level=PyramidLevel.IP_ADDRESSES,
@@ -463,7 +463,7 @@ class TestInvestigationStateHelpers:
         evidence = Evidence(
             id="ev-001",
             type="ip",
-            value="192.168.1.1",
+            value="192.168.56.1",
             source="test",
             timestamp=None,
             pyramid_level=PyramidLevel.IP_ADDRESSES,
@@ -488,7 +488,7 @@ class TestInvestigationStateHelpers:
         evidence1 = Evidence(
             id="ev-001",
             type="ip",
-            value="192.168.1.1",
+            value="192.168.56.1",
             source="network logs",
             timestamp=None,
             pyramid_level=PyramidLevel.IP_ADDRESSES,
@@ -621,7 +621,7 @@ class TestRedTeamStateHelpers:
 
         state = RedTeamState(
             operation_id="test-op",
-            target=Target(ip="192.168.1.1"),
+            target=Target(ip="192.168.56.1"),
         )
 
         key = state.get_credential_key("Admin", "P@ssword123", "DOMAIN")
@@ -633,7 +633,7 @@ class TestRedTeamStateHelpers:
 
         state = RedTeamState(
             operation_id="test-op",
-            target=Target(ip="192.168.1.1"),
+            target=Target(ip="192.168.56.1"),
         )
 
         key = state.get_credential_key("user", "pass")
@@ -645,7 +645,7 @@ class TestRedTeamStateHelpers:
 
         state = RedTeamState(
             operation_id="test-op",
-            target=Target(ip="192.168.1.1"),
+            target=Target(ip="192.168.56.1"),
             credentials=[
                 Credential(
                     username="admin",

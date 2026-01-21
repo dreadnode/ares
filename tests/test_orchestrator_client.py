@@ -31,7 +31,7 @@ async def test_submit_operation_uses_env_model_and_env_vars(monkeypatch):
         result = await submit_operation(
             operation_id="op-1",
             target_domain="example.com",
-            target_ips=["10.0.0.1"],
+            target_ips=["192.168.56.1"],
             model=None,
             env_vars={"OPENAI_API_KEY": "test-key"},  # pragma: allowlist secret
         )
@@ -53,6 +53,6 @@ async def test_submit_operation_raises_when_model_missing(monkeypatch):
         await submit_operation(
             operation_id="op-2",
             target_domain="example.com",
-            target_ips=["10.0.0.2"],
+            target_ips=["192.168.56.2"],
             model=None,
         )

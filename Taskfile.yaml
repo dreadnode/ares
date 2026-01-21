@@ -475,126 +475,21 @@ tasks:
         fi
 
   # ===========================================================================
-  # Ares Local Log Management
+  # Ares Logs
   # ===========================================================================
 
-  ares:logs:list:
-    desc: List all local agent logs
-    cmds:
-      - |
-        echo "Agent Logs:"
-        echo "==========="
-        if [ -d {{.LOG_DIR}} ]; then
-          ls -lht {{.LOG_DIR}}/*.log 2>/dev/null || echo "No logs found"
-        else
-          echo "Log directory not found: {{.LOG_DIR}}"
-        fi
-
-  ares:logs:tail:
-    desc: "Tail the latest log file (usage: task ares:logs:tail [LINES=100] [FOLLOW=true])"
+  ares:logs:
+    desc: "Tail remote logs (usage: task ares:logs [ROLE=enum|orchestrator] [LINES=100] [FOLLOW=true])"
     vars:
+      ROLE: '{{.ROLE | default ""}}'
+      FOLLOW: '{{.FOLLOW | default "true"}}'
       LINES: '{{.LINES | default "100"}}'
-      FOLLOW: '{{.FOLLOW | default "false"}}'
     cmds:
-      - |
-        LATEST=$(ls -t {{.LOG_DIR}}/*.log 2>/dev/null | head -1)
-        if [ -z "$LATEST" ]; then
-          echo "No logs found in {{.LOG_DIR}}"
-          exit 1
-        fi
-
-        echo "📋 Log file: $LATEST"
-        echo "======================================================================"
-
-        if [ "{{.FOLLOW}}" = "true" ]; then
-          tail -f "$LATEST"
-        else
-          tail -n {{.LINES}} "$LATEST"
-        fi
-
-  ares:logs:operation:
-    desc: "Tail logs for a multi-agent operation (usage: task ares:logs:operation OPERATION_ID=op-xxx [LINES=100] [FOLLOW=true])"
-    vars:
-      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
-      LINES: '{{.LINES | default "100"}}'
-      FOLLOW: '{{.FOLLOW | default "false"}}'
-    preconditions:
-      - sh: test -n "{{.OPERATION_ID}}"
-        msg: "OPERATION_ID variable is required. Usage: task ares:logs:operation OPERATION_ID=op-xxx"
-    cmds:
-      - |
-        LATEST=$(ls -t {{.LOG_DIR}}/red-multi-{{.OPERATION_ID}}-*.log 2>/dev/null | head -1)
-        if [ -z "$LATEST" ]; then
-          LATEST=$(ls -t {{.LOG_DIR}}/orchestrator-{{.OPERATION_ID}}-*.log 2>/dev/null | head -1)
-        fi
-        if [ -z "$LATEST" ]; then
-          echo "No logs found for operation {{.OPERATION_ID}} in {{.LOG_DIR}}"
-          exit 1
-        fi
-
-        echo "📋 Operation log: $LATEST"
-        echo "======================================================================"
-
-        if [ "{{.FOLLOW}}" = "true" ]; then
-          tail -f "$LATEST"
-        else
-          tail -n {{.LINES}} "$LATEST"
-        fi
-
-  ares:logs:blue:
-    desc: "Tail the latest blue team log (usage: task ares:logs:blue [LINES=100] [FOLLOW=true])"
-    vars:
-      LINES: '{{.LINES | default "100"}}'
-      FOLLOW: '{{.FOLLOW | default "false"}}'
-    cmds:
-      - |
-        LATEST=$(ls -t {{.LOG_DIR}}/blue-*.log 2>/dev/null | head -1)
-        if [ -z "$LATEST" ]; then
-          echo "No blue team logs found in {{.LOG_DIR}}"
-          exit 1
-        fi
-
-        echo "📋 Blue team log: $LATEST"
-        echo "======================================================================"
-
-        if [ "{{.FOLLOW}}" = "true" ]; then
-          tail -f "$LATEST"
-        else
-          tail -n {{.LINES}} "$LATEST"
-        fi
-
-  ares:logs:red:
-    desc: "Tail the latest red team log (usage: task ares:logs:red [LINES=100] [FOLLOW=true])"
-    vars:
-      LINES: '{{.LINES | default "100"}}'
-      FOLLOW: '{{.FOLLOW | default "false"}}'
-    cmds:
-      - |
-        LATEST=$(ls -t {{.LOG_DIR}}/red-*.log 2>/dev/null | head -1)
-        if [ -z "$LATEST" ]; then
-          echo "No red team logs found in {{.LOG_DIR}}"
-          exit 1
-        fi
-
-        echo "📋 Red team log: $LATEST"
-        echo "======================================================================"
-
-        if [ "{{.FOLLOW}}" = "true" ]; then
-          tail -f "$LATEST"
-        else
-          tail -n {{.LINES}} "$LATEST"
-        fi
-
-  ares:logs:clean:
-    desc: Remove all local agent logs
-    cmds:
-      - |
-        read -p "Delete all logs in {{.LOG_DIR}}? (y/N) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-          rm -rf {{.LOG_DIR}}/*.log
-          echo "✅ Logs cleaned"
-        fi
+      - task: remote:logs
+        vars:
+          ROLE: '{{.ROLE}}'
+          FOLLOW: '{{.FOLLOW}}'
+          LINES: '{{.LINES}}'
 
   ares:version:
     desc: Show Ares version information
@@ -638,7 +533,7 @@ tasks:
     internal: true
     vars:
       PROFILE: '{{.PROFILE | default "lab"}}'
-      REGION: '{{.REGION | default "us-west-2"}}'
+      REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - |
         # Check if AWS CLI is installed
@@ -673,7 +568,7 @@ tasks:
     vars:
       TARGET: '{{.TARGET | default ""}}'
       PROFILE: '{{.PROFILE | default "lab"}}'
-      REGION: '{{.REGION | default "us-west-2"}}'
+      REGION: '{{.REGION | default "us-west-1"}}'
       REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
     preconditions:
       - sh: test -n "{{.TARGET}}"
@@ -781,7 +676,7 @@ tasks:
       RESUME: '{{.RESUME | default "false"}}'
       # Target resolution (where the AD targets live)
       TARGET_PROFILE: '{{.TARGET_PROFILE | default "lab"}}'
-      TARGET_REGION: '{{.TARGET_REGION | default "us-west-2"}}'
+      TARGET_REGION: '{{.TARGET_REGION | default "us-west-1"}}'
       # K8s cluster (where the agents run)
       K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
       REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
@@ -882,6 +777,25 @@ tasks:
       # Create log directory
       - cmd: mkdir -p {{.LOG_DIR}}
         silent: true
+
+      # Pin workers to this operation ID to avoid auto-discovery drift
+      - cmd: |
+          echo "🔧 Setting OPERATION_ID on worker deployments..."
+          for role in enum cracker acl privesc lateral poisoning; do
+            DEPLOYS=$(kubectl get deploy -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role=$role -o name 2>/dev/null)
+            if [ -z "$DEPLOYS" ]; then
+              echo "   ⚠️  No deployments found for role: $role"
+              continue
+            fi
+            kubectl set env -n {{.K8S_NAMESPACE}} $DEPLOYS OPERATION_ID="{{.OPERATION_ID_COMPUTED}}"
+          done
+          echo "⏳ Waiting for worker rollouts..."
+          for role in enum cracker acl privesc lateral poisoning; do
+            for deploy in $(kubectl get deploy -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role=$role -o name 2>/dev/null); do
+              kubectl rollout status -n {{.K8S_NAMESPACE}} "$deploy"
+            done
+          done
+        silent: false
 
       # Submit operation
       - cmd: |
@@ -1021,6 +935,84 @@ tasks:
                 print(f\"  {op['operation_id']}: checkpoint at {op['checkpoint_time']}\")
 
             await recovery.stop()
+
+        asyncio.run(main())
+        "
+
+  ares:red:multi:current:
+    desc: "Print current multi-agent operation ID (prefer running, fallback to latest)"
+    vars:
+      K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
+    cmds:
+      - |
+        REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+        if [ -n "$REDIS_PASS" ]; then
+          REDIS_URL="redis://:${REDIS_PASS}@redis:6379"
+        else
+          REDIS_URL="redis://redis:6379"
+        fi
+
+        kubectl exec -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -c "
+        import asyncio
+        from datetime import datetime
+
+        import redis.asyncio as redis
+
+        from ares.core.task_queue import RedisTaskQueue
+
+        def _pick_latest(items):
+            with_time = [item for item in items if item[0] is not None]
+            if with_time:
+                with_time.sort(key=lambda item: item[0], reverse=True)
+                return with_time[0][1]
+            items.sort(key=lambda item: item[1])
+            return items[0][1]
+
+        async def main():
+            client = redis.from_url('$REDIS_URL', decode_responses=True)
+            await client.ping()
+
+            running = []
+            async for key in client.scan_iter(f\"{RedisTaskQueue.LOCK_PREFIX}:*\"):
+                parts = key.split(':', 2)
+                if len(parts) < 3:
+                    continue
+                op_id = parts[2]
+                checkpoint_key = f'ares:operation:{op_id}:checkpoint_time'
+                checkpoint = await client.get(checkpoint_key)
+                checkpoint_time = None
+                if checkpoint:
+                    try:
+                        checkpoint_time = datetime.fromisoformat(checkpoint)
+                    except Exception:
+                        checkpoint_time = None
+                running.append((checkpoint_time, op_id))
+
+            if running:
+                print(_pick_latest(running))
+                return
+
+            operations = []
+            async for key in client.scan_iter('ares:operation:*:state'):
+                parts = key.split(':')
+                if len(parts) < 3:
+                    continue
+                op_id = parts[2]
+                checkpoint_key = f'ares:operation:{op_id}:checkpoint_time'
+                checkpoint = await client.get(checkpoint_key)
+                checkpoint_time = None
+                if checkpoint:
+                    try:
+                        checkpoint_time = datetime.fromisoformat(checkpoint)
+                    except Exception:
+                        checkpoint_time = None
+                operations.append((checkpoint_time, op_id))
+
+            if operations:
+                print(_pick_latest(operations))
+                return
+
+            print('No operations found')
 
         asyncio.run(main())
         "
@@ -1342,7 +1334,7 @@ tasks:
       LINES: '{{.LINES | default "100"}}'
       FOLLOW: '{{.FOLLOW | default "false"}}'
       PROFILE: '{{.PROFILE | default "lab"}}'
-      REGION: '{{.REGION | default "us-west-2"}}'
+      REGION: '{{.REGION | default "us-west-1"}}'
     deps:
       - task: check-aws-auth
         vars:

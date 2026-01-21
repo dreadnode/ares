@@ -241,17 +241,10 @@ def validate_evidence_value(value: str) -> tuple[bool, str | None]:
     normalized_value = value.lower().strip()
 
     for stored in reversed(_recent_results):
+        # Exact match only
         if normalized_value in stored.extracted_values:
             logger.info(f"Evidence '{value[:50]}...' validated against query {stored.query_id}")
             return True, stored.query_id
-
-        # Also do a substring search in extracted values for partial matches
-        for extracted in stored.extracted_values:
-            if normalized_value in extracted or extracted in normalized_value:
-                logger.info(
-                    f"Evidence '{value[:50]}...' partially validated against query {stored.query_id}"
-                )
-                return True, stored.query_id
 
     logger.warning(f"Evidence '{value[:50]}...' could not be validated against recent queries")
     return False, None

@@ -12,7 +12,8 @@ operation:
 # Agent configurations
 agents:
   orchestrator:
-    model: "claude-sonnet-4-20250514"
+    model: "gpt-5.2"
+    # model: "claude-sonnet-4-20250514"
     max_steps: 200
     pod_selector: "ares.dreadnode.io/role=enum"
     tools:
@@ -33,7 +34,8 @@ agents:
       - announce_domain_admin
 
   enum:
-    model: "claude-sonnet-4-20250514"
+    model: "gpt-5.2"
+    # model: "claude-sonnet-4-20250514"
     max_steps: 100
     pod_selector: "ares.dreadnode.io/role=enum"
     capabilities:
@@ -46,7 +48,8 @@ agents:
       - enum4linux
 
   cracker:
-    model: "claude-sonnet-4-20250514"
+    model: "gpt-5.2"
+    # model: "claude-sonnet-4-20250514"
     max_steps: 50
     pod_selector: "ares.dreadnode.io/role=cracker"
     capabilities:
@@ -55,7 +58,8 @@ agents:
       - ntlmrelayx
 
   acl:
-    model: "claude-sonnet-4-20250514"
+    model: "gpt-5.2"
+    # model: "claude-sonnet-4-20250514"
     max_steps: 50
     pod_selector: "ares.dreadnode.io/role=acl"
     capabilities:
@@ -66,7 +70,8 @@ agents:
       - writedacl_abuse
 
   privesc:
-    model: "claude-sonnet-4-20250514"
+    model: "gpt-5.2"
+    # model: "claude-sonnet-4-20250514"
     max_steps: 100
     pod_selector: "ares.dreadnode.io/role=privesc"
     capabilities:
@@ -79,8 +84,9 @@ agents:
       - shadow_credentials
 
   lateral:
-    model: "claude-sonnet-4-20250514"
-    max_steps: 100
+    model: "gpt-5.2"
+    # model: "claude-sonnet-4-20250514"
+    max_steps: 200
     pod_selector: "ares.dreadnode.io/role=lateral"
     capabilities:
       - psexec
@@ -92,7 +98,8 @@ agents:
       - pass_the_ticket
 
   poisoning:
-    model: "claude-sonnet-4-20250514"
+    model: "gpt-5.2"
+    # model: "claude-sonnet-4-20250514"
     max_steps: 30
     pod_selector: "ares.dreadnode.io/role=poison"
     capabilities:
@@ -101,7 +108,8 @@ agents:
       - ntlmrelayx
 
   atomic:
-    model: "claude-sonnet-4-20250514"
+    model: "gpt-5.2"
+    # model: "claude-sonnet-4-20250514"
     max_steps: 50
     pod_selector: "ares.dreadnode.io/role=atomic"
     capabilities:
@@ -113,7 +121,7 @@ timeouts:
   agent_heartbeat: 30  # seconds - agent considered offline after this
   task_timeout: 300  # seconds - default task timeout
   operation_timeout: 7200  # seconds - 2 hours max operation time
-  lateral_movement: 60  # seconds
+  lateral_movement: 180  # seconds
   hash_cracking: 600  # seconds - 10 minutes
   exploitation: 300  # seconds
 

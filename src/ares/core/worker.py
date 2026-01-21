@@ -24,6 +24,7 @@ from ares.core.config import get_redis_url
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.exceptions import AuthenticationError, ConfigurationError, CriticalWorkerError
 from ares.core.factories.red_agents import create_agent_info, create_specialized_agent
+from ares.core.litellm_env import configure_litellm_env
 from ares.core.messages import (
     AgentMessage,
     DomainAdminAchieved,
@@ -31,8 +32,9 @@ from ares.core.messages import (
     MessageType,
     OperationComplete,
 )
-from ares.core.models import AgentRole  # noqa: TC001 - used at runtime
+from ares.core.models import AgentRole
 from ares.core.task_queue import RedisTaskQueue, TaskMessage
+from ares.tools.red import CrackerCallbackTools, LateralCallbackTools
 
 if TYPE_CHECKING:
     from dreadnode.agent import Agent
@@ -171,6 +173,55 @@ async def discover_active_operation(  # noqa: PLR0912
     finally:
         # Ensure cleanup on any exit path
         await _cleanup_client()
+
+
+async def get_operation_model(redis_url: str, operation_id: str) -> str | None:
+    """Fetch the model configured for a specific operation from Redis."""
+    try:
+        import redis.asyncio as redis_async
+    except ImportError:
+        logger.error("redis package not installed, cannot resolve operation model")
+        return None
+
+    client = redis_async.from_url(redis_url, decode_responses=True)
+    try:
+        return await client.get(f"ares:operation:{operation_id}:model")
+    except Exception as e:
+        logger.warning(f"Failed to read operation model for {operation_id}: {e}")
+        return None
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+
+async def get_operation_model_overrides(redis_url: str, operation_id: str) -> dict[str, str] | None:
+    """Fetch model override env vars for a specific operation from Redis."""
+    try:
+        import redis.asyncio as redis_async
+    except ImportError:
+        logger.error("redis package not installed, cannot resolve operation model overrides")
+        return None
+
+    client = redis_async.from_url(redis_url, decode_responses=True)
+    try:
+        raw = await client.get(f"ares:operation:{operation_id}:model_overrides")
+        if not raw:
+            return None
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items() if v}
+        logger.warning("Unexpected model overrides payload type: {}", type(data))
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to read model overrides for {operation_id}: {e}")
+        return None
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
 
 
 # Mapping of message types to task prompt generators (for dispatcher-based messaging)
@@ -349,6 +400,35 @@ def _extract_structured_payload(result_text: str) -> dict[str, Any] | None:
     return payload
 
 
+def _extract_asrep_hashes(result_text: str) -> list[dict[str, str]]:
+    """Extract Kerberos AS-REP hashes from raw tool output."""
+    hashes: list[dict[str, str]] = []
+    matches = re.findall(
+        r"(\$krb5asrep\$\d+\$[^\s:$]+@[^\s:$]+:[0-9a-fA-F]{32}\$[0-9a-fA-F]+)",
+        result_text,
+    )
+    for value in matches:
+        username = "Unknown"
+        domain = ""
+        parts = value.split("$", 3)
+        if len(parts) >= 4:
+            user_realm_part = parts[3]
+            user_realm = user_realm_part.split(":", 1)[0]
+            if "@" in user_realm:
+                username, domain = user_realm.split("@", 1)
+            elif user_realm:
+                username = user_realm
+        hashes.append(
+            {
+                "username": username,
+                "hash_value": value,
+                "hash_type": "AS-REP",
+                "domain": domain,
+            }
+        )
+    return hashes
+
+
 class RedisWorkerAgent:
     """
     Worker agent that polls Redis task queue for work.
@@ -466,7 +546,7 @@ class RedisWorkerAgent:
                     await asyncio.sleep(5)
                     retry_delay = 1.0  # Reset backoff for non-connection errors
 
-    async def _process_task(self, task: TaskMessage) -> None:
+    async def _process_task(self, task: TaskMessage) -> None:  # noqa: PLR0912
         """Process a task from the Redis queue."""
         self._current_task = task.task_id
         logger.info(f"[{self.agent_name}] Processing task {task.task_id}")
@@ -494,13 +574,36 @@ class RedisWorkerAgent:
             logger.info(f"[{self.agent_name}] Running agent for task {task.task_id}")
             result = await self.agent.run(prompt)
             result_text = self._extract_result(result)
+            agent_error = self._extract_agent_error(result)
 
-            result_payload = {"output": result_text, "task_type": task.task_type}
+            result_payload: dict[str, Any] = {"output": result_text, "task_type": task.task_type}
             structured = _extract_structured_payload(result_text)
             if structured:
                 for key in ("credential", "hash"):
                     if key in structured:
                         result_payload[key] = structured[key]
+            asrep_hashes = _extract_asrep_hashes(result_text)
+            if asrep_hashes:
+                existing = set()
+                if isinstance(result_payload.get("hash"), dict):
+                    existing.add(result_payload["hash"].get("hash_value"))
+                filtered = [h for h in asrep_hashes if h.get("hash_value") not in existing]
+                if filtered:
+                    if "hash" not in result_payload and len(filtered) == 1:
+                        result_payload["hash"] = filtered[0]
+                    else:
+                        result_payload["hashes"] = filtered
+
+            if agent_error:
+                await self.task_queue.send_result(
+                    task_id=task.task_id,
+                    success=False,
+                    result=result_payload,
+                    error=agent_error,
+                    worker_pod=self.pod_name,
+                )
+                logger.error(f"[{self.agent_name}] Task {task.task_id} failed: {agent_error}")
+                return
 
             # Send success result via Redis
             await self.task_queue.send_result(
@@ -607,6 +710,24 @@ class RedisWorkerAgent:
         if hasattr(result, "content"):
             return str(result.content)
         return str(result)
+
+    def _extract_agent_error(self, result: Any) -> str | None:
+        """Pull error details from an agent result without raising."""
+        error = getattr(result, "error", None)
+        if error:
+            return str(error)
+        last_error = getattr(result, "last_error", None)
+        if last_error:
+            return str(last_error)
+        stop_reason = getattr(result, "stop_reason", None)
+        failed = bool(getattr(result, "failed", False))
+        if failed and stop_reason:
+            return f"Agent failed (stop_reason={stop_reason})"
+        if failed:
+            return "Agent failed"
+        if stop_reason == "error":
+            return "Agent stopped with error"
+        return None
 
     async def _heartbeat_loop(self) -> None:
         """Send heartbeats to Redis with automatic reconnection on failure."""
@@ -771,12 +892,23 @@ class WorkerAgent:
             # Extract result from agent output
             result_text = self._extract_result(result)
 
-            result_payload = {"output": result_text, "task_type": msg.type.value}
+            result_payload: dict[str, Any] = {"output": result_text, "task_type": msg.type.value}
             structured = _extract_structured_payload(result_text)
             if structured:
                 for key in ("credential", "hash"):
                     if key in structured:
                         result_payload[key] = structured[key]
+            asrep_hashes = _extract_asrep_hashes(result_text)
+            if asrep_hashes:
+                existing = set()
+                if isinstance(result_payload.get("hash"), dict):
+                    existing.add(result_payload["hash"].get("hash_value"))
+                filtered = [h for h in asrep_hashes if h.get("hash_value") not in existing]
+                if filtered:
+                    if "hash" not in result_payload and len(filtered) == 1:
+                        result_payload["hash"] = filtered[0]
+                    else:
+                        result_payload["hashes"] = filtered
 
             # Report completion
             await self.dispatcher.complete_task(
@@ -882,20 +1014,16 @@ async def run_worker(  # noqa: PLR0912
         discovery_timeout: Max seconds to wait for operation discovery (default: None = wait forever).
         use_redis_queue: If True, poll Redis queue for tasks (Kubernetes mode).
     """
+    configure_litellm_env()
+
     # Resolve config defaults
     redis_url = redis_url or get_redis_url()
-    model = (
+    resolved_model = (
         model
         or os.getenv(f"ARES_AGENT_{role.value.upper()}_MODEL")
         or os.getenv("ARES_WORKER_MODEL")
         or os.getenv("ARES_MODEL")
     )
-    if not model:
-        logger.error(
-            "No model specified for worker. Provide a model argument or set "
-            "ARES_AGENT_<ROLE>_MODEL/ARES_WORKER_MODEL/ARES_MODEL."
-        )
-        return
 
     pod_name = os.environ.get("HOSTNAME", f"local-{role.value}")
     if not os.environ.get("ARES_ROLE"):
@@ -927,6 +1055,27 @@ async def run_worker(  # noqa: PLR0912
         logger.error("Operation ID required but not provided and discovery disabled")
         return
 
+    overrides = await get_operation_model_overrides(redis_url, operation_id)
+    if overrides:
+        role_key = f"ARES_AGENT_{role.value.upper()}_MODEL"
+        if overrides.get(role_key):
+            resolved_model = overrides[role_key]
+        elif overrides.get("ARES_WORKER_MODEL"):
+            resolved_model = overrides["ARES_WORKER_MODEL"]
+        elif overrides.get("ARES_MODEL"):
+            resolved_model = overrides["ARES_MODEL"]
+
+    if not resolved_model:
+        resolved_model = await get_operation_model(redis_url, operation_id)
+
+    if not resolved_model:
+        logger.error(
+            "No model specified for worker. Provide a model argument, set "
+            "ARES_AGENT_<ROLE>_MODEL/ARES_WORKER_MODEL/ARES_MODEL, "
+            "or submit an operation model."
+        )
+        return
+
     logger.info(f"Starting {role.value} worker for operation {operation_id}")
     logger.info(f"Pod: {pod_name}, Redis: {redis_url}, Redis Queue: {use_redis_queue}")
 
@@ -952,14 +1101,26 @@ async def run_worker(  # noqa: PLR0912
     agent_info = create_agent_info(role, pod_name=pod_name)
     await dispatcher.register(agent_info)
 
+    # Add role-specific callback tools
+    additional_tools: list[Any] = []
+    if role == AgentRole.CRACKER:
+        cracker_callbacks = CrackerCallbackTools()
+        cracker_callbacks.set_dispatcher(dispatcher)
+        additional_tools.append(cracker_callbacks)
+    elif role == AgentRole.LATERAL:
+        lateral_callbacks = LateralCallbackTools()
+        lateral_callbacks.set_dispatcher(dispatcher)
+        additional_tools.append(lateral_callbacks)
+
     # Create the specialized agent
     agent = create_specialized_agent(
         role=role,
-        model=model,
+        model=resolved_model,
         shared_state=shared_state,
         dispatcher=dispatcher,
         pod_name=pod_name,
         max_steps=max_steps,
+        additional_tools=additional_tools if additional_tools else None,
     )
 
     try:

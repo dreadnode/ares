@@ -1,11 +1,11 @@
 """Tests for orchestrator tools module."""
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ares.core.models import SharedRedTeamState, Target, TaskInfo, TaskStatus
+from ares.core.models import Credential, SharedRedTeamState, Target, TaskInfo, TaskStatus
 from ares.tools.red.orchestrator import OrchestratorTools
 
 
@@ -14,6 +14,7 @@ def mock_dispatcher():
     """Create a mock dispatcher."""
     dispatcher = MagicMock()
     dispatcher.get_agent_status = MagicMock(return_value={})
+    dispatcher.publish_credential = AsyncMock(return_value=True)
     return dispatcher
 
 
@@ -22,7 +23,7 @@ def shared_state():
     """Create a shared state for testing."""
     return SharedRedTeamState(
         operation_id="test-op",
-        target=Target(ip="192.168.1.100", hostname="dc01"),
+        target=Target(ip="192.168.56.100", hostname="dc01"),
     )
 
 
@@ -122,6 +123,7 @@ class TestCleanupOrphanedTasks:
             created_at=now - timedelta(minutes=10),
             params={},
         )
+
         shared_state.pending_tasks["task_old_2"] = TaskInfo(
             task_id="task_old_2",
             task_type="lateral",
@@ -277,3 +279,91 @@ class TestCleanupOrphanedTasks:
         # Should include task type in output
         assert "crack" in result
         assert "task_001" in result
+
+
+class TestCredentialHandling:
+    """Tests for credential guardrails and reporting."""
+
+    def test_get_all_credentials_filters_placeholder_users(self, orchestrator_tools, shared_state):
+        """Ensure placeholder usernames are skipped in output."""
+        shared_state.all_credentials.extend(
+            [
+                Credential(
+                    username="(none)",
+                    password="hash123",  # pragma: allowlist secret
+                    domain="example.local",
+                    source="orchestrator:note",
+                ),
+                Credential(
+                    username="user1",
+                    password="password1",  # pragma: allowlist secret
+                    domain="example.local",
+                    source="username_as_password",
+                ),
+            ]
+        )
+
+        output = orchestrator_tools.get_all_credentials()
+        assert "example.local\\user1" in output
+        assert "example.local\\(none)" not in output
+
+    def test_get_all_credentials_only_invalid_returns_empty(self, orchestrator_tools, shared_state):
+        """If only invalid creds exist, return the empty message."""
+        shared_state.all_credentials.append(
+            Credential(
+                username="none",
+                password="hash123",  # pragma: allowlist secret
+                domain="example.local",
+                source="orchestrator:note",
+            )
+        )
+
+        output = orchestrator_tools.get_all_credentials()
+        assert output == "No credentials discovered yet"
+
+    @pytest.mark.asyncio
+    async def test_broadcast_credential_rejects_placeholder_username(self, orchestrator_tools):
+        """Reject placeholder usernames and avoid publishing."""
+        result = await orchestrator_tools.broadcast_credential(
+            username="(none)",
+            password="hash123",  # pragma: allowlist secret
+            domain="example.local",
+        )
+
+        assert "Invalid username" in result
+        orchestrator_tools.dispatcher.publish_credential.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_broadcast_credential_rejects_missing_secret(self, orchestrator_tools):
+        """Reject broadcast with no password/hash."""
+        result = await orchestrator_tools.broadcast_credential(
+            username="user1",
+            domain="example.local",
+        )
+
+        assert "Missing password/hash" in result
+        orchestrator_tools.dispatcher.publish_credential.assert_not_awaited()
+
+    def test_get_all_credentials_hides_no_creds_source_when_valid_exists(
+        self, orchestrator_tools, shared_state
+    ):
+        """Ensure 'no valid creds yet' source never surfaces once real creds exist."""
+        shared_state.all_credentials.extend(
+            [
+                Credential(
+                    username="(none)",
+                    password="hash123",  # pragma: allowlist secret
+                    domain="example.local",
+                    source="orchestrator:No valid creds yet; only unauthenticated enumeration performed.",
+                ),
+                Credential(
+                    username="user1",
+                    password="password1",  # pragma: allowlist secret
+                    domain="example.local",
+                    source="username_as_password",
+                ),
+            ]
+        )
+
+        output = orchestrator_tools.get_all_credentials()
+        assert "No valid creds yet" not in output

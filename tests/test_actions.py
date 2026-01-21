@@ -35,7 +35,7 @@ class TestCompletionTools:
                 Evidence(
                     id="ev-1",
                     type="ip_address",
-                    value="192.168.1.100",
+                    value="192.168.56.100",
                     source="Query",
                     timestamp=datetime.now(timezone.utc),
                     pyramid_level=PyramidLevel.IP_ADDRESSES,
@@ -199,7 +199,7 @@ class TestGenerateFallbackSynopsis:
             Evidence(
                 id="ev-test",
                 type="ip",
-                value="10.0.0.1",
+                value="192.168.56.1",
                 source="test",
                 timestamp=datetime.now(timezone.utc),
                 pyramid_level=PyramidLevel.IP_ADDRESSES,

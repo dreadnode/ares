@@ -327,7 +327,7 @@ class TestEdgeCases:
     ):
         """Test report with special characters in target."""
         red_team_state.target = Target(
-            ip="192.168.1.100",
+            ip="192.168.56.100",
             hostname="server-01.domain.local",
             domain="domain.local",
             os="Windows Server 2019 <Special>",

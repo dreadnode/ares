@@ -25,6 +25,39 @@ app = cyclopts.App(
 )
 
 
+def _persist_report(
+    status: dict[str, object],
+    *,
+    operation_id: str,
+    report_dir: Path | None = None,
+) -> Path | None:
+    result_payload = status.get("result") if isinstance(status.get("result"), dict) else None
+    report_markdown = None
+    report_path = None
+    if result_payload:
+        report_markdown = result_payload.get("report_markdown")
+        report_path = result_payload.get("report_path")
+    else:
+        report_markdown = status.get("report_markdown")
+        report_path = status.get("report_path")
+
+    if not report_markdown:
+        return None
+
+    resolved_dir = Path(report_dir or "./reports").resolve()
+    resolved_dir.mkdir(parents=True, exist_ok=True)
+
+    if isinstance(report_path, str) and report_path:
+        filename = Path(report_path).name
+    else:
+        filename = f"{operation_id}_report.md"
+
+    output_path = resolved_dir / filename
+    output_path.write_text(str(report_markdown))
+    logger.success(f"Report saved: {output_path}")
+    return output_path
+
+
 async def _stream_orchestrator_logs(
     namespace: str,
     log_path: Path | None,
@@ -209,6 +242,7 @@ async def submit(
 
         if wait and result["status"] == "completed":
             logger.success("Operation completed successfully!")
+            _persist_report(result, operation_id=operation_id)
         elif wait and result["status"] == "failed":
             logger.error(f"Operation failed: {result.get('error', 'Unknown error')}")
 
@@ -259,6 +293,7 @@ async def status(
 
             if result["status"] == "completed":
                 logger.success("Operation completed successfully")
+                _persist_report(result, operation_id=operation_id)
             elif result["status"] == "failed":
                 logger.error(f"Operation failed: {result.get('error', 'Unknown')}")
         else:
@@ -296,6 +331,7 @@ async def wait_for(
 
         if result["status"] == "completed":
             logger.success("Operation completed successfully!")
+            _persist_report(result, operation_id=operation_id)
         elif result["status"] == "failed":
             logger.error(f"Operation failed: {result.get('error', 'Unknown error')}")
 

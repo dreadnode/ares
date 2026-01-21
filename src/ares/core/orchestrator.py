@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import dreadnode as dn
@@ -27,12 +28,15 @@ from ares.core.models import (
     AgentInfo,
     AgentRole,
     Credential,
+    InvestigationStage,
+    RedTeamState,
     SharedRedTeamState,
     Target,
 )
 from ares.core.recovery import OperationRecoveryManager
 from ares.core.task_queue import RedisTaskQueue
 from ares.core.workflows import exploitation_workflow
+from ares.reports.redteam import RedTeamReportGenerator
 from ares.tools.red.network import (
     BloodHoundTools,
     CertipyTools,
@@ -169,7 +173,6 @@ async def _prime_operation(
         logger.info("Initial checkpoint saved - workers can now discover operation")
     else:
         logger.warning("Failed to save initial checkpoint - workers may not discover operation")
-    _run_mandatory_user_enum(target_ips, target_domain, dispatcher.shared_state)
 
 
 def _log_orchestrator_result(result: rg.RunResult, model: str) -> None:
@@ -186,33 +189,98 @@ def _log_orchestrator_result(result: rg.RunResult, model: str) -> None:
     log_fn(log_msg)
 
 
-@dn.tool
-def complete_operation(summary: str) -> str:
+def _create_completion_tools(
+    shared_state: SharedRedTeamState,
+    dispatcher: RedTeamDispatcher,
+) -> tuple[Any, Any]:
     """
-    Mark the multi-agent red team operation as complete.
+    Create the completion tools that can access shared state.
 
-    Use this tool when you have:
-    - Achieved domain admin access OR exhausted all attack paths
-    - Coordinated with all specialized agents
-    - Collected all available credentials and hashes
-    - Generated golden ticket (if krbtgt hash was found)
-
-    Args:
-        summary: Executive summary of the operation including:
-            - All domain administrators compromised
-            - Attack paths used
-            - Total credentials obtained
-            - Hosts compromised
-            - Key vulnerabilities exploited
+    These tools are used as stop conditions for the orchestrator agent.
+    They need to modify the shared state, so we create them as closures.
 
     Returns:
-        Confirmation message
-
-    Example:
-        >>> complete_operation("Domain admin achieved via ADCS ESC1...")
+        Tuple of (complete_operation, announce_domain_admin) tools
     """
-    logger.success(f"🎯 Multi-agent operation completed: {summary}")
-    return f"✓ Operation marked as complete. Summary: {summary}"
+
+    @dn.tool
+    def complete_operation(summary: str) -> str:
+        """
+        Mark the multi-agent red team operation as complete.
+
+        Use this tool when you have:
+        - Achieved domain admin access OR exhausted all attack paths
+        - Coordinated with all specialized agents
+        - Collected all available credentials and hashes
+        - Generated golden ticket (if krbtgt hash was found)
+
+        Args:
+            summary: Executive summary of the operation including:
+                - All domain administrators compromised
+                - Attack paths used
+                - Total credentials obtained
+                - Hosts compromised
+                - Key vulnerabilities exploited
+
+        Returns:
+            Confirmation message
+
+        Example:
+            >>> complete_operation("Domain admin achieved via ADCS ESC1...")
+        """
+        shared_state.completed = True
+        logger.success(f"🎯 Multi-agent operation completed: {summary}")
+        return f"✓ Operation marked as complete. Summary: {summary}"
+
+    @dn.tool
+    async def announce_domain_admin(
+        domain: str,
+        username: str,
+        credential_type: str,
+        attack_path: str,
+    ) -> str:
+        """
+        Announce successful achievement of Domain Admin privileges.
+
+        Use this tool when you have confirmed Domain Admin access through:
+        - Valid DA credentials (password or hash)
+        - Forged Golden Ticket with krbtgt hash
+        - Successful DA-level command execution (e.g., DCSync, remote code execution on DC)
+
+        Args:
+            domain: Target domain name
+            username: Domain Admin username achieved
+            credential_type: Type of credential (password, hash, golden_ticket)
+            attack_path: Brief description of the attack path used to achieve DA
+
+        Returns:
+            Confirmation message
+
+        Example:
+            >>> await announce_domain_admin(
+            ...     domain="example.local",
+            ...     username="Administrator",
+            ...     credential_type="password",
+            ...     attack_path="ADCS ESC1 exploit -> cert auth"
+            ... )
+        """
+        await dispatcher.announce_domain_admin(
+            username=username,
+            domain=domain,
+            attack_path=attack_path,
+            credential_type=credential_type,
+            source_agent="ares-orchestrator",
+        )
+        logger.success(
+            f"🎯 DOMAIN ADMIN ACHIEVED! Domain: {domain}, User: {username}, "
+            f"Type: {credential_type}, Path: {attack_path}"
+        )
+        return (
+            f"✓ Domain Admin access confirmed for {domain}\\{username} "
+            f"via {credential_type} (attack path: {attack_path})"
+        )
+
+    return complete_operation, announce_domain_admin
 
 
 async def run_multi_agent_operation(
@@ -227,6 +295,7 @@ async def run_multi_agent_operation(
     max_steps: int = 200,
     checkpoint_interval: int = 60,
     openai_api_key: str | None = None,
+    report_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """
     Main entry point for multi-agent red team operations.
@@ -243,6 +312,7 @@ async def run_multi_agent_operation(
         max_steps: Maximum agent steps
         checkpoint_interval: Seconds between checkpoints
         openai_api_key: Optional OpenAI API key to bind directly to the generator
+        report_dir: Directory to write the final report (default: ./reports)
 
     Returns:
         Operation results summary
@@ -316,10 +386,7 @@ async def run_multi_agent_operation(
     )
 
     try:
-        # Do initial checkpoint so workers can discover the operation BEFORE
-        # calling _run_mandatory_user_enum (which is synchronous and blocks the event loop).
-        # The background checkpoint task won't get a chance to run until after
-        # _run_mandatory_user_enum returns.
+        # Do initial checkpoint so workers can discover the operation.
         await _prime_operation(recovery, dispatcher, target_ips, target_domain)
 
         # Create the orchestrator agent with tools
@@ -332,6 +399,19 @@ async def run_multi_agent_operation(
 
         logger.info(f"Starting orchestrator for {target_domain}")
         logger.info(f"Initial prompt:\n{initial_prompt}")
+
+        # Start mandatory user enumeration once the operation commences.
+        tasks.append(
+            asyncio.create_task(
+                asyncio.to_thread(
+                    _run_mandatory_user_enum,
+                    target_ips,
+                    target_domain,
+                    dispatcher.shared_state,
+                ),
+                name="mandatory_user_enum",
+            )
+        )
 
         # Run the orchestrator agent - this drives the entire operation
         with dn.run(tags=["multi-agent-operation", target_domain]):
@@ -349,12 +429,55 @@ async def run_multi_agent_operation(
 
             _log_orchestrator_result(result, model)
 
-        # Wait for any remaining background tasks
-        await _wait_for_completion(dispatcher, tasks, max_runtime=300.0)
+        stop_reason = getattr(result, "stop_reason", None)
+        if (
+            stop_reason == "max_steps_reached"
+            and not dispatcher.shared_state.pending_tasks
+            and not dispatcher.shared_state.completed
+        ):
+            dispatcher.shared_state.completed = True
+            logger.warning(
+                "Orchestrator stopped ({}) with no pending tasks; marking operation complete",
+                stop_reason,
+            )
+
+        if not dispatcher.shared_state.completed:
+            unexploited = [
+                vuln_id
+                for vuln_id in dispatcher.shared_state.discovered_vulnerabilities
+                if vuln_id not in dispatcher.shared_state.exploited_vulnerabilities
+            ]
+            if not dispatcher.shared_state.pending_tasks and not unexploited:
+                dispatcher.shared_state.completed = True
+                if stop_reason == "error":
+                    logger.warning(
+                        "Orchestrator stopped with error; no pending tasks or unexploited "
+                        "vulnerabilities, marking operation complete"
+                    )
+                else:
+                    logger.info(
+                        "No pending tasks or unexploited vulnerabilities; marking operation complete"
+                    )
+
+        if dispatcher.shared_state.completed:
+            logger.info("Operation marked complete; skipping post-run wait")
+        else:
+            # Wait for any remaining background tasks
+            await _wait_for_completion(dispatcher, tasks, max_runtime=300.0)
 
         # Get final state
         final_state = dispatcher.shared_state
         end_time = datetime.now(timezone.utc)
+
+        report_path = None
+        report_markdown = None
+        try:
+            report_path, report_markdown = _generate_multi_agent_report(
+                final_state,
+                report_dir=report_dir,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to generate report for {operation_id}: {e}")
 
         return {
             "operation_id": operation_id,
@@ -371,6 +494,8 @@ async def run_multi_agent_operation(
             "start_time": start_time.isoformat(),
             "end_time": end_time.isoformat(),
             "duration_seconds": (end_time - start_time).total_seconds(),
+            "report_path": str(report_path) if report_path else None,
+            "report_markdown": report_markdown,
         }
 
     except Exception as e:
@@ -401,6 +526,7 @@ async def _create_orchestrator_agent(
     Create the orchestrator agent that coordinates the multi-agent operation.
 
     The orchestrator has:
+    - Completion tools (complete_operation, announce_domain_admin) for stop conditions
     - OrchestratorTools for dispatching tasks to specialized agents
     - NetworkEnumerationTools for initial reconnaissance
     - CredentialDiscoveryTools for finding quick wins
@@ -417,6 +543,9 @@ async def _create_orchestrator_agent(
         Configured orchestrator agent
     """
     shared_state = dispatcher.shared_state
+
+    # Create completion tools that can modify shared state (for stop conditions)
+    complete_operation, announce_domain_admin = _create_completion_tools(shared_state, dispatcher)
 
     # Create orchestrator tools with dispatcher wired in
     orchestrator_tools = OrchestratorTools()
@@ -444,6 +573,8 @@ async def _create_orchestrator_agent(
     reporting_tools.set_state(shared_state)  # type: ignore[arg-type]
 
     tools = [
+        complete_operation,  # Stop condition tool for marking operation complete
+        announce_domain_admin,  # Stop condition tool for announcing DA achievement
         orchestrator_tools,  # Coordination tools (dispatch_*, get_*, broadcast_*)
         network_tools,  # nmap, enum4linux, crackmapexec
         cred_discovery_tools,  # ldap_search_descriptions, password_spray, etc.
@@ -451,7 +582,6 @@ async def _create_orchestrator_agent(
         certipy_tools,  # certipy_find for ADCS enumeration
         bloodhound_tools,  # run_bloodhound for attack path discovery
         reporting_tools,  # record_finding, generate_report
-        complete_operation,  # Stop condition tool
     ]
 
     # Load orchestrator-specific instructions
@@ -476,6 +606,47 @@ async def _create_orchestrator_agent(
         ],
         thread=Thread(),  # type: ignore[call-arg]
     )
+
+
+def _generate_multi_agent_report(
+    state: SharedRedTeamState,
+    *,
+    report_dir: str | Path | None,
+) -> tuple[Path, str]:
+    report_state = _build_redteam_report_state(state)
+    resolved_report_dir = Path(report_dir or "./reports").resolve()
+    resolved_report_dir.mkdir(parents=True, exist_ok=True)
+
+    report_generator = RedTeamReportGenerator()
+    report_content = report_generator.generate(report_state)
+
+    report_filename = f"{state.operation_id}_report.md"
+    report_path = resolved_report_dir / report_filename
+    report_path.write_text(report_content)
+    logger.success(f"Red team report generated: {report_path}")
+    return report_path, report_content
+
+
+def _build_redteam_report_state(state: SharedRedTeamState) -> RedTeamState:
+    target = state.target or Target(ip="", domain="")
+    report_state = RedTeamState(operation_id=state.operation_id, target=target)
+    report_state.completed = state.completed
+    report_state.started_at = state.started_at
+    report_state.stage = InvestigationStage.SYNTHESIS
+    report_state.hosts = list(state.all_hosts)
+    report_state.users = list(state.all_users)
+    report_state.credentials = list(state.all_credentials)
+    report_state.hashes = list(state.all_hashes)
+    report_state.shares = list(state.all_shares)
+    report_state.has_domain_admin = state.has_domain_admin
+    report_state.has_golden_ticket = state.has_golden_ticket
+    report_state.timeline = list(state.operation_timeline)
+    report_state.identified_techniques = set(state.identified_techniques)
+    report_state.weaknesses = [
+        f"{v.vuln_type} on {v.target} ({v.vuln_id})"
+        for v in state.discovered_vulnerabilities.values()
+    ]
+    return report_state
 
 
 async def _create_agent_ensemble(
@@ -693,9 +864,12 @@ async def _wait_for_completion(
             logger.warning(f"Operation reached max runtime ({max_runtime}s)")
             break
 
-        # Check for domain admin
+        # Check for domain admin or explicit completion
         if dispatcher.shared_state.has_domain_admin:
             logger.success("Domain Admin achieved! Operation complete.")
+            break
+        if dispatcher.shared_state.completed:
+            logger.success("Operation marked complete.")
             break
 
         # Check for failed background tasks
@@ -743,14 +917,23 @@ Your objectives:
 4. If no creds, run Kerberos user enumeration with kerberos_user_enum_noauth
 5. Run certipy_find to discover ADCS vulnerabilities
 6. Run run_bloodhound for ACL analysis and attack path discovery
-7. Coordinate with specialized agents to exploit discovered vulnerabilities
-8. Use trigger_credential_expansion after getting new credentials
-9. Continue until Domain Admin access achieved
+7. **CRITICAL CREDENTIAL EXPANSION (run IMMEDIATELY after finding ANY credentials):**
+   - Use secretsdump on ALL domain controllers to dump hashes
+   - Use kerberoast to find service accounts with weak passwords
+   - Use asrep_roast to find accounts without Kerberos pre-auth
+   - Check secretsdump output for krbtgt or Administrator hashes
+   - If krbtgt hash found → Generate golden ticket → Announce Domain Admin
+   - If Administrator hash found → Test DA access → Announce Domain Admin
+8. Coordinate with specialized agents to exploit discovered vulnerabilities
+9. Use trigger_credential_expansion after getting new credentials
+10. Continue until Domain Admin access achieved
 
 Priority vulnerabilities to look for:
 - Passwords in LDAP description fields (QUICK WIN - check first!)
 - Username=password combinations (QUICK WIN)
 - Weak/common passwords via spraying (QUICK WIN)
+- **krbtgt hash via secretsdump (HIGHEST PRIORITY - instant DA)**
+- **Administrator hash via secretsdump (VERY HIGH PRIORITY)**
 - ADCS ESC1-ESC8
 - Kerberoastable accounts
 - AS-REP roastable accounts
@@ -758,10 +941,18 @@ Priority vulnerabilities to look for:
 - ACL abuse paths (GenericAll, WriteDACL, etc.)
 - MSSQL linked servers
 
+CRITICAL WORKFLOW AFTER FINDING CREDENTIALS:
+1. Run secretsdump against all DCs immediately
+2. Run kerberoast and asrep_roast with the credentials
+3. Look for krbtgt or Administrator in secretsdump output
+4. Crack any discovered hashes with dispatch_crack_hash
+5. Test new credentials and repeat steps 1-4
+
 Remember:
 - Use dispatch_* tools to route tasks to specialized agents
 - Use queue_vulnerability_for_exploitation to queue discovered vulnerabilities
 - Use trigger_credential_expansion after finding new credentials
+- **ALWAYS run secretsdump after finding ANY credentials**
 - Monitor progress with get_operation_summary
 - Announce domain admin when achieved with announce_domain_admin
 

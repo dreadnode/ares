@@ -31,7 +31,7 @@ def sample_red_activity() -> RedTeamActivity:
         technique_id="T1059.001",
         technique_name="PowerShell",
         action="Executed PowerShell command for reconnaissance",
-        target_ip="192.168.1.100",
+        target_ip="192.168.56.100",
         target_host="server01",
         credential_used="admin",
         success=True,
@@ -47,7 +47,7 @@ def sample_blue_detection() -> BlueTeamDetection:
         alert_name="Suspicious PowerShell Activity",
         technique_id="T1059.001",
         severity="high",
-        target_ip="192.168.1.100",
+        target_ip="192.168.56.100",
         target_host="server01",
         investigation_id="inv-001",
         status="completed",
@@ -66,7 +66,7 @@ class TestRedTeamActivity:
 
         assert "2024-01-15" in key
         assert "T1059.001" in key
-        assert "192.168.1.100" in key
+        assert "192.168.56.100" in key
 
     def test_key_uniqueness(self) -> None:
         """Test that different activities have different keys."""
@@ -75,7 +75,7 @@ class TestRedTeamActivity:
             technique_id="T1059.001",
             technique_name="PowerShell",
             action="Action 1",
-            target_ip="192.168.1.100",
+            target_ip="192.168.56.100",
             target_host=None,
             credential_used=None,
             success=True,
@@ -85,7 +85,7 @@ class TestRedTeamActivity:
             technique_id="T1059.001",
             technique_name="PowerShell",
             action="Action 2",
-            target_ip="192.168.1.100",
+            target_ip="192.168.56.100",
             target_host=None,
             credential_used=None,
             success=True,
@@ -284,7 +284,7 @@ class TestRedBlueCorrelator:
             alert_name="Late Detection",
             technique_id="T1059.001",
             severity="high",
-            target_ip="192.168.1.100",
+            target_ip="192.168.56.100",
             target_host=None,
             investigation_id="inv-late",
             status="completed",
@@ -312,7 +312,7 @@ class TestRedBlueCorrelator:
             alert_name="Different Technique",
             technique_id="T1003.001",  # Different technique
             severity="high",
-            target_ip="192.168.1.100",
+            target_ip="192.168.56.100",
             target_host=None,
             investigation_id="inv-001",
             status="completed",
@@ -405,7 +405,7 @@ class TestRedBlueCorrelator:
             alert_name="Unrelated Alert",
             technique_id="T9999",  # No matching red activity
             severity="low",
-            target_ip="10.0.0.1",  # Different target
+            target_ip="192.168.56.1",  # Different target
             target_host=None,
             investigation_id="inv-fp",
             status="completed",
@@ -421,7 +421,7 @@ class TestRedBlueCorrelator:
                     alert_name="Matching Alert",
                     technique_id="T1059.001",
                     severity="high",
-                    target_ip="192.168.1.100",
+                    target_ip="192.168.56.100",
                     target_host=None,
                     investigation_id="inv-001",
                     status="completed",
@@ -505,7 +505,7 @@ class TestRedBlueCorrelator:
                 technique_id="T1059.001",
                 technique_name="PowerShell",
                 action="Action 1",
-                target_ip="192.168.1.100",
+                target_ip="192.168.56.100",
                 target_host=None,
                 credential_used=None,
                 success=True,
@@ -515,7 +515,7 @@ class TestRedBlueCorrelator:
                 technique_id="T1059.002",
                 technique_name="Script",
                 action="Action 2",
-                target_ip="192.168.1.100",
+                target_ip="192.168.56.100",
                 target_host=None,
                 credential_used=None,
                 success=True,
@@ -528,7 +528,7 @@ class TestRedBlueCorrelator:
                 alert_name="Alert 1",
                 technique_id="T1059.001",
                 severity="high",
-                target_ip="192.168.1.100",
+                target_ip="192.168.56.100",
                 target_host=None,
                 investigation_id="inv-1",
                 status="completed",
@@ -540,7 +540,7 @@ class TestRedBlueCorrelator:
                 alert_name="Alert 2",
                 technique_id="T1059.002",
                 severity="high",
-                target_ip="192.168.1.100",
+                target_ip="192.168.56.100",
                 target_host=None,
                 investigation_id="inv-2",
                 status="completed",
@@ -588,7 +588,7 @@ class TestRedBlueCorrelator:
         report_content = """# Red Team Operation Report
 
 **Operation ID**: op-test-001
-**Target**: 192.168.1.100
+**Target**: 192.168.56.100
 **Started**: 2024-01-15 10:00:00 UTC
 
 ### Hosts (3)
@@ -640,7 +640,7 @@ Source: credential dumping
 Alert payload contains:
 "startsAt": "2024-01-15T10:30:00Z"
 
-Target IP: 192.168.1.100
+Target IP: 192.168.56.100
 
 Technique: T1059.001
 
@@ -679,7 +679,7 @@ Technique: T1059.001
         red_report = temp_reports_dir / "redteam-op001.md"
         red_report.write_text("""# Red Team Report
 **Operation ID**: op001
-**Target**: 192.168.1.1
+**Target**: 192.168.56.1
 **Started**: 2024-01-15 10:00:00 UTC
 ### Hosts (1)
 ### Credentials (0)
@@ -750,7 +750,7 @@ class TestRedTeamReportParsingEdgeCases:
         content = """# Red Team Operation Report
 
 **Operation ID**: op-test
-**Target:** 192.168.1.1
+**Target:** 192.168.56.1
 **Started:** invalid-date-format
 
 ### Hosts (2)
@@ -772,7 +772,7 @@ class TestRedTeamReportParsingEdgeCases:
         content = """# Red Team Operation Report
 ## op-test
 
-**Target:** 192.168.1.1
+**Target:** 192.168.56.1
 **Started:** 2024-01-15 10:30:00 UTC
 
 ### Credentials (2)
@@ -799,7 +799,7 @@ Source: Secretsdump from DC
         content = """# Red Team Operation Report
 ## op-test
 
-**Target:** 192.168.1.1
+**Target:** 192.168.56.1
 **Started:** 2024-01-15 10:30:00 UTC
 
 ### Timeline of Key Events
@@ -827,7 +827,7 @@ Source: Secretsdump from DC
         content = """# Red Team Operation Report
 ## op-test
 
-**Target:** 192.168.1.1
+**Target:** 192.168.56.1
 
 ### Hosts (1)
 - host1
@@ -846,7 +846,7 @@ Source: Secretsdump from DC
         content = """# Red Team Operation Report
 ## op-test
 
-**Target:** 192.168.1.1
+**Target:** 192.168.56.1
 **Started:** 2024-01-15 10:30:00 UTC
 
 ### Credentials (1)
@@ -966,7 +966,7 @@ class TestGenerateReportMarkdownAdvanced:
                 technique_id="T1046",
                 technique_name="Network Service Discovery",
                 action="Scanned network for open ports",
-                target_ip="192.168.1.0/24",
+                target_ip="192.168.56.0/24",
                 target_host=None,
                 credential_used=None,
                 success=True,
@@ -1007,7 +1007,7 @@ class TestGenerateReportMarkdownAdvanced:
                 technique_id="T1003",
                 technique_name="OS Credential Dumping",
                 action="Dumped credentials via LSASS",
-                target_ip="192.168.1.100",
+                target_ip="192.168.56.100",
                 target_host="server01",
                 credential_used=None,
                 success=True,
@@ -1021,7 +1021,7 @@ class TestGenerateReportMarkdownAdvanced:
             alert_name="False Positive Alert",
             technique_id="T1071",
             severity="medium",
-            target_ip="192.168.1.50",
+            target_ip="192.168.56.50",
             target_host=None,
             investigation_id="inv-fp",
             status="closed",

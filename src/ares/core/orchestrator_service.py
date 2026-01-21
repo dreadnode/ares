@@ -15,14 +15,21 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-import dreadnode as dn
 from loguru import logger
 
 from ares.core.config import get_namespace, get_redis_url
+from ares.core.litellm_env import configure_litellm_env
 from ares.core.models import Credential
 from ares.core.orchestrator import run_multi_agent_operation
 from ares.core.recovery import OperationRecoveryManager
 from ares.core.task_queue import RedisTaskQueue
+
+
+def _configure_dreadnode():
+    configure_litellm_env()
+    import dreadnode as dn
+
+    return dn
 
 
 @dataclass
@@ -220,6 +227,8 @@ class OrchestratorService:
                 f"hosts={len(state.all_hosts)}"
             )
 
+            configure_litellm_env()
+
             result = await run_multi_agent_operation(
                 operation_id=operation_id,
                 target_domain=target_domain,
@@ -355,6 +364,47 @@ class OrchestratorService:
                 logger.warning("OPENAI_API_KEY missing in request env vars; using process env")
         return openai_api_key
 
+    async def _persist_operation_model(self, operation_id: str, model: str) -> None:
+        """Persist per-operation model so workers can resolve it."""
+        if not self.task_queue or not self.task_queue._client:
+            logger.warning("Cannot persist operation model: Redis client unavailable")
+            return
+        key = f"ares:operation:{operation_id}:model"
+        try:
+            await self.task_queue._client.set(key, model)
+        except Exception as e:
+            logger.warning(f"Failed to persist operation model for {operation_id}: {e}")
+
+    async def _persist_operation_model_overrides(
+        self, operation_id: str, request_env_vars: dict[str, str] | None
+    ) -> None:
+        """Persist model env overrides so workers can resolve role-specific models."""
+        if not request_env_vars:
+            return
+        if not self.task_queue or not self.task_queue._client:
+            logger.warning("Cannot persist model overrides: Redis client unavailable")
+            return
+
+        allowed_keys = {
+            "ARES_MODEL",
+            "ARES_ORCHESTRATOR_MODEL",
+            "ARES_WORKER_MODEL",
+        }
+        overrides = {
+            key: value
+            for key, value in request_env_vars.items()
+            if value
+            and (key in allowed_keys or (key.startswith("ARES_AGENT_") and key.endswith("_MODEL")))
+        }
+        if not overrides:
+            return
+
+        key = f"ares:operation:{operation_id}:model_overrides"
+        try:
+            await self.task_queue._client.set(key, json.dumps(overrides))
+        except Exception as e:
+            logger.warning(f"Failed to persist model overrides for {operation_id}: {e}")
+
     async def _process_operation_request(self, request_data: dict[str, Any]) -> None:
         """Process an operation request.
 
@@ -376,9 +426,14 @@ class OrchestratorService:
                         os.environ[key] = value
                         logger.debug(f"Set environment variable: {key}")
 
+            if request.model:
+                await self._persist_operation_model(request.operation_id, request.model)
+            await self._persist_operation_model_overrides(request.operation_id, request.env_vars)
+
             openai_api_key = self._resolve_openai_api_key(request.env_vars)
 
             try:
+                dn = _configure_dreadnode()
                 dn.configure()
             except Exception as e:
                 logger.warning(f"Dreadnode configure failed, continuing without telemetry: {e}")
@@ -418,6 +473,8 @@ class OrchestratorService:
                     "OPENAI_API_KEY is required for OpenAI models. Ensure it is set in the "
                     "orchestrator environment or passed via env_vars."
                 )
+            configure_litellm_env()
+
             result = await run_multi_agent_operation(
                 operation_id=request.operation_id,
                 target_domain=request.target_domain,

@@ -9,6 +9,7 @@ All tools execute commands remotely on the Kali attack box via AWS SSM.
 import json
 import logging
 import re
+import shlex
 import time
 import uuid
 from datetime import datetime, timezone
@@ -99,6 +100,18 @@ def _run_tool(cmd: list[str], timeout_seconds: int = 300) -> tuple[str, str, int
     return result.stdout, result.stderr, result.return_code
 
 
+def _write_users_file_remote(users: list[str], users_file: str) -> tuple[bool, str]:
+    if not users:
+        return False, "no users provided"
+    escaped_users = " ".join(shlex.quote(user) for user in users)
+    cmd = f"printf '%s\\n' {escaped_users} > {shlex.quote(users_file)}"
+    result = run_remote(["bash", "-lc", cmd], timeout_seconds=60)
+    if result.return_code != 0:
+        error = (result.stderr or result.stdout or "unknown error").strip()
+        return False, error
+    return True, ""
+
+
 class NetworkEnumerationTools(Toolset):
     """Tools for network scanning and enumeration."""
 
@@ -107,6 +120,92 @@ class NetworkEnumerationTools(Toolset):
     def set_state(self, state: RedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
+
+    def _extract_users_from_outputs(self, outputs: list[tuple[str, str]]) -> set[str]:  # noqa: PLR0912
+        users: set[str] = set()
+        user_pattern = r"[A-Za-z0-9._$-]+"
+
+        def _add_user(candidate: str) -> None:
+            user = candidate.strip()
+            if not user or user.endswith("$"):
+                return
+            if user.lower() in ("anonymous",):
+                return
+            users.add(user)
+
+        for label, content in outputs:
+            if not content:
+                continue
+            label_lower = label.lower()
+            for line in content.splitlines():
+                if not line.strip():
+                    continue
+
+                rpc_match = re.search(r"user:\[([^\]]+)\]", line, re.IGNORECASE)
+                if rpc_match:
+                    _add_user(rpc_match.group(1))
+                    continue
+
+                if "netexec smb --users" in label_lower:
+                    backslash_match = re.search(
+                        r"\\([A-Za-z0-9._-]+)\\s*\\(SidTypeUser\\)",
+                        line,
+                    )
+                    if backslash_match:
+                        _add_user(backslash_match.group(1))
+                        continue
+                    domain_match = re.search(
+                        rf"[A-Za-z0-9._-]+\\({user_pattern})",
+                        line,
+                    )
+                    if domain_match:
+                        _add_user(domain_match.group(1))
+                        continue
+                    rid_match = re.search(r"\bAccount:\s*([A-Za-z0-9._-]+)", line)
+                    if rid_match:
+                        _add_user(rid_match.group(1))
+                        continue
+
+                if "netexec smb --rid-brute" in label_lower:
+                    if "SidTypeUser" not in line:
+                        continue
+                    backslash_match = re.search(
+                        r"\\([A-Za-z0-9._-]+)\\s*\\(SidTypeUser\\)",
+                        line,
+                    )
+                    if backslash_match:
+                        _add_user(backslash_match.group(1))
+                        continue
+                    domain_match = re.search(
+                        rf"[A-Za-z0-9._-]+\\({user_pattern})",
+                        line,
+                    )
+                    if domain_match:
+                        _add_user(domain_match.group(1))
+                        continue
+                    rid_match = re.search(r"\bAccount:\s*([A-Za-z0-9._-]+)", line)
+                    if rid_match:
+                        _add_user(rid_match.group(1))
+                        continue
+
+                if "smb-enum-users" in label_lower:
+                    name_match = re.search(
+                        r"\b(?:username|user)\s*[:=]\s*([A-Za-z0-9._-]+)",
+                        line,
+                        re.IGNORECASE,
+                    )
+                    if name_match:
+                        _add_user(name_match.group(1))
+                        continue
+                    domain_match = re.search(
+                        rf"[A-Za-z0-9._-]+\\({user_pattern})",
+                        line,
+                    )
+                    if domain_match:
+                        _add_user(domain_match.group(1))
+                        continue
+
+        return users
 
     def _run_user_enum_commands(
         self, target: str, username: str, password: str, domain: str
@@ -138,26 +237,19 @@ class NetworkEnumerationTools(Toolset):
         outputs.append(("netexec smb --users", output))
 
         if not (username and password):
-            rpc_cmd = [
-                "rpcclient",
-                "-U",
-                "",
-                "-N",
-                target,
-                "-c",
-                "lsaquery; enumdomusers; querydispinfo; enumdomgroups",
-            ]
-            rpc_stdout, rpc_stderr, _ = _run_tool(rpc_cmd, timeout_seconds=120)
-            rpc_output = rpc_stdout or rpc_stderr or ""
-            outputs.append(
-                (
-                    "rpcclient null session lsaquery/enumdomusers/querydispinfo/enumdomgroups",
-                    rpc_output,
-                )
-            )
+            for rpc_op in ("lsaquery", "enumdomusers", "querydispinfo", "enumdomgroups"):
+                rpc_cmd = ["rpcclient", "-U", "", "-N", target, "-c", rpc_op]
+                rpc_stdout, rpc_stderr, _ = _run_tool(rpc_cmd, timeout_seconds=120)
+                rpc_output = rpc_stdout or rpc_stderr or ""
+                outputs.append((f"rpcclient null session {rpc_op}", rpc_output))
 
             combined_output = "\n".join(content for _, content in outputs)
             if not _has_user_entries(combined_output):
+                port_cmd = ["nmap", "-Pn", "-p", "445", target]
+                port_stdout, port_stderr, _ = _run_tool(port_cmd, timeout_seconds=120)
+                port_output = port_stdout or port_stderr or ""
+                outputs.append(("nmap port 445", port_output))
+
                 nmap_cmd = ["nmap", "-Pn", "-p", "445", "--script", "smb-enum-users", target]
                 nmap_stdout, nmap_stderr, _ = _run_tool(nmap_cmd, timeout_seconds=180)
                 nmap_output = nmap_stdout or nmap_stderr or ""
@@ -170,8 +262,80 @@ class NetworkEnumerationTools(Toolset):
 
         return outputs
 
+    def _classify_enum_output(self, label: str, output: str) -> str:
+        if not output or not output.strip():
+            return "no output"
+        lower = output.lower()
+        if "nt_status_access_denied" in lower or "access denied" in lower:
+            return "access denied"
+        if "nt_status_logon_failure" in lower or "logon failure" in lower:
+            return "auth failed"
+        if "filtered" in lower and ("445/tcp" in lower or "port 445" in lower):
+            return "445 filtered"
+        if any(
+            token in lower
+            for token in (
+                "connection refused",
+                "timed out",
+                "no route to host",
+                "host is down",
+                "network is unreachable",
+                "nt_status_connection_refused",
+                "nt_status_io_timeout",
+                "nt_status_host_unreachable",
+                "nt_status_network_unreachable",
+            )
+        ):
+            return "connection failed"
+        return "ok"
+
+    def _summarize_enum_outputs(self, outputs: list[tuple[str, str]]) -> str:
+        lines: list[str] = []
+        for label, content in outputs:
+            status = self._classify_enum_output(label, content)
+            lines.append(f"- {label}: {status}")
+        return "\n".join(lines)
+
+    def _format_enum_failure_message(self, outputs: list[tuple[str, str]], raw_output: str) -> str:
+        issues = {
+            "access_denied": False,
+            "auth_failed": False,
+            "conn_failed": False,
+            "filtered_445": False,
+        }
+        for label, content in outputs:
+            status = self._classify_enum_output(label, content)
+            if status == "access denied":
+                issues["access_denied"] = True
+            elif status == "auth failed":
+                issues["auth_failed"] = True
+            elif status == "connection failed":
+                issues["conn_failed"] = True
+            elif status == "445 filtered":
+                issues["filtered_445"] = True
+
+        notes: list[str] = []
+        if issues["filtered_445"] or issues["conn_failed"]:
+            notes.append("Network path to SMB/RPC appears blocked or filtered.")
+        if issues["access_denied"]:
+            notes.append("RPC/SAMR access denied; anonymous enumeration may be restricted.")
+        if issues["auth_failed"]:
+            notes.append("Authentication failed; verify credentials.")
+        if not notes:
+            notes.append("Target may be non-Windows or enumeration is blocked.")
+
+        summary = self._summarize_enum_outputs(outputs)
+        message = "[!] SMB user enumeration did not return users."
+        if summary:
+            message += "\nPer-command status:\n" + summary
+        if notes:
+            message += "\nNotes: " + " ".join(notes)
+        if raw_output:
+            message += "\nRaw output:\n" + raw_output[:500]
+        return message
+
     @dn.tool_method
-    def nmap_scan(self, target: str) -> str:
+    def nmap_scan(self, target: str) -> str:  # noqa: PLR0912
         """
         Scans target IPs to discover services, ports, and host information.
 
@@ -190,6 +354,63 @@ class NetworkEnumerationTools(Toolset):
             >>> result = nmap_scan("192.168.1.2 192.168.1.3 192.168.1.4")
         """
         import re
+
+        def _parse_nmap_hosts(output: str) -> list[Host]:
+            hosts: list[Host] = []
+            current_ip = ""
+            current_hostname = ""
+            current_os = ""
+            current_services: list[str] = []
+
+            def _commit_current() -> None:
+                if not current_ip:
+                    return
+                host = Host(
+                    ip=current_ip,
+                    hostname=current_hostname,
+                    os=current_os or "Unknown",
+                    roles=[],
+                    services=current_services,
+                )
+                hosts.append(host)
+
+            for line in output.splitlines():
+                line = line.strip()  # noqa: PLW2901
+                if not line:
+                    continue
+                report_match = re.match(r"^Nmap scan report for (.+)$", line)
+                if report_match:
+                    _commit_current()
+                    current_ip = ""
+                    current_hostname = ""
+                    current_os = ""
+                    current_services = []
+
+                    host_line = report_match.group(1)
+                    ip_match = re.match(r"(.+) \((\d+\.\d+\.\d+\.\d+)\)$", host_line)
+                    if ip_match:
+                        current_hostname = ip_match.group(1).strip()
+                        current_ip = ip_match.group(2)
+                    else:
+                        ip_only = re.match(r"^(\d+\.\d+\.\d+\.\d+)$", host_line)
+                        if ip_only:
+                            current_ip = ip_only.group(1)
+                        else:
+                            current_hostname = host_line
+                    continue
+
+                if current_ip:
+                    svc_match = re.match(r"^(\d+)/(tcp|udp)\s+open\s+([^\s]+)", line)
+                    if svc_match:
+                        current_services.append(
+                            f"{svc_match.group(1)}/{svc_match.group(2)} {svc_match.group(3)}"
+                        )
+                    os_match = re.search(r"Service Info: OS: ([^;]+)", line)
+                    if os_match and not current_os:
+                        current_os = os_match.group(1).strip()
+
+            _commit_current()
+            return hosts
 
         targets = target.split()
 
@@ -214,6 +435,13 @@ class NetworkEnumerationTools(Toolset):
                 if self.state:
                     for ip in targets:
                         self.state.queried_hosts.add(ip)
+                if self.state:
+                    parsed_hosts = _parse_nmap_hosts(stdout)
+                    for host in parsed_hosts:
+                        if hasattr(self.state, "add_host"):
+                            self.state.add_host(host)
+                        elif not any(h.ip == host.ip for h in self.state.hosts):
+                            self.state.hosts.append(host)
                 return stdout
 
             ports_str = ",".join(sorted(open_ports, key=int))
@@ -226,6 +454,13 @@ class NetworkEnumerationTools(Toolset):
             if svc_returncode != 0:
                 logger.warning(f"[!] Service scan had issues: {svc_stderr}")
                 # Return port scan results if service scan fails
+                if self.state:
+                    parsed_hosts = _parse_nmap_hosts(stdout)
+                    for host in parsed_hosts:
+                        if hasattr(self.state, "add_host"):
+                            self.state.add_host(host)
+                        elif not any(h.ip == host.ip for h in self.state.hosts):
+                            self.state.hosts.append(host)
                 return stdout
 
             logger.info(f"[*] Nmap scan completed for {len(targets)} target(s)")
@@ -234,6 +469,13 @@ class NetworkEnumerationTools(Toolset):
             if self.state:
                 for ip in targets:
                     self.state.queried_hosts.add(ip)
+
+                parsed_hosts = _parse_nmap_hosts(svc_stdout)
+                for host in parsed_hosts:
+                    if hasattr(self.state, "add_host"):
+                        self.state.add_host(host)
+                    elif not any(h.ip == host.ip for h in self.state.hosts):
+                        self.state.hosts.append(host)
 
             return svc_stdout
 
@@ -299,10 +541,8 @@ class NetworkEnumerationTools(Toolset):
             if output and _has_user_entries(output):
                 return output
 
-            return (
-                output
-                or "[!] No SMB user enumeration output. Target may be non-Windows or SMB is blocked."
-            )
+            raw_output = output or ""
+            return self._format_enum_failure_message(outputs, raw_output)
 
         except Exception as e:
             logger.error(f"User enumeration failed: {e}")
@@ -330,6 +570,36 @@ class NetworkEnumerationTools(Toolset):
         Example:
             >>> enumerate_shares("192.168.1.100", "DOMAIN", "user", "pass")
         """
+
+        def _parse_netexec_hosts(output: str) -> list[Host]:
+            hosts: list[Host] = []
+            for line in output.splitlines():
+                if not line.startswith("SMB"):
+                    continue
+                match = re.match(r"^SMB\s+(\d+\.\d+\.\d+\.\d+)\s+\d+\s+(\S+)\s+(.*)$", line)
+                if not match:
+                    continue
+                ip = match.group(1)
+                name = match.group(2)
+                details = match.group(3)
+
+                os_match = re.search(r"\[\*\]\s+([^(]+)", details)
+                os_name = os_match.group(1).strip() if os_match else "Unknown"
+
+                name_match = re.search(r"\(name:([^)]+)\)", details)
+                hostname = name_match.group(1) if name_match else name
+
+                hosts.append(
+                    Host(
+                        ip=ip,
+                        hostname=hostname,
+                        os=os_name,
+                        roles=[],
+                        services=["445/tcp smb"],
+                    )
+                )
+            return hosts
+
         try:
             cmd = ["netexec", "smb", target]
 
@@ -345,7 +615,15 @@ class NetworkEnumerationTools(Toolset):
             stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
             logger.info(f"[*] Share enumeration completed for {target}")
 
-            return stdout or stderr
+            output = stdout or stderr
+            if self.state and output:
+                for host in _parse_netexec_hosts(output):
+                    if hasattr(self.state, "add_host"):
+                        self.state.add_host(host)
+                    elif not any(h.ip == host.ip for h in self.state.hosts):
+                        self.state.hosts.append(host)
+
+            return output
 
         except Exception as e:
             logger.error(f"Share enumeration failed: {e}")
@@ -378,31 +656,17 @@ class NetworkEnumerationTools(Toolset):
         """
         try:
             outputs = self._run_user_enum_commands(target, username, password, domain)
-            output = "\n".join(content for _, content in outputs if content).strip()
-
-            # Parse usernames from output
-            users: set[str] = set()
-
-            # Pattern for netexec: DOMAIN\username or domain\username
-            for match in re.finditer(r"[A-Za-z0-9._-]+\\([A-Za-z0-9._-]+)", output):
-                user = match.group(1)
-                # Filter out machine accounts and common noise
-                if not user.endswith("$") and user.lower() not in ("", "anonymous"):
-                    users.add(user)
-
-            # Pattern for rpcclient: user:[username] rid:[0x...]
-            for match in re.finditer(r"user:\[([^\]]+)\]", output):
-                user = match.group(1)
-                if not user.endswith("$"):
-                    users.add(user)
+            users = self._extract_users_from_outputs(outputs)
 
             if not users:
-                return f"[!] No users found to save. Raw output:\n{output[:500]}"
+                output = "\n".join(content for _, content in outputs if content).strip()
+                return self._format_enum_failure_message(outputs, output)
 
-            # Save to file
+            # Save to file on remote executor
             users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
-            with open(users_file, "w") as f:
-                f.write("\n".join(sorted(users)))
+            ok, error = _write_users_file_remote(sorted(users), users_file)
+            if not ok:
+                return f"[!] Failed to write users file on remote: {error}"
 
             logger.info(f"[+] Saved {len(users)} users to {users_file}")
             return f"[+] Saved {len(users)} users to {users_file}\nUsers: {', '.join(sorted(users)[:20])}{'...' if len(users) > 20 else ''}"
@@ -426,6 +690,14 @@ class CredentialDiscoveryTools(Toolset):
     def set_state(self, state: RedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
+
+    def _run_user_enum_commands(
+        self, target: str, username: str, password: str, domain: str
+    ) -> list[tuple[str, str]]:
+        return NetworkEnumerationTools()._run_user_enum_commands(target, username, password, domain)
+
+    def _extract_users_from_outputs(self, outputs: list[tuple[str, str]]) -> set[str]:
+        return NetworkEnumerationTools()._extract_users_from_outputs(outputs)
 
     def _add_weakness(self, block: str) -> None:
         if not self.state or not block:
@@ -727,27 +999,23 @@ class CredentialDiscoveryTools(Toolset):
                 logger.info(f"[*] Using credential {domain}\\{username} for user enumeration")
 
             outputs = self._run_user_enum_commands(target, username, password, domain)
-            output = "\n".join(content for _, content in outputs if content).strip()
-
-            # Parse usernames
-            users: set[str] = set()
-            for match in re.finditer(r"[A-Za-z0-9._-]+\\([A-Za-z0-9._-]+)", output):
-                user = match.group(1)
-                if not user.endswith("$") and user.lower() not in ("", "anonymous"):
-                    users.add(user)
-            for match in re.finditer(r"user:\[([^\]]+)\]", output):
-                user = match.group(1)
-                if not user.endswith("$"):
-                    users.add(user)
+            users = self._extract_users_from_outputs(outputs)
 
             if not users:
-                logger.warning(f"[!] No users enumerated from {target}")
+                helper = NetworkEnumerationTools()
+                summary = helper._summarize_enum_outputs(outputs)
+                if summary:
+                    logger.warning(f"[!] No users enumerated from {target}. Status:\n{summary}")
+                else:
+                    logger.warning(f"[!] No users enumerated from {target}")
                 return None
 
-            # Save to temp file
+            # Save to temp file on remote executor
             users_file = "/tmp/users_auto.txt"  # nosec B108  # noqa: S108
-            with open(users_file, "w") as f:
-                f.write("\n".join(sorted(users)))
+            ok, error = _write_users_file_remote(sorted(users), users_file)
+            if not ok:
+                logger.warning(f"[!] Failed to write users file on remote: {error}")
+                return None
             logger.info(f"[+] Auto-enumerated {len(users)} users to {users_file}")
             return users_file
 
@@ -815,38 +1083,43 @@ class CredentialDiscoveryTools(Toolset):
             result = stdout + "\n" + (stderr or "")
 
             # Check for successful authentications
-            if "[+]" in result:
-                logger.warning("[!] FOUND USER WITH USERNAME=PASSWORD!")
+            creds = self._parse_netexec_credentials(result)
+            if creds:
+                accounts = sorted(
+                    {f"{cred_domain}\\{username}" for cred_domain, username, _, _ in creds}
+                )
+                logger.warning(
+                    "[!] FOUND USER WITH USERNAME=PASSWORD! Accounts: %s",
+                    ", ".join(accounts),
+                )
                 result = (
                     "🚨 USERNAME=PASSWORD FOUND!\n"
+                    f"→ Accounts: {', '.join(accounts)}\n"
                     "→ Common examples: user1:user1, guest:guest\n"
                     "→ Use found credentials for kerberoast, asrep_roast, bloodhound\n\n" + result
                 )
+            # If output contains [+] but no parseable creds, avoid a noisy warning.
 
-            if self.state:
-                creds = self._parse_netexec_credentials(result)
-                if creds:
-                    accounts = []
-                    for cred_domain, username, found_password, is_admin in creds:
-                        password_value = found_password or username
-                        self._add_credential(
-                            username,
-                            password_value,
-                            cred_domain,
-                            "username_as_password",
-                            is_admin=is_admin,
-                        )
-                        accounts.append(f"{cred_domain}\\{username}")
-                    block = _format_weakness_block(
-                        "Credential Discovery - Username=Password Combinations",
-                        "Users with passwords matching their usernames",
-                        {
-                            "Discovered Accounts": ", ".join(sorted(set(accounts))),
-                        },
-                        "Immediate authenticated access",
-                        "Username-as-password test",
+            if self.state and creds:
+                for cred_domain, username, found_password, is_admin in creds:
+                    password_value = found_password or username
+                    self._add_credential(
+                        username,
+                        password_value,
+                        cred_domain,
+                        "username_as_password",
+                        is_admin=is_admin,
                     )
-                    self._add_weakness(block)
+                block = _format_weakness_block(
+                    "Credential Discovery - Username=Password Combinations",
+                    "Users with passwords matching their usernames",
+                    {
+                        "Discovered Accounts": ", ".join(accounts),
+                    },
+                    "Immediate authenticated access",
+                    "Username-as-password test",
+                )
+                self._add_weakness(block)
 
             return result
 
@@ -1185,7 +1458,7 @@ class CredentialHarvestingTools(Toolset):
             return f"Kerberoasting failed: {e!s}"
 
     @dn.tool_method
-    def kerberos_user_enum_noauth(
+    def kerberos_user_enum_noauth(  # noqa: PLR0912
         self,
         domain: str,
         dc_ip: str,
@@ -1207,6 +1480,17 @@ class CredentialHarvestingTools(Toolset):
         """
         try:
             remote_temp_file = ""
+            users_payload = ""
+            if users_file:
+                check_cmd = ["bash", "-lc", f"test -f {shlex.quote(users_file)}"]
+                check_result = run_remote(check_cmd, timeout_seconds=30)
+                if check_result.return_code != 0:
+                    logger.warning(
+                        "[!] Users file %s not found on remote. Falling back to default list.",
+                        users_file,
+                    )
+                    users_file = ""
+
             if not users_file:
                 default_users = [
                     "administrator",
@@ -1283,7 +1567,13 @@ class CredentialHarvestingTools(Toolset):
 
             if validated:
                 summary = ", ".join(sorted(validated))
-                return f"✓ Valid principals (Kerberos no-auth): {summary}\n\n{output}"
+                users_file = f"/tmp/users_kerberos_{uuid.uuid4().hex}.txt"  # nosec B108  # noqa: S108
+                ok, error = _write_users_file_remote(sorted(validated), users_file)
+                if ok:
+                    file_note = f"\nUsers file: {users_file}"
+                else:
+                    file_note = f"\n[!] Failed to write users file on remote: {error}"
+                return f"✓ Valid principals (Kerberos no-auth): {summary}{file_note}\n\n{output}"
 
             return output
 
@@ -3128,7 +3418,7 @@ class RedTeamReportingTools(Toolset):
     def record_finding(
         self,
         finding_type: str,
-        data: dict[str, Any],
+        data: dict[str, Any] | None = None,
     ) -> str:
         """
         Record a discovery during the red team operation.
@@ -3184,6 +3474,8 @@ class RedTeamReportingTools(Toolset):
         """
         if not self.state:
             return "[!] Error: No operation state available"
+        if data is None:
+            return "[!] Error: record_finding requires a data payload"
 
         try:
             handlers = {

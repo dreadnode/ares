@@ -101,7 +101,7 @@ def state_with_techniques(sample_alert: dict) -> InvestigationState:
             Evidence(
                 id="ev-1",
                 type="ip_address",
-                value="192.168.1.100",
+                value="192.168.56.100",
                 source="Query",
                 timestamp=datetime.now(timezone.utc),
                 pyramid_level=PyramidLevel.IP_ADDRESSES,
@@ -257,7 +257,7 @@ class TestPyramidClimberGenerateQuestions:
                 Evidence(
                     id="ev-ip",
                     type="ip_address",
-                    value="192.168.1.100",
+                    value="192.168.56.100",
                     source="Query",
                     timestamp=datetime.now(timezone.utc),
                     pyramid_level=PyramidLevel.IP_ADDRESSES,
