@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cyclopts
+import dreadnode as dn
 from loguru import logger
 
 app = cyclopts.App(
@@ -22,8 +23,6 @@ def _configure_dreadnode():
     from ares.core.litellm_env import configure_litellm_env
 
     configure_litellm_env()
-    import dreadnode as dn
-
     return dn
 
 

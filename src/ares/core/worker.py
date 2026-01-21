@@ -23,6 +23,7 @@ from loguru import logger
 from ares.core.config import get_redis_url
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.exceptions import AuthenticationError, ConfigurationError, CriticalWorkerError
+from ares.core.factories.red_agents import create_agent_info, create_specialized_agent
 from ares.core.litellm_env import configure_litellm_env
 from ares.core.messages import (
     AgentMessage,
@@ -33,6 +34,7 @@ from ares.core.messages import (
 )
 from ares.core.models import AgentRole
 from ares.core.task_queue import RedisTaskQueue, TaskMessage
+from ares.tools.red import CrackerCallbackTools, LateralCallbackTools
 
 if TYPE_CHECKING:
     from dreadnode.agent import Agent
@@ -1013,8 +1015,6 @@ async def run_worker(  # noqa: PLR0912
         use_redis_queue: If True, poll Redis queue for tasks (Kubernetes mode).
     """
     configure_litellm_env()
-    from ares.core.factories.red_agents import create_agent_info, create_specialized_agent
-    from ares.tools.red import CrackerCallbackTools, LateralCallbackTools
 
     # Resolve config defaults
     redis_url = redis_url or get_redis_url()

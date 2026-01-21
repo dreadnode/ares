@@ -20,6 +20,7 @@ from loguru import logger
 from ares.core.config import get_namespace, get_redis_url
 from ares.core.litellm_env import configure_litellm_env
 from ares.core.models import Credential
+from ares.core.orchestrator import run_multi_agent_operation
 from ares.core.recovery import OperationRecoveryManager
 from ares.core.task_queue import RedisTaskQueue
 
@@ -227,7 +228,6 @@ class OrchestratorService:
             )
 
             configure_litellm_env()
-            from ares.core.orchestrator import run_multi_agent_operation
 
             result = await run_multi_agent_operation(
                 operation_id=operation_id,
@@ -474,7 +474,6 @@ class OrchestratorService:
                     "orchestrator environment or passed via env_vars."
                 )
             configure_litellm_env()
-            from ares.core.orchestrator import run_multi_agent_operation
 
             result = await run_multi_agent_operation(
                 operation_id=request.operation_id,
