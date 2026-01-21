@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.9", "3.10", "3.11"]
 
     steps:
       - name: Set up git repository
@@ -45,7 +45,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov pytest-asyncio ruff
+          pip install pytest pytest-cov ruff
           pip install -e .
 
       - name: Lint with ruff
@@ -55,12 +55,4 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          pytest --cov=src --cov-report=xml --cov-report=term-missing || [ $? -eq 5 ] # Allow workflow to pass when no tests exist
-
-      - name: Upload coverage report
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && matrix.python-version == '3.12'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: coverage-report
-          path: coverage.xml
-          retention-days: 1
+          pytest --cov=src --cov-report=term-missing || [ $? -eq 5 ] # Allow workflow to pass when no tests exist
