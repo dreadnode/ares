@@ -26,7 +26,7 @@ def red_team_state() -> RedTeamState:
     """Create a basic red team state for testing."""
     return RedTeamState(
         operation_id="op-test-001",
-        target=Target(ip="192.168.1.100", hostname="dc01", domain="test.local"),
+        target=Target(ip="192.168.56.100", hostname="dc01", domain="test.local"),
         started_at=datetime.now(timezone.utc),
         stage=InvestigationStage.TRIAGE,
         hosts=[],
@@ -88,6 +88,38 @@ class TestNetworkEnumerationTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
+    def test_extract_users_from_netexec_users_backslash_format(self):
+        """Test parsing netexec --users output with backslash usernames."""
+        from ares.tools.red.network import NetworkEnumerationTools
+
+        tools = NetworkEnumerationTools()
+        outputs = [
+            (
+                "netexec smb --users",
+                "SMB 192.168.56.1 445 DC [*] ACME\\jdoe (SidTypeUser)\n",
+            )
+        ]
+
+        users = tools._extract_users_from_outputs(outputs)
+
+        assert "jdoe" in users
+
+    def test_extract_users_from_netexec_rid_brute_backslash_format(self):
+        """Test parsing netexec --rid-brute output with backslash usernames."""
+        from ares.tools.red.network import NetworkEnumerationTools
+
+        tools = NetworkEnumerationTools()
+        outputs = [
+            (
+                "netexec smb --rid-brute",
+                "SMB 192.168.56.1 445 DC ACME\\svc_account (SidTypeUser)\n",
+            )
+        ]
+
+        users = tools._extract_users_from_outputs(outputs)
+
+        assert "svc_account" in users
+
     def test_nmap_scan_success(self, red_team_state: RedTeamState):
         """Test successful nmap scan."""
         from ares.tools.red.network import NetworkEnumerationTools
@@ -101,11 +133,11 @@ class TestNetworkEnumerationTools:
                 stderr="",
                 return_code=0,
             )
-            result = tools.nmap_scan("192.168.1.100")
+            result = tools.nmap_scan("192.168.56.100")
 
         assert "PORT" in result
         assert "22/tcp" in result
-        assert "192.168.1.100" in red_team_state.queried_hosts
+        assert "192.168.56.100" in red_team_state.queried_hosts
 
     def test_nmap_scan_failure(self, red_team_state: RedTeamState):
         """Test nmap scan failure."""
@@ -118,7 +150,7 @@ class TestNetworkEnumerationTools:
             mock_run.return_value = MockRunResult(
                 stdout="", stderr="Host unreachable", return_code=1
             )
-            result = tools.nmap_scan("192.168.1.100")
+            result = tools.nmap_scan("192.168.56.100")
 
         assert "unreachable" in result.lower() or "failed" in result.lower()
 
@@ -131,7 +163,7 @@ class TestNetworkEnumerationTools:
 
         with patch("ares.tools.red.network.run_remote") as mock_run:
             mock_run.side_effect = Exception("Connection error")
-            result = tools.nmap_scan("192.168.1.100")
+            result = tools.nmap_scan("192.168.56.100")
 
         assert "failed" in result.lower()
 
@@ -144,11 +176,11 @@ class TestNetworkEnumerationTools:
 
         with patch("ares.tools.red.network.run_remote") as mock_run:
             mock_run.return_value = MockRunResult(stdout="Scan complete", return_code=0)
-            tools.nmap_scan("192.168.1.100 192.168.1.101")
+            tools.nmap_scan("192.168.56.100 192.168.56.101")
 
         # Both hosts should be tracked
-        assert "192.168.1.100" in red_team_state.queried_hosts
-        assert "192.168.1.101" in red_team_state.queried_hosts
+        assert "192.168.56.100" in red_team_state.queried_hosts
+        assert "192.168.56.101" in red_team_state.queried_hosts
 
     def test_enumerate_users_success(self, red_team_state: RedTeamState):
         """Test successful user enumeration."""
@@ -162,7 +194,7 @@ class TestNetworkEnumerationTools:
                 stdout="Administrator\nuser1\nuser2", return_code=0
             )
             result = tools.enumerate_users(
-                target="192.168.1.100",
+                target="192.168.56.100",
                 username="admin",
                 password="pass",  # pragma: allowlist secret
                 domain="TEST",
@@ -171,25 +203,64 @@ class TestNetworkEnumerationTools:
         assert "Administrator" in result
 
     def test_enumerate_users_null_session(self, red_team_state: RedTeamState):
-        """Test user enumeration with null session."""
+        """Test user enumeration with null session using GOAD-like output."""
         from ares.tools.red.network import NetworkEnumerationTools
 
         tools = NetworkEnumerationTools()
         tools.set_state(red_team_state)
 
+        netexec_users = (
+            "SMB                      192.168.56.9        445    HQ-DC            "
+            "[*] Windows 10 / Server 2019 Build 17763 x64 (name:HQ-DC) "
+            "(domain:marketing.bigco.com) (signing:True) (SMBv1:None) (Null Auth:True)\n"
+        )
+        lsaquery_output = (
+            "Domain Name: MARKETING\nDomain Sid: S-1-5-21-1111111111-2222222222-3333333333\n"
+        )
+        access_denied = "result was NT_STATUS_ACCESS_DENIED\n"
+        nmap_445 = (
+            "Starting Nmap 7.98 ( https://nmap.org ) at 2026-01-20 17:43 +0000\n"
+            "Nmap scan report for ip-10-0-9-9.us-west-2.compute.internal (192.168.56.9)\n"
+            "Host is up.\n\n"
+            "PORT    STATE    SERVICE\n"
+            "445/tcp filtered microsoft-ds\n\n"
+            "Nmap done: 1 IP address (1 host up) scanned in 2.14 seconds\n"
+        )
+        rid_brute = (
+            "SMB                      192.168.56.9        445    HQ-DC            "
+            "[*] Windows 10 / Server 2019 Build 17763 x64 (name:HQ-DC) "
+            "(domain:marketing.bigco.com) (signing:True) (SMBv1:None) (Null Auth:True)\n"
+            "SMB                      192.168.56.9        445    HQ-DC            "
+            "[+] marketing.bigco.com\\:\n"
+            "SMB                      192.168.56.9        445    HQ-DC            "
+            "[-] Error connecting: LSAD SessionError: code: 0xc0000022 - "
+            "STATUS_ACCESS_DENIED - {Access Denied} A process has requested access "
+            "to an object but has not been granted those access rights.\n"
+        )
+        kerb_noauth = (
+            "Impacket v0.13.0.dev0+20251022.125034.d843881f - Copyright Fortra, LLC "
+            "and its affiliated companies\n\n"
+            "[-] User admin doesn't have UF_DONT_REQUIRE_PREAUTH set\n"
+        )
+
         with patch("ares.tools.red.network.run_remote") as mock_run:
             mock_run.side_effect = [
-                MockRunResult(
-                    stdout="SMB 192.168.1.100 445 HOST [+] test.local\\:\n", return_code=0
-                ),
-                MockRunResult(stdout="user:[Administrator] rid:[0x1f4]\n", return_code=0),
-                MockRunResult(stdout="", return_code=0),
+                MockRunResult(stdout=netexec_users, return_code=0),
+                MockRunResult(stdout=lsaquery_output, return_code=0),
+                MockRunResult(stdout=access_denied, return_code=1),
+                MockRunResult(stdout=access_denied, return_code=1),
+                MockRunResult(stdout=access_denied, return_code=1),
+                MockRunResult(stdout=nmap_445, return_code=0),
+                MockRunResult(stdout=nmap_445, return_code=0),
+                MockRunResult(stdout=rid_brute, return_code=0),
+                MockRunResult(stdout=kerb_noauth, return_code=0),
             ]
-            result = tools.enumerate_users(target="192.168.1.100", username="", password="")
+            result = tools.enumerate_users(target="192.168.56.100", username="", password="")
 
-        # Should work without credentials
-        assert "Administrator" in result
-        assert mock_run.call_count == 3
+        assert "SMB user enumeration did not return users" in result
+        assert "445 filtered" in result
+        assert "access denied" in result.lower()
+        assert mock_run.call_count == 10
 
     def test_enumerate_users_exception(self, red_team_state: RedTeamState):
         """Test user enumeration handles exceptions."""
@@ -201,7 +272,7 @@ class TestNetworkEnumerationTools:
         with patch("ares.tools.red.network.run_remote") as mock_run:
             mock_run.side_effect = Exception("Auth failed")
             result = tools.enumerate_users(
-                target="192.168.1.100",
+                target="192.168.56.100",
                 username="user",
                 password="wrong",  # pragma: allowlist secret
             )
@@ -220,7 +291,7 @@ class TestNetworkEnumerationTools:
                 stdout="ADMIN$ READ,WRITE\nC$ READ\nSHARE1 READ", return_code=0
             )
             result = tools.enumerate_shares(
-                target="192.168.1.100",
+                target="192.168.56.100",
                 domain="TEST",
                 username="admin",
                 password="pass",  # pragma: allowlist secret
@@ -238,7 +309,7 @@ class TestNetworkEnumerationTools:
         with patch("ares.tools.red.network.run_remote") as mock_run:
             mock_run.side_effect = Exception("Connection refused")
             result = tools.enumerate_shares(
-                target="192.168.1.100",
+                target="192.168.56.100",
                 username="user",
                 password="pass",  # pragma: allowlist secret
             )
@@ -264,6 +335,35 @@ class TestCredentialHarvestingTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
+    def test_kerberos_user_enum_noauth_goad(self, red_team_state: RedTeamState):
+        """Test Kerberos no-auth user enumeration using GOAD-like output."""
+        from ares.tools.red.network import CredentialHarvestingTools
+
+        tools = CredentialHarvestingTools()
+        tools.set_state(red_team_state)
+
+        getnpusers_output = (
+            "Impacket v0.13.0.dev0+20251022.125034.d843881f - Copyright Fortra, LLC "
+            "and its affiliated companies\n\n"
+            "[-] User admin doesn't have UF_DONT_REQUIRE_PREAUTH set\n"
+            "[-] User jane.doe doesn't have UF_DONT_REQUIRE_PREAUTH set\n"
+            "[-] User bob.smith doesn't have UF_DONT_REQUIRE_PREAUTH set\n"
+        )
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(stdout=getnpusers_output, return_code=0)
+            result = tools.kerberos_user_enum_noauth(
+                domain="marketing.bigco.com",
+                dc_ip="192.168.56.9",
+                users_file="",
+            )
+
+        assert "✓ Valid principals" in result
+        assert "admin" in result
+        assert "jane.doe" in result
+        assert "bob.smith" in result
+        assert any(user.username == "admin" for user in red_team_state.users)
+
     def test_check_smb_connectivity_success(self, red_team_state: RedTeamState):
         """Test SMB connectivity check success."""
         from ares.tools.red.network import CredentialHarvestingTools
@@ -273,7 +373,7 @@ class TestCredentialHarvestingTools:
 
         with patch("ares.tools.red.network.run_remote") as mock_run:
             mock_run.return_value = MockRunResult(stdout="open", return_code=0)
-            success, _msg = tools._check_smb_connectivity("192.168.1.100")
+            success, _msg = tools._check_smb_connectivity("192.168.56.100")
 
         assert success is True
 
@@ -286,7 +386,7 @@ class TestCredentialHarvestingTools:
 
         with patch("ares.tools.red.network.run_remote") as mock_run:
             mock_run.return_value = MockRunResult(stdout="closed", return_code=1)
-            success, _msg = tools._check_smb_connectivity("192.168.1.100")
+            success, _msg = tools._check_smb_connectivity("192.168.56.100")
 
         assert success is False
 
@@ -422,6 +522,17 @@ class TestRedTeamReportingTools:
         tools = RedTeamReportingTools()
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
+
+    def test_record_finding_requires_data_payload(self, red_team_state: RedTeamState):
+        """Test record_finding returns error when data payload is missing."""
+        from ares.tools.red.network import RedTeamReportingTools
+
+        tools = RedTeamReportingTools()
+        tools.set_state(red_team_state)
+
+        result = tools.record_finding("credential_reuse", None)
+
+        assert "requires a data payload" in result.lower()
 
 
 class TestCoercionTools:

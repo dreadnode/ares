@@ -99,6 +99,11 @@ class RedisTaskQueue:
         self._client = None
         self._connected = False
 
+    @property
+    def redis(self):
+        """Expose the underlying Redis client for legacy call sites."""
+        return self._client
+
     async def connect(self) -> None:
         """Connect to Redis."""
         if self._connected:

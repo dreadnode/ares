@@ -180,11 +180,11 @@ class TestPortScanningDetection:
             mock_instance = mock_client.return_value.__aenter__.return_value
             mock_instance.get = AsyncMock(return_value=mock_response)
 
-            await tools.detect_port_scanning(target_ip="192.168.1.100")
+            await tools.detect_port_scanning(target_ip="192.168.56.100")
 
             call_args = mock_instance.get.call_args
             params = call_args.kwargs.get("params", call_args[1].get("params", {}))
-            assert "192.168.1.100" in params["query"]
+            assert "192.168.56.100" in params["query"]
 
 
 class TestUserEnumerationDetection:

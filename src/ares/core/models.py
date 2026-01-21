@@ -636,6 +636,7 @@ class SharedRedTeamState:
     all_hosts: list[Host] = field(default_factory=list)
     all_users: list[User] = field(default_factory=list)
     all_shares: list[Share] = field(default_factory=list)
+    all_weaknesses: list[str] = field(default_factory=list)
 
     # Vulnerability registry
     discovered_vulnerabilities: dict[str, VulnerabilityInfo] = field(default_factory=dict)
@@ -646,6 +647,7 @@ class SharedRedTeamState:
     completed_tasks: dict[str, TaskResult] = field(default_factory=dict)
 
     # Success flags
+    completed: bool = False
     has_domain_admin: bool = False
     has_golden_ticket: bool = False
     domain_admin_path: str | None = None
@@ -659,6 +661,9 @@ class SharedRedTeamState:
 
     def add_credential(self, credential: Credential, source_agent: str) -> bool:
         """Add credential if not duplicate. Returns True if added."""
+        username = credential.username.strip()
+        if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
+            return False
         key = f"{credential.domain}:{credential.username}:{credential.password}".lower()
         for existing in self.all_credentials:
             existing_key = f"{existing.domain}:{existing.username}:{existing.password}".lower()
@@ -736,6 +741,11 @@ class SharedRedTeamState:
     def shares(self) -> list[Share]:
         """Alias for all_shares (RedTeamState compatibility)."""
         return self.all_shares
+
+    @property
+    def weaknesses(self) -> list[str]:
+        """Alias for all_weaknesses (RedTeamState compatibility)."""
+        return self.all_weaknesses
 
     @property
     def queried_hosts(self) -> set[str]:

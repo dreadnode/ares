@@ -946,7 +946,7 @@ class RedTeamDispatcher:
 
     # Task Completion
 
-    async def complete_task(
+    async def complete_task(  # noqa: PLR0912
         self,
         task_id: str,
         success: bool,
@@ -989,6 +989,55 @@ class RedTeamDispatcher:
             error=error,
         )
         self.shared_state.completed_tasks[task_id] = task_result
+
+        if success and isinstance(result, dict):
+            cred_data = result.get("credential")
+            if isinstance(cred_data, dict):
+                credential = Credential(
+                    username=cred_data.get("username", ""),
+                    password=cred_data.get("password", ""),
+                    domain=cred_data.get("domain", ""),
+                    source=cred_data.get("source", f"task:{task_id}"),
+                    is_admin=cred_data.get("is_admin", False),
+                )
+                await self.publish_credential(credential, source_agent)
+            creds_data = result.get("credentials")
+            if isinstance(creds_data, list):
+                for cred in creds_data:
+                    if not isinstance(cred, dict):
+                        continue
+                    credential = Credential(
+                        username=cred.get("username", ""),
+                        password=cred.get("password", ""),
+                        domain=cred.get("domain", ""),
+                        source=cred.get("source", f"task:{task_id}"),
+                        is_admin=cred.get("is_admin", False),
+                    )
+                    await self.publish_credential(credential, source_agent)
+
+            hash_data = result.get("hash")
+            if isinstance(hash_data, dict):
+                hash_obj = Hash(
+                    username=hash_data.get("username", ""),
+                    hash_value=hash_data.get("hash_value", ""),
+                    hash_type=hash_data.get("hash_type", "NTLM"),
+                    domain=hash_data.get("domain", ""),
+                    cracked_password=hash_data.get("cracked_password", ""),
+                )
+                await self.publish_hash(hash_obj, source_agent)
+            hashes_data = result.get("hashes")
+            if isinstance(hashes_data, list):
+                for h in hashes_data:
+                    if not isinstance(h, dict):
+                        continue
+                    hash_obj = Hash(
+                        username=h.get("username", ""),
+                        hash_value=h.get("hash_value", ""),
+                        hash_type=h.get("hash_type", "NTLM"),
+                        domain=h.get("domain", ""),
+                        cracked_password=h.get("cracked_password", ""),
+                    )
+                    await self.publish_hash(hash_obj, source_agent)
 
         # Broadcast completion
         if success:

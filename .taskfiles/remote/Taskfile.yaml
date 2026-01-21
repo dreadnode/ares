@@ -310,9 +310,16 @@ tasks:
         fi
 
         # Sync to worker pods
+        if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
+          MANIFEST=$(mktemp /tmp/ares-sha256.XXXX)
+          (cd src/ares && find . -type d -name __pycache__ -prune -o -type f ! -name "*.pyc" -print0 | sort -z | xargs -0 shasum -a 256) > "$MANIFEST"
+        else
+          MANIFEST=""
+        fi
         if [ -n "$PODS" ]; then
           printf '%s\n' $PODS | xargs -n1 -P {{.PARALLELISM}} -I{} bash -c '
             pod="$1"
+            manifest="$2"
             worker_container="{{.WORKER_CONTAINER}}"
             if [ -z "$worker_container" ]; then
               worker_container=$(kubectl get pod -n {{.NAMESPACE}} "$pod" \
@@ -323,35 +330,106 @@ tasks:
             else
               container_flag=()
             fi
+            sync_ok="false"
             if kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
                 mkdir -p {{.PVC_PATH}}/src/ares 2>/dev/null && \
               kubectl cp src/ares/. "$pod":{{.PVC_PATH}}/src/ares \
                 -n {{.NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $pod"
+              sync_ok="true"
             elif kubectl cp src/ares/. "$pod":{{.PVC_PATH}}/src/ares \
                 -n {{.NAMESPACE}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $pod"
+              sync_ok="true"
+            fi
+            if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
+              if [ "$sync_ok" = "true" ] && kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
+                  mkdir -p {{.PVC_PATH}}/tmp 2>/dev/null && \
+                kubectl cp "$manifest" "$pod:{{.PVC_PATH}}/tmp/ares.sha256" \
+                  -n {{.NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
+                set +e
+                verify_out=$(kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
+                  sh -c "cd {{.PVC_PATH}}/src/ares && sha256sum -c {{.PVC_PATH}}/tmp/ares.sha256" 2>&1)
+                verify_rc=$?
+                set -e
+                if [ $verify_rc -eq 0 ]; then
+                  echo -e "{{.SUCCESS}}   -> $pod (synced, pvc verified)"
+                else
+                  echo -e "{{.WARN}}   x $pod (synced, pvc differs)"
+                  failed_lines=$(printf "%s\n" "$verify_out" | grep -E "FAILED|No such file" || true)
+                  failed_count=$(printf "%s\n" "$failed_lines" | sed "/^$/d" | wc -l | tr -d " ")
+                  if [ "$failed_count" -gt 0 ]; then
+                    if [ "$failed_count" -gt 20 ]; then
+                      echo -e "{{.INFO}}   showing first 20 of $failed_count failures"
+                    fi
+                    printf "%s\n" "$failed_lines" | head -n 20
+                  else
+                    printf "%s\n" "$verify_out" | head -n 5
+                  fi
+                fi
+              else
+                echo -e "{{.WARN}}   x $pod (sync failed)"
+              fi
             else
-              echo -e "{{.WARN}}   x $pod"
+              if [ "$sync_ok" = "true" ]; then
+                echo -e "{{.SUCCESS}}   -> $pod (synced)"
+              else
+                echo -e "{{.WARN}}   x $pod (sync failed)"
+              fi
             fi
             exit 0
-          ' _ {}
+          ' _ {} "$MANIFEST"
         fi
 
         # Sync to orchestrator
         if [ -n "$ORCH_POD" ]; then
+          sync_ok="false"
           if kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
               mkdir -p {{.PVC_PATH}}/src/ares 2>/dev/null && \
             kubectl cp src/ares/. "$ORCH_POD":{{.PVC_PATH}}/src/ares \
               -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
-            echo -e "{{.SUCCESS}}   -> $ORCH_POD"
+            sync_ok="true"
+          fi
+          if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
+            if [ "$sync_ok" = "true" ] && kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+                mkdir -p {{.PVC_PATH}}/tmp 2>/dev/null && \
+              kubectl cp "$MANIFEST" "$ORCH_POD:{{.PVC_PATH}}/tmp/ares.sha256" \
+                -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
+              set +e
+              verify_out=$(kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+                sh -c "cd {{.PVC_PATH}}/src/ares && sha256sum -c {{.PVC_PATH}}/tmp/ares.sha256" 2>&1)
+              verify_rc=$?
+              set -e
+              if [ $verify_rc -eq 0 ]; then
+                echo -e "{{.SUCCESS}}   -> $ORCH_POD (synced, pvc verified)"
+              else
+                echo -e "{{.WARN}}   x $ORCH_POD (synced, pvc differs)"
+                failed_lines=$(printf "%s\n" "$verify_out" | grep -E "FAILED|No such file" || true)
+                failed_count=$(printf "%s\n" "$failed_lines" | sed "/^$/d" | wc -l | tr -d " ")
+                if [ "$failed_count" -gt 0 ]; then
+                  if [ "$failed_count" -gt 20 ]; then
+                    echo -e "{{.INFO}}   showing first 20 of $failed_count failures"
+                  fi
+                  printf "%s\n" "$failed_lines" | head -n 20
+                else
+                  printf "%s\n" "$verify_out" | head -n 5
+                fi
+              fi
+            else
+              echo -e "{{.WARN}}   x $ORCH_POD (sync failed)"
+            fi
           else
-            echo -e "{{.WARN}}   x $ORCH_POD"
+            if [ "$sync_ok" = "true" ]; then
+              echo -e "{{.SUCCESS}}   -> $ORCH_POD (synced)"
+            else
+              echo -e "{{.WARN}}   x $ORCH_POD (sync failed)"
+            fi
           fi
         fi
 
         echo ""
         echo -e "{{.SUCCESS}} Full sync complete"
+        if [ -n "$MANIFEST" ]; then
+          rm -f "$MANIFEST"
+        fi
 
   # ============================================================================
   # SYNC:BRANCH: Sync only files changed on current branch
@@ -670,54 +748,49 @@ tasks:
   # LOGS: Tail pod logs
   # ============================================================================
   logs:
-    desc: "Tail logs from pods (usage: task remote:logs [ROLE=enum] [FOLLOW=true])"
+    desc: "Tail logs from pods (usage: task remote:logs [ROLE=enum|orchestrator] [FOLLOW=true])"
     silent: true
     vars:
       ROLE: '{{.ROLE | default ""}}'
       FOLLOW: '{{.FOLLOW | default "true"}}'
       LINES: '{{.LINES | default "100"}}'
+      MAX_LOG_REQUESTS: '{{.MAX_LOG_REQUESTS | default "20"}}'
     cmds:
       - |
-        if [ -n "{{.ROLE}}" ]; then
+        CONTAINER_ARGS=""
+        if [ "{{.ROLE}}" = "orchestrator" ]; then
+          SELECTOR="-l app.kubernetes.io/name=ares-orchestrator"
+          CONTAINER_ARGS="-c {{.ORCH_CONTAINER}}"
+          echo -e "{{.INFO}} Orchestrator logs:"
+        elif [ -n "{{.ROLE}}" ]; then
           SELECTOR="-l ares.dreadnode.io/role={{.ROLE}}"
+          if [ -n "{{.WORKER_CONTAINER}}" ]; then
+            CONTAINER_ARGS="-c {{.WORKER_CONTAINER}}"
+          fi
           echo -e "{{.INFO}} Logs from {{.ROLE}} agent:"
         else
           SELECTOR="-l ares.dreadnode.io/component=red-team"
+          if [ -n "{{.WORKER_CONTAINER}}" ]; then
+            CONTAINER_ARGS="-c {{.WORKER_CONTAINER}}"
+          fi
           echo -e "{{.INFO}} Logs from all agents:"
         fi
         echo "========================================"
 
         if [ "{{.FOLLOW}}" = "true" ]; then
-          if [ -n "{{.WORKER_CONTAINER}}" ]; then
-            kubectl logs -n {{.NAMESPACE}} $SELECTOR -c {{.WORKER_CONTAINER}} --tail={{.LINES}} -f --prefix=true 2>/dev/null || \
-              kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} -f --prefix=true
+          if [ -n "$CONTAINER_ARGS" ]; then
+            kubectl logs -n {{.NAMESPACE}} $SELECTOR $CONTAINER_ARGS --tail={{.LINES}} -f --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} 2>/dev/null || \
+              kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} -f --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}}
           else
-            kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} -f --prefix=true
+            kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} -f --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}}
           fi
         else
-          if [ -n "{{.WORKER_CONTAINER}}" ]; then
-            kubectl logs -n {{.NAMESPACE}} $SELECTOR -c {{.WORKER_CONTAINER}} --tail={{.LINES}} --prefix=true 2>/dev/null || \
-              kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} --prefix=true
+          if [ -n "$CONTAINER_ARGS" ]; then
+            kubectl logs -n {{.NAMESPACE}} $SELECTOR $CONTAINER_ARGS --tail={{.LINES}} --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} 2>/dev/null || \
+              kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}}
           else
-            kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} --prefix=true
+            kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}}
           fi
-        fi
-
-  logs:orchestrator:
-    desc: "Tail orchestrator logs"
-    silent: true
-    vars:
-      FOLLOW: '{{.FOLLOW | default "true"}}'
-      LINES: '{{.LINES | default "100"}}'
-    cmds:
-      - |
-        echo -e "{{.INFO}} Orchestrator logs:"
-        echo "========================================"
-
-        if [ "{{.FOLLOW}}" = "true" ]; then
-          kubectl logs -n {{.NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -c {{.ORCH_CONTAINER}} --tail={{.LINES}} -f
-        else
-          kubectl logs -n {{.NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -c {{.ORCH_CONTAINER}} --tail={{.LINES}}
         fi
 
   # ============================================================================

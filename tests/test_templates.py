@@ -137,6 +137,14 @@ class TestAgentTemplates:
 
         assert "TestAlert" in result
 
+    def test_redteam_enum_template_includes_vulnerability_queue(self) -> None:
+        """Test redteam enum template renders with vulnerability queue guidance."""
+        loader = get_template_loader()
+        result = loader.render("redteam/agents/enum.md.jinja")
+
+        assert "queue_vulnerability_for_exploitation" in result
+        assert "get_vulnerability_queue_status" in result
+
 
 class TestEngineTemplates:
     """Test engine template rendering."""

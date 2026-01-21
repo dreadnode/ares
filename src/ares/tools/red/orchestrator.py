@@ -53,6 +53,32 @@ class OrchestratorTools(Toolset):
         return self._shared_state
 
     @dn.tool_method
+    def complete_operation(self, summary: str) -> str:
+        """
+        Mark the multi-agent red team operation as complete.
+
+        Use this tool when you have:
+        - Achieved domain admin access OR exhausted all attack paths
+        - Coordinated with all specialized agents
+        - Collected all available credentials and hashes
+        - Generated golden ticket (if krbtgt hash was found)
+
+        Args:
+            summary: Executive summary of the operation including:
+                - All domain administrators compromised
+                - Attack paths used
+                - Total credentials obtained
+                - Hosts compromised
+                - Key vulnerabilities exploited
+
+        Returns:
+            Confirmation message
+        """
+        self.shared_state.completed = True
+        logger.success(f"🎯 Multi-agent operation completed: {summary}")
+        return f"✓ Operation marked as complete. Summary: {summary}"
+
+    @dn.tool_method
     async def dispatch_crack_hash(
         self,
         hash_value: str,
@@ -493,12 +519,15 @@ class OrchestratorTools(Toolset):
 
         lines = ["🔑 Discovered Credentials:"]
         for cred in creds:
+            username = cred.username.strip()
+            if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
+                continue
             auth = cred.password if cred.password else "[hash]"
             admin_tag = " ⚡ADMIN" if cred.is_admin else ""
             lines.append(f"  • {cred.domain}\\{cred.username}: {auth[:20]}...{admin_tag}")
             lines.append(f"    Source: {cred.source}")
 
-        return "\n".join(lines)
+        return "\n".join(lines) if len(lines) > 1 else "No credentials discovered yet"
 
     @dn.tool_method
     def get_all_hashes(self) -> str:
@@ -675,6 +704,11 @@ class OrchestratorTools(Toolset):
         Returns:
             Confirmation message
         """
+        username = username.strip()
+        if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
+            return "[!] Invalid username; credential not broadcast"
+        if not (password or hash_value):
+            return "[!] Missing password/hash; credential not broadcast"
         from ares.core.models import Credential
 
         cred = Credential(

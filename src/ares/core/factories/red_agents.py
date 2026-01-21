@@ -350,6 +350,8 @@ def create_specialized_agent(
             # Set shared state if toolset supports it
             if hasattr(toolset, "set_shared_state"):
                 toolset.set_shared_state(shared_state)
+            elif hasattr(toolset, "set_state"):
+                toolset.set_state(shared_state)
             if hasattr(toolset, "set_dispatcher"):
                 toolset.set_dispatcher(dispatcher)
             if hasattr(toolset, "set_executor") and pod_executor:

@@ -227,6 +227,64 @@ class TestRunWorkerModelResolution:
         assert result is None
 
 
+class TestRunWorkerCallbacks:
+    """Tests for role-specific callback tools in run_worker."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("role", "callback_attr"),
+        [
+            (AgentRole.CRACKER, "CrackerCallbackTools"),
+            (AgentRole.LATERAL, "LateralCallbackTools"),
+        ],
+    )
+    async def test_run_worker_adds_role_callback_tools(self, monkeypatch, role, callback_attr):
+        from ares.core import worker as worker_module
+
+        created: dict[str, MagicMock] = {}
+
+        class DummyCallback:
+            def __init__(self) -> None:
+                self.set_dispatcher = MagicMock()
+                created["instance"] = self
+
+        monkeypatch.setenv("ARES_MODEL", "test-model")
+
+        shared_state = MagicMock()
+        dispatcher = MagicMock(shared_state=shared_state)
+        dispatcher.start = AsyncMock()
+        dispatcher.recover_state = AsyncMock(return_value=None)
+        dispatcher.register = AsyncMock()
+        dispatcher.stop = AsyncMock()
+
+        agent_info = MagicMock()
+        agent_info.name = "agent-name"
+
+        monkeypatch.setattr(worker_module, "RedTeamDispatcher", lambda **_kwargs: dispatcher)
+        monkeypatch.setattr(
+            worker_module, "create_agent_info", lambda *_args, **_kwargs: agent_info
+        )
+        monkeypatch.setattr(worker_module, callback_attr, DummyCallback)
+
+        create_agent_mock = MagicMock()
+        monkeypatch.setattr(worker_module, "create_specialized_agent", create_agent_mock)
+
+        worker_instance = MagicMock()
+        worker_instance.start = AsyncMock()
+        monkeypatch.setattr(worker_module, "WorkerAgent", MagicMock(return_value=worker_instance))
+
+        await worker_module.run_worker(
+            role=role,
+            operation_id="op-1",
+            discover_operation=False,
+            use_redis_queue=False,
+        )
+
+        created["instance"].set_dispatcher.assert_called_once_with(dispatcher)
+        _, kwargs = create_agent_mock.call_args
+        assert created["instance"] in kwargs["additional_tools"]
+
+
 class TestDiscoverActiveOperationIndefiniteWait:
     """Tests for indefinite wait behavior when max_wait is None."""
 

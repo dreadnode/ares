@@ -10,13 +10,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cyclopts
-import dreadnode as dn
 from loguru import logger
 
 app = cyclopts.App(
     name="ares",
     help="Autonomous SOC Investigation Agent - Question-driven threat investigation",
 )
+
+
+def _configure_dreadnode():
+    from ares.core.litellm_env import configure_litellm_env
+
+    configure_litellm_env()
+    import dreadnode as dn
+
+    return dn
 
 
 @dataclass
@@ -115,6 +123,7 @@ async def main(  # noqa: PLR0912
     dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
 
     # Configure Dreadnode
+    dn = _configure_dreadnode()
     dn.configure(
         server=dn_args.server,
         token=dreadnode_token,
@@ -310,6 +319,7 @@ async def investigate_alert(
     )
     dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
 
+    dn = _configure_dreadnode()
     dn.configure(
         server=dn_args.server,
         token=dreadnode_token,
@@ -388,6 +398,7 @@ async def redteam(
     # Configure Dreadnode
     dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
 
+    dn = _configure_dreadnode()
     dn.configure(
         server=dn_args.server,
         token=dreadnode_token,
@@ -546,6 +557,7 @@ async def multi_agent(
     dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
 
     try:
+        dn = _configure_dreadnode()
         dn.configure(
             server=dn_args.server,
             token=dreadnode_token,
@@ -568,6 +580,7 @@ async def multi_agent(
     logger.info(f"Max Steps: {args.max_steps}")
     logger.info(f"Redis: {redis_url}")
     logger.info(f"Namespace: {namespace}")
+    logger.info(f"Report Dir: {args.report_dir}")
     logger.info("=" * 60)
 
     from ares.core.models import Credential
@@ -590,6 +603,10 @@ async def multi_agent(
     logger.info(f"Starting multi-agent operation {operation_id}...")
     logger.info("")
 
+    report_dir = Path(args.report_dir).resolve()
+    report_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Reports: {report_dir}")
+
     try:
         result = await run_multi_agent_operation(
             operation_id=operation_id,
@@ -600,6 +617,7 @@ async def multi_agent(
             namespace=namespace,
             model=model,
             max_steps=args.max_steps,
+            report_dir=report_dir,
         )
 
         logger.success("")
@@ -621,6 +639,8 @@ async def multi_agent(
         if result.get("golden_ticket_forged"):
             logger.success("  🎫 GOLDEN TICKET: FORGED")
 
+        if result.get("report_path"):
+            logger.success(f"  Report: {result['report_path']}")
         logger.success("")
 
     except Exception as e:
@@ -706,25 +726,23 @@ async def worker(
 
     # Use config values if CLI args not specified
     redis_url = worker_args.redis_url or config.redis_url
-    model = (
-        worker_args.model
-        or agent_config.model
-        or os.getenv(f"ARES_AGENT_{role.upper()}_MODEL")
-        or os.getenv("ARES_WORKER_MODEL")
-        or os.getenv("ARES_MODEL")
-    )
+    model = worker_args.model or os.getenv(f"ARES_AGENT_{role.upper()}_MODEL")
     if not model:
-        logger.error(
-            "No model specified. Set ARES_AGENT_<ROLE>_MODEL/ARES_WORKER_MODEL/ARES_MODEL "
-            "or pass --worker-args.model."
-        )
-        return
+        model = os.getenv("ARES_WORKER_MODEL") or os.getenv("ARES_MODEL")
+    if not model and operation_id:
+        model = agent_config.model
+    # If no model specified and no operation_id, the worker will discover an operation
+    # from Redis and fetch the model from the operation's configuration. This allows
+    # workers to start without ARES_MODEL in the ConfigMap.
+    if not model and not operation_id:
+        logger.info("No model specified - will fetch from operation config after discovery")
     max_steps = worker_args.max_steps if worker_args.max_steps > 0 else agent_config.max_steps
 
     # Configure Dreadnode (optional - don't fail if platform unavailable)
     dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
 
     try:
+        dn = _configure_dreadnode()
         dn.configure(
             server=dn_args.server,
             token=dreadnode_token,
@@ -769,7 +787,7 @@ async def worker(
             role=agent_role,
             operation_id=operation_id if operation_id else None,
             redis_url=redis_url,
-            model=model,
+            model=model or None,  # Pass None to let run_worker fetch from Redis
             max_steps=max_steps if max_steps > 0 else None,
         )
     except KeyboardInterrupt:

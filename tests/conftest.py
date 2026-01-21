@@ -111,7 +111,7 @@ def sample_evidence() -> Evidence:
     return Evidence(
         id="ev-001",
         type="ip_address",
-        value="192.168.1.100",
+        value="192.168.56.100",
         source="Loki query: {job='firewall'}",
         timestamp=datetime.now(timezone.utc),
         pyramid_level=PyramidLevel.IP_ADDRESSES,
@@ -285,7 +285,7 @@ def escalated_investigation_state(
 def sample_target() -> Target:
     """Create a sample target."""
     return Target(
-        ip="192.168.1.100",
+        ip="192.168.56.100",
         hostname="dc01.child.example.local",
         domain="child.example.local",
         os="Windows Server 2019",
@@ -323,8 +323,8 @@ def populated_red_team_state(sample_target: Target) -> RedTeamState:
         started_at=datetime.now(timezone.utc),
         stage=InvestigationStage.CAUSATION,
         hosts=[
-            Host(ip="192.168.1.100", hostname="dc01", os="Windows Server 2019"),
-            Host(ip="192.168.1.101", hostname="dc01", os="Windows 10"),
+            Host(ip="192.168.56.100", hostname="dc01", os="Windows Server 2019"),
+            Host(ip="192.168.56.101", hostname="dc01", os="Windows 10"),
         ],
         users=[
             User(username="alice.smith", domain="north", is_admin=True),
@@ -586,7 +586,7 @@ def correlation_context() -> dict[str, Any]:
     return {
         "cluster_id": "cluster-123",
         "related_alerts": 3,
-        "shared_indicators": ["192.168.1.100", "alice.smith"],
+        "shared_indicators": ["192.168.56.100", "alice.smith"],
         "common_techniques": ["T1003.006"],
         "time_window_minutes": 30,
     }

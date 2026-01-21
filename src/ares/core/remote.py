@@ -111,12 +111,10 @@ class K8sExecutor:
         self._task_queue = None
 
     def _get_task_queue(self):
-        """Lazy-load the RedisTaskQueue."""
-        if self._task_queue is None:
-            from ares.core.task_queue import RedisTaskQueue
+        """Deprecated: Use per-call task queue instances to avoid loop conflicts."""
+        from ares.core.task_queue import RedisTaskQueue
 
-            self._task_queue = RedisTaskQueue(self._redis_url)
-        return self._task_queue
+        return RedisTaskQueue(self._redis_url)
 
     def run_command(
         self,
@@ -173,6 +171,8 @@ class K8sExecutor:
         working_directory: str,
     ) -> CommandResult:
         """Dispatch command via Redis and wait for result."""
+        # Create a fresh task queue bound to the current event loop to avoid
+        # "Future attached to a different loop" errors.
         task_queue = self._get_task_queue()
         await task_queue.connect()
 

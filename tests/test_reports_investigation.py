@@ -360,7 +360,7 @@ class TestPyramidAssessment:
             Evidence(
                 id="ip-1",
                 type="ip",
-                value="192.168.1.1",
+                value="192.168.56.1",
                 source="logs",
                 timestamp=datetime.now(timezone.utc),
                 pyramid_level=PyramidLevel.IP_ADDRESSES,
@@ -368,7 +368,7 @@ class TestPyramidAssessment:
             Evidence(
                 id="ip-2",
                 type="ip",
-                value="192.168.1.2",
+                value="192.168.56.2",
                 source="logs",
                 timestamp=datetime.now(timezone.utc),
                 pyramid_level=PyramidLevel.IP_ADDRESSES,
