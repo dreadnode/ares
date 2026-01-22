@@ -638,12 +638,58 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        resolved_password = password
+        resolved_hash = hash_value
+        resolved_domain = domain
+
+        if not resolved_password and not resolved_hash:
+            username_key = username.strip().lower()
+            domain_key = domain.strip().lower() if domain else ""
+
+            matching_creds = [
+                cred
+                for cred in self.shared_state.all_credentials
+                if cred.username.strip().lower() == username_key
+                and (not domain_key or cred.domain.strip().lower() == domain_key)
+            ]
+
+            if matching_creds:
+                cred = matching_creds[0]
+                resolved_password = cred.password
+                if not resolved_domain:
+                    resolved_domain = cred.domain
+                logger.debug(
+                    "Filled lateral auth from credential store for %s\\%s",
+                    resolved_domain or domain,
+                    username,
+                )
+
+            if not resolved_password:
+                matching_hashes = [
+                    h
+                    for h in self.shared_state.all_hashes
+                    if h.username.strip().lower() == username_key
+                    and (not domain_key or h.domain.strip().lower() == domain_key)
+                ]
+                if matching_hashes:
+                    h = matching_hashes[0]
+                    resolved_hash = h.hash_value
+                    if h.cracked_password:
+                        resolved_password = h.cracked_password
+                    if not resolved_domain:
+                        resolved_domain = h.domain
+                    logger.debug(
+                        "Filled lateral auth from hash store for %s\\%s",
+                        resolved_domain or domain,
+                        username,
+                    )
+
         payload = {
             "target_host": target_host,
             "username": username,
-            "password": password,
-            "hash_value": hash_value,
-            "domain": domain,
+            "password": resolved_password,
+            "hash_value": resolved_hash,
+            "domain": resolved_domain,
             "method": method,
         }
 

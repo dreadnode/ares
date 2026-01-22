@@ -948,7 +948,7 @@ tasks:
           exit 1
         fi
 
-        kubectl exec -i -n {{.K8S_NAMESPACE}} "$POD" -c orchestrator -- env REDIS_URL="$REDIS_URL" python - <<'PY'
+        kubectl exec -i -n {{.K8S_NAMESPACE}} "$POD" -- env REDIS_URL="$REDIS_URL" python - <<'PY'
         import asyncio
         import json
         import os
@@ -1018,7 +1018,7 @@ tasks:
           exit 1
         fi
 
-        kubectl exec -i -n {{.K8S_NAMESPACE}} "$POD" -c orchestrator -- env REDIS_URL="$REDIS_URL" python - <<'PY'
+        kubectl exec -i -n {{.K8S_NAMESPACE}} "$POD" -- env REDIS_URL="$REDIS_URL" python - <<'PY'
         import asyncio
         import json
         import os
