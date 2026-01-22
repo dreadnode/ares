@@ -642,6 +642,7 @@ class TestOrchestratorWorkerFlow:
             dispatcher.request_lateral_movement(
                 target_host="192.168.1.10",
                 username="admin",
+                password="TestPass123!",  # pragma: allowlist secret
                 source_agent="orchestrator",
             ),
             dispatcher.request_acl_analysis(

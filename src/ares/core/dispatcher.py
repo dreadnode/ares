@@ -47,6 +47,7 @@ from ares.core.models import (
     TaskStatus,
     VulnerabilityInfo,
 )
+from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue
 from ares.core.task_queue import TaskResult as QueueTaskResult
 
@@ -145,13 +146,9 @@ class RedTeamDispatcher:
         # Connect to Redis if URL provided
         if self._redis_url:
             try:
-                import redis.asyncio as redis
-
-                self._redis_client = redis.from_url(self._redis_url)
+                self._redis_client = await create_redis_client(self._redis_url)
                 await self._redis_client.ping()
                 logger.info(f"Connected to Redis at {self._redis_url}")
-            except ImportError:
-                logger.warning("redis package not installed, using in-memory state")
             except Exception as e:
                 logger.warning(f"Failed to connect to Redis: {e}, using in-memory state")
 
@@ -641,14 +638,69 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        resolved_password = password
+        resolved_hash = hash_value
+        resolved_domain = domain
+
+        if not resolved_password and not resolved_hash:
+            username_key = username.strip().lower()
+            domain_key = domain.strip().lower() if domain else ""
+
+            matching_creds = [
+                cred
+                for cred in self.shared_state.all_credentials
+                if cred.username.strip().lower() == username_key
+                and (not domain_key or cred.domain.strip().lower() == domain_key)
+            ]
+
+            if matching_creds:
+                cred = matching_creds[0]
+                resolved_password = cred.password
+                if not resolved_domain:
+                    resolved_domain = cred.domain
+                logger.debug(
+                    "Filled lateral auth from credential store for %s\\%s",
+                    resolved_domain or domain,
+                    username,
+                )
+
+            if not resolved_password:
+                matching_hashes = [
+                    h
+                    for h in self.shared_state.all_hashes
+                    if h.username.strip().lower() == username_key
+                    and (not domain_key or h.domain.strip().lower() == domain_key)
+                ]
+                if matching_hashes:
+                    h = matching_hashes[0]
+                    resolved_hash = h.hash_value
+                    if h.cracked_password:
+                        resolved_password = h.cracked_password
+                    if not resolved_domain:
+                        resolved_domain = h.domain
+                    logger.debug(
+                        "Filled lateral auth from hash store for %s\\%s",
+                        resolved_domain or domain,
+                        username,
+                    )
+
         payload = {
             "target_host": target_host,
             "username": username,
-            "password": password,
-            "hash_value": hash_value,
-            "domain": domain,
+            "password": resolved_password,
+            "hash_value": resolved_hash,
+            "domain": resolved_domain,
             "method": method,
         }
+
+        if not resolved_password and not resolved_hash:
+            logger.warning(
+                "Skipping lateral movement for %s\\%s -> %s: missing credentials",
+                resolved_domain or domain,
+                username,
+                target_host,
+            )
+            return ""
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
@@ -1025,6 +1077,15 @@ class RedTeamDispatcher:
                     cracked_password=hash_data.get("cracked_password", ""),
                 )
                 await self.publish_hash(hash_obj, source_agent)
+                if hash_obj.cracked_password:
+                    cracked_cred = Credential(
+                        username=hash_obj.username,
+                        password=hash_obj.cracked_password,
+                        domain=hash_obj.domain,
+                        source=f"hash:{task_id}",
+                        is_admin=False,
+                    )
+                    await self.publish_credential(cracked_cred, source_agent)
             hashes_data = result.get("hashes")
             if isinstance(hashes_data, list):
                 for h in hashes_data:
@@ -1038,6 +1099,15 @@ class RedTeamDispatcher:
                         cracked_password=h.get("cracked_password", ""),
                     )
                     await self.publish_hash(hash_obj, source_agent)
+                    if hash_obj.cracked_password:
+                        cracked_cred = Credential(
+                            username=hash_obj.username,
+                            password=hash_obj.cracked_password,
+                            domain=hash_obj.domain,
+                            source=f"hash:{task_id}",
+                            is_admin=False,
+                        )
+                        await self.publish_credential(cracked_cred, source_agent)
 
         # Broadcast completion
         if success:

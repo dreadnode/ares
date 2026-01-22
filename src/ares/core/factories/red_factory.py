@@ -237,7 +237,7 @@ async def vulnerability_discovery_hook(event: ToolEnd):  # noqa: PLR0912
         redirects.append(
             "🚨 ESC8 ADCS VULNERABILITY FOUND (Web Enrollment)!\n"
             "→ Use certipy_relay_esc8 to set up relay listener\n"
-            "→ Then use petitpotam to coerce DC authentication\n"
+            "→ Then use petitpotam or coercer to coerce DC authentication\n"
             "→ Relay will capture DC certificate\n"
             "→ Use certipy_auth with the captured certificate!"
         )
@@ -299,6 +299,12 @@ async def vulnerability_discovery_hook(event: ToolEnd):  # noqa: PLR0912
             "→ Use mssql_xp_cmdshell with impersonate='sa' to get command execution\n"
             "→ Execute credential harvesting commands"
         )
+    if "is_trustworthy_on" in result.lower() and is_mssql_context:
+        redirects.append(
+            "💾 MSSQL TRUSTWORTHY DATABASE DETECTED!\n"
+            "→ Use mssql_execute_as_user (impersonate_user='dbo')\n"
+            "→ Check for DB-level impersonation and escalate to sysadmin"
+        )
 
     # MSSQL Linked Servers - require explicit linked server indicators
     has_linked_server = (
@@ -329,6 +335,14 @@ async def vulnerability_discovery_hook(event: ToolEnd):  # noqa: PLR0912
             "→ These are local Administrator passwords for specific computers\n"
             "→ Use with evil_winrm or psexec against the target computer\n"
             "→ Then run secretsdump on that target!"
+        )
+
+    # krbtgt hash
+    if "krbtgt" in result.lower() and (":::" in result or "hash" in result.lower()):
+        redirects.append(
+            "🎫 KRBTGT HASH FOUND!\n"
+            "→ If this is a CHILD domain, use raise_child for parent escalation\n"
+            "→ Otherwise use generate_golden_ticket then secretsdump all DCs"
         )
 
     # Password in description - only if non-empty descriptions returned
@@ -424,6 +438,89 @@ def _track_exploitation(tool_name: str) -> None:
             logger.info(f"[+] Exploitation attempted: {vuln_type}")
 
 
+def _track_vulnerability_findings(result: str, tool_name: str, step: int) -> None:
+    result_lower = result.lower()
+    is_mssql = "mssql" in tool_name.lower() or "sql" in result_lower
+    has_acl = any(
+        acl in result_lower
+        for acl in ["genericall", "genericwrite", "writedacl", "forcechangepassword"]
+    )
+    is_acl_tool = tool_name in {"run_bloodhound", "enumerate_users"}
+    has_linked_server = (
+        "linked server" in result_lower
+        or "srv_name" in result_lower
+        or "is_linked" in result_lower
+        or "sp_linkedservers" in result_lower
+    )
+    has_laps_data = (
+        "ms-mcs-admpwd" in result_lower
+        and "no laps" not in result_lower
+        and "not found" not in result_lower
+    )
+
+    checks = [
+        (
+            "ESC1" in result and ("exploitable" in result_lower or "vulnerable" in result_lower),
+            ("esc1_adcs", "ADCS ESC1", "certipy_req_esc1 → certipy_auth"),
+        ),
+        (
+            "ESC4" in result and ("exploitable" in result_lower or "vulnerable" in result_lower),
+            (
+                "esc4_adcs",
+                "ADCS ESC4 (Template Modification)",
+                "certipy_template_esc4 → certipy_req_esc1",
+            ),
+        ),
+        (
+            "ESC8" in result and ("exploitable" in result_lower or "vulnerable" in result_lower),
+            ("esc8_adcs", "ADCS ESC8 (Web Enrollment)", "certipy_relay_esc8 + petitpotam"),
+        ),
+        (
+            has_acl and is_acl_tool,
+            (
+                "acl_abuse",
+                "ACL Abuse Path",
+                "certipy_shadow_auto / targeted_kerberoast / force_change_password / dacl_edit",
+            ),
+        ),
+        (
+            "unconstrained" in result_lower and "delegation" in result_lower,
+            ("unconstrained_delegation", "Unconstrained Delegation", "petitpotam / coercer"),
+        ),
+        (
+            "constrained" in result_lower
+            and "delegation" in result_lower
+            and "unconstrained" not in result_lower,
+            ("constrained_delegation", "Constrained Delegation", "constrained_delegation_s4u"),
+        ),
+        (
+            "impersonate" in result_lower and is_mssql,
+            ("mssql_impersonation", "MSSQL Impersonation", "mssql_xp_cmdshell with impersonate"),
+        ),
+        (
+            "is_trustworthy_on" in result_lower and is_mssql,
+            (
+                "mssql_trustworthy",
+                "MSSQL Trustworthy Database",
+                "mssql_execute_as_user with impersonate_user='dbo'",
+            ),
+        ),
+        (
+            has_linked_server and is_mssql,
+            ("mssql_linked", "MSSQL Linked Servers", "mssql_exec_linked"),
+        ),
+        (has_laps_data, ("laps", "LAPS Passwords", "Use with evil_winrm / psexec")),
+        (
+            "krbtgt" in result_lower and (":::" in result or "hash" in result_lower),
+            ("krbtgt_hash", "Krbtgt Hash", "golden_ticket → secretsdump"),
+        ),
+    ]
+
+    for condition, (vuln_id, vuln_type, tool) in checks:
+        if condition:
+            _track_discovery(vuln_id, vuln_type, tool, step)
+
+
 async def track_vulnerability_discoveries(event: ToolEnd):
     """
     Track discovered vulnerabilities and exploitation attempts.
@@ -441,89 +538,7 @@ async def track_vulnerability_discoveries(event: ToolEnd):
     result = str(event.message.content)
     tool_name = event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
     step = _last_step_number or 0
-    result_lower = result.lower()
-
-    # Track ESC1 ADCS vulnerability
-    is_esc1 = "ESC1" in result and ("exploitable" in result_lower or "vulnerable" in result_lower)
-    if is_esc1:
-        _track_discovery("esc1_adcs", "ADCS ESC1", "certipy_req_esc1 → certipy_auth", step)
-
-    # Track ESC4 ADCS vulnerability
-    is_esc4 = "ESC4" in result and ("exploitable" in result_lower or "vulnerable" in result_lower)
-    if is_esc4:
-        _track_discovery(
-            "esc4_adcs",
-            "ADCS ESC4 (Template Modification)",
-            "certipy_template_esc4 → certipy_req_esc1",
-            step,
-        )
-
-    # Track ESC8 ADCS vulnerability - require explicit ESC8 marker
-    is_esc8 = "ESC8" in result and ("exploitable" in result_lower or "vulnerable" in result_lower)
-    if is_esc8:
-        _track_discovery(
-            "esc8_adcs", "ADCS ESC8 (Web Enrollment)", "certipy_relay_esc8 + petitpotam", step
-        )
-
-    # Track ACL abuse paths
-    has_acl = any(
-        acl in result_lower
-        for acl in ["genericall", "genericwrite", "writedacl", "forcechangepassword"]
-    )
-    is_acl_tool = tool_name in ["run_bloodhound", "enumerate_users"]
-    if has_acl and is_acl_tool:
-        _track_discovery(
-            "acl_abuse",
-            "ACL Abuse Path",
-            "certipy_shadow_auto / targeted_kerberoast / force_change_password / dacl_edit",
-            step,
-        )
-
-    # Track unconstrained delegation
-    if "unconstrained" in result_lower and "delegation" in result_lower:
-        _track_discovery(
-            "unconstrained_delegation", "Unconstrained Delegation", "petitpotam / coercer", step
-        )
-
-    # Track constrained delegation
-    if (
-        "constrained" in result_lower
-        and "delegation" in result_lower
-        and "unconstrained" not in result_lower
-    ):
-        _track_discovery(
-            "constrained_delegation", "Constrained Delegation", "constrained_delegation_s4u", step
-        )
-
-    # Track MSSQL impersonation
-    is_mssql = "mssql" in tool_name.lower() or "sql" in result_lower
-    if "impersonate" in result_lower and is_mssql:
-        _track_discovery(
-            "mssql_impersonation", "MSSQL Impersonation", "mssql_xp_cmdshell with impersonate", step
-        )
-
-    # Track MSSQL linked servers - require explicit indicators
-    has_linked_server = (
-        "linked server" in result_lower
-        or "srv_name" in result_lower
-        or "is_linked" in result_lower
-        or "sp_linkedservers" in result_lower
-    )
-    if has_linked_server and is_mssql:
-        _track_discovery("mssql_linked", "MSSQL Linked Servers", "mssql_exec_linked", step)
-
-    # Track LAPS - only when actual attribute found, not just the word "laps"
-    has_laps_data = (
-        "ms-mcs-admpwd" in result_lower
-        and "no laps" not in result_lower
-        and "not found" not in result_lower
-    )
-    if has_laps_data:
-        _track_discovery("laps", "LAPS Passwords", "Use with evil_winrm / psexec", step)
-
-    # Track krbtgt hash
-    if "krbtgt" in result_lower and (":::" in result or "hash" in result_lower):
-        _track_discovery("krbtgt_hash", "Krbtgt Hash", "golden_ticket → secretsdump", step)
+    _track_vulnerability_findings(result, tool_name, step)
 
     # Track exploitation attempts
     _track_exploitation(tool_name)
