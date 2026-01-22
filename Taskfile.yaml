@@ -778,23 +778,23 @@ tasks:
       - cmd: mkdir -p {{.LOG_DIR}}
         silent: true
 
-      # Pin workers to this operation ID to avoid auto-discovery drift
+      # Pin workers to this operation ID without rolling pods
       - cmd: |
-          echo "🔧 Setting OPERATION_ID on worker deployments..."
-          for role in enum cracker acl privesc lateral poisoning; do
-            DEPLOYS=$(kubectl get deploy -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role=$role -o name 2>/dev/null)
-            if [ -z "$DEPLOYS" ]; then
-              echo "   ⚠️  No deployments found for role: $role"
-              continue
-            fi
-            kubectl set env -n {{.K8S_NAMESPACE}} $DEPLOYS OPERATION_ID="{{.OPERATION_ID_COMPUTED}}"
-          done
-          echo "⏳ Waiting for worker rollouts..."
-          for role in enum cracker acl privesc lateral poisoning; do
-            for deploy in $(kubectl get deploy -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role=$role -o name 2>/dev/null); do
-              kubectl rollout status -n {{.K8S_NAMESPACE}} "$deploy"
-            done
-          done
+          set -euo pipefail
+          echo "🔧 Setting active operation pointer in Redis..."
+          REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
+          if [ -z "$REDIS_POD" ]; then
+            echo "❌ No Redis pod found in namespace {{.K8S_NAMESPACE}}"
+            exit 1
+          fi
+          REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+          REDIS_ENV=()
+          if [ -n "$REDIS_PASS" ]; then
+            REDIS_ENV=(env REDISCLI_AUTH="$REDIS_PASS")
+          fi
+          kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" \
+            redis-cli set ares:operation:active "{{.OPERATION_ID_COMPUTED}}" >/dev/null
+          echo "✅ Set ares:operation:active -> {{.OPERATION_ID_COMPUTED}}"
         silent: false
 
       # Submit operation
@@ -850,6 +850,28 @@ tasks:
           echo ""
           kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | tee -a "{{.LOGFILE}}"
         silent: false
+
+  ares:red:multi:report:
+    desc: "Fetch a multi-agent red team report from the orchestrator pod (usage: task ares:red:multi:report OPERATION_ID=op-xxx)"
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
+      REMOTE_REPORT_DIR: '{{.REMOTE_REPORT_DIR | default "/reports"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required. Usage: task ares:red:multi:report OPERATION_ID=op-xxx"
+    cmds:
+      - |
+        POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=ares-orchestrator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        if [ -z "$POD" ]; then
+          echo "❌ No orchestrator pod found in namespace {{.K8S_NAMESPACE}}"
+          exit 1
+        fi
+        REMOTE_PATH="{{.REMOTE_REPORT_DIR}}/{{.OPERATION_ID}}_report.md"
+        mkdir -p {{.REPORT_DIR}}
+        kubectl exec -n {{.K8S_NAMESPACE}} "$POD" -- test -f "$REMOTE_PATH"
+        kubectl cp -n {{.K8S_NAMESPACE}} "$POD:$REMOTE_PATH" "{{.REPORT_DIR}}/"
+        echo "✅ Report copied to: {{.REPORT_DIR}}/{{.OPERATION_ID}}_report.md"
 
   ares:red:multi:status:
     desc: "Check multi-agent operation status (usage: task ares:red:multi:status OPERATION_ID=op-xxx)"
@@ -1323,9 +1345,10 @@ tasks:
       NAMESPACE: '{{.NAMESPACE | default "attack-simulation"}}'
     cmds:
       - |
-        echo "🔄 Restarting red team deployments in namespace: {{.NAMESPACE}}"
+        echo "🔄 Restarting red team workloads in namespace: {{.NAMESPACE}}"
         kubectl rollout restart deployment -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team
-        echo "✅ Red team deployments restarted"
+        kubectl rollout restart statefulset -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team
+        echo "✅ Red team workloads restarted"
 
   ares:red:logs:
     desc: "Tail red team agent logs from Kali via SSM (usage: task ares:red:logs [KALI=instance-name] [LINES=100] [FOLLOW=true])"

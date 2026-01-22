@@ -33,6 +33,7 @@ from ares.core.messages import (
     OperationComplete,
 )
 from ares.core.models import AgentRole
+from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue, TaskMessage
 from ares.tools.red import CrackerCallbackTools, LateralCallbackTools
 
@@ -67,12 +68,6 @@ async def discover_active_operation(  # noqa: PLR0912
     Raises:
         asyncio.CancelledError: Re-raised after cleanup when the task is cancelled
     """
-    try:
-        import redis.asyncio as redis_async
-    except ImportError:
-        logger.error("redis package not installed, cannot discover operations")
-        return None
-
     start_time = time.monotonic()
     last_log_time = start_time
     consecutive_errors = 0
@@ -93,16 +88,52 @@ async def discover_active_operation(  # noqa: PLR0912
             try:
                 # Reuse existing connection or create new one
                 if client is None:
-                    client = redis_async.from_url(redis_url)
+                    client = await create_redis_client(
+                        redis_url,
+                        decode_responses=True,
+                    )
                 await client.ping()
 
                 now = datetime.now(timezone.utc)
+
+                # Honor explicit operation pointer before scanning checkpoints.
+                active_key = await client.get("ares:operation:active")
+                if active_key:
+                    active_op_id = str(active_key)
+                    state_key = f"ares:operation:{active_op_id}:state"
+                    if await client.exists(state_key):
+                        time_key = f"ares:operation:{active_op_id}:checkpoint_time"
+                        checkpoint_data = await client.get(time_key)
+                        if checkpoint_data:
+                            checkpoint_time = datetime.fromisoformat(str(checkpoint_data))
+                            if checkpoint_time.tzinfo is None:
+                                checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
+                            age_seconds = (now - checkpoint_time).total_seconds()
+                            if age_seconds <= max_operation_age:
+                                logger.info(
+                                    f"Discovered active operation via pointer: {active_op_id}"
+                                )
+                                await _cleanup_client()
+                                return active_op_id
+                            logger.debug(
+                                f"Ignoring stale pointed operation {active_op_id} "
+                                f"(checkpoint age: {age_seconds:.0f}s > "
+                                f"{max_operation_age}s)"
+                            )
+                        else:
+                            logger.debug(
+                                f"Active operation pointer has no checkpoint yet: {active_op_id}"
+                            )
+                    else:
+                        logger.debug(
+                            f"Active operation pointer references missing state: {active_op_id}"
+                        )
 
                 # Scan for operation state keys
                 operations: list[tuple[str, datetime]] = []
                 async for key in client.scan_iter("ares:operation:*:state"):
                     # Extract operation ID from key: ares:operation:<op_id>:state
-                    parts = key.decode().split(":")
+                    parts = str(key).split(":")
                     if len(parts) >= 3:
                         op_id = parts[2]
 
@@ -111,7 +142,7 @@ async def discover_active_operation(  # noqa: PLR0912
                         checkpoint_data = await client.get(time_key)
 
                         if checkpoint_data:
-                            checkpoint_time = datetime.fromisoformat(checkpoint_data.decode())
+                            checkpoint_time = datetime.fromisoformat(str(checkpoint_data))
                             # Ensure checkpoint_time is timezone-aware for comparison
                             if checkpoint_time.tzinfo is None:
                                 checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
@@ -165,6 +196,16 @@ async def discover_active_operation(  # noqa: PLR0912
                 # Close broken connection so we reconnect next iteration
                 await _cleanup_client()
 
+                # If Redis isn't available at all, don't spin forever.
+                if isinstance(e, RuntimeError) and "redis package required" in str(e):
+                    logger.error("redis package not installed, cannot discover operations")
+                    return None
+
+                # Respect max_wait even when errors occur.
+                if max_wait is not None and (time.monotonic() - start_time) >= max_wait:
+                    logger.warning(f"No active operations found after {max_wait}s")
+                    return None
+
                 # Exponential backoff with jitter, capped at 60s
                 backoff = min(5 * (2 ** (consecutive_errors - 1)), 60)
                 jitter = random.uniform(0, 1)  # nosec B311 # noqa: S311 - jitter for backoff
@@ -177,13 +218,7 @@ async def discover_active_operation(  # noqa: PLR0912
 
 async def get_operation_model(redis_url: str, operation_id: str) -> str | None:
     """Fetch the model configured for a specific operation from Redis."""
-    try:
-        import redis.asyncio as redis_async
-    except ImportError:
-        logger.error("redis package not installed, cannot resolve operation model")
-        return None
-
-    client = redis_async.from_url(redis_url, decode_responses=True)
+    client = await create_redis_client(redis_url, decode_responses=True)
     try:
         return await client.get(f"ares:operation:{operation_id}:model")
     except Exception as e:
@@ -198,13 +233,7 @@ async def get_operation_model(redis_url: str, operation_id: str) -> str | None:
 
 async def get_operation_model_overrides(redis_url: str, operation_id: str) -> dict[str, str] | None:
     """Fetch model override env vars for a specific operation from Redis."""
-    try:
-        import redis.asyncio as redis_async
-    except ImportError:
-        logger.error("redis package not installed, cannot resolve operation model overrides")
-        return None
-
-    client = redis_async.from_url(redis_url, decode_responses=True)
+    client = await create_redis_client(redis_url, decode_responses=True)
     try:
         raw = await client.get(f"ares:operation:{operation_id}:model_overrides")
         if not raw:
@@ -216,6 +245,38 @@ async def get_operation_model_overrides(redis_url: str, operation_id: str) -> di
         return None
     except Exception as e:
         logger.warning(f"Failed to read model overrides for {operation_id}: {e}")
+        return None
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+
+async def get_active_operation_pointer(redis_url: str, max_operation_age: int = 300) -> str | None:
+    """Fetch a valid active operation pointer from Redis, if present."""
+    client = await create_redis_client(redis_url, decode_responses=True)
+    try:
+        active_key = await client.get("ares:operation:active")
+        if not active_key:
+            return None
+        op_id = str(active_key)
+        state_key = f"ares:operation:{op_id}:state"
+        if not await client.exists(state_key):
+            return None
+        time_key = f"ares:operation:{op_id}:checkpoint_time"
+        checkpoint_data = await client.get(time_key)
+        if not checkpoint_data:
+            return op_id
+        checkpoint_time = datetime.fromisoformat(str(checkpoint_data))
+        if checkpoint_time.tzinfo is None:
+            checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - checkpoint_time).total_seconds()
+        if age_seconds <= max_operation_age:
+            return op_id
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to read active operation pointer: {e}")
         return None
     finally:
         try:
@@ -444,12 +505,20 @@ class RedisWorkerAgent:
         agent: Agent,
         agent_name: str,
         pod_name: str | None = None,
+        operation_id: str | None = None,
+        redis_url: str | None = None,
+        pointer_check_interval: float = 30.0,
+        max_operation_age: int = 300,
     ):
         self.role = role
         self.task_queue = task_queue
         self.agent = agent
         self.agent_name = agent_name
         self.pod_name = pod_name or os.environ.get("HOSTNAME", "unknown")
+        self.operation_id = operation_id
+        self.redis_url = redis_url
+        self.pointer_check_interval = pointer_check_interval
+        self.max_operation_age = max_operation_age
         self._running = False
         self._current_task: str | None = None
         self._tasks_completed = 0
@@ -484,9 +553,20 @@ class RedisWorkerAgent:
         # Exponential backoff for connection errors
         retry_delay = 1.0  # Start with 1 second
         max_retry_delay = 60.0  # Cap at 60 seconds
+        last_pointer_check = time.monotonic()
 
         while self._running:
             try:
+                if (
+                    self.redis_url
+                    and self.operation_id
+                    and self.pointer_check_interval > 0
+                    and (time.monotonic() - last_pointer_check) >= self.pointer_check_interval
+                ):
+                    last_pointer_check = time.monotonic()
+                    if await self._check_for_pointer_switch():
+                        return
+
                 # Poll Redis queue (blocks up to 5 seconds)
                 task = await self.task_queue.poll_task(
                     role=self.role.value,
@@ -651,6 +731,22 @@ class RedisWorkerAgent:
         finally:
             self._current_task = None
 
+    async def _check_for_pointer_switch(self) -> bool:
+        """Return True if a switch is requested and the worker should exit."""
+        if not self.redis_url or not self.operation_id:
+            return False
+        active_op = await get_active_operation_pointer(
+            self.redis_url, max_operation_age=self.max_operation_age
+        )
+        if not active_op or active_op == self.operation_id:
+            return False
+        logger.warning(
+            "Active operation pointer changed from "
+            f"{self.operation_id} to {active_op}; shutting down to reattach"
+        )
+        self._running = False
+        return True
+
     async def _execute_command_task(self, task: TaskMessage) -> None:
         """Execute a command task locally."""
         import subprocess
@@ -786,11 +882,19 @@ class WorkerAgent:
         dispatcher: RedTeamDispatcher,
         agent: Agent,
         agent_name: str,
+        operation_id: str | None = None,
+        redis_url: str | None = None,
+        pointer_check_interval: float = 30.0,
+        max_operation_age: int = 300,
     ):
         self.role = role
         self.dispatcher = dispatcher
         self.agent = agent
         self.agent_name = agent_name
+        self.operation_id = operation_id
+        self.redis_url = redis_url
+        self.pointer_check_interval = pointer_check_interval
+        self.max_operation_age = max_operation_age
         self._running = False
         self._current_task: str | None = None
         self._tasks_completed = 0
@@ -821,9 +925,20 @@ class WorkerAgent:
     async def _worker_loop(self) -> None:
         """Main worker loop - poll for messages and process tasks."""
         logger.info(f"Worker {self.agent_name} entering main loop")
+        last_pointer_check = time.monotonic()
 
         while self._running:
             try:
+                if (
+                    self.redis_url
+                    and self.operation_id
+                    and self.pointer_check_interval > 0
+                    and (time.monotonic() - last_pointer_check) >= self.pointer_check_interval
+                ):
+                    last_pointer_check = time.monotonic()
+                    if await self._check_for_pointer_switch():
+                        return
+
                 # Poll for messages
                 messages = await self.dispatcher.get_messages(self.agent_name, timeout=1.0)
 
@@ -838,6 +953,22 @@ class WorkerAgent:
             except Exception as e:
                 logger.error(f"Worker loop error: {e}")
                 await asyncio.sleep(5)  # Back off on error
+
+    async def _check_for_pointer_switch(self) -> bool:
+        """Return True if a switch is requested and the worker should exit."""
+        if not self.redis_url or not self.operation_id:
+            return False
+        active_op = await get_active_operation_pointer(
+            self.redis_url, max_operation_age=self.max_operation_age
+        )
+        if not active_op or active_op == self.operation_id:
+            return False
+        logger.warning(
+            "Active operation pointer changed from "
+            f"{self.operation_id} to {active_op}; shutting down to reattach"
+        )
+        self._running = False
+        return True
 
     async def _handle_message(self, msg: AgentMessage) -> None:
         """Handle an incoming message."""
@@ -1079,6 +1210,15 @@ async def run_worker(  # noqa: PLR0912
     logger.info(f"Starting {role.value} worker for operation {operation_id}")
     logger.info(f"Pod: {pod_name}, Redis: {redis_url}, Redis Queue: {use_redis_queue}")
 
+    try:
+        pointer_check_interval = float(os.getenv("ARES_OPERATION_POINTER_REFRESH_SECONDS", "30"))
+    except ValueError:
+        pointer_check_interval = 30.0
+    try:
+        max_operation_age = int(os.getenv("ARES_OPERATION_POINTER_MAX_AGE", "300"))
+    except ValueError:
+        max_operation_age = 300
+
     # Create Redis task queue for direct polling (Kubernetes mode)
     task_queue: RedisTaskQueue | None = None
     if use_redis_queue:
@@ -1133,6 +1273,10 @@ async def run_worker(  # noqa: PLR0912
                 agent=agent,
                 agent_name=agent_info.name,
                 pod_name=pod_name,
+                operation_id=operation_id,
+                redis_url=redis_url,
+                pointer_check_interval=pointer_check_interval,
+                max_operation_age=max_operation_age,
             )
             logger.info(f"Starting Redis worker for role {role.value}")
         else:
@@ -1142,6 +1286,10 @@ async def run_worker(  # noqa: PLR0912
                 dispatcher=dispatcher,
                 agent=agent,
                 agent_name=agent_info.name,
+                operation_id=operation_id,
+                redis_url=redis_url,
+                pointer_check_interval=pointer_check_interval,
+                max_operation_age=max_operation_age,
             )
             logger.info(f"Starting dispatcher worker for role {role.value}")
 

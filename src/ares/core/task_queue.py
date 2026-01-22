@@ -14,6 +14,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from ares.core.config import get_redis_url
+from ares.core.redis_client import create_redis_client, get_redis_sentinel_config
 
 
 class TaskMessage(BaseModel):
@@ -110,18 +111,17 @@ class RedisTaskQueue:
             return
 
         try:
-            import redis.asyncio as redis
-
-            self._client = redis.from_url(
+            self._client = await create_redis_client(
                 self.redis_url,
                 decode_responses=True,  # Auto-decode to strings
             )
             await self._client.ping()
             self._connected = True
-            logger.info(f"TaskQueue connected to Redis at {self.redis_url}")
+            if get_redis_sentinel_config():
+                logger.info("TaskQueue connected to Redis via Sentinel")
+            else:
+                logger.info(f"TaskQueue connected to Redis at {self.redis_url}")
 
-        except ImportError as e:
-            raise RuntimeError("redis package required: pip install redis") from e
         except Exception as e:
             raise RuntimeError(f"Failed to connect to Redis: {e}") from e
 

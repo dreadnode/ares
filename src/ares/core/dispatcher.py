@@ -47,6 +47,7 @@ from ares.core.models import (
     TaskStatus,
     VulnerabilityInfo,
 )
+from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue
 from ares.core.task_queue import TaskResult as QueueTaskResult
 
@@ -145,13 +146,9 @@ class RedTeamDispatcher:
         # Connect to Redis if URL provided
         if self._redis_url:
             try:
-                import redis.asyncio as redis
-
-                self._redis_client = redis.from_url(self._redis_url)
+                self._redis_client = await create_redis_client(self._redis_url)
                 await self._redis_client.ping()
                 logger.info(f"Connected to Redis at {self._redis_url}")
-            except ImportError:
-                logger.warning("redis package not installed, using in-memory state")
             except Exception as e:
                 logger.warning(f"Failed to connect to Redis: {e}, using in-memory state")
 
