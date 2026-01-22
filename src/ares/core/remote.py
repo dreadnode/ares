@@ -20,6 +20,7 @@ from loguru import logger
 
 # Cached execution mode (lazy-detected)
 _execution_mode: str | None = None
+WORKER_ROLES = {"enum", "cracker", "acl", "privesc", "lateral", "poisoning"}
 
 
 def _detect_execution_mode() -> str:
@@ -47,9 +48,7 @@ def _detect_execution_mode() -> str:
     if os.path.exists(k8s_sa_path):
         # In K8s - are we a worker or orchestrator?
         role = os.environ.get("ARES_ROLE", "")
-        worker_roles = {"enum", "cracker", "acl", "privesc", "lateral", "poisoning", "atomic"}
-
-        if role.lower() in worker_roles:
+        if role.lower() in WORKER_ROLES:
             logger.info(f"Detected K8s worker pod (role={role}), using local execution")
             return "local"
         logger.info("Detected K8s orchestrator pod, using k8s execution")
@@ -90,7 +89,7 @@ class CommandResult:
 
 
 class K8sExecutor:
-    """Execute commands via Redis task queue on the enum worker pod.
+    """Execute commands via Redis task queue on a target worker pod.
 
     Uses Redis-based task dispatch instead of kubectl exec to avoid needing
     pods/exec RBAC permissions. The orchestrator submits commands to Redis,
@@ -121,14 +120,34 @@ class K8sExecutor:
         command: str | list[str],
         timeout_seconds: int = 300,
         working_directory: str = "/tmp",  # noqa: S108  # nosec B108
+        target_role: str | None = None,
     ) -> CommandResult:
-        """Execute a command via Redis task queue on the enum worker pod."""
+        """Execute a command via Redis task queue on the target worker pod."""
         import concurrent.futures
 
         # Use shlex.join for proper shell quoting (handles parentheses, spaces, etc.)
         command_str = shlex.join(command) if isinstance(command, list) else command
 
-        logger.debug(f"K8s executing via Redis queue: {command_str[:100]}...")
+        resolved_role = (target_role or os.environ.get("ARES_ROLE", "")).strip().lower()
+        if not resolved_role:
+            resolved_role = "enum"
+
+        if resolved_role not in WORKER_ROLES:
+            error = (
+                "Invalid target role for K8s command routing: "
+                f"'{resolved_role}'. Expected one of: {', '.join(sorted(WORKER_ROLES))}"
+            )
+            logger.error(error)
+            return CommandResult(
+                stdout="",
+                stderr=error,
+                return_code=1,
+                success=False,
+            )
+
+        logger.debug(
+            f"K8s executing via Redis queue (role={resolved_role}): {command_str[:100]}..."
+        )
 
         def _run_in_thread():
             """Run the async task queue call in a new thread with its own event loop."""
@@ -136,7 +155,12 @@ class K8sExecutor:
             asyncio.set_event_loop(loop)
             try:
                 return loop.run_until_complete(
-                    self._dispatch_command(command_str, timeout_seconds, working_directory)
+                    self._dispatch_command(
+                        command_str,
+                        timeout_seconds,
+                        working_directory,
+                        target_role=resolved_role,
+                    )
                 )
             finally:
                 loop.close()
@@ -169,6 +193,7 @@ class K8sExecutor:
         command: str,
         timeout_seconds: int,
         working_directory: str,
+        target_role: str,
     ) -> CommandResult:
         """Dispatch command via Redis and wait for result."""
         # Create a fresh task queue bound to the current event loop to avoid
@@ -177,10 +202,10 @@ class K8sExecutor:
         await task_queue.connect()
 
         try:
-            # Submit command task to enum worker
+            # Submit command task to target worker
             task_id = await task_queue.submit_task(
                 task_type="command",
-                target_role="enum",
+                target_role=target_role,
                 payload={
                     "command": command,
                     "working_directory": working_directory,
@@ -232,6 +257,7 @@ class LocalExecutor:
         command: str | list[str],
         timeout_seconds: int = 300,
         working_directory: str = "/tmp",  # noqa: S108  # nosec B108
+        target_role: str | None = None,
     ) -> CommandResult:
         """Execute a command via subprocess."""
         # Use shlex.join for proper shell quoting (handles parentheses, spaces, etc.)
@@ -422,6 +448,7 @@ class SSMExecutor:
         command: str | list[str],
         timeout_seconds: int = 300,
         working_directory: str = "/tmp",  # noqa: S108  # nosec B108
+        target_role: str | None = None,
     ) -> CommandResult:
         """Execute a command on the remote instance via SSM.
 
@@ -645,6 +672,7 @@ def run_remote(
     command: str | list[str],
     timeout_seconds: int = 300,
     working_directory: str = "/tmp",  # noqa: S108  # nosec B108
+    target_role: str | None = None,
 ) -> CommandResult:
     """Execute a command on the remote Kali instance.
 
@@ -654,6 +682,7 @@ def run_remote(
         command: Command string or list of command parts
         timeout_seconds: Maximum time to wait
         working_directory: Directory to execute in
+        target_role: Worker role to execute on when using the K8s executor
 
     Returns:
         CommandResult with stdout, stderr, and return code
@@ -663,4 +692,9 @@ def run_remote(
         >>> print(result.stdout)
     """
     executor = get_executor()
-    return executor.run_command(command, timeout_seconds, working_directory)
+    return executor.run_command(
+        command,
+        timeout_seconds,
+        working_directory,
+        target_role=target_role,
+    )

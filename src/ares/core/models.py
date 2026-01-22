@@ -525,7 +525,6 @@ class AgentRole(Enum):
     PRIVESC = "privesc"
     LATERAL = "lateral"
     POISONING = "poisoning"
-    ATOMIC = "atomic"
 
 
 class TaskStatus(Enum):

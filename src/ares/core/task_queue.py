@@ -565,7 +565,7 @@ class RedisTaskQueue:
         if not self._connected:
             await self.connect()
 
-        roles = ["cracker", "lateral", "acl", "privesc", "poisoning", "atomic", "enum"]
+        roles = ["cracker", "lateral", "acl", "privesc", "poisoning", "enum"]
         stats = {}
 
         for role in roles:

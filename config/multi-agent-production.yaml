@@ -107,15 +107,6 @@ agents:
       - mitm6
       - ntlmrelayx
 
-  atomic:
-    model: "gpt-5.2"
-    # model: "claude-sonnet-4-20250514"
-    max_steps: 50
-    pod_selector: "ares.dreadnode.io/role=atomic"
-    capabilities:
-      - atomic_red_team
-      - invoke_atomicredteam
-
 # Timeout configurations
 timeouts:
   agent_heartbeat: 30  # seconds - agent considered offline after this

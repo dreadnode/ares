@@ -262,6 +262,109 @@ class TestNetworkEnumerationTools:
         assert "access denied" in result.lower()
         assert mock_run.call_count == 10
 
+
+class TestCertipyRelayEsc8:
+    """Tests for CertipyTools.certipy_relay_esc8 behavior."""
+
+    def test_certipy_relay_esc8_coerce_no_auth(self):
+        """Coercion path returns warning when relay sees no auth."""
+        from ares.tools.red.network import CertipyTools
+
+        tools = CertipyTools()
+
+        with (
+            patch("ares.tools.red.network._infer_listener_ip") as mock_infer,
+            patch("ares.tools.red.network._run_tool") as mock_run,
+        ):
+            mock_infer.return_value = "10.0.0.5"
+            mock_run.return_value = ("empty output", "", 0)
+
+            result = tools.certipy_relay_esc8(
+                ca_host="ca.test.local",
+                coerce_target="dc.test.local",
+                coerce_method="petitpotam",
+                relay_timeout_seconds=123,
+            )
+
+        assert "NO AUTH RECEIVED" in result
+        assert "Coercion fired: petitpotam" in result
+        assert "Listener: 10.0.0.5" in result
+
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args.args[0]
+        assert cmd[:2] == ["bash", "-lc"]
+        assert mock_run.call_args.kwargs["timeout_seconds"] == 50
+        assert "timeout 123s" in cmd[2]
+        assert "timeout 20s petitpotam.py 10.0.0.5 dc.test.local" in cmd[2]
+
+    def test_certipy_relay_esc8_coerce_auth_seen(self):
+        """Coercion path returns success when relay sees auth."""
+        from ares.tools.red.network import CertipyTools
+
+        tools = CertipyTools()
+
+        with (
+            patch("ares.tools.red.network._infer_listener_ip") as mock_infer,
+            patch("ares.tools.red.network._run_tool") as mock_run,
+        ):
+            mock_infer.return_value = "10.0.0.6"
+            mock_run.return_value = ("NTLM relay connection", "", 0)
+
+            result = tools.certipy_relay_esc8(
+                ca_host="ca.test.local",
+                coerce_target="dc.test.local",
+                coerce_method="coercer",
+                relay_timeout_seconds=90,
+            )
+
+        assert "ESC8 RELAY + COERCION" in result
+        assert "Coercion: coercer against dc.test.local" in result
+        assert "Listener: 10.0.0.6" in result
+
+    def test_certipy_relay_esc8_coerce_missing_listener(self):
+        """Coercion path fails fast when listener cannot be inferred."""
+        from ares.tools.red.network import CertipyTools
+
+        tools = CertipyTools()
+
+        with (
+            patch("ares.tools.red.network._infer_listener_ip") as mock_infer,
+            patch("ares.tools.red.network._run_tool") as mock_run,
+        ):
+            mock_infer.return_value = None
+            result = tools.certipy_relay_esc8(
+                ca_host="ca.test.local",
+                coerce_target="dc.test.local",
+            )
+
+        assert "listener IP could not be determined" in result
+        mock_run.assert_not_called()
+
+    def test_certipy_relay_esc8_noncoerce_env_timeout(self, monkeypatch: pytest.MonkeyPatch):
+        """Non-coercion path respects env timeout and reports auth seen."""
+        from ares.tools.red.network import CertipyTools
+
+        tools = CertipyTools()
+        monkeypatch.setenv("ARES_ESC8_RELAY_TIMEOUT", "321")
+
+        with (
+            patch("ares.tools.red.network._infer_listener_ip") as mock_infer,
+            patch("ares.tools.red.network._run_tool") as mock_run,
+        ):
+            mock_infer.return_value = "10.0.0.9"
+            mock_run.return_value = ("NTLM relay success", "", 0)
+
+            result = tools.certipy_relay_esc8(
+                ca_host="ca.test.local",
+                template_name="DomainController",
+            )
+
+        assert "ESC8 RELAY SETUP" in result
+        assert "Listener: 10.0.0.9" in result
+        assert "Auth seen: yes" in result
+        mock_run.assert_called_once()
+        assert mock_run.call_args.kwargs["timeout_seconds"] == 321
+
     def test_enumerate_users_exception(self, red_team_state: RedTeamState):
         """Test user enumeration handles exceptions."""
         from ares.tools.red.network import NetworkEnumerationTools

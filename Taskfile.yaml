@@ -37,7 +37,6 @@ vars:
   MODEL_PRIVESC: '{{.MODEL_PRIVESC | default ""}}'
   MODEL_LATERAL: '{{.MODEL_LATERAL | default ""}}'
   MODEL_POISONING: '{{.MODEL_POISONING | default ""}}'
-  MODEL_ATOMIC: '{{.MODEL_ATOMIC | default ""}}'
 
 tasks:
   default:
@@ -830,7 +829,6 @@ tasks:
             ARES_AGENT_PRIVESC_MODEL="{{.MODEL_PRIVESC}}" \
             ARES_AGENT_LATERAL_MODEL="{{.MODEL_LATERAL}}" \
             ARES_AGENT_POISONING_MODEL="{{.MODEL_POISONING}}" \
-            ARES_AGENT_ATOMIC_MODEL="{{.MODEL_ATOMIC}}" \
             GRAFANA_URL="{{.GRAFANA_URL}}" \
             python -m ares.cli_ops submit "{{.TARGET}}" "{{.DOMAIN}}" \
             $IPS_ARGS \
@@ -929,6 +927,8 @@ tasks:
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       ROLE: '{{.ROLE | default ""}}'
+      FOLLOW: '{{.FOLLOW | default "false"}}'
+      INTERVAL: '{{.INTERVAL | default "5"}}'
       K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}"
@@ -948,7 +948,8 @@ tasks:
           exit 1
         fi
 
-        kubectl exec -i -n {{.K8S_NAMESPACE}} "$POD" -- env REDIS_URL="$REDIS_URL" python - <<'PY'
+        run_once() {
+          kubectl exec -i -n {{.K8S_NAMESPACE}} "$POD" -- env REDIS_URL="$REDIS_URL" python - <<'PY'
         import asyncio
         import json
         import os
@@ -992,6 +993,16 @@ tasks:
 
         asyncio.run(main())
         PY
+        }
+
+        if [ "{{.FOLLOW}}" = "true" ]; then
+          while true; do
+            run_once
+            sleep {{.INTERVAL}}
+          done
+        else
+          run_once
+        fi
 
   ares:red:multi:tasks:list:
     desc: "List tasks for an operation (usage: task ares:red:multi:tasks:list OPERATION_ID=op-xxx [ROLE=lateral] [STATUS=running|completed|failed|all])"
@@ -1296,7 +1307,6 @@ tasks:
       MODEL_PRIVESC: '{{.MODEL_PRIVESC | default ""}}'
       MODEL_LATERAL: '{{.MODEL_LATERAL | default ""}}'
       MODEL_POISONING: '{{.MODEL_POISONING | default ""}}'
-      MODEL_ATOMIC: '{{.MODEL_ATOMIC | default ""}}'
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
@@ -1321,7 +1331,6 @@ tasks:
           MODEL_PRIVESC: "{{.MODEL_PRIVESC}}"
           MODEL_LATERAL: "{{.MODEL_LATERAL}}"
           MODEL_POISONING: "{{.MODEL_POISONING}}"
-          MODEL_ATOMIC: "{{.MODEL_ATOMIC}}"
 
   ares:red:multi:cleanup:
     desc: "Clean up old multi-agent operation checkpoints (usage: task ares:red:multi:cleanup [MAX_AGE_HOURS=24])"
@@ -1396,6 +1405,21 @@ tasks:
         echo "▶️  Scaling $ORCH_DEPLOY back to $CURRENT_REPLICAS replicas"
         kubectl scale -n {{.K8S_NAMESPACE}} deploy/$ORCH_DEPLOY --replicas="$CURRENT_REPLICAS"
         kubectl rollout status -n {{.K8S_NAMESPACE}} deploy/$ORCH_DEPLOY || true
+
+  ares:red:multi:sync:align:
+    desc: "Sync code changes to PVCs, clear Redis cache, and align cluster pods"
+    vars:
+      K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
+    cmds:
+      - |
+        echo "SYNCING CODE"
+        task remote:sync:full NAMESPACE={{.K8S_NAMESPACE}}
+      - |
+        echo "CLEARING REDIS CACHE"
+        task ares:red:multi:redis:clear K8S_NAMESPACE={{.K8S_NAMESPACE}}
+      - |
+        echo "ROLLING OUT"
+        task remote:rollout NAMESPACE={{.K8S_NAMESPACE}}
 
   ares:red:multi:redis:list:
     desc: "List multi-agent Redis operations, statuses, and locks"
@@ -1472,7 +1496,7 @@ tasks:
 
         # Check agent pods
         echo "🤖 Agent Pods:"
-        for role in enum cracker acl privesc lateral poisoning atomic; do
+        for role in enum cracker acl privesc lateral poisoning; do
           POD_COUNT=$(kubectl get pods -n {{.NAMESPACE}} -l ares.dreadnode.io/role=$role -o name 2>/dev/null | wc -l | xargs)
           if [ "$POD_COUNT" -gt 0 ]; then
             STATUS=$(kubectl get pods -n {{.NAMESPACE}} -l ares.dreadnode.io/role=$role -o jsonpath='{.items[0].status.phase}' 2>/dev/null)

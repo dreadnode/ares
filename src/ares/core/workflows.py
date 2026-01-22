@@ -298,7 +298,17 @@ async def exploitation_workflow(
         logger.info(f"Processing vulnerability: {vuln['type']} on {vuln['target']}")
 
         # Route to appropriate agent
+        exploit_started = asyncio.get_event_loop().time()
         result = await _exploit_vulnerability(dispatcher, vuln)
+        exploit_elapsed = asyncio.get_event_loop().time() - exploit_started
+        logger.info(
+            "Exploit result for %s (%s): success=%s error=%s elapsed=%.1fs",
+            vuln["id"],
+            vuln["type"],
+            result.get("success"),
+            result.get("error"),
+            exploit_elapsed,
+        )
 
         # Mark as attempted
         await dispatcher.mark_vulnerability_exploited(

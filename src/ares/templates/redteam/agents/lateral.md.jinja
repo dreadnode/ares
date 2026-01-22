@@ -96,6 +96,14 @@ secretsdump with -just-dc flag
    - Use report_lateral_success with new creds
    - Or report_lateral_failed with reason
 
+## Hard Limits (Avoid Step Loops)
+
+- Use at most 2 access methods per target.
+- Run secretsdump at most once per target.
+- Do not retry the same method.
+- If access fails, report_lateral_failed immediately with the best reason.
+- Keep tool usage concise; do not loop.
+
 ## Tools Available
 
 ### Movement Tools

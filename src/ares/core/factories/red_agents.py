@@ -78,9 +78,6 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
         PoisoningTools,
         # PoisonCallbackTools added separately
     ],
-    AgentRole.ATOMIC: [
-        # AtomicRedTeamTools, AtomicCallbackTools added separately
-    ],
 }
 
 
@@ -92,7 +89,6 @@ ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
     AgentRole.PRIVESC: "redteam/agents/privesc.md.jinja",
     AgentRole.LATERAL: "redteam/agents/lateral.md.jinja",
     AgentRole.POISONING: "redteam/agents/poisoning.md.jinja",
-    AgentRole.ATOMIC: "redteam/agents/atomic.md.jinja",
 }
 
 
@@ -102,9 +98,8 @@ ROLE_MAX_STEPS: dict[AgentRole, int] = {
     AgentRole.CRACKER: 50,
     AgentRole.ACL: 100,
     AgentRole.PRIVESC: 100,
-    AgentRole.LATERAL: 100,
+    AgentRole.LATERAL: 200,
     AgentRole.POISONING: 30,
-    AgentRole.ATOMIC: 50,
 }
 
 
@@ -298,11 +293,6 @@ def create_role_hooks(
             "2. Use coercion techniques (petitpotam, coercer)\n"
             "3. Report captured hashes"
         ),
-        AgentRole.ATOMIC: (
-            "You seem stuck. As atomic agent, focus on:\n"
-            "1. Execute requested T-code tests\n"
-            "2. Report test results"
-        ),
     }
 
     unstall_hook = retry_with_feedback(
@@ -450,10 +440,6 @@ def create_agent_info(
             "coercion",
             "responder",
             "ntlm_relay",
-        },
-        AgentRole.ATOMIC: {
-            "atomic_red_team",
-            "technique_execution",
         },
     }
 

@@ -301,9 +301,6 @@ class RedTeamDispatcher:
             AgentRole.POISONING: {
                 MessageType.POISON_REQUEST,
             },
-            AgentRole.ATOMIC: {
-                MessageType.ATOMIC_TEST_REQUEST,
-            },
         }
 
         subscriptions = common_subscriptions | role_subscriptions.get(agent.role, set())
@@ -1401,20 +1398,64 @@ class RedTeamDispatcher:
             for name, agent in self._agents.items()
         }
 
-    def get_exploitation_status(self) -> dict[str, Any]:
+    async def get_exploitation_status(self) -> dict[str, Any]:
         """Get status of discovered vs exploited vulnerabilities."""
         discovered = self.shared_state.discovered_vulnerabilities
-        exploited = self.shared_state.exploited_vulnerabilities
+        succeeded: set[str] = set(self.shared_state.exploited_vulnerabilities)
+        failed: dict[str, dict[str, Any]] = {}
+
+        if self._redis_client is not None:
+            try:
+                import json
+
+                key_prefix = f"ares:operation:{self.shared_state.operation_id}:exploited:"
+                async for key in self._redis_client.scan_iter(f"{key_prefix}*"):
+                    key_str = key.decode() if isinstance(key, bytes) else str(key)
+                    if not key_str.startswith(key_prefix):
+                        continue
+                    raw = await self._redis_client.get(key)
+                    if not raw:
+                        continue
+                    try:
+                        data = json.loads(raw)
+                    except Exception as e:
+                        logger.debug(f"Failed to parse exploit status for {key_str}: {e}")
+                        continue
+                    vuln_id = key_str[len(key_prefix) :]
+                    if data.get("success"):
+                        succeeded.add(vuln_id)
+                    else:
+                        failed[vuln_id] = data
+            except Exception as e:
+                logger.warning(f"Failed to load exploitation status from Redis: {e}")
+
+        failed_ids = set(failed.keys())
 
         return {
             "total_discovered": len(discovered),
-            "total_exploited": len(exploited),
+            "total_succeeded": len(succeeded),
+            "total_failed": len(failed),
             "pending": [
                 {"id": vid, "type": v.vuln_type, "target": v.target}
                 for vid, v in discovered.items()
-                if vid not in exploited
+                if vid not in succeeded and vid not in failed_ids
             ],
-            "exploited": list(exploited),
+            "succeeded": [
+                {"id": vid, "type": discovered[vid].vuln_type, "target": discovered[vid].target}
+                for vid in discovered
+                if vid in succeeded
+            ],
+            "failed": [
+                {
+                    "id": vid,
+                    "type": discovered[vid].vuln_type if vid in discovered else "unknown",
+                    "target": discovered[vid].target if vid in discovered else "unknown",
+                    "error": failed.get(vid, {}).get("result", {}).get("error")
+                    or failed.get(vid, {}).get("error")
+                    or "Unknown error",
+                }
+                for vid in failed
+            ],
         }
 
     # Priority Vulnerability Queue Methods
@@ -1504,7 +1545,8 @@ class RedTeamDispatcher:
             success: Whether exploitation was successful
             result: Exploitation result (credentials, hashes, etc.)
         """
-        self.shared_state.mark_exploited(vuln_id)
+        if success:
+            self.shared_state.mark_exploited(vuln_id)
 
         if success and result:
             result_payload = result
@@ -1537,7 +1579,10 @@ class RedTeamDispatcher:
         await self._mark_exploited_in_redis(vuln_id, success, result)
         await self._checkpoint()
 
-        logger.info(f"Marked vulnerability {vuln_id} as exploited (success={success})")
+        if success:
+            logger.info(f"Marked vulnerability {vuln_id} as exploited (success=True)")
+        else:
+            logger.info(f"Recorded failed exploitation attempt for {vuln_id}")
 
     async def _save_vulnerability_to_redis(self, vuln_id: str, vuln_data: dict[str, Any]) -> None:
         """Save vulnerability to Redis for persistence."""
@@ -1569,9 +1614,17 @@ class RedTeamDispatcher:
         # Check Redis if available
         if self._redis_client is not None:
             try:
+                import json
+
                 key = f"ares:operation:{self.shared_state.operation_id}:exploited:{vuln_id}"
-                result = await self._redis_client.exists(key)
-                return bool(result)
+                raw = await self._redis_client.get(key)
+                if not raw:
+                    return False
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    return False
+                return bool(data.get("success"))
             except Exception as e:
                 logger.warning(f"Failed to check Redis for exploited vuln: {e}")
 

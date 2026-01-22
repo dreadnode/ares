@@ -653,7 +653,7 @@ class WorkerArgs:
     """Worker agent arguments.
 
     Attributes:
-        role: Worker role (cracker, acl, privesc, lateral, poisoning, atomic).
+        role: Worker role (cracker, acl, privesc, lateral, poisoning).
         operation_id: Operation ID to join (required).
         config_file: Path to config file (auto-detected if not specified).
         redis_url: Redis URL for dispatcher connection (from config if not specified).
@@ -695,10 +695,9 @@ async def worker(
     - privesc: ADCS, delegation, MSSQL exploitation
     - lateral: Lateral movement and credential harvesting
     - poisoning: Network poisoning (responder, mitm6)
-    - atomic: Atomic Red Team technique execution
 
     Args:
-        role: Worker role (enum, cracker, acl, privesc, lateral, poisoning, atomic)
+        role: Worker role (enum, cracker, acl, privesc, lateral, poisoning)
         operation_id: Operation ID to join (optional - will auto-discover if not provided)
 
     Example:
@@ -714,7 +713,7 @@ async def worker(
     dn_args = dn_args or DreadnodeArgs()
 
     # Validate role
-    valid_roles = ["enum", "cracker", "acl", "privesc", "lateral", "poisoning", "atomic"]
+    valid_roles = ["enum", "cracker", "acl", "privesc", "lateral", "poisoning"]
     if role not in valid_roles:
         logger.error(f"Invalid role: {role}. Must be one of: {', '.join(valid_roles)}")
         return
@@ -780,7 +779,6 @@ async def worker(
         "privesc": AgentRole.PRIVESC,
         "lateral": AgentRole.LATERAL,
         "poisoning": AgentRole.POISONING,
-        "atomic": AgentRole.ATOMIC,
     }
     agent_role = role_mapping[role]
 

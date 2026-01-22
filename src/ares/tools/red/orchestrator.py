@@ -329,6 +329,11 @@ class OrchestratorTools(Toolset):
         if not vuln_id:
             vuln_id = f"{vuln_type}_{target}".replace(" ", "_")
 
+        if vuln_type == "ADCS_ESC8":
+            kwargs = dict(kwargs)
+            if not kwargs.get("coerce_target"):
+                kwargs["coerce_target"] = kwargs.get("dc_host") or kwargs.get("ca_host") or target
+
         task_id = await self.dispatcher.request_exploit(
             vuln_type=vuln_type,
             vuln_id=vuln_id,
@@ -440,7 +445,11 @@ class OrchestratorTools(Toolset):
         return "\n".join(lines)
 
     @dn.tool_method
-    async def cleanup_orphaned_tasks(self, task_ids: list[str] | None = None) -> str:
+    async def cleanup_orphaned_tasks(  # noqa: PLR0912
+        self,
+        task_ids: list[str] | None = None,
+        force: bool = False,
+    ) -> str:
         """
         Clean up orphaned or stale tasks that are stuck in pending/retrying/in-progress state.
 
@@ -452,6 +461,7 @@ class OrchestratorTools(Toolset):
         Args:
             task_ids: Optional list of specific task IDs to clean up.
                      If None, cleans up ALL pending/retrying/in-progress tasks older than 5 minutes.
+            force: If True, remove specified task_ids immediately regardless of age/status.
 
         Returns:
             Summary of cleaned up tasks
@@ -466,22 +476,42 @@ class OrchestratorTools(Toolset):
         from datetime import datetime, timezone
 
         cleaned = []
+        skipped = []
         pending = self.shared_state.pending_tasks
 
         if not pending:
             return "No pending tasks to clean up"
 
+        now = datetime.now(timezone.utc)
+        stale_threshold = 300  # 5 minutes
+        stale_statuses = {"pending", "retrying", "in_progress"}
+
         if task_ids:
             for task_id in task_ids:
                 if task_id in pending:
-                    task = pending.pop(task_id)
-                    cleaned.append(f"{task_id} ({task.task_type})")
-                    logger.info(f"Manually cleaned orphaned task: {task_id}")
+                    task = pending[task_id]
+                    age_seconds = (now - task.created_at).total_seconds()
+                    if force:
+                        pending.pop(task_id)
+                        cleaned.append(f"{task_id} ({task.task_type})")
+                        logger.info(f"Manually cleaned orphaned task (force): {task_id}")
+                    elif task.status.value in {"failed", "cancelled", "completed"}:
+                        pending.pop(task_id)
+                        cleaned.append(f"{task_id} ({task.task_type})")
+                        logger.info(f"Manually cleaned terminal task: {task_id}")
+                    elif task.status.value in stale_statuses and age_seconds > stale_threshold:
+                        pending.pop(task_id)
+                        cleaned.append(f"{task_id} ({task.task_type}, age: {int(age_seconds)}s)")
+                        logger.info(
+                            f"Manually cleaned stale pending task: {task_id} "
+                            f"(age: {int(age_seconds)}s)"
+                        )
+                    else:
+                        skipped.append(
+                            f"{task_id} ({task.task_type}, age: {int(age_seconds)}s, "
+                            f"status: {task.status.value})"
+                        )
         else:
-            now = datetime.now(timezone.utc)
-            stale_threshold = 300  # 5 minutes
-            stale_statuses = {"pending", "retrying", "in_progress"}
-
             for task_id, task in list(pending.items()):
                 if task.status.value in stale_statuses:
                     age_seconds = (now - task.created_at).total_seconds()
@@ -492,12 +522,16 @@ class OrchestratorTools(Toolset):
                             f"Auto-cleaned stale pending task: {task_id} (age: {int(age_seconds)}s)"
                         )
 
-        if not cleaned:
+        if not cleaned and not skipped:
             return "No orphaned tasks found to clean up"
 
         lines = ["🧹 Cleaned up orphaned tasks:"]
         for item in cleaned:
             lines.append(f"  • {item}")
+        if skipped:
+            lines.append("\n⏭️ Skipped tasks (not stale):")
+            for item in skipped:
+                lines.append(f"  • {item}")
 
         return "\n".join(lines)
 
@@ -560,7 +594,7 @@ class OrchestratorTools(Toolset):
         return "\n".join(lines)
 
     @dn.tool_method
-    def get_exploitation_status(self) -> str:
+    async def get_exploitation_status(self) -> str:
         """
         Get status of discovered vs exploited vulnerabilities.
 
@@ -570,7 +604,7 @@ class OrchestratorTools(Toolset):
             Formatted vulnerability status
         """
         discovered = self.shared_state.discovered_vulnerabilities
-        exploited = self.shared_state.exploited_vulnerabilities
+        status = await self.dispatcher.get_exploitation_status()
 
         lines = ["🎯 Vulnerability Status:"]
 
@@ -579,25 +613,36 @@ class OrchestratorTools(Toolset):
             return "\n".join(lines)
 
         pending = []
-        done = []
+        succeeded = []
+        failed = []
 
-        for vuln_id, info in discovered.items():
-            if vuln_id in exploited:
-                done.append(f"  ✓ [EXPLOITED] {info.vuln_type}: {info.target}")
-            else:
-                pending.append(
-                    f"  ⚠️ [PENDING] {info.vuln_type}: {info.target} (priority: {info.priority})"
-                )
+        for vuln in status.get("pending", []):
+            info = discovered.get(vuln["id"])
+            priority = info.priority if info else "unknown"
+            pending.append(f"  ⚠️ [PENDING] {vuln['type']}: {vuln['target']} (priority: {priority})")
+
+        for vuln in status.get("succeeded", []):
+            succeeded.append(f"  ✓ [SUCCEEDED] {vuln['type']}: {vuln['target']}")
+
+        for vuln in status.get("failed", []):
+            failed.append(f"  ✗ [FAILED] {vuln['type']}: {vuln['target']} (error: {vuln['error']})")
 
         if pending:
             lines.append("\n⚠️ UNEXPLOITED (high priority):")
             lines.extend(sorted(pending, key=lambda x: "priority" in x))
 
-        if done:
-            lines.append("\n✓ EXPLOITED:")
-            lines.extend(done)
+        if failed:
+            lines.append("\n✗ FAILED:")
+            lines.extend(failed)
 
-        lines.append(f"\nTotal: {len(done)} exploited / {len(discovered)} discovered")
+        if succeeded:
+            lines.append("\n✓ SUCCEEDED:")
+            lines.extend(succeeded)
+
+        lines.append(
+            f"\nTotal: {status.get('total_succeeded', 0)} succeeded / "
+            f"{status.get('total_failed', 0)} failed / {len(discovered)} discovered"
+        )
 
         return "\n".join(lines)
 
@@ -860,11 +905,12 @@ class OrchestratorTools(Toolset):
         Returns:
             Formatted queue status
         """
-        status = self.dispatcher.get_exploitation_status()
+        status = await self.dispatcher.get_exploitation_status()
 
         lines = ["🎯 Vulnerability Queue Status:"]
         lines.append(f"  Total discovered: {status['total_discovered']}")
-        lines.append(f"  Total exploited: {status['total_exploited']}")
+        lines.append(f"  Total succeeded: {status.get('total_succeeded', 0)}")
+        lines.append(f"  Total failed: {status.get('total_failed', 0)}")
 
         if status["pending"]:
             lines.append("\n⏳ Pending exploitation:")
@@ -873,8 +919,15 @@ class OrchestratorTools(Toolset):
         else:
             lines.append("\n✓ No vulnerabilities pending exploitation")
 
-        if status["exploited"]:
-            lines.append(f"\n✓ Exploited: {len(status['exploited'])} vulnerabilities")
+        if status.get("failed"):
+            lines.append("\n✗ Failed exploitation:")
+            for vuln in status["failed"]:
+                lines.append(
+                    f"  • [{vuln['type']}] {vuln['target']} (ID: {vuln['id']}) - {vuln['error']}"
+                )
+
+        if status.get("succeeded"):
+            lines.append(f"\n✓ Succeeded: {len(status['succeeded'])} vulnerabilities")
 
         return "\n".join(lines)
 

