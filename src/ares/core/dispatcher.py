@@ -693,6 +693,15 @@ class RedTeamDispatcher:
             "method": method,
         }
 
+        if not resolved_password and not resolved_hash:
+            logger.warning(
+                "Skipping lateral movement for %s\\%s -> %s: missing credentials",
+                resolved_domain or domain,
+                username,
+                target_host,
+            )
+            return ""
+
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
             task_id = await self._task_queue.submit_task(
@@ -1068,6 +1077,15 @@ class RedTeamDispatcher:
                     cracked_password=hash_data.get("cracked_password", ""),
                 )
                 await self.publish_hash(hash_obj, source_agent)
+                if hash_obj.cracked_password:
+                    cracked_cred = Credential(
+                        username=hash_obj.username,
+                        password=hash_obj.cracked_password,
+                        domain=hash_obj.domain,
+                        source=f"hash:{task_id}",
+                        is_admin=False,
+                    )
+                    await self.publish_credential(cracked_cred, source_agent)
             hashes_data = result.get("hashes")
             if isinstance(hashes_data, list):
                 for h in hashes_data:
@@ -1081,6 +1099,15 @@ class RedTeamDispatcher:
                         cracked_password=h.get("cracked_password", ""),
                     )
                     await self.publish_hash(hash_obj, source_agent)
+                    if hash_obj.cracked_password:
+                        cracked_cred = Credential(
+                            username=hash_obj.username,
+                            password=hash_obj.cracked_password,
+                            domain=hash_obj.domain,
+                            source=f"hash:{task_id}",
+                            is_admin=False,
+                        )
+                        await self.publish_credential(cracked_cred, source_agent)
 
         # Broadcast completion
         if success:

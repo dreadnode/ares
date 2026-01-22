@@ -753,6 +753,9 @@ async def worker(
     except Exception as e:
         logger.warning(f"Dreadnode platform unavailable, continuing without telemetry: {e}")
 
+    if not operation_id:
+        operation_id = os.getenv("OPERATION_ID", "")
+
     # Log startup
     logger.info("=" * 60)
     logger.info(f"ARES WORKER AGENT: {role.upper()}")
