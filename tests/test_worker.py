@@ -78,7 +78,17 @@ class TestDiscoverActiveOperationFindsOperation:
         from ares.core.worker import discover_active_operation
 
         mock_client, redis_patch = mock_redis_setup
-        mock_client.get = AsyncMock(return_value=recent_checkpoint_time)
+
+        # Mock get to return None for pointer key, checkpoint time for checkpoint keys
+        async def mock_get(key):
+            if key == "ares:operation:active":
+                return None
+            if ":checkpoint_time" in key:
+                return recent_checkpoint_time
+            return None
+
+        mock_client.get = mock_get
+        mock_client.exists = AsyncMock(return_value=True)
 
         async def mock_scan_iter(pattern):
             yield "ares:operation:test-op-001:state"
@@ -108,6 +118,8 @@ class TestDiscoverActiveOperationFindsOperation:
         mock_client.scan_iter = mock_scan_iter
 
         async def mock_get(key):
+            if key == "ares:operation:active":
+                return None
             if "old-op" in key:
                 return older_time
             if "new-op" in key:
@@ -115,6 +127,7 @@ class TestDiscoverActiveOperationFindsOperation:
             return None
 
         mock_client.get = mock_get
+        mock_client.exists = AsyncMock(return_value=True)
 
         with redis_patch:
             result = await discover_active_operation("redis://localhost:6379", max_wait=5)
@@ -127,7 +140,16 @@ class TestDiscoverActiveOperationFindsOperation:
         from ares.core.worker import discover_active_operation
 
         mock_client, redis_patch = mock_redis_setup
-        mock_client.get = AsyncMock(return_value=stale_checkpoint_time)
+
+        async def mock_get(key):
+            if key == "ares:operation:active":
+                return None
+            if ":checkpoint_time" in key:
+                return stale_checkpoint_time
+            return None
+
+        mock_client.get = mock_get
+        mock_client.exists = AsyncMock(return_value=True)
 
         async def mock_scan_iter(pattern):
             yield "ares:operation:stale-op:state"
@@ -307,7 +329,16 @@ class TestDiscoverActiveOperationIndefiniteWait:
 
         now = datetime.now(timezone.utc)
         recent_time = (now - timedelta(seconds=30)).isoformat()
-        mock_client.get = AsyncMock(return_value=recent_time)
+
+        async def mock_get(key):
+            if key == "ares:operation:active":
+                return None
+            if ":checkpoint_time" in key:
+                return recent_time
+            return None
+
+        mock_client.get = mock_get
+        mock_client.exists = AsyncMock(return_value=True)
 
         iteration_count = 0
 
@@ -335,7 +366,16 @@ class TestDiscoverActiveOperationIndefiniteWait:
 
         now = datetime.now(timezone.utc)
         recent_time = (now - timedelta(seconds=30)).isoformat()
-        mock_client.get = AsyncMock(return_value=recent_time)
+
+        async def mock_get(key):
+            if key == "ares:operation:active":
+                return None
+            if ":checkpoint_time" in key:
+                return recent_time
+            return None
+
+        mock_client.get = mock_get
+        mock_client.exists = AsyncMock(return_value=True)
 
         iteration_count = 0
         max_iterations = 5
@@ -375,7 +415,16 @@ class TestDiscoverActiveOperationErrorHandling:
 
         now = datetime.now(timezone.utc)
         recent_time = (now - timedelta(seconds=30)).isoformat()
-        mock_client.get = AsyncMock(return_value=recent_time)
+
+        async def mock_get(key):
+            if key == "ares:operation:active":
+                return None
+            if ":checkpoint_time" in key:
+                return recent_time
+            return None
+
+        mock_client.get = mock_get
+        mock_client.exists = AsyncMock(return_value=True)
 
         error_count = 0
 
@@ -420,7 +469,16 @@ class TestDiscoverActiveOperationTimezoneHandling:
         # So we need to create a naive time that's recent in UTC terms
         now_utc = datetime.now(timezone.utc)
         naive_time = now_utc.replace(tzinfo=None).isoformat()
-        mock_client.get = AsyncMock(return_value=naive_time)
+
+        async def mock_get(key):
+            if key == "ares:operation:active":
+                return None
+            if ":checkpoint_time" in key:
+                return naive_time
+            return None
+
+        mock_client.get = mock_get
+        mock_client.exists = AsyncMock(return_value=True)
 
         async def mock_scan_iter(pattern):
             yield "ares:operation:naive-tz-op:state"
@@ -441,7 +499,16 @@ class TestDiscoverActiveOperationTimezoneHandling:
 
         # Create an aware datetime with explicit UTC timezone
         aware_time = datetime.now(timezone.utc).isoformat()
-        mock_client.get = AsyncMock(return_value=aware_time)
+
+        async def mock_get(key):
+            if key == "ares:operation:active":
+                return None
+            if ":checkpoint_time" in key:
+                return aware_time
+            return None
+
+        mock_client.get = mock_get
+        mock_client.exists = AsyncMock(return_value=True)
 
         async def mock_scan_iter(pattern):
             yield "ares:operation:aware-tz-op:state"
@@ -545,7 +612,16 @@ class TestDiscoverActiveOperationExponentialBackoff:
 
         now = datetime.now(timezone.utc)
         recent_time = (now - timedelta(seconds=30)).isoformat()
-        mock_client.get = AsyncMock(return_value=recent_time)
+
+        async def mock_get(key):
+            if key == "ares:operation:active":
+                return None
+            if ":checkpoint_time" in key:
+                return recent_time
+            return None
+
+        mock_client.get = mock_get
+        mock_client.exists = AsyncMock(return_value=True)
 
         error_count = 0
         sleep_delays = []
@@ -589,7 +665,16 @@ class TestDiscoverActiveOperationExponentialBackoff:
 
         now = datetime.now(timezone.utc)
         recent_time = (now - timedelta(seconds=30)).isoformat()
-        mock_client.get = AsyncMock(return_value=recent_time)
+
+        async def mock_get(key):
+            if key == "ares:operation:active":
+                return None
+            if ":checkpoint_time" in key:
+                return recent_time
+            return None
+
+        mock_client.get = mock_get
+        mock_client.exists = AsyncMock(return_value=True)
 
         error_count = 0
         sleep_delays = []
@@ -627,7 +712,16 @@ class TestDiscoverActiveOperationExponentialBackoff:
 
         now = datetime.now(timezone.utc)
         recent_time = (now - timedelta(seconds=30)).isoformat()
-        mock_client.get = AsyncMock(return_value=recent_time)
+
+        async def mock_get(key):
+            if key == "ares:operation:active":
+                return None
+            if ":checkpoint_time" in key:
+                return recent_time
+            return None
+
+        mock_client.get = mock_get
+        mock_client.exists = AsyncMock(return_value=True)
 
         call_count = 0
         sleep_delays = []
@@ -679,7 +773,16 @@ class TestDiscoverActiveOperationConnectionReuse:
 
         now = datetime.now(timezone.utc)
         recent_time = (now - timedelta(seconds=30)).isoformat()
-        mock_client.get = AsyncMock(return_value=recent_time)
+
+        async def mock_get(key):
+            if key == "ares:operation:active":
+                return None
+            if ":checkpoint_time" in key:
+                return recent_time
+            return None
+
+        mock_client.get = mock_get
+        mock_client.exists = AsyncMock(return_value=True)
 
         iteration_count = 0
 
@@ -716,7 +819,16 @@ class TestDiscoverActiveOperationConnectionReuse:
 
         now = datetime.now(timezone.utc)
         recent_time = (now - timedelta(seconds=30)).isoformat()
-        mock_client.get = AsyncMock(return_value=recent_time)
+
+        async def mock_get(key):
+            if key == "ares:operation:active":
+                return None
+            if ":checkpoint_time" in key:
+                return recent_time
+            return None
+
+        mock_client.get = mock_get
+        mock_client.exists = AsyncMock(return_value=True)
 
         error_count = 0
 
