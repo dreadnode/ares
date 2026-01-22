@@ -629,6 +629,22 @@ class RedisWorkerAgent:
     async def _process_task(self, task: TaskMessage) -> None:  # noqa: PLR0912
         """Process a task from the Redis queue."""
         self._current_task = task.task_id
+        started_at = datetime.now(timezone.utc).isoformat()
+        payload_snapshot = task.payload
+        try:
+            await self.task_queue.set_task_status(
+                task_id=task.task_id,
+                status="running",
+                operation_id=self.operation_id,
+                role=self.role.value,
+                agent_name=self.agent_name,
+                pod_name=self.pod_name,
+                task_type=task.task_type,
+                payload=payload_snapshot,
+                started_at=started_at,
+            )
+        except Exception as e:
+            logger.warning(f"[{self.agent_name}] Failed to record task status: {e}")
         logger.info(f"[{self.agent_name}] Processing task {task.task_id}")
 
         try:
@@ -682,6 +698,20 @@ class RedisWorkerAgent:
                     error=agent_error,
                     worker_pod=self.pod_name,
                 )
+                try:
+                    await self.task_queue.set_task_status(
+                        task_id=task.task_id,
+                        status="failed",
+                        operation_id=self.operation_id,
+                        role=self.role.value,
+                        agent_name=self.agent_name,
+                        pod_name=self.pod_name,
+                        task_type=task.task_type,
+                        ended_at=datetime.now(timezone.utc).isoformat(),
+                        error=agent_error,
+                    )
+                except Exception as e:
+                    logger.warning(f"[{self.agent_name}] Failed to record task status: {e}")
                 logger.error(f"[{self.agent_name}] Task {task.task_id} failed: {agent_error}")
                 return
 
@@ -692,6 +722,19 @@ class RedisWorkerAgent:
                 result=result_payload,
                 worker_pod=self.pod_name,
             )
+            try:
+                await self.task_queue.set_task_status(
+                    task_id=task.task_id,
+                    status="completed",
+                    operation_id=self.operation_id,
+                    role=self.role.value,
+                    agent_name=self.agent_name,
+                    pod_name=self.pod_name,
+                    task_type=task.task_type,
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception as e:
+                logger.warning(f"[{self.agent_name}] Failed to record task status: {e}")
             self._tasks_completed += 1
             logger.success(f"[{self.agent_name}] Task {task.task_id} completed")
 
@@ -707,6 +750,17 @@ class RedisWorkerAgent:
                     success=False,
                     error=f"FATAL: {type(e).__name__}: {e!s}",
                     worker_pod=self.pod_name,
+                )
+                await self.task_queue.set_task_status(
+                    task_id=task.task_id,
+                    status="failed",
+                    operation_id=self.operation_id,
+                    role=self.role.value,
+                    agent_name=self.agent_name,
+                    pod_name=self.pod_name,
+                    task_type=task.task_type,
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                    error=str(e),
                 )
             except Exception as send_error:
                 logger.error(
@@ -728,6 +782,20 @@ class RedisWorkerAgent:
                 error=f"{type(e).__name__}: {e!s}",
                 worker_pod=self.pod_name,
             )
+            try:
+                await self.task_queue.set_task_status(
+                    task_id=task.task_id,
+                    status="failed",
+                    operation_id=self.operation_id,
+                    role=self.role.value,
+                    agent_name=self.agent_name,
+                    pod_name=self.pod_name,
+                    task_type=task.task_type,
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                    error=str(e),
+                )
+            except Exception as status_error:
+                logger.warning(f"[{self.agent_name}] Failed to record task status: {status_error}")
         finally:
             self._current_task = None
 
@@ -780,6 +848,19 @@ class RedisWorkerAgent:
                 },
                 worker_pod=self.pod_name,
             )
+            try:
+                await self.task_queue.set_task_status(
+                    task_id=task.task_id,
+                    status="completed",
+                    operation_id=self.operation_id,
+                    role=self.role.value,
+                    agent_name=self.agent_name,
+                    pod_name=self.pod_name,
+                    task_type=task.task_type,
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception as e:
+                logger.warning(f"[{self.agent_name}] Failed to record task status: {e}")
             self._tasks_completed += 1
             logger.success(f"[{self.agent_name}] Command completed: exit code {result.returncode}")
 
@@ -790,6 +871,20 @@ class RedisWorkerAgent:
                 error=f"Command timed out after {timeout}s",
                 worker_pod=self.pod_name,
             )
+            try:
+                await self.task_queue.set_task_status(
+                    task_id=task.task_id,
+                    status="failed",
+                    operation_id=self.operation_id,
+                    role=self.role.value,
+                    agent_name=self.agent_name,
+                    pod_name=self.pod_name,
+                    task_type=task.task_type,
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                    error=f"Command timed out after {timeout}s",
+                )
+            except Exception as e:
+                logger.warning(f"[{self.agent_name}] Failed to record task status: {e}")
         except Exception as e:
             logger.error(f"Command execution failed: {e}")
             await self.task_queue.send_result(
@@ -798,6 +893,20 @@ class RedisWorkerAgent:
                 error=str(e),
                 worker_pod=self.pod_name,
             )
+            try:
+                await self.task_queue.set_task_status(
+                    task_id=task.task_id,
+                    status="failed",
+                    operation_id=self.operation_id,
+                    role=self.role.value,
+                    agent_name=self.agent_name,
+                    pod_name=self.pod_name,
+                    task_type=task.task_type,
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                    error=str(e),
+                )
+            except Exception as status_error:
+                logger.warning(f"[{self.agent_name}] Failed to record task status: {status_error}")
 
     def _extract_result(self, result: Any) -> str:
         """Extract text result from agent output."""
@@ -838,6 +947,8 @@ class RedisWorkerAgent:
                     status=status,
                     current_task=self._current_task,
                     pod_name=self.pod_name,
+                    role=self.role.value,
+                    operation_id=self.operation_id,
                 )
                 # Reset retry delay on success
                 retry_delay = 1.0

@@ -88,6 +88,8 @@ class RedisTaskQueue:
     TASK_QUEUE_PREFIX = "ares:tasks"
     RESULT_QUEUE_PREFIX = "ares:results"
     HEARTBEAT_PREFIX = "ares:heartbeat"
+    TASK_STATUS_PREFIX = "ares:task_status"
+    TASK_STATUS_TTL = 60 * 60 * 24  # 24 hours
     LOCK_PREFIX = "ares:lock"
 
     # TTLs
@@ -156,6 +158,10 @@ class RedisTaskQueue:
     def _heartbeat_key(self, agent_name: str) -> str:
         """Get heartbeat key for an agent."""
         return f"{self.HEARTBEAT_PREFIX}:{agent_name}"
+
+    def _task_status_key(self, task_id: str) -> str:
+        """Get task status key for a task."""
+        return f"{self.TASK_STATUS_PREFIX}:{task_id}"
 
     # === Orchestrator Methods ===
 
@@ -414,6 +420,8 @@ class RedisTaskQueue:
         status: str = "idle",
         current_task: str | None = None,
         pod_name: str | None = None,
+        role: str | None = None,
+        operation_id: str | None = None,
     ) -> None:
         """
         Send agent heartbeat.
@@ -436,12 +444,46 @@ class RedisTaskQueue:
                 "status": status,
                 "current_task": current_task,
                 "pod_name": pod_name,
+                "role": role,
+                "operation_id": operation_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )
 
         try:
             await self._client.set(heartbeat_key, data, ex=self.HEARTBEAT_TTL)
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(
+                keyword in error_str
+                for keyword in [
+                    "connection",
+                    "connect",
+                    "closed",
+                    "timeout",
+                    "broken pipe",
+                    "reset",
+                ]
+            ):
+                self._handle_connection_error(e)
+            raise
+
+    async def set_task_status(
+        self,
+        task_id: str,
+        status: str,
+        **fields: Any,
+    ) -> None:
+        """Persist task status with a TTL for debugging/insight."""
+        if not self._connected:
+            await self.connect()
+
+        data = {"status": status, "updated_at": datetime.now(timezone.utc).isoformat()}
+        data.update(fields)
+        key = self._task_status_key(task_id)
+
+        try:
+            await self._client.set(key, json.dumps(data, default=str), ex=self.TASK_STATUS_TTL)
         except Exception as e:
             error_str = str(e).lower()
             if any(

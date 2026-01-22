@@ -924,6 +924,153 @@ tasks:
         asyncio.run(main())
         "
 
+  ares:red:multi:tasks:running:
+    desc: "List running tasks for an operation (usage: task ares:red:multi:tasks:running OPERATION_ID=op-xxx [ROLE=lateral])"
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      ROLE: '{{.ROLE | default ""}}'
+      K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required. Usage: task ares:red:multi:tasks:running OPERATION_ID=op-xxx [ROLE=lateral]"
+    cmds:
+      - |
+        REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+        if [ -n "$REDIS_PASS" ]; then
+          REDIS_URL="redis://:${REDIS_PASS}@redis:6379"
+        else
+          REDIS_URL="redis://redis:6379"
+        fi
+
+        POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role=orchestrator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        if [ -z "$POD" ]; then
+          echo "❌ No orchestrator pod found in namespace {{.K8S_NAMESPACE}}"
+          exit 1
+        fi
+
+        kubectl exec -i -n {{.K8S_NAMESPACE}} "$POD" -c orchestrator -- env REDIS_URL="$REDIS_URL" python - <<'PY'
+        import asyncio
+        import json
+        import os
+        import redis.asyncio as redis
+
+        OP_ID = "{{.OPERATION_ID}}"
+        ROLE = "{{.ROLE}}"
+
+        async def main():
+            client = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+            running = []
+            async for key in client.scan_iter("ares:task_status:*"):
+                raw = await client.get(key)
+                if not raw:
+                    continue
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
+                if data.get("operation_id") != OP_ID:
+                    continue
+                if ROLE and data.get("role") != ROLE:
+                    continue
+                if data.get("status") != "running":
+                    continue
+                running.append((key, data))
+
+            if not running:
+                print("No running tasks found")
+                return
+
+            for key, data in sorted(running, key=lambda x: x[1].get("started_at", "")):
+                print(key)
+                print(json.dumps({
+                    "started_at": data.get("started_at"),
+                    "pod": data.get("pod_name"),
+                    "role": data.get("role"),
+                    "task_type": data.get("task_type"),
+                    "payload": data.get("payload"),
+                }, indent=2))
+
+        asyncio.run(main())
+        PY
+
+  ares:red:multi:tasks:list:
+    desc: "List tasks for an operation (usage: task ares:red:multi:tasks:list OPERATION_ID=op-xxx [ROLE=lateral] [STATUS=running|completed|failed|all])"
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      ROLE: '{{.ROLE | default ""}}'
+      STATUS: '{{.STATUS | default "running"}}'
+      K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required. Usage: task ares:red:multi:tasks:list OPERATION_ID=op-xxx [ROLE=lateral] [STATUS=running|completed|failed|all]"
+    cmds:
+      - |
+        REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+        if [ -n "$REDIS_PASS" ]; then
+          REDIS_URL="redis://:${REDIS_PASS}@redis:6379"
+        else
+          REDIS_URL="redis://redis:6379"
+        fi
+
+        POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role=orchestrator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        if [ -z "$POD" ]; then
+          echo "❌ No orchestrator pod found in namespace {{.K8S_NAMESPACE}}"
+          exit 1
+        fi
+
+        kubectl exec -i -n {{.K8S_NAMESPACE}} "$POD" -c orchestrator -- env REDIS_URL="$REDIS_URL" python - <<'PY'
+        import asyncio
+        import json
+        import os
+        import redis.asyncio as redis
+
+        OP_ID = "{{.OPERATION_ID}}"
+        ROLE = "{{.ROLE}}"
+        STATUS = "{{.STATUS}}"
+
+        async def main():
+            client = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+            tasks = []
+            async for key in client.scan_iter("ares:task_status:*"):
+                raw = await client.get(key)
+                if not raw:
+                    continue
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
+                if data.get("operation_id") != OP_ID:
+                    continue
+                if ROLE and data.get("role") != ROLE:
+                    continue
+                if STATUS != "all" and data.get("status") != STATUS:
+                    continue
+                tasks.append((key, data))
+
+            if not tasks:
+                print("No tasks found")
+                return
+
+            def _ts(item):
+                data = item[1]
+                return data.get("started_at") or data.get("ended_at") or ""
+
+            for key, data in sorted(tasks, key=_ts):
+                print(key)
+                print(json.dumps({
+                    "status": data.get("status"),
+                    "started_at": data.get("started_at"),
+                    "ended_at": data.get("ended_at"),
+                    "pod": data.get("pod_name"),
+                    "role": data.get("role"),
+                    "task_type": data.get("task_type"),
+                    "error": data.get("error"),
+                    "payload": data.get("payload"),
+                }, indent=2))
+
+        asyncio.run(main())
+        PY
+
   ares:red:multi:list:
     desc: "List all multi-agent operations with checkpoints"
     vars:
