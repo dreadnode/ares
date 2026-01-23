@@ -69,6 +69,20 @@ class TestRunToolFunction:
         assert stderr == "error"
         assert code == 1
 
+    def test_run_tool_passes_target_role(self):
+        """Test target_role forwarding to remote executor."""
+        from ares.tools.red.network import _run_tool
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(stdout="ok", stderr="", return_code=0)
+            _run_tool(["whoami"], target_role="lateral")
+
+        mock_run.assert_called_once_with(
+            ["whoami"],
+            timeout_seconds=300,
+            target_role="lateral",
+        )
+
 
 class TestNetworkEnumerationTools:
     """Tests for NetworkEnumerationTools class."""
@@ -1287,3 +1301,68 @@ class TestLateralMovementTools:
             )
 
         assert "failed" in result.lower()
+
+
+class TestPostureValidationTools:
+    """Tests for PostureValidationTools."""
+
+    def test_check_credman_entries_adds_weakness(self, red_team_state: RedTeamState):
+        """Credential Manager entries should be tracked as weaknesses."""
+        from ares.tools.red.network import PostureValidationTools
+
+        tools = PostureValidationTools()
+        tools.set_state(red_team_state)
+
+        output = "Target: LegacyGeneric:target=TERMSRV/host\n"
+        with patch.object(tools, "_run_netexec_command", return_value=output):
+            result = tools.check_credman_entries(
+                target="192.168.56.10",
+                username="admin",
+                password="pass",  # pragma: allowlist secret
+                domain="TEST",
+            )
+
+        assert "Credential Manager entries found" in result
+        assert any("Credential Manager Entries" in block for block in red_team_state.weaknesses)
+
+    def test_check_autologon_registry_adds_weakness(self, red_team_state: RedTeamState):
+        """Autologon registry credentials should be flagged."""
+        from ares.tools.red.network import PostureValidationTools
+
+        tools = PostureValidationTools()
+        tools.set_state(red_team_state)
+
+        output = (
+            "AutoAdminLogon    REG_SZ    1\n"
+            "DefaultUserName    REG_SZ    TEST\\svc\n"
+            "DefaultPassword    REG_SZ    Secret123\n"
+        )
+        with patch.object(tools, "_run_netexec_command", return_value=output):
+            result = tools.check_autologon_registry(
+                target="192.168.56.10",
+                username="admin",
+                password="pass",  # pragma: allowlist secret
+                domain="TEST",
+            )
+
+        assert "Autologon credentials detected" in result
+        assert any("Autologon Credentials" in block for block in red_team_state.weaknesses)
+
+    def test_check_lm_compatibility_level_adds_weakness(self, red_team_state: RedTeamState):
+        """LmCompatibilityLevel allowing NTLMv1 should be recorded."""
+        from ares.tools.red.network import PostureValidationTools
+
+        tools = PostureValidationTools()
+        tools.set_state(red_team_state)
+
+        output = "LmCompatibilityLevel    REG_DWORD    0x2\n"
+        with patch.object(tools, "_run_netexec_command", return_value=output):
+            result = tools.check_lm_compatibility_level(
+                target="192.168.56.10",
+                username="admin",
+                password="pass",  # pragma: allowlist secret
+                domain="TEST",
+            )
+
+        assert "NTLMv1 allowed" in result
+        assert any("NTLMv1 Downgrade Allowed" in block for block in red_team_state.weaknesses)

@@ -404,12 +404,13 @@ All tasks support the following configuration variables:
 | `MODEL_ALL` | `""` | Override all agents with one model value |
 | `MODEL_ORCHESTRATOR` | `""` | Override multi-agent orchestrator model |
 | `MODEL_WORKER` | `""` | Override multi-agent worker models |
-| `MODEL_ENUM` | `""` | Override enum agent model |
+| `MODEL_RECON` | `""` | Override recon agent model |
+| `MODEL_CREDENTIAL_ACCESS` | `""` | Override credential access agent model |
 | `MODEL_CRACKER` | `""` | Override cracker agent model |
 | `MODEL_ACL` | `""` | Override ACL agent model |
 | `MODEL_PRIVESC` | `""` | Override PrivEsc agent model |
 | `MODEL_LATERAL` | `""` | Override lateral agent model |
-| `MODEL_POISONING` | `""` | Override poisoning agent model |
+| `MODEL_COERCION` | `""` | Override coercion agent model |
 | `GRAFANA_URL` | `https://grafana.dev.plundr.ai` | Grafana URL for alerts |
 | `POLL_INTERVAL` | `30` | Seconds between alert polls |
 | `MAX_STEPS` | `50` | Maximum agent steps for polling mode (Taskfile override, code default is 30) |
@@ -422,8 +423,8 @@ All tasks support the following configuration variables:
 
 **Model precedence (multi-agent):**
 
-1. `MODEL_ENUM` / `MODEL_CRACKER` / `MODEL_ACL` / `MODEL_PRIVESC` /
-   `MODEL_LATERAL` / `MODEL_POISONING`
+1. `MODEL_RECON` / `MODEL_CREDENTIAL_ACCESS` / `MODEL_CRACKER` / `MODEL_ACL` /
+   `MODEL_PRIVESC` / `MODEL_LATERAL` / `MODEL_COERCION`
 2. `MODEL_ORCHESTRATOR` (orchestrator only)
 3. `MODEL_WORKER` (all non-orchestrator agents)
 4. `MODEL_ALL`

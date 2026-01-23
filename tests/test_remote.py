@@ -516,6 +516,35 @@ class TestRunRemote:
             target_role="cracker",
         )
 
+    def test_run_remote_routes_cross_role_in_local_mode(self):
+        """Cross-role calls in local mode should use K8sExecutor."""
+        executor = MagicMock()
+        executor.run_command.side_effect = AssertionError("Unexpected executor call")
+        k8s_result = CommandResult(
+            stdout="ok",
+            stderr="",
+            return_code=0,
+            success=True,
+        )
+
+        with (
+            patch("ares.core.remote.get_execution_mode", return_value="local"),
+            patch("ares.core.remote.get_executor", return_value=executor),
+            patch("ares.core.remote.K8sExecutor") as mock_k8s,
+            patch.dict(os.environ, {"ARES_ROLE": "recon"}, clear=False),
+        ):
+            mock_k8s.return_value.run_command.return_value = k8s_result
+            result = run_remote("echo test", target_role="lateral")
+
+        assert result is k8s_result
+        mock_k8s.return_value.run_command.assert_called_once_with(
+            "echo test",
+            300,
+            "/tmp",
+            target_role="lateral",
+        )
+        executor.run_command.assert_not_called()
+
 
 class TestK8sExecutorInit:
     """Tests for K8sExecutor initialization."""
@@ -581,8 +610,8 @@ class TestK8sExecutorRouting:
         assert result.success is True
         assert calls[0]["target_role"] == "cracker"
 
-    def test_run_command_defaults_to_enum_without_role(self):
-        """Test run_command defaults to enum when no role set."""
+    def test_run_command_defaults_to_recon_without_role(self):
+        """Test run_command defaults to recon when no role set."""
         executor = K8sExecutor()
         calls: list[dict[str, str]] = []
 
@@ -603,7 +632,7 @@ class TestK8sExecutorRouting:
             result = executor.run_command(["echo", "test"])
 
         assert result.success is True
-        assert calls[0]["target_role"] == "enum"
+        assert calls[0]["target_role"] == "recon"
 
     def test_run_command_explicit_role_overrides_env(self):
         """Test run_command honors explicit target_role."""

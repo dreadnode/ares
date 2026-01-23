@@ -206,7 +206,7 @@ class TestRunWorkerModelResolution:
         """Test that run_worker returns early when no model is configured."""
         from ares.core.worker import run_worker
 
-        monkeypatch.delenv("ARES_AGENT_ENUM_MODEL", raising=False)
+        monkeypatch.delenv("ARES_AGENT_RECON_MODEL", raising=False)
         monkeypatch.delenv("ARES_WORKER_MODEL", raising=False)
         monkeypatch.delenv("ARES_MODEL", raising=False)
 
@@ -218,7 +218,7 @@ class TestRunWorkerModelResolution:
             patch("ares.core.worker.logger") as mock_logger,
         ):
             result = await run_worker(
-                role=AgentRole.ENUM,
+                role=AgentRole.RECON,
                 operation_id="op-1",
                 discover_operation=False,
             )

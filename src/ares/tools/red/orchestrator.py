@@ -158,8 +158,8 @@ class OrchestratorTools(Toolset):
         """
         Request ACLAgent to analyze attack paths for target.
 
-        The ACL agent will run BloodHound and find the shortest
-        path to privileged groups/users.
+        The ACL agent focuses on exploiting ACL abuse paths. Ensure
+        BloodHound analysis is run by recon/orchestrator when needed.
 
         Args:
             target_user: User to find paths FROM (usually current compromised user)
@@ -370,7 +370,7 @@ class OrchestratorTools(Toolset):
         timeout: float = 600.0,
     ) -> str:
         """
-        Request PoisonAgent to start network poisoning.
+        Request the coercion agent to start network poisoning.
 
         The poisoner will run responder/mitm6 to capture hashes.
 
@@ -401,7 +401,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to start poisoning - no poison agent available"
+            return "✗ Failed to start poisoning - no coercion agent available"
 
         logger.info(f"Dispatched poisoning: {task_id}")
 
@@ -671,7 +671,7 @@ class OrchestratorTools(Toolset):
         return "\n".join(lines)
 
     @dn.tool_method
-    def get_operation_summary(self) -> str:
+    async def get_operation_summary(self) -> str:
         """
         Get comprehensive operation summary.
 
@@ -682,6 +682,7 @@ class OrchestratorTools(Toolset):
         """
         state = self.shared_state
         summary = state.to_summary()
+        status = await self.dispatcher.get_exploitation_status()
 
         lines = [
             "📊 OPERATION SUMMARY",
@@ -694,8 +695,8 @@ class OrchestratorTools(Toolset):
             f"  • Hashes captured: {summary['hash_count']}",
             "",
             "🎯 Exploitation Progress:",
-            f"  • Vulnerabilities found: {summary['vulnerability_count']}",
-            f"  • Vulnerabilities exploited: {summary['exploited_count']}",
+            f"  • Vulnerabilities found: {status.get('total_discovered', summary['vulnerability_count'])}",
+            f"  • Vulnerabilities exploited: {status.get('total_succeeded', summary['exploited_count'])}",
             "",
             "📋 Task Status:",
             f"  • Pending tasks: {summary['pending_tasks']}",

@@ -15,7 +15,7 @@ class TestModelResolution:
         """Test role-specific model override takes precedence."""
         config_data = {
             "agents": {
-                "enum": {"model": "default-model"},
+                "recon": {"model": "default-model"},
                 "orchestrator": {"model": "default-orchestrator"},
             }
         }
@@ -23,7 +23,7 @@ class TestModelResolution:
         with patch.dict(
             os.environ,
             {
-                "ARES_AGENT_ENUM_MODEL": "role-specific-model",
+                "ARES_AGENT_RECON_MODEL": "role-specific-model",
                 "ARES_WORKER_MODEL": "worker-model",
                 "ARES_MODEL": "global-model",
             },
@@ -35,7 +35,7 @@ class TestModelResolution:
             config = _apply_env_overrides(config)
 
             # Role-specific should win
-            assert config.agents["enum"].model == "role-specific-model"
+            assert config.agents["recon"].model == "role-specific-model"
 
     def test_orchestrator_model_override(self):
         """Test ARES_ORCHESTRATOR_MODEL applies to orchestrator role."""
@@ -64,7 +64,7 @@ class TestModelResolution:
         """Test ARES_WORKER_MODEL applies to worker roles but not orchestrator."""
         config_data = {
             "agents": {
-                "enum": {"model": "default-enum"},
+                "recon": {"model": "default-recon"},
                 "cracker": {"model": "default-cracker"},
                 "orchestrator": {"model": "default-orchestrator"},
             }
@@ -84,7 +84,7 @@ class TestModelResolution:
             config = _apply_env_overrides(config)
 
             # Workers should use ARES_WORKER_MODEL
-            assert config.agents["enum"].model == "worker-model"
+            assert config.agents["recon"].model == "worker-model"
             assert config.agents["cracker"].model == "worker-model"
             # Orchestrator should use ARES_MODEL (not ARES_WORKER_MODEL)
             assert config.agents["orchestrator"].model == "global-model"
@@ -93,7 +93,7 @@ class TestModelResolution:
         """Test ARES_MODEL applies as fallback for all roles."""
         config_data = {
             "agents": {
-                "enum": {"model": "default-model"},
+                "recon": {"model": "default-model"},
                 "orchestrator": {"model": "default-orchestrator"},
             }
         }
@@ -108,21 +108,21 @@ class TestModelResolution:
             config = _build_config(config_data)
             config = _apply_env_overrides(config)
 
-            assert config.agents["enum"].model == "global-override"
+            assert config.agents["recon"].model == "global-override"
             assert config.agents["orchestrator"].model == "global-override"
 
     def test_precedence_role_over_worker(self):
         """Test role-specific overrides worker-level override."""
         config_data = {
             "agents": {
-                "enum": {"model": "default-model"},
+                "recon": {"model": "default-model"},
             }
         }
 
         with patch.dict(
             os.environ,
             {
-                "ARES_AGENT_ENUM_MODEL": "enum-specific",
+                "ARES_AGENT_RECON_MODEL": "recon-specific",
                 "ARES_WORKER_MODEL": "worker-level",
             },
             clear=False,
@@ -132,7 +132,7 @@ class TestModelResolution:
             config = _build_config(config_data)
             config = _apply_env_overrides(config)
 
-            assert config.agents["enum"].model == "enum-specific"
+            assert config.agents["recon"].model == "recon-specific"
 
     def test_precedence_worker_over_global(self):
         """Test worker-level override takes precedence over global."""
@@ -184,7 +184,7 @@ class TestModelResolution:
         """Test that without overrides, config defaults are used."""
         config_data = {
             "agents": {
-                "enum": {"model": "config-default"},
+                "recon": {"model": "config-default"},
             }
         }
 
@@ -194,13 +194,13 @@ class TestModelResolution:
             config = _build_config(config_data)
             config = _apply_env_overrides(config)
 
-            assert config.agents["enum"].model == "config-default"
+            assert config.agents["recon"].model == "config-default"
 
     def test_add_role_from_env_variable(self):
         """Test that role-specific env creates agent config if not in file."""
         config_data = {
             "agents": {
-                "enum": {"model": "default-model"},
+                "recon": {"model": "default-model"},
             }
         }
 
@@ -224,7 +224,7 @@ class TestModelResolution:
         """Test that role name in env variable is case-insensitive."""
         config_data = {
             "agents": {
-                "enum": {"model": "default-model"},
+                "recon": {"model": "default-model"},
             }
         }
 
@@ -248,7 +248,7 @@ class TestModelResolution:
         """Test that empty environment variables are ignored."""
         config_data = {
             "agents": {
-                "enum": {"model": "default-model"},
+                "recon": {"model": "default-model"},
             }
         }
 
@@ -257,7 +257,7 @@ class TestModelResolution:
             {
                 "ARES_MODEL": "",  # Empty value
                 "ARES_WORKER_MODEL": "",
-                "ARES_AGENT_ENUM_MODEL": "",
+                "ARES_AGENT_RECON_MODEL": "",
             },
             clear=False,
         ):
@@ -267,13 +267,13 @@ class TestModelResolution:
             config = _apply_env_overrides(config)
 
             # Should keep config default since env is empty
-            assert config.agents["enum"].model == "default-model"
+            assert config.agents["recon"].model == "default-model"
 
     def test_model_resolution_from_config_with_env_vars(self):
         """Test that model can be specified with env vars in config file."""
         config_data = {
             "agents": {
-                "enum": {"model": "${ARES_CUSTOM_MODEL}"},
+                "recon": {"model": "${ARES_CUSTOM_MODEL}"},
             }
         }
 
@@ -287,13 +287,13 @@ class TestModelResolution:
             config = _build_config(config_data)
 
             # _resolve_env should have been applied during build
-            assert config.agents["enum"].model == "custom-from-env"
+            assert config.agents["recon"].model == "custom-from-env"
 
     def test_multiple_agents_with_different_overrides(self):
         """Test complex scenario with multiple agents and override levels."""
         config_data = {
             "agents": {
-                "enum": {"model": "default-enum"},
+                "recon": {"model": "default-recon"},
                 "cracker": {"model": "default-cracker"},
                 "orchestrator": {"model": "default-orchestrator"},
                 "lateral": {"model": "default-lateral"},
@@ -315,8 +315,8 @@ class TestModelResolution:
             config = _build_config(config_data)
             config = _apply_env_overrides(config)
 
-            # enum: worker-model (no role-specific, uses worker)
-            assert config.agents["enum"].model == "worker-model"
+            # recon: worker-model (no role-specific, uses worker)
+            assert config.agents["recon"].model == "worker-model"
             # cracker: cracker-specific (role-specific wins)
             assert config.agents["cracker"].model == "cracker-specific"
             # orchestrator: orchestrator-model (orchestrator-specific)

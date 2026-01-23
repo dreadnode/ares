@@ -85,8 +85,8 @@ def state_with_in_progress_tasks():
     )
     state.pending_tasks["task_003"] = TaskInfo(
         task_id="task_003",
-        task_type="enum",
-        assigned_agent="enum",
+        task_type="recon",
+        assigned_agent="recon",
         status=TaskStatus.PENDING,  # Pending tasks are also requeued
         created_at=datetime.now(timezone.utc),
         params={},
@@ -104,7 +104,7 @@ def state_with_in_progress_tasks():
     state.pending_tasks["task_005"] = TaskInfo(
         task_id="task_005",
         task_type="poison",
-        assigned_agent="poisoning",
+        assigned_agent="coercion",
         status=TaskStatus.RETRYING,  # Retrying tasks are requeued without incrementing
         created_at=datetime.now(timezone.utc),
         params={},
@@ -194,8 +194,8 @@ def state_with_failed_tasks():
     )
     state.pending_tasks["task_normal_fail"] = TaskInfo(
         task_id="task_normal_fail",
-        task_type="enum",
-        assigned_agent="enum",
+        task_type="recon",
+        assigned_agent="recon",
         status=TaskStatus.FAILED,
         created_at=datetime.now(timezone.utc),
         completed_at=datetime.now(timezone.utc),

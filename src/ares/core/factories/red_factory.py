@@ -660,7 +660,7 @@ def create_redteam_agent(
     golden_ticket_tools = GoldenTicketTools()
     golden_ticket_tools.set_state(state)
 
-    # New GOAD-based toolsets
+    # AD analysis toolsets
     bloodhound_tools = BloodHoundTools()
     bloodhound_tools.set_state(state)
 

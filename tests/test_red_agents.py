@@ -22,7 +22,7 @@ async def test_create_multi_agent_ensemble_requires_model(monkeypatch):
             operation_id="op-1",
             target_ip="192.168.56.1",
             dispatcher=dispatcher,
-            roles=[AgentRole.ENUM],
+            roles=[AgentRole.RECON],
         )
 
 
@@ -41,7 +41,7 @@ async def test_create_multi_agent_ensemble_uses_env_models(monkeypatch):
             operation_id="op-2",
             target_ip="192.168.56.2",
             dispatcher=dispatcher,
-            roles=[AgentRole.ENUM, AgentRole.CRACKER],
+            roles=[AgentRole.RECON, AgentRole.CRACKER],
         )
 
     assert mock_create.call_count == 2
@@ -59,7 +59,7 @@ def test_create_specialized_agent_uses_set_state_when_shared_state_missing(monke
 
     monkeypatch.setattr(
         "ares.core.factories.red_agents.ROLE_TOOLSETS",
-        {AgentRole.ENUM: [DummyToolset]},
+        {AgentRole.RECON: [DummyToolset]},
     )
     monkeypatch.setattr(
         "ares.core.factories.red_agents.load_agent_instructions",
@@ -77,7 +77,7 @@ def test_create_specialized_agent_uses_set_state_when_shared_state_missing(monke
     dispatcher = MagicMock()
 
     create_specialized_agent(
-        role=AgentRole.ENUM,
+        role=AgentRole.RECON,
         model="test-model",
         shared_state=shared_state,
         dispatcher=dispatcher,

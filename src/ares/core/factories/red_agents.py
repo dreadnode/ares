@@ -34,6 +34,7 @@ from ares.tools.red.network import (
     MSSQLTools,
     NetworkEnumerationTools,
     PoisoningTools,
+    PostureValidationTools,
     RedTeamReportingTools,
     SharePilferingTools,
 )
@@ -44,18 +45,23 @@ if TYPE_CHECKING:
 
 # Tool assignments per agent role
 ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
-    AgentRole.ENUM: [
+    AgentRole.RECON: [
         NetworkEnumerationTools,
+        BloodHoundTools,
         CredentialDiscoveryTools,
         RedTeamReportingTools,
         # OrchestratorTools added separately (needs dispatcher)
+    ],
+    AgentRole.CREDENTIAL_ACCESS: [
+        CredentialDiscoveryTools,
+        CredentialHarvestingTools,
+        # CredentialAccessCallbackTools added separately if needed
     ],
     AgentRole.CRACKER: [
         CrackingTools,
         # CrackerCallbackTools added separately
     ],
     AgentRole.ACL: [
-        BloodHoundTools,
         ACLExploitTools,
         # ACLCallbackTools added separately
     ],
@@ -71,9 +77,10 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
         LateralMovementTools,
         CredentialHarvestingTools,
         SharePilferingTools,
+        PostureValidationTools,
         # LateralCallbackTools added separately
     ],
-    AgentRole.POISONING: [
+    AgentRole.COERCION: [
         CoercionTools,
         PoisoningTools,
         # PoisonCallbackTools added separately
@@ -83,23 +90,25 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
 
 # System instruction templates per role
 ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
-    AgentRole.ENUM: "redteam/agents/enum.md.jinja",
+    AgentRole.RECON: "redteam/agents/recon.md.jinja",
+    AgentRole.CREDENTIAL_ACCESS: "redteam/agents/credential_access.md.jinja",
     AgentRole.CRACKER: "redteam/agents/cracker.md.jinja",
     AgentRole.ACL: "redteam/agents/acl.md.jinja",
     AgentRole.PRIVESC: "redteam/agents/privesc.md.jinja",
     AgentRole.LATERAL: "redteam/agents/lateral.md.jinja",
-    AgentRole.POISONING: "redteam/agents/poisoning.md.jinja",
+    AgentRole.COERCION: "redteam/agents/coercion.md.jinja",
 }
 
 
 # Default max steps per role
 ROLE_MAX_STEPS: dict[AgentRole, int] = {
-    AgentRole.ENUM: 200,
+    AgentRole.RECON: 200,
+    AgentRole.CREDENTIAL_ACCESS: 120,
     AgentRole.CRACKER: 50,
     AgentRole.ACL: 100,
     AgentRole.PRIVESC: 100,
     AgentRole.LATERAL: 200,
-    AgentRole.POISONING: 30,
+    AgentRole.COERCION: 30,
 }
 
 
@@ -176,7 +185,7 @@ def create_role_hooks(
     hooks.extend([log_tool_usage, log_tool_result])
 
     # Role-specific hooks
-    if role == AgentRole.ENUM:
+    if role == AgentRole.RECON:
         # Orchestrator monitors for domain admin achievement
         async def check_domain_admin(event: ToolEnd):
             if not isinstance(event, ToolEnd):
@@ -254,7 +263,7 @@ def create_role_hooks(
 
     # Unstall hook for all roles
     role_feedback = {
-        AgentRole.ENUM: (
+        AgentRole.RECON: (
             "You seem stuck. As orchestrator, focus on:\n"
             "1. Check pending tasks with get_pending_tasks()\n"
             "2. Review unexploited vulnerabilities with get_exploitation_status()\n"
@@ -287,7 +296,7 @@ def create_role_hooks(
             "3. Run secretsdump on successful access\n"
             "4. Report new credentials back"
         ),
-        AgentRole.POISONING: (
+        AgentRole.COERCION: (
             "You seem stuck. As poisoner, focus on:\n"
             "1. Start responder/mitm6 if not running\n"
             "2. Use coercion techniques (petitpotam, coercer)\n"
@@ -362,7 +371,7 @@ def create_specialized_agent(
 
     # Determine stop conditions based on role
     stop_conditions = []
-    if role == AgentRole.ENUM:
+    if role == AgentRole.RECON:
         stop_conditions.append(tool_use("complete_operation"))
     else:
         # Worker agents stop when task is complete or they need assistance
@@ -373,7 +382,7 @@ def create_specialized_agent(
             ]
         )
 
-    agent_name = f"ares-{role.value}"
+    agent_name = f"ares-{role.value.replace('_', '-')}"
     max_steps = max_steps or ROLE_MAX_STEPS.get(role, 100)
 
     logger.info(f"Creating {agent_name} agent with {len(tools)} toolsets, max_steps={max_steps}")
@@ -406,45 +415,77 @@ def create_agent_info(
     """
     # Define capabilities per role
     role_capabilities: dict[AgentRole, set[str]] = {
-        AgentRole.ENUM: {
-            "enumeration",
-            "coordination",
-            "task_dispatch",
-            "reporting",
+        AgentRole.RECON: {
+            "nmap",
+            "netexec",
+            "rpcclient",
+            "ldapsearch",
+            "enum4linux",
+            "enum4linux-ng",
+            "bloodhound",
+            "certipy",
+            "adidnsdump",
+        },
+        AgentRole.CREDENTIAL_ACCESS: {
+            "impacket-getnpusers",
+            "impacket-secretsdump",
+            "targetedkerberoast",
+            "lsassy",
+            "sprayhound",
         },
         AgentRole.CRACKER: {
-            "hash_cracking",
             "hashcat",
             "john",
+            "rockyou",
+            "seclists",
         },
         AgentRole.ACL: {
-            "bloodhound",
-            "acl_abuse",
-            "shadow_credentials",
-            "targeted_kerberoast",
+            "bloodyad",
+            "pywhisker",
+            "dacledit",
+            "targetedkerberoast",
+            "rpcclient",
         },
         AgentRole.PRIVESC: {
-            "adcs_exploitation",
-            "delegation_abuse",
-            "mssql_exploitation",
-            "cve_exploitation",
+            "certipy",
+            "impacket-getst",
+            "impacket-gettgt",
+            "impacket-rbcd",
+            "mssqlclient",
+            "nopac",
+            "printnightmare",
+            "raisechild",
+            "krbrelayup",
+            "printspoofer",
+            "godpotato",
+            "winpeas",
+            "linpeas",
+            "powerupsql",
         },
         AgentRole.LATERAL: {
-            "lateral_movement",
-            "credential_harvesting",
-            "psexec",
-            "evil_winrm",
+            "evil-winrm",
+            "impacket-psexec",
+            "impacket-wmiexec",
+            "impacket-smbexec",
+            "impacket-secretsdump",
+            "smbclient",
+            "xfreerdp",
+            "sshpass",
         },
-        AgentRole.POISONING: {
-            "network_poisoning",
-            "coercion",
+        AgentRole.COERCION: {
             "responder",
-            "ntlm_relay",
+            "mitm6",
+            "coercer",
+            "petitpotam",
+            "ntlmrelayx",
+            "krbrelayx",
+            "printerbug",
+            "dfscoerce",
         },
     }
 
     return AgentInfo(
-        name=f"ares-{role.value}",
+        name=f"ares-{role.value.replace('_', '-')}",
         pod_name=pod_name,
         role=role,
         capabilities=role_capabilities.get(role, set()),
@@ -482,11 +523,13 @@ async def create_multi_agent_ensemble(
     # Default roles if not specified
     if roles is None:
         roles = [
-            AgentRole.ENUM,
+            AgentRole.RECON,
+            AgentRole.CREDENTIAL_ACCESS,
             AgentRole.CRACKER,
             AgentRole.ACL,
             AgentRole.PRIVESC,
             AgentRole.LATERAL,
+            AgentRole.COERCION,
         ]
 
     # Create dispatcher if not provided
@@ -512,7 +555,7 @@ async def create_multi_agent_ensemble(
 
     for role in roles:
         # Determine model for this role
-        if role == AgentRole.ENUM:
+        if role == AgentRole.RECON:
             agent_model = orch_model or base_model
         else:
             agent_model = work_model or base_model
@@ -529,13 +572,13 @@ async def create_multi_agent_ensemble(
             shared_state=shared_state,
             dispatcher=dispatcher,
             pod_executor=pod_executor,
-            pod_name=f"ares-{role.value}-0",  # Default pod naming
+            pod_name=f"ares-{role.value.replace('_', '-')}-0",  # Default pod naming
         )
 
         agents[role] = agent
 
         # Register with dispatcher
-        agent_info = create_agent_info(role, pod_name=f"ares-{role.value}-0")
+        agent_info = create_agent_info(role, pod_name=f"ares-{role.value.replace('_', '-')}-0")
         await dispatcher.register(agent_info)
 
     logger.info(f"Created multi-agent ensemble with {len(agents)} agents")

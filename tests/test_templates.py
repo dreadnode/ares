@@ -137,13 +137,20 @@ class TestAgentTemplates:
 
         assert "TestAlert" in result
 
-    def test_redteam_enum_template_includes_vulnerability_queue(self) -> None:
-        """Test redteam enum template renders with vulnerability queue guidance."""
+    def test_redteam_recon_template_includes_vulnerability_queue(self) -> None:
+        """Test redteam recon template renders with vulnerability queue guidance."""
         loader = get_template_loader()
-        result = loader.render("redteam/agents/enum.md.jinja")
+        result = loader.render("redteam/agents/recon.md.jinja")
 
         assert "queue_vulnerability_for_exploitation" in result
         assert "get_vulnerability_queue_status" in result
+
+    def test_redteam_coercion_template_renders(self) -> None:
+        """Test redteam coercion template renders without errors."""
+        loader = get_template_loader()
+        result = loader.render("redteam/agents/coercion.md.jinja")
+
+        assert "coercion" in result.lower()
 
 
 class TestEngineTemplates:

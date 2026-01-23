@@ -201,12 +201,12 @@ class TestPromptGeneration:
         assert "exploit_adcs" in prompt
 
     def test_poison_prompt(self):
-        """Test prompt generation for poisoning tasks."""
+        """Test prompt generation for coercion tasks."""
         task = TaskMessage(
             task_id="poison_001",
             task_type="poison",
             source_agent="orchestrator",
-            target_agent="poisoning",
+            target_agent="coercion",
             payload={
                 "interface": "eth0",
                 "techniques": ["LLMNR", "NBT-NS", "mDNS"],
@@ -328,7 +328,7 @@ class TestDispatcherRedisIntegration:
     async def test_request_poisoning_uses_redis_queue(
         self, dispatcher_with_redis, mock_redis_client
     ):
-        """Test poisoning request goes through Redis queue."""
+        """Test coercion request goes through Redis queue."""
         task_id = await dispatcher_with_redis.request_poisoning(
             source_agent="orchestrator",
             interface="eth0",

@@ -31,12 +31,13 @@ vars:
   MODEL_ORCHESTRATOR: '{{.MODEL_ORCHESTRATOR | default ""}}'
   MODEL_WORKER: '{{.MODEL_WORKER | default ""}}'
   MODEL_ALL: '{{.MODEL_ALL | default ""}}'
-  MODEL_ENUM: '{{.MODEL_ENUM | default ""}}'
+  MODEL_RECON: '{{.MODEL_RECON | default ""}}'
+  MODEL_CREDENTIAL_ACCESS: '{{.MODEL_CREDENTIAL_ACCESS | default ""}}'
   MODEL_CRACKER: '{{.MODEL_CRACKER | default ""}}'
   MODEL_ACL: '{{.MODEL_ACL | default ""}}'
   MODEL_PRIVESC: '{{.MODEL_PRIVESC | default ""}}'
   MODEL_LATERAL: '{{.MODEL_LATERAL | default ""}}'
-  MODEL_POISONING: '{{.MODEL_POISONING | default ""}}'
+  MODEL_COERCION: '{{.MODEL_COERCION | default ""}}'
 
 tasks:
   default:
@@ -823,12 +824,13 @@ tasks:
             ARES_MODEL="{{.ARES_MODEL}}" \
             ARES_ORCHESTRATOR_MODEL="{{.MODEL_ORCHESTRATOR}}" \
             ARES_WORKER_MODEL="{{.MODEL_WORKER}}" \
-            ARES_AGENT_ENUM_MODEL="{{.MODEL_ENUM}}" \
+            ARES_AGENT_RECON_MODEL="{{.MODEL_RECON}}" \
+            ARES_AGENT_CREDENTIAL_ACCESS_MODEL="{{.MODEL_CREDENTIAL_ACCESS}}" \
             ARES_AGENT_CRACKER_MODEL="{{.MODEL_CRACKER}}" \
             ARES_AGENT_ACL_MODEL="{{.MODEL_ACL}}" \
             ARES_AGENT_PRIVESC_MODEL="{{.MODEL_PRIVESC}}" \
             ARES_AGENT_LATERAL_MODEL="{{.MODEL_LATERAL}}" \
-            ARES_AGENT_POISONING_MODEL="{{.MODEL_POISONING}}" \
+            ARES_AGENT_COERCION_MODEL="{{.MODEL_COERCION}}" \
             GRAFANA_URL="{{.GRAFANA_URL}}" \
             python -m ares.cli_ops submit "{{.TARGET}}" "{{.DOMAIN}}" \
             $IPS_ARGS \
@@ -1301,12 +1303,13 @@ tasks:
       MODEL_ALL: '{{.MODEL_ALL | default ""}}'
       MODEL_ORCHESTRATOR: '{{.MODEL_ORCHESTRATOR | default ""}}'
       MODEL_WORKER: '{{.MODEL_WORKER | default ""}}'
-      MODEL_ENUM: '{{.MODEL_ENUM | default ""}}'
+      MODEL_RECON: '{{.MODEL_RECON | default ""}}'
+      MODEL_CREDENTIAL_ACCESS: '{{.MODEL_CREDENTIAL_ACCESS | default ""}}'
       MODEL_CRACKER: '{{.MODEL_CRACKER | default ""}}'
       MODEL_ACL: '{{.MODEL_ACL | default ""}}'
       MODEL_PRIVESC: '{{.MODEL_PRIVESC | default ""}}'
       MODEL_LATERAL: '{{.MODEL_LATERAL | default ""}}'
-      MODEL_POISONING: '{{.MODEL_POISONING | default ""}}'
+      MODEL_COERCION: '{{.MODEL_COERCION | default ""}}'
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
@@ -1325,12 +1328,13 @@ tasks:
           MODEL_ALL: "{{.MODEL_ALL}}"
           MODEL_ORCHESTRATOR: "{{.MODEL_ORCHESTRATOR}}"
           MODEL_WORKER: "{{.MODEL_WORKER}}"
-          MODEL_ENUM: "{{.MODEL_ENUM}}"
+          MODEL_RECON: "{{.MODEL_RECON}}"
+          MODEL_CREDENTIAL_ACCESS: "{{.MODEL_CREDENTIAL_ACCESS}}"
           MODEL_CRACKER: "{{.MODEL_CRACKER}}"
           MODEL_ACL: "{{.MODEL_ACL}}"
           MODEL_PRIVESC: "{{.MODEL_PRIVESC}}"
           MODEL_LATERAL: "{{.MODEL_LATERAL}}"
-          MODEL_POISONING: "{{.MODEL_POISONING}}"
+          MODEL_COERCION: "{{.MODEL_COERCION}}"
 
   ares:red:multi:cleanup:
     desc: "Clean up old multi-agent operation checkpoints (usage: task ares:red:multi:cleanup [MAX_AGE_HOURS=24])"

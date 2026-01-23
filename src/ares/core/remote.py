@@ -20,7 +20,15 @@ from loguru import logger
 
 # Cached execution mode (lazy-detected)
 _execution_mode: str | None = None
-WORKER_ROLES = {"enum", "cracker", "acl", "privesc", "lateral", "poisoning"}
+WORKER_ROLES = {
+    "recon",
+    "credential_access",
+    "cracker",
+    "acl",
+    "privesc",
+    "lateral",
+    "coercion",
+}
 
 
 def _detect_execution_mode() -> str:
@@ -130,7 +138,7 @@ class K8sExecutor:
 
         resolved_role = (target_role or os.environ.get("ARES_ROLE", "")).strip().lower()
         if not resolved_role:
-            resolved_role = "enum"
+            resolved_role = "recon"
 
         if resolved_role not in WORKER_ROLES:
             error = (
@@ -214,7 +222,7 @@ class K8sExecutor:
                 source_agent="orchestrator",
             )
 
-            logger.debug(f"Command task {task_id} submitted to enum worker")
+            logger.debug(f"Command task {task_id} submitted to recon worker")
 
             # Wait for result
             result = await task_queue.wait_for_result(task_id, timeout=float(timeout_seconds))
@@ -692,6 +700,16 @@ def run_remote(
         >>> print(result.stdout)
     """
     executor = get_executor()
+    if target_role:
+        local_role = os.environ.get("ARES_ROLE", "").strip().lower()
+        if local_role and get_execution_mode() == "local" and local_role != target_role.lower():
+            # Route cross-role command to the Redis queue when running inside a worker pod.
+            return K8sExecutor().run_command(
+                command,
+                timeout_seconds,
+                working_directory,
+                target_role=target_role,
+            )
     return executor.run_command(
         command,
         timeout_seconds,

@@ -34,6 +34,12 @@ class RedTeamReportGenerator:
         duration_str = str(duration).split(".")[0]
 
         executive_summary = self._generate_executive_summary(state)
+        vulnerability_count = getattr(state, "vulnerability_count", None)
+        if vulnerability_count is None:
+            vulnerability_count = len(state.weaknesses)
+        exploited_count = getattr(state, "exploited_count", None)
+        if exploited_count is None:
+            exploited_count = "unknown"
 
         # Render the report using the template
         return self.loader.render(
@@ -51,6 +57,8 @@ class RedTeamReportGenerator:
             user_count=len(state.users),
             credential_count=state.credential_count,
             admin_count=state.admin_count,
+            vulnerability_count=vulnerability_count,
+            exploited_count=exploited_count,
             share_count=len(state.shares),
             hosts=state.hosts,
             users=state.users,
@@ -96,13 +104,17 @@ class RedTeamReportGenerator:
             summary_parts.append("\n\n**Key Achievements:**\n" + "\n".join(achievements))
 
         # Discovery statistics
+        vulnerability_count = getattr(state, "vulnerability_count", len(state.weaknesses))
+        exploited_count = getattr(state, "exploited_count", None)
+        exploited_label = exploited_count if exploited_count is not None else "unknown"
         summary_parts.append(
             f"\n\n**Discovery Statistics:**\n"
             f"- Hosts Discovered: {state.host_count}\n"
             f"- User Accounts: {len(state.users)}\n"
             f"- Network Shares: {len(state.shares)}\n"
             f"- Password Hashes: {len(state.hashes)}\n"
-            f"- Vulnerabilities: {len(state.weaknesses)}"
+            f"- Vulnerabilities: {vulnerability_count}\n"
+            f"- Vulnerabilities Exploited: {exploited_label}"
         )
 
         # Attack path summary

@@ -704,10 +704,10 @@ class TestRedisTaskQueueRequeue:
     async def test_requeue_task_uses_high_priority(self, task_queue, mock_redis_client):
         """Test that requeued tasks have high priority by default."""
         await task_queue.requeue_task(
-            task_type="enum",
-            target_role="enum",
+            task_type="recon",
+            target_role="recon",
             payload={"target": "192.168.56.0/24"},
-            task_id="enum_retry_001",
+            task_id="recon_retry_001",
             retry_count=1,
         )
 
@@ -804,7 +804,9 @@ class TestRedisTaskQueueStats:
         assert stats["lateral"] == 0
         assert stats["acl"] == 1
         assert stats["privesc"] == 0
-        assert stats["poisoning"] == 2
+        assert stats["coercion"] == 2
+        assert stats["recon"] == 0
+        assert stats["credential_access"] == 0
 
 
 # ============================================================================

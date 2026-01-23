@@ -195,12 +195,13 @@ async def submit(
         "ARES_MODEL",
         "ARES_ORCHESTRATOR_MODEL",
         "ARES_WORKER_MODEL",
-        "ARES_AGENT_ENUM_MODEL",
+        "ARES_AGENT_RECON_MODEL",
+        "ARES_AGENT_CREDENTIAL_ACCESS_MODEL",
         "ARES_AGENT_CRACKER_MODEL",
         "ARES_AGENT_ACL_MODEL",
         "ARES_AGENT_PRIVESC_MODEL",
         "ARES_AGENT_LATERAL_MODEL",
-        "ARES_AGENT_POISONING_MODEL",
+        "ARES_AGENT_COERCION_MODEL",
     ]
     env_vars = {name: os.environ.get(name, "") for name in env_var_names if os.environ.get(name)}
     if env_vars:

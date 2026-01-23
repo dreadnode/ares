@@ -183,7 +183,7 @@ class TestPriorityVulnerabilityQueue:
             vuln_type="ADCS_ESC1",
             target="dc01.testlab.local",
             details={"template": "VulnerableTemplate"},
-            discovered_by="enum-agent",
+            discovered_by="recon-agent",
         )
 
         assert vuln_id is not None
@@ -288,16 +288,16 @@ class TestDispatcher:
     async def test_agent_registration(self, dispatcher):
         """Test agent registration."""
         agent = AgentInfo(
-            name="enum-agent",
-            pod_name="enum-agent-0",
-            role=AgentRole.ENUM,
+            name="recon-agent",
+            pod_name="recon-agent-0",
+            role=AgentRole.RECON,
             capabilities={"nmap", "crackmapexec"},
         )
 
         await dispatcher.register(agent)
 
-        assert "enum-agent" in dispatcher._agents
-        assert dispatcher.get_agent_for_role(AgentRole.ENUM) is not None
+        assert "recon-agent" in dispatcher._agents
+        assert dispatcher.get_agent_for_role(AgentRole.RECON) is not None
 
     @pytest.mark.asyncio
     async def test_credential_publishing(self, dispatcher, sample_credentials):
@@ -314,7 +314,7 @@ class TestDispatcher:
         await dispatcher.register(agent)
 
         # Publish credential
-        added = await dispatcher.publish_credential(cred, "enum-agent")
+        added = await dispatcher.publish_credential(cred, "recon-agent")
 
         assert added is True
         assert len(dispatcher.shared_state.all_credentials) == 1
@@ -498,8 +498,8 @@ class TestKubernetesIntegration:
         with patch("kubernetes.client.CoreV1Api") as mock_k8s:
             # Setup mock pods
             mock_pod = MagicMock()
-            mock_pod.metadata.name = "enum-agent-0"
-            mock_pod.metadata.labels = {"ares.dreadnode.io/role": "enum"}
+            mock_pod.metadata.name = "recon-agent-0"
+            mock_pod.metadata.labels = {"ares.dreadnode.io/role": "recon"}
             mock_pod.status.phase = "Running"
 
             mock_pods = MagicMock()
@@ -516,7 +516,7 @@ class TestKubernetesIntegration:
                 dispatcher._task_queue._connected = True
 
             # Register agents
-            for role in [AgentRole.ENUM, AgentRole.CRACKER, AgentRole.LATERAL]:
+            for role in [AgentRole.RECON, AgentRole.CRACKER, AgentRole.LATERAL]:
                 agent = AgentInfo(
                     name=f"{role.value}-agent",
                     pod_name=f"{role.value}-agent-0",
@@ -530,7 +530,7 @@ class TestKubernetesIntegration:
                 vuln_type="ADCS_ESC1",
                 target="dc01",
                 details={},
-                discovered_by="enum-agent",
+                discovered_by="recon-agent",
             )
 
             # Verify state

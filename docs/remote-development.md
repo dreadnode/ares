@@ -100,8 +100,8 @@ task remote:pvc:clear CONFIRM=true
 [INFO] core/orchestrator.py
 [SUCCESS]   -> ares-acl-agent-799cd6c474-59q6d
 [SUCCESS]   -> ares-acl-agent-799cd6c474-59q6d (pvc verified)
-[SUCCESS]   -> ares-enum-agent-67dc44c9-4tx2t
-[SUCCESS]   -> ares-enum-agent-67dc44c9-4tx2t (pvc verified)
+[SUCCESS]   -> ares-recon-agent-67dc44c9-4tx2t
+[SUCCESS]   -> ares-recon-agent-67dc44c9-4tx2t (pvc verified)
 [SUCCESS]   -> ares-orchestrator-76f467578c-6lwzf
 [SUCCESS]   -> ares-orchestrator-76f467578c-6lwzf (pvc verified)
 ...
@@ -115,19 +115,19 @@ pod's sync+verify output stays grouped together.
 ### Check logs while developing
 
 ```bash
-task remote:logs ROLE=enum
+task remote:logs ROLE=recon
 ```
 
 ### Verify code was synced
 
 ```bash
-task remote:verify ROLE=enum FILE=core/worker.py
+task remote:verify ROLE=recon FILE=core/worker.py
 ```
 
 ### Shell into a pod
 
 ```bash
-task remote:exec ROLE=enum CMD=bash
+task remote:exec ROLE=recon CMD=bash
 ```
 
 ## Troubleshooting
