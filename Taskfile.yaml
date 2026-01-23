@@ -31,13 +31,13 @@ vars:
   MODEL_ORCHESTRATOR: '{{.MODEL_ORCHESTRATOR | default ""}}'
   MODEL_WORKER: '{{.MODEL_WORKER | default ""}}'
   MODEL_ALL: '{{.MODEL_ALL | default ""}}'
-  MODEL_ENUM: '{{.MODEL_ENUM | default ""}}'
+  MODEL_RECON: '{{.MODEL_RECON | default ""}}'
+  MODEL_CREDENTIAL_ACCESS: '{{.MODEL_CREDENTIAL_ACCESS | default ""}}'
   MODEL_CRACKER: '{{.MODEL_CRACKER | default ""}}'
   MODEL_ACL: '{{.MODEL_ACL | default ""}}'
   MODEL_PRIVESC: '{{.MODEL_PRIVESC | default ""}}'
   MODEL_LATERAL: '{{.MODEL_LATERAL | default ""}}'
-  MODEL_POISONING: '{{.MODEL_POISONING | default ""}}'
-  MODEL_ATOMIC: '{{.MODEL_ATOMIC | default ""}}'
+  MODEL_COERCION: '{{.MODEL_COERCION | default ""}}'
 
 tasks:
   default:
@@ -824,13 +824,13 @@ tasks:
             ARES_MODEL="{{.ARES_MODEL}}" \
             ARES_ORCHESTRATOR_MODEL="{{.MODEL_ORCHESTRATOR}}" \
             ARES_WORKER_MODEL="{{.MODEL_WORKER}}" \
-            ARES_AGENT_ENUM_MODEL="{{.MODEL_ENUM}}" \
+            ARES_AGENT_RECON_MODEL="{{.MODEL_RECON}}" \
+            ARES_AGENT_CREDENTIAL_ACCESS_MODEL="{{.MODEL_CREDENTIAL_ACCESS}}" \
             ARES_AGENT_CRACKER_MODEL="{{.MODEL_CRACKER}}" \
             ARES_AGENT_ACL_MODEL="{{.MODEL_ACL}}" \
             ARES_AGENT_PRIVESC_MODEL="{{.MODEL_PRIVESC}}" \
             ARES_AGENT_LATERAL_MODEL="{{.MODEL_LATERAL}}" \
-            ARES_AGENT_POISONING_MODEL="{{.MODEL_POISONING}}" \
-            ARES_AGENT_ATOMIC_MODEL="{{.MODEL_ATOMIC}}" \
+            ARES_AGENT_COERCION_MODEL="{{.MODEL_COERCION}}" \
             GRAFANA_URL="{{.GRAFANA_URL}}" \
             python -m ares.cli_ops submit "{{.TARGET}}" "{{.DOMAIN}}" \
             $IPS_ARGS \
@@ -929,6 +929,8 @@ tasks:
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       ROLE: '{{.ROLE | default ""}}'
+      FOLLOW: '{{.FOLLOW | default "false"}}'
+      INTERVAL: '{{.INTERVAL | default "5"}}'
       K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}"
@@ -948,7 +950,8 @@ tasks:
           exit 1
         fi
 
-        kubectl exec -i -n {{.K8S_NAMESPACE}} "$POD" -- env REDIS_URL="$REDIS_URL" python - <<'PY'
+        run_once() {
+          kubectl exec -i -n {{.K8S_NAMESPACE}} "$POD" -- env REDIS_URL="$REDIS_URL" python - <<'PY'
         import asyncio
         import json
         import os
@@ -992,6 +995,16 @@ tasks:
 
         asyncio.run(main())
         PY
+        }
+
+        if [ "{{.FOLLOW}}" = "true" ]; then
+          while true; do
+            run_once
+            sleep {{.INTERVAL}}
+          done
+        else
+          run_once
+        fi
 
   ares:red:multi:tasks:list:
     desc: "List tasks for an operation (usage: task ares:red:multi:tasks:list OPERATION_ID=op-xxx [ROLE=lateral] [STATUS=running|completed|failed|all])"
@@ -1290,13 +1303,13 @@ tasks:
       MODEL_ALL: '{{.MODEL_ALL | default ""}}'
       MODEL_ORCHESTRATOR: '{{.MODEL_ORCHESTRATOR | default ""}}'
       MODEL_WORKER: '{{.MODEL_WORKER | default ""}}'
-      MODEL_ENUM: '{{.MODEL_ENUM | default ""}}'
+      MODEL_RECON: '{{.MODEL_RECON | default ""}}'
+      MODEL_CREDENTIAL_ACCESS: '{{.MODEL_CREDENTIAL_ACCESS | default ""}}'
       MODEL_CRACKER: '{{.MODEL_CRACKER | default ""}}'
       MODEL_ACL: '{{.MODEL_ACL | default ""}}'
       MODEL_PRIVESC: '{{.MODEL_PRIVESC | default ""}}'
       MODEL_LATERAL: '{{.MODEL_LATERAL | default ""}}'
-      MODEL_POISONING: '{{.MODEL_POISONING | default ""}}'
-      MODEL_ATOMIC: '{{.MODEL_ATOMIC | default ""}}'
+      MODEL_COERCION: '{{.MODEL_COERCION | default ""}}'
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
@@ -1315,13 +1328,13 @@ tasks:
           MODEL_ALL: "{{.MODEL_ALL}}"
           MODEL_ORCHESTRATOR: "{{.MODEL_ORCHESTRATOR}}"
           MODEL_WORKER: "{{.MODEL_WORKER}}"
-          MODEL_ENUM: "{{.MODEL_ENUM}}"
+          MODEL_RECON: "{{.MODEL_RECON}}"
+          MODEL_CREDENTIAL_ACCESS: "{{.MODEL_CREDENTIAL_ACCESS}}"
           MODEL_CRACKER: "{{.MODEL_CRACKER}}"
           MODEL_ACL: "{{.MODEL_ACL}}"
           MODEL_PRIVESC: "{{.MODEL_PRIVESC}}"
           MODEL_LATERAL: "{{.MODEL_LATERAL}}"
-          MODEL_POISONING: "{{.MODEL_POISONING}}"
-          MODEL_ATOMIC: "{{.MODEL_ATOMIC}}"
+          MODEL_COERCION: "{{.MODEL_COERCION}}"
 
   ares:red:multi:cleanup:
     desc: "Clean up old multi-agent operation checkpoints (usage: task ares:red:multi:cleanup [MAX_AGE_HOURS=24])"
@@ -1396,6 +1409,21 @@ tasks:
         echo "▶️  Scaling $ORCH_DEPLOY back to $CURRENT_REPLICAS replicas"
         kubectl scale -n {{.K8S_NAMESPACE}} deploy/$ORCH_DEPLOY --replicas="$CURRENT_REPLICAS"
         kubectl rollout status -n {{.K8S_NAMESPACE}} deploy/$ORCH_DEPLOY || true
+
+  ares:red:multi:sync:align:
+    desc: "Sync code changes to PVCs, clear Redis cache, and align cluster pods"
+    vars:
+      K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
+    cmds:
+      - |
+        echo "SYNCING CODE"
+        task remote:sync:full NAMESPACE={{.K8S_NAMESPACE}}
+      - |
+        echo "CLEARING REDIS CACHE"
+        task ares:red:multi:redis:clear K8S_NAMESPACE={{.K8S_NAMESPACE}}
+      - |
+        echo "ROLLING OUT"
+        task remote:rollout NAMESPACE={{.K8S_NAMESPACE}}
 
   ares:red:multi:redis:list:
     desc: "List multi-agent Redis operations, statuses, and locks"
@@ -1472,7 +1500,7 @@ tasks:
 
         # Check agent pods
         echo "🤖 Agent Pods:"
-        for role in enum cracker acl privesc lateral poisoning atomic; do
+        for role in enum cracker acl privesc lateral poisoning; do
           POD_COUNT=$(kubectl get pods -n {{.NAMESPACE}} -l ares.dreadnode.io/role=$role -o name 2>/dev/null | wc -l | xargs)
           if [ "$POD_COUNT" -gt 0 ]; then
             STATUS=$(kubectl get pods -n {{.NAMESPACE}} -l ares.dreadnode.io/role=$role -o jsonpath='{.items[0].status.phase}' 2>/dev/null)

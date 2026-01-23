@@ -18,7 +18,7 @@ from dreadnode.agent import Agent, Thread
 from dreadnode.agent.stop import tool_use
 from loguru import logger
 
-from ares.core.config import get_namespace, get_redis_url
+from ares.core.config import get_agent_config, get_namespace, get_redis_url
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.factories.red_agents import (
     create_role_hooks,
@@ -82,7 +82,7 @@ async def _wait_for_required_workers(
 
     Args:
         dispatcher: The dispatcher instance
-        required_roles: List of roles that must be online (e.g., ["enum"])
+        required_roles: List of roles that must be online (e.g., ["recon"])
         timeout: Maximum time to wait in seconds
 
     Returns:
@@ -368,7 +368,7 @@ async def run_multi_agent_operation(
     await _register_agents(dispatcher, agents)
 
     # Wait for required workers before starting
-    await _ensure_required_workers(dispatcher, ["enum"], timeout=120.0)
+    await _ensure_required_workers(dispatcher, ["recon"], timeout=120.0)
 
     # Start background tasks
     tasks = [
@@ -441,13 +441,10 @@ async def run_multi_agent_operation(
                 stop_reason,
             )
 
+        exploitation_status = await dispatcher.get_exploitation_status()
         if not dispatcher.shared_state.completed:
-            unexploited = [
-                vuln_id
-                for vuln_id in dispatcher.shared_state.discovered_vulnerabilities
-                if vuln_id not in dispatcher.shared_state.exploited_vulnerabilities
-            ]
-            if not dispatcher.shared_state.pending_tasks and not unexploited:
+            has_pending_vulns = bool(exploitation_status.get("pending"))
+            if not dispatcher.shared_state.pending_tasks and not has_pending_vulns:
                 dispatcher.shared_state.completed = True
                 if stop_reason == "error":
                     logger.warning(
@@ -465,6 +462,8 @@ async def run_multi_agent_operation(
             # Wait for any remaining background tasks
             await _wait_for_completion(dispatcher, tasks, max_runtime=300.0)
 
+        exploitation_status = await dispatcher.get_exploitation_status()
+
         # Get final state
         final_state = dispatcher.shared_state
         end_time = datetime.now(timezone.utc)
@@ -475,6 +474,7 @@ async def run_multi_agent_operation(
             report_path, report_markdown = _generate_multi_agent_report(
                 final_state,
                 report_dir=report_dir,
+                exploitation_status=exploitation_status,
             )
         except Exception as e:
             logger.warning(f"Failed to generate report for {operation_id}: {e}")
@@ -488,8 +488,14 @@ async def run_multi_agent_operation(
             "credentials_discovered": len(final_state.all_credentials),
             "hashes_discovered": len(final_state.all_hashes),
             "hosts_discovered": len(final_state.all_hosts),
-            "vulnerabilities_discovered": len(final_state.discovered_vulnerabilities),
-            "vulnerabilities_exploited": len(final_state.exploited_vulnerabilities),
+            "vulnerabilities_discovered": exploitation_status.get(
+                "total_discovered",
+                len(final_state.discovered_vulnerabilities),
+            ),
+            "vulnerabilities_exploited": exploitation_status.get(
+                "total_succeeded",
+                len(final_state.exploited_vulnerabilities),
+            ),
             "tasks_completed": len(final_state.completed_tasks),
             "start_time": start_time.isoformat(),
             "end_time": end_time.isoformat(),
@@ -585,10 +591,10 @@ async def _create_orchestrator_agent(
     ]
 
     # Load orchestrator-specific instructions
-    instructions = load_agent_instructions(AgentRole.ENUM)
+    instructions = load_agent_instructions(AgentRole.RECON)
 
     # Create hooks for monitoring and guidance
-    hooks = create_role_hooks(AgentRole.ENUM, dispatcher, shared_state)
+    hooks = create_role_hooks(AgentRole.RECON, dispatcher, shared_state)
 
     logger.info(f"Creating orchestrator agent with {len(tools)} toolsets, max_steps={max_steps}")
 
@@ -612,8 +618,9 @@ def _generate_multi_agent_report(
     state: SharedRedTeamState,
     *,
     report_dir: str | Path | None,
+    exploitation_status: dict[str, Any] | None = None,
 ) -> tuple[Path, str]:
-    report_state = _build_redteam_report_state(state)
+    report_state = _build_redteam_report_state(state, exploitation_status)
     resolved_report_dir = Path(report_dir or "./reports").resolve()
     resolved_report_dir.mkdir(parents=True, exist_ok=True)
 
@@ -627,7 +634,10 @@ def _generate_multi_agent_report(
     return report_path, report_content
 
 
-def _build_redteam_report_state(state: SharedRedTeamState) -> RedTeamState:
+def _build_redteam_report_state(
+    state: SharedRedTeamState,
+    exploitation_status: dict[str, Any] | None = None,
+) -> RedTeamState:
     target = state.target or Target(ip="", domain="")
     report_state = RedTeamState(operation_id=state.operation_id, target=target)
     report_state.completed = state.completed
@@ -646,6 +656,15 @@ def _build_redteam_report_state(state: SharedRedTeamState) -> RedTeamState:
         f"{v.vuln_type} on {v.target} ({v.vuln_id})"
         for v in state.discovered_vulnerabilities.values()
     ]
+    if exploitation_status:
+        report_state.vulnerability_count = exploitation_status.get(
+            "total_discovered",
+            len(state.discovered_vulnerabilities),
+        )
+        report_state.exploited_count = exploitation_status.get(
+            "total_succeeded",
+            len(state.exploited_vulnerabilities),
+        )
     return report_state
 
 
@@ -658,6 +677,8 @@ async def _create_agent_ensemble(
     """
     Create the agent ensemble with role-specific configurations.
 
+    Capabilities are loaded from config (single source of truth).
+
     Args:
         dispatcher: The dispatcher instance
         model: LLM model to use
@@ -669,78 +690,24 @@ async def _create_agent_ensemble(
     """
     agents: dict[AgentRole, AgentInfo] = {}
 
-    # Define agent configurations
-    agent_configs: list[dict[str, AgentRole | str | set[str]]] = [
-        {
-            "role": AgentRole.ENUM,
-            "name": "ares-enum",
-            "pod_selector": "ares.dreadnode.io/role=enum",
-            "capabilities": {
-                "nmap",
-                "crackmapexec",
-                "ldapsearch",
-                "certipy",
-                "bloodhound",
-                "secretsdump",
-                "enum4linux",
-            },
-        },
-        {
-            "role": AgentRole.CRACKER,
-            "name": "ares-cracker",
-            "pod_selector": "ares.dreadnode.io/role=cracker",
-            "capabilities": {"hashcat", "john", "ntlmrelayx"},
-        },
-        {
-            "role": AgentRole.ACL,
-            "name": "ares-acl",
-            "pod_selector": "ares.dreadnode.io/role=acl",
-            "capabilities": {"bloodhound", "dacledit", "owneredit"},
-        },
-        {
-            "role": AgentRole.PRIVESC,
-            "name": "ares-privesc",
-            "pod_selector": "ares.dreadnode.io/role=privesc",
-            "capabilities": {
-                "certipy",
-                "kerberoast",
-                "asreproast",
-                "constrained_delegation",
-                "unconstrained_delegation",
-            },
-        },
-        {
-            "role": AgentRole.LATERAL,
-            "name": "ares-lateral",
-            "pod_selector": "ares.dreadnode.io/role=lateral",
-            "capabilities": {
-                "psexec",
-                "wmiexec",
-                "smbexec",
-                "winrm",
-                "secretsdump",
-                "pass_the_hash",
-            },
-        },
-        {
-            "role": AgentRole.POISONING,
-            "name": "ares-poisoning",
-            "pod_selector": "ares.dreadnode.io/role=poison",
-            "capabilities": {"responder", "mitm6", "ntlmrelayx"},
-        },
+    # All roles to create
+    roles_to_create = [
+        AgentRole.RECON,
+        AgentRole.CREDENTIAL_ACCESS,
+        AgentRole.CRACKER,
+        AgentRole.ACL,
+        AgentRole.PRIVESC,
+        AgentRole.LATERAL,
+        AgentRole.COERCION,
     ]
 
-    for config in agent_configs:
-        role = config["role"]
-        name = config["name"]
-        capabilities = config["capabilities"]
-        # Type narrowing for mypy
-        if not isinstance(role, AgentRole):
-            continue
-        if not isinstance(name, str):
-            continue
-        if not isinstance(capabilities, set):
-            continue
+    for role in roles_to_create:
+        # Get capabilities from config (single source of truth)
+        config_key = role.value  # e.g., "recon", "credential_access"
+        agent_config = get_agent_config(config_key)
+        capabilities = set(agent_config.capabilities)
+
+        name = f"ares-{role.value.replace('_', '-')}"
         agent_info = AgentInfo(
             name=name,
             pod_name=f"{name}-0",  # Will be updated by K8s discovery

@@ -85,6 +85,12 @@ Your role is to receive hash cracking requests and report cracked credentials ba
 | report_crack_failed | Report failure |
 | task_complete | Mark task done |
 
+## Tooling
+
+{% for tool in capabilities -%}
+- {{ tool }}
+{% endfor -%}
+
 ## Efficiency Guidelines
 
 1. **Speed Matters**

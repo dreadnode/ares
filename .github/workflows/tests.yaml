@@ -57,8 +57,25 @@ jobs:
         run: |
           pytest --cov=src --cov-report=xml --cov-report=term-missing || [ $? -eq 5 ] # Allow workflow to pass when no tests exist
 
+      - name: Run integration tests
+        env:
+          ARES_RUN_INTEGRATION_TESTS: "1"
+        run: |
+          pytest -m integration
+
+      - name: Add coverage summary
+        if: always()
+        run: |
+          {
+            echo "## Coverage"
+            echo
+            echo '```'
+            python -m coverage report --show-missing
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload coverage report
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && matrix.python-version == '3.12'
+        if: matrix.python-version == '3.12' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && github.event_name == 'push'))
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: coverage-report

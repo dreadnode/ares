@@ -20,6 +20,7 @@ from ares.core.messages import (
     AgentMessage,
     AgentRegistered,
     CrackRequest,
+    CredentialAccessRequest,
     CredentialDiscovered,
     DomainAdminAchieved,
     ExploitRequest,
@@ -73,7 +74,7 @@ class RedTeamDispatcher:
         await dispatcher.register(agent_info)
 
         # Publish discoveries to all agents
-        await dispatcher.publish_credential(credential, "ares-enum")
+        await dispatcher.publish_credential(credential, "ares-recon")
 
         # Route tasks to specialized agents
         task_id = await dispatcher.request_crack(hash_data, "orchestrator")
@@ -275,7 +276,7 @@ class RedTeamDispatcher:
 
         # Role-specific subscriptions
         role_subscriptions = {
-            AgentRole.ENUM: {
+            AgentRole.RECON: {
                 MessageType.TASK_COMPLETE,
                 MessageType.TASK_FAILED,
                 MessageType.VULNERABILITY_FOUND,
@@ -290,6 +291,9 @@ class RedTeamDispatcher:
                 MessageType.ACL_ANALYSIS_REQUEST,
                 MessageType.VULNERABILITY_FOUND,
             },
+            AgentRole.CREDENTIAL_ACCESS: {
+                MessageType.CREDENTIAL_ACCESS_REQUEST,
+            },
             AgentRole.PRIVESC: {
                 MessageType.EXPLOIT_REQUEST,
                 MessageType.VULNERABILITY_FOUND,
@@ -298,11 +302,8 @@ class RedTeamDispatcher:
                 MessageType.LATERAL_REQUEST,
                 MessageType.HOST_DISCOVERED,
             },
-            AgentRole.POISONING: {
+            AgentRole.COERCION: {
                 MessageType.POISON_REQUEST,
-            },
-            AgentRole.ATOMIC: {
-                MessageType.ATOMIC_TEST_REQUEST,
             },
         }
 
@@ -834,6 +835,96 @@ class RedTeamDispatcher:
         logger.info(f"ACL analysis request {task_id} sent to {acl_agent}")
         return task_id
 
+    async def request_credential_access(
+        self,
+        source_agent: str,
+        domain: str,
+        target_ips: list[str] | None = None,
+        username: str = "",
+        password: str | None = None,
+        hash_value: str | None = None,
+        techniques: list[str] | None = None,
+    ) -> str:
+        """
+        Request credential access actions (AS-REP roast, Kerberoast, secretsdump, LSASS).
+
+        Uses Redis task queue for cross-pod communication when available.
+
+        Args:
+            source_agent: Agent making the request.
+            domain: Target domain.
+            target_ips: Target IPs for credential access actions.
+            username: Optional username for authenticated actions.
+            password: Optional password for authenticated actions.
+            hash_value: Optional NTLM hash for pass-the-hash actions.
+            techniques: Optional list of techniques to prioritize.
+
+        Returns:
+            Task ID for tracking.
+        """
+        payload = {
+            "domain": domain,
+            "target_ips": target_ips or [],
+            "username": username,
+            "password": password,
+            "hash_value": hash_value,
+            "techniques": techniques or [],
+        }
+
+        # Use Redis task queue if available (Kubernetes multi-pod mode)
+        if self._task_queue:
+            task_id = await self._task_queue.submit_task(
+                task_type="credential_access",
+                target_role="credential_access",
+                payload=payload,
+                source_agent=source_agent,
+            )
+
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type="credential_access",
+                assigned_agent="credential_access",
+                params=payload,
+            )
+            self.shared_state.pending_tasks[task_id] = task_info
+            self._redis_task_ids.add(task_id)
+
+            logger.info(f"Credential access task {task_id} submitted to Redis queue")
+            return task_id
+
+        # Fallback to in-memory queue (single-process mode)
+        task_id = generate_task_id()
+        credential_agent = self._role_queues.get(AgentRole.CREDENTIAL_ACCESS)
+
+        if not credential_agent:
+            logger.warning("No credential access agent registered, cannot route request")
+            return ""
+
+        task_info = TaskInfo(
+            task_id=task_id,
+            task_type="credential_access",
+            assigned_agent=credential_agent,
+            params=payload,
+        )
+        self.shared_state.pending_tasks[task_id] = task_info
+
+        await self._message_queues[credential_agent].put(
+            CredentialAccessRequest(
+                source_agent=source_agent,
+                task_id=task_id,
+                domain=domain,
+                target_ips=payload["target_ips"],
+                username=username,
+                password=password,
+                hash_value=hash_value,
+                techniques=payload["techniques"],
+                callback_agent=source_agent,
+            )
+        )
+
+        logger.info(f"Credential access request {task_id} sent to {credential_agent}")
+        return task_id
+
     async def request_exploit(
         self,
         vuln_type: str,
@@ -924,7 +1015,7 @@ class RedTeamDispatcher:
         duration: int = 300,
     ) -> str:
         """
-        Request PoisonAgent to start network poisoning.
+        Request the coercion agent to start network poisoning.
 
         Uses Redis task queue for cross-pod communication when available.
 
@@ -949,40 +1040,40 @@ class RedTeamDispatcher:
         if self._task_queue:
             task_id = await self._task_queue.submit_task(
                 task_type="poison",
-                target_role="poisoning",
+                target_role="coercion",
                 payload=payload,
                 source_agent=source_agent,
             )
 
             task_info = TaskInfo(
                 task_id=task_id,
-                task_type="poisoning",
-                assigned_agent="poisoning",
+                task_type="coercion",
+                assigned_agent="coercion",
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
             self._redis_task_ids.add(task_id)
 
-            logger.info(f"Poisoning task {task_id} submitted to Redis queue")
+            logger.info(f"Coercion task {task_id} submitted to Redis queue")
             return task_id
 
         # Fallback to in-memory queue (single-process mode)
         task_id = generate_task_id()
-        poison_agent = self._role_queues.get(AgentRole.POISONING)
+        coercion_agent = self._role_queues.get(AgentRole.COERCION)
 
-        if not poison_agent:
-            logger.warning("No poison agent registered, cannot route poison request")
+        if not coercion_agent:
+            logger.warning("No coercion agent registered, cannot route poison request")
             return ""
 
         task_info = TaskInfo(
             task_id=task_id,
-            task_type="poisoning",
-            assigned_agent=poison_agent,
+            task_type="coercion",
+            assigned_agent=coercion_agent,
             params=payload,
         )
         self.shared_state.pending_tasks[task_id] = task_info
 
-        await self._message_queues[poison_agent].put(
+        await self._message_queues[coercion_agent].put(
             PoisonRequest(
                 source_agent=source_agent,
                 task_id=task_id,
@@ -993,7 +1084,7 @@ class RedTeamDispatcher:
             )
         )
 
-        logger.info(f"Poisoning request {task_id} sent to {poison_agent}")
+        logger.info(f"Poisoning request {task_id} sent to {coercion_agent}")
         return task_id
 
     # Task Completion
@@ -1401,20 +1492,104 @@ class RedTeamDispatcher:
             for name, agent in self._agents.items()
         }
 
-    def get_exploitation_status(self) -> dict[str, Any]:
+    async def get_exploitation_status(self) -> dict[str, Any]:  # noqa: PLR0912
         """Get status of discovered vs exploited vulnerabilities."""
-        discovered = self.shared_state.discovered_vulnerabilities
-        exploited = self.shared_state.exploited_vulnerabilities
+        discovered: dict[str, VulnerabilityInfo] = dict(
+            self.shared_state.discovered_vulnerabilities
+        )
+        succeeded: set[str] = set(self.shared_state.exploited_vulnerabilities)
+        failed: dict[str, dict[str, Any]] = {}
+
+        if self._redis_client is not None:
+            try:
+                import json
+
+                vuln_prefix = f"ares:operation:{self.shared_state.operation_id}:vulns:"
+                async for key in self._redis_client.scan_iter(f"{vuln_prefix}*"):
+                    key_str = key.decode() if isinstance(key, bytes) else str(key)
+                    if not key_str.startswith(vuln_prefix):
+                        continue
+                    raw = await self._redis_client.get(key)
+                    if not raw:
+                        continue
+                    try:
+                        data = json.loads(raw)
+                    except Exception as e:
+                        logger.debug(f"Failed to parse vulnerability data for {key_str}: {e}")
+                        continue
+                    vuln_id = key_str[len(vuln_prefix) :]
+                    if vuln_id in discovered:
+                        continue
+                    vuln_type = data.get("type", "unknown")
+                    target = data.get("target", "unknown")
+                    discovered_by = data.get("discovered_by", "unknown")
+                    details = data.get("details") or {}
+                    priority = self._vulnerability_priorities.get(vuln_type, 99)
+                    discovered_at = datetime.now(timezone.utc)
+                    queued_at = data.get("queued_at")
+                    if queued_at:
+                        try:
+                            discovered_at = datetime.fromisoformat(str(queued_at))
+                        except Exception:
+                            pass
+                    discovered[vuln_id] = VulnerabilityInfo(
+                        vuln_id=vuln_id,
+                        vuln_type=vuln_type,
+                        target=target,
+                        discovered_by=discovered_by,
+                        discovered_at=discovered_at,
+                        details=details,
+                        priority=priority,
+                    )
+
+                key_prefix = f"ares:operation:{self.shared_state.operation_id}:exploited:"
+                async for key in self._redis_client.scan_iter(f"{key_prefix}*"):
+                    key_str = key.decode() if isinstance(key, bytes) else str(key)
+                    if not key_str.startswith(key_prefix):
+                        continue
+                    raw = await self._redis_client.get(key)
+                    if not raw:
+                        continue
+                    try:
+                        data = json.loads(raw)
+                    except Exception as e:
+                        logger.debug(f"Failed to parse exploit status for {key_str}: {e}")
+                        continue
+                    vuln_id = key_str[len(key_prefix) :]
+                    if data.get("success"):
+                        succeeded.add(vuln_id)
+                    else:
+                        failed[vuln_id] = data
+            except Exception as e:
+                logger.warning(f"Failed to load exploitation status from Redis: {e}")
+
+        failed_ids = set(failed.keys())
 
         return {
             "total_discovered": len(discovered),
-            "total_exploited": len(exploited),
+            "total_succeeded": len(succeeded),
+            "total_failed": len(failed),
             "pending": [
                 {"id": vid, "type": v.vuln_type, "target": v.target}
                 for vid, v in discovered.items()
-                if vid not in exploited
+                if vid not in succeeded and vid not in failed_ids
             ],
-            "exploited": list(exploited),
+            "succeeded": [
+                {"id": vid, "type": discovered[vid].vuln_type, "target": discovered[vid].target}
+                for vid in discovered
+                if vid in succeeded
+            ],
+            "failed": [
+                {
+                    "id": vid,
+                    "type": discovered[vid].vuln_type if vid in discovered else "unknown",
+                    "target": discovered[vid].target if vid in discovered else "unknown",
+                    "error": failed.get(vid, {}).get("result", {}).get("error")
+                    or failed.get(vid, {}).get("error")
+                    or "Unknown error",
+                }
+                for vid in failed
+            ],
         }
 
     # Priority Vulnerability Queue Methods
@@ -1504,7 +1679,8 @@ class RedTeamDispatcher:
             success: Whether exploitation was successful
             result: Exploitation result (credentials, hashes, etc.)
         """
-        self.shared_state.mark_exploited(vuln_id)
+        if success:
+            self.shared_state.mark_exploited(vuln_id)
 
         if success and result:
             result_payload = result
@@ -1537,7 +1713,10 @@ class RedTeamDispatcher:
         await self._mark_exploited_in_redis(vuln_id, success, result)
         await self._checkpoint()
 
-        logger.info(f"Marked vulnerability {vuln_id} as exploited (success={success})")
+        if success:
+            logger.info(f"Marked vulnerability {vuln_id} as exploited (success=True)")
+        else:
+            logger.info(f"Recorded failed exploitation attempt for {vuln_id}")
 
     async def _save_vulnerability_to_redis(self, vuln_id: str, vuln_data: dict[str, Any]) -> None:
         """Save vulnerability to Redis for persistence."""
@@ -1569,9 +1748,17 @@ class RedTeamDispatcher:
         # Check Redis if available
         if self._redis_client is not None:
             try:
+                import json
+
                 key = f"ares:operation:{self.shared_state.operation_id}:exploited:{vuln_id}"
-                result = await self._redis_client.exists(key)
-                return bool(result)
+                raw = await self._redis_client.get(key)
+                if not raw:
+                    return False
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    return False
+                return bool(data.get("success"))
             except Exception as e:
                 logger.warning(f"Failed to check Redis for exploited vuln: {e}")
 

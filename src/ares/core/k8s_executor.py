@@ -118,7 +118,7 @@ class KubernetesPodExecutor:
         Handles pod restarts by re-discovering pods.
 
         Args:
-            role: The agent role (enum, cracker, acl, privesc, lateral, poisoning).
+            role: The agent role (recon, credential_access, cracker, acl, privesc, lateral, coercion).
 
         Returns:
             Pod name if found, None otherwise.
@@ -173,7 +173,7 @@ class KubernetesPodExecutor:
         Execute command in pod for given role.
 
         Args:
-            role: The agent role (enum, cracker, acl, privesc, lateral, poisoning).
+            role: The agent role (recon, credential_access, cracker, acl, privesc, lateral, coercion).
             command: Command to execute as list of strings or shell command string.
             container: Container name to execute in (default: first container).
             timeout_seconds: Execution timeout in seconds.

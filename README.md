@@ -440,7 +440,7 @@ pytest --cov=src tests/
 | `ARES_MODEL` | No | Default model for all multi-agent roles |
 | `ARES_ORCHESTRATOR_MODEL` | No | Override orchestrator model |
 | `ARES_WORKER_MODEL` | No | Override all worker models |
-| `ARES_AGENT_<ROLE>_MODEL` | No | Role-specific model override (e.g., `ARES_AGENT_ENUM_MODEL`) |
+| `ARES_AGENT_<ROLE>_MODEL` | No | Role-specific model override (e.g., `ARES_AGENT_RECON_MODEL`) |
 
 Precedence (highest first): `ARES_AGENT_<ROLE>_MODEL` >
 `ARES_ORCHESTRATOR_MODEL`/`ARES_WORKER_MODEL` > `ARES_MODEL` > config file.

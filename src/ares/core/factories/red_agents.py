@@ -16,6 +16,7 @@ from dreadnode.agent.hooks import retry_with_feedback
 from dreadnode.agent.stop import tool_use
 from loguru import logger
 
+from ares.core.config import get_agent_config
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.models import AgentInfo, AgentRole, SharedRedTeamState
 from ares.core.templates import get_template_loader
@@ -34,6 +35,7 @@ from ares.tools.red.network import (
     MSSQLTools,
     NetworkEnumerationTools,
     PoisoningTools,
+    PostureValidationTools,
     RedTeamReportingTools,
     SharePilferingTools,
 )
@@ -44,18 +46,23 @@ if TYPE_CHECKING:
 
 # Tool assignments per agent role
 ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
-    AgentRole.ENUM: [
+    AgentRole.RECON: [
         NetworkEnumerationTools,
+        BloodHoundTools,
         CredentialDiscoveryTools,
         RedTeamReportingTools,
         # OrchestratorTools added separately (needs dispatcher)
+    ],
+    AgentRole.CREDENTIAL_ACCESS: [
+        CredentialDiscoveryTools,
+        CredentialHarvestingTools,
+        # CredentialAccessCallbackTools added separately if needed
     ],
     AgentRole.CRACKER: [
         CrackingTools,
         # CrackerCallbackTools added separately
     ],
     AgentRole.ACL: [
-        BloodHoundTools,
         ACLExploitTools,
         # ACLCallbackTools added separately
     ],
@@ -71,40 +78,38 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
         LateralMovementTools,
         CredentialHarvestingTools,
         SharePilferingTools,
+        PostureValidationTools,
         # LateralCallbackTools added separately
     ],
-    AgentRole.POISONING: [
+    AgentRole.COERCION: [
         CoercionTools,
         PoisoningTools,
         # PoisonCallbackTools added separately
-    ],
-    AgentRole.ATOMIC: [
-        # AtomicRedTeamTools, AtomicCallbackTools added separately
     ],
 }
 
 
 # System instruction templates per role
 ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
-    AgentRole.ENUM: "redteam/agents/enum.md.jinja",
+    AgentRole.RECON: "redteam/agents/recon.md.jinja",
+    AgentRole.CREDENTIAL_ACCESS: "redteam/agents/credential_access.md.jinja",
     AgentRole.CRACKER: "redteam/agents/cracker.md.jinja",
     AgentRole.ACL: "redteam/agents/acl.md.jinja",
     AgentRole.PRIVESC: "redteam/agents/privesc.md.jinja",
     AgentRole.LATERAL: "redteam/agents/lateral.md.jinja",
-    AgentRole.POISONING: "redteam/agents/poisoning.md.jinja",
-    AgentRole.ATOMIC: "redteam/agents/atomic.md.jinja",
+    AgentRole.COERCION: "redteam/agents/coercion.md.jinja",
 }
 
 
 # Default max steps per role
 ROLE_MAX_STEPS: dict[AgentRole, int] = {
-    AgentRole.ENUM: 200,
+    AgentRole.RECON: 200,
+    AgentRole.CREDENTIAL_ACCESS: 120,
     AgentRole.CRACKER: 50,
     AgentRole.ACL: 100,
     AgentRole.PRIVESC: 100,
-    AgentRole.LATERAL: 100,
-    AgentRole.POISONING: 30,
-    AgentRole.ATOMIC: 50,
+    AgentRole.LATERAL: 200,
+    AgentRole.COERCION: 30,
 }
 
 
@@ -113,16 +118,35 @@ def load_agent_instructions(role: AgentRole) -> str:
     Load role-specific system instructions from template.
 
     Falls back to generic red team instructions if role-specific not found.
+    Capabilities are loaded from config and passed to the template.
     """
+    # Get capabilities from config (single source of truth)
+    config_key = role.value  # e.g., "recon", "credential_access", "privesc"
+    agent_config = get_agent_config(config_key)
+    capabilities = agent_config.capabilities
+
     template_path = ROLE_INSTRUCTIONS.get(role)
     if template_path:
         try:
-            return get_template_loader().render(template_path)
+            return get_template_loader().render(template_path, capabilities=capabilities)
         except Exception as e:
             logger.warning(f"Failed to load template {template_path}: {e}")
 
-    # Fallback to generic red team instructions
-    return get_template_loader().render("redteam/agents/system_instructions.md.jinja")
+    # Fallback to generic red team instructions - pass ALL role capabilities
+    all_capabilities = {
+        "recon": get_agent_config("recon").capabilities,
+        "credential_access": get_agent_config("credential_access").capabilities,
+        "cracker": get_agent_config("cracker").capabilities,
+        "coercion": get_agent_config("coercion").capabilities,
+        "acl": get_agent_config("acl").capabilities,
+        "privesc": get_agent_config("privesc").capabilities,
+        "lateral": get_agent_config("lateral").capabilities,
+    }
+    return get_template_loader().render(
+        "redteam/agents/system_instructions.md.jinja",
+        capabilities=capabilities,
+        all_capabilities=all_capabilities,
+    )
 
 
 def create_role_hooks(
@@ -181,7 +205,7 @@ def create_role_hooks(
     hooks.extend([log_tool_usage, log_tool_result])
 
     # Role-specific hooks
-    if role == AgentRole.ENUM:
+    if role == AgentRole.RECON:
         # Orchestrator monitors for domain admin achievement
         async def check_domain_admin(event: ToolEnd):
             if not isinstance(event, ToolEnd):
@@ -259,7 +283,7 @@ def create_role_hooks(
 
     # Unstall hook for all roles
     role_feedback = {
-        AgentRole.ENUM: (
+        AgentRole.RECON: (
             "You seem stuck. As orchestrator, focus on:\n"
             "1. Check pending tasks with get_pending_tasks()\n"
             "2. Review unexploited vulnerabilities with get_exploitation_status()\n"
@@ -292,16 +316,11 @@ def create_role_hooks(
             "3. Run secretsdump on successful access\n"
             "4. Report new credentials back"
         ),
-        AgentRole.POISONING: (
-            "You seem stuck. As poisoner, focus on:\n"
+        AgentRole.COERCION: (
+            "You seem stuck. As coercion, focus on:\n"
             "1. Start responder/mitm6 if not running\n"
             "2. Use coercion techniques (petitpotam, coercer)\n"
             "3. Report captured hashes"
-        ),
-        AgentRole.ATOMIC: (
-            "You seem stuck. As atomic agent, focus on:\n"
-            "1. Execute requested T-code tests\n"
-            "2. Report test results"
         ),
     }
 
@@ -372,7 +391,7 @@ def create_specialized_agent(
 
     # Determine stop conditions based on role
     stop_conditions = []
-    if role == AgentRole.ENUM:
+    if role == AgentRole.RECON:
         stop_conditions.append(tool_use("complete_operation"))
     else:
         # Worker agents stop when task is complete or they need assistance
@@ -383,7 +402,7 @@ def create_specialized_agent(
             ]
         )
 
-    agent_name = f"ares-{role.value}"
+    agent_name = f"ares-{role.value.replace('_', '-')}"
     max_steps = max_steps or ROLE_MAX_STEPS.get(role, 100)
 
     logger.info(f"Creating {agent_name} agent with {len(tools)} toolsets, max_steps={max_steps}")
@@ -407,6 +426,8 @@ def create_agent_info(
     """
     Create AgentInfo for registration with dispatcher.
 
+    Capabilities are loaded from config (single source of truth).
+
     Args:
         role: The agent role.
         pod_name: Name of the Kubernetes pod.
@@ -414,54 +435,16 @@ def create_agent_info(
     Returns:
         AgentInfo object.
     """
-    # Define capabilities per role
-    role_capabilities: dict[AgentRole, set[str]] = {
-        AgentRole.ENUM: {
-            "enumeration",
-            "coordination",
-            "task_dispatch",
-            "reporting",
-        },
-        AgentRole.CRACKER: {
-            "hash_cracking",
-            "hashcat",
-            "john",
-        },
-        AgentRole.ACL: {
-            "bloodhound",
-            "acl_abuse",
-            "shadow_credentials",
-            "targeted_kerberoast",
-        },
-        AgentRole.PRIVESC: {
-            "adcs_exploitation",
-            "delegation_abuse",
-            "mssql_exploitation",
-            "cve_exploitation",
-        },
-        AgentRole.LATERAL: {
-            "lateral_movement",
-            "credential_harvesting",
-            "psexec",
-            "evil_winrm",
-        },
-        AgentRole.POISONING: {
-            "network_poisoning",
-            "coercion",
-            "responder",
-            "ntlm_relay",
-        },
-        AgentRole.ATOMIC: {
-            "atomic_red_team",
-            "technique_execution",
-        },
-    }
+    # Get capabilities from config (single source of truth)
+    config_key = role.value  # e.g., "recon", "credential_access", "privesc"
+    agent_config = get_agent_config(config_key)
+    capabilities = set(agent_config.capabilities)
 
     return AgentInfo(
-        name=f"ares-{role.value}",
+        name=f"ares-{role.value.replace('_', '-')}",
         pod_name=pod_name,
         role=role,
-        capabilities=role_capabilities.get(role, set()),
+        capabilities=capabilities,
     )
 
 
@@ -496,11 +479,13 @@ async def create_multi_agent_ensemble(
     # Default roles if not specified
     if roles is None:
         roles = [
-            AgentRole.ENUM,
+            AgentRole.RECON,
+            AgentRole.CREDENTIAL_ACCESS,
             AgentRole.CRACKER,
             AgentRole.ACL,
             AgentRole.PRIVESC,
             AgentRole.LATERAL,
+            AgentRole.COERCION,
         ]
 
     # Create dispatcher if not provided
@@ -526,7 +511,7 @@ async def create_multi_agent_ensemble(
 
     for role in roles:
         # Determine model for this role
-        if role == AgentRole.ENUM:
+        if role == AgentRole.RECON:
             agent_model = orch_model or base_model
         else:
             agent_model = work_model or base_model
@@ -543,13 +528,13 @@ async def create_multi_agent_ensemble(
             shared_state=shared_state,
             dispatcher=dispatcher,
             pod_executor=pod_executor,
-            pod_name=f"ares-{role.value}-0",  # Default pod naming
+            pod_name=f"ares-{role.value.replace('_', '-')}-0",  # Default pod naming
         )
 
         agents[role] = agent
 
         # Register with dispatcher
-        agent_info = create_agent_info(role, pod_name=f"ares-{role.value}-0")
+        agent_info = create_agent_info(role, pod_name=f"ares-{role.value.replace('_', '-')}-0")
         await dispatcher.register(agent_info)
 
     logger.info(f"Created multi-agent ensemble with {len(agents)} agents")

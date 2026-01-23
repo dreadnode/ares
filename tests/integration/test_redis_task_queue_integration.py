@@ -8,10 +8,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.integration
+
+if os.getenv("ARES_RUN_INTEGRATION_TESTS") != "1":
+    pytest.skip(
+        "Set ARES_RUN_INTEGRATION_TESTS=1 to run integration tests.",
+        allow_module_level=True,
+    )
 
 # Create mock redis module if not installed
 if "redis" not in sys.modules:
@@ -21,10 +30,10 @@ if "redis" not in sys.modules:
     sys.modules["redis"] = mock_redis_module
     sys.modules["redis.asyncio"] = mock_redis_asyncio
 
-from ares.core.dispatcher import RedTeamDispatcher
-from ares.core.models import AgentInfo, AgentRole
-from ares.core.task_queue import RedisTaskQueue, TaskMessage, TaskResult
-from ares.core.worker import (
+from ares.core.dispatcher import RedTeamDispatcher  # noqa: E402
+from ares.core.models import AgentInfo, AgentRole  # noqa: E402
+from ares.core.task_queue import RedisTaskQueue, TaskMessage, TaskResult  # noqa: E402
+from ares.core.worker import (  # noqa: E402
     RedisWorkerAgent,
     generate_prompt_from_task,
 )
@@ -201,12 +210,12 @@ class TestPromptGeneration:
         assert "exploit_adcs" in prompt
 
     def test_poison_prompt(self):
-        """Test prompt generation for poisoning tasks."""
+        """Test prompt generation for coercion tasks."""
         task = TaskMessage(
             task_id="poison_001",
             task_type="poison",
             source_agent="orchestrator",
-            target_agent="poisoning",
+            target_agent="coercion",
             payload={
                 "interface": "eth0",
                 "techniques": ["LLMNR", "NBT-NS", "mDNS"],
@@ -328,7 +337,7 @@ class TestDispatcherRedisIntegration:
     async def test_request_poisoning_uses_redis_queue(
         self, dispatcher_with_redis, mock_redis_client
     ):
-        """Test poisoning request goes through Redis queue."""
+        """Test coercion request goes through Redis queue."""
         task_id = await dispatcher_with_redis.request_poisoning(
             source_agent="orchestrator",
             interface="eth0",

@@ -509,12 +509,13 @@ async def multi_agent(
     Execute a multi-agent red team operation.
 
     This command coordinates multiple specialized agents:
-    - Orchestrator (ares-enum): Coordinates operation, does initial recon
+    - Orchestrator (ares-recon): Coordinates operation, does initial recon
+    - Credential Access: Active credential attacks (AS-REP roasting, Kerberoasting, LSASS dumping)
     - Cracker: Hash cracking with hashcat/john
     - ACL: BloodHound analysis and ACL abuse
     - PrivEsc: ADCS, delegation, MSSQL exploitation
     - Lateral: Lateral movement and credential harvesting
-    - Poisoning: Network poisoning (responder, mitm6)
+    - Coercion: Network poisoning (responder, mitm6)
 
     Args:
         target_domain: Target domain (e.g., example.local)
@@ -653,7 +654,7 @@ class WorkerArgs:
     """Worker agent arguments.
 
     Attributes:
-        role: Worker role (cracker, acl, privesc, lateral, poisoning, atomic).
+        role: Worker role (credential_access, cracker, acl, privesc, lateral, coercion).
         operation_id: Operation ID to join (required).
         config_file: Path to config file (auto-detected if not specified).
         redis_url: Redis URL for dispatcher connection (from config if not specified).
@@ -689,16 +690,16 @@ async def worker(
     - Reports results back to the orchestrator
 
     Worker roles:
-    - enum: Enumeration and reconnaissance
+    - recon: Enumeration and reconnaissance
+    - credential_access: Active credential attacks (AS-REP roasting, Kerberoasting, LSASS dumping)
     - cracker: Hash cracking with hashcat/john
     - acl: BloodHound analysis and ACL abuse
     - privesc: ADCS, delegation, MSSQL exploitation
     - lateral: Lateral movement and credential harvesting
-    - poisoning: Network poisoning (responder, mitm6)
-    - atomic: Atomic Red Team technique execution
+    - coercion: Network poisoning (responder, mitm6)
 
     Args:
-        role: Worker role (enum, cracker, acl, privesc, lateral, poisoning, atomic)
+        role: Worker role (recon, credential_access, cracker, acl, privesc, lateral, coercion)
         operation_id: Operation ID to join (optional - will auto-discover if not provided)
 
     Example:
@@ -714,7 +715,15 @@ async def worker(
     dn_args = dn_args or DreadnodeArgs()
 
     # Validate role
-    valid_roles = ["enum", "cracker", "acl", "privesc", "lateral", "poisoning", "atomic"]
+    valid_roles = [
+        "recon",
+        "credential_access",
+        "cracker",
+        "acl",
+        "privesc",
+        "lateral",
+        "coercion",
+    ]
     if role not in valid_roles:
         logger.error(f"Invalid role: {role}. Must be one of: {', '.join(valid_roles)}")
         return
@@ -774,13 +783,13 @@ async def worker(
 
     # Convert string role to AgentRole enum
     role_mapping = {
-        "enum": AgentRole.ENUM,
+        "recon": AgentRole.RECON,
+        "credential_access": AgentRole.CREDENTIAL_ACCESS,
         "cracker": AgentRole.CRACKER,
         "acl": AgentRole.ACL,
         "privesc": AgentRole.PRIVESC,
         "lateral": AgentRole.LATERAL,
-        "poisoning": AgentRole.POISONING,
-        "atomic": AgentRole.ATOMIC,
+        "coercion": AgentRole.COERCION,
     }
     agent_role = role_mapping[role]
 

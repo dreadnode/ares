@@ -15,8 +15,9 @@ agents:
     model: "gpt-5.2"
     # model: "claude-sonnet-4-20250514"
     max_steps: 200
-    pod_selector: "ares.dreadnode.io/role=enum"
+    pod_selector: "ares.dreadnode.io/role=recon"
     tools:
+      - dispatch_credential_access
       - dispatch_crack_hash
       - dispatch_acl_analysis
       - dispatch_lateral_movement
@@ -33,19 +34,50 @@ agents:
       - broadcast_credential
       - announce_domain_admin
 
-  enum:
+  recon:
     model: "gpt-5.2"
     # model: "claude-sonnet-4-20250514"
     max_steps: 100
-    pod_selector: "ares.dreadnode.io/role=enum"
+    pod_selector: "ares.dreadnode.io/role=recon"
     capabilities:
       - nmap
-      - crackmapexec
+      - netexec
+      - rpcclient
       - ldapsearch
-      - certipy
-      - bloodhound
-      - secretsdump
       - enum4linux
+      - enum4linux-ng
+      - bloodhound
+      - certipy
+      - adidnsdump
+      - impacket-getnpusers
+      - impacket-getuserspns
+      - impacket-regsecrets
+      - impacket-secretsdump
+      - impacket-psexec
+      - impacket-wmiexec
+      - impacket-smbexec
+      - impacket-rbcd
+      - impacket-getst
+      - impacket-gettgt
+      - mssqlclient
+      - raisechild
+      - impacket-ticketer
+      - dig
+      - nslookup
+      - whois
+
+  credential_access:
+    model: "gpt-5.2"
+    # model: "claude-sonnet-4-20250514"
+    max_steps: 100
+    pod_selector: "ares.dreadnode.io/role=credential_access"
+    capabilities:
+      - impacket-getnpusers
+      - impacket-secretsdump
+      - targeted_kerberoast
+      - lsassy
+      - sprayhound
+      - rpcclient
 
   cracker:
     model: "gpt-5.2"
@@ -55,7 +87,8 @@ agents:
     capabilities:
       - hashcat
       - john
-      - ntlmrelayx
+      - rockyou
+      - seclists
 
   acl:
     model: "gpt-5.2"
@@ -63,11 +96,11 @@ agents:
     max_steps: 50
     pod_selector: "ares.dreadnode.io/role=acl"
     capabilities:
-      - bloodhound
+      - bloodyad
+      - pywhisker
       - dacledit
-      - owneredit
-      - genericall_abuse
-      - writedacl_abuse
+      - targeted_kerberoast
+      - rpcclient
 
   privesc:
     model: "gpt-5.2"
@@ -76,12 +109,26 @@ agents:
     pod_selector: "ares.dreadnode.io/role=privesc"
     capabilities:
       - certipy
-      - kerberoast
-      - asreproast
-      - constrained_delegation
-      - unconstrained_delegation
-      - rbcd
-      - shadow_credentials
+      - impacket-getst
+      - impacket-gettgt
+      - impacket-rbcd
+      - mssqlclient
+      - nopac
+      - printnightmare
+      - raisechild
+      - krbrelayup
+      - printspoofer
+      - godpotato
+      - sweetpotato
+      - winpeas
+      - linpeas
+      - powerupsql
+      - powerup
+      - sharpup
+      - seatbelt
+      - sharpgpoabuse
+      - runascs
+      - scmuacbypass
 
   lateral:
     model: "gpt-5.2"
@@ -89,32 +136,31 @@ agents:
     max_steps: 200
     pod_selector: "ares.dreadnode.io/role=lateral"
     capabilities:
-      - psexec
-      - wmiexec
-      - smbexec
-      - winrm
-      - secretsdump
-      - pass_the_hash
-      - pass_the_ticket
+      - evil-winrm
+      - impacket-psexec
+      - impacket-wmiexec
+      - impacket-smbexec
+      - impacket-secretsdump
+      - smbclient
+      - xfreerdp
+      - sshpass
 
-  poisoning:
+  coercion:
     model: "gpt-5.2"
     # model: "claude-sonnet-4-20250514"
     max_steps: 30
-    pod_selector: "ares.dreadnode.io/role=poison"
+    pod_selector: "ares.dreadnode.io/role=coercion"
     capabilities:
       - responder
       - mitm6
+      - coercer
+      - petitpotam
       - ntlmrelayx
-
-  atomic:
-    model: "gpt-5.2"
-    # model: "claude-sonnet-4-20250514"
-    max_steps: 50
-    pod_selector: "ares.dreadnode.io/role=atomic"
-    capabilities:
-      - atomic_red_team
-      - invoke_atomicredteam
+      - krbrelayx
+      - addspn
+      - dnstool
+      - printerbug
+      - dfscoerce
 
 # Timeout configurations
 timeouts:

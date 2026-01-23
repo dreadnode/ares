@@ -519,13 +519,13 @@ class RedTeamState:
 class AgentRole(Enum):
     """Specialized roles for multi-agent red team operations."""
 
-    ENUM = "enum"
+    RECON = "recon"
+    CREDENTIAL_ACCESS = "credential_access"
     CRACKER = "cracker"
     ACL = "acl"
     PRIVESC = "privesc"
     LATERAL = "lateral"
-    POISONING = "poisoning"
-    ATOMIC = "atomic"
+    COERCION = "coercion"
 
 
 class TaskStatus(Enum):

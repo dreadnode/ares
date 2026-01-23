@@ -10,10 +10,19 @@ Tests the complete multi-agent workflow including:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.integration
+
+if os.getenv("ARES_RUN_INTEGRATION_TESTS") != "1":
+    pytest.skip(
+        "Set ARES_RUN_INTEGRATION_TESTS=1 to run integration tests.",
+        allow_module_level=True,
+    )
 
 pytest.importorskip("kubernetes")
 
@@ -25,15 +34,15 @@ if "redis" not in sys.modules:
     sys.modules["redis"] = mock_redis_module
     sys.modules["redis.asyncio"] = mock_redis_asyncio
 
-from ares.core.dispatcher import RedTeamDispatcher
-from ares.core.models import (
+from ares.core.dispatcher import RedTeamDispatcher  # noqa: E402
+from ares.core.models import (  # noqa: E402
     AgentInfo,
     AgentRole,
     Credential,
     Host,
     SharedRedTeamState,
 )
-from ares.core.workflows import (
+from ares.core.workflows import (  # noqa: E402
     CredentialTestingTracker,
     credential_expansion_loop,
 )
@@ -183,7 +192,7 @@ class TestPriorityVulnerabilityQueue:
             vuln_type="ADCS_ESC1",
             target="dc01.testlab.local",
             details={"template": "VulnerableTemplate"},
-            discovered_by="enum-agent",
+            discovered_by="recon-agent",
         )
 
         assert vuln_id is not None
@@ -288,16 +297,16 @@ class TestDispatcher:
     async def test_agent_registration(self, dispatcher):
         """Test agent registration."""
         agent = AgentInfo(
-            name="enum-agent",
-            pod_name="enum-agent-0",
-            role=AgentRole.ENUM,
+            name="recon-agent",
+            pod_name="recon-agent-0",
+            role=AgentRole.RECON,
             capabilities={"nmap", "crackmapexec"},
         )
 
         await dispatcher.register(agent)
 
-        assert "enum-agent" in dispatcher._agents
-        assert dispatcher.get_agent_for_role(AgentRole.ENUM) is not None
+        assert "recon-agent" in dispatcher._agents
+        assert dispatcher.get_agent_for_role(AgentRole.RECON) is not None
 
     @pytest.mark.asyncio
     async def test_credential_publishing(self, dispatcher, sample_credentials):
@@ -314,7 +323,7 @@ class TestDispatcher:
         await dispatcher.register(agent)
 
         # Publish credential
-        added = await dispatcher.publish_credential(cred, "enum-agent")
+        added = await dispatcher.publish_credential(cred, "recon-agent")
 
         assert added is True
         assert len(dispatcher.shared_state.all_credentials) == 1
@@ -459,6 +468,8 @@ class TestCredentialExpansionLoop:
         self, dispatcher, sample_credentials, sample_hosts
     ):
         """Test expansion with credentials and hosts."""
+        dispatcher.wait_for_task = AsyncMock(return_value={"success": False})
+
         # Register lateral agent
         lateral = AgentInfo(
             name="lateral-agent",
@@ -498,8 +509,8 @@ class TestKubernetesIntegration:
         with patch("kubernetes.client.CoreV1Api") as mock_k8s:
             # Setup mock pods
             mock_pod = MagicMock()
-            mock_pod.metadata.name = "enum-agent-0"
-            mock_pod.metadata.labels = {"ares.dreadnode.io/role": "enum"}
+            mock_pod.metadata.name = "recon-agent-0"
+            mock_pod.metadata.labels = {"ares.dreadnode.io/role": "recon"}
             mock_pod.status.phase = "Running"
 
             mock_pods = MagicMock()
@@ -516,7 +527,7 @@ class TestKubernetesIntegration:
                 dispatcher._task_queue._connected = True
 
             # Register agents
-            for role in [AgentRole.ENUM, AgentRole.CRACKER, AgentRole.LATERAL]:
+            for role in [AgentRole.RECON, AgentRole.CRACKER, AgentRole.LATERAL]:
                 agent = AgentInfo(
                     name=f"{role.value}-agent",
                     pod_name=f"{role.value}-agent-0",
@@ -530,7 +541,7 @@ class TestKubernetesIntegration:
                 vuln_type="ADCS_ESC1",
                 target="dc01",
                 details={},
-                discovered_by="enum-agent",
+                discovered_by="recon-agent",
             )
 
             # Verify state

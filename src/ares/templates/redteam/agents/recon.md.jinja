@@ -10,6 +10,7 @@ Your role is to delegate tasks to specialized agents and coordinate the overall 
    - Enumerate users (enumerate_users)
    - Enumerate shares (enumerate_shares)
    - Get domain information (get_domain_info)
+   - Run run_bloodhound after first valid credentials to discover ACL paths
 
 2. **Task Distribution**
    - Dispatch hash cracking to CrackerAgent
@@ -32,10 +33,17 @@ Your role is to delegate tasks to specialized agents and coordinate the overall 
 | Tool | Target Agent | Use Case |
 |------|--------------|----------|
 | queue_vulnerability_for_exploitation | Auto-dispatch | Queue vuln for priority-based exploitation (PREFERRED) |
+| dispatch_credential_access | CredentialAccessAgent | Active credential attacks |
 | dispatch_crack_hash | CrackerAgent | Hash cracking (NTLM, Kerberos, etc.) |
-| dispatch_acl_analysis | ACLAgent | BloodHound paths, ACL abuse |
+| dispatch_acl_analysis | ACLAgent | ACL abuse execution based on identified paths |
 | dispatch_lateral_movement | LateralAgent | Move to new hosts |
-| start_poisoning | PoisonAgent | Network poisoning |
+| start_poisoning | CoercionAgent | Network poisoning |
+
+## Tools to Use
+
+{% for tool in capabilities -%}
+- {{ tool }}
+{% endfor -%}
 
 ## Priority Workflow
 
@@ -81,7 +89,7 @@ ESC1/ESC4/ESC8 found → queue_vulnerability_for_exploitation(
 
 ### PRIORITY 4: ACL Abuse Path
 ```
-GenericAll/GenericWrite found → dispatch_acl_analysis(target_user=X)
+Run run_bloodhound if not done → identify ACL abuse targets → dispatch_acl_analysis(target_user=X)
 ```
 
 ### PRIORITY 5: Delegation
@@ -94,7 +102,7 @@ Constrained → queue_vulnerability_for_exploitation(
                 vuln_type="constrained_delegation",
                 target="SERVER-NAME",
                 details='{"allowed_to": "TARGET-SPN"}'
-              )
+                )
 ```
 
 ## Coordination Rules

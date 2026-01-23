@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ares.core.models import SharedRedTeamState, Target, VulnerabilityInfo
 from ares.core.orchestrator import run_multi_agent_operation
 
 
@@ -46,6 +47,9 @@ async def test_run_multi_agent_operation_skips_wait_when_completed(monkeypatch):
     dispatcher.recover_state = AsyncMock(return_value=None)
     dispatcher.register = AsyncMock()
     dispatcher.stop = AsyncMock()
+    dispatcher.get_exploitation_status = AsyncMock(
+        return_value={"pending": [], "total_discovered": 0, "total_succeeded": 0}
+    )
 
     task_queue = SimpleNamespace()
     task_queue.connect = AsyncMock()
@@ -101,3 +105,29 @@ async def test_run_multi_agent_operation_skips_wait_when_completed(monkeypatch):
     )
 
     wait_mock.assert_not_awaited()
+
+
+def test_build_redteam_report_state_uses_exploitation_status_counts():
+    """Report state should honor exploitation_status counts when provided."""
+    from ares.core.orchestrator import _build_redteam_report_state
+
+    state = SharedRedTeamState(
+        operation_id="op-3",
+        target=Target(ip="192.168.56.3", domain="example.com"),
+    )
+    vuln = VulnerabilityInfo(
+        vuln_id="ADCS_ESC1_dc01",
+        vuln_type="ADCS_ESC1",
+        target="dc01",
+        discovered_by="recon",
+    )
+    state.discovered_vulnerabilities[vuln.vuln_id] = vuln
+    state.exploited_vulnerabilities.add(vuln.vuln_id)
+
+    report_state = _build_redteam_report_state(
+        state,
+        {"total_discovered": 4, "total_succeeded": 2},
+    )
+
+    assert report_state.vulnerability_count == 4
+    assert report_state.exploited_count == 2

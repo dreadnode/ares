@@ -597,8 +597,8 @@ class TestTaskStatusAndTaskInfo:
 
         task = TaskInfo(
             task_id="test-task-003",
-            task_type="enum",
-            assigned_agent="enum",
+            task_type="recon",
+            assigned_agent="recon",
             status=TaskStatus.FAILED,
             created_at=datetime.now(timezone.utc),
             completed_at=datetime.now(timezone.utc),

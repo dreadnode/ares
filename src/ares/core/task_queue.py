@@ -23,7 +23,7 @@ class TaskMessage(BaseModel):
     task_id: str
     task_type: str  # crack, lateral, acl_analysis, exploit, poison
     source_agent: str
-    target_agent: str  # Role: cracker, lateral, acl, privesc, poisoning
+    target_agent: str  # Role: credential_access, cracker, lateral, acl, privesc, coercion
     payload: dict[str, Any]
     priority: int = 5  # 1=urgent, 5=normal, 10=low
     created_at: datetime | None = None
@@ -565,7 +565,15 @@ class RedisTaskQueue:
         if not self._connected:
             await self.connect()
 
-        roles = ["cracker", "lateral", "acl", "privesc", "poisoning", "atomic", "enum"]
+        roles = [
+            "cracker",
+            "lateral",
+            "acl",
+            "privesc",
+            "coercion",
+            "recon",
+            "credential_access",
+        ]
         stats = {}
 
         for role in roles:

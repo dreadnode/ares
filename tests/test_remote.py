@@ -495,6 +495,56 @@ class TestRunRemote:
         # Clean up
         reset_executor()
 
+    def test_run_remote_passes_target_role(self):
+        """Test run_remote forwards target_role to executor."""
+        executor = MagicMock()
+        executor.run_command.return_value = CommandResult(
+            stdout="ok",
+            stderr="",
+            return_code=0,
+            success=True,
+        )
+
+        with patch("ares.core.remote.get_executor", return_value=executor):
+            result = run_remote("echo test", target_role="cracker")
+
+        assert result.success is True
+        executor.run_command.assert_called_once_with(
+            "echo test",
+            300,
+            "/tmp",
+            target_role="cracker",
+        )
+
+    def test_run_remote_routes_cross_role_in_local_mode(self):
+        """Cross-role calls in local mode should use K8sExecutor."""
+        executor = MagicMock()
+        executor.run_command.side_effect = AssertionError("Unexpected executor call")
+        k8s_result = CommandResult(
+            stdout="ok",
+            stderr="",
+            return_code=0,
+            success=True,
+        )
+
+        with (
+            patch("ares.core.remote.get_execution_mode", return_value="local"),
+            patch("ares.core.remote.get_executor", return_value=executor),
+            patch("ares.core.remote.K8sExecutor") as mock_k8s,
+            patch.dict(os.environ, {"ARES_ROLE": "recon"}, clear=False),
+        ):
+            mock_k8s.return_value.run_command.return_value = k8s_result
+            result = run_remote("echo test", target_role="lateral")
+
+        assert result is k8s_result
+        mock_k8s.return_value.run_command.assert_called_once_with(
+            "echo test",
+            300,
+            "/tmp",
+            target_role="lateral",
+        )
+        executor.run_command.assert_not_called()
+
 
 class TestK8sExecutorInit:
     """Tests for K8sExecutor initialization."""
@@ -531,3 +581,91 @@ class TestK8sExecutorInit:
         with patch.dict(os.environ, {}, clear=True):
             executor = K8sExecutor()
             assert executor._redis_url == "redis://redis:6379"
+
+
+class TestK8sExecutorRouting:
+    """Tests for K8sExecutor role routing."""
+
+    def test_run_command_uses_env_role_when_set(self):
+        """Test run_command routes to ARES_ROLE by default."""
+        executor = K8sExecutor()
+        calls: list[dict[str, str]] = []
+
+        async def fake_dispatch(command, timeout_seconds, working_directory, target_role):
+            calls.append(
+                {
+                    "command": command,
+                    "timeout": str(timeout_seconds),
+                    "working_directory": working_directory,
+                    "target_role": target_role,
+                }
+            )
+            return CommandResult(stdout="ok", stderr="", return_code=0, success=True)
+
+        executor._dispatch_command = fake_dispatch  # type: ignore[method-assign]
+
+        with patch.dict(os.environ, {"ARES_ROLE": "cracker"}, clear=False):
+            result = executor.run_command(["echo", "test"])
+
+        assert result.success is True
+        assert calls[0]["target_role"] == "cracker"
+
+    def test_run_command_defaults_to_recon_without_role(self):
+        """Test run_command defaults to recon when no role set."""
+        executor = K8sExecutor()
+        calls: list[dict[str, str]] = []
+
+        async def fake_dispatch(command, timeout_seconds, working_directory, target_role):
+            calls.append(
+                {
+                    "command": command,
+                    "timeout": str(timeout_seconds),
+                    "working_directory": working_directory,
+                    "target_role": target_role,
+                }
+            )
+            return CommandResult(stdout="ok", stderr="", return_code=0, success=True)
+
+        executor._dispatch_command = fake_dispatch  # type: ignore[method-assign]
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = executor.run_command(["echo", "test"])
+
+        assert result.success is True
+        assert calls[0]["target_role"] == "recon"
+
+    def test_run_command_explicit_role_overrides_env(self):
+        """Test run_command honors explicit target_role."""
+        executor = K8sExecutor()
+        calls: list[dict[str, str]] = []
+
+        async def fake_dispatch(command, timeout_seconds, working_directory, target_role):
+            calls.append(
+                {
+                    "command": command,
+                    "timeout": str(timeout_seconds),
+                    "working_directory": working_directory,
+                    "target_role": target_role,
+                }
+            )
+            return CommandResult(stdout="ok", stderr="", return_code=0, success=True)
+
+        executor._dispatch_command = fake_dispatch  # type: ignore[method-assign]
+
+        with patch.dict(os.environ, {"ARES_ROLE": "cracker"}, clear=False):
+            result = executor.run_command(["echo", "test"], target_role="lateral")
+
+        assert result.success is True
+        assert calls[0]["target_role"] == "lateral"
+
+    def test_run_command_invalid_role_returns_error(self):
+        """Test run_command fails fast when role is invalid."""
+        executor = K8sExecutor()
+        executor._dispatch_command = MagicMock()  # type: ignore[method-assign]
+
+        with patch.dict(os.environ, {"ARES_ROLE": "worker"}, clear=False):
+            result = executor.run_command(["echo", "test"])
+
+        assert result.success is False
+        assert "Invalid target role" in result.stderr
+        executor._dispatch_command.assert_not_called()

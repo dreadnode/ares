@@ -31,7 +31,7 @@ class MessageType(Enum):
     EXPLOIT_REQUEST = "exploit_request"
     POISON_REQUEST = "poison_request"
     ACL_ANALYSIS_REQUEST = "acl_analysis_request"
-    ATOMIC_TEST_REQUEST = "atomic_test_request"
+    CREDENTIAL_ACCESS_REQUEST = "credential_access_request"
 
     # Task responses - report results back
     TASK_COMPLETE = "task_complete"
@@ -176,6 +176,20 @@ class ACLAnalysisRequest(AgentMessage):
     callback_agent: str = ""
 
 
+class CredentialAccessRequest(AgentMessage):
+    """Request credential access actions (AS-REP roast, Kerberoast, secretsdump, LSASS)."""
+
+    type: MessageType = MessageType.CREDENTIAL_ACCESS_REQUEST
+    task_id: str = Field(default_factory=generate_task_id)
+    target_ips: list[str] = Field(default_factory=list)
+    domain: str = ""
+    username: str = ""
+    password: str | None = None
+    hash_value: str | None = None
+    techniques: list[str] = Field(default_factory=list)
+    callback_agent: str = ""
+
+
 class PoisonRequest(AgentMessage):
     """Request network poisoning."""
 
@@ -184,17 +198,6 @@ class PoisonRequest(AgentMessage):
     interface: str = "eth0"
     techniques: list[str] = Field(default_factory=lambda: ["LLMNR", "NBT-NS", "mDNS"])
     duration: int = 300  # seconds
-    callback_agent: str = ""
-
-
-class AtomicTestRequest(AgentMessage):
-    """Request Atomic Red Team technique execution."""
-
-    type: MessageType = MessageType.ATOMIC_TEST_REQUEST
-    task_id: str = Field(default_factory=generate_task_id)
-    technique_id: str  # T1003, T1059, etc.
-    test_number: int = 1
-    input_args: dict[str, str] = Field(default_factory=dict)
     callback_agent: str = ""
 
 
@@ -320,7 +323,6 @@ def create_message(message_type: MessageType, source_agent: str, **kwargs) -> Ag
         MessageType.EXPLOIT_REQUEST: ExploitRequest,
         MessageType.ACL_ANALYSIS_REQUEST: ACLAnalysisRequest,
         MessageType.POISON_REQUEST: PoisonRequest,
-        MessageType.ATOMIC_TEST_REQUEST: AtomicTestRequest,
         MessageType.TASK_COMPLETE: TaskComplete,
         MessageType.TASK_FAILED: TaskFailed,
         MessageType.TASK_PROGRESS: TaskProgress,
@@ -345,7 +347,6 @@ __all__ = [
     # Base class
     "AgentMessage",
     "AgentRegistered",
-    "AtomicTestRequest",
     "CrackRequest",
     # Discovery messages
     "CredentialDiscovered",

@@ -14,8 +14,10 @@ import json
 import os
 import random
 import re
+import tempfile
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -311,8 +313,20 @@ TASK_PROMPTS: dict[MessageType, callable] = {
         f"Domain: {msg.domain}\n"
         f"Find Path To: {msg.find_path_to}\n"
         f"Task ID: {msg.task_id}\n\n"
-        "Run BloodHound collection if needed, then find shortest paths. "
+        "Use provided ACL/BloodHound context if available. "
+        "If pathing data is missing, request BloodHound analysis from recon/orchestrator. "
         "Execute any viable ACL abuse attacks. Report the result using task_complete."
+    ),
+    MessageType.CREDENTIAL_ACCESS_REQUEST: lambda msg: (
+        "Perform credential access against the target environment:\n"
+        f"Domain: {msg.domain}\n"
+        f"Targets: {', '.join(msg.target_ips) if msg.target_ips else 'N/A'}\n"
+        f"Username: {msg.username or 'N/A'}\n"
+        f"Credential: {'password' if msg.password else 'hash' if msg.hash_value else 'none'}\n"
+        f"Techniques: {', '.join(msg.techniques) if msg.techniques else 'auto-select'}\n"
+        f"Task ID: {msg.task_id}\n\n"
+        "Prioritize GetNPUsers/AS-REP roast, Kerberoast, secretsdump, and LSASS "
+        "if credentials allow. Report any hashes or credentials using task_complete."
     ),
     MessageType.EXPLOIT_REQUEST: lambda msg: (
         f"Exploit vulnerability:\n"
@@ -340,14 +354,6 @@ TASK_PROMPTS: dict[MessageType, callable] = {
         f"Task ID: {msg.task_id}\n\n"
         "Start responder/mitm6 and capture any hashes. "
         "Report captured credentials using task_complete."
-    ),
-    MessageType.ATOMIC_TEST_REQUEST: lambda msg: (
-        f"Execute Atomic Red Team test:\n"
-        f"Technique: {msg.technique_id}\n"
-        f"Test Number: {msg.test_number}\n"
-        f"Input Args: {msg.input_args}\n"
-        f"Task ID: {msg.task_id}\n\n"
-        "Execute the atomic test and report results using task_complete."
     ),
 }
 
@@ -385,7 +391,9 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:
             f"Credential: {cred_type}\n"
             f"Method: {payload.get('method') or 'auto-select'}\n"
             f"Task ID: {task.task_id}\n\n"
-            "Establish access and run secretsdump if successful."
+            "Try at most two methods (psexec then winrm/wmi), no loops. "
+            "If access succeeds, run secretsdump once. "
+            "If access fails, report_lateral_failed with a concise reason."
         )
 
     if task.task_type == "acl_analysis":
@@ -395,7 +403,30 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:
             f"Domain: {payload['domain']}\n"
             f"Find Path To: {payload.get('find_path_to', 'Domain Admins')}\n"
             f"Task ID: {task.task_id}\n\n"
-            "Run BloodHound collection if needed. Execute viable ACL abuse attacks."
+            "Use provided ACL/BloodHound context if available. "
+            "If pathing data is missing, request BloodHound analysis from recon/orchestrator. "
+            "Execute viable ACL abuse attacks."
+        )
+
+    if task.task_type == "credential_access":
+        cred_type = (
+            "password"
+            if payload.get("password")
+            else "hash"
+            if payload.get("hash_value")
+            else "none"
+        )
+        targets = payload.get("target_ips") or []
+        return (
+            "Perform credential access against the target environment:\n"
+            f"Domain: {payload.get('domain', '')}\n"
+            f"Targets: {', '.join(targets) if targets else 'N/A'}\n"
+            f"Username: {payload.get('username') or 'N/A'}\n"
+            f"Credential: {cred_type}\n"
+            f"Techniques: {', '.join(payload.get('techniques', [])) or 'auto-select'}\n"
+            f"Task ID: {task.task_id}\n\n"
+            "Prioritize GetNPUsers/AS-REP roast, Kerberoast, secretsdump, and LSASS "
+            "if credentials allow. Report any hashes or credentials."
         )
 
     if task.task_type == "exploit":
@@ -426,16 +457,6 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:
             f"Duration: {payload.get('duration', 300)}s\n"
             f"Task ID: {task.task_id}\n\n"
             "Start responder/mitm6 and capture hashes."
-        )
-
-    if task.task_type == "atomic":
-        return (
-            f"Execute Atomic Red Team test:\n"
-            f"Technique: {payload.get('technique_id', 'unknown')}\n"
-            f"Test Number: {payload.get('test_number', 1)}\n"
-            f"Input Args: {payload.get('input_args', {})}\n"
-            f"Task ID: {task.task_id}\n\n"
-            "Execute the atomic test and report results."
         )
 
     # "command" tasks are handled specially - executed directly, not via agent
@@ -522,10 +543,23 @@ class RedisWorkerAgent:
         self._running = False
         self._current_task: str | None = None
         self._tasks_completed = 0
+        self._pointer_switched = False
+        self._run_agent_in_thread = self.role == AgentRole.ACL
+
+    def _run_agent_sync(self, prompt: str) -> Any:
+        """Run the async agent in a dedicated event loop (thread-safe helper)."""
+        return asyncio.run(self.agent.run(prompt))
+
+    async def _run_agent(self, prompt: str) -> Any:
+        """Run the agent without blocking the worker event loop."""
+        if self._run_agent_in_thread:
+            return await asyncio.to_thread(self._run_agent_sync, prompt)
+        return await self.agent.run(prompt)
 
     async def start(self) -> None:
         """Start the Redis worker loop."""
         self._running = True
+        self._pointer_switched = False
         logger.info(f"Redis worker {self.agent_name} starting...")
 
         # Start heartbeat task
@@ -545,6 +579,10 @@ class RedisWorkerAgent:
         """Stop the worker loop."""
         self._running = False
         logger.info(f"Redis worker {self.agent_name} stopping...")
+
+    @property
+    def pointer_switched(self) -> bool:
+        return self._pointer_switched
 
     async def _worker_loop(self) -> None:
         """Main worker loop - poll Redis for tasks."""
@@ -645,7 +683,10 @@ class RedisWorkerAgent:
             )
         except Exception as e:
             logger.warning(f"[{self.agent_name}] Failed to record task status: {e}")
-        logger.info(f"[{self.agent_name}] Processing task {task.task_id}")
+        logger.info(
+            f"[{self.agent_name}] Processing task {task.task_id} "
+            f"(type={task.task_type}, payload={payload_snapshot})"
+        )
 
         try:
             # Handle "command" tasks directly via subprocess (no agent needed)
@@ -668,9 +709,12 @@ class RedisWorkerAgent:
 
             # Run agent
             logger.info(f"[{self.agent_name}] Running agent for task {task.task_id}")
-            result = await self.agent.run(prompt)
+            result = await self._run_agent(prompt)
             result_text = self._extract_result(result)
             agent_error = self._extract_agent_error(result)
+            result_summary = self._summarize_agent_result(result)
+            if result_summary:
+                logger.info(f"[{self.agent_name}] Agent result summary: {result_summary}")
 
             result_payload: dict[str, Any] = {"output": result_text, "task_type": task.task_type}
             structured = _extract_structured_payload(result_text)
@@ -691,6 +735,13 @@ class RedisWorkerAgent:
                         result_payload["hashes"] = filtered
 
             if agent_error:
+                if "Maximum steps reached" in agent_error:
+                    self._dump_task_trace(task, prompt, result_text, result)
+                    excerpt = result_text[-800:] if result_text else ""
+                    logger.error(
+                        f"[{self.agent_name}] Max steps reached for task {task.task_id}; "
+                        f"output_excerpt={excerpt!r}"
+                    )
                 await self.task_queue.send_result(
                     task_id=task.task_id,
                     success=False,
@@ -812,6 +863,7 @@ class RedisWorkerAgent:
             "Active operation pointer changed from "
             f"{self.operation_id} to {active_op}; shutting down to reattach"
         )
+        self._pointer_switched = True
         self._running = False
         return True
 
@@ -934,6 +986,50 @@ class RedisWorkerAgent:
             return "Agent stopped with error"
         return None
 
+    def _summarize_agent_result(self, result: Any) -> str:
+        """Summarize agent outcome for logging."""
+        summary_parts = []
+        for key in ("run_id", "id", "stop_reason", "failed", "model", "steps"):
+            value = getattr(result, key, None)
+            if value is not None:
+                summary_parts.append(f"{key}={value}")
+        usage = getattr(result, "usage", None)
+        if usage:
+            summary_parts.append(f"usage={usage}")
+        return ", ".join(summary_parts)
+
+    def _dump_task_trace(
+        self, task: TaskMessage, prompt: str, result_text: str, result: Any
+    ) -> None:
+        """Persist a task trace for debugging max-step failures."""
+        try:
+            trace_path = Path(tempfile.gettempdir()) / f"ares-task-{task.task_id}.log"
+            summary = self._summarize_agent_result(result)
+            trace_path.write_text(
+                "\n".join(
+                    [
+                        f"task_id: {task.task_id}",
+                        f"task_type: {task.task_type}",
+                        f"role: {self.role.value}",
+                        f"agent: {self.agent_name}",
+                        f"pod: {self.pod_name}",
+                        f"operation_id: {self.operation_id}",
+                        f"payload: {task.payload}",
+                        f"summary: {summary}",
+                        "prompt:",
+                        prompt,
+                        "result:",
+                        result_text,
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            logger.warning(
+                f"[{self.agent_name}] Task trace saved to {trace_path} for {task.task_id}"
+            )
+        except Exception as e:
+            logger.warning(f"[{self.agent_name}] Failed to write task trace: {e}")
+
     async def _heartbeat_loop(self) -> None:
         """Send heartbeats to Redis with automatic reconnection on failure."""
         retry_delay = 1.0
@@ -1009,10 +1105,22 @@ class WorkerAgent:
         self._running = False
         self._current_task: str | None = None
         self._tasks_completed = 0
+        self._run_agent_in_thread = self.role == AgentRole.ACL
+
+    def _run_agent_sync(self, prompt: str) -> Any:
+        """Run the async agent in a dedicated event loop (thread-safe helper)."""
+        return asyncio.run(self.agent.run(prompt))
+
+    async def _run_agent(self, prompt: str) -> Any:
+        """Run the agent without blocking the worker event loop."""
+        if self._run_agent_in_thread:
+            return await asyncio.to_thread(self._run_agent_sync, prompt)
+        return await self.agent.run(prompt)
 
     async def start(self) -> None:
         """Start the worker loop."""
         self._running = True
+        self._pointer_switched = False
         logger.info(f"Worker {self.agent_name} starting...")
 
         # Start heartbeat task
@@ -1032,6 +1140,10 @@ class WorkerAgent:
         """Stop the worker loop."""
         self._running = False
         logger.info(f"Worker {self.agent_name} stopping...")
+
+    @property
+    def pointer_switched(self) -> bool:
+        return self._pointer_switched
 
     async def _worker_loop(self) -> None:
         """Main worker loop - poll for messages and process tasks."""
@@ -1078,6 +1190,7 @@ class WorkerAgent:
             "Active operation pointer changed from "
             f"{self.operation_id} to {active_op}; shutting down to reattach"
         )
+        self._pointer_switched = True
         self._running = False
         return True
 
@@ -1129,7 +1242,7 @@ class WorkerAgent:
 
             # Run the agent
             logger.info(f"[{self.agent_name}] Running agent for task {task_id}")
-            result = await self.agent.run(prompt)
+            result = await self._run_agent(prompt)
 
             # Extract result from agent output
             result_text = self._extract_result(result)
@@ -1247,7 +1360,7 @@ async def run_worker(  # noqa: PLR0912
     uses in-memory dispatcher queues.
 
     Args:
-        role: The agent role (cracker, acl, privesc, lateral, poisoning, atomic).
+        role: The agent role (credential_access, cracker, acl, privesc, lateral, coercion).
         operation_id: The operation ID to join (optional - will discover if not provided).
         redis_url: Redis URL for task queue and state (default: from config).
         model: LLM model to use.
@@ -1279,48 +1392,6 @@ async def run_worker(  # noqa: PLR0912
     if operation_id == "":
         operation_id = None
 
-    # Discover operation if not provided
-    if operation_id is None and discover_operation:
-        if discovery_timeout is None:
-            logger.info("No operation ID provided, waiting indefinitely for an active operation...")
-        else:
-            logger.info(
-                f"No operation ID provided, waiting up to {discovery_timeout}s for an active operation..."
-            )
-        operation_id = await discover_active_operation(redis_url, max_wait=discovery_timeout)
-
-        if operation_id is None:
-            logger.error("No active operation found within timeout and none specified")
-            return
-
-    if operation_id is None:
-        logger.error("Operation ID required but not provided and discovery disabled")
-        return
-
-    overrides = await get_operation_model_overrides(redis_url, operation_id)
-    if overrides:
-        role_key = f"ARES_AGENT_{role.value.upper()}_MODEL"
-        if overrides.get(role_key):
-            resolved_model = overrides[role_key]
-        elif overrides.get("ARES_WORKER_MODEL"):
-            resolved_model = overrides["ARES_WORKER_MODEL"]
-        elif overrides.get("ARES_MODEL"):
-            resolved_model = overrides["ARES_MODEL"]
-
-    if not resolved_model:
-        resolved_model = await get_operation_model(redis_url, operation_id)
-
-    if not resolved_model:
-        logger.error(
-            "No model specified for worker. Provide a model argument, set "
-            "ARES_AGENT_<ROLE>_MODEL/ARES_WORKER_MODEL/ARES_MODEL, "
-            "or submit an operation model."
-        )
-        return
-
-    logger.info(f"Starting {role.value} worker for operation {operation_id}")
-    logger.info(f"Pod: {pod_name}, Redis: {redis_url}, Redis Queue: {use_redis_queue}")
-
     try:
         pointer_check_interval = float(os.getenv("ARES_OPERATION_POINTER_REFRESH_SECONDS", "30"))
     except ValueError:
@@ -1330,86 +1401,148 @@ async def run_worker(  # noqa: PLR0912
     except ValueError:
         max_operation_age = 300
 
-    # Create Redis task queue for direct polling (Kubernetes mode)
-    task_queue: RedisTaskQueue | None = None
-    if use_redis_queue:
-        task_queue = RedisTaskQueue(redis_url)
-        await task_queue.connect()
-        logger.info("Worker connected to Redis task queue")
+    reattach_attempt = 0
+    while True:
+        # Discover operation if not provided
+        if operation_id is None and discover_operation:
+            if discovery_timeout is None:
+                logger.info(
+                    "No operation ID provided, waiting indefinitely for an active operation..."
+                )
+            else:
+                logger.info(
+                    "No operation ID provided, waiting up to "
+                    f"{discovery_timeout}s for an active operation..."
+                )
+            operation_id = await discover_active_operation(redis_url, max_wait=discovery_timeout)
 
-    # Create dispatcher for state management and fallback messaging
-    dispatcher = RedTeamDispatcher(redis_url=redis_url)
-    await dispatcher.start(operation_id)
+            if operation_id is None:
+                logger.error("No active operation found within timeout and none specified")
+                return
 
-    # Try to recover existing state
-    recovered = await dispatcher.recover_state(operation_id)
-    if recovered:
-        logger.info(f"Recovered state: {len(recovered.all_credentials)} credentials")
+        if operation_id is None:
+            logger.error("Operation ID required but not provided and discovery disabled")
+            return
 
-    shared_state = dispatcher.shared_state
+        overrides = await get_operation_model_overrides(redis_url, operation_id)
+        if overrides:
+            role_key = f"ARES_AGENT_{role.value.upper()}_MODEL"
+            if overrides.get(role_key):
+                resolved_model = overrides[role_key]
+            elif overrides.get("ARES_WORKER_MODEL"):
+                resolved_model = overrides["ARES_WORKER_MODEL"]
+            elif overrides.get("ARES_MODEL"):
+                resolved_model = overrides["ARES_MODEL"]
 
-    # Create agent info and register (even in Redis mode for state tracking)
-    agent_info = create_agent_info(role, pod_name=pod_name)
-    await dispatcher.register(agent_info)
+        if not resolved_model:
+            resolved_model = await get_operation_model(redis_url, operation_id)
 
-    # Add role-specific callback tools
-    additional_tools: list[Any] = []
-    if role == AgentRole.CRACKER:
-        cracker_callbacks = CrackerCallbackTools()
-        cracker_callbacks.set_dispatcher(dispatcher)
-        additional_tools.append(cracker_callbacks)
-    elif role == AgentRole.LATERAL:
-        lateral_callbacks = LateralCallbackTools()
-        lateral_callbacks.set_dispatcher(dispatcher)
-        additional_tools.append(lateral_callbacks)
-
-    # Create the specialized agent
-    agent = create_specialized_agent(
-        role=role,
-        model=resolved_model,
-        shared_state=shared_state,
-        dispatcher=dispatcher,
-        pod_name=pod_name,
-        max_steps=max_steps,
-        additional_tools=additional_tools if additional_tools else None,
-    )
-
-    try:
-        worker: RedisWorkerAgent | WorkerAgent
-        if use_redis_queue and task_queue:
-            # Kubernetes multi-pod mode: poll Redis queue directly
-            worker = RedisWorkerAgent(
-                role=role,
-                task_queue=task_queue,
-                agent=agent,
-                agent_name=agent_info.name,
-                pod_name=pod_name,
-                operation_id=operation_id,
-                redis_url=redis_url,
-                pointer_check_interval=pointer_check_interval,
-                max_operation_age=max_operation_age,
+        if not resolved_model:
+            logger.error(
+                "No model specified for worker. Provide a model argument, set "
+                "ARES_AGENT_<ROLE>_MODEL/ARES_WORKER_MODEL/ARES_MODEL, "
+                "or submit an operation model."
             )
-            logger.info(f"Starting Redis worker for role {role.value}")
-        else:
-            # Single-process mode: use dispatcher in-memory queues
-            worker = WorkerAgent(
-                role=role,
-                dispatcher=dispatcher,
-                agent=agent,
-                agent_name=agent_info.name,
-                operation_id=operation_id,
-                redis_url=redis_url,
-                pointer_check_interval=pointer_check_interval,
-                max_operation_age=max_operation_age,
-            )
-            logger.info(f"Starting dispatcher worker for role {role.value}")
+            return
 
-        await worker.start()
-    finally:
-        if task_queue:
-            await task_queue.disconnect()
-        await dispatcher.stop()
-        logger.info(f"Worker {agent_info.name} shutdown complete")
+        logger.info(f"Starting {role.value} worker for operation {operation_id}")
+        logger.info(f"Pod: {pod_name}, Redis: {redis_url}, Redis Queue: {use_redis_queue}")
+
+        # Create Redis task queue for direct polling (Kubernetes mode)
+        task_queue: RedisTaskQueue | None = None
+        if use_redis_queue:
+            task_queue = RedisTaskQueue(redis_url)
+            await task_queue.connect()
+            logger.info("Worker connected to Redis task queue")
+
+        # Create dispatcher for state management and fallback messaging
+        dispatcher = RedTeamDispatcher(redis_url=redis_url)
+        await dispatcher.start(operation_id)
+
+        # Try to recover existing state
+        recovered = await dispatcher.recover_state(operation_id)
+        if recovered:
+            logger.info(f"Recovered state: {len(recovered.all_credentials)} credentials")
+
+        shared_state = dispatcher.shared_state
+
+        # Create agent info and register (even in Redis mode for state tracking)
+        agent_info = create_agent_info(role, pod_name=pod_name)
+        await dispatcher.register(agent_info)
+
+        # Add role-specific callback tools
+        additional_tools: list[Any] = []
+        if role == AgentRole.CRACKER:
+            cracker_callbacks = CrackerCallbackTools()
+            cracker_callbacks.set_dispatcher(dispatcher)
+            additional_tools.append(cracker_callbacks)
+        elif role == AgentRole.LATERAL:
+            lateral_callbacks = LateralCallbackTools()
+            lateral_callbacks.set_dispatcher(dispatcher)
+            additional_tools.append(lateral_callbacks)
+
+        # Create the specialized agent
+        agent = create_specialized_agent(
+            role=role,
+            model=resolved_model,
+            shared_state=shared_state,
+            dispatcher=dispatcher,
+            pod_name=pod_name,
+            max_steps=max_steps,
+            additional_tools=additional_tools if additional_tools else None,
+        )
+
+        pointer_switched = False
+        try:
+            worker: RedisWorkerAgent | WorkerAgent
+            if use_redis_queue and task_queue:
+                # Kubernetes multi-pod mode: poll Redis queue directly
+                worker = RedisWorkerAgent(
+                    role=role,
+                    task_queue=task_queue,
+                    agent=agent,
+                    agent_name=agent_info.name,
+                    pod_name=pod_name,
+                    operation_id=operation_id,
+                    redis_url=redis_url,
+                    pointer_check_interval=pointer_check_interval,
+                    max_operation_age=max_operation_age,
+                )
+                logger.info(f"Starting Redis worker for role {role.value}")
+            else:
+                # Single-process mode: use dispatcher in-memory queues
+                worker = WorkerAgent(
+                    role=role,
+                    dispatcher=dispatcher,
+                    agent=agent,
+                    agent_name=agent_info.name,
+                    operation_id=operation_id,
+                    redis_url=redis_url,
+                    pointer_check_interval=pointer_check_interval,
+                    max_operation_age=max_operation_age,
+                )
+                logger.info(f"Starting dispatcher worker for role {role.value}")
+
+            await worker.start()
+            pointer_switched = worker.pointer_switched
+        finally:
+            if task_queue:
+                await task_queue.disconnect()
+            await dispatcher.stop()
+            logger.info(f"Worker {agent_info.name} shutdown complete")
+
+        if pointer_switched and discover_operation:
+            reattach_attempt += 1
+            # Using random for jitter, not cryptographic purposes
+            delay = min(30.0, 2.0 + (reattach_attempt * 2.0) + random.random())  # noqa: S311  # nosec B311
+            logger.info(
+                f"Pointer switch detected; reattaching after {delay:.1f}s (attempt {reattach_attempt})"
+            )
+            await asyncio.sleep(delay)
+            operation_id = None
+            continue
+
+        break
 
 
 __all__ = [

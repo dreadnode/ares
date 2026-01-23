@@ -68,8 +68,8 @@ class TestCleanupOrphanedTasks:
         )
         shared_state.pending_tasks["task_003"] = TaskInfo(
             task_id="task_003",
-            task_type="enum",
-            assigned_agent="enum",
+            task_type="recon",
+            assigned_agent="recon",
             status=TaskStatus.PENDING,
             created_at=now - timedelta(minutes=5),
             params={},
@@ -134,8 +134,8 @@ class TestCleanupOrphanedTasks:
         )
         shared_state.pending_tasks["task_recent"] = TaskInfo(
             task_id="task_recent",
-            task_type="enum",
-            assigned_agent="enum",
+            task_type="recon",
+            assigned_agent="recon",
             status=TaskStatus.PENDING,
             created_at=now - timedelta(minutes=2),
             params={},
@@ -209,8 +209,8 @@ class TestCleanupOrphanedTasks:
         )
         shared_state.pending_tasks["task_completed"] = TaskInfo(
             task_id="task_completed",
-            task_type="enum",
-            assigned_agent="enum",
+            task_type="recon",
+            assigned_agent="recon",
             status=TaskStatus.COMPLETED,
             created_at=now - timedelta(minutes=10),
             params={},

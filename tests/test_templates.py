@@ -137,13 +137,139 @@ class TestAgentTemplates:
 
         assert "TestAlert" in result
 
-    def test_redteam_enum_template_includes_vulnerability_queue(self) -> None:
-        """Test redteam enum template renders with vulnerability queue guidance."""
+    def test_redteam_recon_template_includes_vulnerability_queue(self) -> None:
+        """Test redteam recon template renders with vulnerability queue guidance."""
         loader = get_template_loader()
-        result = loader.render("redteam/agents/enum.md.jinja")
+        result = loader.render("redteam/agents/recon.md.jinja")
 
         assert "queue_vulnerability_for_exploitation" in result
         assert "get_vulnerability_queue_status" in result
+
+    def test_redteam_coercion_template_renders(self) -> None:
+        """Test redteam coercion template renders without errors."""
+        loader = get_template_loader()
+        result = loader.render("redteam/agents/coercion.md.jinja")
+
+        assert "coercion" in result.lower()
+
+
+class TestRedTeamCapabilitiesTemplates:
+    """Tests for redteam agent templates with capabilities from config."""
+
+    def test_recon_template_renders_capabilities(self) -> None:
+        """Test recon template renders capabilities list."""
+        loader = get_template_loader()
+        capabilities = ["nmap", "netexec", "bloodhound", "certipy"]
+
+        result = loader.render(
+            "redteam/agents/recon.md.jinja",
+            capabilities=capabilities,
+        )
+
+        for cap in capabilities:
+            assert cap in result, f"Capability '{cap}' not found in rendered template"
+
+    def test_privesc_template_renders_capabilities(self) -> None:
+        """Test privesc template renders capabilities list."""
+        loader = get_template_loader()
+        capabilities = ["certipy", "sweetpotato", "godpotato", "krbrelayup"]
+
+        result = loader.render(
+            "redteam/agents/privesc.md.jinja",
+            capabilities=capabilities,
+        )
+
+        for cap in capabilities:
+            assert cap in result, f"Capability '{cap}' not found in rendered template"
+
+    def test_acl_template_renders_capabilities(self) -> None:
+        """Test ACL template renders capabilities list."""
+        loader = get_template_loader()
+        capabilities = ["bloodyad", "pywhisker", "dacledit"]
+
+        result = loader.render(
+            "redteam/agents/acl.md.jinja",
+            capabilities=capabilities,
+        )
+
+        for cap in capabilities:
+            assert cap in result, f"Capability '{cap}' not found in rendered template"
+
+    def test_lateral_template_renders_capabilities(self) -> None:
+        """Test lateral template renders capabilities list."""
+        loader = get_template_loader()
+        capabilities = ["evil-winrm", "impacket-psexec", "smbclient"]
+
+        result = loader.render(
+            "redteam/agents/lateral.md.jinja",
+            capabilities=capabilities,
+        )
+
+        for cap in capabilities:
+            assert cap in result, f"Capability '{cap}' not found in rendered template"
+
+    def test_coercion_template_renders_capabilities(self) -> None:
+        """Test coercion template renders capabilities list."""
+        loader = get_template_loader()
+        capabilities = ["responder", "mitm6", "petitpotam", "printerbug"]
+
+        result = loader.render(
+            "redteam/agents/coercion.md.jinja",
+            capabilities=capabilities,
+        )
+
+        for cap in capabilities:
+            assert cap in result, f"Capability '{cap}' not found in rendered template"
+
+    def test_credential_access_template_renders_capabilities(self) -> None:
+        """Test credential_access template renders capabilities list."""
+        loader = get_template_loader()
+        capabilities = ["impacket-getnpusers", "lsassy", "sprayhound"]
+
+        result = loader.render(
+            "redteam/agents/credential_access.md.jinja",
+            capabilities=capabilities,
+        )
+
+        for cap in capabilities:
+            assert cap in result, f"Capability '{cap}' not found in rendered template"
+
+    def test_cracker_template_renders_capabilities(self) -> None:
+        """Test cracker template renders capabilities list."""
+        loader = get_template_loader()
+        capabilities = ["hashcat", "john", "rockyou"]
+
+        result = loader.render(
+            "redteam/agents/cracker.md.jinja",
+            capabilities=capabilities,
+        )
+
+        for cap in capabilities:
+            assert cap in result, f"Capability '{cap}' not found in rendered template"
+
+    def test_template_with_empty_capabilities(self) -> None:
+        """Test templates handle empty capabilities gracefully."""
+        loader = get_template_loader()
+
+        # Should not raise an error, just render without tool list
+        result = loader.render(
+            "redteam/agents/privesc.md.jinja",
+            capabilities=[],
+        )
+
+        # Template should still render the structure
+        assert "Tool Inventory" in result
+        assert "ADCS" in result  # Other content should still be there
+
+    def test_template_without_capabilities_variable(self) -> None:
+        """Test templates handle missing capabilities variable (renders empty)."""
+        loader = get_template_loader()
+
+        # Jinja2 treats undefined as empty list in for loops
+        result = loader.render("redteam/agents/cracker.md.jinja")
+
+        # Should render but with no tools listed
+        assert "Tooling" in result
 
 
 class TestEngineTemplates:
