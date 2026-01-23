@@ -10,10 +10,19 @@ Tests the complete multi-agent workflow including:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.integration
+
+if os.getenv("ARES_RUN_INTEGRATION_TESTS") != "1":
+    pytest.skip(
+        "Set ARES_RUN_INTEGRATION_TESTS=1 to run integration tests.",
+        allow_module_level=True,
+    )
 
 pytest.importorskip("kubernetes")
 
@@ -25,15 +34,15 @@ if "redis" not in sys.modules:
     sys.modules["redis"] = mock_redis_module
     sys.modules["redis.asyncio"] = mock_redis_asyncio
 
-from ares.core.dispatcher import RedTeamDispatcher
-from ares.core.models import (
+from ares.core.dispatcher import RedTeamDispatcher  # noqa: E402
+from ares.core.models import (  # noqa: E402
     AgentInfo,
     AgentRole,
     Credential,
     Host,
     SharedRedTeamState,
 )
-from ares.core.workflows import (
+from ares.core.workflows import (  # noqa: E402
     CredentialTestingTracker,
     credential_expansion_loop,
 )
@@ -459,6 +468,8 @@ class TestCredentialExpansionLoop:
         self, dispatcher, sample_credentials, sample_hosts
     ):
         """Test expansion with credentials and hosts."""
+        dispatcher.wait_for_task = AsyncMock(return_value={"success": False})
+
         # Register lateral agent
         lateral = AgentInfo(
             name="lateral-agent",

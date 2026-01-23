@@ -132,21 +132,15 @@ Coordinate with PrivEsc agent:
 
 ### Tool Inventory
 
-- Responder
-- mitm6
-- Coercer
-- PetitPotam
-- ntlmrelayx
-- krbrelayx
-- printerbug
-- dfscoerce
+{% for tool in capabilities -%}
+- {{ tool }}
+{% endfor -%}
 
 ### Poisoning Tools
 | Tool | Use Case |
 |------|----------|
 | responder | LLMNR/NBT-NS/mDNS poisoning |
 | mitm6 | IPv6 DNS takeover |
-| inveigh | Windows-based Responder |
 
 ### Coercion Tools
 | Tool | Use Case |
@@ -161,7 +155,6 @@ Coordinate with PrivEsc agent:
 |------|----------|
 | ntlmrelayx | Multi-target relay |
 | krbrelayx | Kerberos relay |
-| impacket-ntlmrelayx | Same as above |
 
 ## Hash Types Captured
 

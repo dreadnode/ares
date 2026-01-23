@@ -87,10 +87,9 @@ Your role is to receive hash cracking requests and report cracked credentials ba
 
 ## Tooling
 
-- hashcat
-- john
-- rockyou
-- seclists
+{% for tool in capabilities -%}
+- {{ tool }}
+{% endfor -%}
 
 ## Efficiency Guidelines
 

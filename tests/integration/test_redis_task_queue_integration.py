@@ -8,10 +8,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.integration
+
+if os.getenv("ARES_RUN_INTEGRATION_TESTS") != "1":
+    pytest.skip(
+        "Set ARES_RUN_INTEGRATION_TESTS=1 to run integration tests.",
+        allow_module_level=True,
+    )
 
 # Create mock redis module if not installed
 if "redis" not in sys.modules:
@@ -21,10 +30,10 @@ if "redis" not in sys.modules:
     sys.modules["redis"] = mock_redis_module
     sys.modules["redis.asyncio"] = mock_redis_asyncio
 
-from ares.core.dispatcher import RedTeamDispatcher
-from ares.core.models import AgentInfo, AgentRole
-from ares.core.task_queue import RedisTaskQueue, TaskMessage, TaskResult
-from ares.core.worker import (
+from ares.core.dispatcher import RedTeamDispatcher  # noqa: E402
+from ares.core.models import AgentInfo, AgentRole  # noqa: E402
+from ares.core.task_queue import RedisTaskQueue, TaskMessage, TaskResult  # noqa: E402
+from ares.core.worker import (  # noqa: E402
     RedisWorkerAgent,
     generate_prompt_from_task,
 )

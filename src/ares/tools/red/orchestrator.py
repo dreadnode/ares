@@ -372,7 +372,7 @@ class OrchestratorTools(Toolset):
         """
         Request the coercion agent to start network poisoning.
 
-        The poisoner will run responder/mitm6 to capture hashes.
+        The coercion agent will run responder/mitm6 to capture hashes.
 
         Args:
             interface: Network interface to use

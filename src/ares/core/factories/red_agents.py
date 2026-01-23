@@ -16,6 +16,7 @@ from dreadnode.agent.hooks import retry_with_feedback
 from dreadnode.agent.stop import tool_use
 from loguru import logger
 
+from ares.core.config import get_agent_config
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.models import AgentInfo, AgentRole, SharedRedTeamState
 from ares.core.templates import get_template_loader
@@ -117,16 +118,35 @@ def load_agent_instructions(role: AgentRole) -> str:
     Load role-specific system instructions from template.
 
     Falls back to generic red team instructions if role-specific not found.
+    Capabilities are loaded from config and passed to the template.
     """
+    # Get capabilities from config (single source of truth)
+    config_key = role.value  # e.g., "recon", "credential_access", "privesc"
+    agent_config = get_agent_config(config_key)
+    capabilities = agent_config.capabilities
+
     template_path = ROLE_INSTRUCTIONS.get(role)
     if template_path:
         try:
-            return get_template_loader().render(template_path)
+            return get_template_loader().render(template_path, capabilities=capabilities)
         except Exception as e:
             logger.warning(f"Failed to load template {template_path}: {e}")
 
-    # Fallback to generic red team instructions
-    return get_template_loader().render("redteam/agents/system_instructions.md.jinja")
+    # Fallback to generic red team instructions - pass ALL role capabilities
+    all_capabilities = {
+        "recon": get_agent_config("recon").capabilities,
+        "credential_access": get_agent_config("credential_access").capabilities,
+        "cracker": get_agent_config("cracker").capabilities,
+        "coercion": get_agent_config("coercion").capabilities,
+        "acl": get_agent_config("acl").capabilities,
+        "privesc": get_agent_config("privesc").capabilities,
+        "lateral": get_agent_config("lateral").capabilities,
+    }
+    return get_template_loader().render(
+        "redteam/agents/system_instructions.md.jinja",
+        capabilities=capabilities,
+        all_capabilities=all_capabilities,
+    )
 
 
 def create_role_hooks(
@@ -297,7 +317,7 @@ def create_role_hooks(
             "4. Report new credentials back"
         ),
         AgentRole.COERCION: (
-            "You seem stuck. As poisoner, focus on:\n"
+            "You seem stuck. As coercion, focus on:\n"
             "1. Start responder/mitm6 if not running\n"
             "2. Use coercion techniques (petitpotam, coercer)\n"
             "3. Report captured hashes"
@@ -406,6 +426,8 @@ def create_agent_info(
     """
     Create AgentInfo for registration with dispatcher.
 
+    Capabilities are loaded from config (single source of truth).
+
     Args:
         role: The agent role.
         pod_name: Name of the Kubernetes pod.
@@ -413,82 +435,16 @@ def create_agent_info(
     Returns:
         AgentInfo object.
     """
-    # Define capabilities per role
-    role_capabilities: dict[AgentRole, set[str]] = {
-        AgentRole.RECON: {
-            "nmap",
-            "netexec",
-            "rpcclient",
-            "ldapsearch",
-            "enum4linux",
-            "enum4linux-ng",
-            "bloodhound",
-            "certipy",
-            "adidnsdump",
-        },
-        AgentRole.CREDENTIAL_ACCESS: {
-            "impacket-getnpusers",
-            "impacket-secretsdump",
-            "targetedkerberoast",
-            "lsassy",
-            "sprayhound",
-        },
-        AgentRole.CRACKER: {
-            "hashcat",
-            "john",
-            "rockyou",
-            "seclists",
-        },
-        AgentRole.ACL: {
-            "bloodyad",
-            "pywhisker",
-            "dacledit",
-            "targetedkerberoast",
-            "rpcclient",
-        },
-        AgentRole.PRIVESC: {
-            "certipy",
-            "impacket-getst",
-            "impacket-gettgt",
-            "impacket-rbcd",
-            "mssqlclient",
-            "nopac",
-            "printnightmare",
-            "raisechild",
-            "krbrelayup",
-            "printspoofer",
-            "godpotato",
-            "winpeas",
-            "linpeas",
-            "powerupsql",
-        },
-        AgentRole.LATERAL: {
-            "evil-winrm",
-            "impacket-psexec",
-            "impacket-wmiexec",
-            "impacket-smbexec",
-            "impacket-secretsdump",
-            "smbclient",
-            "xfreerdp",
-            "sshpass",
-        },
-        AgentRole.COERCION: {
-            "responder",
-            "mitm6",
-            "coercer",
-            "petitpotam",
-            "ntlmrelayx",
-            "krbrelayx",
-            "printerbug",
-            "dfscoerce",
-        },
-    }
+    # Get capabilities from config (single source of truth)
+    config_key = role.value  # e.g., "recon", "credential_access", "privesc"
+    agent_config = get_agent_config(config_key)
+    capabilities = set(agent_config.capabilities)
 
     return AgentInfo(
         name=f"ares-{role.value.replace('_', '-')}",
         pod_name=pod_name,
         role=role,
-        capabilities=role_capabilities.get(role, set()),
+        capabilities=capabilities,
     )
 
 

@@ -18,7 +18,7 @@ from dreadnode.agent import Agent, Thread
 from dreadnode.agent.stop import tool_use
 from loguru import logger
 
-from ares.core.config import get_namespace, get_redis_url
+from ares.core.config import get_agent_config, get_namespace, get_redis_url
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.factories.red_agents import (
     create_role_hooks,
@@ -677,6 +677,8 @@ async def _create_agent_ensemble(
     """
     Create the agent ensemble with role-specific configurations.
 
+    Capabilities are loaded from config (single source of truth).
+
     Args:
         dispatcher: The dispatcher instance
         model: LLM model to use
@@ -688,118 +690,24 @@ async def _create_agent_ensemble(
     """
     agents: dict[AgentRole, AgentInfo] = {}
 
-    # Define agent configurations
-    agent_configs: list[dict[str, AgentRole | str | set[str]]] = [
-        {
-            "role": AgentRole.RECON,
-            "name": "ares-recon",
-            "pod_selector": "ares.dreadnode.io/role=recon",
-            "capabilities": {
-                "nmap",
-                "netexec",
-                "rpcclient",
-                "ldapsearch",
-                "enum4linux",
-                "enum4linux-ng",
-                "bloodhound",
-                "certipy",
-                "adidnsdump",
-            },
-        },
-        {
-            "role": AgentRole.CREDENTIAL_ACCESS,
-            "name": "ares-credential-access",
-            "pod_selector": "ares.dreadnode.io/role=credential_access",
-            "capabilities": {
-                "impacket-getnpusers",
-                "impacket-secretsdump",
-                "targetedkerberoast",
-                "lsassy",
-                "sprayhound",
-            },
-        },
-        {
-            "role": AgentRole.CRACKER,
-            "name": "ares-cracker",
-            "pod_selector": "ares.dreadnode.io/role=cracker",
-            "capabilities": {"hashcat", "john", "rockyou", "seclists"},
-        },
-        {
-            "role": AgentRole.ACL,
-            "name": "ares-acl",
-            "pod_selector": "ares.dreadnode.io/role=acl",
-            "capabilities": {
-                "bloodyad",
-                "pywhisker",
-                "dacledit",
-                "targetedkerberoast",
-                "rpcclient",
-            },
-        },
-        {
-            "role": AgentRole.PRIVESC,
-            "name": "ares-privesc",
-            "pod_selector": "ares.dreadnode.io/role=privesc",
-            "capabilities": {
-                "certipy",
-                "impacket-getst",
-                "impacket-gettgt",
-                "impacket-rbcd",
-                "mssqlclient",
-                "nopac",
-                "printnightmare",
-                "raisechild",
-                "krbrelayup",
-                "printspoofer",
-                "godpotato",
-                "winpeas",
-                "linpeas",
-                "powerupsql",
-            },
-        },
-        {
-            "role": AgentRole.LATERAL,
-            "name": "ares-lateral",
-            "pod_selector": "ares.dreadnode.io/role=lateral",
-            "capabilities": {
-                "evil-winrm",
-                "impacket-psexec",
-                "impacket-wmiexec",
-                "impacket-smbexec",
-                "impacket-secretsdump",
-                "smbclient",
-                "xfreerdp",
-                "sshpass",
-            },
-        },
-        {
-            "role": AgentRole.COERCION,
-            "name": "ares-coercion",
-            "pod_selector": "ares.dreadnode.io/role=coercion",
-            "capabilities": {
-                "responder",
-                "mitm6",
-                "coercer",
-                "petitpotam",
-                "ntlmrelayx",
-                "krbrelayx",
-                "printerbug",
-                "dfscoerce",
-            },
-        },
+    # All roles to create
+    roles_to_create = [
+        AgentRole.RECON,
+        AgentRole.CREDENTIAL_ACCESS,
+        AgentRole.CRACKER,
+        AgentRole.ACL,
+        AgentRole.PRIVESC,
+        AgentRole.LATERAL,
+        AgentRole.COERCION,
     ]
 
-    for config in agent_configs:
-        role = config["role"]
-        name = config["name"]
-        capabilities = config["capabilities"]
-        # Type narrowing for mypy
-        if not isinstance(role, AgentRole):
-            continue
-        if not isinstance(name, str):
-            continue
-        if not isinstance(capabilities, set):
-            continue
+    for role in roles_to_create:
+        # Get capabilities from config (single source of truth)
+        config_key = role.value  # e.g., "recon", "credential_access"
+        agent_config = get_agent_config(config_key)
+        capabilities = set(agent_config.capabilities)
+
+        name = f"ares-{role.value.replace('_', '-')}"
         agent_info = AgentInfo(
             name=name,
             pod_name=f"{name}-0",  # Will be updated by K8s discovery

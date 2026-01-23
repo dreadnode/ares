@@ -41,15 +41,9 @@ Your role is to delegate tasks to specialized agents and coordinate the overall 
 
 ## Tools to Use
 
-- nmap
-- netexec
-- rpcclient
-- ldapsearch
-- enum4linux
-- enum4linux-ng
-- bloodhound
-- certipy
-- adidnsdump
+{% for tool in capabilities -%}
+- {{ tool }}
+{% endfor -%}
 
 ## Priority Workflow
 

@@ -108,11 +108,9 @@ bloodyad_add_group_member(group="Domain Admins", member="youruser")
 
 ### Tool Inventory
 
-- bloodyAD
-- pywhisker
-- dacledit
-- targetedKerberoast
-- rpcclient
+{% for tool in capabilities -%}
+- {{ tool }}
+{% endfor -%}
 
 | Tool | Use Case |
 |------|----------|

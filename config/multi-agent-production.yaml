@@ -49,6 +49,22 @@ agents:
       - bloodhound
       - certipy
       - adidnsdump
+      - impacket-getnpusers
+      - impacket-getuserspns
+      - impacket-regsecrets
+      - impacket-secretsdump
+      - impacket-psexec
+      - impacket-wmiexec
+      - impacket-smbexec
+      - impacket-rbcd
+      - impacket-getst
+      - impacket-gettgt
+      - mssqlclient
+      - raisechild
+      - impacket-ticketer
+      - dig
+      - nslookup
+      - whois
 
   credential_access:
     model: "gpt-5.2"
@@ -58,9 +74,10 @@ agents:
     capabilities:
       - impacket-getnpusers
       - impacket-secretsdump
-      - targetedkerberoast
+      - targeted_kerberoast
       - lsassy
       - sprayhound
+      - rpcclient
 
   cracker:
     model: "gpt-5.2"
@@ -82,7 +99,7 @@ agents:
       - bloodyad
       - pywhisker
       - dacledit
-      - targetedkerberoast
+      - targeted_kerberoast
       - rpcclient
 
   privesc:
@@ -102,9 +119,16 @@ agents:
       - krbrelayup
       - printspoofer
       - godpotato
+      - sweetpotato
       - winpeas
       - linpeas
       - powerupsql
+      - powerup
+      - sharpup
+      - seatbelt
+      - sharpgpoabuse
+      - runascs
+      - scmuacbypass
 
   lateral:
     model: "gpt-5.2"
@@ -133,6 +157,8 @@ agents:
       - petitpotam
       - ntlmrelayx
       - krbrelayx
+      - addspn
+      - dnstool
       - printerbug
       - dfscoerce
 

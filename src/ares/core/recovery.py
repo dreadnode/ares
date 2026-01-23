@@ -329,7 +329,7 @@ class OperationRecoveryManager:
             return {}
 
         if roles is None:
-            roles = ["orchestrator", "cracker", "acl", "privesc", "lateral", "poisoner"]
+            roles = ["orchestrator", "cracker", "acl", "privesc", "lateral", "coercion"]
 
         return await self._k8s.wait_for_all_pods(roles, timeout)
 
