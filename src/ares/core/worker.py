@@ -313,8 +313,20 @@ TASK_PROMPTS: dict[MessageType, callable] = {
         f"Domain: {msg.domain}\n"
         f"Find Path To: {msg.find_path_to}\n"
         f"Task ID: {msg.task_id}\n\n"
-        "Run BloodHound collection if needed, then find shortest paths. "
+        "Use provided ACL/BloodHound context if available. "
+        "If pathing data is missing, request BloodHound analysis from recon/orchestrator. "
         "Execute any viable ACL abuse attacks. Report the result using task_complete."
+    ),
+    MessageType.CREDENTIAL_ACCESS_REQUEST: lambda msg: (
+        "Perform credential access against the target environment:\n"
+        f"Domain: {msg.domain}\n"
+        f"Targets: {', '.join(msg.target_ips) if msg.target_ips else 'N/A'}\n"
+        f"Username: {msg.username or 'N/A'}\n"
+        f"Credential: {'password' if msg.password else 'hash' if msg.hash_value else 'none'}\n"
+        f"Techniques: {', '.join(msg.techniques) if msg.techniques else 'auto-select'}\n"
+        f"Task ID: {msg.task_id}\n\n"
+        "Prioritize GetNPUsers/AS-REP roast, Kerberoast, secretsdump, and LSASS "
+        "if credentials allow. Report any hashes or credentials using task_complete."
     ),
     MessageType.EXPLOIT_REQUEST: lambda msg: (
         f"Exploit vulnerability:\n"
@@ -391,7 +403,30 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:
             f"Domain: {payload['domain']}\n"
             f"Find Path To: {payload.get('find_path_to', 'Domain Admins')}\n"
             f"Task ID: {task.task_id}\n\n"
-            "Run BloodHound collection if needed. Execute viable ACL abuse attacks."
+            "Use provided ACL/BloodHound context if available. "
+            "If pathing data is missing, request BloodHound analysis from recon/orchestrator. "
+            "Execute viable ACL abuse attacks."
+        )
+
+    if task.task_type == "credential_access":
+        cred_type = (
+            "password"
+            if payload.get("password")
+            else "hash"
+            if payload.get("hash_value")
+            else "none"
+        )
+        targets = payload.get("target_ips") or []
+        return (
+            "Perform credential access against the target environment:\n"
+            f"Domain: {payload.get('domain', '')}\n"
+            f"Targets: {', '.join(targets) if targets else 'N/A'}\n"
+            f"Username: {payload.get('username') or 'N/A'}\n"
+            f"Credential: {cred_type}\n"
+            f"Techniques: {', '.join(payload.get('techniques', [])) or 'auto-select'}\n"
+            f"Task ID: {task.task_id}\n\n"
+            "Prioritize GetNPUsers/AS-REP roast, Kerberoast, secretsdump, and LSASS "
+            "if credentials allow. Report any hashes or credentials."
         )
 
     if task.task_type == "exploit":
@@ -509,6 +544,17 @@ class RedisWorkerAgent:
         self._current_task: str | None = None
         self._tasks_completed = 0
         self._pointer_switched = False
+        self._run_agent_in_thread = self.role == AgentRole.ACL
+
+    def _run_agent_sync(self, prompt: str) -> Any:
+        """Run the async agent in a dedicated event loop (thread-safe helper)."""
+        return asyncio.run(self.agent.run(prompt))
+
+    async def _run_agent(self, prompt: str) -> Any:
+        """Run the agent without blocking the worker event loop."""
+        if self._run_agent_in_thread:
+            return await asyncio.to_thread(self._run_agent_sync, prompt)
+        return await self.agent.run(prompt)
 
     async def start(self) -> None:
         """Start the Redis worker loop."""
@@ -663,7 +709,7 @@ class RedisWorkerAgent:
 
             # Run agent
             logger.info(f"[{self.agent_name}] Running agent for task {task.task_id}")
-            result = await self.agent.run(prompt)
+            result = await self._run_agent(prompt)
             result_text = self._extract_result(result)
             agent_error = self._extract_agent_error(result)
             result_summary = self._summarize_agent_result(result)
@@ -1059,7 +1105,17 @@ class WorkerAgent:
         self._running = False
         self._current_task: str | None = None
         self._tasks_completed = 0
-        self._pointer_switched = False
+        self._run_agent_in_thread = self.role == AgentRole.ACL
+
+    def _run_agent_sync(self, prompt: str) -> Any:
+        """Run the async agent in a dedicated event loop (thread-safe helper)."""
+        return asyncio.run(self.agent.run(prompt))
+
+    async def _run_agent(self, prompt: str) -> Any:
+        """Run the agent without blocking the worker event loop."""
+        if self._run_agent_in_thread:
+            return await asyncio.to_thread(self._run_agent_sync, prompt)
+        return await self.agent.run(prompt)
 
     async def start(self) -> None:
         """Start the worker loop."""
@@ -1186,7 +1242,7 @@ class WorkerAgent:
 
             # Run the agent
             logger.info(f"[{self.agent_name}] Running agent for task {task_id}")
-            result = await self.agent.run(prompt)
+            result = await self._run_agent(prompt)
 
             # Extract result from agent output
             result_text = self._extract_result(result)
@@ -1304,7 +1360,7 @@ async def run_worker(  # noqa: PLR0912
     uses in-memory dispatcher queues.
 
     Args:
-        role: The agent role (cracker, acl, privesc, lateral, poisoning).
+        role: The agent role (credential_access, cracker, acl, privesc, lateral, coercion).
         operation_id: The operation ID to join (optional - will discover if not provided).
         redis_url: Redis URL for task queue and state (default: from config).
         model: LLM model to use.
