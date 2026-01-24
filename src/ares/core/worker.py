@@ -18,7 +18,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from loguru import logger
 
@@ -737,11 +737,25 @@ class RedisWorkerAgent:
             if agent_error:
                 if "Maximum steps reached" in agent_error:
                     self._dump_task_trace(task, prompt, result_text, result)
-                    excerpt = result_text[-800:] if result_text else ""
-                    logger.error(
-                        f"[{self.agent_name}] Max steps reached for task {task.task_id}; "
-                        f"output_excerpt={excerpt!r}"
-                    )
+
+                    # Check if max steps was caused by model refusing to execute
+                    is_refusing, refusal_count, sample_refusal = self._detect_model_refusal(result)
+                    if is_refusing:
+                        logger.critical(
+                            f"[{self.agent_name}] 🚨 MODEL REFUSAL DETECTED for task {task.task_id}! "
+                            f"Model refused {refusal_count} times. This model may not support security testing. "
+                            f"Sample refusal: {sample_refusal!r}"
+                        )
+                        agent_error = (
+                            f"MODEL REFUSAL: Model refused to execute security tasks {refusal_count} times. "
+                            f"Consider switching to a model that supports authorized security testing."
+                        )
+                    else:
+                        excerpt = result_text[-800:] if result_text else ""
+                        logger.error(
+                            f"[{self.agent_name}] Max steps reached for task {task.task_id}; "
+                            f"output_excerpt={excerpt!r}"
+                        )
                 await self.task_queue.send_result(
                     task_id=task.task_id,
                     success=False,
@@ -959,6 +973,86 @@ class RedisWorkerAgent:
                 )
             except Exception as status_error:
                 logger.warning(f"[{self.agent_name}] Failed to record task status: {status_error}")
+
+    # Patterns that indicate a model is refusing to execute security tasks
+    MODEL_REFUSAL_PATTERNS: ClassVar[list[str]] = [
+        r"I can'?t do that",
+        r"I can'?t assist with",
+        r"I can'?t comply with",
+        r"I can'?t help with",
+        r"I'?m not able to",
+        r"I cannot (?:assist|help|comply|do)",
+        r"(?:is |are )?disallowed",
+        r"(?:is |are )?not allowed",
+        r"against (?:my |the )?policy",
+        r"violates? (?:my |the )?(?:policy|guidelines)",
+        r"Denied by policy",
+        r"lateral movement.{0,50}credential.{0,50}disallowed",
+        r"secretsdump.{0,30}disallowed",
+    ]
+
+    def _detect_model_refusal(self, result: Any) -> tuple[bool, int, str | None]:
+        """
+        Detect if the model is refusing to execute tasks.
+
+        Checks agent messages for refusal patterns that indicate the model
+        won't execute security testing tasks (e.g., GPT refusing lateral movement).
+
+        Returns:
+            Tuple of (is_refusing, refusal_count, sample_refusal_message)
+        """
+        messages = getattr(result, "messages", None)
+        if not messages:
+            return False, 0, None
+
+        try:
+            messages_list = list(messages) if not isinstance(messages, list) else messages
+        except Exception:
+            return False, 0, None
+
+        refusal_count = 0
+        sample_message = None
+
+        for msg in messages_list:
+            # Extract content from message dict or object
+            if isinstance(msg, dict):
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+            else:
+                role = getattr(msg, "role", "")
+                content = getattr(msg, "content", "")
+
+            # Only check assistant messages
+            if role != "assistant":
+                continue
+
+            content_str = str(content) if content else ""
+
+            # Check for refusal patterns
+            for pattern in self.MODEL_REFUSAL_PATTERNS:
+                if re.search(pattern, content_str, re.IGNORECASE):
+                    refusal_count += 1
+                    if sample_message is None:
+                        # Capture a sample, truncated for logging
+                        sample_message = (
+                            content_str[:200] + "..." if len(content_str) > 200 else content_str
+                        )
+                    break  # Count each message only once
+
+        # Consider it a refusal loop if >30% of assistant messages are refusals
+        # and there are at least 5 refusals
+        assistant_count = sum(
+            1
+            for msg in messages_list
+            if (isinstance(msg, dict) and msg.get("role") == "assistant")
+            or (hasattr(msg, "role") and msg.role == "assistant")
+        )
+
+        is_refusing = refusal_count >= 5 and (
+            assistant_count == 0 or refusal_count / max(assistant_count, 1) > 0.3
+        )
+
+        return is_refusing, refusal_count, sample_message
 
     def _extract_result(self, result: Any) -> str:
         """Extract text result from agent output."""

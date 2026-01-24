@@ -768,6 +768,36 @@ class RedTeamDispatcher:
         logger.info(f"Lateral movement request {task_id} sent to {lateral_agent}")
         return task_id
 
+    def _find_domain_credential(self, domain: str) -> Credential | None:
+        """Find a credential for the specified domain."""
+        domain_lower = domain.lower() if domain else ""
+        credential = None
+        for cred in self.shared_state.all_credentials:
+            cred_domain = cred.domain.lower() if cred.domain else ""
+            if cred_domain == domain_lower or domain_lower in cred_domain:
+                if cred.password:  # Prefer credentials with passwords
+                    return cred
+                if not credential:
+                    credential = cred
+        return credential
+
+    def _find_domain_controller_ip(self, domain: str) -> str:
+        """Find DC IP for the specified domain."""
+        domain_lower = domain.lower() if domain else ""
+        # Check target first
+        if self.shared_state.target:
+            target_domain = (self.shared_state.target.domain or "").lower()
+            if target_domain == domain_lower or domain_lower in target_domain:
+                return self.shared_state.target.ip
+        # Search all hosts
+        for host in self.shared_state.all_hosts:
+            if (
+                "dc" in (host.hostname or "").lower()
+                or "domain controller" in str(host.roles).lower()
+            ):
+                return host.ip
+        return ""
+
     async def request_acl_analysis(
         self,
         target_user: str,
@@ -789,11 +819,25 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        # Find credential and DC for this domain
+        credential = self._find_domain_credential(domain)
+        dc_ip = self._find_domain_controller_ip(domain)
+
         payload = {
             "target_user": target_user,
             "domain": domain,
             "find_path_to": find_path_to,
+            "dc_ip": dc_ip,
         }
+        if credential:
+            payload["username"] = credential.username
+            payload["password"] = credential.password or ""
+            if not credential.password:
+                # Check for hash
+                for h in self.shared_state.all_hashes:
+                    if h.username == credential.username:
+                        payload["hash"] = h.hash_value
+                        break
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:

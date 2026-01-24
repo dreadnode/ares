@@ -222,7 +222,7 @@ class K8sExecutor:
                 source_agent="orchestrator",
             )
 
-            logger.debug(f"Command task {task_id} submitted to recon worker")
+            logger.debug(f"Command task {task_id} submitted to {target_role} worker")
 
             # Wait for result
             result = await task_queue.wait_for_result(task_id, timeout=float(timeout_seconds))
