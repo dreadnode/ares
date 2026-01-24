@@ -175,7 +175,7 @@ class TestExecutiveSummary:
     ):
         """Test summary includes investigated users."""
         summary = generator._executive_summary(populated_investigation_state)
-        assert "alice.smith" in summary or "bob.jones" in summary
+        assert "danj" in summary or "adamb" in summary
 
     def test_summary_escalated_assessment(
         self, generator: MarkdownReportGenerator, escalated_investigation_state: InvestigationState

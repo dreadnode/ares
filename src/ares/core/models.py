@@ -488,6 +488,7 @@ class RedTeamState:
     tested_credentials: set[str] = field(default_factory=set)
     timeline: list[TimelineEvent] = field(default_factory=list)
     identified_techniques: set[str] = field(default_factory=set)
+    pending_credential_findings: set[str] = field(default_factory=set)
 
     # Success flags
     has_domain_admin: bool = False
@@ -658,19 +659,48 @@ class SharedRedTeamState:
     # Timeline for cross-agent correlation
     operation_timeline: list[TimelineEvent] = field(default_factory=list)
     identified_techniques: set[str] = field(default_factory=set)
+    pending_credential_findings: set[str] = field(default_factory=set)
 
     def add_credential(self, credential: Credential, source_agent: str) -> bool:
         """Add credential if not duplicate. Returns True if added."""
         username = credential.username.strip()
+        domain = credential.domain.strip()
+        password = credential.password.strip()
         if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
             return False
-        key = f"{credential.domain}:{credential.username}:{credential.password}".lower()
+        # Guard against file-path artifacts (e.g., /tmp/users.txt) leaking in.
+        if "/" in username or "\\" in username or username.endswith(".txt"):
+            return False
+        self.add_user(username, domain)
+        key = f"{domain}:{username}:{password}".lower()
         for existing in self.all_credentials:
-            existing_key = f"{existing.domain}:{existing.username}:{existing.password}".lower()
+            existing_key = f"{existing.domain.strip()}:{existing.username.strip()}:{existing.password.strip()}".lower()
             if key == existing_key:
+                pending_key = f"{domain}:{username}".lower()
+                self.pending_credential_findings.discard(pending_key)
                 return False
+        credential.username = username
+        credential.domain = domain
+        credential.password = password
         credential.source = f"{source_agent}:{credential.source}"
         self.all_credentials.append(credential)
+        pending_key = f"{domain}:{username}".lower()
+        self.pending_credential_findings.discard(pending_key)
+        return True
+
+    def add_user(self, username: str, domain: str) -> bool:
+        """Add user if not duplicate. Returns True if added."""
+        if not username:
+            return False
+        normalized = username.strip()
+        if not normalized or normalized.lower() in {"(none)", "none", "null", "(null)"}:
+            return False
+        if "/" in normalized or "\\" in normalized or normalized.endswith(".txt"):
+            return False
+        for existing in self.all_users:
+            if existing.username == normalized and existing.domain == domain:
+                return False
+        self.all_users.append(User(username=normalized, domain=domain))
         return True
 
     def add_hash(self, hash_obj: Hash, source_agent: str) -> bool:
@@ -683,8 +713,43 @@ class SharedRedTeamState:
 
     def add_host(self, host: Host) -> bool:
         """Add host if not duplicate. Returns True if added."""
+        if not host.ip or not host.ip.strip():
+            return False
+        host.ip = host.ip.strip()
+        host.hostname = host.hostname.strip()
+        if host.hostname:
+            hostname_lower = host.hostname.lower()
+            if hostname_lower.startswith("ip-") and "compute.internal" in hostname_lower:
+                host.hostname = ""
         for existing in self.all_hosts:
             if existing.ip == host.ip:
+                # Merge stronger hostname/OS details instead of dropping updates.
+                existing_hostname = (existing.hostname or "").strip()
+                if existing_hostname:
+                    existing_lower = existing_hostname.lower()
+                    if existing_lower.startswith("ip-") and "compute.internal" in existing_lower:
+                        existing_hostname = ""
+                        existing.hostname = ""
+                new_hostname = (host.hostname or "").strip()
+                if new_hostname:
+                    existing_lower = existing_hostname.lower()
+                    existing_is_short = "." not in existing_hostname
+                    new_is_fqdn = "." in new_hostname
+                    existing_is_ptr = (
+                        existing_lower.startswith("ip-") and "compute.internal" in existing_lower
+                    )
+                    if (
+                        not existing_hostname
+                        or existing_is_ptr
+                        or (existing_is_short and new_is_fqdn)
+                    ):
+                        existing.hostname = new_hostname
+                if host.os and (not existing.os or existing.os.lower() == "unknown"):
+                    existing.os = host.os
+                if host.roles:
+                    existing.roles = list({*existing.roles, *host.roles})
+                if host.services:
+                    existing.services = list({*existing.services, *host.services})
                 return False
         self.all_hosts.append(host)
         return True
@@ -783,6 +848,7 @@ class SharedRedTeamState:
             "exploited_count": len(self.exploited_vulnerabilities),
             "pending_tasks": len(self.pending_tasks),
             "completed_tasks": len(self.completed_tasks),
+            "pending_credential_findings": len(self.pending_credential_findings),
             "has_domain_admin": self.has_domain_admin,
             "has_golden_ticket": self.has_golden_ticket,
             "registered_agents": list(self.registered_agents.keys()),
@@ -792,6 +858,14 @@ class SharedRedTeamState:
         """Serialize state for Redis storage."""
         import pickle  # nosec B403
 
+        for host in self.all_hosts:
+            hostname = (host.hostname or "").strip()
+            if not hostname:
+                continue
+            lowered = hostname.lower()
+            if lowered.startswith("ip-") and "compute.internal" in lowered:
+                host.hostname = ""
+
         return pickle.dumps(self)  # nosec B301
 
     @classmethod
@@ -799,7 +873,32 @@ class SharedRedTeamState:
         """Deserialize state from Redis."""
         import pickle  # nosec B403
 
-        return pickle.loads(data)  # noqa: S301  # nosec B301
+        state = pickle.loads(data)  # noqa: S301  # nosec B301
+        if not hasattr(state, "pending_credential_findings"):
+            state.pending_credential_findings = set()
+        deduped_creds: list[Credential] = []
+        seen_creds: set[str] = set()
+        for cred in state.all_credentials:
+            username = (cred.username or "").strip()
+            domain = (cred.domain or "").strip()
+            password = (cred.password or "").strip()
+            key = f"{domain}:{username}:{password}".lower()
+            if not username or key in seen_creds:
+                continue
+            seen_creds.add(key)
+            cred.username = username
+            cred.domain = domain
+            cred.password = password
+            deduped_creds.append(cred)
+        state.all_credentials = deduped_creds
+        for host in state.all_hosts:
+            hostname = (host.hostname or "").strip()
+            if not hostname:
+                continue
+            lowered = hostname.lower()
+            if lowered.startswith("ip-") and "compute.internal" in lowered:
+                host.hostname = ""
+        return state
 
 
 @dataclass

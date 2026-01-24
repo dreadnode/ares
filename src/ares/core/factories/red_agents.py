@@ -24,6 +24,7 @@ from ares.tools.red.network import (
     ACLExploitTools,
     BloodHoundTools,
     CertipyTools,
+    CoercionNetworkTools,
     CoercionTools,
     CrackingTools,
     CredentialDiscoveryTools,
@@ -34,7 +35,6 @@ from ares.tools.red.network import (
     LateralMovementTools,
     MSSQLTools,
     NetworkEnumerationTools,
-    PoisoningTools,
     PostureValidationTools,
     RedTeamReportingTools,
     SharePilferingTools,
@@ -83,8 +83,8 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
     ],
     AgentRole.COERCION: [
         CoercionTools,
-        PoisoningTools,
-        # PoisonCallbackTools added separately
+        CoercionNetworkTools,
+        # CoercionCallbackTools added separately
     ],
 }
 
@@ -106,7 +106,7 @@ ROLE_MAX_STEPS: dict[AgentRole, int] = {
     AgentRole.RECON: 200,
     AgentRole.CREDENTIAL_ACCESS: 120,
     AgentRole.CRACKER: 50,
-    AgentRole.ACL: 100,
+    AgentRole.ACL: 150,  # ACL analysis requires complex path finding
     AgentRole.PRIVESC: 100,
     AgentRole.LATERAL: 200,
     AgentRole.COERCION: 30,
@@ -404,6 +404,10 @@ def create_specialized_agent(
 
     agent_name = f"ares-{role.value.replace('_', '-')}"
     max_steps = max_steps or ROLE_MAX_STEPS.get(role, 100)
+    if role == AgentRole.LATERAL and max_steps < 300:
+        max_steps = 300
+    if role == AgentRole.CRACKER and max_steps < 150:
+        max_steps = 150
 
     logger.info(f"Creating {agent_name} agent with {len(tools)} toolsets, max_steps={max_steps}")
 

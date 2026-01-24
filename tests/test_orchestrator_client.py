@@ -30,7 +30,7 @@ async def test_submit_operation_uses_env_model_and_env_vars(monkeypatch):
     with patch("ares.core.orchestrator_client.RedisTaskQueue", return_value=fake_queue):
         result = await submit_operation(
             operation_id="op-1",
-            target_domain="example.com",
+            target_domain="contoso.local",
             target_ips=["192.168.56.1"],
             model=None,
             env_vars={"OPENAI_API_KEY": "test-key"},  # pragma: allowlist secret
@@ -52,7 +52,7 @@ async def test_submit_operation_raises_when_model_missing(monkeypatch):
     with pytest.raises(ValueError, match="No model specified"):
         await submit_operation(
             operation_id="op-2",
-            target_domain="example.com",
+            target_domain="contoso.local",
             target_ips=["192.168.56.2"],
             model=None,
         )

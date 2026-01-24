@@ -291,21 +291,21 @@ class TestCredentialHandling:
                 Credential(
                     username="(none)",
                     password="hash123",  # pragma: allowlist secret
-                    domain="example.local",
+                    domain="contoso.local",
                     source="orchestrator:note",
                 ),
                 Credential(
                     username="user1",
                     password="password1",  # pragma: allowlist secret
-                    domain="example.local",
+                    domain="contoso.local",
                     source="username_as_password",
                 ),
             ]
         )
 
         output = orchestrator_tools.get_all_credentials()
-        assert "example.local\\user1" in output
-        assert "example.local\\(none)" not in output
+        assert "contoso.local\\user1" in output
+        assert "contoso.local\\(none)" not in output
 
     def test_get_all_credentials_only_invalid_returns_empty(self, orchestrator_tools, shared_state):
         """If only invalid creds exist, return the empty message."""
@@ -313,7 +313,7 @@ class TestCredentialHandling:
             Credential(
                 username="none",
                 password="hash123",  # pragma: allowlist secret
-                domain="example.local",
+                domain="contoso.local",
                 source="orchestrator:note",
             )
         )
@@ -327,7 +327,7 @@ class TestCredentialHandling:
         result = await orchestrator_tools.broadcast_credential(
             username="(none)",
             password="hash123",  # pragma: allowlist secret
-            domain="example.local",
+            domain="contoso.local",
         )
 
         assert "Invalid username" in result
@@ -338,7 +338,7 @@ class TestCredentialHandling:
         """Reject broadcast with no password/hash."""
         result = await orchestrator_tools.broadcast_credential(
             username="user1",
-            domain="example.local",
+            domain="contoso.local",
         )
 
         assert "Missing password/hash" in result
@@ -353,13 +353,13 @@ class TestCredentialHandling:
                 Credential(
                     username="(none)",
                     password="hash123",  # pragma: allowlist secret
-                    domain="example.local",
+                    domain="contoso.local",
                     source="orchestrator:No valid creds yet; only unauthenticated enumeration performed.",
                 ),
                 Credential(
                     username="user1",
                     password="password1",  # pragma: allowlist secret
-                    domain="example.local",
+                    domain="contoso.local",
                     source="username_as_password",
                 ),
             ]

@@ -22,7 +22,7 @@ agents:
       - dispatch_acl_analysis
       - dispatch_lateral_movement
       - dispatch_privesc_exploit
-      - start_poisoning
+      - start_coercion
       - trigger_credential_expansion
       - queue_vulnerability_for_exploitation
       - get_pending_tasks
@@ -82,7 +82,7 @@ agents:
   cracker:
     model: "gpt-5.2"
     # model: "claude-sonnet-4-20250514"
-    max_steps: 50
+    max_steps: 150
     pod_selector: "ares.dreadnode.io/role=cracker"
     capabilities:
       - hashcat
@@ -93,7 +93,7 @@ agents:
   acl:
     model: "gpt-5.2"
     # model: "claude-sonnet-4-20250514"
-    max_steps: 50
+    max_steps: 150  # ACL analysis requires complex path finding
     pod_selector: "ares.dreadnode.io/role=acl"
     capabilities:
       - bloodyad
@@ -133,7 +133,7 @@ agents:
   lateral:
     model: "gpt-5.2"
     # model: "claude-sonnet-4-20250514"
-    max_steps: 200
+    max_steps: 300
     pod_selector: "ares.dreadnode.io/role=lateral"
     capabilities:
       - evil-winrm
@@ -169,7 +169,7 @@ timeouts:
   operation_timeout: 7200  # seconds - 2 hours max operation time
   lateral_movement: 180  # seconds
   hash_cracking: 600  # seconds - 10 minutes
-  exploitation: 300  # seconds
+  exploitation: 900  # seconds - ACL tasks can take 10+ minutes
 
 # Recovery configuration
 recovery:

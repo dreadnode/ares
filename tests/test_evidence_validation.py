@@ -325,8 +325,8 @@ class TestClassifyIOC:
 
     def test_classify_hostname(self):
         """Test classifying hostname."""
-        assert _classify_ioc("server01.domain.local") == "hostname"
-        assert _classify_ioc("dc01.corp.example.com") == "hostname"
+        assert _classify_ioc("app-srv01.contoso.local") == "hostname"
+        assert _classify_ioc("dc01.corp.contoso.com") == "hostname"
 
     def test_classify_user_domain(self):
         """Test classifying domain\\user."""

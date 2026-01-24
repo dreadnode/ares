@@ -36,13 +36,13 @@ class TestHostConnection:
             destination_host="server01",
             connection_type="rdp",
             timestamp=ts,
-            user="admin",
+            user="danj",
             evidence_ids=["ev001", "ev002"],
             mitre_technique="T1021.001",
         )
 
         assert conn.timestamp == ts
-        assert conn.user == "admin"
+        assert conn.user == "danj"
         assert conn.evidence_ids == ["ev001", "ev002"]
         assert conn.mitre_technique == "T1021.001"
 
@@ -134,13 +134,13 @@ class TestLateralGraph:
             destination="server01",
             conn_type="rdp",
             timestamp=ts,
-            user="admin",
+            user="danj",
             evidence_id="ev001",
             mitre_technique="T1021.001",
         )
 
         assert conn.timestamp == ts
-        assert conn.user == "admin"
+        assert conn.user == "danj"
         assert conn.mitre_technique == "T1021.001"
 
     def test_mark_investigated(self) -> None:
@@ -257,14 +257,14 @@ class TestLateralGraph:
     def test_get_unique_users(self) -> None:
         """Test getting unique users from connections."""
         graph = LateralGraph()
-        graph.add_connection("ws01", "srv01", "smb", user="admin")
-        graph.add_connection("ws02", "srv01", "rdp", user="admin")
-        graph.add_connection("ws03", "srv02", "wmi", user="svc_account")
+        graph.add_connection("ws01", "srv01", "smb", user="danj")
+        graph.add_connection("ws02", "srv01", "rdp", user="danj")
+        graph.add_connection("ws03", "srv02", "wmi", user="svc-sql")
         graph.add_connection("ws04", "srv03", "ssh")  # No user
 
         users = graph.get_unique_users()
 
-        assert users == {"admin", "svc_account"}
+        assert users == {"danj", "svc-sql"}
 
     def test_get_unique_users_empty(self) -> None:
         """Test getting unique users with no connections."""
@@ -277,9 +277,9 @@ class TestLateralGraph:
     def test_to_summary(self) -> None:
         """Test generating graph summary."""
         graph = LateralGraph()
-        graph.add_connection("ws01", "srv01", "smb", user="admin")
-        graph.add_connection("ws01", "srv02", "rdp", user="admin")
-        graph.add_connection("srv01", "dc01", "wmi", user="svc")
+        graph.add_connection("ws01", "srv01", "smb", user="danj")
+        graph.add_connection("ws01", "srv02", "rdp", user="danj")
+        graph.add_connection("srv01", "dc01", "wmi", user="svc-sql")
         graph.mark_investigated("ws01")
 
         summary = graph.to_summary()
@@ -288,7 +288,7 @@ class TestLateralGraph:
         assert summary["hosts_investigated"] == 1
         assert summary["hosts_pending"] == 3  # srv01, srv02, dc01
         assert summary["connection_types"] == {"smb": 1, "rdp": 1, "wmi": 1}
-        assert set(summary["unique_users"]) == {"admin", "svc"}
+        assert set(summary["unique_users"]) == {"danj", "svc-sql"}
 
     def test_to_summary_empty(self) -> None:
         """Test generating summary for empty graph."""
@@ -337,9 +337,9 @@ class TestLateralMovementAnalyzer:
         """Test _looks_like_hostname with valid hostnames."""
         analyzer = LateralMovementAnalyzer()
 
-        assert analyzer._looks_like_hostname("server01.domain.local") is True
-        assert analyzer._looks_like_hostname("workstation.corp.com") is True
-        assert analyzer._looks_like_hostname("dc01.ad.company.net") is True
+        assert analyzer._looks_like_hostname("app-srv01.contoso.local") is True
+        assert analyzer._looks_like_hostname("workstation.corp.contoso.com") is True
+        assert analyzer._looks_like_hostname("dc01.corp.contoso.local") is True
 
     def test_looks_like_hostname_invalid_ip(self) -> None:
         """Test _looks_like_hostname rejects IP addresses."""
@@ -359,7 +359,7 @@ class TestLateralMovementAnalyzer:
         """Test _looks_like_hostname rejects strings starting with digit."""
         analyzer = LateralMovementAnalyzer()
 
-        assert analyzer._looks_like_hostname("123server.domain.com") is False
+        assert analyzer._looks_like_hostname("123server.contoso.com") is False
 
     def test_looks_like_hostname_invalid_too_short(self) -> None:
         """Test _looks_like_hostname rejects strings that are too short."""
@@ -477,15 +477,15 @@ class TestLateralMovementAnalyzer:
     def test_get_pivot_suggestions(self) -> None:
         """Test generating pivot suggestions."""
         analyzer = LateralMovementAnalyzer()
-        analyzer.graph.add_connection("ws01", "srv01.domain.local", "smb")
-        analyzer.graph.add_connection("ws01", "srv01.domain.local", "rdp")
-        analyzer.graph.add_connection("ws02", "srv02.domain.local", "wmi")
+        analyzer.graph.add_connection("ws01", "srv01.contoso.local", "smb")
+        analyzer.graph.add_connection("ws01", "srv01.contoso.local", "rdp")
+        analyzer.graph.add_connection("ws02", "srv02.contoso.local", "wmi")
 
         suggestions = analyzer.get_pivot_suggestions()
 
         assert len(suggestions) >= 1
-        # srv01.domain.local should have higher priority (2 connections)
-        assert suggestions[0]["host"] in ["srv01.domain.local", "srv02.domain.local"]
+        # srv01.contoso.local should have higher priority (2 connections)
+        assert suggestions[0]["host"] in ["srv01.contoso.local", "srv02.contoso.local"]
         assert "discovered_from" in suggestions[0]
         assert "connection_types" in suggestions[0]
         assert "suggested_queries" in suggestions[0]
@@ -495,15 +495,15 @@ class TestLateralMovementAnalyzer:
         """Test that pivot suggestions are sorted by priority."""
         analyzer = LateralMovementAnalyzer()
         # srv01 has 3 connections, srv02 has 1
-        analyzer.graph.add_connection("ws01", "srv01.domain.local", "smb")
-        analyzer.graph.add_connection("ws02", "srv01.domain.local", "rdp")
-        analyzer.graph.add_connection("ws03", "srv01.domain.local", "wmi")
-        analyzer.graph.add_connection("ws04", "srv02.domain.local", "ssh")
+        analyzer.graph.add_connection("ws01", "srv01.contoso.local", "smb")
+        analyzer.graph.add_connection("ws02", "srv01.contoso.local", "rdp")
+        analyzer.graph.add_connection("ws03", "srv01.contoso.local", "wmi")
+        analyzer.graph.add_connection("ws04", "srv02.contoso.local", "ssh")
 
         suggestions = analyzer.get_pivot_suggestions()
 
         # srv01 should come first due to higher priority
-        assert suggestions[0]["host"] == "srv01.domain.local"
+        assert suggestions[0]["host"] == "srv01.contoso.local"
         assert suggestions[0]["priority"] == 3
 
     def test_get_attack_path_empty(self) -> None:
@@ -575,7 +575,7 @@ class TestLateralMovementAnalyzerIntegration:
         result_data = {
             "stream": {"hostname": "workstation01"},
             "values": [
-                "Event 4624: Logon Type 10 from server01.domain.local",
+                "Event 4624: Logon Type 10 from app-srv01.contoso.local",
                 "mstsc.exe initiated connection to port 3389",
             ],
         }
@@ -592,10 +592,12 @@ class TestLateralMovementAnalyzerIntegration:
 
         # Simulate query result with SMB indicators
         result_data = {
-            "message": "admin$ share accessed on fileserver.corp.local via port 445",
+            "message": "admin$ share accessed on fileserver.contoso.local via port 445",
         }
 
-        connections = analyzer.analyze_query_result(result_data, source_host="attacker.corp.local")
+        connections = analyzer.analyze_query_result(
+            result_data, source_host="attacker.contoso.local"
+        )
 
         # Should detect SMB connection
         if connections:
@@ -606,22 +608,22 @@ class TestLateralMovementAnalyzerIntegration:
         analyzer = LateralMovementAnalyzer()
 
         # Initial compromise
-        analyzer.graph.mark_investigated("initial-workstation.corp.local")
+        analyzer.graph.mark_investigated("initial-workstation.contoso.local")
 
         # Discover lateral movement
         analyzer.graph.add_connection(
-            source="initial-workstation.corp.local",
-            destination="fileserver.corp.local",
+            source="initial-workstation.contoso.local",
+            destination="fileserver.contoso.local",
             conn_type="smb",
-            user="compromised_user",
+            user="danj",
             mitre_technique="T1021.002",
         )
 
         analyzer.graph.add_connection(
-            source="initial-workstation.corp.local",
-            destination="dc01.corp.local",
+            source="initial-workstation.contoso.local",
+            destination="dc01.contoso.local",
             conn_type="rdp",
-            user="compromised_user",
+            user="danj",
             mitre_technique="T1021.001",
         )
 
@@ -630,33 +632,33 @@ class TestLateralMovementAnalyzerIntegration:
 
         assert len(suggestions) == 2
         pending_hosts = {s["host"] for s in suggestions}
-        assert "fileserver.corp.local" in pending_hosts
-        assert "dc01.corp.local" in pending_hosts
+        assert "fileserver.contoso.local" in pending_hosts
+        assert "dc01.contoso.local" in pending_hosts
 
         # Investigate one host
-        analyzer.graph.mark_investigated("fileserver.corp.local")
+        analyzer.graph.mark_investigated("fileserver.contoso.local")
 
         # Continue investigation
         analyzer.graph.add_connection(
-            source="fileserver.corp.local",
-            destination="backup-server.corp.local",
+            source="fileserver.contoso.local",
+            destination="backup-server.contoso.local",
             conn_type="wmi",
-            user="compromised_user",
+            user="danj",
         )
 
         # Get attack path
         path = analyzer.get_attack_path()
 
-        assert path[0] == "initial-workstation.corp.local"
-        assert "fileserver.corp.local" in path
-        assert "dc01.corp.local" in path
+        assert path[0] == "initial-workstation.contoso.local"
+        assert "fileserver.contoso.local" in path
+        assert "dc01.contoso.local" in path
 
         # Check summary
         summary = analyzer.graph.to_summary()
 
         assert summary["total_connections"] == 3
         assert summary["hosts_investigated"] == 2
-        assert "compromised_user" in summary["unique_users"]
+        assert "danj" in summary["unique_users"]
 
 
 class TestLateralPatternsRegex:

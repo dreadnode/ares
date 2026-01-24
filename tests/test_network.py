@@ -102,6 +102,68 @@ class TestNetworkEnumerationTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
+    def test_credential_tool_adds_user_with_shared_state(self):
+        """Ensure credentials add users when using SharedRedTeamState."""
+        from ares.core.models import SharedRedTeamState
+        from ares.tools.red.network import CredentialDiscoveryTools
+
+        state = SharedRedTeamState(operation_id="op-test-cred-user-sync")
+        tools = CredentialDiscoveryTools()
+        tools.set_state(state)
+
+        tools._add_credential(
+            username="alans",
+            password="alans",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="username_as_password",
+        )
+        tools._add_credential(
+            username="alans",
+            password="alans",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="username_as_password",
+        )
+
+        assert len(state.all_credentials) == 1
+        users = {(user.username, user.domain) for user in state.all_users}
+        assert ("alans", "contoso.local") in users
+
+    def test_nmap_scan_drops_aws_ptr_hostname_and_keeps_os(self, red_team_state: RedTeamState):
+        """Ensure AWS PTR hostnames are not stored while OS details are kept."""
+        from ares.tools.red.network import NetworkEnumerationTools
+
+        tools = NetworkEnumerationTools()
+        tools.set_state(red_team_state)
+
+        port_stdout = (
+            "Starting Nmap 7.98 ( https://nmap.org ) at 2026-01-20 17:43 +0000\n"
+            "Nmap scan report for ip-10-1-2-183.us-west-2.compute.internal (10.1.2.183)\n"
+            "Host is up.\n\n"
+            "PORT    STATE    SERVICE\n"
+            "445/tcp open     microsoft-ds\n\n"
+            "Nmap done: 1 IP address (1 host up) scanned in 2.14 seconds\n"
+        )
+        svc_stdout = (
+            "Starting Nmap 7.98 ( https://nmap.org ) at 2026-01-20 17:44 +0000\n"
+            "Nmap scan report for ip-10-1-2-183.us-west-2.compute.internal (10.1.2.183)\n"
+            "Host is up.\n\n"
+            "PORT    STATE    SERVICE\n"
+            "445/tcp open     microsoft-ds\n"
+            "Service Info: OS: Windows; CPE: cpe:/o:microsoft:windows\n\n"
+            "Nmap done: 1 IP address (1 host up) scanned in 4.21 seconds\n"
+        )
+
+        with patch("ares.tools.red.network.run_remote") as mock_run:
+            mock_run.side_effect = [
+                MockRunResult(stdout=port_stdout, return_code=0),
+                MockRunResult(stdout=svc_stdout, return_code=0),
+            ]
+            tools.nmap_scan("10.1.2.183")
+
+        host = next(h for h in red_team_state.hosts if h.ip == "10.1.2.183")
+        assert "compute.internal" not in (host.hostname or "").lower()
+        assert host.os.lower().startswith("windows")
+
     def test_extract_users_from_netexec_users_backslash_format(self):
         """Test parsing netexec --users output with backslash usernames."""
         from ares.tools.red.network import NetworkEnumerationTools
@@ -110,13 +172,13 @@ class TestNetworkEnumerationTools:
         outputs = [
             (
                 "netexec smb --users",
-                "SMB 192.168.56.1 445 DC [*] ACME\\jdoe (SidTypeUser)\n",
+                "SMB 192.168.56.1 445 DC [*] CONTOSO\\alans (SidTypeUser)\n",
             )
         ]
 
         users = tools._extract_users_from_outputs(outputs)
 
-        assert "jdoe" in users
+        assert "alans" in users
 
     def test_extract_users_from_netexec_rid_brute_backslash_format(self):
         """Test parsing netexec --rid-brute output with backslash usernames."""
@@ -126,13 +188,13 @@ class TestNetworkEnumerationTools:
         outputs = [
             (
                 "netexec smb --rid-brute",
-                "SMB 192.168.56.1 445 DC ACME\\svc_account (SidTypeUser)\n",
+                "SMB 192.168.56.1 445 DC CONTOSO\\svc-sql (SidTypeUser)\n",
             )
         ]
 
         users = tools._extract_users_from_outputs(outputs)
 
-        assert "svc_account" in users
+        assert "svc-sql" in users
 
     def test_nmap_scan_success(self, red_team_state: RedTeamState):
         """Test successful nmap scan."""

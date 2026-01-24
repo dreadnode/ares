@@ -8,6 +8,7 @@ running in Kubernetes pods.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from asyncio import PriorityQueue, Queue
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from ares.core.messages import (
     ACLAnalysisRequest,
     AgentMessage,
     AgentRegistered,
+    CoercionRequest,
     CrackRequest,
     CredentialAccessRequest,
     CredentialDiscovered,
@@ -30,7 +32,6 @@ from ares.core.messages import (
     LateralMovementRequest,
     MessageType,
     OperationComplete,
-    PoisonRequest,
     TaskComplete,
     TaskFailed,
     VulnerabilityFound,
@@ -46,6 +47,7 @@ from ares.core.models import (
     TaskInfo,
     TaskResult,
     TaskStatus,
+    User,
     VulnerabilityInfo,
 )
 from ares.core.redis_client import create_redis_client
@@ -303,7 +305,7 @@ class RedTeamDispatcher:
                 MessageType.HOST_DISCOVERED,
             },
             AgentRole.COERCION: {
-                MessageType.POISON_REQUEST,
+                MessageType.COERCION_REQUEST,
             },
         }
 
@@ -394,6 +396,7 @@ class RedTeamDispatcher:
         Returns:
             True if credential was new and added.
         """
+        self._add_user(credential.username, credential.domain)
         added = self.shared_state.add_credential(credential, source_agent)
 
         if added:
@@ -639,6 +642,14 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        if not target_host or not target_host.strip():
+            logger.warning(
+                "Skipping lateral movement for %s\\%s: empty target_host",
+                domain,
+                username,
+            )
+            return ""
+
         resolved_password = password
         resolved_hash = hash_value
         resolved_domain = domain
@@ -1007,7 +1018,7 @@ class RedTeamDispatcher:
         logger.info(f"Exploit request {task_id} for {vuln_type} sent to {privesc_agent}")
         return task_id
 
-    async def request_poisoning(
+    async def request_coercion(
         self,
         source_agent: str,
         interface: str = "eth0",
@@ -1015,14 +1026,14 @@ class RedTeamDispatcher:
         duration: int = 300,
     ) -> str:
         """
-        Request the coercion agent to start network poisoning.
+        Request the coercion agent to start network coercion.
 
         Uses Redis task queue for cross-pod communication when available.
 
         Args:
             source_agent: Agent making the request.
             interface: Network interface.
-            techniques: Poisoning techniques to use.
+            techniques: Coercion techniques to use.
             duration: How long to run (seconds).
 
         Returns:
@@ -1039,7 +1050,7 @@ class RedTeamDispatcher:
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
             task_id = await self._task_queue.submit_task(
-                task_type="poison",
+                task_type="coercion",
                 target_role="coercion",
                 payload=payload,
                 source_agent=source_agent,
@@ -1062,7 +1073,7 @@ class RedTeamDispatcher:
         coercion_agent = self._role_queues.get(AgentRole.COERCION)
 
         if not coercion_agent:
-            logger.warning("No coercion agent registered, cannot route poison request")
+            logger.warning("No coercion agent registered, cannot route coercion request")
             return ""
 
         task_info = TaskInfo(
@@ -1074,7 +1085,7 @@ class RedTeamDispatcher:
         self.shared_state.pending_tasks[task_id] = task_info
 
         await self._message_queues[coercion_agent].put(
-            PoisonRequest(
+            CoercionRequest(
                 source_agent=source_agent,
                 task_id=task_id,
                 interface=interface,
@@ -1084,7 +1095,7 @@ class RedTeamDispatcher:
             )
         )
 
-        logger.info(f"Poisoning request {task_id} sent to {coercion_agent}")
+        logger.info(f"Coercion request {task_id} sent to {coercion_agent}")
         return task_id
 
     # Task Completion
@@ -1133,9 +1144,12 @@ class RedTeamDispatcher:
         )
         self.shared_state.completed_tasks[task_id] = task_result
 
+        output = ""
+
         if success and isinstance(result, dict):
             cred_data = result.get("credential")
             if isinstance(cred_data, dict):
+                self._add_user(cred_data.get("username", ""), cred_data.get("domain", ""))
                 credential = Credential(
                     username=cred_data.get("username", ""),
                     password=cred_data.get("password", ""),
@@ -1149,6 +1163,7 @@ class RedTeamDispatcher:
                 for cred in creds_data:
                     if not isinstance(cred, dict):
                         continue
+                    self._add_user(cred.get("username", ""), cred.get("domain", ""))
                     credential = Credential(
                         username=cred.get("username", ""),
                         password=cred.get("password", ""),
@@ -1200,6 +1215,49 @@ class RedTeamDispatcher:
                         )
                         await self.publish_credential(cracked_cred, source_agent)
 
+            stdout = result.get("stdout", "")
+            stderr = result.get("stderr", "")
+            output_field = result.get("output", "")
+            output_parts = []
+            for chunk in (stdout, stderr, output_field):
+                if isinstance(chunk, str) and chunk.strip():
+                    output_parts.append(chunk.strip())
+            output = "\n".join(output_parts).strip()
+        elif success and isinstance(result, str):
+            output = result.strip()
+
+        if output:
+            domain = ""
+            if self.shared_state.target and self.shared_state.target.domain:
+                domain = self.shared_state.target.domain
+
+            for host in self._extract_hosts_from_output(output):
+                if hasattr(self.shared_state, "add_host"):
+                    self.shared_state.add_host(host)
+                elif not any(h.ip == host.ip for h in self.shared_state.all_hosts):
+                    self.shared_state.all_hosts.append(host)
+
+            for username in self._extract_users_from_output(output):
+                self._add_user(username, domain)
+
+            creds = self._extract_plaintext_passwords_from_output(output)
+            if "password :" in output.lower() and not creds and domain:
+                self.shared_state.pending_credential_findings.add(f"{domain}:unknown")
+            for username, password in creds:
+                if domain:
+                    self.shared_state.pending_credential_findings.add(
+                        f"{domain}:{username}".lower()
+                    )
+                self._add_user(username, domain)
+                credential = Credential(
+                    username=username,
+                    password=password,
+                    domain=domain,
+                    source="user_description",
+                    is_admin=False,
+                )
+                await self.publish_credential(credential, source_agent)
+
         # Broadcast completion
         if success:
             await self._broadcast(
@@ -1223,6 +1281,154 @@ class RedTeamDispatcher:
 
         await self._checkpoint()
         logger.info(f"Task {task_id} completed: success={success}")
+
+    def _add_user(self, username: str, domain: str) -> bool:
+        if not username:
+            return False
+        normalized = username.strip()
+        if not normalized or normalized.lower() in {"(none)", "none", "null", "(null)"}:
+            return False
+        if "/" in normalized or "\\" in normalized or normalized.endswith(".txt"):
+            return False
+        for existing in self.shared_state.all_users:
+            if existing.username == normalized and existing.domain == domain:
+                return False
+        self.shared_state.all_users.append(User(username=normalized, domain=domain))
+        return True
+
+    def _sanitize_hostname(self, hostname: str) -> str:
+        cleaned = hostname.strip()
+        if not cleaned:
+            return cleaned
+        lowered = cleaned.lower()
+        if lowered.startswith("ip-") and "compute.internal" in lowered:
+            return ""
+        return cleaned
+
+    def _extract_hosts_from_output(self, output: str) -> list[Host]:
+        if not output:
+            return []
+        hosts: list[Host] = []
+        seen: set[str] = set()
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            smb_match = re.search(
+                r"SMB\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+([A-Za-z0-9_.-]+)\s+\[\*\]\s+(.+)",
+                stripped,
+            )
+            if not smb_match:
+                continue
+            ip = smb_match.group(1)
+            host_col = smb_match.group(2)
+            details = smb_match.group(3)
+            name_match = re.search(r"\(name:([^)]+)\)", details)
+            domain_match = re.search(r"\(domain:([^)]+)\)", details)
+            domain = domain_match.group(1) if domain_match else ""
+            hostname = name_match.group(1) if name_match else host_col
+            if domain and hostname and not hostname.lower().endswith(domain.lower()):
+                hostname = f"{hostname.lower()}.{domain}"
+            hostname = self._sanitize_hostname(hostname)
+            os_match = re.search(r"^\s*([^(]+?)\s+\(name:", details)
+            os_name = os_match.group(1).strip() if os_match else "Unknown"
+            if ip in seen:
+                continue
+            seen.add(ip)
+            hosts.append(
+                Host(
+                    ip=ip,
+                    hostname=hostname,
+                    os=os_name,
+                    roles=[],
+                    services=[],
+                )
+            )
+        return hosts
+
+    def _extract_users_from_output(self, output: str) -> list[str]:
+        if not output:
+            return []
+        users: list[str] = []
+        seen: set[str] = set()
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            for match in re.findall(r"user:\[([^\]]+)\]", stripped, re.IGNORECASE):
+                user = match.strip()
+                if user and user not in seen:
+                    users.append(user)
+                    seen.add(user)
+            account_match = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)
+            if account_match:
+                user = account_match.group(1).strip()
+                if user and user not in seen:
+                    users.append(user)
+                    seen.add(user)
+            sam_match = re.search(r"samaccountname:\s*([A-Za-z0-9_.-]+)", stripped, re.IGNORECASE)
+            if sam_match:
+                user = sam_match.group(1).strip()
+                if user and user not in seen:
+                    users.append(user)
+                    seen.add(user)
+            smb_match = re.search(
+                r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.-]+)\s+\d{4}-\d{2}-\d{2}",
+                stripped,
+            )
+            if smb_match:
+                user = smb_match.group(1).strip()
+                if user and user not in seen:
+                    users.append(user)
+                    seen.add(user)
+        return users
+
+    def _extract_plaintext_passwords_from_output(self, output: str) -> list[tuple[str, str]]:  # noqa: PLR0912
+        if not output:
+            return []
+        creds: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        current_user = ""
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            user_match = re.search(r"user:\[([^\]]+)\]", stripped, re.IGNORECASE)
+            if user_match:
+                current_user = user_match.group(1).strip()
+            account_match = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)
+            if account_match:
+                current_user = account_match.group(1).strip()
+            sam_match = re.search(r"samaccountname:\s*([A-Za-z0-9_.-]+)", stripped, re.IGNORECASE)
+            if sam_match:
+                current_user = sam_match.group(1).strip()
+            if "password" not in stripped.lower():
+                continue
+            pass_match = re.search(r"Password\s*:\s*([^\s\)]+)", stripped, re.IGNORECASE)
+            if not pass_match:
+                continue
+            password = pass_match.group(1).strip()
+            username = ""
+            smb_match = re.search(
+                r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.-]+)\s+\d{4}-\d{2}-\d{2}.*Password\s*:\s*",
+                stripped,
+            )
+            if smb_match:
+                username = smb_match.group(1).strip()
+            elif current_user:
+                username = current_user
+            if not username:
+                continue
+            if "/" in username or "\\" in username or username.endswith(".txt"):
+                continue
+            if "/" in password or "\\" in password or password.endswith(".txt"):
+                continue
+            key = (username, password)
+            if key in seen:
+                continue
+            seen.add(key)
+            creds.append(key)
+        return creds
 
     # Domain Admin Achievement
 

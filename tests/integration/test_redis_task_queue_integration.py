@@ -132,7 +132,7 @@ class TestPromptGeneration:
                 "hash_value": "aad3b435b51404ee:500",
                 "hash_type": "NTLM",
                 "username": "admin",
-                "domain": "testlab.local",
+                "domain": "contoso.local",
                 "wordlist": "rockyou.txt",
             },
         )
@@ -155,7 +155,7 @@ class TestPromptGeneration:
             payload={
                 "target_host": "192.168.1.10",
                 "username": "admin",
-                "domain": "testlab.local",
+                "domain": "contoso.local",
                 "password": "Password123",  # pragma: allowlist secret
                 "method": "psexec",
             },
@@ -164,7 +164,7 @@ class TestPromptGeneration:
         prompt = generate_prompt_from_task(task)
 
         assert "192.168.1.10" in prompt
-        assert "testlab.local\\admin" in prompt
+        assert "contoso.local\\admin" in prompt
         assert "password" in prompt.lower()
         assert "lateral_xyz" in prompt
 
@@ -176,16 +176,16 @@ class TestPromptGeneration:
             source_agent="orchestrator",
             target_agent="acl",
             payload={
-                "target_user": "compromised_user",
-                "domain": "testlab.local",
+                "target_user": "danj",
+                "domain": "contoso.local",
                 "find_path_to": "Domain Admins",
             },
         )
 
         prompt = generate_prompt_from_task(task)
 
-        assert "compromised_user" in prompt
-        assert "testlab.local" in prompt
+        assert "danj" in prompt
+        assert "contoso.local" in prompt
         assert "Domain Admins" in prompt
         assert "BloodHound" in prompt
 
@@ -198,7 +198,7 @@ class TestPromptGeneration:
             target_agent="privesc",
             payload={
                 "vuln_type": "ADCS_ESC1",
-                "target": "dc01.testlab.local",
+                "target": "dc01.contoso.local",
                 "vuln_id": "vuln_001",
             },
         )
@@ -206,14 +206,14 @@ class TestPromptGeneration:
         prompt = generate_prompt_from_task(task)
 
         assert "ADCS_ESC1" in prompt
-        assert "dc01.testlab.local" in prompt
+        assert "dc01.contoso.local" in prompt
         assert "exploit_adcs" in prompt
 
-    def test_poison_prompt(self):
+    def test_coercion_prompt(self):
         """Test prompt generation for coercion tasks."""
         task = TaskMessage(
-            task_id="poison_001",
-            task_type="poison",
+            task_id="coercion_001",
+            task_type="coercion",
             source_agent="orchestrator",
             target_agent="coercion",
             payload={
@@ -283,7 +283,7 @@ class TestDispatcherRedisIntegration:
             hash_type="NTLM",
             source_agent="orchestrator",
             username="admin",
-            domain="testlab.local",
+            domain="contoso.local",
         )
 
         assert task_id.startswith("crack_")
@@ -300,7 +300,7 @@ class TestDispatcherRedisIntegration:
             username="admin",
             source_agent="orchestrator",
             password="Password123",  # pragma: allowlist secret
-            domain="testlab.local",
+            domain="contoso.local",
         )
 
         assert task_id.startswith("lateral_")
@@ -313,7 +313,7 @@ class TestDispatcherRedisIntegration:
         """Test ACL analysis request goes through Redis queue."""
         task_id = await dispatcher_with_redis.request_acl_analysis(
             target_user="compromised",
-            domain="testlab.local",
+            domain="contoso.local",
             source_agent="orchestrator",
         )
 
@@ -334,16 +334,16 @@ class TestDispatcherRedisIntegration:
         mock_redis_client.lpush.assert_called()
 
     @pytest.mark.asyncio
-    async def test_request_poisoning_uses_redis_queue(
+    async def test_request_coercion_uses_redis_queue(
         self, dispatcher_with_redis, mock_redis_client
     ):
         """Test coercion request goes through Redis queue."""
-        task_id = await dispatcher_with_redis.request_poisoning(
+        task_id = await dispatcher_with_redis.request_coercion(
             source_agent="orchestrator",
             interface="eth0",
         )
 
-        assert task_id.startswith("poison_")
+        assert task_id.startswith("coercion_")
         mock_redis_client.lpush.assert_called()
 
     @pytest.mark.asyncio
@@ -378,7 +378,7 @@ class TestDispatcherRedisIntegration:
             hash_type="NTLM",
             source_agent="orchestrator",
             username="admin",
-            domain="testlab.local",
+            domain="contoso.local",
         )
 
         task_result = TaskResult(
@@ -573,7 +573,7 @@ class TestOrchestratorWorkerFlow:
             hash_type="NTLM",
             source_agent="orchestrator",
             username="admin",
-            domain="testlab.local",
+            domain="contoso.local",
         )
 
         assert len(task_queue_items) == 1

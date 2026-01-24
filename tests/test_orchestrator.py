@@ -20,7 +20,7 @@ async def test_run_multi_agent_operation_requires_model(monkeypatch):
     with pytest.raises(ValueError, match="No model specified"):
         await run_multi_agent_operation(
             operation_id="op-1",
-            target_domain="example.com",
+            target_domain="contoso.local",
             target_ips=["192.168.56.1"],
         )
 
@@ -99,7 +99,7 @@ async def test_run_multi_agent_operation_skips_wait_when_completed(monkeypatch):
 
     await run_multi_agent_operation(
         operation_id="op-2",
-        target_domain="example.com",
+        target_domain="contoso.local",
         target_ips=["192.168.56.2"],
         model="test-model",
     )
@@ -113,7 +113,7 @@ def test_build_redteam_report_state_uses_exploitation_status_counts():
 
     state = SharedRedTeamState(
         operation_id="op-3",
-        target=Target(ip="192.168.56.3", domain="example.com"),
+        target=Target(ip="192.168.56.3", domain="contoso.local"),
     )
     vuln = VulnerabilityInfo(
         vuln_id="ADCS_ESC1_dc01",

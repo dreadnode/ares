@@ -439,11 +439,11 @@ class TestQueryTemplatesWithHostFilter:
             mock_instance = mock_client.return_value.__aenter__.return_value
             mock_instance.get = AsyncMock(return_value=mock_response)
 
-            await tools.detect_kerberoasting(domain_controller="dc01.corp.local")
+            await tools.detect_kerberoasting(domain_controller="dc01.contoso.local")
 
             call_args = mock_instance.get.call_args
             params = call_args.kwargs.get("params", call_args[1].get("params", {}))
-            assert "dc01.corp.local" in params["query"]
+            assert "dc01.contoso.local" in params["query"]
 
 
 class TestTimeRangeParameter:

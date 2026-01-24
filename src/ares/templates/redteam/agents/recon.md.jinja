@@ -37,7 +37,7 @@ Your role is to delegate tasks to specialized agents and coordinate the overall 
 | dispatch_crack_hash | CrackerAgent | Hash cracking (NTLM, Kerberos, etc.) |
 | dispatch_acl_analysis | ACLAgent | ACL abuse execution based on identified paths |
 | dispatch_lateral_movement | LateralAgent | Move to new hosts |
-| start_poisoning | CoercionAgent | Network poisoning |
+| start_coercion | CoercionAgent | Network coercion |
 
 ## Tools to Use
 
@@ -97,7 +97,7 @@ Run run_bloodhound if not done → identify ACL abuse targets → dispatch_acl_a
 Unconstrained → queue_vulnerability_for_exploitation(
                   vuln_type="unconstrained_delegation",
                   target="SERVER-NAME"
-                ) + start_poisoning()
+                ) + start_coercion()
 Constrained → queue_vulnerability_for_exploitation(
                 vuln_type="constrained_delegation",
                 target="SERVER-NAME",

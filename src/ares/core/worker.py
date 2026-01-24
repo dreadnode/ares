@@ -346,8 +346,8 @@ TASK_PROMPTS: dict[MessageType, callable] = {
         '{"hash": {"username": "", "hash_value": "", "hash_type": "NTLM", "domain": ""}}\n'
         "```"
     ),
-    MessageType.POISON_REQUEST: lambda msg: (
-        f"Start network poisoning:\n"
+    MessageType.COERCION_REQUEST: lambda msg: (
+        f"Start network coercion:\n"
         f"Interface: {msg.interface}\n"
         f"Techniques: {', '.join(msg.techniques)}\n"
         f"Duration: {msg.duration}s\n"
@@ -448,10 +448,10 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:
             "```"
         )
 
-    if task.task_type == "poison":
+    if task.task_type == "coercion":
         techniques = payload.get("techniques", ["LLMNR", "NBT-NS"])
         return (
-            f"Start network poisoning:\n"
+            f"Start network coercion:\n"
             f"Interface: {payload.get('interface', 'eth0')}\n"
             f"Techniques: {', '.join(techniques)}\n"
             f"Duration: {payload.get('duration', 300)}s\n"
@@ -998,6 +998,43 @@ class RedisWorkerAgent:
             summary_parts.append(f"usage={usage}")
         return ", ".join(summary_parts)
 
+    def _format_agent_messages(
+        self, result: Any, max_messages: int = 50, max_chars: int = 2000
+    ) -> tuple[list[str], int]:
+        """Format agent messages for debug traces without ballooning file size."""
+        messages = getattr(result, "messages", None)
+        if not messages:
+            return [], 0
+
+        try:
+            total = len(messages)
+        except Exception:
+            total = 0
+
+        if isinstance(messages, dict):
+            messages_list = [messages]
+        else:
+            try:
+                messages_list = list(messages)
+            except Exception:
+                messages_list = [messages]
+
+        if total == 0:
+            total = len(messages_list)
+
+        trimmed = messages_list[-max_messages:]
+        start_index = max(total - len(trimmed), 0)
+        lines = []
+        for idx, message in enumerate(trimmed, start=start_index + 1):
+            if isinstance(message, dict):
+                serialized = json.dumps(message, ensure_ascii=True)
+            else:
+                serialized = json.dumps(str(message), ensure_ascii=True)
+            if len(serialized) > max_chars:
+                serialized = f"{serialized[:max_chars]}...(truncated)"
+            lines.append(f"{idx}: {serialized}")
+        return lines, total
+
     def _dump_task_trace(
         self, task: TaskMessage, prompt: str, result_text: str, result: Any
     ) -> None:
@@ -1005,23 +1042,28 @@ class RedisWorkerAgent:
         try:
             trace_path = Path(tempfile.gettempdir()) / f"ares-task-{task.task_id}.log"
             summary = self._summarize_agent_result(result)
+            message_lines, message_total = self._format_agent_messages(result)
+            trace_lines = [
+                f"task_id: {task.task_id}",
+                f"task_type: {task.task_type}",
+                f"role: {self.role.value}",
+                f"agent: {self.agent_name}",
+                f"pod: {self.pod_name}",
+                f"operation_id: {self.operation_id}",
+                f"payload: {task.payload}",
+                f"summary: {summary}",
+                "prompt:",
+                prompt,
+                "result:",
+                result_text,
+            ]
+            if message_lines:
+                trace_lines.append(
+                    f"messages: showing last {len(message_lines)} of {message_total}"
+                )
+                trace_lines.extend(message_lines)
             trace_path.write_text(
-                "\n".join(
-                    [
-                        f"task_id: {task.task_id}",
-                        f"task_type: {task.task_type}",
-                        f"role: {self.role.value}",
-                        f"agent: {self.agent_name}",
-                        f"pod: {self.pod_name}",
-                        f"operation_id: {self.operation_id}",
-                        f"payload: {task.payload}",
-                        f"summary: {summary}",
-                        "prompt:",
-                        prompt,
-                        "result:",
-                        result_text,
-                    ]
-                ),
+                "\n".join(trace_lines),
                 encoding="utf-8",
             )
             logger.warning(

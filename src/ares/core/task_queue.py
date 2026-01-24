@@ -21,7 +21,7 @@ class TaskMessage(BaseModel):
     """Task message structure for Redis queues."""
 
     task_id: str
-    task_type: str  # crack, lateral, acl_analysis, exploit, poison
+    task_type: str  # crack, lateral, acl_analysis, exploit, coercion
     source_agent: str
     target_agent: str  # Role: credential_access, cracker, lateral, acl, privesc, coercion
     payload: dict[str, Any]

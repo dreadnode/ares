@@ -361,7 +361,7 @@ class OrchestratorTools(Toolset):
         return f"✗ Exploitation failed: {result.error}"
 
     @dn.tool_method
-    async def start_poisoning(
+    async def start_coercion(
         self,
         interface: str = "eth0",
         techniques: str = "LLMNR,NBT-NS,mDNS",
@@ -370,22 +370,22 @@ class OrchestratorTools(Toolset):
         timeout: float = 600.0,
     ) -> str:
         """
-        Request the coercion agent to start network poisoning.
+        Request the coercion agent to start network coercion.
 
         The coercion agent will run responder/mitm6 to capture hashes.
 
         Args:
             interface: Network interface to use
-            techniques: Comma-separated poisoning techniques (LLMNR, NBT-NS, mDNS)
+            techniques: Comma-separated coercion techniques (LLMNR, NBT-NS, mDNS)
             duration: How long to run in seconds (default: 300)
-            wait_for_result: If True, wait for poisoning to complete
+            wait_for_result: If True, wait for coercion to complete
             timeout: Max time to wait if wait_for_result=True (seconds)
 
         Returns:
             Task ID for tracking, or result if wait_for_result=True
 
         Example:
-            >>> start_poisoning(
+            >>> start_coercion(
             ...     interface="eth0",
             ...     techniques="LLMNR,NBT-NS",
             ...     duration=600
@@ -393,7 +393,7 @@ class OrchestratorTools(Toolset):
         """
         tech_list = [t.strip() for t in techniques.split(",")]
 
-        task_id = await self.dispatcher.request_poisoning(
+        task_id = await self.dispatcher.request_coercion(
             source_agent=self._agent_name,
             interface=interface,
             techniques=tech_list,
@@ -401,25 +401,25 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to start poisoning - no coercion agent available"
+            return "✗ Failed to start coercion - no coercion agent available"
 
-        logger.info(f"Dispatched poisoning: {task_id}")
+        logger.info(f"Dispatched coercion: {task_id}")
 
         if not wait_for_result:
             return (
-                f"✓ Poisoning started: {task_id}\n"
+                f"✓ Coercion started: {task_id}\n"
                 f"Techniques: {', '.join(tech_list)}, Duration: {duration}s"
             )
 
-        # Wait for result via Redis queue (longer timeout for poisoning)
+        # Wait for result via Redis queue (longer timeout for coercion)
         result = await self.dispatcher.wait_for_redis_result(task_id, timeout=timeout)
 
         if result is None:
-            return f"⏳ Poisoning {task_id} timed out after {timeout}s"
+            return f"⏳ Coercion {task_id} timed out after {timeout}s"
 
         if result.success:
-            return f"✓ Poisoning complete: {result.result}"
-        return f"✗ Poisoning failed: {result.error}"
+            return f"✓ Coercion complete: {result.result}"
+        return f"✗ Coercion failed: {result.error}"
 
     @dn.tool_method
     def get_pending_tasks(self) -> str:
@@ -468,7 +468,7 @@ class OrchestratorTools(Toolset):
 
         Example:
             # Clean up specific orphaned tasks
-            >>> cleanup_orphaned_tasks(["poison_ab0056ff310a", "exploit_fe7b6d76ce4b"])
+            >>> cleanup_orphaned_tasks(["coercion_ab0056ff310a", "exploit_fe7b6d76ce4b"])
 
             # Clean up all stale tasks
             >>> cleanup_orphaned_tasks()
@@ -944,7 +944,7 @@ class OrchestratorTools(Toolset):
         """
         Register a newly discovered host with all agents.
 
-        Use this when network enumeration discovers new systems.
+        Use this when network recon discovers new systems.
 
         Args:
             ip: IP address of the host

@@ -96,13 +96,13 @@ def sample_credentials():
         Credential(
             username="user1",
             password="Password123",  # pragma: allowlist secret
-            domain="testlab.local",
+            domain="contoso.local",
             source="test",
         ),
         Credential(
             username="admin",
             password="AdminPass!",  # pragma: allowlist secret
-            domain="testlab.local",
+            domain="contoso.local",
             source="test",
             is_admin=True,
         ),
@@ -190,7 +190,7 @@ class TestPriorityVulnerabilityQueue:
         """Test queuing a vulnerability."""
         vuln_id = await dispatcher.queue_vulnerability(
             vuln_type="ADCS_ESC1",
-            target="dc01.testlab.local",
+            target="dc01.contoso.local",
             details={"template": "VulnerableTemplate"},
             discovered_by="recon-agent",
         )
@@ -253,7 +253,7 @@ class TestPriorityVulnerabilityQueue:
                 "credential": {
                     "username": "admin",
                     "password": "AdminPass!",  # pragma: allowlist secret
-                    "domain": "testlab.local",
+                    "domain": "contoso.local",
                     "is_admin": True,
                 }
             },
@@ -576,7 +576,7 @@ class TestDomainAdminAchievement:
         # Announce domain admin
         await dispatcher.announce_domain_admin(
             username="Administrator",
-            domain="testlab.local",
+            domain="contoso.local",
             attack_path="ADCS ESC1 -> Admin Certificate -> DCSync",
             credential_type="password",
             source_agent="orchestrator",
@@ -604,7 +604,7 @@ class TestRecovery:
         cred = Credential(
             username="test",
             password="pass",  # pragma: allowlist secret
-            domain="testlab.local",
+            domain="contoso.local",
             source="test",
         )
         dispatcher.shared_state.add_credential(cred, "test")

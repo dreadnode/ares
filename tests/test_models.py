@@ -35,7 +35,7 @@ class TestEvidenceModel:
         evidence = Evidence(
             id="test-002",
             type="domain",
-            value="malicious.example.com",
+            value="malicious-external.com",
             source="dns_query",
             timestamp=None,
             pyramid_level=PyramidLevel.DOMAIN_NAMES,
@@ -260,11 +260,11 @@ class TestRedTeamModels:
         """Test Target model."""
         from ares.core.models import Target
 
-        target = Target(ip="192.168.56.50", hostname="dc01", domain="corp.local")
+        target = Target(ip="192.168.56.50", hostname="dc01", domain="contoso.local")
 
         assert target.ip == "192.168.56.50"
         assert target.hostname == "dc01"
-        assert target.domain == "corp.local"
+        assert target.domain == "contoso.local"
 
     def test_host_model(self) -> None:
         """Test Host model."""
@@ -287,14 +287,14 @@ class TestRedTeamModels:
         from ares.core.models import Credential
 
         cred = Credential(
-            username="admin",
+            username="danj",
             password="P@ssw0rd",  # pragma: allowlist secret
-            domain="CORP",
+            domain="CONTOSO",
             source="mimikatz",
             is_admin=True,
         )
 
-        assert cred.username == "admin"
+        assert cred.username == "danj"
         assert cred.is_admin is True
         assert cred.source == "mimikatz"
 
@@ -303,13 +303,13 @@ class TestRedTeamModels:
         from ares.core.models import Hash
 
         h = Hash(
-            username="svc_account",
+            username="svc-sql",
             hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
             hash_type="NTLM",
-            domain="CORP",
+            domain="CONTOSO",
         )
 
-        assert h.username == "svc_account"
+        assert h.username == "svc-sql"
         assert h.hash_type == "NTLM"
 
 
@@ -624,8 +624,8 @@ class TestRedTeamStateHelpers:
             target=Target(ip="192.168.56.1"),
         )
 
-        key = state.get_credential_key("Admin", "P@ssword123", "DOMAIN")
-        assert key == "domain:admin:p@ssword123"
+        key = state.get_credential_key("danj", "P@ssword123", "CONTOSO")
+        assert key == "contoso:danj:p@ssword123"
 
     def test_get_credential_key_no_domain(self) -> None:
         """Test generating credential key without domain."""
@@ -636,8 +636,8 @@ class TestRedTeamStateHelpers:
             target=Target(ip="192.168.56.1"),
         )
 
-        key = state.get_credential_key("user", "pass")
-        assert key == ":user:pass"
+        key = state.get_credential_key("adamb", "pass")
+        assert key == ":adamb:pass"
 
     def test_admin_count(self) -> None:
         """Test counting admin credentials."""
@@ -648,21 +648,21 @@ class TestRedTeamStateHelpers:
             target=Target(ip="192.168.56.1"),
             credentials=[
                 Credential(
-                    username="admin",
+                    username="danj",
                     password="pass",  # pragma: allowlist secret
-                    domain="test",
+                    domain="CONTOSO",
                     is_admin=True,
                 ),
                 Credential(
-                    username="user",
+                    username="adamb",
                     password="pass",  # pragma: allowlist secret
-                    domain="test",
+                    domain="CONTOSO",
                     is_admin=False,
                 ),
                 Credential(
-                    username="root",
+                    username="karimm",
                     password="pass",  # pragma: allowlist secret
-                    domain="test",
+                    domain="CONTOSO",
                     is_admin=True,
                 ),
             ],

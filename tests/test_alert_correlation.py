@@ -711,11 +711,11 @@ class TestAlertCorrelatorIntegration:
         ]
         incident2_alerts = [
             {
-                "labels": {"hostname": "SERVER99", "user": "svc_account"},
+                "labels": {"hostname": "SERVER99", "user": "svc-sql"},
                 "fingerprint": "inc2_alert1",
             },
             {
-                "labels": {"hostname": "SERVER99", "user": "svc_account"},
+                "labels": {"hostname": "SERVER99", "user": "svc-sql"},
                 "fingerprint": "inc2_alert2",
             },
         ]
@@ -735,7 +735,7 @@ class TestAlertCorrelatorIntegration:
             {
                 "labels": {
                     "hostname": "WORKSTATION01",
-                    "user": "compromised_user",
+                    "user": "danj",
                     "source_ip": "192.168.56.10",
                 },
                 "fingerprint": "lat1",
@@ -743,7 +743,7 @@ class TestAlertCorrelatorIntegration:
             {
                 "labels": {
                     "hostname": "SERVER01",
-                    "user": "compromised_user",
+                    "user": "danj",
                     "source_ip": "192.168.56.10",
                 },
                 "fingerprint": "lat2",
@@ -751,7 +751,7 @@ class TestAlertCorrelatorIntegration:
             {
                 "labels": {
                     "hostname": "DC01",
-                    "user": "compromised_user",
+                    "user": "danj",
                     "source_ip": "192.168.56.10",
                 },
                 "fingerprint": "lat3",

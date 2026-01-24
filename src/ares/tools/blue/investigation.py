@@ -741,8 +741,8 @@ class QuestionEngineTools(Toolset):  # type: ignore[misc]
         Available recipes:
         - password_spray: Detect password spray attacks
         - credential_stuffing: Detect credential stuffing
-        - share_enumeration: Detect network share enumeration
-        - ldap_enumeration: Detect LDAP/AD enumeration
+        - share_enumeration: Detect network share recon
+        - ldap_enumeration: Detect LDAP/AD recon
         - kerberos_attacks: Detect Kerberoasting, AS-REP roasting, etc.
         - dcsync: Detect DCSync attacks
         - pass_the_hash: Detect pass-the-hash attacks

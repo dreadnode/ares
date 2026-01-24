@@ -113,7 +113,7 @@ def _is_child_domain(child_domain: str, parent_domain: str) -> bool:
     return child_domain.endswith(f".{parent_domain}")
 
 
-async def credential_expansion_loop(
+async def credential_expansion_loop(  # noqa: PLR0912
     dispatcher: RedTeamDispatcher,
     max_iterations: int = 10,
     delay_between_tests: float = 5.0,
@@ -158,12 +158,30 @@ async def credential_expansion_loop(
         )
 
         for cred in credentials:
-            domain_variants = {cred.domain} if cred.domain else set()
-            if cred.password:
-                domain_variants.update(candidate_domains)
-            domain_variants = {d for d in domain_variants if d}
+            if cred.domain:
+                domain_variants = {cred.domain}
+            elif cred.password:
+                domain_variants = {d for d in candidate_domains if d}
+            else:
+                domain_variants = set()
+
+            hash_value = None
+            if cred.username:
+                matching_hashes = [
+                    h
+                    for h in state.all_hashes
+                    if h.username == cred.username and (not cred.domain or h.domain == cred.domain)
+                ]
+                if matching_hashes:
+                    hash_value = matching_hashes[0].hash_value
 
             for host in hosts:
+                if not host.ip:
+                    logger.debug(
+                        "Skipping lateral movement for %s: missing host IP",
+                        host.hostname or "unknown-host",
+                    )
+                    continue
                 for domain_override in domain_variants:
                     test_cred = RuntimeCredential(
                         username=cred.username,
@@ -187,6 +205,7 @@ async def credential_expansion_loop(
                         username=cred.username,
                         source_agent="orchestrator",
                         password=cred.password if cred.password else None,
+                        hash_value=hash_value,
                         domain=domain_override,
                     )
 
@@ -302,12 +321,9 @@ async def exploitation_workflow(
         result = await _exploit_vulnerability(dispatcher, vuln)
         exploit_elapsed = asyncio.get_event_loop().time() - exploit_started
         logger.info(
-            "Exploit result for %s (%s): success=%s error=%s elapsed=%.1fs",
-            vuln["id"],
-            vuln["type"],
-            result.get("success"),
-            result.get("error"),
-            exploit_elapsed,
+            f"Exploit result for {vuln['id']} ({vuln['type']}): "
+            f"success={result.get('success')} error={result.get('error')} "
+            f"elapsed={exploit_elapsed:.1f}s"
         )
 
         # Mark as attempted
@@ -461,10 +477,11 @@ async def _exploit_vulnerability(
         return {"success": False, "error": "Failed to dispatch task"}
 
     # Wait for task completion (with timeout)
+    # ACL tasks take 7-10 minutes each + queue wait time, so use 15 minute timeout
     try:
-        return await dispatcher.wait_for_task(task_id, timeout=300)
+        return await dispatcher.wait_for_task(task_id, timeout=900)
     except asyncio.TimeoutError:
-        logger.warning(f"Exploitation task {task_id} timed out")
+        logger.warning(f"Exploitation task {task_id} timed out after 15 minutes")
         return {"success": False, "error": "Task timed out"}
 
 

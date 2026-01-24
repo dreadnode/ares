@@ -283,7 +283,7 @@ def _create_completion_tools(
     return complete_operation, announce_domain_admin
 
 
-async def run_multi_agent_operation(
+async def run_multi_agent_operation(  # noqa: PLR0912
     operation_id: str,
     target_domain: str,
     target_ips: list[str],
@@ -400,7 +400,7 @@ async def run_multi_agent_operation(
         logger.info(f"Starting orchestrator for {target_domain}")
         logger.info(f"Initial prompt:\n{initial_prompt}")
 
-        # Start mandatory user enumeration once the operation commences.
+        # Start mandatory user recon once the operation commences.
         tasks.append(
             asyncio.create_task(
                 asyncio.to_thread(
@@ -435,26 +435,42 @@ async def run_multi_agent_operation(
             and not dispatcher.shared_state.pending_tasks
             and not dispatcher.shared_state.completed
         ):
-            dispatcher.shared_state.completed = True
-            logger.warning(
-                "Orchestrator stopped ({}) with no pending tasks; marking operation complete",
-                stop_reason,
+            pending_plaintext = bool(
+                getattr(dispatcher.shared_state, "pending_credential_findings", set())
             )
+            if pending_plaintext:
+                logger.warning(
+                    "Orchestrator stopped ({}) but pending plaintext credentials exist; "
+                    "keeping operation open",
+                    stop_reason,
+                )
+            else:
+                dispatcher.shared_state.completed = True
+                logger.warning(
+                    "Orchestrator stopped ({}) with no pending tasks; marking operation complete",
+                    stop_reason,
+                )
 
         exploitation_status = await dispatcher.get_exploitation_status()
         if not dispatcher.shared_state.completed:
             has_pending_vulns = bool(exploitation_status.get("pending"))
             if not dispatcher.shared_state.pending_tasks and not has_pending_vulns:
-                dispatcher.shared_state.completed = True
-                if stop_reason == "error":
-                    logger.warning(
-                        "Orchestrator stopped with error; no pending tasks or unexploited "
-                        "vulnerabilities, marking operation complete"
-                    )
+                pending_plaintext = bool(
+                    getattr(dispatcher.shared_state, "pending_credential_findings", set())
+                )
+                if pending_plaintext:
+                    logger.warning("Pending plaintext credentials exist; keeping operation open")
                 else:
-                    logger.info(
-                        "No pending tasks or unexploited vulnerabilities; marking operation complete"
-                    )
+                    dispatcher.shared_state.completed = True
+                    if stop_reason == "error":
+                        logger.warning(
+                            "Orchestrator stopped with error; no pending tasks or unexploited "
+                            "vulnerabilities, marking operation complete"
+                        )
+                    else:
+                        logger.info(
+                            "No pending tasks or unexploited vulnerabilities; marking operation complete"
+                        )
 
         if dispatcher.shared_state.completed:
             logger.info("Operation marked complete; skipping post-run wait")
@@ -536,7 +552,7 @@ async def _create_orchestrator_agent(
     - OrchestratorTools for dispatching tasks to specialized agents
     - NetworkEnumerationTools for initial reconnaissance
     - CredentialDiscoveryTools for finding quick wins
-    - CertipyTools for ADCS enumeration
+    - CertipyTools for ADCS recon
     - RedTeamReportingTools for recording findings
 
     Args:
@@ -558,7 +574,7 @@ async def _create_orchestrator_agent(
     orchestrator_tools.set_dispatcher(dispatcher)
     orchestrator_tools.set_shared_state(shared_state)
 
-    # Enumeration tools for initial recon
+    # Recon tools for initial recon
     # Note: These tools use RedTeamState internally. SharedRedTeamState provides
     # compatibility aliases (hosts, credentials, etc.) so they work in multi-agent mode.
     network_tools = NetworkEnumerationTools()
@@ -585,7 +601,7 @@ async def _create_orchestrator_agent(
         network_tools,  # nmap, enum4linux, crackmapexec
         cred_discovery_tools,  # ldap_search_descriptions, password_spray, etc.
         credential_tools,  # kerberos_user_enum_noauth, secretsdump, etc.
-        certipy_tools,  # certipy_find for ADCS enumeration
+        certipy_tools,  # certipy_find for ADCS recon
         bloodhound_tools,  # run_bloodhound for attack path discovery
         reporting_tools,  # record_finding, generate_report
     ]
@@ -865,7 +881,7 @@ def _build_orchestrator_prompt(
     Returns:
         Formatted prompt string
     """
-    cred_info = "None (start with unauthenticated enumeration)"
+    cred_info = "None (start with unauthenticated recon)"
     if initial_credential:
         cred_info = f"{initial_credential.domain}\\{initial_credential.username}"
 
@@ -881,7 +897,7 @@ Your objectives:
    - password_spray with common passwords (Password1, Welcome1, Summer2024, etc.)
    - username_as_password: Test if users have username as password (e.g., user1:user1)
 3. Enumerate users and shares with netexec/enum4linux-ng/rpcclient/smbclient
-4. If no creds, run Kerberos user enumeration with kerberos_user_enum_noauth
+4. If no creds, run Kerberos user recon with kerberos_user_enum_noauth
 5. Run certipy_find to discover ADCS vulnerabilities
 6. Run run_bloodhound for ACL analysis and attack path discovery
 7. **CRITICAL CREDENTIAL EXPANSION (run IMMEDIATELY after finding ANY credentials):**
@@ -927,28 +943,65 @@ Let's begin the operation!
 """
 
 
-def _run_mandatory_user_enum(
+def _run_mandatory_user_enum(  # noqa: PLR0912
     target_ips: list[str],
     target_domain: str,
     shared_state: SharedRedTeamState,
 ) -> None:
     if not target_ips:
-        logger.warning("No target IPs provided for mandatory user enumeration")
+        logger.warning("No target IPs provided for mandatory user recon")
         return
 
     network_tools = NetworkEnumerationTools()
     network_tools.set_state(shared_state)  # type: ignore[arg-type]
-    logger.info("Running mandatory user enumeration on all targets")
+    logger.info("Running mandatory user recon on all targets")
+
+    targets_str = " ".join(target_ips)
+    if targets_str:
+        try:
+            output = network_tools.smb_sweep(targets_str)
+            if output:
+                logger.info("Mandatory SMB sweep output:\n%s", output)
+        except Exception as exc:
+            logger.warning(f"Mandatory SMB sweep failed: {exc}")
+
+    if target_domain and target_ips:
+        try:
+            output = network_tools.resolve_domain_controllers(target_domain, target_ips[0])
+            if output:
+                logger.info("Mandatory SRV lookup output:\n%s", output)
+        except Exception as exc:
+            logger.warning(f"Mandatory SRV lookup failed: {exc}")
 
     for target in target_ips:
         try:
             output = network_tools.enumerate_users(target, "", "", target_domain)
             if output:
-                logger.info(f"Mandatory user enumeration output for {target}:\n{output}")
+                logger.info(f"Mandatory user recon output for {target}:\n{output}")
             else:
-                logger.info(f"Mandatory user enumeration produced no output for {target}")
+                logger.info(f"Mandatory user recon produced no output for {target}")
         except Exception as exc:  # noqa: PERF203
-            logger.warning(f"Mandatory user enumeration failed for {target}: {exc}")
+            logger.warning(f"Mandatory user recon failed for {target}: {exc}")
+
+    if shared_state.hosts:
+        hostnames: set[str] = set()
+        for host in shared_state.hosts:
+            hostname = (host.hostname or "").strip()
+            if not hostname:
+                continue
+            lower = hostname.lower()
+            if lower.startswith("ip-") and "compute.internal" in lower:
+                continue
+            if "." not in hostname and target_domain:
+                hostname = f"{hostname.lower()}.{target_domain.lower()}"
+            hostnames.add(hostname)
+        for hostname in sorted(hostnames):
+            try:
+                output = network_tools.smbclient_kerberos_shares(hostname)
+                if output:
+                    logger.info(f"Mandatory smbclient shares output for {hostname}:\n{output}")
+            except Exception as exc:  # noqa: PERF203
+                logger.warning(f"Mandatory smbclient shares failed for {hostname}: {exc}")
 
 
 __all__ = [
