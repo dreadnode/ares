@@ -38,6 +38,7 @@ from ares.tools.red.network import (
     PostureValidationTools,
     RedTeamReportingTools,
     SharePilferingTools,
+    TrustAttackTools,
 )
 
 if TYPE_CHECKING:
@@ -49,22 +50,17 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
     AgentRole.RECON: [
         NetworkEnumerationTools,
         BloodHoundTools,
-        CredentialDiscoveryTools,
         RedTeamReportingTools,
-        # OrchestratorTools added separately (needs dispatcher)
     ],
     AgentRole.CREDENTIAL_ACCESS: [
         CredentialDiscoveryTools,
         CredentialHarvestingTools,
-        # CredentialAccessCallbackTools added separately if needed
     ],
     AgentRole.CRACKER: [
         CrackingTools,
-        # CrackerCallbackTools added separately
     ],
     AgentRole.ACL: [
         ACLExploitTools,
-        # ACLCallbackTools added separately
     ],
     AgentRole.PRIVESC: [
         CertipyTools,
@@ -72,19 +68,17 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
         MSSQLTools,
         CVEExploitTools,
         GoldenTicketTools,
-        # PrivEscCallbackTools added separately
+        TrustAttackTools,
     ],
     AgentRole.LATERAL: [
         LateralMovementTools,
         CredentialHarvestingTools,
         SharePilferingTools,
         PostureValidationTools,
-        # LateralCallbackTools added separately
     ],
     AgentRole.COERCION: [
         CoercionTools,
         CoercionNetworkTools,
-        # CoercionCallbackTools added separately
     ],
 }
 
