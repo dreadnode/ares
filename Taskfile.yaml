@@ -1147,9 +1147,8 @@ tasks:
         kubectl exec -i -n {{.K8S_NAMESPACE}} "$POD" -- env REDIS_URL="$REDIS_URL" python - <<'PY'
         import asyncio
         import os
-        import redis.asyncio as redis
-
         from ares.core.models import SharedRedTeamState
+        from ares.core.redis_client import create_redis_client
 
         OP_ID = "{{.OPERATION_ID}}"
 
@@ -1185,7 +1184,7 @@ tasks:
             return f"{prefix}:{password}{suffix}" if prefix or password else "(unknown)"
 
         async def main():
-            client = redis.from_url(os.environ["REDIS_URL"], decode_responses=False)
+            client = await create_redis_client(decode_responses=False)
             try:
                 data = await client.get(f"ares:operation:{OP_ID}:state")
                 if not data:
