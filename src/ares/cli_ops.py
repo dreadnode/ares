@@ -18,6 +18,7 @@ from ares.core.orchestrator_client import (
     submit_operation,
     wait_for_operation_completion,
 )
+from ares.core.redis_client import create_redis_client
 
 app = cyclopts.App(
     name="ares-ops",
@@ -527,15 +528,15 @@ async def tasks(
     """
     import json as json_module
 
-    import redis.asyncio as redis_async
-
     resolved_redis_url = redis_url or get_redis_url()
 
     try:
-        client = redis_async.from_url(resolved_redis_url, decode_responses=True)
+        client = await create_redis_client(resolved_redis_url, decode_responses=True)
         found_tasks = []
 
-        async for key in client.scan_iter("ares:task_status:*"):
+        # Use KEYS instead of SCAN for reliability - SCAN can miss keys
+        task_keys = await client.keys("ares:task_status:*")
+        for key in task_keys:
             raw = await client.get(key)
             if not raw:
                 continue
@@ -601,8 +602,6 @@ async def list_operations(
         ares-ops list              # List all operations
         ares-ops list --latest     # Print only the latest/running operation ID
     """
-    import redis.asyncio as redis_async
-
     from ares.core.task_queue import RedisTaskQueue
 
     resolved_redis_url = redis_url or get_redis_url()
@@ -616,7 +615,7 @@ async def list_operations(
         return items[0][1]
 
     try:
-        client = redis_async.from_url(resolved_redis_url, decode_responses=True)
+        client = await create_redis_client(resolved_redis_url, decode_responses=True)
         await client.ping()
 
         # Gather all operations with their checkpoint times and running status
@@ -625,14 +624,18 @@ async def list_operations(
         ] = []  # (checkpoint_time, op_id, is_running)
 
         # Check for running operations (have locks)
+        # Use KEYS instead of SCAN for reliability - SCAN can miss keys
         running_ops: set[str] = set()
-        async for key in client.scan_iter(f"{RedisTaskQueue.LOCK_PREFIX}:*"):
+        lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
+        for key in lock_keys:
             parts = key.split(":", 2)
             if len(parts) >= 3:
                 running_ops.add(parts[2])
 
         # Get all operations with state
-        async for key in client.scan_iter("ares:operation:*:state"):
+        # Use KEYS instead of SCAN for reliability - SCAN can miss keys
+        state_keys = await client.keys("ares:operation:*:state")
+        for key in state_keys:
             parts = key.split(":")
             if len(parts) < 3:
                 continue
@@ -689,20 +692,20 @@ async def queue(
     """
     from collections import Counter
 
-    import redis.asyncio as redis_async
-
     from ares.core.models import SharedRedTeamState
     from ares.core.task_queue import RedisTaskQueue
 
     resolved_redis_url = redis_url or get_redis_url()
 
     try:
-        client = redis_async.from_url(resolved_redis_url, decode_responses=False)
+        client = await create_redis_client(resolved_redis_url, decode_responses=False)
         await client.ping()
 
         operations = []
-        async for key in client.scan_iter("ares:operation:*:state"):
-            key_str = key.decode()
+        # Use KEYS instead of SCAN for reliability - SCAN can miss keys
+        state_keys = await client.keys("ares:operation:*:state")
+        for key in state_keys:
+            key_str = key.decode() if isinstance(key, bytes) else key
             parts = key_str.split(":")
             if len(parts) < 3:
                 continue
