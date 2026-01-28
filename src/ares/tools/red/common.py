@@ -132,8 +132,21 @@ def run_tool(
     Returns:
         Tuple of (stdout, stderr, return_code)
     """
+    from ares.core.logging_utils import sanitize_command, truncate_output
+
     resolved_role = resolve_recon_route(cmd, target_role)
+    sanitized = sanitize_command(cmd)
+    tool_name = cmd[0] if cmd else "unknown"
+
+    logger.debug(f"Tool start: {tool_name} -> {sanitized[:100]}")
+
     result = run_remote(cmd, timeout_seconds=timeout_seconds, target_role=resolved_role)
+
+    if result.return_code != 0:
+        logger.info(f"Tool {tool_name} returned {result.return_code}")
+        if result.stderr:
+            logger.debug(f"Tool stderr: {truncate_output(result.stderr, 300)}")
+
     return result.stdout, result.stderr, result.return_code
 
 

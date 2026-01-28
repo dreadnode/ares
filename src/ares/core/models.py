@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from enum import Enum, IntEnum
 from typing import Any
 
+from loguru import logger
 from pydantic import Field, computed_field
 from rigging import Model
 from rigging.model import element, wrapped
@@ -670,9 +671,11 @@ class SharedRedTeamState:
         domain = credential.domain.strip()
         password = credential.password.strip()
         if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
+            logger.debug(f"Credential rejected: invalid username '{username}' from {source_agent}")
             return False
         # Guard against file-path artifacts (e.g., /tmp/users.txt) leaking in.
         if "/" in username or "\\" in username or username.endswith(".txt"):
+            logger.debug(f"Credential rejected: path artifact '{username}' from {source_agent}")
             return False
         self.add_user(username, domain)
         self.add_domain(domain)
@@ -682,6 +685,9 @@ class SharedRedTeamState:
             if key == existing_key:
                 pending_key = f"{domain}:{username}".lower()
                 self.pending_credential_findings.discard(pending_key)
+                logger.debug(
+                    f"Credential rejected: duplicate {domain}\\{username} from {source_agent}"
+                )
                 return False
         credential.username = username
         credential.domain = domain
@@ -690,22 +696,28 @@ class SharedRedTeamState:
         self.all_credentials.append(credential)
         pending_key = f"{domain}:{username}".lower()
         self.pending_credential_findings.discard(pending_key)
+        logger.info(f"Credential added: {domain}\\{username} (source: {source_agent})")
         return True
 
     def add_user(self, username: str, domain: str) -> bool:
         """Add user if not duplicate. Returns True if added."""
         if not username:
+            logger.debug(f"User rejected: empty username for domain {domain}")
             return False
         normalized = username.strip()
         if not normalized or normalized.lower() in {"(none)", "none", "null", "(null)"}:
+            logger.debug(f"User rejected: invalid username '{normalized}' for domain {domain}")
             return False
         if "/" in normalized or "\\" in normalized or normalized.endswith(".txt"):
+            logger.debug(f"User rejected: path artifact '{normalized}' for domain {domain}")
             return False
         for existing in self.all_users:
             if existing.username == normalized and existing.domain == domain:
+                logger.debug(f"User rejected: duplicate {domain}\\{normalized}")
                 return False
         self.all_users.append(User(username=normalized, domain=domain))
         self.add_domain(domain)
+        logger.debug(f"User added: {domain}\\{normalized}")
         return True
 
     def add_domain(self, domain: str) -> bool:
@@ -725,6 +737,9 @@ class SharedRedTeamState:
         domain = (hash_obj.domain or "").strip().lower()
         for existing in self.all_hashes:
             if existing.hash_value == hash_obj.hash_value:
+                logger.debug(
+                    f"Hash rejected: duplicate hash for {domain}\\{username} ({hash_type}) from {source_agent}"
+                )
                 return False
             if hash_type in {"as-rep", "asrep", "krb5asrep"}:
                 existing_type = (existing.hash_type or "").strip().lower()
@@ -732,6 +747,9 @@ class SharedRedTeamState:
                     existing_user = (existing.username or "").strip().lower()
                     existing_domain = (existing.domain or "").strip().lower()
                     if existing_user == username and existing_domain == domain:
+                        logger.debug(
+                            f"Hash rejected: duplicate AS-REP user {domain}\\{username} from {source_agent}"
+                        )
                         return False
         self.add_domain(hash_obj.domain)
         if not getattr(hash_obj, "source", ""):
@@ -741,11 +759,13 @@ class SharedRedTeamState:
         if not getattr(hash_obj, "discovered_at", None):
             hash_obj.discovered_at = datetime.now(timezone.utc)
         self.all_hashes.append(hash_obj)
+        logger.info(f"Hash added: {domain}\\{username} ({hash_type}) (source: {source_agent})")
         return True
 
     def add_host(self, host: Host) -> bool:
         """Add host if not duplicate. Returns True if added."""
         if not host.ip or not host.ip.strip():
+            logger.debug("Host rejected: empty IP address")
             return False
         host.ip = host.ip.strip()
         host.hostname = host.hostname.strip()
@@ -782,8 +802,10 @@ class SharedRedTeamState:
                     existing.roles = list({*existing.roles, *host.roles})
                 if host.services:
                     existing.services = list({*existing.services, *host.services})
+                logger.debug(f"Host merged: {host.ip} (existing, updated details)")
                 return False
         self.all_hosts.append(host)
+        logger.debug(f"Host added: {host.ip} ({host.hostname or 'no hostname'})")
         return True
 
     def add_share(self, share: Share) -> bool:
@@ -791,13 +813,16 @@ class SharedRedTeamState:
         host = (share.host or "").strip().lower()
         name = (share.name or "").strip().lower()
         if not host or not name:
+            logger.debug(f"Share rejected: empty host or name (host='{host}', name='{name}')")
             return False
         for existing in self.all_shares:
             if (existing.host or "").strip().lower() == host and (
                 existing.name or ""
             ).strip().lower() == name:
+                logger.debug(f"Share rejected: duplicate {host}/{name}")
                 return False
         self.all_shares.append(share)
+        logger.debug(f"Share added: {host}/{name}")
         return True
 
     def add_vulnerability(self, vuln: VulnerabilityInfo) -> bool:

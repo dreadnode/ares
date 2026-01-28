@@ -984,8 +984,19 @@ class RedisWorkerAgent:
 
     def _merge_shared_state(self, fresh: SharedRedTeamState) -> None:
         if self.shared_state is None:
+            logger.debug(
+                f"[{self.agent_name}] Initial state: "
+                f"{len(fresh.all_credentials)} creds, {len(fresh.all_hashes)} hashes, "
+                f"{len(fresh.all_hosts)} hosts"
+            )
             self.shared_state = fresh
             return
+
+        # Track counts before merge
+        old_creds = len(self.shared_state.all_credentials)
+        old_hashes = len(self.shared_state.all_hashes)
+        old_hosts = len(self.shared_state.all_hosts)
+
         current = self.shared_state
         for attr in (
             "operation_id",
@@ -1021,6 +1032,18 @@ class RedisWorkerAgent:
                 current_value: set = getattr(current, dynamic_attr, set())
                 merged = current_value | fresh_value
                 object.__setattr__(current, dynamic_attr, merged)
+
+        # Log if state changed
+        new_creds = len(current.all_credentials)
+        new_hashes = len(current.all_hashes)
+        new_hosts = len(current.all_hosts)
+        if new_creds != old_creds or new_hashes != old_hashes or new_hosts != old_hosts:
+            logger.debug(
+                f"[{self.agent_name}] State merged: "
+                f"creds {old_creds}->{new_creds}, "
+                f"hashes {old_hashes}->{new_hashes}, "
+                f"hosts {old_hosts}->{new_hosts}"
+            )
 
     async def _execute_crack_task(self, task: TaskMessage) -> None:
         payload = task.payload or {}

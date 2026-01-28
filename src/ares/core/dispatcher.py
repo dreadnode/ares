@@ -418,6 +418,10 @@ class RedTeamDispatcher:
             )
             await self._checkpoint()
             logger.info(f"Credential published: {credential.domain}\\{credential.username}")
+        else:
+            logger.debug(
+                f"Credential not published (duplicate/invalid): {credential.domain}\\{credential.username}"
+            )
 
         return added
 
@@ -457,6 +461,10 @@ class RedTeamDispatcher:
             logger.info(
                 f"Hash published: {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type})"
             )
+        else:
+            logger.debug(
+                f"Hash not published (duplicate): {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type})"
+            )
 
         return added
 
@@ -475,6 +483,8 @@ class RedTeamDispatcher:
         if added:
             await self._checkpoint()
             logger.info(f"Share recorded: {share.host}/{share.name}")
+        else:
+            logger.debug(f"Share not published (duplicate/invalid): {share.host}/{share.name}")
         return added
 
     def signal_credential_access(self) -> None:
@@ -520,6 +530,8 @@ class RedTeamDispatcher:
             )
             await self._checkpoint()
             logger.info(f"Host published: {host.ip} ({host.hostname})")
+        else:
+            logger.debug(f"Host not published (duplicate/merged): {host.ip} ({host.hostname})")
 
         return added
 
