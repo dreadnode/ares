@@ -45,6 +45,20 @@ if TYPE_CHECKING:
     from ares.core.k8s_executor import KubernetesPodExecutor
 
 
+def sanitize_tool_output(content: str) -> str:
+    """Remove invalid UTF-8 surrogates from tool output.
+
+    Tool output may contain binary data or invalid UTF-8 sequences that cause
+    encoding errors when logging or processing. This function replaces any
+    problematic characters with the Unicode replacement character.
+    """
+    if not content:
+        return ""
+    # Encode with surrogateescape to handle invalid sequences, then decode
+    # with replace to convert them to replacement characters
+    return content.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+
+
 # Tool assignments per agent role
 ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
     AgentRole.RECON: [
@@ -182,7 +196,7 @@ def create_role_hooks(
             if hasattr(event, "error") and event.error:
                 logger.warning(f"❌ [{log_name}] {event.tool_call.name} failed: {event.error}")
             else:
-                content = (
+                content = sanitize_tool_output(
                     str(event.message.content) if event.message and event.message.content else ""
                 )
                 if not content:
@@ -213,7 +227,7 @@ def create_role_hooks(
             if not event.message or not event.message.content:
                 return None
 
-            result = str(event.message.content).lower()
+            result = sanitize_tool_output(str(event.message.content)).lower()
             tool_name = (
                 event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
             )
@@ -238,7 +252,7 @@ def create_role_hooks(
             if not event.message or not event.message.content:
                 return None
 
-            result = str(event.message.content)
+            result = sanitize_tool_output(str(event.message.content))
             tool_name = (
                 event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
             )
@@ -262,7 +276,7 @@ def create_role_hooks(
             if not event.message or not event.message.content:
                 return None
 
-            result = str(event.message.content)
+            result = sanitize_tool_output(str(event.message.content))
             tool_name = (
                 event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
             )

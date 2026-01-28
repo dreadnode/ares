@@ -48,6 +48,9 @@ from ares.tools.red import (
 )
 from ares.tools.red.orchestrator import OrchestratorTools
 
+# Default max runtime in seconds (30 minutes), configurable via ARES_MAX_RUNTIME env var
+DEFAULT_MAX_RUNTIME = float(os.environ.get("ARES_MAX_RUNTIME", "1800"))
+
 
 def _resolve_model_generator(model: str, openai_api_key: str | None) -> str | rg.Generator:
     if not openai_api_key:
@@ -322,6 +325,7 @@ async def run_multi_agent_operation(  # noqa: PLR0912
     checkpoint_interval: int = 60,
     openai_api_key: str | None = None,
     report_dir: str | Path | None = None,
+    max_runtime: float | None = None,
 ) -> dict[str, Any]:
     """
     Main entry point for multi-agent red team operations.
@@ -339,10 +343,13 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         checkpoint_interval: Seconds between checkpoints
         openai_api_key: Optional OpenAI API key to bind directly to the generator
         report_dir: Directory to write the final report (default: ./reports)
+        max_runtime: Maximum runtime in seconds (default: 1800s / 30 min, via ARES_MAX_RUNTIME env)
 
     Returns:
         Operation results summary
     """
+    # Resolve max runtime from parameter, env, or default
+    resolved_max_runtime = max_runtime if max_runtime is not None else DEFAULT_MAX_RUNTIME
     # Resolve config defaults
     redis_url = redis_url or get_redis_url()
     namespace = namespace or get_namespace()
@@ -444,6 +451,11 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         )
 
         # Run the orchestrator agent - this drives the entire operation
+        # Track crash attempts to prevent infinite loops
+        orchestrator_crash_count = 0
+        max_orchestrator_crashes = 3
+        result = None
+
         with dn.run(tags=["multi-agent-operation", target_domain]):
             dn.log_params(
                 model=model,
@@ -453,11 +465,50 @@ async def run_multi_agent_operation(  # noqa: PLR0912
                 max_steps=max_steps,
             )
 
-            # Run the orchestrator agent
-            logger.info(f"🤖 Connecting to {model}...")
-            result = await orchestrator_agent.run(initial_prompt)
+            # Run the orchestrator agent with crash recovery
+            while orchestrator_crash_count < max_orchestrator_crashes:
+                try:
+                    logger.info(f"🤖 Connecting to {model}...")
+                    result = await orchestrator_agent.run(initial_prompt)
+                    _log_orchestrator_result(result, model)
+                    break  # Success - exit the retry loop
+                except Exception as e:
+                    orchestrator_crash_count += 1
+                    state = dispatcher.shared_state
+                    has_progress = len(state.all_credentials) > 0 or len(state.all_hashes) > 0
 
-            _log_orchestrator_result(result, model)
+                    logger.error(
+                        f"Orchestrator crashed (attempt {orchestrator_crash_count}/{max_orchestrator_crashes}): {e}",
+                        exc_info=True,
+                    )
+
+                    if has_progress and orchestrator_crash_count < max_orchestrator_crashes:
+                        logger.warning(
+                            f"Orchestrator crashed but has progress ({len(state.all_credentials)} creds, "
+                            f"{len(state.all_hashes)} hashes). Continuing background tasks and retrying..."
+                        )
+                        # Give background tasks time to work before retrying
+                        await asyncio.sleep(30)
+                    elif not has_progress:
+                        # No progress - fail fast
+                        raise
+                    else:
+                        # Max crashes reached with progress - continue without orchestrator
+                        logger.warning(
+                            f"Orchestrator crashed {max_orchestrator_crashes} times. "
+                            "Continuing with background tasks only."
+                        )
+                        break
+
+        # Handle case where result is None (all retries failed but we have progress)
+        if result is None:
+            # Create a synthetic stop reason for the completion logic below
+            class SyntheticResult:
+                stop_reason = "orchestrator_crashed"
+                steps = 0
+                error = "Orchestrator crashed after max retries"
+
+            result = SyntheticResult()  # type: ignore[assignment]
 
         stop_reason = getattr(result, "stop_reason", None)
         if (
@@ -506,7 +557,7 @@ async def run_multi_agent_operation(  # noqa: PLR0912
             logger.info("Operation marked complete; skipping post-run wait")
         else:
             # Wait for any remaining background tasks
-            await _wait_for_completion(dispatcher, tasks, max_runtime=300.0)
+            await _wait_for_completion(dispatcher, tasks, max_runtime=resolved_max_runtime)
 
         exploitation_status = await dispatcher.get_exploitation_status()
 
@@ -623,6 +674,9 @@ async def _create_orchestrator_agent(
     certipy_tools.set_state(shared_state)
     bloodhound_tools.set_state(shared_state)
     reporting_tools.set_state(shared_state)
+
+    # Wire dispatcher on credential tools for auto-DA announcement
+    credential_tools.set_dispatcher(dispatcher)
 
     tools = [
         complete_operation,  # Stop condition tool for marking operation complete

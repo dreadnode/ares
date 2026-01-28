@@ -334,3 +334,57 @@ def add_weakness_to_state(state: AnyRedTeamState | None, block: str) -> None:
         return
     if block not in state.weaknesses:
         state.weaknesses.append(block)
+
+
+def check_tool_result(
+    stdout: str,
+    stderr: str,
+    return_code: int,
+    tool_name: str,
+    success_indicators: list[str] | None = None,
+    error_indicators: list[str] | None = None,
+) -> tuple[str, bool]:
+    """Check tool result and return (formatted_output, is_success).
+
+    This helper function inspects both the return code and output content
+    to determine if a tool execution was successful.
+
+    Args:
+        stdout: Standard output from the tool
+        stderr: Standard error from the tool
+        return_code: Exit code from the tool
+        tool_name: Name of the tool for logging
+        success_indicators: Optional list of strings indicating success in output
+        error_indicators: Optional list of strings indicating failure in output
+
+    Returns:
+        Tuple of (formatted_output, is_success) where is_success is True if
+        the tool executed successfully based on return code and output analysis.
+    """
+    output = stdout or ""
+    if stderr:
+        output = output + "\n" + stderr if output else stderr
+
+    # Check return code first
+    if return_code != 0:
+        # Some tools return non-zero even on partial success
+        # Check if output has success indicators before declaring failure
+        if success_indicators:
+            output_lower = output.lower()
+            for indicator in success_indicators:
+                if indicator.lower() in output_lower:
+                    logger.debug(f"{tool_name} returned {return_code} but has success indicator")
+                    return output, True
+
+        logger.warning(f"{tool_name} failed with return code {return_code}")
+        return output, False
+
+    # Check for error indicators in output
+    if error_indicators:
+        output_lower = output.lower()
+        for indicator in error_indicators:
+            if indicator.lower() in output_lower:
+                logger.warning(f"{tool_name} output contains error indicator: {indicator}")
+                return output, False
+
+    return output, True
