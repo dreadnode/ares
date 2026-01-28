@@ -1522,7 +1522,7 @@ class CrackingTools(Toolset):
         hash_value: str,
         hashcat_mode: int = 13100,
         wordlist_path: str = "/usr/share/wordlists/rockyou.txt",
-        max_time_minutes: int = 10,
+        max_time_minutes: int | None = 10,
         use_dynamic_wordlist: bool = True,
     ) -> str:
         """
@@ -1540,7 +1540,7 @@ class CrackingTools(Toolset):
                 - 13100: Kerberos TGS ($krb5tgs$)
                 - 18200: Kerberos AS-REP ($krb5asrep$)
             wordlist_path: Path to wordlist file (default: rockyou.txt)
-            max_time_minutes: Maximum time to spend cracking (default: 10 minutes)
+            max_time_minutes: Maximum time to spend cracking (default: 10 minutes, None=unlimited)
 
         Returns:
             Cracked passwords if successful, otherwise error message
@@ -1559,16 +1559,20 @@ class CrackingTools(Toolset):
             logger.info("[*] Using dynamic user-based wordlist for cracking")
 
         try:
+            # Build runtime flag only if time limit is specified
+            runtime_flag = f"--runtime {max_time_minutes * 60}" if max_time_minutes else ""
             cmd = f"""
 echo '{hash_value}' > {hash_file_path}
-hashcat -m {hashcat_mode} -a 0 {hash_file_path} {wordlist_path} --runtime {max_time_minutes * 60} --force 2>&1 || true
+hashcat -m {hashcat_mode} -a 0 {hash_file_path} {wordlist_path} {runtime_flag} --force 2>&1 || true
 hashcat -m {hashcat_mode} {hash_file_path} --show 2>&1
 rm -f {hash_file_path}
 """
+            # Use 30 min default timeout if no time limit specified
+            timeout = (max_time_minutes * 60 + 60) if max_time_minutes else 1800
             stdout, stderr, _ = await asyncio.to_thread(
                 run_tool,
                 ["bash", "-c", cmd],
-                timeout_seconds=(max_time_minutes * 60) + 60,
+                timeout_seconds=timeout,
             )
 
             if stdout and ":" in stdout:

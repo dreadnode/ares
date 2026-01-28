@@ -243,3 +243,7 @@ skip-magic-trailing-comma = false
     "T201",    # printing is fine for examples
     "DTZ003",  # datetime without tz is fine for examples
 ]
+"src/ares/cli_ops.py" = [
+    "T201",    # printing is fine for CLI commands
+    "PLR0912", # too many branches is acceptable for CLI command functions
+]

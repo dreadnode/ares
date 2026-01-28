@@ -273,7 +273,11 @@ class LocalExecutor:
         # Use shlex.join for proper shell quoting (handles parentheses, spaces, etc.)
         command_str = shlex.join(command) if isinstance(command, list) else command
 
-        logger.debug(f"Executing locally: {command_str[:150]}...")
+        # Log full command for debugging (truncate very long ones like hashes)
+        if len(command_str) > 500:
+            logger.debug(f"Executing locally: {command_str[:200]}...{command_str[-100:]}")
+        else:
+            logger.debug(f"Executing locally: {command_str}")
 
         try:
             result = subprocess.run(  # noqa: S602  # nosec B602
@@ -285,10 +289,18 @@ class LocalExecutor:
                 cwd=working_directory,
                 check=False,
             )
+
+            # Log command output for visibility
+            if result.stdout:
+                logger.info(f"Command output:\n{truncate_output(result.stdout, 2000)}")
             if result.returncode != 0:
-                logger.warning(f"Command failed (code={result.returncode}): {command_str[:150]}")
+                logger.warning(f"Command failed (code={result.returncode}): {command_str[:200]}")
                 if result.stderr:
-                    logger.debug(f"stderr: {truncate_output(result.stderr, 500)}")
+                    logger.warning(f"stderr: {truncate_output(result.stderr, 1000)}")
+            elif result.stderr:
+                # Log stderr even on success (some tools write info there)
+                logger.debug(f"stderr: {truncate_output(result.stderr, 500)}")
+
             return CommandResult(
                 stdout=result.stdout,
                 stderr=result.stderr,

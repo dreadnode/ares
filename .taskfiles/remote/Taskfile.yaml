@@ -309,6 +309,14 @@ tasks:
           exit 1
         fi
 
+        # Show what we found
+        POD_COUNT=$(echo $PODS | wc -w | tr -d ' ')
+        ORCH_MSG=""
+        if [ -n "$ORCH_POD" ]; then
+          ORCH_MSG=" + orchestrator"
+        fi
+        echo -e "{{.INFO}} Found $POD_COUNT worker pods${ORCH_MSG}, syncing..."
+
         # Sync to worker pods
         if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
           MANIFEST=$(mktemp /tmp/ares-sha256.XXXX)
@@ -796,6 +804,70 @@ tasks:
             kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}}
           fi
         fi
+
+  # ============================================================================
+  # LOGS:DUMP: Write logs to file for analysis
+  # ============================================================================
+  logs:dump:
+    desc: "Dump logs to file for analysis (usage: task remote:logs:dump [ROLE=cracker] [LINES=5000] [SINCE=10m])"
+    silent: true
+    vars:
+      ROLE: '{{.ROLE | default ""}}'
+      LINES: '{{.LINES | default "5000"}}'
+      SINCE: '{{.SINCE | default ""}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "/tmp"}}'
+      MAX_LOG_REQUESTS: '{{.MAX_LOG_REQUESTS | default "20"}}'
+    cmds:
+      - |
+        CONTAINER_ARGS=""
+        if [ "{{.ROLE}}" = "orchestrator" ]; then
+          SELECTOR="-l app.kubernetes.io/name=ares-orchestrator"
+          CONTAINER_ARGS="-c {{.ORCH_CONTAINER}}"
+          FILENAME="ares-orchestrator.log"
+        elif [ -n "{{.ROLE}}" ]; then
+          SELECTOR="-l ares.dreadnode.io/role={{.ROLE}}"
+          if [ -n "{{.WORKER_CONTAINER}}" ]; then
+            CONTAINER_ARGS="-c {{.WORKER_CONTAINER}}"
+          fi
+          FILENAME="ares-{{.ROLE}}.log"
+        else
+          SELECTOR="-l ares.dreadnode.io/component=red-team"
+          if [ -n "{{.WORKER_CONTAINER}}" ]; then
+            CONTAINER_ARGS="-c {{.WORKER_CONTAINER}}"
+          fi
+          FILENAME="ares-all-agents.log"
+        fi
+
+        OUTPUT_FILE="{{.OUTPUT_DIR}}/$FILENAME"
+
+        # Build time filter if specified
+        TIME_FILTER=""
+        if [ -n "{{.SINCE}}" ]; then
+          TIME_FILTER="--since={{.SINCE}}"
+        fi
+
+        echo -e "{{.INFO}} Dumping logs to $OUTPUT_FILE"
+        SINCE_DISPLAY="{{.SINCE}}"
+        if [ -z "$SINCE_DISPLAY" ]; then SINCE_DISPLAY="(all)"; fi
+        echo -e "{{.INFO}} Lines: {{.LINES}}, Since: $SINCE_DISPLAY"
+
+        if [ -n "$CONTAINER_ARGS" ]; then
+          kubectl logs -n {{.NAMESPACE}} $SELECTOR $CONTAINER_ARGS --tail={{.LINES}} $TIME_FILTER --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} 2>/dev/null > "$OUTPUT_FILE" || \
+            kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} $TIME_FILTER --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} > "$OUTPUT_FILE"
+        else
+          kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} $TIME_FILTER --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} > "$OUTPUT_FILE"
+        fi
+
+        LINE_COUNT=$(wc -l < "$OUTPUT_FILE" | tr -d ' ')
+        FILE_SIZE=$(ls -lh "$OUTPUT_FILE" | awk '{print $5}')
+
+        echo -e "{{.SUCCESS}} Wrote $LINE_COUNT lines ($FILE_SIZE) to $OUTPUT_FILE"
+        echo ""
+        echo -e "{{.INFO}} Quick analysis commands:"
+        echo "  View last 100 lines:  tail -100 $OUTPUT_FILE"
+        echo "  Search for task:      grep -A50 'task_id' $OUTPUT_FILE"
+        echo "  Search for errors:    grep -iE 'error|exception|failed' $OUTPUT_FILE"
+        echo "  View in less:         less +G $OUTPUT_FILE"
 
   # ============================================================================
   # EXEC: Run commands in pods
