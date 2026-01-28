@@ -328,5 +328,5 @@ To use these capabilities:
 
 For more information, see:
 
-- [Grafana MCP Setup Guide](grafana_mcp_setup.md)
-- [Ares Documentation](../README.md)
+- [Grafana MCP Setup Guide](topics/grafana-mcp-setup.md)
+- [Home](index.md)
