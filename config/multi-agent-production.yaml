@@ -15,8 +15,9 @@ agents:
     model: "gpt-5.2"
     # model: "claude-sonnet-4-20250514"
     max_steps: 200
-    pod_selector: "ares.dreadnode.io/role=recon"
+    pod_selector: "app.kubernetes.io/name=ares-orchestrator"
     tools:
+      - dispatch_recon
       - dispatch_credential_access
       - dispatch_crack_hash
       - dispatch_acl_analysis

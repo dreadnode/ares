@@ -1144,9 +1144,9 @@ class NetworkEnumerationTools(Toolset):
                 output = "\n".join(content for _, content in outputs if content).strip()
                 return self._format_enum_failure_message(outputs, output)
 
-            # Save to file on remote executor
+            # Save to file on recon pod where netexec commands execute
             users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
-            ok, error = write_users_file_remote(sorted(users), users_file)
+            ok, error = write_users_file_remote(sorted(users), users_file, target_role="recon")
             if not ok:
                 return f"[!] Failed to write users file on remote: {error}"
 

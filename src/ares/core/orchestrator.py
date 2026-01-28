@@ -38,14 +38,7 @@ from ares.core.recovery import OperationRecoveryManager
 from ares.core.task_queue import RedisTaskQueue
 from ares.core.workflows import exploitation_workflow
 from ares.reports.redteam import RedTeamReportGenerator
-from ares.tools.red import (
-    BloodHoundTools,
-    CertipyTools,
-    CredentialDiscoveryTools,
-    CredentialHarvestingTools,
-    NetworkEnumerationTools,
-    RedTeamReportingTools,
-)
+from ares.tools.red import RedTeamReportingTools
 from ares.tools.red.orchestrator import OrchestratorTools
 
 # Default max runtime in seconds (30 minutes), configurable via ARES_MAX_RUNTIME env var
@@ -437,18 +430,9 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         logger.info(f"Starting orchestrator for {target_domain}")
         logger.info(f"Initial prompt:\n{initial_prompt}")
 
-        # Start mandatory user recon once the operation commences.
-        tasks.append(
-            asyncio.create_task(
-                asyncio.to_thread(
-                    _run_mandatory_user_enum,
-                    target_ips,
-                    target_domain,
-                    dispatcher.shared_state,
-                ),
-                name="mandatory_user_enum",
-            )
-        )
+        # NOTE: Initial reconnaissance is dispatched by the orchestrator agent
+        # through its template instructions (dispatch_recon). The orchestrator
+        # coordinates all work through dispatch tools, not direct execution.
 
         # Run the orchestrator agent - this drives the entire operation
         # Track crash attempts to prevent infinite loops
@@ -630,11 +614,12 @@ async def _create_orchestrator_agent(
 
     The orchestrator has:
     - Completion tools (complete_operation, announce_domain_admin) for stop conditions
-    - OrchestratorTools for dispatching tasks to specialized agents
-    - NetworkEnumerationTools for initial reconnaissance
-    - CredentialDiscoveryTools for finding quick wins
-    - CertipyTools for ADCS recon
-    - RedTeamReportingTools for recording findings
+    - OrchestratorTools for dispatching tasks to specialized worker agents
+    - RedTeamReportingTools for recording findings and status
+
+    The orchestrator does NOT execute exploitation tools directly. It delegates
+    all tool execution to specialized worker agents (RECON, CREDENTIAL_ACCESS,
+    CRACKER, ACL, PRIVESC, LATERAL, COERCION).
 
     Args:
         dispatcher: The dispatcher for inter-agent communication
@@ -655,48 +640,22 @@ async def _create_orchestrator_agent(
     orchestrator_tools.set_dispatcher(dispatcher)
     orchestrator_tools.set_shared_state(shared_state)
 
-    # Recon tools for initial recon
-    # Note: These tools use RedTeamState internally. SharedRedTeamState provides
-    # compatibility aliases (hosts, credentials, etc.) so they work in multi-agent mode.
-    network_tools = NetworkEnumerationTools()
-    cred_discovery_tools = CredentialDiscoveryTools()
-    credential_tools = CredentialHarvestingTools()
-    certipy_tools = CertipyTools()
-    bloodhound_tools = BloodHoundTools()
+    # Reporting tools for status tracking
     reporting_tools = RedTeamReportingTools()
-
-    # Set shared state on all toolsets for state tracking
-    # SharedRedTeamState has compatibility properties (hosts, credentials, etc.)
-    # that map to all_hosts, all_credentials, etc. for backward compatibility
-    network_tools.set_state(shared_state)
-    cred_discovery_tools.set_state(shared_state)
-    credential_tools.set_state(shared_state)
-    certipy_tools.set_state(shared_state)
-    bloodhound_tools.set_state(shared_state)
     reporting_tools.set_state(shared_state)
-
-    # Wire dispatcher on credential tools for auto-DA announcement
-    credential_tools.set_dispatcher(dispatcher)
 
     tools = [
         complete_operation,  # Stop condition tool for marking operation complete
         announce_domain_admin,  # Stop condition tool for announcing DA achievement
         orchestrator_tools,  # Coordination tools (dispatch_*, get_*, broadcast_*)
-        network_tools,  # nmap, enum4linux, crackmapexec
-        cred_discovery_tools,  # ldap_search_descriptions, password_spray, etc.
-        credential_tools,  # kerberos_user_enum_noauth, secretsdump, etc.
-        certipy_tools,  # certipy_find for ADCS recon
-        bloodhound_tools,  # run_bloodhound for attack path discovery
         reporting_tools,  # record_finding, generate_report
     ]
 
     # Load orchestrator-specific instructions
-    instructions = load_agent_instructions(AgentRole.RECON)
+    instructions = load_agent_instructions(AgentRole.ORCHESTRATOR)
 
     # Create hooks for monitoring and guidance
-    hooks = create_role_hooks(
-        AgentRole.RECON, dispatcher, shared_state, display_name="orchestrator"
-    )
+    hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
 
     logger.info(f"Creating orchestrator agent with {len(tools)} toolsets, max_steps={max_steps}")
 
@@ -1303,71 +1262,6 @@ Remember:
 
 Let's begin the operation!
 """
-
-
-def _run_mandatory_user_enum(  # noqa: PLR0912
-    target_ips: list[str],
-    target_domain: str,
-    shared_state: SharedRedTeamState,
-) -> None:
-    if not target_ips:
-        logger.warning("No target IPs provided for mandatory user recon")
-        return
-
-    network_tools = NetworkEnumerationTools()
-    network_tools.set_state(shared_state)  # type: ignore[arg-type]
-    logger.info("Running mandatory user recon on all targets")
-
-    targets_str = " ".join(target_ips)
-    if targets_str:
-        try:
-            output = network_tools.smb_sweep(targets_str)
-            if output:
-                logger.info("Mandatory SMB sweep output:\n%s", output)
-        except Exception as exc:
-            logger.warning(f"Mandatory SMB sweep failed: {exc}")
-
-    if target_domain and target_ips:
-        try:
-            output = network_tools.resolve_domain_controllers(target_domain, target_ips[0])
-            if output:
-                logger.info("Mandatory SRV lookup output:\n%s", output)
-        except Exception as exc:
-            logger.warning(f"Mandatory SRV lookup failed: {exc}")
-
-    for target in target_ips:
-        try:
-            output = network_tools.enumerate_users(target, "", "", target_domain)
-            if output:
-                logger.info(f"Mandatory user recon output for {target}:\n{output}")
-            else:
-                logger.info(f"Mandatory user recon produced no output for {target}")
-        except Exception as exc:  # noqa: PERF203
-            logger.warning(f"Mandatory user recon failed for {target}: {exc}")
-
-    if shared_state.hosts:
-        hostnames: set[str] = set()
-        host_ip_map: dict[str, str] = {}
-        for host in shared_state.hosts:
-            hostname = (host.hostname or "").strip()
-            if not hostname:
-                continue
-            lower = hostname.lower()
-            if lower.startswith("ip-") and "compute.internal" in lower:
-                continue
-            if "." not in hostname and target_domain:
-                hostname = f"{hostname.lower()}.{target_domain.lower()}"
-            hostnames.add(hostname)
-            if host.ip:
-                host_ip_map[hostname] = host.ip
-        for hostname in sorted(hostnames):
-            try:
-                target_ip = host_ip_map.get(hostname, "")
-                output = network_tools.smbclient_kerberos_shares(hostname, target_ip=target_ip)
-                if output:
-                    logger.info(f"Mandatory smbclient shares output for {hostname}:\n{output}")
-            except Exception as exc:  # noqa: PERF203
-                logger.warning(f"Mandatory smbclient shares failed for {hostname}: {exc}")
 
 
 __all__ = [

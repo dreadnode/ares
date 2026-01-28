@@ -32,6 +32,7 @@ class MessageType(Enum):
     COERCION_REQUEST = "coercion_request"
     ACL_ANALYSIS_REQUEST = "acl_analysis_request"
     CREDENTIAL_ACCESS_REQUEST = "credential_access_request"
+    RECON_REQUEST = "recon_request"
 
     # Task responses - report results back
     TASK_COMPLETE = "task_complete"
@@ -187,6 +188,22 @@ class CredentialAccessRequest(AgentMessage):
     username: str = ""
     password: str | None = None
     hash_value: str | None = None
+    techniques: list[str] = Field(default_factory=list)
+    callback_agent: str = ""
+
+
+class ReconRequest(AgentMessage):
+    """Request reconnaissance actions (nmap, user enumeration, BloodHound)."""
+
+    type: MessageType = MessageType.RECON_REQUEST
+    task_id: str = Field(default_factory=generate_task_id)
+    target_ips: list[str] = Field(default_factory=list)
+    domain: str = ""
+    dc_ip: str = ""
+    username: str = ""
+    password: str | None = None
+    hash_value: str | None = None
+    reason: str | None = None  # e.g., "network_scan", "bloodhound", "user_enum"
     techniques: list[str] = Field(default_factory=list)
     callback_agent: str = ""
 

@@ -523,7 +523,8 @@ class RedTeamState:
 class AgentRole(Enum):
     """Specialized roles for multi-agent red team operations."""
 
-    RECON = "recon"
+    ORCHESTRATOR = "orchestrator"  # Central coordinator, dispatches to workers
+    RECON = "recon"  # Network scanning, enumeration, BloodHound
     CREDENTIAL_ACCESS = "credential_access"
     CRACKER = "cracker"
     ACL = "acl"

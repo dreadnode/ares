@@ -82,7 +82,6 @@ async def test_run_multi_agent_operation_skips_wait_when_completed(monkeypatch):
     monkeypatch.setattr(
         orch, "_generate_multi_agent_report", lambda *_args, **_kwargs: (None, None)
     )
-    monkeypatch.setattr(orch, "_run_mandatory_user_enum", lambda *_args, **_kwargs: None)
 
     async def _noop(*_args, **_kwargs):
         return None

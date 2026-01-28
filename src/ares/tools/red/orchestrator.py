@@ -79,6 +79,125 @@ class OrchestratorTools(Toolset):
         return f"✓ Operation marked as complete. Summary: {summary}"
 
     @dn.tool_method
+    async def dispatch_recon(
+        self,
+        task_type: str,
+        targets: str = "",
+        domain: str = "",
+        username: str = "",
+        password: str = "",
+        hash_value: str = "",
+        details: str = "{}",
+        wait_for_result: bool = False,
+        timeout: float = 600.0,
+    ) -> str:
+        """
+        Dispatch reconnaissance tasks to the RECON agent.
+
+        The RECON agent specializes in network scanning, enumeration, and
+        attack path discovery. Use this to delegate:
+        - Network scanning (nmap)
+        - User and share enumeration
+        - Domain information gathering
+        - BloodHound collection and analysis
+
+        Args:
+            task_type: Type of reconnaissance task:
+                - "network_scan": Run nmap to discover live hosts and services
+                - "user_enumeration": Enumerate domain users
+                - "share_enumeration": Enumerate network shares
+                - "domain_info": Gather domain controller and trust information
+                - "bloodhound": Run BloodHound collection and analysis (requires creds)
+            targets: Comma-separated target IPs, hostnames, or CIDR ranges (e.g., "10.0.0.0/24,10.0.1.5")
+            domain: Target domain (e.g., "corp.local")
+            username: Username for authenticated enumeration (optional)
+            password: Password for authenticated enumeration (optional)
+            hash_value: NTLM hash for pass-the-hash (optional)
+            details: JSON string with additional parameters (e.g., '{"ports": "80,443,445"}')
+            wait_for_result: If True, wait for task completion
+            timeout: Max time to wait if wait_for_result=True (seconds, default 600 for long scans)
+
+        Returns:
+            Task ID for tracking, or result if wait_for_result=True
+
+        Example:
+            # Initial network scan
+            >>> dispatch_recon(
+            ...     task_type="network_scan",
+            ...     targets="10.0.0.0/24",
+            ...     details='{"ports": "top-1000"}'
+            ... )
+
+            # User enumeration (unauthenticated)
+            >>> dispatch_recon(
+            ...     task_type="user_enumeration",
+            ...     targets="10.0.0.1",
+            ...     domain="corp.local"
+            ... )
+
+            # BloodHound with credentials
+            >>> dispatch_recon(
+            ...     task_type="bloodhound",
+            ...     targets="10.0.0.1",
+            ...     domain="corp.local",
+            ...     username="user1",
+            ...     password="P@ssw0rd"  # pragma: allowlist secret
+            ... )
+        """
+        # Parse targets into list
+        target_ips = [t.strip() for t in targets.split(",") if t.strip()] if targets else []
+
+        # Map task_type to techniques
+        technique_map = {
+            "network_scan": ["nmap_scan"],
+            "user_enumeration": ["enumerate_users"],
+            "share_enumeration": ["enumerate_shares"],
+            "domain_info": ["get_domain_info"],
+            "bloodhound": ["run_bloodhound"],
+        }
+
+        techniques = technique_map.get(task_type, [task_type])
+
+        # Get domain from shared state if not provided
+        if not domain and self.shared_state.domains:
+            domain = next(iter(self.shared_state.domains))
+
+        task_id = await self.dispatcher.request_recon(
+            source_agent=self._agent_name,
+            domain=domain,
+            target_ips=target_ips or None,
+            username=username or "",
+            password=password or None,
+            hash_value=hash_value or None,
+            reason=task_type,
+            techniques=techniques,
+        )
+
+        if not task_id:
+            return "✗ Failed to dispatch recon - no recon agent available"
+
+        logger.info(f"Dispatched recon ({task_type}): {task_id}")
+
+        if not wait_for_result:
+            target_info = f", Targets: {targets}" if targets else ""
+            cred_info = f", User: {username}" if username else ""
+            return (
+                f"✓ Recon task dispatched: {task_id}\n"
+                f"Type: {task_type}{target_info}{cred_info}\n"
+                f"Techniques: {', '.join(techniques)}"
+            )
+
+        # Wait for result via Redis queue
+        result = await self.dispatcher.wait_for_redis_result(task_id, timeout=timeout)
+
+        if result is None:
+            return f"⏳ Recon task {task_id} timed out after {timeout}s"
+
+        if result.success:
+            return f"✓ Recon complete: {result.result}"
+        return f"✗ Recon failed: {result.error}"
+
+    @dn.tool_method
     async def dispatch_credential_access(
         self,
         task_type: str,

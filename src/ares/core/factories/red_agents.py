@@ -60,6 +60,8 @@ def fix_tool_output_encoding(content: str) -> str:
 
 
 # Tool assignments per agent role
+# Note: ORCHESTRATOR is not included here - it uses OrchestratorTools which are
+# wired up separately in the orchestrator.py module
 ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
     AgentRole.RECON: [
         NetworkEnumerationTools,
@@ -101,6 +103,7 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
 
 # System instruction templates per role
 ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
+    AgentRole.ORCHESTRATOR: "redteam/agents/orchestrator.md.jinja",
     AgentRole.RECON: "redteam/agents/recon.md.jinja",
     AgentRole.CREDENTIAL_ACCESS: "redteam/agents/credential_access.md.jinja",
     AgentRole.CRACKER: "redteam/agents/cracker.md.jinja",
@@ -113,6 +116,7 @@ ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
 
 # Default max steps per role
 ROLE_MAX_STEPS: dict[AgentRole, int] = {
+    AgentRole.ORCHESTRATOR: 200,  # Coordinator role with dispatching
     AgentRole.RECON: 200,
     AgentRole.CREDENTIAL_ACCESS: 120,
     AgentRole.CRACKER: 50,
@@ -218,7 +222,7 @@ def create_role_hooks(
     hooks.extend([log_tool_usage, log_tool_result])
 
     # Role-specific hooks
-    if role == AgentRole.RECON:
+    if role == AgentRole.ORCHESTRATOR:
         # Orchestrator monitors for domain admin achievement
         async def check_domain_admin(event: ToolEnd):
             if not isinstance(event, ToolEnd):
@@ -296,12 +300,19 @@ def create_role_hooks(
 
     # Unstall hook for all roles
     role_feedback = {
-        AgentRole.RECON: (
+        AgentRole.ORCHESTRATOR: (
             "You seem stuck. As orchestrator, focus on:\n"
             "1. Check pending tasks with get_pending_tasks()\n"
             "2. Review unexploited vulnerabilities with get_exploitation_status()\n"
             "3. Dispatch work to specialized agents\n"
             "4. Don't do exploitation yourself - delegate!"
+        ),
+        AgentRole.RECON: (
+            "You seem stuck. As recon agent, focus on:\n"
+            "1. Run network scans with nmap_scan\n"
+            "2. Enumerate users and shares\n"
+            "3. Run BloodHound collection if credentials available\n"
+            "4. Report findings back to orchestrator"
         ),
         AgentRole.CRACKER: (
             "You seem stuck. As cracker, focus on:\n"
@@ -403,7 +414,7 @@ def create_specialized_agent(
 
     # Determine stop conditions based on role
     stop_conditions = []
-    if role == AgentRole.RECON:
+    if role == AgentRole.ORCHESTRATOR:
         stop_conditions.append(tool_use("complete_operation"))
     else:
         # Worker agents stop when task is complete or they need assistance
@@ -527,7 +538,7 @@ async def create_multi_agent_ensemble(
 
     for role in roles:
         # Determine model for this role
-        if role == AgentRole.RECON:
+        if role == AgentRole.ORCHESTRATOR:
             agent_model = orch_model or base_model
         else:
             agent_model = work_model or base_model

@@ -273,10 +273,19 @@ def infer_listener_ip(target: str | None = None) -> str | None:
         return None
 
 
-def write_users_file_remote(users: list[str], users_file: str) -> tuple[bool, str]:
+def write_users_file_remote(
+    users: list[str],
+    users_file: str,
+    target_role: str | None = None,
+) -> tuple[bool, str]:
     """Write a list of users to a file on the remote system.
 
     Filters out MOTD garbage and invalid usernames before writing.
+
+    Args:
+        users: List of usernames to write
+        users_file: Path to write the file
+        target_role: Optional worker role to route the write to (e.g., "recon")
     """
     if not users:
         return False, "no users provided"
@@ -292,17 +301,22 @@ def write_users_file_remote(users: list[str], users_file: str) -> tuple[bool, st
 
     escaped_users = " ".join(shlex.quote(user) for user in clean_users)
     cmd = f"printf '%s\\n' {escaped_users} > {shlex.quote(users_file)}"
-    result = run_remote(["bash", "-lc", cmd], timeout_seconds=60)
+    result = run_remote(["bash", "-lc", cmd], timeout_seconds=60, target_role=target_role)
     if result.return_code != 0:
         error = (result.stderr or result.stdout or "unknown error").strip()
         return False, error
     return True, ""
 
 
-def remote_file_exists(path: str) -> tuple[bool, str]:
-    """Check if a file exists and is non-empty on the remote system."""
+def remote_file_exists(path: str, target_role: str | None = None) -> tuple[bool, str]:
+    """Check if a file exists and is non-empty on the remote system.
+
+    Args:
+        path: Path to check
+        target_role: Optional worker role to route the check to (e.g., "recon")
+    """
     cmd = f"test -s {shlex.quote(path)}"
-    result = run_remote(["bash", "-lc", cmd], timeout_seconds=30)
+    result = run_remote(["bash", "-lc", cmd], timeout_seconds=30, target_role=target_role)
     if result.return_code == 0:
         return True, ""
     error = (result.stderr or result.stdout or "file not found").strip()
@@ -312,12 +326,23 @@ def remote_file_exists(path: str) -> tuple[bool, str]:
 def filter_users_file_remote(
     users_file: str,
     exclude_users: set[str],
+    target_role: str | None = None,
 ) -> tuple[str, str | None]:
-    """Filter a remote users file to exclude certain usernames and MOTD garbage."""
+    """Filter a remote users file to exclude certain usernames and MOTD garbage.
+
+    Args:
+        users_file: Path to the users file
+        exclude_users: Set of usernames to exclude
+        target_role: Optional worker role to route operations to (e.g., "recon")
+    """
     if not exclude_users:
         # Still need to filter for MOTD garbage even with no exclude list
         exclude_users = set()
-    result = run_remote(["bash", "-lc", f"cat {shlex.quote(users_file)}"], timeout_seconds=60)
+    result = run_remote(
+        ["bash", "-lc", f"cat {shlex.quote(users_file)}"],
+        timeout_seconds=60,
+        target_role=target_role,
+    )
     if result.return_code != 0:
         error = (result.stderr or result.stdout or "failed to read users file").strip()
         return users_file, error
@@ -345,7 +370,7 @@ def filter_users_file_remote(
     if not users:
         return "", "all users already have credentials"
     filtered_file = f"/tmp/users_spray_filtered_{uuid.uuid4().hex}.txt"  # nosec B108  # noqa: S108
-    ok, error = write_users_file_remote(users, filtered_file)
+    ok, error = write_users_file_remote(users, filtered_file, target_role=target_role)
     if not ok:
         return users_file, error or "failed to write filtered users file"
     return filtered_file, None

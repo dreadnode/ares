@@ -10,44 +10,44 @@ orchestrator delegates tasks to specialized worker agents. Each agent runs in
 its own Kubernetes pod with role-specific tools installed.
 
 ```text
-┌─────────────────────────────────────────────────────────────────┐
-│                        Orchestrator                              │
-│                    (RECON Agent Pod)                             │
-│                                                                  │
-│  Responsibilities:                                               │
-│  - Initial network reconnaissance                                │
-│  - Asset discovery and enumeration                               │
-│  - Attack path identification                                    │
-│  - Task dispatch to specialized workers                          │
-│  - Progress monitoring and coordination                          │
-│  - Operation completion decision                                 │
-└─────────────────────┬───────────────────────────────────────────┘
-                      │ Redis pub/sub + task queues
-        ┌─────────────┼─────────────┬─────────────┬─────────────┐
-        ▼             ▼             ▼             ▼             ▼
-┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐
-│ CREDENTIAL│ │  CRACKER  │ │    ACL    │ │  PRIVESC  │ │  LATERAL  │
-│  ACCESS   │ │           │ │           │ │           │ │           │
-└───────────┘ └───────────┘ └───────────┘ └───────────┘ └───────────┘
-        │             │             │             │             │
-        ▼             ▼             ▼             ▼             ▼
-   secretsdump    hashcat      bloodyAD      certipy      psexec
-   kerberoast     john         pywhisker     mssqlclient  evil-winrm
-   asrep_roast                 dacledit      rbcd         wmiexec
-   password_spray                            delegation   smbexec
+┌────────────────────────────────────────────────────────────────────────┐
+│                     Orchestrator Service Pod                           │
+│                    (ares-orchestrator-*)                               │
+│                                                                         │
+│  Responsibilities:                                                      │
+│  - LLM-powered strategic coordination                                   │
+│  - Attack path identification and planning                              │
+│  - Task dispatch to all worker agents                                   │
+│  - Progress monitoring and state aggregation                            │
+│  - Operation completion decision                                        │
+│  - Does NOT execute exploitation tools directly                         │
+└──────────────────────────────┬─────────────────────────────────────────┘
+                               │ Redis pub/sub + task queues
+       ┌───────────────────────┼─────────────┬─────────────┬─────────────┬─────────────┐
+       ▼             ▼         ▼             ▼             ▼             ▼             ▼
+┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐
+│   RECON   │ │ CREDENTIAL│ │  CRACKER  │ │    ACL    │ │  PRIVESC  │ │  LATERAL  │ │ COERCION  │
+│           │ │  ACCESS   │ │           │ │           │ │           │ │           │ │           │
+└───────────┘ └───────────┘ └───────────┘ └───────────┘ └───────────┘ └───────────┘ └───────────┘
+        │             │             │             │             │             │             │
+        ▼             ▼             ▼             ▼             ▼             ▼             ▼
+   nmap        secretsdump    hashcat      bloodyAD      certipy      psexec      PetitPotam
+   enum4linux  kerberoast     john         pywhisker     mssqlclient  evil-winrm  Coercer
+   bloodhound  asrep_roast                 dacledit      rbcd         wmiexec     ntlmrelayx
+               password_spray                            delegation   smbexec     Responder
 ```
 
 ## Design Principles
 
 ### 1. Orchestrator Coordinates, Workers Execute
 
-The orchestrator (RECON agent) **never executes exploitation tools directly**.
-It:
+The orchestrator **never executes exploitation tools directly**. It:
 
-- Gathers information through passive enumeration
-- Identifies attack opportunities
-- Dispatches tasks to appropriate worker agents
-- Monitors progress and makes strategic decisions
+- Uses LLM-powered strategic decision making
+- Identifies attack opportunities from shared state
+- Dispatches tasks to appropriate worker agents (including RECON)
+- Monitors progress and aggregates results
+- Makes completion decisions
 
 ### 2. Workers Are Specialists
 
@@ -68,32 +68,53 @@ All agents share state through Redis:
 
 ## Agent Roles and Responsibilities
 
-### Orchestrator (RECON)
+### Orchestrator Service
 
-**Purpose**: Central coordinator with the "big picture" view.
+**Purpose**: Central LLM-powered coordinator with the "big picture" view.
+
+**Pod**: `ares-orchestrator-*` (separate from worker agents)
+
+**Tools Available**:
+
+- `OrchestratorTools` - Dispatch functions for all worker types
+- `RedTeamReportingTools` - Status reporting, operation control
+
+**Does NOT Have**:
+
+- Network enumeration tools (nmap, enum4linux) - dispatches to RECON
+- Credential harvesting tools (secretsdump, kerberoast) - dispatches to CREDENTIAL_ACCESS
+- Exploitation tools (certipy, mssqlclient) - dispatches to PRIVESC
+- Lateral movement tools (psexec, evil-winrm) - dispatches to LATERAL
+- Cracking tools (hashcat, john) - dispatches to CRACKER
+
+**Dispatch Functions**:
+
+- `dispatch_recon` - RECON, network scanning, user/share enumeration, BloodHound
+- `dispatch_credential_access` - CREDENTIAL_ACCESS, password attacks, hash extraction
+- `dispatch_crack_hash` - CRACKER, hash cracking
+- `dispatch_acl_analysis` - ACL, ACL abuse paths
+- `dispatch_lateral_movement` - LATERAL, host compromise
+- `dispatch_privesc_exploit` - PRIVESC, direct exploitation
+- `queue_vulnerability_for_exploitation` - PRIVESC, queue vuln for exploitation
+- `start_coercion` - COERCION, NTLM coercion/relay
+
+### RECON
+
+**Purpose**: Network reconnaissance and asset discovery.
+
+**Pods**: `ares-recon-agent-*` (2 replicas)
 
 **Tools Available**:
 
 - `NetworkEnumerationTools` - nmap, user/share enumeration, domain info
-- `BloodHoundTools` - AD relationship mapping
-- `RedTeamReportingTools` - status reporting, operation control
+- `BloodHoundTools` - AD relationship mapping, attack path analysis
 
-**Does NOT Have**:
+**Workflow**:
 
-- Credential harvesting tools (secretsdump, kerberoast)
-- Exploitation tools (certipy, mssqlclient)
-- Lateral movement tools (psexec, evil-winrm)
-- Cracking tools (hashcat, john)
-
-**Dispatch Tools**:
-
-- `dispatch_credential_access` - CREDENTIAL_ACCESS, password attacks, hash
-  extraction
-- `dispatch_crack_hash` - CRACKER, hash cracking
-- `dispatch_acl_analysis` - ACL, ACL abuse paths
-- `dispatch_lateral_movement` - LATERAL, host compromise
-- `queue_vulnerability_for_exploitation` - PRIVESC, ADCS, delegation, MSSQL
-- `start_coercion` - COERCION, NTLM coercion/relay
+1. Receive reconnaissance task from orchestrator (e.g., "scan subnet")
+2. Execute network scanning and enumeration
+3. Report discovered hosts, users, shares, services
+4. Mark task complete
 
 ### CREDENTIAL_ACCESS
 
@@ -205,13 +226,24 @@ All agents share state through Redis:
 
 ### Phase 1: Initial Reconnaissance
 
-The orchestrator performs passive enumeration:
+The orchestrator dispatches reconnaissance tasks to RECON workers:
 
 ```text
-1. nmap_scan - Discover live hosts and services
-2. enumerate_users - Get domain user list
-3. enumerate_shares - Find accessible shares
-4. get_domain_info - Domain controllers, trusts, etc.
+# Network discovery
+dispatch_recon(task_type="network_scan", targets="10.0.0.0/24")
+→ RECON executes: nmap_scan - Discover live hosts and services
+
+# User enumeration (unauthenticated)
+dispatch_recon(task_type="user_enumeration", targets="DC_IP", domain="corp.local")
+→ RECON executes: enumerate_users - Get domain user list
+
+# Share enumeration
+dispatch_recon(task_type="share_enumeration", targets="DC_IP", domain="corp.local")
+→ RECON executes: enumerate_shares - Find accessible shares
+
+# Domain information
+dispatch_recon(task_type="domain_info", targets="DC_IP", domain="corp.local")
+→ RECON executes: get_domain_info - Domain controllers, trusts, etc.
 ```
 
 ### Phase 2: Low-Hanging Fruit (Dispatched)
@@ -234,19 +266,22 @@ CREDENTIAL_ACCESS executes:
 **Every time a credential is found**, orchestrator dispatches:
 
 ```text
-1. dispatch_credential_access(task="secretsdump", targets="ALL_DCs")
+1. dispatch_recon(task_type="bloodhound", domain="corp.local", username="user", password="pass")  # pragma: allowlist secret
+   → Run BloodHound collection for attack path analysis
+
+2. dispatch_credential_access(task="secretsdump", targets="ALL_DCs")
    → Extracts NTLM hashes, looks for krbtgt/Administrator
 
-2. dispatch_credential_access(task="kerberoast", ...)
+3. dispatch_credential_access(task="kerberoast", ...)
    → Finds service accounts with SPNs
 
-3. dispatch_credential_access(task="asrep_roast", ...)
+4. dispatch_credential_access(task="asrep_roast", ...)
    → Finds accounts without pre-auth
 
-4. dispatch_crack_hash for any new hashes
+5. dispatch_crack_hash for any new hashes
    → Attempts offline cracking
 
-5. REPEAT with any newly cracked credentials
+6. REPEAT with any newly cracked credentials
 ```
 
 This loop continues until:
@@ -404,19 +439,23 @@ When any agent discovers a credential:
 
 ### Orchestrator Should NOT
 
-1. **Execute credential attacks directly**
+1. **Execute reconnaissance tools directly**
+   - Wrong: Orchestrator calls `nmap_scan`, `enumerate_users`
+   - Right: Orchestrator dispatches to RECON
+
+2. **Execute credential attacks directly**
    - Wrong: Orchestrator calls `secretsdump`, `kerberoast`
    - Right: Orchestrator dispatches to CREDENTIAL_ACCESS
 
-2. **Run exploitation tools**
+3. **Run exploitation tools**
    - Wrong: Orchestrator calls `certipy_req_esc1`, `mssql_exec_linked`
    - Right: Orchestrator queues vulnerability for PRIVESC
 
-3. **Perform lateral movement**
+4. **Perform lateral movement**
    - Wrong: Orchestrator calls `psexec`, `evil_winrm`
    - Right: Orchestrator dispatches to LATERAL
 
-4. **Crack hashes**
+5. **Crack hashes**
    - Wrong: Orchestrator calls `hashcat`, `john`
    - Right: Orchestrator dispatches to CRACKER
 
@@ -433,19 +472,18 @@ When any agent discovers a credential:
 
 ## File Reference
 
-- `src/ares/core/factories/red_agents.py` - Agent creation and toolset
-  assignment
+- `src/ares/core/orchestrator.py` - Main orchestrator coordination engine
+- `src/ares/core/orchestrator_service.py` - Orchestrator service (K8s pod)
+- `src/ares/core/orchestrator_client.py` - Client for submitting operations
 - `src/ares/core/dispatcher.py` - Task routing and state management
-- `src/ares/templates/redteam/agents/recon.md.jinja` - Orchestrator
-  instructions
-- `src/ares/templates/redteam/agents/credential_access.md.jinja` -
-  CREDENTIAL_ACCESS instructions
+- `src/ares/core/factories/red_agents.py` - Agent creation and toolset assignment
+- `src/ares/templates/redteam/agents/recon.md.jinja` - RECON agent instructions
+- `src/ares/templates/redteam/agents/credential_access.md.jinja` - CRED_ACCESS
 - `src/ares/templates/redteam/agents/privesc.md.jinja` - PRIVESC instructions
 - `src/ares/templates/redteam/agents/lateral.md.jinja` - LATERAL instructions
 - `src/ares/templates/redteam/agents/acl.md.jinja` - ACL instructions
 - `src/ares/templates/redteam/agents/cracker.md.jinja` - CRACKER instructions
-- `src/ares/templates/redteam/agents/coercion.md.jinja` - COERCION
-  instructions
+- `src/ares/templates/redteam/agents/coercion.md.jinja` - COERCION instructions
 - `src/ares/tools/red/` - Tool implementations
 
 ## Installed Tools by Agent Role
@@ -462,17 +500,21 @@ All agents inherit these foundational tools:
 - **Build**: build-essential, libffi-dev, libssl-dev
 - **Python packages**: python-dotenv, dreadnode, rigging, pydantic, asyncio
 
-### Orchestrator / RECON Agent
+### Orchestrator Service Pod
+
+- **Python runtime**: python3, pip3, dreadnode SDK
+- **Redis client**: For dispatcher and state management
+- **Kubernetes client**: For pod discovery and health monitoring
+- **No pentesting tools**: Orchestrator only coordinates, never executes tools directly
+
+### RECON Agent
 
 - **Network scanning**: nmap
 - **LDAP**: ldap-utils (ldapsearch)
-- **SMB enumeration**: enum4linux, enum4linux-ng, samba-common-bin
-  (rpcclient)
+- **SMB enumeration**: enum4linux, enum4linux-ng, samba-common-bin (rpcclient)
 - **DNS**: dnsutils (dig, nslookup), whois, adidnsdump
-- **AD tools**: NetExec (netexec, nxc, nxcdb), bloodhound-python, certipy-ad
-- **Impacket suite**: GetNPUsers, GetUserSPNs, secretsdump, regsecrets,
-  ntlmrelayx, psexec, wmiexec, smbexec, rbcd, getST, getTGT, mssqlclient,
-  raiseChild, ticketer
+- **AD tools**: NetExec (netexec, nxc, nxcdb), bloodhound-python
+- **Impacket suite**: GetNPUsers, GetUserSPNs
 
 ### CREDENTIAL_ACCESS Agent
 

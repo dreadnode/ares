@@ -33,6 +33,7 @@ from ares.core.messages import (
     LateralMovementRequest,
     MessageType,
     OperationComplete,
+    ReconRequest,
     TaskComplete,
     TaskFailed,
     VulnerabilityFound,
@@ -284,12 +285,22 @@ class RedTeamDispatcher:
 
         # Role-specific subscriptions
         role_subscriptions = {
-            AgentRole.RECON: {
+            AgentRole.ORCHESTRATOR: {
+                # Orchestrator receives all task status updates and discoveries
                 MessageType.TASK_COMPLETE,
                 MessageType.TASK_FAILED,
+                MessageType.TASK_PROGRESS,
                 MessageType.VULNERABILITY_FOUND,
                 MessageType.HASH_DISCOVERED,
                 MessageType.HOST_DISCOVERED,
+                MessageType.USER_DISCOVERED,
+                MessageType.SHARE_DISCOVERED,
+                MessageType.GOLDEN_TICKET_FORGED,
+            },
+            AgentRole.RECON: {
+                MessageType.RECON_REQUEST,
+                MessageType.TASK_COMPLETE,
+                MessageType.TASK_FAILED,
             },
             AgentRole.CRACKER: {
                 MessageType.CRACK_REQUEST,
@@ -963,6 +974,114 @@ class RedTeamDispatcher:
         )
 
         logger.info(f"ACL analysis request {task_id} sent to {acl_agent}")
+        return task_id
+
+    async def request_recon(
+        self,
+        source_agent: str,
+        domain: str,
+        target_ips: list[str] | None = None,
+        username: str = "",
+        password: str | None = None,
+        hash_value: str | None = None,
+        reason: str | None = None,
+        techniques: list[str] | None = None,
+    ) -> str:
+        """
+        Request reconnaissance actions (nmap, user enumeration, BloodHound).
+
+        Uses Redis task queue for cross-pod communication when available.
+
+        Args:
+            source_agent: Agent making the request.
+            domain: Target domain.
+            target_ips: Target IPs for scanning/enumeration.
+            username: Optional username for authenticated enumeration.
+            password: Optional password for authenticated enumeration.
+            hash_value: Optional NTLM hash for pass-the-hash.
+            reason: Reason for the recon request (e.g., "network_scan", "bloodhound").
+            techniques: Optional list of techniques to prioritize.
+
+        Returns:
+            Task ID for tracking.
+        """
+        dc_ip = self._find_domain_controller_ip(domain)
+        payload = {
+            "domain": domain,
+            "target_ips": target_ips or [],
+            "dc_ip": dc_ip,
+            "username": username,
+            "password": password,
+            "hash_value": hash_value,
+            "reason": reason,
+            "techniques": techniques or [],
+        }
+
+        # Use Redis task queue if available (Kubernetes multi-pod mode)
+        if self._task_queue:
+            task_id = await self._task_queue.submit_task(
+                task_type="recon",
+                target_role="recon",
+                payload=payload,
+                source_agent=source_agent,
+            )
+
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type="recon",
+                assigned_agent="recon",
+                params=payload,
+            )
+            self.shared_state.pending_tasks[task_id] = task_info
+            self._redis_task_ids.add(task_id)
+
+            cred_label = username or "unauthenticated"
+            if hash_value and not password:
+                cred_label = f"{cred_label} (hash)"
+            if password:
+                cred_label = f"{cred_label} (password)"
+            reason_label = f" reason={reason}" if reason else ""
+            logger.info(
+                "Recon task {} submitted to Redis queue for {}{}",
+                task_id,
+                cred_label,
+                reason_label,
+            )
+            return task_id
+
+        # Fallback to in-memory queue (single-process mode)
+        task_id = generate_task_id()
+        recon_agent = self._role_queues.get(AgentRole.RECON)
+
+        if not recon_agent:
+            logger.warning("No recon agent registered, cannot route request")
+            return ""
+
+        task_info = TaskInfo(
+            task_id=task_id,
+            task_type="recon",
+            assigned_agent=recon_agent,
+            params=payload,
+        )
+        self.shared_state.pending_tasks[task_id] = task_info
+
+        await self._message_queues[recon_agent].put(
+            ReconRequest(
+                source_agent=source_agent,
+                task_id=task_id,
+                domain=domain,
+                target_ips=payload["target_ips"],
+                dc_ip=dc_ip,
+                username=username,
+                password=password,
+                hash_value=hash_value,
+                reason=reason,
+                techniques=payload["techniques"],
+                callback_agent=source_agent,
+            )
+        )
+
+        logger.info(f"Recon request {task_id} sent to {recon_agent}")
         return task_id
 
     async def request_credential_access(
