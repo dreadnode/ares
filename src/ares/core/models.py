@@ -951,7 +951,6 @@ class SharedRedTeamState:
         if not hasattr(state, "pending_credential_findings"):
             state.pending_credential_findings = set()
         state.all_credentials = cls._dedupe_credentials(state.all_credentials)
-        cls._sanitize_hostnames(state.all_hosts)
         if not state.all_domains:
             state.all_domains = cls._extract_domains(state)
         return state
@@ -974,16 +973,6 @@ class SharedRedTeamState:
             cred.password = password
             deduped.append(cred)
         return deduped
-
-    @staticmethod
-    def _sanitize_hostnames(hosts: list[Host]) -> None:
-        """Clear AWS internal hostnames that provide no useful info."""
-        for host in hosts:
-            hostname = (host.hostname or "").strip()
-            if hostname:
-                lowered = hostname.lower()
-                if lowered.startswith("ip-") and "compute.internal" in lowered:
-                    host.hostname = ""
 
     @staticmethod
     def _extract_domains(state: SharedRedTeamState) -> list[str]:

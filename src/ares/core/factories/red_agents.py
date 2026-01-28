@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from ares.core.k8s_executor import KubernetesPodExecutor
 
 
-def sanitize_tool_output(content: str) -> str:
+def fix_tool_output_encoding(content: str) -> str:
     """Remove invalid UTF-8 surrogates from tool output.
 
     Tool output may contain binary data or invalid UTF-8 sequences that cause
@@ -196,7 +196,7 @@ def create_role_hooks(
             if hasattr(event, "error") and event.error:
                 logger.warning(f"❌ [{log_name}] {event.tool_call.name} failed: {event.error}")
             else:
-                content = sanitize_tool_output(
+                content = fix_tool_output_encoding(
                     str(event.message.content) if event.message and event.message.content else ""
                 )
                 if not content:
@@ -227,7 +227,7 @@ def create_role_hooks(
             if not event.message or not event.message.content:
                 return None
 
-            result = sanitize_tool_output(str(event.message.content)).lower()
+            result = fix_tool_output_encoding(str(event.message.content)).lower()
             tool_name = (
                 event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
             )
@@ -252,7 +252,7 @@ def create_role_hooks(
             if not event.message or not event.message.content:
                 return None
 
-            result = sanitize_tool_output(str(event.message.content))
+            result = fix_tool_output_encoding(str(event.message.content))
             tool_name = (
                 event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
             )
@@ -276,7 +276,7 @@ def create_role_hooks(
             if not event.message or not event.message.content:
                 return None
 
-            result = sanitize_tool_output(str(event.message.content))
+            result = fix_tool_output_encoding(str(event.message.content))
             tool_name = (
                 event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
             )

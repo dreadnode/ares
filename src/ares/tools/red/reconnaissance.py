@@ -20,7 +20,6 @@ from ares.tools.red.common import (
     add_credential_to_state,
     format_weakness_block,
     run_tool,
-    sanitize_hostname,
     write_users_file_remote,
 )
 
@@ -416,7 +415,7 @@ class NetworkEnumerationTools(Toolset):
                     return
                 host = Host(
                     ip=current_ip,
-                    hostname=sanitize_hostname(current_hostname),
+                    hostname=current_hostname,
                     os=current_os or "Unknown",
                     roles=[],
                     services=current_services,
@@ -566,7 +565,6 @@ class NetworkEnumerationTools(Toolset):
                 domain_value = domain_match.group(1).strip() if domain_match else ""
                 if domain_value and hostname and "." not in hostname:
                     hostname = f"{hostname.lower()}.{domain_value.lower()}"
-                hostname = sanitize_hostname(hostname)
 
                 hosts.append(
                     Host(
@@ -661,16 +659,15 @@ class NetworkEnumerationTools(Toolset):
             if self.state and hosts:
                 for raw_hostname in hosts:
                     hostname = raw_hostname.strip().rstrip(".")
-                    sanitized = sanitize_hostname(hostname)
-                    if not sanitized:
+                    if not hostname:
                         continue
-                    ip = _resolve_host(sanitized)
+                    ip = _resolve_host(hostname)
                     if not ip:
-                        logger.warning(f"[!] Failed to resolve DC hostname: {sanitized}")
+                        logger.warning(f"[!] Failed to resolve DC hostname: {hostname}")
                         continue
                     host = Host(
                         ip=ip,
-                        hostname=sanitized,
+                        hostname=hostname,
                         os="Unknown",
                         roles=["AD DC"],
                         services=["389/tcp ldap"],
@@ -745,7 +742,6 @@ class NetworkEnumerationTools(Toolset):
                     and not hostname.lower().endswith(domain_value.lower())
                 ):
                     hostname = f"{hostname.lower()}.{domain_value}"
-                hostname = sanitize_hostname(hostname)
 
                 hosts.append(
                     Host(
@@ -889,7 +885,6 @@ class NetworkEnumerationTools(Toolset):
                 domain_value = domain_match.group(1).strip() if domain_match else ""
                 if domain_value and hostname and "." not in hostname:
                     hostname = f"{hostname.lower()}.{domain_value.lower()}"
-                hostname = sanitize_hostname(hostname)
 
                 hosts.append(
                     Host(

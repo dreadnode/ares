@@ -203,17 +203,6 @@ def find_remote_users_file(paths: list[str]) -> str | None:
     return None
 
 
-def sanitize_hostname(hostname: str) -> str:
-    """Clean and sanitize a hostname string."""
-    cleaned = hostname.strip()
-    if not cleaned:
-        return cleaned
-    lowered = cleaned.lower()
-    if lowered.startswith("ip-") and "compute.internal" in lowered:
-        return ""
-    return cleaned
-
-
 def filter_users_file_remote(
     users_file: str,
     exclude_users: set[str],

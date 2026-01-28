@@ -1467,15 +1467,6 @@ class RedTeamDispatcher:
         self.shared_state.all_users.append(User(username=normalized, domain=domain))
         return True
 
-    def _sanitize_hostname(self, hostname: str) -> str:
-        cleaned = hostname.strip()
-        if not cleaned:
-            return cleaned
-        lowered = cleaned.lower()
-        if lowered.startswith("ip-") and "compute.internal" in lowered:
-            return ""
-        return cleaned
-
     def _extract_hosts_from_output(self, output: str) -> list[Host]:
         if not output:
             return []
@@ -1500,7 +1491,6 @@ class RedTeamDispatcher:
             hostname = name_match.group(1) if name_match else host_col
             if domain and hostname and not hostname.lower().endswith(domain.lower()):
                 hostname = f"{hostname.lower()}.{domain}"
-            hostname = self._sanitize_hostname(hostname)
             os_match = re.search(r"^\s*([^(]+?)\s+\(name:", details)
             os_name = os_match.group(1).strip() if os_match else "Unknown"
             if ip in seen:
