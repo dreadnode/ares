@@ -1897,7 +1897,7 @@ class SharePilferingTools(Toolset):
             script_extensions = ["*.bat", "*.cmd", "*.ps1", "*.vbs", "*.wsf", "*.inf"]
 
             # Use Linux smbclient (not Impacket's smbclient.py) which supports -c flag
-            # Route to recon pod which has native smbclient installed
+            # Use native smbclient (available on credential-access pod)
             sysvol_share = f"//{target}/SYSVOL"
             scripts_path = f"{domain}/scripts"
 
@@ -1911,10 +1911,7 @@ class SharePilferingTools(Toolset):
                     "-c",
                     f"cd {scripts_path}; ls {ext}",
                 ]
-                # Route to recon pod (has native smbclient)
-                stdout, stderr, returncode = run_tool(
-                    list_cmd, timeout_seconds=60, target_role="recon"
-                )
+                stdout, stderr, returncode = run_tool(list_cmd, timeout_seconds=60)
                 output = stdout + "\n" + (stderr or "")
 
                 # Skip if access denied or share not found
@@ -1947,8 +1944,7 @@ class SharePilferingTools(Toolset):
                         "-c",
                         f"cd {scripts_path}; get {script_file} /tmp/sysvol_script.txt",
                     ]
-                    # Route to recon pod (has native smbclient)
-                    run_tool(get_cmd, timeout_seconds=30, target_role="recon")
+                    run_tool(get_cmd, timeout_seconds=30)
 
                     # Store the downloaded script as a shared artifact for all agents
                     if self.state:
@@ -1957,19 +1953,16 @@ class SharePilferingTools(Toolset):
                             self.state,
                             "/tmp/sysvol_script.txt",  # noqa: S108  # nosec B108 - remote pod path
                             artifact_key,
-                            target_role="recon",
                             source_agent="credential_discovery",
                         )
 
-                    # Search the downloaded file for password patterns (also on recon where file was downloaded)
+                    # Search the downloaded file for password patterns
                     grep_cmd = [
                         "bash",
                         "-lc",
                         "grep -iE '(password|passwd|pwd|cred|secret)\\s*[=:]' /tmp/sysvol_script.txt 2>/dev/null || true",
                     ]
-                    grep_stdout, _grep_stderr, _ = run_tool(
-                        grep_cmd, timeout_seconds=10, target_role="recon"
-                    )
+                    grep_stdout, _grep_stderr, _ = run_tool(grep_cmd, timeout_seconds=10)
                     grep_output = grep_stdout.strip()
 
                     if grep_output:
