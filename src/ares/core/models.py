@@ -666,6 +666,88 @@ class SharedRedTeamState:
     identified_techniques: set[str] = field(default_factory=set)
     pending_credential_findings: set[str] = field(default_factory=set)
 
+    # Shared artifacts storage (base64-encoded file contents)
+    # Key format: "category/filename" -> base64 content
+    # Example: "sysvol/login.bat" -> "QmF0Y2ggZmlsZSBjb250ZW50..."
+    downloaded_artifacts: dict[str, str] = field(default_factory=dict)
+
+    def store_artifact(self, key: str, content: bytes | str, source_agent: str = "") -> bool:
+        """Store a downloaded artifact in shared state.
+
+        Args:
+            key: Artifact key (e.g., "sysvol/login.bat" or "loot/ntds.dit")
+            content: File content as bytes or string
+            source_agent: Agent that downloaded the artifact
+
+        Returns:
+            True if stored, False if duplicate or too large
+        """
+        import base64
+
+        # Limit artifact size to 10MB (Redis Sentinel provides robust storage)
+        max_size = 10 * 1024 * 1024
+        if isinstance(content, str):
+            content_bytes = content.encode("utf-8", errors="replace")
+        else:
+            content_bytes = content
+
+        if len(content_bytes) > max_size:
+            logger.warning(f"Artifact '{key}' too large ({len(content_bytes)} bytes), skipping")
+            return False
+
+        if key in self.downloaded_artifacts:
+            logger.debug(f"Artifact '{key}' already exists, skipping")
+            return False
+
+        encoded = base64.b64encode(content_bytes).decode("ascii")
+        self.downloaded_artifacts[key] = encoded
+        logger.info(f"Artifact stored: {key} ({len(content_bytes)} bytes) from {source_agent}")
+        return True
+
+    def get_artifact(self, key: str) -> bytes | None:
+        """Retrieve a downloaded artifact from shared state.
+
+        Args:
+            key: Artifact key
+
+        Returns:
+            File content as bytes, or None if not found
+        """
+        import base64
+
+        encoded = self.downloaded_artifacts.get(key)
+        if not encoded:
+            return None
+        return base64.b64decode(encoded)
+
+    def get_artifact_text(self, key: str, encoding: str = "utf-8") -> str | None:
+        """Retrieve a downloaded artifact as text.
+
+        Args:
+            key: Artifact key
+            encoding: Text encoding (default utf-8)
+
+        Returns:
+            File content as string, or None if not found
+        """
+        content = self.get_artifact(key)
+        if content is None:
+            return None
+        return content.decode(encoding, errors="replace")
+
+    def list_artifacts(self, prefix: str = "") -> list[str]:
+        """List all artifact keys, optionally filtered by prefix.
+
+        Args:
+            prefix: Optional prefix filter (e.g., "sysvol/")
+
+        Returns:
+            List of artifact keys
+        """
+        if not prefix:
+            return list(self.downloaded_artifacts.keys())
+        return [k for k in self.downloaded_artifacts if k.startswith(prefix)]
+
     def add_credential(self, credential: Credential, source_agent: str) -> bool:
         """Add credential if not duplicate. Returns True if added."""
         username = credential.username.strip()
@@ -951,6 +1033,8 @@ class SharedRedTeamState:
             state.all_domains = []
         if not hasattr(state, "pending_credential_findings"):
             state.pending_credential_findings = set()
+        if not hasattr(state, "downloaded_artifacts"):
+            state.downloaded_artifacts = {}
         state.all_credentials = cls._dedupe_credentials(state.all_credentials)
         if not state.all_domains:
             state.all_domains = cls._extract_domains(state)

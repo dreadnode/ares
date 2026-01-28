@@ -252,6 +252,78 @@ def run_tool(
     return result.stdout, result.stderr, result.return_code
 
 
+def fetch_remote_file(
+    remote_path: str,
+    target_role: str | None = None,
+    timeout_seconds: int = 30,
+) -> bytes | None:
+    """Read a file from a remote pod and return its contents.
+
+    Args:
+        remote_path: Path to the file on the remote system
+        target_role: Optional role to route the read to
+        timeout_seconds: Timeout for the read operation
+
+    Returns:
+        File contents as bytes, or None if file doesn't exist or read failed
+    """
+    # Use base64 encoding to safely transfer binary content
+    cmd = [
+        "bash",
+        "-lc",
+        f"base64 -w0 {shlex.quote(remote_path)} 2>/dev/null",
+    ]
+    stdout, stderr, returncode = run_tool(
+        cmd, timeout_seconds=timeout_seconds, target_role=target_role
+    )
+
+    if returncode != 0 or not stdout.strip():
+        logger.debug(f"Failed to read remote file {remote_path}: {stderr}")
+        return None
+
+    import base64
+
+    try:
+        return base64.b64decode(stdout.strip())
+    except Exception as e:
+        logger.debug(f"Failed to decode remote file {remote_path}: {e}")
+        return None
+
+
+def store_remote_artifact(
+    state: AnyRedTeamState,
+    remote_path: str,
+    artifact_key: str,
+    target_role: str | None = None,
+    source_agent: str = "",
+) -> bool:
+    """Fetch a file from a remote pod and store it as a shared artifact.
+
+    This function reads a file from a remote pod (e.g., after downloading via smbclient)
+    and stores it in the shared state so all agents can access it.
+
+    Args:
+        state: The shared state to store the artifact in
+        remote_path: Path to the file on the remote system
+        artifact_key: Key to store the artifact under (e.g., "sysvol/login.bat")
+        target_role: Optional role where the file exists (same as where it was downloaded)
+        source_agent: Name of the agent storing the artifact
+
+    Returns:
+        True if artifact was stored, False otherwise
+    """
+    if not isinstance(state, SharedRedTeamState):
+        logger.debug("store_remote_artifact only works with SharedRedTeamState")
+        return False
+
+    content = fetch_remote_file(remote_path, target_role=target_role)
+    if content is None:
+        logger.debug(f"Could not fetch {remote_path} for artifact storage")
+        return False
+
+    return state.store_artifact(artifact_key, content, source_agent=source_agent)
+
+
 def infer_listener_ip(target: str | None = None) -> str | None:
     """Infer a listener IP reachable from the target network."""
     for key in ("ARES_ESC8_LISTENER", "ARES_RELAY_LISTENER", "ARES_LISTENER_IP", "POD_IP"):
@@ -349,6 +421,8 @@ def filter_users_file_remote(
     users: list[str] = []
     seen: set[str] = set()
     motd_filtered = 0
+    excluded_count = 0
+    valid_users_before_exclude = 0
     for line in (result.stdout or "").splitlines():
         user = line.strip()
         if not user:
@@ -357,7 +431,9 @@ def filter_users_file_remote(
         if is_motd_garbage(user):
             motd_filtered += 1
             continue
+        valid_users_before_exclude += 1
         if user.lower() in exclude_users:
+            excluded_count += 1
             continue
         if user.lower() in seen:
             continue
@@ -368,7 +444,17 @@ def filter_users_file_remote(
         logger.debug(f"Filtered {motd_filtered} MOTD garbage entries from users file")
 
     if not users:
-        return "", "all users already have credentials"
+        # Only return "all users already have credentials" if we actually excluded users
+        # and there were valid users to begin with
+        if excluded_count > 0 and valid_users_before_exclude == excluded_count:
+            return "", "all users already have credentials"
+        # File was empty, only contained MOTD garbage, or had other issues
+        # Don't skip spray - return original file and let netexec handle it
+        logger.warning(
+            f"Users file {users_file} yielded no users after filtering "
+            f"(valid={valid_users_before_exclude}, excluded={excluded_count}, motd={motd_filtered})"
+        )
+        return users_file, None  # Return original file, no error - let spray proceed
     filtered_file = f"/tmp/users_spray_filtered_{uuid.uuid4().hex}.txt"  # nosec B108  # noqa: S108
     ok, error = write_users_file_remote(users, filtered_file, target_role=target_role)
     if not ok:

