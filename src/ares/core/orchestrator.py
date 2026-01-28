@@ -1115,38 +1115,41 @@ async def _auto_credential_access(  # noqa: PLR0912
 
             for hash_obj in state.all_hashes:
                 key = (hash_obj.username, hash_obj.domain or "", hash_obj.hash_value)
-                if key in processed_hashes:
-                    continue
-                if not _is_pass_the_hash_compatible(hash_obj.hash_value, hash_obj.hash_type):
-                    logger.info(
-                        "Skipping credential access for {}\\{}: non-NTLM hash type {}",
-                        hash_obj.domain or "(unknown)",
-                        hash_obj.username,
-                        hash_obj.hash_type or "unknown",
-                    )
-                    processed_hashes.add(key)
-                    continue
-                domain_name = hash_obj.domain or (state.target.domain if state.target else "")
-                domain_hosts = hosts_by_domain.get(domain_name.lower(), []) or host_ips
-                task_id = await dispatcher.request_credential_access(
-                    source_agent="orchestrator",
-                    domain=domain_name,
-                    target_ips=domain_hosts,
-                    username=hash_obj.username,
-                    hash_value=hash_obj.hash_value,
-                    hash_type=hash_obj.hash_type,
-                    reason="new_hash",
-                    techniques=["kerberoast", "secretsdump", "lsassy"],
-                )
-                if task_id:
-                    processed_hashes.add(key)
-                    logger.info(
-                        "Auto credential access dispatched for {}\\{} (hash_type={})",
-                        hash_obj.domain or "(unknown)",
-                        hash_obj.username,
-                        hash_obj.hash_type or "unknown",
-                    )
+                # Credential access (pass-the-hash) only for NTLM-compatible hashes
+                if key not in processed_hashes:
+                    if not _is_pass_the_hash_compatible(hash_obj.hash_value, hash_obj.hash_type):
+                        logger.info(
+                            "Skipping credential access for {}\\{}: non-NTLM hash type {}",
+                            hash_obj.domain or "(unknown)",
+                            hash_obj.username,
+                            hash_obj.hash_type or "unknown",
+                        )
+                        processed_hashes.add(key)
+                    else:
+                        domain_name = hash_obj.domain or (
+                            state.target.domain if state.target else ""
+                        )
+                        domain_hosts = hosts_by_domain.get(domain_name.lower(), []) or host_ips
+                        task_id = await dispatcher.request_credential_access(
+                            source_agent="orchestrator",
+                            domain=domain_name,
+                            target_ips=domain_hosts,
+                            username=hash_obj.username,
+                            hash_value=hash_obj.hash_value,
+                            hash_type=hash_obj.hash_type,
+                            reason="new_hash",
+                            techniques=["kerberoast", "secretsdump", "lsassy"],
+                        )
+                        if task_id:
+                            processed_hashes.add(key)
+                            logger.info(
+                                "Auto credential access dispatched for {}\\{} (hash_type={})",
+                                hash_obj.domain or "(unknown)",
+                                hash_obj.username,
+                                hash_obj.hash_type or "unknown",
+                            )
 
+                # Crack requests for ALL hashes (AS-REP, Kerberoast, NTLM, etc.)
                 crack_key = (
                     hash_obj.username,
                     hash_obj.domain or "",

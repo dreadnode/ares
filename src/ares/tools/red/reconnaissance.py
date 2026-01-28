@@ -766,25 +766,20 @@ class NetworkEnumerationTools(Toolset):
             output = "\n\n".join(sections).strip()
             logger.info(f"[*] User recon completed for {target} (user:{username}, domain:{domain})")
 
+            # Determine domain early so we can populate state before Kerberos call
             domain_hint = domain
-            if not (username and password):
-                if not domain_hint and self.state and self.state.target:
-                    domain_hint = self.state.target.domain or ""
-                if domain_hint:
-                    cred_tools = CredentialHarvestingTools()
-                    if self.state is not None:
-                        cred_tools.set_state(self.state)
-                    kerb_output = cred_tools.kerberos_user_enum_noauth(domain_hint, target)
-                    if kerb_output:
-                        output = (output + "\n\n" + kerb_output).strip()
             if output and not domain_hint:
                 domain_match = re.search(r"\(domain:([^)]+)\)", output, re.IGNORECASE)
                 if domain_match:
                     domain_hint = domain_match.group(1).strip()
+            if not domain_hint and self.state and self.state.target:
+                domain_hint = self.state.target.domain or ""
 
             effective_domain = domain or domain_hint
             if effective_domain and self.state and hasattr(self.state, "add_domain"):
                 self.state.add_domain(effective_domain)
+
+            # Populate hosts and users in state BEFORE Kerberos call so it has users to validate
             found_users = False
             found_passwords = False
             if output and self.state:
@@ -831,6 +826,15 @@ class NetworkEnumerationTools(Toolset):
                             )
                         logger.warning("[!] Plaintext password hints found but no usernames parsed")
 
+            # Now run Kerberos user validation with populated state.users
+            if not (username and password) and domain_hint:
+                cred_tools = CredentialHarvestingTools()
+                if self.state is not None:
+                    cred_tools.set_state(self.state)
+                kerb_output = cred_tools.kerberos_user_enum_noauth(domain_hint, target)
+                if kerb_output:
+                    output = (output + "\n\n" + kerb_output).strip()
+
             if output and (_has_user_entries(output) or found_users or found_passwords):
                 return output
 
@@ -842,7 +846,7 @@ class NetworkEnumerationTools(Toolset):
             return f"User recon failed for {target}: {e}"
 
     @dn.tool_method
-    def enumerate_shares(
+    def enumerate_shares(  # noqa: PLR0912
         self, target: str, domain: str = "", username: str = "", password: str = ""
     ) -> str:
         """
@@ -936,42 +940,113 @@ class NetworkEnumerationTools(Toolset):
                 )
             return shares
 
-        try:
-            cmd = ["netexec", "smb", target]
-
-            if username and password:
-                cmd.extend(["-u", username, "-p", password])
-                if domain:
-                    cmd.extend(["-d", domain])
-            else:
-                cmd.extend(["-u", "", "-p", ""])
-
+        def _run_share_enum(
+            auth_user: str, auth_pass: str, auth_domain: str, auth_desc: str
+        ) -> tuple[str, list[Share], bool]:
+            """Run share enumeration with given auth, return (output, shares, success)."""
+            cmd = ["netexec", "smb", target, "-u", auth_user, "-p", auth_pass]
+            if auth_domain:
+                cmd.extend(["-d", auth_domain])
             cmd.append("--shares")
 
+            logger.info(f"[enumerate_shares] Trying {auth_desc} on {target}")
             stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
-            logger.info(f"[*] Share recon completed for {target}")
-
             output = stdout or stderr
-            if self.state and output:
-                for host in _parse_netexec_hosts(output):
+
+            # Check for access denied or connection errors
+            access_denied = any(
+                err in output.lower()
+                for err in [
+                    "status_access_denied",
+                    "status_logon_failure",
+                    "error occurs while reading",
+                    "connection refused",
+                    "error enumerating shares",
+                ]
+            )
+
+            if access_denied:
+                logger.warning(f"[enumerate_shares] {auth_desc} failed on {target}: access denied")
+                return output, [], False
+
+            shares = _parse_netexec_shares(output)
+            if shares:
+                logger.info(
+                    f"[enumerate_shares] {auth_desc} found {len(shares)} shares on {target}: "
+                    f"{[s.name for s in shares]}"
+                )
+            else:
+                logger.debug(f"[enumerate_shares] {auth_desc} returned no shares on {target}")
+
+            return output, shares, True
+
+        try:
+            all_output = ""
+            all_shares: list[Share] = []
+
+            if username and password:
+                # Use provided credentials
+                output, shares, success = _run_share_enum(
+                    username, password, domain, f"auth ({username})"
+                )
+                all_output = output
+                all_shares = shares
+            else:
+                # Try multiple anonymous/guest auth methods
+                auth_methods = [
+                    ("", "", "", "null session (-u '' -p '')"),
+                    ("guest", "", "", "guest account (-u 'guest' -p '')"),
+                    ("a", "", "", "anonymous (-u 'a' -p '')"),
+                ]
+
+                for auth_user, auth_pass, auth_domain, auth_desc in auth_methods:
+                    output, shares, success = _run_share_enum(
+                        auth_user, auth_pass, auth_domain, auth_desc
+                    )
+                    all_output += f"\n--- {auth_desc} ---\n{output}"
+
+                    if shares:
+                        all_shares.extend(shares)
+                        logger.info(f"[enumerate_shares] Success with {auth_desc} on {target}")
+                        break  # Stop on first success with shares
+
+                    if success and not shares:
+                        # Auth worked but no shares found, still a valid result
+                        logger.debug(
+                            f"[enumerate_shares] {auth_desc} worked but no shares on {target}"
+                        )
+                        break
+
+            # Parse hosts from output
+            if self.state and all_output:
+                for host in _parse_netexec_hosts(all_output):
                     if hasattr(self.state, "add_host"):
                         self.state.add_host(host)
                     elif not any(h.ip == host.ip for h in self.state.hosts):
                         self.state.hosts.append(host)
-                for share in _parse_netexec_shares(output):
-                    if hasattr(self.state, "add_share"):
-                        self.state.add_share(share)
-                    else:
-                        if any(
-                            s.host == share.host and s.name == share.name for s in self.state.shares
-                        ):
-                            continue
-                        self.state.shares.append(share)
 
-            return output
+            # Add discovered shares to state
+            shares_added = 0
+            if self.state:
+                for share in all_shares:
+                    if hasattr(self.state, "add_share"):
+                        if self.state.add_share(share):
+                            shares_added += 1
+                    elif not any(
+                        s.host == share.host and s.name == share.name for s in self.state.shares
+                    ):
+                        self.state.shares.append(share)
+                        shares_added += 1
+
+            if shares_added > 0:
+                logger.info(
+                    f"[enumerate_shares] Added {shares_added} new shares to state for {target}"
+                )
+
+            return all_output
 
         except Exception as e:
-            logger.error(f"Share recon failed: {e}")
+            logger.error(f"[enumerate_shares] Failed for {target}: {e}")
             return f"Share recon failed for {target}: {e}"
 
     @dn.tool_method

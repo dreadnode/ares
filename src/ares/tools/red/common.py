@@ -132,13 +132,13 @@ def run_tool(
     Returns:
         Tuple of (stdout, stderr, return_code)
     """
-    from ares.core.logging_utils import sanitize_command, truncate_output
+    from ares.core.logging_utils import truncate_output
 
     resolved_role = resolve_recon_route(cmd, target_role)
-    sanitized = sanitize_command(cmd)
+    cmd_str = shlex.join(cmd) if isinstance(cmd, list) else cmd
     tool_name = cmd[0] if cmd else "unknown"
 
-    logger.debug(f"Tool start: {tool_name} -> {sanitized[:100]}")
+    logger.debug(f"Tool start: {tool_name} -> {cmd_str[:100]}")
 
     result = run_remote(cmd, timeout_seconds=timeout_seconds, target_role=resolved_role)
 
