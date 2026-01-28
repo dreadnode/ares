@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from ares.core.config import get_agent_heartbeat_timeout
 from ares.core.messages import (
     ACLAnalysisRequest,
     AgentMessage,
@@ -43,6 +44,7 @@ from ares.core.models import (
     Credential,
     Hash,
     Host,
+    Share,
     SharedRedTeamState,
     TaskInfo,
     TaskResult,
@@ -100,6 +102,8 @@ class RedTeamDispatcher:
         self._redis_client = None
         self._heartbeat_task: asyncio.Task | None = None
         self._message_processor_task: asyncio.Task | None = None
+        self._agent_heartbeat_timeout = get_agent_heartbeat_timeout()
+        self._credential_access_event = asyncio.Event()
 
         # Redis task queue for cross-pod communication
         self._task_queue: RedisTaskQueue | None = None
@@ -400,6 +404,7 @@ class RedTeamDispatcher:
         added = self.shared_state.add_credential(credential, source_agent)
 
         if added:
+            self.signal_credential_access()
             await self._broadcast(
                 CredentialDiscovered(
                     source_agent=source_agent,
@@ -436,6 +441,7 @@ class RedTeamDispatcher:
         added = self.shared_state.add_hash(hash_obj, source_agent)
 
         if added:
+            self.signal_credential_access()
             await self._broadcast(
                 HashDiscovered(
                     source_agent=source_agent,
@@ -453,6 +459,39 @@ class RedTeamDispatcher:
             )
 
         return added
+
+    async def publish_share(self, share: Share, source_agent: str) -> bool:
+        """
+        Record share discovery in shared state.
+
+        Args:
+            share: The discovered share.
+            source_agent: Agent that discovered it.
+
+        Returns:
+            True if share was new and added.
+        """
+        added = self.shared_state.add_share(share)
+        if added:
+            await self._checkpoint()
+            logger.info(f"Share recorded: {share.host}/{share.name}")
+        return added
+
+    def signal_credential_access(self) -> None:
+        """Wake credential access loop when new credentials or hashes appear."""
+        self._credential_access_event.set()
+
+    async def wait_for_credential_access_signal(self, timeout: float) -> None:
+        """Wait for new credential activity or a timeout."""
+        if self._credential_access_event.is_set():
+            self._credential_access_event.clear()
+            return
+        try:
+            await asyncio.wait_for(self._credential_access_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return
+        finally:
+            self._credential_access_event.clear()
 
     async def publish_host(self, host: Host, source_agent: str) -> bool:
         """
@@ -784,17 +823,39 @@ class RedTeamDispatcher:
     def _find_domain_controller_ip(self, domain: str) -> str:
         """Find DC IP for the specified domain."""
         domain_lower = domain.lower() if domain else ""
+        dc_service_tokens = ("88/tcp", "389/tcp", "53/tcp", "kerberos", "ldap")
+
+        def _has_dc_services(host: Host) -> bool:
+            services = " ".join(host.services).lower()
+            return any(token in services for token in dc_service_tokens)
+
         # Check target first
-        if self.shared_state.target:
-            target_domain = (self.shared_state.target.domain or "").lower()
-            if target_domain == domain_lower or domain_lower in target_domain:
-                return self.shared_state.target.ip
-        # Search all hosts
+        if self.shared_state.target and self.shared_state.target.ip:
+            target_ip = self.shared_state.target.ip
+            target_hostname = (self.shared_state.target.hostname or "").lower()
+            if target_hostname and target_hostname.endswith(domain_lower):
+                return target_ip
+            for host in self.shared_state.all_hosts:
+                if host.ip == target_ip:
+                    hostname = (host.hostname or "").lower()
+                    if hostname.endswith(domain_lower) and _has_dc_services(host):
+                        return host.ip
+        # Search all hosts by explicit DC markers
         for host in self.shared_state.all_hosts:
             if (
                 "dc" in (host.hostname or "").lower()
                 or "domain controller" in str(host.roles).lower()
             ):
+                return host.ip
+        # Fallback: infer DC from services on hosts within the domain
+        if domain_lower:
+            for host in self.shared_state.all_hosts:
+                hostname = (host.hostname or "").lower()
+                if hostname.endswith(domain_lower) and _has_dc_services(host):
+                    return host.ip
+        # Last resort: any host advertising DC-like services
+        for host in self.shared_state.all_hosts:
+            if _has_dc_services(host):
                 return host.ip
         return ""
 
@@ -898,6 +959,9 @@ class RedTeamDispatcher:
         username: str = "",
         password: str | None = None,
         hash_value: str | None = None,
+        hash_type: str | None = None,
+        credential_source: str | None = None,
+        reason: str | None = None,
         techniques: list[str] | None = None,
     ) -> str:
         """
@@ -917,12 +981,17 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        dc_ip = self._find_domain_controller_ip(domain)
         payload = {
             "domain": domain,
             "target_ips": target_ips or [],
+            "dc_ip": dc_ip,
             "username": username,
             "password": password,
             "hash_value": hash_value,
+            "hash_type": hash_type,
+            "credential_source": credential_source,
+            "reason": reason,
             "techniques": techniques or [],
         }
 
@@ -944,7 +1013,22 @@ class RedTeamDispatcher:
             self.shared_state.pending_tasks[task_id] = task_info
             self._redis_task_ids.add(task_id)
 
-            logger.info(f"Credential access task {task_id} submitted to Redis queue")
+            cred_label = username or "no-cred"
+            if hash_value and not password:
+                cred_label = f"{cred_label} (hash)"
+            if password:
+                cred_label = f"{cred_label} (password)"
+            reason_label = f" reason={reason}" if reason else ""
+            source_label = f" source={credential_source}" if credential_source else ""
+            hash_label = f" hash_type={hash_type}" if hash_type else ""
+            logger.info(
+                "Credential access task {} submitted to Redis queue for {}{}{}{}",
+                task_id,
+                cred_label,
+                reason_label,
+                source_label,
+                hash_label,
+            )
             return task_id
 
         # Fallback to in-memory queue (single-process mode)
@@ -969,6 +1053,7 @@ class RedTeamDispatcher:
                 task_id=task_id,
                 domain=domain,
                 target_ips=payload["target_ips"],
+                dc_ip=dc_ip,
                 username=username,
                 password=password,
                 hash_value=hash_value,
@@ -1259,6 +1344,28 @@ class RedTeamDispatcher:
                         )
                         await self.publish_credential(cracked_cred, source_agent)
 
+            share_data = result.get("share")
+            if isinstance(share_data, dict):
+                share = Share(
+                    host=share_data.get("host", share_data.get("host_ip", "")),
+                    name=share_data.get("name", share_data.get("share_name", "")),
+                    permissions=share_data.get("permissions", ""),
+                    comment=share_data.get("comment", share_data.get("description", "")),
+                )
+                await self.publish_share(share, source_agent)
+            shares_data = result.get("shares")
+            if isinstance(shares_data, list):
+                for s in shares_data:
+                    if not isinstance(s, dict):
+                        continue
+                    share = Share(
+                        host=s.get("host", s.get("host_ip", "")),
+                        name=s.get("name", s.get("share_name", "")),
+                        permissions=s.get("permissions", ""),
+                        comment=s.get("comment", s.get("description", "")),
+                    )
+                    await self.publish_share(share, source_agent)
+
             stdout = result.get("stdout", "")
             stderr = result.get("stderr", "")
             output_field = result.get("output", "")
@@ -1301,6 +1408,14 @@ class RedTeamDispatcher:
                     is_admin=False,
                 )
                 await self.publish_credential(credential, source_agent)
+
+            # Extract shares from netexec --shares output
+            for share in self._extract_shares_from_output(output):
+                await self.publish_share(share, source_agent)
+
+            # Extract hashes (Kerberoast, AS-REP, NTLM) from tool output
+            for hash_obj in self._extract_hashes_from_output(output):
+                await self.publish_hash(hash_obj, source_agent)
 
         # Broadcast completion
         if success:
@@ -1474,6 +1589,147 @@ class RedTeamDispatcher:
             creds.append(key)
         return creds
 
+    def _extract_shares_from_output(  # noqa: PLR0912
+        self, output: str, default_host: str = ""
+    ) -> list[Share]:
+        """Extract shares from netexec --shares output."""
+        if not output:
+            return []
+        shares: list[Share] = []
+        seen: set[tuple[str, str]] = set()
+        in_table = False
+        current_host = default_host
+
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # Parse host from SMB line prefix: "SMB  192.168.1.1  445  HOSTNAME  ..."
+            if stripped.startswith("SMB"):
+                smb_match = re.match(r"^SMB\s+(\d+\.\d+\.\d+\.\d+)\s+", stripped)
+                if smb_match:
+                    current_host = smb_match.group(1)
+                # Strip SMB prefix to get body
+                body = re.sub(r"^SMB\s+\S+\s+\d+\s+\S+\s+", "", stripped).strip()
+                if not body:
+                    continue
+                lower = body.lower()
+                # Detect share table header
+                if lower.startswith("share") and "permission" in lower:
+                    in_table = True
+                    continue
+                # Skip separator lines
+                if in_table and set(body) <= {"-", " "}:
+                    continue
+                # End of table
+                if in_table and (body.startswith("[") or lower.startswith("smb")):
+                    in_table = False
+                    continue
+                if not in_table:
+                    continue
+                # Parse share row
+                parts = body.split(None, 2)
+                if not parts:
+                    continue
+                name = parts[0].strip()
+                if not name or name.lower() == "share":
+                    continue
+                permissions = parts[1].strip() if len(parts) > 1 else ""
+                comment = parts[2].strip() if len(parts) > 2 else ""
+                key = (current_host.lower(), name.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                shares.append(
+                    Share(
+                        host=current_host,
+                        name=name,
+                        permissions=permissions,
+                        comment=comment,
+                    )
+                )
+        return shares
+
+    def _extract_hashes_from_output(self, output: str) -> list[Hash]:
+        """Extract Kerberos hashes (TGS, AS-REP) from tool output."""
+        if not output:
+            return []
+        hashes: list[Hash] = []
+        seen: set[str] = set()
+
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # Match Kerberoast TGS hashes: $krb5tgs$23$*username$domain$...
+            tgs_match = re.search(
+                r"(\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^$]+\$[a-fA-F0-9$]+)",
+                stripped,
+            )
+            if tgs_match:
+                hash_value = tgs_match.group(1)
+                username = tgs_match.group(2)
+                domain = tgs_match.group(3)
+                if hash_value not in seen:
+                    seen.add(hash_value)
+                    hashes.append(
+                        Hash(
+                            username=username,
+                            hash_value=hash_value,
+                            hash_type="TGS",
+                            domain=domain,
+                        )
+                    )
+                continue
+
+            # Match AS-REP hashes: $krb5asrep$23$username@domain:...
+            asrep_match = re.search(
+                r"(\$krb5asrep\$\d+\$([^@:]+)@([^:]+):[a-fA-F0-9$]+)",
+                stripped,
+            )
+            if asrep_match:
+                hash_value = asrep_match.group(1)
+                username = asrep_match.group(2)
+                domain = asrep_match.group(3)
+                if hash_value not in seen:
+                    seen.add(hash_value)
+                    hashes.append(
+                        Hash(
+                            username=username,
+                            hash_value=hash_value,
+                            hash_type="AS-REP",
+                            domain=domain,
+                        )
+                    )
+                continue
+
+            # Match NTLM hashes from secretsdump: domain\user:rid:lmhash:nthash:::
+            ntlm_match = re.search(
+                r"([^\\:\s]+)\\([^:\\]+):\d+:([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::",
+                stripped,
+            )
+            if ntlm_match:
+                domain = ntlm_match.group(1)
+                username = ntlm_match.group(2)
+                lm_hash = ntlm_match.group(3)
+                nt_hash = ntlm_match.group(4)
+                # Use NT hash (more useful), include LM if not empty
+                hash_value = f"{lm_hash}:{nt_hash}"
+                if hash_value not in seen:
+                    seen.add(hash_value)
+                    hashes.append(
+                        Hash(
+                            username=username,
+                            hash_value=hash_value,
+                            hash_type="NTLM",
+                            domain=domain,
+                        )
+                    )
+
+        return hashes
+
     # Domain Admin Achievement
 
     async def announce_domain_admin(
@@ -1622,7 +1878,8 @@ class RedTeamDispatcher:
             # Check for stale heartbeats
             for agent_name, agent_info in list(self._agents.items()):
                 elapsed = (now - agent_info.last_heartbeat).total_seconds()
-                if elapsed > 60 and agent_info.status != "offline":
+                stale_threshold = max(60, self._agent_heartbeat_timeout)
+                if elapsed > stale_threshold and agent_info.status != "offline":
                     logger.warning(
                         f"Agent {agent_name} heartbeat stale ({elapsed:.0f}s) - marking offline"
                     )
@@ -1693,6 +1950,11 @@ class RedTeamDispatcher:
 
         try:
             key = f"ares:operation:{self.shared_state.operation_id}:state"
+            # Debug: log state counts before dispatcher checkpoint
+            logger.debug(
+                f"[Dispatcher checkpoint] hosts={len(self.shared_state.all_hosts)}, "
+                f"creds={len(self.shared_state.all_credentials)}, hashes={len(self.shared_state.all_hashes)}"
+            )
             await self._redis_client.set(key, self.shared_state.to_bytes())
             await self._redis_client.expire(key, 86400)  # 24 hour TTL
         except Exception as e:

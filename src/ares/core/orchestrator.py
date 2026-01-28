@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,26 @@ def _resolve_orchestrator_model(model: str | None) -> str:
     return resolved
 
 
+def _is_pass_the_hash_compatible(hash_value: str, hash_type: str | None) -> bool:
+    if not hash_value:
+        return False
+    normalized_type = (hash_type or "").strip().upper()
+    if normalized_type and normalized_type not in {"NTLM", "LM", "NTLMV1", "NTLMV2"}:
+        return False
+    value = hash_value.strip()
+    if "$" in value:
+        return False
+    if ":" in value:
+        parts = value.split(":")
+        if len(parts) != 2:
+            return False
+        lm_part, ntlm_part = parts
+        if lm_part and not re.fullmatch(r"[0-9a-fA-F]{32}", lm_part):
+            return False
+        return bool(re.fullmatch(r"[0-9a-fA-F]{32}", ntlm_part))
+    return bool(re.fullmatch(r"[0-9a-fA-F]{32}", value))
+
+
 async def _wait_for_required_workers(
     dispatcher: RedTeamDispatcher,
     required_roles: list[str],
@@ -129,6 +150,8 @@ async def _load_or_initialize_state(
         state = await recovery.recover_operation(operation_id)
         if state:
             dispatcher._shared_state = state
+            if state.all_credentials or state.all_hashes:
+                dispatcher.signal_credential_access()
             logger.info(f"Resumed operation {operation_id} from checkpoint")
             return
         logger.warning(f"No checkpoint found for {operation_id}, starting fresh")
@@ -138,8 +161,11 @@ async def _load_or_initialize_state(
         ip=target_ips[0] if target_ips else "",
         domain=target_domain,
     )
+    if target_domain:
+        state.add_domain(target_domain)
     if initial_credential:
         state.add_credential(initial_credential, "initial")
+        dispatcher.signal_credential_access()
 
 
 async def _register_agents(
@@ -376,6 +402,10 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         asyncio.create_task(_monitor_agent_health(dispatcher), name="health_monitor"),
         asyncio.create_task(exploitation_workflow(dispatcher), name="exploitation_workflow"),
         asyncio.create_task(_extend_operation_lock(task_queue, operation_id), name="lock_extender"),
+        asyncio.create_task(
+            _auto_credential_expansion(dispatcher), name="auto_credential_expansion"
+        ),
+        asyncio.create_task(_auto_credential_access(dispatcher), name="auto_credential_access"),
     ]
 
     # Build initial prompt for orchestrator
@@ -587,12 +617,12 @@ async def _create_orchestrator_agent(
     # Set shared state on all toolsets for state tracking
     # SharedRedTeamState has compatibility properties (hosts, credentials, etc.)
     # that map to all_hosts, all_credentials, etc. for backward compatibility
-    network_tools.set_state(shared_state)  # type: ignore[arg-type]
-    cred_discovery_tools.set_state(shared_state)  # type: ignore[arg-type]
-    credential_tools.set_state(shared_state)  # type: ignore[arg-type]
-    certipy_tools.set_state(shared_state)  # type: ignore[arg-type]
-    bloodhound_tools.set_state(shared_state)  # type: ignore[arg-type]
-    reporting_tools.set_state(shared_state)  # type: ignore[arg-type]
+    network_tools.set_state(shared_state)
+    cred_discovery_tools.set_state(shared_state)
+    credential_tools.set_state(shared_state)
+    certipy_tools.set_state(shared_state)
+    bloodhound_tools.set_state(shared_state)
+    reporting_tools.set_state(shared_state)
 
     tools = [
         complete_operation,  # Stop condition tool for marking operation complete
@@ -610,7 +640,9 @@ async def _create_orchestrator_agent(
     instructions = load_agent_instructions(AgentRole.RECON)
 
     # Create hooks for monitoring and guidance
-    hooks = create_role_hooks(AgentRole.RECON, dispatcher, shared_state)
+    hooks = create_role_hooks(
+        AgentRole.RECON, dispatcher, shared_state, display_name="orchestrator"
+    )
 
     logger.info(f"Creating orchestrator agent with {len(tools)} toolsets, max_steps={max_steps}")
 
@@ -822,6 +854,279 @@ async def _extend_operation_lock(
             logger.error(f"Error extending operation lock: {e}")
 
 
+async def _auto_credential_expansion(
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 30.0,
+    min_hosts: int = 1,
+) -> None:
+    """
+    Background task that automatically triggers credential expansion when new credentials appear.
+
+    Monitors the shared state for new credentials and dispatches lateral movement
+    tests without requiring the orchestrator LLM to explicitly call trigger_credential_expansion.
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between credential checks
+        min_hosts: Minimum hosts required before triggering expansion
+    """
+    from ares.core.workflows import credential_expansion_loop
+
+    processed_creds: set[tuple[str, str, int]] = set()  # (username, domain, password_hash)
+    expansion_running = False
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # Skip if operation is complete
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping auto credential expansion")
+                break
+
+            # Skip if not enough hosts discovered yet
+            if len(state.all_hosts) < min_hosts:
+                logger.debug(
+                    f"Waiting for hosts ({len(state.all_hosts)}/{min_hosts}) "
+                    "before credential expansion"
+                )
+                continue
+
+            # Check for new credentials
+            current_creds = {
+                (c.username, c.domain or "", hash(c.password or "")) for c in state.all_credentials
+            }
+            new_creds = current_creds - processed_creds
+
+            if new_creds and not expansion_running:
+                new_count = len(new_creds)
+                logger.info(
+                    f"🔑 Auto-expansion: {new_count} new credential(s) detected, "
+                    f"triggering lateral movement tests against {len(state.all_hosts)} hosts"
+                )
+
+                expansion_running = True
+                try:
+                    await credential_expansion_loop(dispatcher, max_iterations=3)
+                except Exception as e:
+                    logger.warning(f"Credential expansion failed: {e}")
+                finally:
+                    expansion_running = False
+                    # Mark all current creds as processed
+                    processed_creds.update(current_creds)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto credential expansion error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_credential_access(  # noqa: PLR0912
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 60.0,
+    min_hosts: int = 1,
+) -> None:
+    """
+    Background task that proactively runs credential access techniques.
+
+    1) If no creds/hashes yet, run no-creds AS-REP roast per domain.
+    2) For each new credential/hash, run kerberoast + secretsdump attempts.
+    """
+    processed_creds: set[tuple[str, str, str]] = set()
+    processed_hashes: set[tuple[str, str, str]] = set()
+    processed_crack_hashes: set[tuple[str, str, str, str]] = set()
+    processed_no_cred_domains: set[str] = set()
+
+    while True:
+        try:
+            state = dispatcher.shared_state
+
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping auto credential access")
+                break
+
+            if len(state.all_hosts) < min_hosts and not state.target:
+                logger.debug(
+                    f"Waiting for hosts ({len(state.all_hosts)}/{min_hosts}) "
+                    "before credential access"
+                )
+                await dispatcher.wait_for_credential_access_signal(check_interval)
+                continue
+
+            host_ips = [h.ip for h in state.all_hosts if h.ip]
+            if not host_ips and state.target and state.target.ip:
+                host_ips = [state.target.ip]
+
+            hosts_by_domain: dict[str, list[str]] = {}
+            for host in state.all_hosts:
+                if not host.ip:
+                    continue
+                hostname = (host.hostname or "").lower()
+                if "." in hostname:
+                    host_domain = hostname.split(".", 1)[1]
+                    hosts_by_domain.setdefault(host_domain, []).append(host.ip)
+            if state.target and state.target.domain and state.target.ip:
+                hosts_by_domain.setdefault(state.target.domain.lower(), []).append(state.target.ip)
+
+            domains: set[str] = set()
+            if state.target and state.target.domain:
+                domains.add(state.target.domain)
+            for cred in state.all_credentials:
+                if cred.domain:
+                    domains.add(cred.domain)
+            for user in state.all_users:
+                if user.domain:
+                    domains.add(user.domain)
+
+            if not domains:
+                await dispatcher.wait_for_credential_access_signal(check_interval)
+                continue
+
+            has_new_creds = any(
+                (cred.username, cred.domain or "", cred.password or "") not in processed_creds
+                for cred in state.all_credentials
+            )
+            has_new_hashes = any(
+                (hash_obj.username, hash_obj.domain or "", hash_obj.hash_value)
+                not in processed_hashes
+                for hash_obj in state.all_hashes
+            )
+            has_new_cracks = any(
+                (
+                    hash_obj.username,
+                    hash_obj.domain or "",
+                    hash_obj.hash_value,
+                    (hash_obj.hash_type or "").upper(),
+                )
+                not in processed_crack_hashes
+                and not hash_obj.cracked_password
+                for hash_obj in state.all_hashes
+            )
+            has_new_domains = (
+                not state.all_credentials
+                and not state.all_hashes
+                and any(domain not in processed_no_cred_domains for domain in domains)
+            )
+
+            if not (has_new_creds or has_new_hashes or has_new_cracks or has_new_domains):
+                await dispatcher.wait_for_credential_access_signal(check_interval)
+                continue
+
+            if not state.all_credentials and not state.all_hashes:
+                for domain in sorted(domains):
+                    if domain in processed_no_cred_domains:
+                        continue
+                    domain_hosts = hosts_by_domain.get(domain.lower(), []) or host_ips
+                    task_id = await dispatcher.request_credential_access(
+                        source_agent="orchestrator",
+                        domain=domain,
+                        target_ips=domain_hosts,
+                        reason="no_creds_domain",
+                        techniques=["asrep_roast"],
+                    )
+                    if task_id:
+                        processed_no_cred_domains.add(domain)
+                        logger.info(
+                            "Auto credential access (no-creds) dispatched for domain %s",
+                            domain,
+                        )
+
+            for cred in state.all_credentials:
+                key = (cred.username, cred.domain or "", cred.password or "")
+                if key in processed_creds:
+                    continue
+                domain_name = cred.domain or (state.target.domain if state.target else "")
+                domain_hosts = hosts_by_domain.get(domain_name.lower(), []) or host_ips
+                task_id = await dispatcher.request_credential_access(
+                    source_agent="orchestrator",
+                    domain=domain_name,
+                    target_ips=domain_hosts,
+                    username=cred.username,
+                    password=cred.password,
+                    credential_source=cred.source,
+                    reason="new_credential",
+                    techniques=["kerberoast", "secretsdump", "lsassy"],
+                )
+                if task_id:
+                    processed_creds.add(key)
+                    logger.info(
+                        "Auto credential access dispatched for {}\\{} (source={})",
+                        cred.domain or "(unknown)",
+                        cred.username,
+                        cred.source or "unknown",
+                    )
+
+            for hash_obj in state.all_hashes:
+                key = (hash_obj.username, hash_obj.domain or "", hash_obj.hash_value)
+                if key in processed_hashes:
+                    continue
+                if not _is_pass_the_hash_compatible(hash_obj.hash_value, hash_obj.hash_type):
+                    logger.info(
+                        "Skipping credential access for {}\\{}: non-NTLM hash type {}",
+                        hash_obj.domain or "(unknown)",
+                        hash_obj.username,
+                        hash_obj.hash_type or "unknown",
+                    )
+                    processed_hashes.add(key)
+                    continue
+                domain_name = hash_obj.domain or (state.target.domain if state.target else "")
+                domain_hosts = hosts_by_domain.get(domain_name.lower(), []) or host_ips
+                task_id = await dispatcher.request_credential_access(
+                    source_agent="orchestrator",
+                    domain=domain_name,
+                    target_ips=domain_hosts,
+                    username=hash_obj.username,
+                    hash_value=hash_obj.hash_value,
+                    hash_type=hash_obj.hash_type,
+                    reason="new_hash",
+                    techniques=["kerberoast", "secretsdump", "lsassy"],
+                )
+                if task_id:
+                    processed_hashes.add(key)
+                    logger.info(
+                        "Auto credential access dispatched for {}\\{} (hash_type={})",
+                        hash_obj.domain or "(unknown)",
+                        hash_obj.username,
+                        hash_obj.hash_type or "unknown",
+                    )
+
+                crack_key = (
+                    hash_obj.username,
+                    hash_obj.domain or "",
+                    hash_obj.hash_value,
+                    (hash_obj.hash_type or "").upper(),
+                )
+                if hash_obj.cracked_password:
+                    processed_crack_hashes.add(crack_key)
+                    continue
+                if crack_key in processed_crack_hashes:
+                    continue
+                crack_task_id = await dispatcher.request_crack(
+                    hash_value=hash_obj.hash_value,
+                    hash_type=hash_obj.hash_type,
+                    source_agent="orchestrator",
+                    username=hash_obj.username,
+                    domain=hash_obj.domain,
+                )
+                if crack_task_id:
+                    processed_crack_hashes.add(crack_key)
+                    logger.info(
+                        "Auto crack dispatched for {}\\{} ({})",
+                        hash_obj.domain or "(unknown)",
+                        hash_obj.username,
+                        hash_obj.hash_type or "unknown",
+                    )
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto credential access error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
 async def _wait_for_completion(
     dispatcher: RedTeamDispatcher,
     background_tasks: list[asyncio.Task],
@@ -985,6 +1290,7 @@ def _run_mandatory_user_enum(  # noqa: PLR0912
 
     if shared_state.hosts:
         hostnames: set[str] = set()
+        host_ip_map: dict[str, str] = {}
         for host in shared_state.hosts:
             hostname = (host.hostname or "").strip()
             if not hostname:
@@ -995,9 +1301,12 @@ def _run_mandatory_user_enum(  # noqa: PLR0912
             if "." not in hostname and target_domain:
                 hostname = f"{hostname.lower()}.{target_domain.lower()}"
             hostnames.add(hostname)
+            if host.ip:
+                host_ip_map[hostname] = host.ip
         for hostname in sorted(hostnames):
             try:
-                output = network_tools.smbclient_kerberos_shares(hostname)
+                target_ip = host_ip_map.get(hostname, "")
+                output = network_tools.smbclient_kerberos_shares(hostname, target_ip=target_ip)
                 if output:
                     logger.info(f"Mandatory smbclient shares output for {hostname}:\n{output}")
             except Exception as exc:  # noqa: PERF203

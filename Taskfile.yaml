@@ -895,7 +895,7 @@ tasks:
         msg: "OPERATION_ID variable is required. Usage: task ares:red:multi:report OPERATION_ID=op-xxx"
     cmds:
       - |
-        POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=ares-orchestrator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
         if [ -z "$POD" ]; then
           echo "❌ No orchestrator pod found in namespace {{.K8S_NAMESPACE}}"
           exit 1
@@ -903,7 +903,7 @@ tasks:
         REMOTE_PATH="{{.REMOTE_REPORT_DIR}}/{{.OPERATION_ID}}_report.md"
         mkdir -p {{.REPORT_DIR}}
         kubectl exec -n {{.K8S_NAMESPACE}} "$POD" -- test -f "$REMOTE_PATH"
-        kubectl cp -n {{.K8S_NAMESPACE}} "$POD:$REMOTE_PATH" "{{.REPORT_DIR}}/"
+        kubectl cp -n {{.K8S_NAMESPACE}} "$POD:$REMOTE_PATH" "{{.REPORT_DIR}}/{{.OPERATION_ID}}_report.md"
         echo "✅ Report copied to: {{.REPORT_DIR}}/{{.OPERATION_ID}}_report.md"
 
   ares:red:multi:status:
@@ -1131,6 +1131,8 @@ tasks:
         msg: "OPERATION_ID variable is required. Usage: task ares:red:multi:loot OPERATION_ID=op-xxx"
     cmds:
       - |
+        echo "[ares:red:multi:loot] Context: $(kubectl config current-context 2>/dev/null || echo unknown)"
+        echo "[ares:red:multi:loot] Namespace: {{.K8S_NAMESPACE}}"
         REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
         if [ -n "$REDIS_PASS" ]; then
           REDIS_URL="redis://:${REDIS_PASS}@redis:6379"
@@ -1142,6 +1144,12 @@ tasks:
         if [ -z "$POD" ]; then
           echo "No orchestrator pod found in namespace {{.K8S_NAMESPACE}}"
           exit 1
+        fi
+        POD_UID=$(kubectl get pod -n {{.K8S_NAMESPACE}} "$POD" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+        echo "[ares:red:multi:loot] Orchestrator pod: ${POD} (${POD_UID})"
+        MASTER_ADDR=$(kubectl exec -n {{.K8S_NAMESPACE}} "${POD}" -- sh -lc 'redis-cli -p ${REDIS_SENTINEL_PORT:-26379} -h ${REDIS_SENTINEL_HOST:-redis-sentinel} SENTINEL get-master-addr-by-name ${REDIS_SENTINEL_MASTER:-aresmaster} 2>/dev/null | tr -d "\r" | tr "\n" " "' 2>/dev/null)
+        if [ -n "$MASTER_ADDR" ]; then
+          echo "[ares:red:multi:loot] Redis master: ${MASTER_ADDR}"
         fi
 
         kubectl exec -i -n {{.K8S_NAMESPACE}} "$POD" -- env REDIS_URL="$REDIS_URL" python - <<'PY'
@@ -1183,6 +1191,37 @@ tasks:
             suffix = f" ({', '.join(flags)})" if flags else ""
             return f"{prefix}:{password}{suffix}" if prefix or password else "(unknown)"
 
+        def _extract_domains(state):
+            domains = set()
+
+            def _add(value):
+                value = (value or "").strip().lower()
+                if value:
+                    domains.add(value)
+
+            if state.target:
+                _add(getattr(state.target, "domain", ""))
+                target_host = getattr(state.target, "hostname", "")
+                if target_host and "." in target_host:
+                    parts = target_host.split(".")
+                    if len(parts) > 1:
+                        _add(".".join(parts[1:]))
+
+            for cred in state.all_credentials:
+                _add(getattr(cred, "domain", ""))
+            for user in state.all_users:
+                _add(getattr(user, "domain", ""))
+            for h in state.all_hashes:
+                _add(getattr(h, "domain", ""))
+            for host in state.all_hosts:
+                hostname = getattr(host, "hostname", "")
+                if hostname and "." in hostname:
+                    parts = hostname.split(".")
+                    if len(parts) > 1:
+                        _add(".".join(parts[1:]))
+
+            return sorted(domains)
+
         async def main():
             client = await create_redis_client(decode_responses=False)
             try:
@@ -1197,10 +1236,36 @@ tasks:
             print(f"Operation: {state.operation_id}")
             print("")
 
+            domains = sorted(
+                {d.strip().lower() for d in getattr(state, "all_domains", []) if d}
+            )
+            if not domains:
+                domains = _extract_domains(state)
+
+            print(f"Domains ({len(domains)}):")
+            if domains:
+                for domain in domains:
+                    print(f"- {domain}")
+            else:
+                print("- None")
+            print("")
+
             hosts = state.all_hosts
             users = state.all_users
             creds = state.all_credentials
             hashes = state.all_hashes
+            seen_hash_keys = set()
+            filtered_hashes = []
+            for h in hashes:
+                domain = (getattr(h, "domain", "") or "").strip().lower()
+                name = (getattr(h, "username", "") or "").strip().lower()
+                htype = (getattr(h, "hash_type", "") or "").strip().lower()
+                key = (domain, name, htype)
+                if key in seen_hash_keys:
+                    continue
+                seen_hash_keys.add(key)
+                filtered_hashes.append(h)
+            hashes = filtered_hashes
             shares = state.all_shares
             weaknesses = state.all_weaknesses
 
@@ -1233,8 +1298,14 @@ tasks:
                 for h in hashes:
                     domain = getattr(h, "domain", "")
                     name = getattr(h, "username", "")
+                    source = getattr(h, "source", "") or "unknown"
+                    discovered_at = getattr(h, "discovered_at", "") or "unknown"
                     prefix = f"{domain}\\\\{name}" if domain else name
-                    print(f"- {prefix}:{h.hash_type}:{h.hash_value}")
+                    meta_parts = []
+                    meta_parts.append(f"source={source}")
+                    meta_parts.append(f"discovered_at={discovered_at}")
+                    meta = f" [{', '.join(meta_parts)}]" if meta_parts else ""
+                    print(f"- {prefix}:{h.hash_type}:{h.hash_value}{meta}")
             else:
                 print("- None")
             print("")
@@ -1260,6 +1331,98 @@ tasks:
                     print(f"- {item}")
             else:
                 print("- None")
+
+        asyncio.run(main())
+        PY
+
+  ares:red:multi:backfill-domains:
+    desc: "Backfill domain list into Redis state (usage: task ares:red:multi:backfill-domains OPERATION_ID=op-xxx)"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required. Usage: task ares:red:multi:backfill-domains OPERATION_ID=op-xxx"
+    cmds:
+      - |
+        echo "[ares:red:multi:backfill-domains] Context: $(kubectl config current-context 2>/dev/null || echo unknown)"
+        echo "[ares:red:multi:backfill-domains] Namespace: {{.K8S_NAMESPACE}}"
+        REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+        if [ -n "$REDIS_PASS" ]; then
+          REDIS_URL="redis://:${REDIS_PASS}@redis:6379"
+        else
+          REDIS_URL="redis://redis:6379"
+        fi
+
+        POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role=orchestrator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        if [ -z "$POD" ]; then
+          echo "No orchestrator pod found in namespace {{.K8S_NAMESPACE}}"
+          exit 1
+        fi
+
+        kubectl exec -i -n {{.K8S_NAMESPACE}} "$POD" -- env REDIS_URL="$REDIS_URL" python - <<'PY'
+        import asyncio
+        from ares.core.models import SharedRedTeamState
+        from ares.core.redis_client import create_redis_client
+
+        OP_ID = "{{.OPERATION_ID}}"
+
+        def _extract_domains(state):
+            domains = set()
+
+            def _add(value):
+                value = (value or "").strip().lower()
+                if value:
+                    domains.add(value)
+
+            if state.target:
+                _add(getattr(state.target, "domain", ""))
+                target_host = getattr(state.target, "hostname", "")
+                if target_host and "." in target_host:
+                    parts = target_host.split(".")
+                    if len(parts) > 1:
+                        _add(".".join(parts[1:]))
+
+            for cred in state.all_credentials:
+                _add(getattr(cred, "domain", ""))
+            for user in state.all_users:
+                _add(getattr(user, "domain", ""))
+            for h in state.all_hashes:
+                _add(getattr(h, "domain", ""))
+            for host in state.all_hosts:
+                hostname = getattr(host, "hostname", "")
+                if hostname and "." in hostname:
+                    parts = hostname.split(".")
+                    if len(parts) > 1:
+                        _add(".".join(parts[1:]))
+
+            return sorted(domains)
+
+        async def main():
+            client = await create_redis_client(decode_responses=False)
+            try:
+                key = f"ares:operation:{OP_ID}:state"
+                data = await client.get(key)
+                if not data:
+                    print(f"No state found for operation: {OP_ID}")
+                    return
+                state = SharedRedTeamState.from_bytes(data)
+                domains = _extract_domains(state)
+                if not domains:
+                    print("No domains inferred from current state.")
+                    return
+                before = set(getattr(state, "all_domains", []))
+                for domain in domains:
+                    if hasattr(state, "add_domain"):
+                        state.add_domain(domain)
+                    elif domain not in before:
+                        state.all_domains.append(domain)
+                await client.set(key, state.to_bytes())
+                added = [d for d in domains if d not in before]
+                print(f"Backfilled domains ({len(added)}): {', '.join(added) if added else 'None'}")
+            finally:
+                await client.aclose()
 
         asyncio.run(main())
         PY

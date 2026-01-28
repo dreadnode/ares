@@ -13,7 +13,7 @@ from typing import Any
 from loguru import logger
 from pydantic import BaseModel
 
-from ares.core.config import get_redis_url
+from ares.core.config import get_agent_heartbeat_timeout, get_redis_url
 from ares.core.redis_client import create_redis_client, get_redis_sentinel_config
 
 
@@ -101,6 +101,7 @@ class RedisTaskQueue:
         self.redis_url = redis_url or get_redis_url()
         self._client = None
         self._connected = False
+        self._heartbeat_ttl = max(self.HEARTBEAT_TTL, get_agent_heartbeat_timeout() * 2)
 
     @property
     def redis(self):
@@ -451,7 +452,7 @@ class RedisTaskQueue:
         )
 
         try:
-            await self._client.set(heartbeat_key, data, ex=self.HEARTBEAT_TTL)
+            await self._client.set(heartbeat_key, data, ex=self._heartbeat_ttl)
         except Exception as e:
             error_str = str(e).lower()
             if any(

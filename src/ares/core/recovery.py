@@ -25,6 +25,89 @@ class RecoveryError(Exception):
     """Raised when recovery fails."""
 
 
+def _merge_state(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+    """Merge existing checkpoint data into current state to prevent regressions."""
+    # Hosts, domains, users (using built-in dedup methods)
+    for host in existing.all_hosts:
+        target.add_host(host)
+    for domain in getattr(existing, "all_domains", []):
+        target.add_domain(domain)
+    for user in existing.all_users:
+        target.add_user(user.username, user.domain)
+
+    # Credentials (preserve original source fields)
+    _merge_credentials(target, existing)
+    _merge_hashes(target, existing)
+    _merge_shares(target, existing)
+    _merge_weaknesses(target, existing)
+
+    # Vulnerabilities and techniques
+    for vuln_id, vuln in existing.discovered_vulnerabilities.items():
+        target.discovered_vulnerabilities.setdefault(vuln_id, vuln)
+    target.exploited_vulnerabilities |= existing.exploited_vulnerabilities
+    target.identified_techniques |= existing.identified_techniques
+
+    # Timeline
+    _merge_timeline(target, existing)
+
+    # Merge dynamic tracking attributes (set via object.__setattr__)
+    for dynamic_attr in ("_queried_hosts", "_tested_credentials"):
+        existing_value = getattr(existing, dynamic_attr, None)
+        if existing_value is not None:
+            target_value: set = getattr(target, dynamic_attr, set())
+            object.__setattr__(target, dynamic_attr, target_value | existing_value)
+
+
+def _merge_credentials(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+    """Merge credentials from existing state into target."""
+    seen = {
+        f"{c.domain.strip()}:{c.username.strip()}:{c.password.strip()}".lower()
+        for c in target.all_credentials
+    }
+    for cred in existing.all_credentials:
+        key = f"{cred.domain.strip()}:{cred.username.strip()}:{cred.password.strip()}".lower()
+        if cred.username and key not in seen:
+            seen.add(key)
+            target.all_credentials.append(cred)
+
+
+def _merge_hashes(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+    """Merge hashes from existing state into target."""
+    seen = {h.hash_value for h in target.all_hashes}
+    for h in existing.all_hashes:
+        if h.hash_value not in seen:
+            seen.add(h.hash_value)
+            target.all_hashes.append(h)
+
+
+def _merge_shares(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+    """Merge shares from existing state into target."""
+    seen = {(s.host, s.name) for s in target.all_shares}
+    for s in existing.all_shares:
+        key = (s.host, s.name)
+        if key not in seen:
+            seen.add(key)
+            target.all_shares.append(s)
+
+
+def _merge_weaknesses(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+    """Merge weaknesses from existing state into target."""
+    seen = set(target.all_weaknesses)
+    for w in existing.all_weaknesses:
+        if w not in seen:
+            seen.add(w)
+            target.all_weaknesses.append(w)
+
+
+def _merge_timeline(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+    """Merge timeline events from existing state into target."""
+    seen = {e.id for e in target.operation_timeline}
+    for event in existing.operation_timeline:
+        if event.id not in seen:
+            seen.add(event.id)
+            target.operation_timeline.append(event)
+
+
 class OperationRecoveryManager:
     """
     Handle pod restarts and operation recovery.
@@ -105,6 +188,18 @@ class OperationRecoveryManager:
 
         try:
             key = f"ares:operation:{state.operation_id}:state"
+            existing_data = await self._redis_client.get(key)
+            if existing_data:
+                try:
+                    existing_state = SharedRedTeamState.from_bytes(existing_data)
+                    _merge_state(state, existing_state)
+                except Exception as exc:
+                    logger.warning(f"Failed to merge existing checkpoint state: {exc}")
+            # Debug: log state counts before checkpoint
+            logger.info(
+                f"Checkpointing state: hosts={len(state.all_hosts)}, "
+                f"creds={len(state.all_credentials)}, hashes={len(state.all_hashes)}"
+            )
             await self._redis_client.set(key, state.to_bytes())
 
             # Set checkpoint timestamp

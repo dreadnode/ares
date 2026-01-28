@@ -53,8 +53,10 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
         RedTeamReportingTools,
     ],
     AgentRole.CREDENTIAL_ACCESS: [
+        NetworkEnumerationTools,
         CredentialDiscoveryTools,
         CredentialHarvestingTools,
+        SharePilferingTools,
     ],
     AgentRole.CRACKER: [
         CrackingTools,
@@ -147,6 +149,7 @@ def create_role_hooks(
     role: AgentRole,
     dispatcher: RedTeamDispatcher,
     shared_state: SharedRedTeamState,
+    display_name: str | None = None,
 ) -> list:
     """
     Create hooks for a specific agent role.
@@ -155,18 +158,20 @@ def create_role_hooks(
         role: The agent role.
         dispatcher: The dispatcher for inter-agent communication.
         shared_state: The shared state object.
+        display_name: Optional display name for logging (defaults to role.value).
 
     Returns:
         List of hook functions.
     """
     hooks = []
+    log_name = display_name or role.value
 
     # Common logging hooks
     async def log_tool_usage(event: ToolStart):
         """Log tool calls for observability."""
         if hasattr(event, "tool_call") and event.tool_call:
-            logger.info(f"🔧 [{role.value}] Tool: {event.tool_call.name}")
-            dn.log_metric(f"multiagent_{role.value}_tool_{event.tool_call.name}", 1, mode="count")
+            logger.info(f"🔧 [{log_name}] Tool: {event.tool_call.name}")
+            dn.log_metric(f"multiagent_{log_name}_tool_{event.tool_call.name}", 1, mode="count")
 
     async def log_tool_result(event: ToolEnd):
         """Log tool results."""
@@ -175,13 +180,13 @@ def create_role_hooks(
 
         if hasattr(event, "tool_call") and event.tool_call:
             if hasattr(event, "error") and event.error:
-                logger.warning(f"❌ [{role.value}] {event.tool_call.name} failed: {event.error}")
+                logger.warning(f"❌ [{log_name}] {event.tool_call.name} failed: {event.error}")
             else:
                 content = (
                     str(event.message.content) if event.message and event.message.content else ""
                 )
                 if not content:
-                    logger.info(f"✅ [{role.value}] {event.tool_call.name}: (empty)")
+                    logger.info(f"✅ [{log_name}] {event.tool_call.name}: (empty)")
                 else:
                     # Show first 50 lines, max 5000 chars
                     lines = content.split("\n")[:50]
@@ -192,9 +197,9 @@ def create_role_hooks(
                         truncated = True
                     suffix = " ..." if truncated else ""
                     if "\n" in result:
-                        logger.info(f"✅ [{role.value}] {event.tool_call.name}:\n{result}{suffix}")
+                        logger.info(f"✅ [{log_name}] {event.tool_call.name}:\n{result}{suffix}")
                     else:
-                        logger.info(f"✅ [{role.value}] {event.tool_call.name}: {result}{suffix}")
+                        logger.info(f"✅ [{log_name}] {event.tool_call.name}: {result}{suffix}")
 
     hooks.extend([log_tool_usage, log_tool_result])
 
@@ -318,11 +323,12 @@ def create_role_hooks(
         ),
     }
 
-    unstall_hook = retry_with_feedback(
-        event_type=AgentStalled,
-        feedback=role_feedback.get(role, "Try a different approach."),
-    )
-    hooks.append(unstall_hook)
+    if role not in (AgentRole.CREDENTIAL_ACCESS, AgentRole.LATERAL, AgentRole.CRACKER):
+        unstall_hook = retry_with_feedback(
+            event_type=AgentStalled,
+            feedback=role_feedback.get(role, "Try a different approach."),
+        )
+        hooks.append(unstall_hook)
 
     return hooks
 
@@ -360,10 +366,8 @@ def create_specialized_agent(
     for cls in toolset_classes:
         try:
             toolset = cls()
-            # Set shared state if toolset supports it
-            if hasattr(toolset, "set_shared_state"):
-                toolset.set_shared_state(shared_state)
-            elif hasattr(toolset, "set_state"):
+            # Set shared state on toolset (all toolsets accept AnyRedTeamState)
+            if hasattr(toolset, "set_state"):
                 toolset.set_state(shared_state)
             if hasattr(toolset, "set_dispatcher"):
                 toolset.set_dispatcher(dispatcher)

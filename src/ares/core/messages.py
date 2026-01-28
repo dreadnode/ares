@@ -183,6 +183,7 @@ class CredentialAccessRequest(AgentMessage):
     task_id: str = Field(default_factory=generate_task_id)
     target_ips: list[str] = Field(default_factory=list)
     domain: str = ""
+    dc_ip: str = ""
     username: str = ""
     password: str | None = None
     hash_value: str | None = None

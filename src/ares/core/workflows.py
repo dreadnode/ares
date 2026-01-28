@@ -86,6 +86,9 @@ def _has_admin_access(state: SharedRedTeamState, host: Host) -> bool:
 
 def _collect_candidate_domains(state: SharedRedTeamState) -> set[str]:
     domains: set[str] = set()
+    for domain in getattr(state, "all_domains", []):
+        if domain:
+            domains.add(domain)
     if state.target and state.target.domain:
         domains.add(state.target.domain)
     for cred in state.all_credentials:

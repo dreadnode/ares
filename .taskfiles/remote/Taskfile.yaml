@@ -627,10 +627,13 @@ tasks:
     silent: true
     cmds:
       - |
-        echo -e "{{.INFO}} Restarting deployments in {{.NAMESPACE}}..."
+        echo -e "{{.INFO}} Restarting deployments and statefulsets in {{.NAMESPACE}}..."
 
-        # Restart worker agents (deployments only; statefulsets excluded)
+        # Restart worker agents (deployments)
         kubectl rollout restart deployment -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team 2>/dev/null || true
+
+        # Restart worker agents (statefulsets)
+        kubectl rollout restart statefulset -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team 2>/dev/null || true
 
         # Restart orchestrator (has different label)
         kubectl rollout restart deployment -n {{.NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator 2>/dev/null || true
@@ -639,6 +642,7 @@ tasks:
         echo -e "{{.INFO}} Checking worker status..."
 
         kubectl rollout status deployment -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team --timeout=60s 2>/dev/null || true
+        kubectl rollout status statefulset -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team --timeout=60s 2>/dev/null || true
 
         echo -e "{{.INFO}} Checking orchestrator status..."
         kubectl rollout status deployment -n {{.NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator --timeout=60s 2>/dev/null || true

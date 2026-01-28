@@ -453,6 +453,8 @@ class Hash(Model):
     hash_type: str = "NTLM"
     domain: str = ""
     cracked_password: str = ""
+    source: str = ""
+    discovered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class Share(Model):
@@ -632,6 +634,7 @@ class SharedRedTeamState:
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Global discoveries (aggregated from all agents)
+    all_domains: list[str] = field(default_factory=list)
     all_credentials: list[Credential] = field(default_factory=list)
     all_hashes: list[Hash] = field(default_factory=list)
     all_hosts: list[Host] = field(default_factory=list)
@@ -672,6 +675,7 @@ class SharedRedTeamState:
         if "/" in username or "\\" in username or username.endswith(".txt"):
             return False
         self.add_user(username, domain)
+        self.add_domain(domain)
         key = f"{domain}:{username}:{password}".lower()
         for existing in self.all_credentials:
             existing_key = f"{existing.domain.strip()}:{existing.username.strip()}:{existing.password.strip()}".lower()
@@ -701,13 +705,41 @@ class SharedRedTeamState:
             if existing.username == normalized and existing.domain == domain:
                 return False
         self.all_users.append(User(username=normalized, domain=domain))
+        self.add_domain(domain)
+        return True
+
+    def add_domain(self, domain: str) -> bool:
+        """Add domain if not duplicate. Returns True if added."""
+        normalized = (domain or "").strip().lower()
+        if not normalized:
+            return False
+        if any(existing.lower() == normalized for existing in self.all_domains):
+            return False
+        self.all_domains.append(normalized)
         return True
 
     def add_hash(self, hash_obj: Hash, source_agent: str) -> bool:
         """Add hash if not duplicate. Returns True if added."""
+        hash_type = (hash_obj.hash_type or "").strip().lower()
+        username = (hash_obj.username or "").strip().lower()
+        domain = (hash_obj.domain or "").strip().lower()
         for existing in self.all_hashes:
             if existing.hash_value == hash_obj.hash_value:
                 return False
+            if hash_type in {"as-rep", "asrep", "krb5asrep"}:
+                existing_type = (existing.hash_type or "").strip().lower()
+                if existing_type in {"as-rep", "asrep", "krb5asrep"}:
+                    existing_user = (existing.username or "").strip().lower()
+                    existing_domain = (existing.domain or "").strip().lower()
+                    if existing_user == username and existing_domain == domain:
+                        return False
+        self.add_domain(hash_obj.domain)
+        if not getattr(hash_obj, "source", ""):
+            hash_obj.source = source_agent
+        else:
+            hash_obj.source = f"{source_agent}:{hash_obj.source}"
+        if not getattr(hash_obj, "discovered_at", None):
+            hash_obj.discovered_at = datetime.now(timezone.utc)
         self.all_hashes.append(hash_obj)
         return True
 
@@ -752,6 +784,20 @@ class SharedRedTeamState:
                     existing.services = list({*existing.services, *host.services})
                 return False
         self.all_hosts.append(host)
+        return True
+
+    def add_share(self, share: Share) -> bool:
+        """Add share if not duplicate. Returns True if added."""
+        host = (share.host or "").strip().lower()
+        name = (share.name or "").strip().lower()
+        if not host or not name:
+            return False
+        for existing in self.all_shares:
+            if (existing.host or "").strip().lower() == host and (
+                existing.name or ""
+            ).strip().lower() == name:
+                return False
+        self.all_shares.append(share)
         return True
 
     def add_vulnerability(self, vuln: VulnerabilityInfo) -> bool:
@@ -841,6 +887,7 @@ class SharedRedTeamState:
         """Generate summary for reporting."""
         return {
             "operation_id": self.operation_id,
+            "domain_count": len(self.all_domains),
             "host_count": len(self.all_hosts),
             "credential_count": len(self.all_credentials),
             "hash_count": len(self.all_hashes),
@@ -874,31 +921,61 @@ class SharedRedTeamState:
         import pickle  # nosec B403
 
         state = pickle.loads(data)  # noqa: S301  # nosec B301
+        if not hasattr(state, "all_domains"):
+            state.all_domains = []
         if not hasattr(state, "pending_credential_findings"):
             state.pending_credential_findings = set()
-        deduped_creds: list[Credential] = []
-        seen_creds: set[str] = set()
-        for cred in state.all_credentials:
+        state.all_credentials = cls._dedupe_credentials(state.all_credentials)
+        cls._sanitize_hostnames(state.all_hosts)
+        if not state.all_domains:
+            state.all_domains = cls._extract_domains(state)
+        return state
+
+    @staticmethod
+    def _dedupe_credentials(credentials: list[Credential]) -> list[Credential]:
+        """Deduplicate credentials by domain:username:password key."""
+        deduped: list[Credential] = []
+        seen: set[str] = set()
+        for cred in credentials:
             username = (cred.username or "").strip()
             domain = (cred.domain or "").strip()
             password = (cred.password or "").strip()
             key = f"{domain}:{username}:{password}".lower()
-            if not username or key in seen_creds:
+            if not username or key in seen:
                 continue
-            seen_creds.add(key)
+            seen.add(key)
             cred.username = username
             cred.domain = domain
             cred.password = password
-            deduped_creds.append(cred)
-        state.all_credentials = deduped_creds
-        for host in state.all_hosts:
+            deduped.append(cred)
+        return deduped
+
+    @staticmethod
+    def _sanitize_hostnames(hosts: list[Host]) -> None:
+        """Clear AWS internal hostnames that provide no useful info."""
+        for host in hosts:
             hostname = (host.hostname or "").strip()
-            if not hostname:
-                continue
-            lowered = hostname.lower()
-            if lowered.startswith("ip-") and "compute.internal" in lowered:
-                host.hostname = ""
-        return state
+            if hostname:
+                lowered = hostname.lower()
+                if lowered.startswith("ip-") and "compute.internal" in lowered:
+                    host.hostname = ""
+
+    @staticmethod
+    def _extract_domains(state: SharedRedTeamState) -> list[str]:
+        """Extract all domains from state objects."""
+        domains: set[str] = set()
+        if state.target and state.target.domain:
+            domains.add(state.target.domain.strip().lower())
+        for user in state.all_users:
+            if user.domain:
+                domains.add(user.domain.strip().lower())
+        for cred in state.all_credentials:
+            if cred.domain:
+                domains.add(cred.domain.strip().lower())
+        for h in state.all_hashes:
+            if h.domain:
+                domains.add(h.domain.strip().lower())
+        return sorted(domains)
 
 
 @dataclass

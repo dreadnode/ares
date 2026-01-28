@@ -23,6 +23,7 @@ async def submit_operation(
     model: str | None = None,
     max_steps: int = 200,
     checkpoint_interval: int = 60,
+    report_dir: str | None = None,
     redis_url: str | None = None,
     operations_queue: str = "ares:operations",
     wait_for_completion: bool = False,
@@ -44,6 +45,7 @@ async def submit_operation(
         model: LLM model to use
         max_steps: Maximum agent steps
         checkpoint_interval: Seconds between checkpoints
+        report_dir: Directory for markdown reports (orchestrator-side)
         redis_url: Redis connection URL (default: from config)
         operations_queue: Redis queue name for operations
         wait_for_completion: If True, wait for operation to complete
@@ -69,6 +71,7 @@ async def submit_operation(
         "model": model or os.environ.get("ARES_ORCHESTRATOR_MODEL") or os.environ.get("ARES_MODEL"),
         "max_steps": max_steps,
         "checkpoint_interval": checkpoint_interval,
+        "report_dir": report_dir,
         "submitted_at": datetime.now(timezone.utc).isoformat(),
         "env_vars": env_vars,
     }

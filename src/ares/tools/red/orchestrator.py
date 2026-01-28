@@ -6,7 +6,7 @@ and dispatch tasks to specialized worker agents.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import dreadnode as dn
 from dreadnode.agent.tools import Toolset
@@ -1037,7 +1037,16 @@ class CrackerCallbackTools(Toolset):
         await self.dispatcher.complete_task(
             task_id=task_id,
             success=True,
-            result={"username": username, "password": password, "method": method},
+            result={
+                "credential": {
+                    "username": username,
+                    "password": password,
+                    "domain": domain,
+                    "source": f"cracked:{method}",
+                },
+                "original_hash": original_hash,
+                "method": method,
+            },
             source_agent=self._agent_name,
         )
 
@@ -1087,6 +1096,28 @@ class LateralCallbackTools(Toolset):
             raise RuntimeError("Dispatcher not set")
         return self._dispatcher
 
+    async def _send_via_task_queue(
+        self,
+        task_id: str,
+        *,
+        success: bool,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> bool:
+        task_queue = self.dispatcher.task_queue
+        if not task_queue:
+            return False
+        if task_id in self.dispatcher.shared_state.pending_tasks:
+            return False
+        await task_queue.send_result(
+            task_id=task_id,
+            success=success,
+            result=result,
+            error=error,
+            worker_pod=self._agent_name,
+        )
+        return True
+
     @dn.tool_method
     async def report_lateral_success(
         self,
@@ -1094,6 +1125,7 @@ class LateralCallbackTools(Toolset):
         target_host: str,
         method: str,
         new_credentials: str = "",
+        new_hashes: str = "",
     ) -> str:
         """
         Report successful lateral movement.
@@ -1102,26 +1134,60 @@ class LateralCallbackTools(Toolset):
             task_id: The original lateral movement task ID
             target_host: Host that was accessed
             method: Method used (psexec/winrm/etc)
-            new_credentials: Any new credentials found (JSON format)
+            new_credentials: Any new credentials found (JSON format, list of dicts with
+                username, password, domain, source fields)
+            new_hashes: Any new hashes found (JSON format, list of dicts with
+                username, hash_value, hash_type, domain fields)
 
         Returns:
             Confirmation message
         """
         import json
 
-        result = {
+        result: dict[str, Any] = {
             "target_host": target_host,
             "method": method,
             "success": True,
         }
 
-        # Parse and broadcast new credentials
+        # Parse credentials and include in result for complete_task to publish
         if new_credentials:
             try:
                 creds = json.loads(new_credentials)
-                result["new_credentials_count"] = len(creds) if isinstance(creds, list) else 1
+                if isinstance(creds, list):
+                    result["credentials"] = creds
+                elif isinstance(creds, dict):
+                    result["credential"] = creds
             except json.JSONDecodeError:
-                pass
+                logger.warning(f"Failed to parse new_credentials JSON: {new_credentials[:200]}")
+
+        # Parse hashes and include in result for complete_task to publish
+        if new_hashes:
+            try:
+                hashes = json.loads(new_hashes)
+                if isinstance(hashes, list):
+                    result["hashes"] = hashes
+                elif isinstance(hashes, dict):
+                    result["hash"] = hashes
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse new_hashes JSON: {new_hashes[:200]}")
+
+        # Calculate extra message for reporting
+        cred_count = len(result.get("credentials", [])) or (1 if "credential" in result else 0)
+        hash_count = len(result.get("hashes", [])) or (1 if "hash" in result else 0)
+        extras = []
+        if cred_count:
+            extras.append(f"{cred_count} credential(s)")
+        if hash_count:
+            extras.append(f"{hash_count} hash(es)")
+        extra_msg = f" with {', '.join(extras)}" if extras else ""
+
+        if await self._send_via_task_queue(
+            task_id,
+            success=True,
+            result=result,
+        ):
+            return f"✓ Lateral movement to {target_host} reported{extra_msg}"
 
         await self.dispatcher.complete_task(
             task_id=task_id,
@@ -1130,7 +1196,7 @@ class LateralCallbackTools(Toolset):
             source_agent=self._agent_name,
         )
 
-        return f"✓ Lateral movement to {target_host} reported"
+        return f"✓ Lateral movement to {target_host} reported{extra_msg}"
 
     @dn.tool_method
     async def report_lateral_failed(
@@ -1150,10 +1216,18 @@ class LateralCallbackTools(Toolset):
         Returns:
             Confirmation message
         """
+        error = f"Lateral to {target_host} failed: {reason}"
+        if await self._send_via_task_queue(
+            task_id,
+            success=False,
+            error=error,
+        ):
+            return f"✗ Lateral movement failed: {reason}"
+
         await self.dispatcher.complete_task(
             task_id=task_id,
             success=False,
-            error=f"Lateral to {target_host} failed: {reason}",
+            error=error,
             source_agent=self._agent_name,
         )
 

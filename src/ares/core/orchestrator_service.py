@@ -44,6 +44,7 @@ class OperationRequest:
     model: str | None = None
     max_steps: int = 200
     checkpoint_interval: int = 60
+    report_dir: str | None = None
     # API keys passed from client (set as env vars before running)
     env_vars: dict[str, str] | None = None
 
@@ -67,6 +68,7 @@ class OperationRequest:
             or os.environ.get("ARES_MODEL"),
             max_steps=data.get("max_steps", 200),
             checkpoint_interval=data.get("checkpoint_interval", 60),
+            report_dir=data.get("report_dir") or os.environ.get("ARES_REPORT_DIR"),
             env_vars=data.get("env_vars"),
         )
 
@@ -95,6 +97,7 @@ class OrchestratorService:
         self._shutdown_event = asyncio.Event()
         # Max age in seconds for an operation to be considered recoverable
         self._max_operation_age = int(os.getenv("MAX_OPERATION_AGE", "300"))  # 5 minutes default
+        self._report_dir = os.environ.get("ARES_REPORT_DIR")
 
     @staticmethod
     def _decode_redis_value(value: str | bytes) -> str:
@@ -235,6 +238,7 @@ class OrchestratorService:
                 target_ips=target_ips,
                 initial_credential=state.all_credentials[0] if state.all_credentials else None,
                 resume_from_checkpoint=True,
+                report_dir=self._report_dir,
                 redis_url=self.redis_url,
                 namespace=self.namespace,
             )
@@ -481,6 +485,7 @@ class OrchestratorService:
                 target_ips=request.target_ips,
                 initial_credential=initial_cred,
                 resume_from_checkpoint=request.resume_from_checkpoint,
+                report_dir=request.report_dir or self._report_dir,
                 redis_url=self.redis_url,
                 namespace=self.namespace,
                 model=request.model,

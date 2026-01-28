@@ -72,12 +72,15 @@ agents:
     max_steps: 100
     pod_selector: "ares.dreadnode.io/role=credential_access"
     capabilities:
+      - netexec
+      - ldapsearch
       - impacket-getnpusers
       - impacket-secretsdump
       - targeted_kerberoast
       - lsassy
       - sprayhound
       - rpcclient
+      - smbclient
 
   cracker:
     model: "gpt-5.2"
@@ -164,7 +167,7 @@ agents:
 
 # Timeout configurations
 timeouts:
-  agent_heartbeat: 30  # seconds - agent considered offline after this
+  agent_heartbeat: 180  # seconds - agent considered offline after this
   task_timeout: 300  # seconds - default task timeout
   operation_timeout: 7200  # seconds - 2 hours max operation time
   lateral_movement: 180  # seconds

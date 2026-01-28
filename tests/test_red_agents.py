@@ -205,6 +205,9 @@ class TestCapabilitiesFromConfig:
         # Test that credential_access has rpcclient
         cred_config = get_agent_config("credential_access")
         assert "rpcclient" in cred_config.capabilities
+        assert "netexec" in cred_config.capabilities
+        assert "ldapsearch" in cred_config.capabilities
+        assert "smbclient" in cred_config.capabilities
 
     def test_template_renders_capabilities_from_config(self):
         """Integration test: verify templates render capabilities from config."""
