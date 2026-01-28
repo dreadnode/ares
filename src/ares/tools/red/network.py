@@ -3687,6 +3687,72 @@ class BloodHoundTools(Toolset):
             realm = domain.upper()
             krb5_conf = f"/tmp/ares-krb5-{uuid.uuid4().hex}.conf"  # nosec B108  # noqa: S108
             cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
+
+            # Resolve DC hostname to add to /etc/hosts for DNS resolution
+            # Query SRV records to discover DC hostnames
+            logger.info(f"[*] Resolving domain controllers for {domain}")
+            srv_query = f"_ldap._tcp.dc._msdcs.{domain}"
+            dc_hostnames = []
+            try:
+                nslookup_cmd = ["nslookup", "-type=srv", srv_query, dc_ip]
+                srv_stdout, srv_stderr, _ = _run_tool(
+                    nslookup_cmd, timeout_seconds=30, target_role="recon"
+                )
+                srv_output = srv_stdout or srv_stderr or ""
+
+                # Extract DC hostnames from SRV records
+                for line in srv_output.splitlines():
+                    # Match patterns like "svr hostname = hostname.domain.local"
+                    srv_match = re.search(r"svr hostname = ([^\s]+)", line, re.IGNORECASE)
+                    if srv_match:
+                        hostname = srv_match.group(1).rstrip(".")
+                        dc_hostnames.append(hostname)
+                        logger.debug(f"Found DC hostname: {hostname}")
+                    # Also match "service = 0 100 389 hostname.domain.local"
+                    service_match = re.search(
+                        r"service = \d+ \d+ \d+ ([^\s]+)", line, re.IGNORECASE
+                    )
+                    if service_match and not srv_match:  # Avoid duplicates
+                        hostname = service_match.group(1).rstrip(".")
+                        dc_hostnames.append(hostname)
+                        logger.debug(f"Found DC hostname: {hostname}")
+
+                # Remove duplicates
+                dc_hostnames = list(dict.fromkeys(dc_hostnames))
+                logger.info(
+                    f"[+] Discovered {len(dc_hostnames)} DC hostname(s): {', '.join(dc_hostnames)}"
+                )
+            except Exception as e:
+                logger.warning(f"[!] Failed to resolve DC hostnames via SRV: {e}")
+                # Fallback: try reverse DNS lookup
+                try:
+                    ptr_cmd = ["nslookup", dc_ip, dc_ip]
+                    ptr_stdout, ptr_stderr, _ = _run_tool(
+                        ptr_cmd, timeout_seconds=15, target_role="recon"
+                    )
+                    ptr_output = ptr_stdout or ptr_stderr or ""
+                    # Extract hostname from PTR record: "name = hostname.domain.local"
+                    for line in ptr_output.splitlines():
+                        ptr_match = re.search(r"name = ([^\s]+)", line, re.IGNORECASE)
+                        if ptr_match:
+                            hostname = ptr_match.group(1).rstrip(".")
+                            dc_hostnames.append(hostname)
+                            logger.info(f"[+] Found DC hostname via PTR: {hostname}")
+                            break
+                except Exception as ptr_e:
+                    logger.warning(f"[!] Failed to resolve DC hostname via PTR: {ptr_e}")
+
+            # Build /etc/hosts entries for DC hostnames
+            hosts_entries = ""
+            if dc_hostnames:
+                for hostname in dc_hostnames:
+                    hosts_entries += f"echo '{dc_ip} {hostname}' >> /etc/hosts\n"
+                logger.info("[*] Adding DC hostname(s) to /etc/hosts for DNS resolution")
+            else:
+                logger.warning(
+                    "[!] No DC hostnames discovered; BloodHound may fail with DNS errors"
+                )
+
             cmd_script = (
                 f"tmp_conf={krb5_conf}\n"
                 "trap 'rm -f \"$tmp_conf\"' EXIT\n"
@@ -3703,6 +3769,7 @@ class BloodHoundTools(Toolset):
                 f" .{domain} = {realm}\n"
                 f" {domain} = {realm}\n"
                 "EOF\n"
+                f"{hosts_entries}"
                 f'env KRB5_CONFIG="$tmp_conf" {cmd_str}\n'
             )
             cmd = ["bash", "-lc", cmd_script]
