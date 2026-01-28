@@ -37,8 +37,7 @@ from ares.core.messages import (
 from ares.core.models import AgentRole, SharedRedTeamState
 from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue, TaskMessage
-from ares.tools.red import CrackerCallbackTools, LateralCallbackTools
-from ares.tools.red.network import CrackingTools
+from ares.tools.red import CrackerCallbackTools, CrackingTools, LateralCallbackTools
 
 if TYPE_CHECKING:
     from dreadnode.agent import Agent

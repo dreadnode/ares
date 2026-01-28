@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from ares.core.models import SharedRedTeamState, Target
-from ares.tools.red import network
-from ares.tools.red.network import NetworkEnumerationTools
+from ares.tools.red import NetworkEnumerationTools, reconnaissance
 
 
 def test_enumerate_users_records_users_hosts_and_credentials(monkeypatch):
@@ -76,7 +75,7 @@ def test_smb_sweep_srv_lookup_and_smbclient_shares(monkeypatch):
             )
         return ("", "", 0)
 
-    monkeypatch.setattr(network, "_run_tool", fake_run)
+    monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
 
     tool.smb_sweep("10.1.2.240")
     tool.resolve_domain_controllers("contoso.local", "10.1.2.240")

@@ -38,7 +38,7 @@ from ares.core.recovery import OperationRecoveryManager
 from ares.core.task_queue import RedisTaskQueue
 from ares.core.workflows import exploitation_workflow
 from ares.reports.redteam import RedTeamReportGenerator
-from ares.tools.red.network import (
+from ares.tools.red import (
     BloodHoundTools,
     CertipyTools,
     CredentialDiscoveryTools,

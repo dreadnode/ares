@@ -20,7 +20,7 @@ from ares.core.config import get_agent_config
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.models import AgentInfo, AgentRole, SharedRedTeamState
 from ares.core.templates import get_template_loader
-from ares.tools.red.network import (
+from ares.tools.red import (
     ACLExploitTools,
     BloodHoundTools,
     CertipyTools,

@@ -20,7 +20,7 @@ from loguru import logger
 from ares.core.models import RedTeamState
 from ares.core.templates import get_template_loader
 from ares.integrations.mitre import MITREAttackClient
-from ares.tools.red.network import (
+from ares.tools.red import (
     ACLExploitTools,
     BloodHoundTools,
     CertipyTools,
