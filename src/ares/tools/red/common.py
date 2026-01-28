@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import socket
+import tempfile
 import uuid
 from typing import ClassVar
 
@@ -22,6 +23,107 @@ logger = logging.getLogger(__name__)
 
 # Shared placeholder passwords used across multiple toolsets
 PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = {"password", "changeme", "<password>"}
+
+# Characters that indicate Kali MOTD pollution (box-drawing characters)
+# These appear when bash outputs the Kali "minimal installation" message
+MOTD_GARBAGE_CHARS: frozenset[str] = frozenset("┏┃┗┓┛━─│┌┐└┘├┤┬┴┼╔╗╚╝║═")
+
+# Patterns that indicate MOTD or system messages, not valid usernames
+TEMP_USERS_PATTERN = f"{tempfile.gettempdir().rstrip(os.sep)}{os.sep}users".lower()
+
+MOTD_GARBAGE_PATTERNS: tuple[str, ...] = (
+    "message from kali",
+    "minimal installation",
+    "kali.org",
+    "hushlogin",
+    "supplementary tools",
+    "learn how",
+    TEMP_USERS_PATTERN,  # File path leaking as username
+    ".txt",  # File extension leaking
+)
+
+
+def is_motd_line(line: str) -> bool:
+    """Check if a line appears to be Kali MOTD garbage (for line-level filtering).
+
+    This is a less strict check than is_motd_garbage(), used for filtering
+    whole output lines before extracting usernames from them.
+
+    Args:
+        line: Line of output to check
+
+    Returns:
+        True if the line appears to be MOTD garbage, False otherwise
+    """
+    if not line:
+        return False  # Empty lines are not garbage, just empty
+
+    stripped = line.strip()
+    if not stripped:
+        return False
+
+    # Check for box-drawing characters (Kali MOTD uses these)
+    if any(char in MOTD_GARBAGE_CHARS for char in stripped):
+        return True
+
+    # Check for common MOTD patterns
+    lower = stripped.lower()
+    return any(pattern in lower for pattern in MOTD_GARBAGE_PATTERNS)
+
+
+def is_motd_garbage(value: str) -> bool:
+    """Check if a string appears to be Kali MOTD garbage or invalid username.
+
+    This is a strict check used for validating extracted usernames.
+    For line-level filtering, use is_motd_line() instead.
+
+    Args:
+        value: String to check (typically an extracted username)
+
+    Returns:
+        True if the value appears to be MOTD garbage, False otherwise
+    """
+    if not value:
+        return True
+
+    stripped = value.strip()
+    if not stripped:
+        return True
+
+    # Check for box-drawing characters (Kali MOTD uses these)
+    if any(char in MOTD_GARBAGE_CHARS for char in stripped):
+        return True
+
+    # Check for common MOTD patterns
+    lower = stripped.lower()
+    if any(pattern in lower for pattern in MOTD_GARBAGE_PATTERNS):
+        return True
+
+    # Check for non-ASCII characters (valid AD usernames are ASCII)
+    try:
+        stripped.encode("ascii")
+    except UnicodeEncodeError:
+        return True
+
+    # Check for path-like strings
+    if "/" in stripped or "\\" in stripped:
+        return True
+
+    # Valid usernames are typically alphanumeric with . _ - $
+    # Reject if it has unusual characters
+    return not re.match(r"^[A-Za-z0-9._$-]+$", stripped)
+
+
+def filter_motd_garbage(users: list[str]) -> list[str]:
+    """Filter out MOTD garbage from a list of usernames.
+
+    Args:
+        users: List of potential usernames
+
+    Returns:
+        Filtered list with MOTD garbage removed
+    """
+    return [u for u in users if not is_motd_garbage(u)]
 
 
 def format_weakness_block(
@@ -172,10 +274,23 @@ def infer_listener_ip(target: str | None = None) -> str | None:
 
 
 def write_users_file_remote(users: list[str], users_file: str) -> tuple[bool, str]:
-    """Write a list of users to a file on the remote system."""
+    """Write a list of users to a file on the remote system.
+
+    Filters out MOTD garbage and invalid usernames before writing.
+    """
     if not users:
         return False, "no users provided"
-    escaped_users = " ".join(shlex.quote(user) for user in users)
+
+    # Filter out MOTD garbage and invalid usernames
+    clean_users = filter_motd_garbage(users)
+    if not clean_users:
+        return False, "no valid users after filtering MOTD garbage"
+
+    filtered_count = len(users) - len(clean_users)
+    if filtered_count > 0:
+        logger.debug(f"Filtered {filtered_count} MOTD garbage entries from users list")
+
+    escaped_users = " ".join(shlex.quote(user) for user in clean_users)
     cmd = f"printf '%s\\n' {escaped_users} > {shlex.quote(users_file)}"
     result = run_remote(["bash", "-lc", cmd], timeout_seconds=60)
     if result.return_code != 0:
@@ -194,31 +309,28 @@ def remote_file_exists(path: str) -> tuple[bool, str]:
     return False, error
 
 
-def find_remote_users_file(paths: list[str]) -> str | None:
-    """Find the first existing users file from a list of paths."""
-    for path in paths:
-        ok, _ = remote_file_exists(path)
-        if ok:
-            return path
-    return None
-
-
 def filter_users_file_remote(
     users_file: str,
     exclude_users: set[str],
 ) -> tuple[str, str | None]:
-    """Filter a remote users file to exclude certain usernames."""
+    """Filter a remote users file to exclude certain usernames and MOTD garbage."""
     if not exclude_users:
-        return users_file, None
+        # Still need to filter for MOTD garbage even with no exclude list
+        exclude_users = set()
     result = run_remote(["bash", "-lc", f"cat {shlex.quote(users_file)}"], timeout_seconds=60)
     if result.return_code != 0:
         error = (result.stderr or result.stdout or "failed to read users file").strip()
         return users_file, error
     users: list[str] = []
     seen: set[str] = set()
+    motd_filtered = 0
     for line in (result.stdout or "").splitlines():
         user = line.strip()
         if not user:
+            continue
+        # Filter out MOTD garbage
+        if is_motd_garbage(user):
+            motd_filtered += 1
             continue
         if user.lower() in exclude_users:
             continue
@@ -226,6 +338,10 @@ def filter_users_file_remote(
             continue
         users.append(user)
         seen.add(user.lower())
+
+    if motd_filtered > 0:
+        logger.debug(f"Filtered {motd_filtered} MOTD garbage entries from users file")
+
     if not users:
         return "", "all users already have credentials"
     filtered_file = f"/tmp/users_spray_filtered_{uuid.uuid4().hex}.txt"  # nosec B108  # noqa: S108

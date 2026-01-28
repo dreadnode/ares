@@ -27,9 +27,9 @@ from ares.tools.red.common import (
     AnyRedTeamState,
     add_credential_to_state,
     filter_users_file_remote,
-    find_remote_users_file,
     format_weakness_block,
     is_ntlm_hash,
+    remote_file_exists,
     resolve_host_or_ip,
     resolve_password,
     run_tool,
@@ -375,14 +375,15 @@ class CredentialDiscoveryTools(Toolset):
                 logger.info(f"[*] No users file provided, auto-enumerating from {target}")
                 enumerated_file = self._enumerate_users_to_file(target)
                 if not enumerated_file:
-                    fallback = find_remote_users_file(["/tmp/users.txt", "/tmp/users_auto.txt"])  # nosec B108 # noqa: S108
-                    if not fallback:
+                    canonical_users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
+                    exists, _ = remote_file_exists(canonical_users_file)
+                    if not exists:
                         return (
                             "[!] Failed to enumerate users and no users_file provided. "
                             "Try save_users_to_file first."
                         )
-                    logger.info(f"[*] Using existing users file on remote: {fallback}")
-                    users_file = fallback
+                    logger.info(f"[*] Using existing users file on remote: {canonical_users_file}")
+                    users_file = canonical_users_file
                 else:
                     users_file = enumerated_file
 
@@ -498,7 +499,7 @@ class CredentialDiscoveryTools(Toolset):
                     logger.warning(f"[!] No users enumerated from {target}")
                 return None
 
-            users_file = "/tmp/users_auto.txt"  # nosec B108  # noqa: S108
+            users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
             ok, error = write_users_file_remote(sorted(users), users_file)
             if not ok:
                 logger.warning(f"[!] Failed to write users file on remote: {error}")
@@ -545,14 +546,15 @@ class CredentialDiscoveryTools(Toolset):
                 logger.info(f"[*] No users file provided, auto-enumerating from {target}")
                 enumerated_file = self._enumerate_users_to_file(target)
                 if not enumerated_file:
-                    fallback = find_remote_users_file(["/tmp/users.txt", "/tmp/users_auto.txt"])  # nosec B108 # noqa: S108
-                    if not fallback:
+                    canonical_users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
+                    exists, _ = remote_file_exists(canonical_users_file)
+                    if not exists:
                         return (
                             "[!] Failed to enumerate users and no users_file provided. "
                             "Try save_users_to_file first."
                         )
-                    logger.info(f"[*] Using existing users file on remote: {fallback}")
-                    users_file = fallback
+                    logger.info(f"[*] Using existing users file on remote: {canonical_users_file}")
+                    users_file = canonical_users_file
                 else:
                     users_file = enumerated_file
 

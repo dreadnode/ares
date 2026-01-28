@@ -18,7 +18,13 @@ async def test_crack_task_resolves_relative_wordlist(monkeypatch):
             return None
 
         async def crack_with_hashcat(
-            self, *, hash_value, hashcat_mode, wordlist_path, use_dynamic_wordlist
+            self,
+            *,
+            hash_value,
+            hashcat_mode,
+            wordlist_path,
+            use_dynamic_wordlist,
+            max_time_minutes=None,
         ):
             captured["wordlist_path"] = wordlist_path
             return "ok"
@@ -58,16 +64,26 @@ async def test_crack_task_resolves_relative_wordlist(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_crack_task_uses_gz_wordlist(monkeypatch):
+    import tempfile
+    from pathlib import Path
+
     captured = {}
-    tmp_wordlist = "/tmp/rockyou.txt"
-    gz_wordlist = "/usr/share/wordlists/rockyou.txt.gz"
+    tmp_dir = Path(tempfile.gettempdir())
+    tmp_wordlist = tmp_dir / "rockyou.txt"
+    gz_wordlist = Path("/usr/share/wordlists/rockyou.txt.gz")
 
     class FakeCrackingTools:
         def set_state(self, _state):
             return None
 
         async def crack_with_hashcat(
-            self, *, hash_value, hashcat_mode, wordlist_path, use_dynamic_wordlist
+            self,
+            *,
+            hash_value,
+            hashcat_mode,
+            wordlist_path,
+            use_dynamic_wordlist,
+            max_time_minutes=None,
         ):
             captured["wordlist_path"] = wordlist_path
             return "ok"
@@ -80,9 +96,10 @@ async def test_crack_task_uses_gz_wordlist(monkeypatch):
     tmp_seen = {"count": 0}
 
     def exists_side_effect(path):
-        if path == gz_wordlist:
+        path_obj = Path(path)
+        if path_obj == gz_wordlist:
             return True
-        if path == tmp_wordlist:
+        if path_obj == tmp_wordlist:
             tmp_seen["count"] += 1
             return tmp_seen["count"] > 1
         return False

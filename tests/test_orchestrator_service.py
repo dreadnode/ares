@@ -112,9 +112,10 @@ async def test_recover_orphaned_operation_runs_and_publishes_status():
     assert kwargs["target_domain"] == "contoso.local"
     assert kwargs["target_ips"] == ["192.168.56.1"]
     assert kwargs["resume_from_checkpoint"] is True
-    assert kwargs["initial_credential"].username == "admin"
+    assert kwargs["initial_credential"].username == "danj"
 
     calls = service._publish_operation_status.await_args_list
+    assert len(calls) == 2
     assert calls[0].args[0] == "op-123"
     assert calls[0].args[1] == "running"
     assert calls[0].args[2]["recovered"] is True

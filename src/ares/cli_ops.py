@@ -373,6 +373,41 @@ async def loot(
 
         state = SharedRedTeamState.from_bytes(data)
 
+        # Deduplicate users by normalized domain+username
+        seen_user_keys: set[tuple[str, str]] = set()
+        unique_users = []
+        for user in state.all_users:
+            user_key = (user.domain.strip().lower(), user.username.strip().lower())
+            if user_key not in seen_user_keys:
+                seen_user_keys.add(user_key)
+                unique_users.append(user)
+
+        # Deduplicate credentials by normalized domain+username+password
+        seen_cred_keys: set[tuple[str, str, str]] = set()
+        unique_creds = []
+        for cred in state.all_credentials:
+            cred_key = (
+                cred.domain.strip().lower(),
+                cred.username.strip().lower(),
+                cred.password,
+            )
+            if cred_key not in seen_cred_keys:
+                seen_cred_keys.add(cred_key)
+                unique_creds.append(cred)
+
+        # Deduplicate hashes by normalized domain+username+hash_type
+        seen_hash_keys: set[tuple[str, str, str]] = set()
+        unique_hashes = []
+        for h in state.all_hashes:
+            hash_key = (
+                h.domain.strip().lower(),
+                h.username.strip().lower(),
+                h.hash_type.strip().lower(),
+            )
+            if hash_key not in seen_hash_keys:
+                seen_hash_keys.add(hash_key)
+                unique_hashes.append(h)
+
         if json_output:
             output = {
                 "operation_id": state.operation_id,
@@ -382,7 +417,7 @@ async def loot(
                 ],
                 "users": [
                     {"username": u.username, "domain": u.domain, "is_admin": u.is_admin}
-                    for u in state.all_users
+                    for u in unique_users
                 ],
                 "credentials": [
                     {
@@ -391,7 +426,7 @@ async def loot(
                         "domain": c.domain,
                         "is_admin": c.is_admin,
                     }
-                    for c in state.all_credentials
+                    for c in unique_creds
                 ],
                 "hashes": [
                     {
@@ -401,7 +436,7 @@ async def loot(
                         "hash_value": h.hash_value,
                         "source": h.source,
                     }
-                    for h in state.all_hashes
+                    for h in unique_hashes
                 ],
                 "shares": [
                     {"host": s.host, "name": s.name, "permissions": s.permissions}
@@ -434,34 +469,22 @@ async def loot(
         print()
 
         # Users
-        print(f"Users ({len(state.all_users)}):")
-        for user in state.all_users:
+        print(f"Users ({len(unique_users)}):")
+        for user in unique_users:
             prefix = f"{user.domain}\\{user.username}" if user.domain else user.username
             suffix = " (admin)" if user.is_admin else ""
             print(f"  - {prefix}{suffix}")
         print()
 
         # Credentials
-        print(f"Credentials ({len(state.all_credentials)}):")
-        for cred in state.all_credentials:
+        print(f"Credentials ({len(unique_creds)}):")
+        for cred in unique_creds:
             prefix = f"{cred.domain}\\{cred.username}" if cred.domain else cred.username
             suffix = " (admin)" if cred.is_admin else ""
             print(f"  - {prefix}:{cred.password}{suffix}")
         print()
 
-        # Hashes (deduplicated)
-        seen_hash_keys: set[tuple[str, str, str]] = set()
-        unique_hashes = []
-        for h in state.all_hashes:
-            key = (
-                h.domain.strip().lower(),
-                h.username.strip().lower(),
-                h.hash_type.strip().lower(),
-            )
-            if key not in seen_hash_keys:
-                seen_hash_keys.add(key)
-                unique_hashes.append(h)
-
+        # Hashes
         print(f"Hashes ({len(unique_hashes)}):")
         for h in unique_hashes:
             prefix = f"{h.domain}\\{h.username}" if h.domain else h.username

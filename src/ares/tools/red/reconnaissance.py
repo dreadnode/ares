@@ -20,6 +20,7 @@ from ares.tools.red.common import (
     add_credential_to_state,
     format_weakness_block,
     is_motd_garbage,
+    is_motd_line,
     run_tool,
     write_users_file_remote,
 )
@@ -114,7 +115,7 @@ class NetworkEnumerationTools(Toolset):
                     continue
 
                 # Skip lines that look like Kali MOTD (contain box-drawing characters)
-                if is_motd_garbage(line):
+                if is_motd_line(line):
                     continue
 
                 rpc_match = re.search(r"user:\[([^\]]+)\]", line, re.IGNORECASE)

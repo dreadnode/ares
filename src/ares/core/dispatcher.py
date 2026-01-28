@@ -127,10 +127,12 @@ class RedTeamDispatcher:
             "rbcd": 9,
             "mssql_impersonation": 10,
             "mssql_linked": 11,
-            "gpo_abuse": 12,
-            "laps_abuse": 13,
-            "dcsync": 14,
-            "shadow_credentials": 15,
+            "mssql_linked_server": 11,  # Alias for mssql_linked
+            "mssql_xp_cmdshell": 12,
+            "gpo_abuse": 13,
+            "laps_abuse": 14,
+            "dcsync": 15,
+            "shadow_credentials": 16,
         }
 
         # Task completion futures for wait_for_task
