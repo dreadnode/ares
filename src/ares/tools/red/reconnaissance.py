@@ -19,6 +19,7 @@ from ares.tools.red.common import (
     AnyRedTeamState,
     add_credential_to_state,
     format_weakness_block,
+    is_motd_garbage,
     run_tool,
     write_users_file_remote,
 )
@@ -99,6 +100,9 @@ class NetworkEnumerationTools(Toolset):
                 return
             if user.lower() in ("anonymous",):
                 return
+            # Filter out Kali MOTD garbage and invalid usernames
+            if is_motd_garbage(user):
+                return
             users.add(user)
 
         for label, content in outputs:
@@ -107,6 +111,10 @@ class NetworkEnumerationTools(Toolset):
             label_lower = label.lower()
             for line in content.splitlines():
                 if not line.strip():
+                    continue
+
+                # Skip lines that look like Kali MOTD (contain box-drawing characters)
+                if is_motd_garbage(line):
                     continue
 
                 rpc_match = re.search(r"user:\[([^\]]+)\]", line, re.IGNORECASE)
@@ -1765,33 +1773,33 @@ class BloodHoundTools(Toolset):
                 output_parts.append("\n\u2705 Collection successful!")
                 if parsed["json_files_created"]:
                     output_parts.append(
-                        f"\n\ud83d\udcc1 JSON files created: {', '.join(parsed['json_files_created'])}"
+                        f"\n📁 JSON files created: {', '.join(parsed['json_files_created'])}"
                     )
             else:
                 output_parts.append("\n\u26a0\ufe0f Collection may have encountered issues")
 
             if parsed["acl_abuse_targets"]:
-                output_parts.append("\n\n\ud83c\udfaf ACL ABUSE OPPORTUNITIES DETECTED:")
+                output_parts.append("\n\n🎯 ACL ABUSE OPPORTUNITIES DETECTED:")
                 for target in parsed["acl_abuse_targets"]:
                     output_parts.append(f"  - [{target['type']}] {target['description']}")
 
             if parsed["delegation_targets"]:
-                output_parts.append("\n\n\ud83d\udd17 DELEGATION TARGETS DETECTED:")
+                output_parts.append("\n\n🔗 DELEGATION TARGETS DETECTED:")
                 for target in parsed["delegation_targets"]:
                     output_parts.append(f"  - {target['description']}")
 
             if parsed["high_value_targets"]:
-                output_parts.append("\n\n\ud83d\udc51 HIGH-VALUE TARGETS REFERENCED:")
+                output_parts.append("\n\n👑 HIGH-VALUE TARGETS REFERENCED:")
                 for target in parsed["high_value_targets"]:
                     output_parts.append(f"  - {target['type']}")
 
             if parsed["recommended_actions"]:
-                output_parts.append("\n\n\ud83d\udccb RECOMMENDED ACTIONS (Execute in order):")
+                output_parts.append("\n\n📋 RECOMMENDED ACTIONS (Execute in order):")
                 for i, action in enumerate(parsed["recommended_actions"], 1):
                     output_parts.append(f"\n  {i}. [{action['priority']}] {action['description']}")
                     output_parts.append(f"     \u2192 Use tool: {action['next_tool']}")
 
-            output_parts.append("\n\n\ud83d\udcca STRUCTURED DATA (JSON):")
+            output_parts.append("\n\n📊 STRUCTURED DATA (JSON):")
             output_parts.append(
                 json.dumps(
                     {
@@ -1806,7 +1814,7 @@ class BloodHoundTools(Toolset):
                 )
             )
 
-            output_parts.append("\n\n\ud83d\udcc4 RAW OUTPUT:")
+            output_parts.append("\n\n📄 RAW OUTPUT:")
             output_parts.append(raw_output)
 
             return "\n".join(output_parts)

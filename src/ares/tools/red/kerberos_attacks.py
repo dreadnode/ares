@@ -226,7 +226,7 @@ class DelegationTools(Toolset):
             if "unconstrained" in result.lower():
                 logger.warning("[!] Unconstrained delegation found!")
                 result = (
-                    "\ud83d\udea8 UNCONSTRAINED DELEGATION DETECTED!\n"
+                    "🚨 UNCONSTRAINED DELEGATION DETECTED!\n"
                     "\u2192 Compromise this account to impersonate ANY user\n"
                     "\u2192 Use Rubeus/mimikatz to harvest TGTs\n\n" + result
                 )
@@ -241,7 +241,7 @@ class DelegationTools(Toolset):
             elif "constrained" in result.lower():
                 logger.info("[+] Constrained delegation found")
                 result = (
-                    "\ud83d\udd17 CONSTRAINED DELEGATION DETECTED:\n"
+                    "🔗 CONSTRAINED DELEGATION DETECTED:\n"
                     "\u2192 Can impersonate users to specific services\n"
                     "\u2192 Check for S4U2Self abuse opportunities\n\n" + result
                 )
@@ -403,7 +403,7 @@ class DelegationTools(Toolset):
             if ".ccache" in result:
                 logger.info("[+] S4U attack successful - ticket obtained!")
                 result = (
-                    "\ud83c\udfab S4U ATTACK SUCCESSFUL!\n"
+                    "🎫 S4U ATTACK SUCCESSFUL!\n"
                     "\u2192 Service ticket obtained for impersonated user\n"
                     "\u2192 Set KRB5CCNAME=<ticket.ccache> and use with psexec\n\n" + result
                 )
@@ -596,7 +596,7 @@ class CertipyTools(Toolset):
                 esc_type = vuln_match.group(1).upper()
                 logger.warning(f"[!] ADCS vulnerability found: {esc_type}")
                 result = (
-                    f"\ud83d\udea8 ADCS VULNERABILITY DETECTED: {esc_type}!\n"
+                    f"🚨 ADCS VULNERABILITY DETECTED: {esc_type}!\n"
                     "\u2192 Use certipy_request to exploit vulnerable template\n"
                     "\u2192 Request certificate as Administrator\n\n" + result
                 )
@@ -611,9 +611,9 @@ class CertipyTools(Toolset):
 
             if "esc8" in result.lower() or "web enrollment" in result.lower():
                 logger.warning("[!] ESC8 detected - HTTP Web Enrollment vulnerable to relay!")
-                if "\ud83d\udea8" not in result:
+                if "🚨" not in result:
                     result = (
-                        "\ud83d\udea8 ESC8 DETECTED - WEB ENROLLMENT RELAY POSSIBLE!\n"
+                        "🚨 ESC8 DETECTED - WEB ENROLLMENT RELAY POSSIBLE!\n"
                         "\u2192 Use ntlmrelayx to relay coerced auth to the CA\n"
                         "\u2192 See certipy_relay for exploitation\n\n" + result
                     )
@@ -687,7 +687,7 @@ class CertipyTools(Toolset):
             if ".pfx" in result:
                 logger.warning(f"[!] Certificate obtained for {upn}!")
                 result = (
-                    f"\ud83c\udfab CERTIFICATE OBTAINED FOR {upn}!\n"
+                    f"🎫 CERTIFICATE OBTAINED FOR {upn}!\n"
                     "\u2192 Use certipy_auth with the .pfx file to get NTLM hash\n"
                     "\u2192 Then use hash for pass-the-hash or secretsdump\n\n" + result
                 )
@@ -742,7 +742,7 @@ class CertipyTools(Toolset):
             if "hash" in result.lower() or re.search(r"[a-fA-F0-9]{32}", result):
                 logger.warning("[!] NTLM hash obtained from certificate!")
                 result = (
-                    "\ud83d\udea8 NTLM HASH OBTAINED!\n"
+                    "🚨 NTLM HASH OBTAINED!\n"
                     "\u2192 Use hash with secretsdump for full domain dump\n"
                     "\u2192 Or use with pass-the-hash for lateral movement\n\n" + result
                 )
@@ -823,7 +823,7 @@ class CertipyTools(Toolset):
             if ".pfx" in result or "hash" in result.lower():
                 logger.warning(f"[!] Shadow credentials attack successful on {target}!")
                 result = (
-                    f"\ud83d\udea8 SHADOW CREDENTIALS ADDED TO {target}!\n"
+                    f"🚨 SHADOW CREDENTIALS ADDED TO {target}!\n"
                     "\u2192 Certificate/hash obtained for the target\n"
                     "\u2192 Use for authentication or secretsdump\n\n" + result
                 )
@@ -892,7 +892,7 @@ class TrustAttackTools(Toolset):
             if "enterprise admin" in result.lower() or "golden ticket" in result.lower():
                 logger.info("[+] Child-to-parent escalation successful!")
                 result = (
-                    "\ud83d\udea8 DOMAIN ESCALATION SUCCESSFUL!\n"
+                    "🚨 DOMAIN ESCALATION SUCCESSFUL!\n"
                     "\u2192 Enterprise Admin access obtained\n"
                     "\u2192 Use secretsdump on parent domain DCs\n\n" + result
                 )

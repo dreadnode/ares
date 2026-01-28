@@ -89,7 +89,7 @@ class ACLExploitTools(Toolset):
             if ".pfx" in result.lower() or "saved" in result.lower():
                 logger.info("[+] Shadow credentials added! Use certipy_auth with the PFX file.")
                 result = (
-                    "\ud83d\udea8 SHADOW CREDENTIALS ADDED!\n"
+                    "🚨 SHADOW CREDENTIALS ADDED!\n"
                     "\u2192 Use certipy_auth with the generated PFX file to get NTLM hash\n\n"
                     + result
                 )
@@ -431,7 +431,7 @@ class ACLExploitTools(Toolset):
                         else:
                             self.state.hashes.append(hash_obj)
                 result = (
-                    f"\ud83d\udea8 KERBEROAST HASH OBTAINED FOR {target_user}!\n"
+                    f"🚨 KERBEROAST HASH OBTAINED FOR {target_user}!\n"
                     "\u2192 Use crack_with_hashcat with mode 13100 to crack\n"
                     "\u2192 SPN will be automatically cleaned up\n\n" + result
                 )

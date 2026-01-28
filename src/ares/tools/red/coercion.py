@@ -78,7 +78,7 @@ class CoercionTools(Toolset):
             if "attack worked" in result.lower() or "success" in result.lower():
                 logger.info("[+] PetitPotam coercion successful!")
                 result = (
-                    "\ud83d\udea8 PETITPOTAM COERCION SUCCESSFUL!\n"
+                    "🚨 PETITPOTAM COERCION SUCCESSFUL!\n"
                     f"\u2192 Target {target} should authenticate to {listener}\n"
                     "\u2192 Check ntlmrelayx/Responder for captured auth\n\n" + result
                 )
@@ -132,7 +132,7 @@ class CoercionTools(Toolset):
             if "success" in result.lower() or "worked" in result.lower():
                 logger.info("[+] Coercer found working methods!")
                 result = (
-                    "\ud83d\udea8 COERCION METHODS FOUND!\n"
+                    "🚨 COERCION METHODS FOUND!\n"
                     f"\u2192 Target {target} can be coerced to {listener}\n"
                     "\u2192 Use with ntlmrelayx for exploitation\n\n" + result
                 )
@@ -189,7 +189,7 @@ class CoercionNetworkTools(Toolset):
 
             result = stdout + "\n" + (stderr or "")
             return (
-                "\ud83d\udcf6 RESPONDER STARTED\n"
+                "📶 RESPONDER STARTED\n"
                 f"\u2192 Listening on {interface}\n"
                 "\u2192 Captured hashes will appear in logs\n"
                 "\u2192 Use crack_with_hashcat on captured NTLMv2 hashes (mode 5600)\n\n" + result
@@ -230,7 +230,7 @@ class CoercionNetworkTools(Toolset):
 
             result = stdout + "\n" + (stderr or "")
             return (
-                "\ud83d\udcf6 MITM6 STARTED\n"
+                "📶 MITM6 STARTED\n"
                 f"\u2192 Rogue DHCPv6/DNS for {domain}\n"
                 "\u2192 Run ntlmrelayx in parallel to relay captured auth\n\n" + result
             )
@@ -273,7 +273,7 @@ class CoercionNetworkTools(Toolset):
 
             result = stdout + "\n" + (stderr or "")
             return (
-                "\ud83d\udccb NTLMRELAYX STARTED\n"
+                "📋 NTLMRELAYX STARTED\n"
                 f"\u2192 Relaying to ldaps://{dc_ip}\n"
                 "\u2192 Use petitpotam/coercer to trigger authentication\n"
                 "\u2192 Machine account will be created for RBCD\n\n" + result
@@ -321,7 +321,7 @@ class CoercionNetworkTools(Toolset):
 
             result = stdout + "\n" + (stderr or "")
             return (
-                "\ud83d\udccb NTLMRELAYX TO ADCS STARTED\n"
+                "📋 NTLMRELAYX TO ADCS STARTED\n"
                 f"\u2192 Relaying to http://{ca_host}/certsrv/\n"
                 f"\u2192 Template: {template}\n"
                 "\u2192 Coerce a DC to get its certificate\n"

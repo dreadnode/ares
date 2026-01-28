@@ -265,7 +265,7 @@ class RedTeamReportingTools(Toolset):
             return "[!] No operation state available"
 
         lines = [
-            "\ud83d\udcca OPERATION SUMMARY",
+            "📊 OPERATION SUMMARY",
             "=" * 40,
         ]
 
@@ -291,7 +291,7 @@ class RedTeamReportingTools(Toolset):
             lines.append(f"Timeline Events: {len(self.state.timeline)}")
 
         if hasattr(self.state, "has_golden_ticket") and self.state.has_golden_ticket:
-            lines.append("\n\ud83c\udfab Golden Ticket: OBTAINED")
+            lines.append("\n🎫 Golden Ticket: OBTAINED")
 
         if hasattr(self.state, "goal_achieved") and self.state.goal_achieved:
             lines.append("\n\u2705 Goal: ACHIEVED")
@@ -321,7 +321,7 @@ class RedTeamReportingTools(Toolset):
             return "[*] No credentials discovered yet"
 
         lines = [
-            "\ud83d\udd11 DISCOVERED CREDENTIALS",
+            "🔑 DISCOVERED CREDENTIALS",
             "=" * 40,
         ]
 
