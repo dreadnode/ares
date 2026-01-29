@@ -379,7 +379,7 @@ TASK_PROMPTS: dict[MessageType, callable] = {
 }
 
 
-def generate_prompt_from_task(task: TaskMessage) -> str | None:
+def generate_prompt_from_task(task: TaskMessage) -> str | None:  # noqa: PLR0912
     """
     Generate agent prompt from Redis TaskMessage.
 
@@ -467,6 +467,28 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:
                 "NOTE: Provided hash is not NTLM pass-the-hash compatible; "
                 "do not attempt secretsdump/lsassy with it.\n"
             )
+        # Check if this is a low_hanging_fruit task
+        has_sysvol = any(t in techniques for t in ("sysvol_script_search", "gpp_password_finder"))
+        has_low_hanging = "low_hanging_fruit" in reason.lower() or has_sysvol
+
+        if has_low_hanging and payload.get("password"):
+            # Low hanging fruit with creds - prioritize SYSVOL/GPP
+            return (
+                "Perform LOW HANGING FRUIT credential harvesting:\n"
+                f"Domain: {payload.get('domain', '')}\n"
+                f"DC IP: {dc_ip or 'N/A'}\n"
+                f"Username: {payload.get('username') or 'N/A'}\n"
+                f"Password: {payload.get('password')}\n"
+                f"Task ID: {task.task_id}\n\n"
+                "**EXECUTE IN THIS ORDER:**\n"
+                "1. gpp_password_finder(target=DC_IP, username=USER, password=PASS, domain=DOMAIN)\n"
+                "2. sysvol_script_search(target=DC_IP, username=USER, password=PASS, domain=DOMAIN)\n"
+                "3. ldap_search_descriptions(...) - check for passwords in LDAP descriptions\n"
+                "4. username_as_password(...) - check for user=password accounts\n\n"
+                "These are HIGH SUCCESS RATE techniques that find hardcoded credentials.\n"
+                "Report any credentials found immediately."
+            )
+
         return (
             "Perform credential access against the target environment:\n"
             f"Domain: {payload.get('domain', '')}\n"
@@ -482,21 +504,58 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:
             f"{hash_note}"
             "Use the exact credential value above; do not substitute placeholders. "
             "If DC IP is provided, pass -dc-ip to Kerberos/LDAP tools to avoid DNS issues. "
-            "If SMB access exists (guest or creds), enumerate shares, spider files, "
-            "download/upload for staging, and check WinRM/RDP reachability (5985/5986, 3389). "
-            "Prioritize GetNPUsers/AS-REP roast, Kerberoast, secretsdump, and LSASS "
-            "if credentials allow. Report any hashes or credentials."
+            "**PRIORITY ORDER when creds available:**\n"
+            "1. gpp_password_finder + sysvol_script_search (LOW HANGING FRUIT - run first!)\n"
+            "2. Kerberoast for service account hashes\n"
+            "3. secretsdump if admin access exists\n"
+            "4. LSASS dumping if viable\n"
+            "Report any hashes or credentials found."
         )
 
     if task.task_type == "exploit":
-        return (
+        vuln_type = payload.get("vuln_type", "")
+        base_prompt = (
             f"Exploit vulnerability:\n"
-            f"Type: {payload['vuln_type']}\n"
+            f"Type: {vuln_type}\n"
             f"Target: {payload['target']}\n"
             f"Vuln ID: {payload.get('vuln_id', 'unknown')}\n"
             f"Params: {payload}\n"
             f"Task ID: {task.task_id}\n\n"
-            "Execute the exploitation technique. Report credentials obtained.\n"
+        )
+
+        # Special handling for MSSQL vulnerabilities
+        if vuln_type.startswith("mssql_"):
+            available_creds = payload.get("available_credentials", [])
+            creds_section = ""
+            if available_creds:
+                creds_section = "\n**AVAILABLE SQL CREDENTIALS (use these!):**\n"
+                for cred in available_creds:
+                    is_sql = cred.get("is_sql_account", "False") == "True"
+                    marker = " [SQL SERVICE ACCOUNT]" if is_sql else ""
+                    creds_section += (
+                        f"- {cred.get('domain', '')}\\{cred.get('username', '')}: "
+                        f"{cred.get('password', '')}{marker}\n"
+                    )
+
+            return (
+                base_prompt + "**MSSQL EXPLOITATION WORKFLOW:**\n"
+                "1. Use mssql_enum_linked_servers() to find linked servers\n"
+                "2. Check for impersonation: EXECUTE AS LOGIN / EXECUTE AS USER\n"
+                "3. If impersonation available, use mssql_impersonate() to escalate to 'sa'\n"
+                "4. If linked servers exist, use mssql_exec_linked() to pivot cross-domain\n"
+                "5. Enable xp_cmdshell if sysadmin and get code execution\n"
+                + creds_section
+                + "\nTry EACH credential against the target - SQL accepts Windows auth.\n"
+                "Report credentials obtained.\n"
+                "If you obtain credentials or hashes, include a JSON block:\n"
+                "```json\n"
+                '{"credential": {"username": "", "password": "", "domain": "", "is_admin": false}}\n'
+                "```"
+            )
+
+        # Default exploit prompt
+        return (
+            base_prompt + "Execute the exploitation technique. Report credentials obtained.\n"
             "If you obtain credentials or hashes, include a JSON block:\n"
             "```json\n"
             '{"credential": {"username": "", "password": "", "domain": "", "is_admin": false}}\n'
@@ -611,6 +670,89 @@ class RedisWorkerAgent:
     def _run_agent_sync(self, prompt: str) -> Any:
         """Run the async agent in a dedicated event loop (thread-safe helper)."""
         return asyncio.run(self.agent.run(prompt))
+
+    def _serialize_state_discoveries(self) -> dict[str, Any]:
+        """Serialize local state discoveries for inclusion in task results.
+
+        Workers have their own local SharedRedTeamState that tools populate
+        when they discover hosts, credentials, hashes, etc. This method
+        serializes those discoveries so they can be sent back to the
+        orchestrator's dispatcher, which will merge them into the canonical
+        shared state that gets checkpointed to Redis.
+
+        Returns:
+            Dictionary with discovered_hosts, discovered_credentials,
+            discovered_hashes, discovered_shares, and discovered_users.
+        """
+        if not self.shared_state:
+            return {}
+
+        discoveries: dict[str, Any] = {}
+
+        # Serialize discovered hosts
+        if self.shared_state.all_hosts:
+            discoveries["discovered_hosts"] = [
+                {
+                    "ip": h.ip,
+                    "hostname": h.hostname,
+                    "os": h.os,
+                    "roles": list(h.roles) if h.roles else [],
+                    "services": list(h.services) if h.services else [],
+                }
+                for h in self.shared_state.all_hosts
+            ]
+
+        # Serialize discovered credentials
+        if self.shared_state.all_credentials:
+            discoveries["discovered_credentials"] = [
+                {
+                    "username": c.username,
+                    "password": c.password,
+                    "domain": c.domain,
+                    "source": c.source,
+                    "is_admin": c.is_admin,
+                }
+                for c in self.shared_state.all_credentials
+            ]
+
+        # Serialize discovered hashes
+        if self.shared_state.all_hashes:
+            discoveries["discovered_hashes"] = [
+                {
+                    "username": h.username,
+                    "hash_value": h.hash_value,
+                    "hash_type": h.hash_type,
+                    "domain": h.domain,
+                    "cracked_password": h.cracked_password,
+                    "source": h.source,
+                }
+                for h in self.shared_state.all_hashes
+            ]
+
+        # Serialize discovered shares
+        if self.shared_state.all_shares:
+            discoveries["discovered_shares"] = [
+                {
+                    "host": s.host,
+                    "name": s.name,
+                    "permissions": s.permissions,
+                    "comment": s.comment,
+                }
+                for s in self.shared_state.all_shares
+            ]
+
+        # Serialize discovered users
+        if self.shared_state.all_users:
+            discoveries["discovered_users"] = [
+                {
+                    "username": u.username,
+                    "domain": u.domain,
+                    "is_admin": u.is_admin,
+                }
+                for u in self.shared_state.all_users
+            ]
+
+        return discoveries
 
     async def _run_agent(self, prompt: str) -> Any:
         """Run the agent without blocking the worker event loop."""
@@ -857,6 +999,16 @@ class RedisWorkerAgent:
                             f"[{self.agent_name}] Max steps reached for task {task.task_id}; "
                             f"output_excerpt={excerpt!r}"
                         )
+                # Even on failure, preserve any discoveries made during the task
+                state_discoveries = self._serialize_state_discoveries()
+                if state_discoveries:
+                    result_payload.update(state_discoveries)
+                    logger.info(
+                        f"[{self.agent_name}] Preserving state from failed task: "
+                        f"{len(state_discoveries.get('discovered_hosts', []))} hosts, "
+                        f"{len(state_discoveries.get('discovered_credentials', []))} creds, "
+                        f"{len(state_discoveries.get('discovered_hashes', []))} hashes"
+                    )
                 await self.task_queue.send_result(
                     task_id=task.task_id,
                     success=False,
@@ -880,6 +1032,19 @@ class RedisWorkerAgent:
                     logger.warning(f"[{self.agent_name}] Failed to record task status: {e}")
                 logger.error(f"[{self.agent_name}] Task {task.task_id} failed: {agent_error}")
                 return
+
+            # Serialize local state discoveries into result payload
+            # Workers have their own SharedRedTeamState that tools populate.
+            # This ensures discoveries are sent back to the orchestrator.
+            state_discoveries = self._serialize_state_discoveries()
+            if state_discoveries:
+                result_payload.update(state_discoveries)
+                logger.info(
+                    f"[{self.agent_name}] Serialized state: "
+                    f"{len(state_discoveries.get('discovered_hosts', []))} hosts, "
+                    f"{len(state_discoveries.get('discovered_credentials', []))} creds, "
+                    f"{len(state_discoveries.get('discovered_hashes', []))} hashes"
+                )
 
             # Send success result via Redis
             await self.task_queue.send_result(
@@ -911,9 +1076,12 @@ class RedisWorkerAgent:
                 exc_info=True,
             )
             try:
+                # Preserve any discoveries made before the fatal error
+                fatal_result = self._serialize_state_discoveries()
                 await self.task_queue.send_result(
                     task_id=task.task_id,
                     success=False,
+                    result=fatal_result if fatal_result else None,
                     error=f"FATAL: {type(e).__name__}: {e!s}",
                     worker_pod=self.pod_name,
                 )
@@ -942,9 +1110,12 @@ class RedisWorkerAgent:
                 f"[{self.agent_name}] Task {task.task_id} failed: {type(e).__name__}: {e}",
                 exc_info=True,
             )
+            # Preserve any discoveries made before the exception
+            exception_result = self._serialize_state_discoveries()
             await self.task_queue.send_result(
                 task_id=task.task_id,
                 success=False,
+                result=exception_result if exception_result else None,
                 error=f"{type(e).__name__}: {e!s}",
                 worker_pod=self.pod_name,
             )
@@ -1927,6 +2098,8 @@ async def run_worker(  # noqa: PLR0912
             logger.info(f"Recovered state: {len(recovered.all_credentials)} credentials")
 
         shared_state = dispatcher.shared_state
+        # Enable real-time publishing of discoveries to Redis
+        shared_state.set_dispatcher(dispatcher)
 
         # Create agent info and register (even in Redis mode for state tracking)
         agent_info = create_agent_info(role, pod_name=pod_name)

@@ -53,6 +53,7 @@ from ares.core.models import (
     User,
     VulnerabilityInfo,
 )
+from ares.core.recovery import _merge_state
 from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue
 from ares.core.task_queue import TaskResult as QueueTaskResult
@@ -543,10 +544,157 @@ class RedTeamDispatcher:
             )
             await self._checkpoint()
             logger.info(f"Host published: {host.ip} ({host.hostname})")
+
+            # Auto-detect MSSQL and queue vulnerability for exploitation
+            await self._auto_detect_mssql(host, source_agent)
         else:
             logger.debug(f"Host not published (duplicate/merged): {host.ip} ({host.hostname})")
 
         return added
+
+    async def _auto_detect_mssql(self, host: Host, source_agent: str) -> None:
+        """
+        Auto-detect MSSQL service on host and queue vulnerability for exploitation.
+
+        Checks for MSSQL indicators in services list and automatically queues
+        an mssql_linked_server vulnerability for the privesc agent to exploit.
+        """
+        services_lower = [s.lower() for s in host.services]
+
+        # Check for MSSQL indicators
+        has_mssql = any(
+            indicator in svc
+            for svc in services_lower
+            for indicator in ("mssql", "1433", "ms-sql", "sqlserver")
+        )
+
+        if not has_mssql:
+            return
+
+        # Check if we already have an MSSQL vuln queued for this host
+        existing_vulns = self.shared_state.vulnerabilities
+        for vuln in existing_vulns:
+            if vuln.target == host.ip and vuln.vuln_type.startswith("mssql_"):
+                logger.debug(f"MSSQL vulnerability already queued for {host.ip}")
+                return
+
+        # Find any SQL-related credentials we have
+        sql_creds = self._find_sql_credentials()
+
+        # Queue MSSQL vulnerability for exploitation
+        details: dict[str, Any] = {
+            "hostname": host.hostname,
+            "services": host.services,
+            "note": "Auto-detected MSSQL service. Check for linked servers and impersonation.",
+        }
+
+        if sql_creds:
+            details["available_credentials"] = sql_creds
+            details["note"] += f" Found {len(sql_creds)} potential SQL credential(s)."
+
+        await self.queue_vulnerability(
+            vuln_type="mssql_linked_server",
+            target=host.ip,
+            details=details,
+            discovered_by=source_agent,
+        )
+        logger.warning(
+            f"Auto-queued MSSQL vulnerability for {host.ip} ({host.hostname}) - "
+            f"found {len(sql_creds)} potential SQL creds"
+        )
+
+    def _find_sql_credentials(self) -> list[dict[str, str]]:
+        """
+        Find credentials that might work for MSSQL authentication.
+
+        Returns credentials for:
+        - Users with 'sql' in username (e.g., sql_svc)
+        - Domain users (can auth to SQL via Windows auth)
+        """
+        sql_creds: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        for cred in self.shared_state.credentials:
+            key = f"{cred.domain}\\{cred.username}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            # Prioritize SQL service accounts
+            is_sql_account = "sql" in cred.username.lower()
+
+            sql_creds.append(
+                {
+                    "username": cred.username,
+                    "password": cred.password,
+                    "domain": cred.domain,
+                    "is_sql_account": str(is_sql_account),
+                }
+            )
+
+        # Sort to prioritize SQL accounts
+        sql_creds.sort(key=lambda x: x.get("is_sql_account", "False") != "True")
+        return sql_creds[:5]  # Return top 5 candidates
+
+    async def scan_hosts_for_mssql(self) -> int:
+        """
+        Scan all known hosts for MSSQL services and queue vulnerabilities.
+
+        This method should be called periodically by the orchestrator to catch
+        MSSQL hosts discovered by worker agents that didn't go through publish_host.
+
+        Returns:
+            Number of new MSSQL vulnerabilities queued.
+        """
+        queued = 0
+        for host in self.shared_state.all_hosts:
+            services_lower = [s.lower() for s in host.services]
+
+            # Check for MSSQL indicators
+            has_mssql = any(
+                indicator in svc
+                for svc in services_lower
+                for indicator in ("mssql", "1433", "ms-sql", "sqlserver")
+            )
+
+            if not has_mssql:
+                continue
+
+            # Check if we already have an MSSQL vuln queued for this host
+            already_queued = any(
+                vuln.target == host.ip and vuln.vuln_type.startswith("mssql_")
+                for vuln in self.shared_state.vulnerabilities
+            )
+
+            if already_queued:
+                continue
+
+            # Find SQL credentials
+            sql_creds = self._find_sql_credentials()
+
+            # Queue MSSQL vulnerability
+            details: dict[str, Any] = {
+                "hostname": host.hostname,
+                "services": host.services,
+                "note": "Auto-detected MSSQL service. Check for linked servers and impersonation.",
+            }
+
+            if sql_creds:
+                details["available_credentials"] = sql_creds
+                details["note"] += f" Found {len(sql_creds)} potential SQL credential(s)."
+
+            await self.queue_vulnerability(
+                vuln_type="mssql_linked_server",
+                target=host.ip,
+                details=details,
+                discovered_by="mssql_scanner",
+            )
+            queued += 1
+            logger.warning(
+                f"Periodic scan: queued MSSQL vulnerability for {host.ip} ({host.hostname})"
+            )
+
+        return queued
 
     async def publish_vulnerability(
         self,
@@ -1499,6 +1647,89 @@ class RedTeamDispatcher:
                     )
                     await self.publish_share(share, source_agent)
 
+            # Process serialized state discoveries from worker's local state
+            # Workers serialize their SharedRedTeamState discoveries into these fields
+            discovered_hosts = result.get("discovered_hosts")
+            if isinstance(discovered_hosts, list) and discovered_hosts:
+                logger.info(
+                    f"Processing {len(discovered_hosts)} discovered hosts from {source_agent}"
+                )
+                for h in discovered_hosts:
+                    if not isinstance(h, dict):
+                        continue
+                    host = Host(
+                        ip=h.get("ip", ""),
+                        hostname=h.get("hostname", ""),
+                        os=h.get("os", ""),
+                        roles=h.get("roles", []),
+                        services=h.get("services", []),
+                    )
+                    await self.publish_host(host, source_agent)
+
+            discovered_credentials = result.get("discovered_credentials")
+            if isinstance(discovered_credentials, list) and discovered_credentials:
+                logger.info(
+                    f"Processing {len(discovered_credentials)} discovered credentials from {source_agent}"
+                )
+                for c in discovered_credentials:
+                    if not isinstance(c, dict):
+                        continue
+                    credential = Credential(
+                        username=c.get("username", ""),
+                        password=c.get("password", ""),
+                        domain=c.get("domain", ""),
+                        source=c.get("source", f"worker:{source_agent}"),
+                        is_admin=c.get("is_admin", False),
+                    )
+                    await self.publish_credential(credential, source_agent)
+
+            discovered_hashes = result.get("discovered_hashes")
+            if isinstance(discovered_hashes, list) and discovered_hashes:
+                logger.info(
+                    f"Processing {len(discovered_hashes)} discovered hashes from {source_agent}"
+                )
+                for h in discovered_hashes:
+                    if not isinstance(h, dict):
+                        continue
+                    hash_obj = Hash(
+                        username=h.get("username", ""),
+                        hash_value=h.get("hash_value", ""),
+                        hash_type=h.get("hash_type", "NTLM"),
+                        domain=h.get("domain", ""),
+                        cracked_password=h.get("cracked_password", ""),
+                        source=h.get("source", ""),
+                    )
+                    await self.publish_hash(hash_obj, source_agent)
+                    if hash_obj.cracked_password:
+                        cracked_cred = Credential(
+                            username=hash_obj.username,
+                            password=hash_obj.cracked_password,
+                            domain=hash_obj.domain,
+                            source=f"cracked:{source_agent}",
+                            is_admin=False,
+                        )
+                        await self.publish_credential(cracked_cred, source_agent)
+
+            discovered_shares = result.get("discovered_shares")
+            if isinstance(discovered_shares, list):
+                for s in discovered_shares:
+                    if not isinstance(s, dict):
+                        continue
+                    share = Share(
+                        host=s.get("host", ""),
+                        name=s.get("name", ""),
+                        permissions=s.get("permissions", ""),
+                        comment=s.get("comment", ""),
+                    )
+                    await self.publish_share(share, source_agent)
+
+            discovered_users = result.get("discovered_users")
+            if isinstance(discovered_users, list):
+                for u in discovered_users:
+                    if not isinstance(u, dict):
+                        continue
+                    self._add_user(u.get("username", ""), u.get("domain", ""))
+
             stdout = result.get("stdout", "")
             stderr = result.get("stderr", "")
             output_field = result.get("output", "")
@@ -2067,13 +2298,29 @@ class RedTeamDispatcher:
     # State Persistence
 
     async def _checkpoint(self) -> None:
-        """Save state checkpoint to Redis if available."""
+        """Save state checkpoint to Redis if available.
+
+        IMPORTANT: This method merges with existing Redis state before writing
+        to prevent race conditions where multiple workers/orchestrator overwrite
+        each other's discoveries. All state is additive (credentials, hosts, etc.)
+        so merging is safe and ensures no discoveries are lost.
+        """
         if self._redis_client is None:
             return
 
         try:
             key = f"ares:operation:{self.shared_state.operation_id}:state"
-            # Debug: log state counts before dispatcher checkpoint
+
+            # Merge with existing state to prevent overwrites from other workers
+            existing_data = await self._redis_client.get(key)
+            if existing_data:
+                try:
+                    existing_state = SharedRedTeamState.from_bytes(existing_data)
+                    _merge_state(self.shared_state, existing_state)
+                except Exception as exc:
+                    logger.warning(f"Failed to merge existing checkpoint state: {exc}")
+
+            # Debug: log state counts after merge
             logger.debug(
                 f"[Dispatcher checkpoint] hosts={len(self.shared_state.all_hosts)}, "
                 f"creds={len(self.shared_state.all_credentials)}, hashes={len(self.shared_state.all_hashes)}"

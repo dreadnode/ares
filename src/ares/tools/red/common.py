@@ -535,24 +535,27 @@ def add_credential_to_state(
     source_role: str = "recon",
     dispatcher=None,
 ) -> None:
-    """Add a credential to state, handling both single and shared state types."""
+    """Add a credential to state (real-time Redis publish handled by state.add_credential)."""
     if not state or not cred.username:
         return
+
+    # SharedRedTeamState.add_credential() handles real-time Redis checkpoint internally
     if hasattr(state, "add_credential"):
         state.add_credential(cred, source_role)
-        if dispatcher:
-            dispatcher.signal_credential_access()
-        return
-    existing = any(
-        c.username == cred.username and c.password == cred.password and c.domain == cred.domain
-        for c in state.credentials
-    )
-    if existing:
-        return
-    state.credentials.append(cred)
-    cred_key = state.get_credential_key(cred.username, cred.password, cred.domain)
-    state.tested_credentials.add(cred_key)
-    track_cross_domain_reuse(state, cred)
+    else:
+        # Legacy single-agent state
+        existing = any(
+            c.username == cred.username and c.password == cred.password and c.domain == cred.domain
+            for c in state.credentials
+        )
+        if existing:
+            return
+        state.credentials.append(cred)
+        cred_key = state.get_credential_key(cred.username, cred.password, cred.domain)
+        state.tested_credentials.add(cred_key)
+        track_cross_domain_reuse(state, cred)
+
+    # Signal dispatcher if provided (for legacy compatibility)
     if dispatcher:
         dispatcher.signal_credential_access()
 
@@ -563,6 +566,40 @@ def add_weakness_to_state(state: AnyRedTeamState | None, block: str) -> None:
         return
     if block not in state.weaknesses:
         state.weaknesses.append(block)
+
+
+def add_host_to_state(
+    state: AnyRedTeamState | None,
+    host,
+    source_role: str = "recon",
+    dispatcher=None,
+) -> None:
+    """Add a host to state (real-time Redis publish handled by state.add_host)."""
+    if not state or not host:
+        return
+
+    # SharedRedTeamState.add_host() handles real-time Redis checkpoint internally
+    if hasattr(state, "add_host"):
+        state.add_host(host)
+
+
+def add_hash_to_state(
+    state: AnyRedTeamState | None,
+    hash_obj,
+    source_role: str = "recon",
+    dispatcher=None,
+) -> None:
+    """Add a hash to state (real-time Redis publish handled by state.add_hash)."""
+    if not state or not hash_obj:
+        return
+
+    # SharedRedTeamState.add_hash() handles real-time Redis checkpoint internally
+    if hasattr(state, "add_hash"):
+        state.add_hash(hash_obj, source_role)
+
+    # Signal dispatcher if provided (for legacy compatibility)
+    if dispatcher:
+        dispatcher.signal_credential_access()
 
 
 def check_tool_result(

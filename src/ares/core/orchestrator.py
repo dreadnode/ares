@@ -153,6 +153,8 @@ async def _load_or_initialize_state(
         logger.warning(f"No checkpoint found for {operation_id}, starting fresh")
 
     state = dispatcher.shared_state
+    # Enable real-time publishing of discoveries to Redis
+    state.set_dispatcher(dispatcher)
     state.target = Target(
         ip=target_ips[0] if target_ips else "",
         domain=target_domain,
@@ -406,6 +408,7 @@ async def run_multi_agent_operation(  # noqa: PLR0912
             _auto_credential_expansion(dispatcher), name="auto_credential_expansion"
         ),
         asyncio.create_task(_auto_credential_access(dispatcher), name="auto_credential_access"),
+        asyncio.create_task(_auto_mssql_detection(dispatcher), name="auto_mssql_detection"),
     ]
 
     # Build initial prompt for orchestrator
@@ -631,6 +634,9 @@ async def _create_orchestrator_agent(
         Configured orchestrator agent
     """
     shared_state = dispatcher.shared_state
+    # Ensure real-time publishing is enabled
+    if not shared_state._dispatcher:
+        shared_state.set_dispatcher(dispatcher)
 
     # Create completion tools that can modify shared state (for stop conditions)
     complete_operation, announce_domain_admin = _create_completion_tools(shared_state, dispatcher)
@@ -934,6 +940,54 @@ async def _auto_credential_expansion(
             break
         except Exception as e:
             logger.error(f"Auto credential expansion error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_mssql_detection(
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 60.0,
+) -> None:
+    """
+    Background task that periodically scans for MSSQL hosts and queues vulnerabilities.
+
+    This catches MSSQL hosts discovered by worker agents that don't go through
+    the orchestrator's publish_host() method.
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between MSSQL scans
+    """
+    scanned_hosts: set[str] = set()
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # Skip if operation is complete
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping MSSQL detection")
+                break
+
+            # Check for new hosts we haven't scanned
+            current_hosts = {h.ip for h in state.all_hosts}
+            new_hosts = current_hosts - scanned_hosts
+
+            if new_hosts:
+                logger.debug(f"MSSQL scanner: checking {len(new_hosts)} new host(s)")
+                queued = await dispatcher.scan_hosts_for_mssql()
+                scanned_hosts.update(current_hosts)
+
+                if queued > 0:
+                    logger.warning(
+                        f"🗄️ Auto-detected MSSQL: queued {queued} vulnerability(ies) for exploitation"
+                    )
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"MSSQL detection error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
 
 

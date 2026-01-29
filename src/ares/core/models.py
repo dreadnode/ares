@@ -671,6 +671,37 @@ class SharedRedTeamState:
     # Example: "sysvol/login.bat" -> "QmF0Y2ggZmlsZSBjb250ZW50..."
     downloaded_artifacts: dict[str, str] = field(default_factory=dict)
 
+    # Transient dispatcher reference for real-time publishing (NOT pickled)
+    _dispatcher: Any = field(default=None, init=False, repr=False, compare=False)
+
+    def __getstate__(self):
+        """Exclude _dispatcher from pickling."""
+        state = self.__dict__.copy()
+        state.pop("_dispatcher", None)
+        return state
+
+    def __setstate__(self, state):
+        """Restore state without dispatcher."""
+        self.__dict__.update(state)
+        self._dispatcher = None
+
+    def set_dispatcher(self, dispatcher) -> None:
+        """Set dispatcher for real-time publishing of discoveries."""
+        object.__setattr__(self, "_dispatcher", dispatcher)
+
+    def _publish_async(self, coro) -> None:
+        """Fire-and-forget async publish to Redis."""
+        if not self._dispatcher:
+            return
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+            asyncio.ensure_future(coro, loop=loop)  # noqa: RUF006 - fire-and-forget
+        except RuntimeError:
+            # No event loop, skip real-time publish
+            pass
+
     def store_artifact(self, key: str, content: bytes | str, source_agent: str = "") -> bool:
         """Store a downloaded artifact in shared state.
 
@@ -756,6 +787,12 @@ class SharedRedTeamState:
         if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
             logger.debug(f"Credential rejected: invalid username '{username}' from {source_agent}")
             return False
+        # Reject credentials without passwords (use add_hash for hashes)
+        if not password:
+            logger.debug(
+                f"Credential rejected: empty password for '{username}' from {source_agent}"
+            )
+            return False
         # Guard against file-path artifacts (e.g., /tmp/users.txt) leaking in.
         if "/" in username or "\\" in username or username.endswith(".txt"):
             logger.debug(f"Credential rejected: path artifact '{username}' from {source_agent}")
@@ -780,6 +817,12 @@ class SharedRedTeamState:
         pending_key = f"{domain}:{username}".lower()
         self.pending_credential_findings.discard(pending_key)
         logger.info(f"Credential added: {domain}\\{username} (source: {source_agent})")
+
+        # Real-time checkpoint to Redis (don't call publish_credential - that would re-add)
+        if self._dispatcher:
+            self._dispatcher.signal_credential_access()
+            self._publish_async(self._dispatcher._checkpoint())
+
         return True
 
     def add_user(self, username: str, domain: str) -> bool:
@@ -843,9 +886,15 @@ class SharedRedTeamState:
             hash_obj.discovered_at = datetime.now(timezone.utc)
         self.all_hashes.append(hash_obj)
         logger.info(f"Hash added: {domain}\\{username} ({hash_type}) (source: {source_agent})")
+
+        # Real-time checkpoint to Redis (don't call publish_hash - that would re-add)
+        if self._dispatcher:
+            self._dispatcher.signal_credential_access()
+            self._publish_async(self._dispatcher._checkpoint())
+
         return True
 
-    def add_host(self, host: Host) -> bool:
+    def add_host(self, host: Host) -> bool:  # noqa: PLR0912
         """Add host if not duplicate. Returns True if added."""
         if not host.ip or not host.ip.strip():
             logger.debug("Host rejected: empty IP address")
@@ -889,6 +938,11 @@ class SharedRedTeamState:
                 return False
         self.all_hosts.append(host)
         logger.debug(f"Host added: {host.ip} ({host.hostname or 'no hostname'})")
+
+        # Real-time checkpoint to Redis (don't call publish_host - that would re-add)
+        if self._dispatcher:
+            self._publish_async(self._dispatcher._checkpoint())
+
         return True
 
     def add_share(self, share: Share) -> bool:
