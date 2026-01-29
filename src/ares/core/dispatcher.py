@@ -1556,6 +1556,93 @@ class RedTeamDispatcher:
 
         output = ""
 
+        # Process discoveries from result dict (even if task failed)
+        # Workers serialize discoveries and send them regardless of success/failure
+        if isinstance(result, dict):
+            # Process serialized state discoveries from worker's local state first
+            # These should be processed even on failure since workers preserve discoveries
+            discovered_hosts = result.get("discovered_hosts")
+            if isinstance(discovered_hosts, list) and discovered_hosts:
+                logger.info(
+                    f"Processing {len(discovered_hosts)} discovered hosts from {source_agent}"
+                )
+                for h in discovered_hosts:
+                    if not isinstance(h, dict):
+                        continue
+                    host = Host(
+                        ip=h.get("ip", ""),
+                        hostname=h.get("hostname", ""),
+                        os=h.get("os", ""),
+                        roles=h.get("roles", []),
+                        services=h.get("services", []),
+                    )
+                    await self.publish_host(host, source_agent)
+
+            discovered_credentials = result.get("discovered_credentials")
+            if isinstance(discovered_credentials, list) and discovered_credentials:
+                logger.info(
+                    f"Processing {len(discovered_credentials)} discovered credentials from {source_agent}"
+                )
+                for c in discovered_credentials:
+                    if not isinstance(c, dict):
+                        continue
+                    credential = Credential(
+                        username=c.get("username", ""),
+                        password=c.get("password", ""),
+                        domain=c.get("domain", ""),
+                        source=c.get("source", f"worker:{source_agent}"),
+                        is_admin=c.get("is_admin", False),
+                    )
+                    await self.publish_credential(credential, source_agent)
+
+            discovered_hashes = result.get("discovered_hashes")
+            if isinstance(discovered_hashes, list) and discovered_hashes:
+                logger.info(
+                    f"Processing {len(discovered_hashes)} discovered hashes from {source_agent}"
+                )
+                for h in discovered_hashes:
+                    if not isinstance(h, dict):
+                        continue
+                    hash_obj = Hash(
+                        username=h.get("username", ""),
+                        hash_value=h.get("hash_value", ""),
+                        hash_type=h.get("hash_type", "NTLM"),
+                        domain=h.get("domain", ""),
+                        cracked_password=h.get("cracked_password", ""),
+                        source=h.get("source", ""),
+                    )
+                    await self.publish_hash(hash_obj, source_agent)
+                    if hash_obj.cracked_password:
+                        cracked_cred = Credential(
+                            username=hash_obj.username,
+                            password=hash_obj.cracked_password,
+                            domain=hash_obj.domain,
+                            source=f"cracked:{source_agent}",
+                            is_admin=False,
+                        )
+                        await self.publish_credential(cracked_cred, source_agent)
+
+            discovered_shares = result.get("discovered_shares")
+            if isinstance(discovered_shares, list):
+                for s in discovered_shares:
+                    if not isinstance(s, dict):
+                        continue
+                    share = Share(
+                        host=s.get("host", ""),
+                        name=s.get("name", ""),
+                        permissions=s.get("permissions", ""),
+                        comment=s.get("comment", ""),
+                    )
+                    await self.publish_share(share, source_agent)
+
+            discovered_users = result.get("discovered_users")
+            if isinstance(discovered_users, list):
+                for u in discovered_users:
+                    if not isinstance(u, dict):
+                        continue
+                    self._add_user(u.get("username", ""), u.get("domain", ""))
+
+        # Process additional result fields only on success
         if success and isinstance(result, dict):
             cred_data = result.get("credential")
             if isinstance(cred_data, dict):
@@ -1646,89 +1733,6 @@ class RedTeamDispatcher:
                         comment=s.get("comment", s.get("description", "")),
                     )
                     await self.publish_share(share, source_agent)
-
-            # Process serialized state discoveries from worker's local state
-            # Workers serialize their SharedRedTeamState discoveries into these fields
-            discovered_hosts = result.get("discovered_hosts")
-            if isinstance(discovered_hosts, list) and discovered_hosts:
-                logger.info(
-                    f"Processing {len(discovered_hosts)} discovered hosts from {source_agent}"
-                )
-                for h in discovered_hosts:
-                    if not isinstance(h, dict):
-                        continue
-                    host = Host(
-                        ip=h.get("ip", ""),
-                        hostname=h.get("hostname", ""),
-                        os=h.get("os", ""),
-                        roles=h.get("roles", []),
-                        services=h.get("services", []),
-                    )
-                    await self.publish_host(host, source_agent)
-
-            discovered_credentials = result.get("discovered_credentials")
-            if isinstance(discovered_credentials, list) and discovered_credentials:
-                logger.info(
-                    f"Processing {len(discovered_credentials)} discovered credentials from {source_agent}"
-                )
-                for c in discovered_credentials:
-                    if not isinstance(c, dict):
-                        continue
-                    credential = Credential(
-                        username=c.get("username", ""),
-                        password=c.get("password", ""),
-                        domain=c.get("domain", ""),
-                        source=c.get("source", f"worker:{source_agent}"),
-                        is_admin=c.get("is_admin", False),
-                    )
-                    await self.publish_credential(credential, source_agent)
-
-            discovered_hashes = result.get("discovered_hashes")
-            if isinstance(discovered_hashes, list) and discovered_hashes:
-                logger.info(
-                    f"Processing {len(discovered_hashes)} discovered hashes from {source_agent}"
-                )
-                for h in discovered_hashes:
-                    if not isinstance(h, dict):
-                        continue
-                    hash_obj = Hash(
-                        username=h.get("username", ""),
-                        hash_value=h.get("hash_value", ""),
-                        hash_type=h.get("hash_type", "NTLM"),
-                        domain=h.get("domain", ""),
-                        cracked_password=h.get("cracked_password", ""),
-                        source=h.get("source", ""),
-                    )
-                    await self.publish_hash(hash_obj, source_agent)
-                    if hash_obj.cracked_password:
-                        cracked_cred = Credential(
-                            username=hash_obj.username,
-                            password=hash_obj.cracked_password,
-                            domain=hash_obj.domain,
-                            source=f"cracked:{source_agent}",
-                            is_admin=False,
-                        )
-                        await self.publish_credential(cracked_cred, source_agent)
-
-            discovered_shares = result.get("discovered_shares")
-            if isinstance(discovered_shares, list):
-                for s in discovered_shares:
-                    if not isinstance(s, dict):
-                        continue
-                    share = Share(
-                        host=s.get("host", ""),
-                        name=s.get("name", ""),
-                        permissions=s.get("permissions", ""),
-                        comment=s.get("comment", ""),
-                    )
-                    await self.publish_share(share, source_agent)
-
-            discovered_users = result.get("discovered_users")
-            if isinstance(discovered_users, list):
-                for u in discovered_users:
-                    if not isinstance(u, dict):
-                        continue
-                    self._add_user(u.get("username", ""), u.get("domain", ""))
 
             stdout = result.get("stdout", "")
             stderr = result.get("stderr", "")
@@ -2327,6 +2331,10 @@ class RedTeamDispatcher:
             )
             await self._redis_client.set(key, self.shared_state.to_bytes())
             await self._redis_client.expire(key, 86400)  # 24 hour TTL
+
+            # Publish state update notification via pub/sub for real-time worker sync
+            if self._task_queue:
+                await self._task_queue.publish_state_update(self.shared_state.operation_id)
         except Exception as e:
             logger.warning(f"Failed to checkpoint state: {e}")
 

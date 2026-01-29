@@ -960,6 +960,11 @@ class SharedRedTeamState:
                 return False
         self.all_shares.append(share)
         logger.debug(f"Share added: {host}/{name}")
+
+        # Real-time checkpoint to Redis
+        if self._dispatcher:
+            self._publish_async(self._dispatcher._checkpoint())
+
         return True
 
     def add_vulnerability(self, vuln: VulnerabilityInfo) -> bool:

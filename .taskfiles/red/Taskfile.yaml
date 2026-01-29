@@ -41,11 +41,11 @@ tasks:
   # ===========================================================================
 
   multi:
-    desc: "Run multi-agent red team operation (usage: task red:multi TARGET=dreadgoad [DOMAIN=example.local])"
+    desc: "Run multi-agent red team operation (usage: task red:multi TARGET=dreadgoad [DOMAIN=sevenkingdoms.local])"
     silent: true
     vars:
       TARGET: '{{.TARGET | default ""}}'
-      DOMAIN: '{{.DOMAIN | default "example.local"}}'
+      DOMAIN: '{{.DOMAIN | default "sevenkingdoms.local"}}'
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       RESUME: '{{.RESUME | default "false"}}'
       # Computed vars
@@ -143,17 +143,25 @@ tasks:
       - cmd: |
           set -euo pipefail
           echo "Setting active operation pointer in Redis..."
-          REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
-          if [ -z "$REDIS_POD" ]; then
-            echo "No Redis pod found in namespace {{.K8S_NAMESPACE}}"
+          REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+
+          # Find the Redis master pod (replicas are read-only)
+          REDIS_MASTER=""
+          for pod in $(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null); do
+            ROLE=$(kubectl exec -n {{.K8S_NAMESPACE}} $pod -c redis -- env REDISCLI_AUTH="$REDIS_PASS" redis-cli info replication 2>/dev/null | grep "^role:" | cut -d: -f2 | tr -d '\r')
+            if [ "$ROLE" = "master" ]; then
+              REDIS_MASTER=$pod
+              break
+            fi
+          done
+
+          if [ -z "$REDIS_MASTER" ]; then
+            echo "No Redis master found in namespace {{.K8S_NAMESPACE}}"
             exit 1
           fi
-          REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
-          REDIS_ENV=()
-          if [ -n "$REDIS_PASS" ]; then
-            REDIS_ENV=(env REDISCLI_AUTH="$REDIS_PASS")
-          fi
-          kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" \
+          echo "Found Redis master: $REDIS_MASTER"
+
+          kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_MASTER -c redis -- env REDISCLI_AUTH="$REDIS_PASS" \
             redis-cli set ares:operation:active "{{.OPERATION_ID_COMPUTED}}" >/dev/null
           echo "Set ares:operation:active -> {{.OPERATION_ID_COMPUTED}}"
         silent: false
@@ -337,13 +345,14 @@ tasks:
         echo "Report copied to: {{.REPORT_DIR}}/{{.OPERATION_ID}}_report.md"
 
   multi:local:
-    desc: "Run multi-agent red team operation using .env file (usage: task red:multi:local TARGET=dreadgoad [DOMAIN=example.local])"
+    desc: "Run multi-agent red team operation using .env file (usage: task red:multi:local TARGET=dreadgoad [DOMAIN=sevenkingdoms.local])"
     silent: true
     vars:
-      TARGET: '{{.TARGET | default ""}}'
-      DOMAIN: '{{.DOMAIN | default "example.local"}}'
+      TARGET: '{{.TARGET | default "dreadgoad"}}'
+      DOMAIN: '{{.DOMAIN | default "sevenkingdoms.local"}}'
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       RESUME: '{{.RESUME | default "false"}}'
+      MODEL_ALL: '{{.MODEL_ALL | default "gpt-4.1"}}'
       # Computed vars (no 1Password - uses .env)
       ARES_MODEL:
         sh: |
@@ -441,17 +450,25 @@ tasks:
       - cmd: |
           set -euo pipefail
           echo "Setting active operation pointer in Redis..."
-          REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
-          if [ -z "$REDIS_POD" ]; then
-            echo "No Redis pod found in namespace {{.K8S_NAMESPACE}}"
+          REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+
+          # Find the Redis master pod (replicas are read-only)
+          REDIS_MASTER=""
+          for pod in $(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null); do
+            ROLE=$(kubectl exec -n {{.K8S_NAMESPACE}} $pod -c redis -- env REDISCLI_AUTH="$REDIS_PASS" redis-cli info replication 2>/dev/null | grep "^role:" | cut -d: -f2 | tr -d '\r')
+            if [ "$ROLE" = "master" ]; then
+              REDIS_MASTER=$pod
+              break
+            fi
+          done
+
+          if [ -z "$REDIS_MASTER" ]; then
+            echo "No Redis master found in namespace {{.K8S_NAMESPACE}}"
             exit 1
           fi
-          REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
-          REDIS_ENV=()
-          if [ -n "$REDIS_PASS" ]; then
-            REDIS_ENV=(env REDISCLI_AUTH="$REDIS_PASS")
-          fi
-          kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" \
+          echo "Found Redis master: $REDIS_MASTER"
+
+          kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_MASTER -c redis -- env REDISCLI_AUTH="$REDIS_PASS" \
             redis-cli set ares:operation:active "{{.OPERATION_ID_COMPUTED}}" >/dev/null
           echo "Set ares:operation:active -> {{.OPERATION_ID_COMPUTED}}"
         silent: false

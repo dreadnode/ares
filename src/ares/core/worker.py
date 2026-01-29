@@ -670,6 +670,9 @@ class RedisWorkerAgent:
         # Threaded heartbeat to avoid blocking by sync tool execution
         self._heartbeat_thread: threading.Thread | None = None
         self._heartbeat_stop_event = threading.Event()
+        # Threaded state subscriber for real-time pub/sub updates
+        self._state_subscriber_thread: threading.Thread | None = None
+        self._state_subscriber_stop_event = threading.Event()
 
     def _run_agent_sync(self, prompt: str) -> Any:
         """Run the async agent in a dedicated event loop (thread-safe helper)."""
@@ -769,6 +772,7 @@ class RedisWorkerAgent:
         self._running = True
         self._pointer_switched = False
         self._heartbeat_stop_event.clear()
+        self._state_subscriber_stop_event.clear()
         logger.info(f"Redis worker {self.agent_name} starting...")
 
         # Start heartbeat in a separate thread to avoid blocking by sync tool execution.
@@ -781,6 +785,16 @@ class RedisWorkerAgent:
         self._heartbeat_thread.start()
         logger.debug(f"Heartbeat thread started for {self.agent_name}")
 
+        # Start state subscriber thread for real-time pub/sub updates from orchestrator
+        if self.operation_id and self.redis_url:
+            self._state_subscriber_thread = threading.Thread(
+                target=self._threaded_state_subscriber_loop,
+                name=f"{self.agent_name}-state-subscriber",
+                daemon=True,
+            )
+            self._state_subscriber_thread.start()
+            logger.debug(f"State subscriber thread started for {self.agent_name}")
+
         try:
             await self._worker_loop()
         finally:
@@ -792,6 +806,14 @@ class RedisWorkerAgent:
                 if self._heartbeat_thread.is_alive():
                     logger.warning(
                         f"Heartbeat thread for {self.agent_name} did not stop gracefully"
+                    )
+            # Signal state subscriber thread to stop and wait for it
+            self._state_subscriber_stop_event.set()
+            if self._state_subscriber_thread and self._state_subscriber_thread.is_alive():
+                self._state_subscriber_thread.join(timeout=5.0)
+                if self._state_subscriber_thread.is_alive():
+                    logger.warning(
+                        f"State subscriber thread for {self.agent_name} did not stop gracefully"
                     )
 
     async def stop(self) -> None:
@@ -1182,6 +1204,16 @@ class RedisWorkerAgent:
         old_creds = len(self.shared_state.all_credentials)
         old_hashes = len(self.shared_state.all_hashes)
         old_hosts = len(self.shared_state.all_hosts)
+        old_shares = len(self.shared_state.all_shares)
+
+        # Preserve local discoveries before they get overwritten.
+        # Workers discover shares/hosts/creds locally, but if a Redis state update
+        # arrives before the task result is sent back, these would be lost.
+        local_shares = list(self.shared_state.all_shares)
+        local_hosts = list(self.shared_state.all_hosts)
+        local_creds = list(self.shared_state.all_credentials)
+        local_hashes = list(self.shared_state.all_hashes)
+        local_users = list(self.shared_state.all_users)
 
         current = self.shared_state
         for attr in (
@@ -1210,6 +1242,20 @@ class RedisWorkerAgent:
         ):
             setattr(current, attr, getattr(fresh, attr))
 
+        # Re-add local discoveries that may not be in the fresh state yet.
+        # This preserves discoveries made during the current task before they're
+        # serialized and sent back to the orchestrator.
+        for share in local_shares:
+            current.add_share(share)
+        for host in local_hosts:
+            current.add_host(host)
+        for cred in local_creds:
+            current.add_credential(cred, self.agent_name)
+        for hash_obj in local_hashes:
+            current.add_hash(hash_obj, self.agent_name)
+        for user in local_users:
+            current.add_user(user.username, user.domain)
+
         # Merge dynamic tracking attributes (set via object.__setattr__)
         # These track queried hosts and tested credentials to avoid duplicates
         for dynamic_attr in ("_queried_hosts", "_tested_credentials"):
@@ -1223,12 +1269,19 @@ class RedisWorkerAgent:
         new_creds = len(current.all_credentials)
         new_hashes = len(current.all_hashes)
         new_hosts = len(current.all_hosts)
-        if new_creds != old_creds or new_hashes != old_hashes or new_hosts != old_hosts:
+        new_shares = len(current.all_shares)
+        if (
+            new_creds != old_creds
+            or new_hashes != old_hashes
+            or new_hosts != old_hosts
+            or new_shares != old_shares
+        ):
             logger.debug(
                 f"[{self.agent_name}] State merged: "
                 f"creds {old_creds}->{new_creds}, "
                 f"hashes {old_hashes}->{new_hashes}, "
-                f"hosts {old_hosts}->{new_hosts}"
+                f"hosts {old_hosts}->{new_hosts}, "
+                f"shares {old_shares}->{new_shares}"
             )
 
     async def _execute_crack_task(self, task: TaskMessage) -> None:
@@ -1756,6 +1809,150 @@ class RedisWorkerAgent:
                     pass
             loop.close()
             logger.debug(f"Heartbeat thread stopped for {self.agent_name}")
+
+    def _threaded_state_subscriber_loop(self) -> None:  # noqa: PLR0912
+        """Subscribe to Redis pub/sub for real-time state updates from orchestrator.
+
+        When the orchestrator checkpoints state changes (new credentials, hosts, etc.),
+        it publishes a notification to a channel. This thread subscribes to that channel
+        and refreshes the local shared_state when notifications arrive, enabling
+        near-instant state propagation instead of waiting for task boundaries.
+        """
+        # Ensure we have an operation_id before starting subscriber
+        if not self.operation_id:
+            logger.warning(
+                f"[{self.agent_name}] Cannot start state subscriber: operation_id not set"
+            )
+            return
+
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        subscriber_queue: RedisTaskQueue | None = None
+        state_client = None
+        pubsub = None
+        retry_delay = 1.0
+        max_retry_delay = 60.0
+
+        try:
+            while not self._state_subscriber_stop_event.is_set() and self._running:
+                try:
+                    # Lazily connect on first use or reconnect if needed
+                    if subscriber_queue is None or not subscriber_queue._connected:
+                        redis_url = self.redis_url or get_redis_url()
+                        subscriber_queue = RedisTaskQueue(redis_url)
+                        loop.run_until_complete(subscriber_queue.connect())
+                        # Create separate client for state fetching (can't mix pubsub and regular commands)
+                        state_client = loop.run_until_complete(
+                            create_redis_client(redis_url, decode_responses=False)
+                        )
+                        # Subscribe to state updates channel
+                        pubsub = loop.run_until_complete(
+                            subscriber_queue.subscribe_state_updates(self.operation_id)
+                        )
+                        logger.info(
+                            f"State subscriber connected for {self.agent_name} "
+                            f"(operation: {self.operation_id})"
+                        )
+
+                    # Listen for messages with a timeout so we can check stop event
+                    message = loop.run_until_complete(
+                        self._wait_for_pubsub_message(pubsub, timeout=5.0)
+                    )
+
+                    if message and message.get("type") == "message":
+                        # Received state update notification - refresh state
+                        logger.debug(
+                            f"[{self.agent_name}] Received state update notification via pub/sub"
+                        )
+                        loop.run_until_complete(self._fetch_and_merge_state(state_client))
+
+                    # Reset retry delay on success
+                    retry_delay = 1.0
+
+                except Exception as e:  # noqa: PERF203
+                    error_str = str(e).lower()
+                    is_connection_error = any(
+                        keyword in error_str
+                        for keyword in [
+                            "connection",
+                            "connect",
+                            "closed",
+                            "timeout",
+                            "broken pipe",
+                            "reset",
+                        ]
+                    )
+
+                    if is_connection_error:
+                        logger.warning(f"State subscriber connection error, will retry: {e}")
+                        # Mark as disconnected to force reconnection
+                        if subscriber_queue:
+                            subscriber_queue._connected = False
+                        if pubsub:
+                            try:
+                                loop.run_until_complete(pubsub.aclose())
+                            except Exception:
+                                pass
+                            pubsub = None
+                        if state_client:
+                            try:
+                                loop.run_until_complete(state_client.aclose())
+                            except Exception:
+                                pass
+                            state_client = None
+                        # Wait with exponential backoff before retry
+                        self._state_subscriber_stop_event.wait(retry_delay)
+                        retry_delay = min(retry_delay * 2, max_retry_delay)
+                        continue
+                    logger.warning(f"State subscriber error: {e}")
+
+        finally:
+            # Clean up
+            if pubsub:
+                try:
+                    loop.run_until_complete(pubsub.unsubscribe())
+                    loop.run_until_complete(pubsub.aclose())
+                except Exception:
+                    pass
+            if state_client:
+                try:
+                    loop.run_until_complete(state_client.aclose())
+                except Exception:
+                    pass
+            if subscriber_queue:
+                try:
+                    loop.run_until_complete(subscriber_queue.disconnect())
+                except Exception:
+                    pass
+            loop.close()
+            logger.debug(f"State subscriber thread stopped for {self.agent_name}")
+
+    async def _wait_for_pubsub_message(self, pubsub, timeout: float = 5.0) -> dict | None:
+        """Wait for a pub/sub message with timeout."""
+        try:
+            # get_message with timeout returns None if no message
+            return await asyncio.wait_for(
+                pubsub.get_message(ignore_subscribe_messages=True, timeout=timeout),
+                timeout=timeout + 1.0,  # Slightly longer to let internal timeout work
+            )
+        except asyncio.TimeoutError:
+            return None
+
+    async def _fetch_and_merge_state(self, redis_client) -> None:
+        """Fetch state from Redis and merge into local shared_state."""
+        if not self.operation_id:
+            return
+        try:
+            key = f"ares:operation:{self.operation_id}:state"
+            data = await redis_client.get(key)
+            if not data:
+                return
+            fresh = SharedRedTeamState.from_bytes(data)
+            self._merge_shared_state(fresh)
+        except Exception as e:
+            logger.debug(f"[{self.agent_name}] Failed to fetch/merge state: {e}")
 
 
 class WorkerAgent:
