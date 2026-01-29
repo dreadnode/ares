@@ -669,3 +669,95 @@ class TestRedTeamStateHelpers:
         )
 
         assert state.admin_count == 2
+
+
+class TestExtractDomains:
+    """Tests for SharedRedTeamState._extract_domains."""
+
+    def test_extracts_domains_from_host_fqdns(self) -> None:
+        """Test that domains are extracted from host FQDNs."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_hosts = [
+            Host(ip="10.1.2.183", hostname="kingslanding.sevenkingdoms.local"),
+            Host(ip="10.1.2.239", hostname="meereen.essos.local"),
+            Host(ip="10.1.2.92", hostname="braavos.essos.local"),
+        ]
+
+        domains = SharedRedTeamState._extract_domains(state)
+
+        assert "sevenkingdoms.local" in domains
+        assert "essos.local" in domains
+
+    def test_extracts_domains_from_nested_fqdns(self) -> None:
+        """Test that domains are extracted from nested FQDNs like sub.domain.local."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_hosts = [
+            Host(ip="10.1.2.240", hostname="winterfell.north.sevenkingdoms.local"),
+        ]
+
+        domains = SharedRedTeamState._extract_domains(state)
+
+        # Should extract "north.sevenkingdoms.local" (everything after first dot)
+        assert "north.sevenkingdoms.local" in domains
+
+    def test_extracts_domains_from_all_sources(self) -> None:
+        """Test that domains are extracted from users, credentials, hashes, and hosts."""
+        from ares.core.models import (
+            Credential,
+            Hash,
+            Host,
+            SharedRedTeamState,
+            Target,
+            User,
+        )
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="10.1.2.1", hostname="dc.target.local", domain="target.local")
+        state.all_users = [User(username="admin", domain="users.local")]
+        state.all_credentials = [
+            Credential(
+                username="admin",
+                password="pass",  # pragma: allowlist secret
+                domain="creds.local",
+            )
+        ]
+        state.all_hashes = [Hash(username="admin", hash_value="abc", domain="hashes.local")]
+        state.all_hosts = [Host(ip="10.1.2.2", hostname="server.hosts.local")]
+
+        domains = SharedRedTeamState._extract_domains(state)
+
+        assert "target.local" in domains  # from target.domain
+        assert "users.local" in domains  # from user
+        assert "creds.local" in domains  # from credential
+        assert "hashes.local" in domains  # from hash
+        assert "hosts.local" in domains  # from host FQDN
+
+    def test_extracts_domain_from_target_hostname(self) -> None:
+        """Test that domain is extracted from target hostname FQDN."""
+        from ares.core.models import SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="10.1.2.1", hostname="dc01.corp.local")
+
+        domains = SharedRedTeamState._extract_domains(state)
+
+        assert "corp.local" in domains
+
+    def test_handles_hosts_without_fqdn(self) -> None:
+        """Test that hosts without dots in hostname don't cause issues."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_hosts = [
+            Host(ip="10.1.2.1", hostname="server1"),  # No domain
+            Host(ip="10.1.2.2", hostname=""),  # Empty hostname
+            Host(ip="10.1.2.3"),  # No hostname at all
+        ]
+
+        # Should not raise, should return empty list
+        domains = SharedRedTeamState._extract_domains(state)
+        assert domains == []

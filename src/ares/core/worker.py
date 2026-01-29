@@ -61,6 +61,188 @@ def _is_pass_the_hash_compatible(hash_value: str | None) -> bool:
     return bool(re.fullmatch(r"[0-9a-fA-F]{32}", normalized))
 
 
+def format_state_context(  # noqa: PLR0912
+    state: SharedRedTeamState | None,
+    task_type: str,
+    current_target: str | None = None,
+) -> str:
+    """
+    Format shared state as context for task prompts.
+
+    This provides workers with visibility into all discovered credentials,
+    hosts, hashes, and opportunities so they can make strategic decisions.
+
+    Args:
+        state: The shared red team state
+        task_type: Type of task (lateral, credential_access, exploit, coercion)
+        current_target: The primary target of this task (for prioritization)
+
+    Returns:
+        Formatted state context string to append to task prompts
+    """
+    if not state:
+        return ""
+
+    lines = ["\n\n## SHARED STATE CONTEXT (use this intelligence!)"]
+
+    # Domains
+    if state.all_domains:
+        lines.append(f"\n### Discovered Domains ({len(state.all_domains)})")
+        for domain in state.all_domains[:10]:
+            lines.append(f"  - {domain}")
+
+    # Credentials - CRITICAL for lateral/privesc
+    if state.all_credentials:
+        lines.append(f"\n### Available Credentials ({len(state.all_credentials)})")
+        lines.append("**TRY THESE for authentication/lateral movement:**")
+        for cred in state.all_credentials[:15]:
+            admin_marker = " [ADMIN]" if cred.is_admin else ""
+            lines.append(f"  - {cred.domain}\\{cred.username}:{cred.password}{admin_marker}")
+
+    # Hashes - show cracked vs uncracked
+    if state.all_hashes:
+        cracked = [h for h in state.all_hashes if h.cracked_password]
+        uncracked = [h for h in state.all_hashes if not h.cracked_password]
+
+        if cracked:
+            lines.append(f"\n### Cracked Hashes ({len(cracked)}) - USE THESE!")
+            for h in cracked[:10]:
+                lines.append(
+                    f"  - {h.domain}\\{h.username}:{h.cracked_password} (from {h.hash_type})"
+                )
+
+        if uncracked:
+            lines.append(f"\n### Uncracked Hashes ({len(uncracked)}) - awaiting crack")
+            for h in uncracked[:8]:
+                hash_preview = h.hash_value[:40] + "..." if len(h.hash_value) > 40 else h.hash_value
+                lines.append(f"  - {h.domain}\\{h.username} ({h.hash_type}): {hash_preview}")
+
+    # Hosts with role-specific prioritization
+    if state.all_hosts:
+        lines.append(f"\n### Discovered Hosts ({len(state.all_hosts)})")
+
+        # Categorize hosts by role
+        dcs = []
+        mssql_hosts = []
+        adcs_hosts = []
+        other_hosts = []
+
+        for host in state.all_hosts:
+            hostname_lower = (host.hostname or "").lower()
+            services_lower = " ".join(host.services).lower() if host.services else ""
+            roles_lower = " ".join(host.roles).lower() if host.roles else ""
+
+            is_dc = (
+                "dc" in hostname_lower
+                or "domain controller" in roles_lower
+                or "88/tcp" in services_lower
+                or "389/tcp" in services_lower
+            )
+            is_mssql = (
+                "mssql" in services_lower or "1433" in services_lower or "sql" in hostname_lower
+            )
+            is_adcs = (
+                "certsrv" in services_lower
+                or "adcs" in roles_lower
+                or "certenroll" in services_lower
+            )
+
+            if is_dc:
+                dcs.append(host)
+            elif is_mssql:
+                mssql_hosts.append(host)
+            elif is_adcs:
+                adcs_hosts.append(host)
+            else:
+                other_hosts.append(host)
+
+        if dcs:
+            lines.append("\n**Domain Controllers (HIGH VALUE - DCSync/NTDS.dit):**")
+            for h in dcs:
+                marker = " ← CURRENT TARGET" if h.ip == current_target else ""
+                lines.append(f"  - {h.ip} ({h.hostname or 'unknown'}){marker}")
+
+        if mssql_hosts:
+            lines.append("\n**MSSQL Servers (linked server pivot opportunity):**")
+            for h in mssql_hosts:
+                marker = " ← CURRENT TARGET" if h.ip == current_target else ""
+                lines.append(f"  - {h.ip} ({h.hostname or 'unknown'}){marker}")
+
+        if adcs_hosts:
+            lines.append("\n**ADCS Servers (certificate attacks ESC1-ESC8):**")
+            for h in adcs_hosts:
+                marker = " ← CURRENT TARGET" if h.ip == current_target else ""
+                lines.append(f"  - {h.ip} ({h.hostname or 'unknown'}){marker}")
+
+        if other_hosts and len(other_hosts) <= 10:
+            lines.append("\n**Other Hosts:**")
+            for h in other_hosts:
+                marker = " ← CURRENT TARGET" if h.ip == current_target else ""
+                lines.append(f"  - {h.ip} ({h.hostname or 'unknown'}){marker}")
+
+    # Shares - highlight writable and interesting ones
+    if state.all_shares:
+        interesting_shares = []
+        for share in state.all_shares:
+            name_lower = share.name.lower()
+            perms_lower = (share.permissions or "").lower()
+            is_interesting = (
+                "write" in perms_lower
+                or name_lower in ("sysvol", "netlogon", "certenroll")
+                or "admin" in name_lower
+            )
+            if is_interesting:
+                interesting_shares.append(share)
+
+        if interesting_shares:
+            lines.append(f"\n### Interesting Shares ({len(interesting_shares)})")
+            for share in interesting_shares[:10]:
+                lines.append(f"  - {share.host}/{share.name} [{share.permissions}]")
+
+    # Vulnerabilities discovered but not exploited
+    if hasattr(state, "discovered_vulnerabilities") and state.discovered_vulnerabilities:
+        unexploited = [
+            v
+            for v in state.discovered_vulnerabilities.values()
+            if v.vuln_id not in state.exploited_vulnerabilities
+        ]
+        if unexploited:
+            lines.append(f"\n### Pending Vulnerabilities ({len(unexploited)})")
+            for vuln in unexploited[:5]:
+                lines.append(f"  - {vuln.vuln_type} on {vuln.target} (ID: {vuln.vuln_id})")
+
+    # Task-specific guidance
+    if task_type == "lateral":
+        lines.append("\n### LATERAL MOVEMENT PRIORITIES")
+        lines.append("1. Try ALL available credentials above against the target")
+        lines.append("2. If DC: run secretsdump for NTDS.dit → krbtgt hash → golden ticket")
+        lines.append("3. If MSSQL: check for linked servers and xp_cmdshell")
+        lines.append("4. After access: harvest creds with secretsdump/lsassy")
+
+    elif task_type == "credential_access":
+        lines.append("\n### CREDENTIAL ACCESS PRIORITIES")
+        lines.append("1. gpp_password_finder + sysvol_script_search on DCs (low-hanging fruit)")
+        lines.append("2. Kerberoast service accounts (sql_svc, etc.)")
+        lines.append("3. AS-REP roast users without pre-auth")
+        lines.append("4. secretsdump on hosts where we have admin")
+        lines.append("5. LAPS dump if we have read access")
+
+    elif task_type == "exploit":
+        lines.append("\n### EXPLOITATION PRIORITIES")
+        lines.append("1. Try ALL available credentials against the target")
+        lines.append("2. For MSSQL: enumerate linked servers for cross-domain pivot")
+        lines.append("3. For ADCS: certipy find → ESC1/ESC4/ESC8 attacks")
+        lines.append("4. Check for delegation (constrained/unconstrained)")
+
+    elif task_type == "coercion":
+        lines.append("\n### COERCION PRIORITIES")
+        lines.append("1. Target DCs with PetitPotam for ESC8 relay")
+        lines.append("2. Use LLMNR/NBT-NS for hash capture")
+        lines.append("3. Coordinate relay targets with hosts lacking SMB signing")
+
+    return "\n".join(lines)
+
+
 async def discover_active_operation(  # noqa: PLR0912
     redis_url: str, max_wait: int | None = None, max_operation_age: int = 300
 ) -> str | None:
@@ -380,7 +562,10 @@ TASK_PROMPTS: dict[MessageType, callable] = {
 }
 
 
-def generate_prompt_from_task(task: TaskMessage) -> str | None:  # noqa: PLR0912
+def generate_prompt_from_task(  # noqa: PLR0912
+    task: TaskMessage,
+    state: SharedRedTeamState | None = None,
+) -> str | None:
     """
     Generate agent prompt from Redis TaskMessage.
 
@@ -388,6 +573,8 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:  # noqa: PLR0912
 
     Args:
         task: TaskMessage from Redis queue
+        state: Optional shared state to include context about all discovered
+               credentials, hosts, hashes, and vulnerabilities
 
     Returns:
         Prompt string for the agent
@@ -395,6 +582,7 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:  # noqa: PLR0912
     payload = task.payload
 
     if task.task_type == "crack":
+        # Crack tasks don't need state context - they're deterministic
         return (
             f"Crack this hash for user {payload.get('username', 'unknown')}"
             f"@{payload.get('domain', '')}:\n"
@@ -410,8 +598,9 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:  # noqa: PLR0912
     if task.task_type == "lateral":
         cred_type = "password" if payload.get("password") else "hash"
         cred_value = payload.get("password") or payload.get("hash_value") or "N/A"
-        return (
-            f"Perform lateral movement to {payload['target_host']}:\n"
+        target_host = payload.get("target_host", "")
+        base_prompt = (
+            f"Perform lateral movement to {target_host}:\n"
             f"Username: {payload.get('domain', '')}\\{payload['username']}\n"
             f"Credential ({cred_type}): {cred_value}\n"
             f"Method: {payload.get('method') or 'auto-select'}\n"
@@ -423,9 +612,11 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:  # noqa: PLR0912
             "with any credentials/hashes found as JSON. "
             "If access fails, call report_lateral_failed(task_id, target, reason)."
         )
+        state_context = format_state_context(state, "lateral", current_target=target_host)
+        return base_prompt + state_context
 
     if task.task_type == "acl_analysis":
-        return (
+        base_prompt = (
             f"Analyze ACLs and find attack paths:\n"
             f"Target User: {payload['target_user']}\n"
             f"Domain: {payload['domain']}\n"
@@ -433,8 +624,11 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:  # noqa: PLR0912
             f"Task ID: {task.task_id}\n\n"
             "Use provided ACL/BloodHound context if available. "
             "If pathing data is missing, request BloodHound analysis from recon/orchestrator. "
-            "Execute viable ACL abuse attacks."
+            "Execute viable ACL abuse attacks (shadow credentials, targeted kerberoast, "
+            "ForceChangePassword, WriteDACL, etc.)."
         )
+        state_context = format_state_context(state, "acl_analysis")
+        return base_prompt + state_context
 
     if task.task_type == "credential_access":
         hash_value = payload.get("hash_value")
@@ -474,7 +668,7 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:  # noqa: PLR0912
 
         if has_low_hanging and payload.get("password"):
             # Low hanging fruit with creds - prioritize SYSVOL/GPP
-            return (
+            base_prompt = (
                 "Perform LOW HANGING FRUIT credential harvesting:\n"
                 f"Domain: {payload.get('domain', '')}\n"
                 f"DC IP: {dc_ip or 'N/A'}\n"
@@ -489,8 +683,10 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:  # noqa: PLR0912
                 "These are HIGH SUCCESS RATE techniques that find hardcoded credentials.\n"
                 "Report any credentials found immediately."
             )
+            state_context = format_state_context(state, "credential_access", current_target=dc_ip)
+            return base_prompt + state_context
 
-        return (
+        base_prompt = (
             "Perform credential access against the target environment:\n"
             f"Domain: {payload.get('domain', '')}\n"
             f"Targets: {', '.join(targets) if targets else 'N/A'}\n"
@@ -512,17 +708,48 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:  # noqa: PLR0912
             "4. LSASS dumping if viable\n"
             "Report any hashes or credentials found."
         )
+        state_context = format_state_context(state, "credential_access", current_target=dc_ip)
+        return base_prompt + state_context
 
     if task.task_type == "exploit":
         vuln_type = payload.get("vuln_type", "")
+        target = payload.get("target", "")
         base_prompt = (
             f"Exploit vulnerability:\n"
             f"Type: {vuln_type}\n"
-            f"Target: {payload['target']}\n"
+            f"Target: {target}\n"
             f"Vuln ID: {payload.get('vuln_id', 'unknown')}\n"
             f"Params: {payload}\n"
             f"Task ID: {task.task_id}\n\n"
         )
+
+        # Special handling for ADCS enumeration
+        if vuln_type == "adcs_enumerate":
+            domain = payload.get("domain", "")
+            dc_ip = payload.get("dc_ip", target)
+            username = payload.get("username", "")
+            password = payload.get("password", "")
+
+            adcs_prompt = (
+                f"**ADCS ENUMERATION TASK**\n\n"
+                f"Target CA Server: {target}\n"
+                f"Domain: {domain}\n"
+                f"DC IP: {dc_ip}\n"
+                f"Credentials: {domain}\\{username}\n"
+                f"Task ID: {task.task_id}\n\n"
+                "**INSTRUCTIONS:**\n"
+                "1. Run certipy_find to enumerate ADCS vulnerabilities:\n"
+                f"   certipy_find(domain='{domain}', username='{username}', "
+                f"password='{password}', dc_ip='{dc_ip}')\n\n"
+                "2. Look for ESC1-ESC15 vulnerabilities in the output\n"
+                "3. Report any vulnerable templates found\n"
+                "4. If ESC1/ESC4 found: can request cert with arbitrary UPN\n"
+                "5. If ESC8 found: web enrollment relay attack possible\n\n"
+                "**CRITICAL**: Run certipy_find FIRST before any exploitation!\n"
+                "Report discovered vulnerabilities so they can be queued for exploitation."
+            )
+            state_context = format_state_context(state, "exploit", current_target=target)
+            return adcs_prompt + state_context
 
         # Special handling for MSSQL vulnerabilities
         if vuln_type.startswith("mssql_"):
@@ -538,7 +765,7 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:  # noqa: PLR0912
                         f"{cred.get('password', '')}{marker}\n"
                     )
 
-            return (
+            mssql_prompt = (
                 base_prompt + "**MSSQL EXPLOITATION WORKFLOW:**\n"
                 "1. Use mssql_enum_linked_servers() to find linked servers\n"
                 "2. Check for impersonation: EXECUTE AS LOGIN / EXECUTE AS USER\n"
@@ -553,9 +780,11 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:  # noqa: PLR0912
                 '{"credential": {"username": "", "password": "", "domain": "", "is_admin": false}}\n'
                 "```"
             )
+            state_context = format_state_context(state, "exploit", current_target=target)
+            return mssql_prompt + state_context
 
         # Default exploit prompt
-        return (
+        default_prompt = (
             base_prompt + "Execute the exploitation technique. Report credentials obtained.\n"
             "If you obtain credentials or hashes, include a JSON block:\n"
             "```json\n"
@@ -566,17 +795,22 @@ def generate_prompt_from_task(task: TaskMessage) -> str | None:  # noqa: PLR0912
             '{"hash": {"username": "", "hash_value": "", "hash_type": "NTLM", "domain": ""}}\n'
             "```"
         )
+        state_context = format_state_context(state, "exploit", current_target=target)
+        return default_prompt + state_context
 
     if task.task_type == "coercion":
         techniques = payload.get("techniques", ["LLMNR", "NBT-NS"])
-        return (
+        base_prompt = (
             f"Start network coercion:\n"
             f"Interface: {payload.get('interface', 'eth0')}\n"
             f"Techniques: {', '.join(techniques)}\n"
             f"Duration: {payload.get('duration', 300)}s\n"
             f"Task ID: {task.task_id}\n\n"
-            "Start responder/mitm6 and capture hashes."
+            "Start responder/mitm6 and capture hashes. "
+            "For ESC8 relay attacks, coordinate PetitPotam against DCs."
         )
+        state_context = format_state_context(state, "coercion")
+        return base_prompt + state_context
 
     # "command" tasks are handled specially - executed directly, not via agent
     if task.task_type == "command":
@@ -940,8 +1174,8 @@ class RedisWorkerAgent:
                 await self._execute_crack_task(task)
                 return
 
-            # Generate prompt from task
-            prompt = generate_prompt_from_task(task)
+            # Generate prompt from task with state context
+            prompt = generate_prompt_from_task(task, state=self.shared_state)
 
             if prompt is None:
                 # Task type not supported for agent execution
@@ -2184,11 +2418,33 @@ class WorkerAgent:
             self._current_task = None
 
     def _generate_task_prompt(self, msg: AgentMessage) -> str | None:
-        """Generate a prompt for the agent based on message type."""
+        """Generate a prompt for the agent based on message type with state context."""
         prompt_generator = TASK_PROMPTS.get(msg.type)
-        if prompt_generator:
-            return prompt_generator(msg)
-        return None
+        if not prompt_generator:
+            return None
+
+        base_prompt = prompt_generator(msg)
+
+        # Determine task type for state context
+        task_type_map = {
+            MessageType.LATERAL_MOVEMENT_REQUEST: "lateral",
+            MessageType.CREDENTIAL_ACCESS_REQUEST: "credential_access",
+            MessageType.EXPLOIT_REQUEST: "exploit",
+            MessageType.COERCION_REQUEST: "coercion",
+            MessageType.ACL_ANALYSIS_REQUEST: "acl_analysis",
+        }
+        task_type = task_type_map.get(msg.type, "")
+
+        # Get current target if available
+        current_target = getattr(msg, "target_host", None) or getattr(msg, "target", None)
+
+        # Append state context
+        state = self.dispatcher.shared_state if self.dispatcher else None
+        if state and task_type:
+            state_context = format_state_context(state, task_type, current_target=current_target)
+            return base_prompt + state_context
+
+        return base_prompt
 
     def _extract_result(self, result: Any) -> str:
         """Extract text result from agent output."""

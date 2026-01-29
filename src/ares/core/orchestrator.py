@@ -409,6 +409,7 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         ),
         asyncio.create_task(_auto_credential_access(dispatcher), name="auto_credential_access"),
         asyncio.create_task(_auto_mssql_detection(dispatcher), name="auto_mssql_detection"),
+        asyncio.create_task(_auto_adcs_enumeration(dispatcher), name="auto_adcs_enumeration"),
     ]
 
     # Build initial prompt for orchestrator
@@ -988,6 +989,103 @@ async def _auto_mssql_detection(
             break
         except Exception as e:
             logger.error(f"MSSQL detection error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_adcs_enumeration(  # noqa: PLR0912
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 45.0,
+) -> None:
+    """
+    Background task that automatically runs ADCS enumeration when:
+    1. ADCS servers are detected (CertEnroll share indicator)
+    2. Credentials are available for authentication
+
+    This catches ADCS servers discovered by worker agents and triggers
+    certipy_find to enumerate ESC1-ESC15 vulnerabilities.
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between ADCS checks
+    """
+    enumerated_servers: set[str] = set()  # Track servers we've already enumerated
+    enumerated_creds: set[tuple[str, str, str]] = set()  # Track (server, user, domain) combos
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # Skip if operation is complete
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping ADCS enumeration")
+                break
+
+            # Need credentials to enumerate ADCS
+            if not state.all_credentials:
+                logger.debug("ADCS scanner: waiting for credentials")
+                continue
+
+            # Find ADCS servers (hosts with CertEnroll share)
+            adcs_servers = dispatcher.find_adcs_servers()
+
+            if not adcs_servers:
+                logger.debug("ADCS scanner: no ADCS servers detected yet")
+                continue
+
+            # Get domains we know about
+            domains: set[str] = set()
+            if state.target and state.target.domain:
+                domains.add(state.target.domain)
+            for cred in state.all_credentials:
+                if cred.domain:
+                    domains.add(cred.domain)
+
+            # Try to enumerate each ADCS server with available credentials
+            for server_ip, server_hostname in adcs_servers:
+                for cred in state.all_credentials:
+                    if not cred.password:
+                        continue
+
+                    cred_key = (server_ip, cred.username, cred.domain or "")
+                    if cred_key in enumerated_creds:
+                        continue
+
+                    # Find the best domain for this enumeration
+                    target_domain = cred.domain
+                    if not target_domain:
+                        target_domain = state.target.domain if state.target else ""
+                    if not target_domain and domains:
+                        target_domain = next(iter(domains))
+
+                    if not target_domain:
+                        continue
+
+                    logger.warning(
+                        f"🔐 Auto-ADCS: Found ADCS server {server_ip} ({server_hostname}), "
+                        f"dispatching certipy_find with {cred.domain}\\{cred.username}"
+                    )
+
+                    task_id = await dispatcher.request_adcs_enumeration(
+                        source_agent="orchestrator",
+                        target_ip=server_ip,
+                        domain=target_domain,
+                        username=cred.username,
+                        password=cred.password,
+                    )
+
+                    if task_id:
+                        enumerated_creds.add(cred_key)
+                        enumerated_servers.add(server_ip)
+                        logger.info(f"ADCS enumeration task {task_id} dispatched for {server_ip}")
+                        # Only need to enumerate once per server with valid creds
+                        break
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"ADCS enumeration error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
 
 

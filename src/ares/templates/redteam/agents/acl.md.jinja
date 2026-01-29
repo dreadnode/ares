@@ -63,6 +63,25 @@ bloodyad_add_group_member(group="Domain Admins", member="youruser")
 → Instant privilege escalation
 ```
 
+### WriteOwner
+Take ownership of an object, then grant yourself full control:
+```
+1. owneredit(target="targetuser", new_owner="youruser")
+   → Become owner of the object
+2. dacl_edit(target="targetuser", right="GenericAll")
+   → Grant yourself full control
+3. Use GenericAll techniques above
+```
+
+### GPO Abuse (Coordinate with PRIVESC)
+When you have write access to a GPO (via BloodHound):
+```
+Report to orchestrator for PRIVESC dispatch:
+→ GPO abuse requires SharpGPOAbuse (on PRIVESC agent)
+→ Can add user to local admins on all GPO-linked computers
+→ Can create scheduled task for code execution
+```
+
 ## Workflow
 
 1. **Receive Analysis Request**
@@ -119,6 +138,7 @@ bloodyad_add_group_member(group="Domain Admins", member="youruser")
 | force_change_password | Reset user password |
 | bloodyad_set_password | Alternative password reset |
 | dacl_edit | Modify DACL permissions |
+| owneredit | Take ownership of AD objects |
 | bloodyad_add_group_member | Add to groups |
 | rpcclient | Validate rights and group membership |
 

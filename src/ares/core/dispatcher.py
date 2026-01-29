@@ -696,6 +696,121 @@ class RedTeamDispatcher:
 
         return queued
 
+    def find_adcs_servers(self) -> list[tuple[str, str]]:
+        """
+        Find ADCS servers from discovered shares (CertEnroll indicator).
+
+        Returns:
+            List of (ip, hostname) tuples for hosts with CertEnroll shares.
+        """
+        adcs_servers: list[tuple[str, str]] = []
+        seen_hosts: set[str] = set()
+
+        for share in self.shared_state.all_shares:
+            if share.name and share.name.lower() == "certenroll":
+                host_ip = share.host
+                if host_ip and host_ip not in seen_hosts:
+                    # Find hostname from all_hosts
+                    hostname = ""
+                    for h in self.shared_state.all_hosts:
+                        if h.ip == host_ip:
+                            hostname = h.hostname or ""
+                            break
+                    adcs_servers.append((host_ip, hostname))
+                    seen_hosts.add(host_ip)
+
+        return adcs_servers
+
+    async def request_adcs_enumeration(
+        self,
+        source_agent: str,
+        target_ip: str,
+        domain: str,
+        username: str,
+        password: str,
+    ) -> str:
+        """
+        Request ADCS enumeration (certipy_find) on a target CA server.
+
+        This dispatches a task to the PRIVESC agent to run certipy_find
+        and discover ADCS vulnerabilities (ESC1-ESC15).
+
+        Args:
+            source_agent: Agent making the request.
+            target_ip: IP of the ADCS server (CA).
+            domain: Target domain.
+            username: Username for authentication.
+            password: Password for authentication.
+
+        Returns:
+            Task ID for tracking.
+        """
+        dc_ip = self._find_domain_controller_ip(domain)
+        payload = {
+            "vuln_type": "adcs_enumerate",
+            "vuln_id": f"adcs_enumerate_{target_ip}_{hash(f'{domain}{username}') % 10000:04d}",
+            "target": target_ip,
+            "domain": domain,
+            "dc_ip": dc_ip or target_ip,
+            "username": username,
+            "password": password,
+            "note": "Auto-detected ADCS server (CertEnroll share). Run certipy_find to enumerate ESC1-ESC15 vulnerabilities.",
+        }
+
+        # Use Redis task queue if available (Kubernetes multi-pod mode)
+        if self._task_queue:
+            task_id = await self._task_queue.submit_task(
+                task_type="exploit",
+                target_role="privesc",
+                payload=payload,
+                source_agent=source_agent,
+            )
+
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type="exploit",
+                assigned_agent="privesc",
+                params=payload,
+            )
+            self.shared_state.pending_tasks[task_id] = task_info
+            self._redis_task_ids.add(task_id)
+
+            logger.info(f"ADCS enumeration task {task_id} submitted to Redis queue for {target_ip}")
+            return task_id
+
+        # Fallback to in-memory queue (single-process mode)
+        task_id = generate_task_id()
+        privesc_agent = self._role_queues.get(AgentRole.PRIVESC)
+
+        if not privesc_agent:
+            logger.warning("No privesc agent registered, cannot route ADCS enumeration")
+            return ""
+
+        from ares.core.messages import ExploitRequest
+
+        task_info = TaskInfo(
+            task_id=task_id,
+            task_type="exploit",
+            assigned_agent=privesc_agent,
+            params=payload,
+        )
+        self.shared_state.pending_tasks[task_id] = task_info
+
+        await self._message_queues[privesc_agent].put(
+            ExploitRequest(
+                source_agent=source_agent,
+                task_id=task_id,
+                vuln_type="adcs_enumerate",
+                vuln_id=payload["vuln_id"],
+                target=target_ip,
+                params=payload,
+                callback_agent=source_agent,
+            )
+        )
+
+        logger.info(f"ADCS enumeration request {task_id} sent to {privesc_agent}")
+        return task_id
+
     async def publish_vulnerability(
         self,
         vuln: VulnerabilityInfo,
@@ -1566,6 +1681,23 @@ class RedTeamDispatcher:
 
         output = ""
 
+        # Resolve target host for better logging
+        target_label = source_agent
+        task_params = task_info.params or {}
+        target_ip = task_params.get("target") or task_params.get("target_host")
+        if not target_ip and task_params.get("target_ips"):
+            target_ips = task_params.get("target_ips", [])
+            if target_ips:
+                target_ip = target_ips[0] if isinstance(target_ips, list) else target_ips
+        if target_ip:
+            # Look up hostname from shared state
+            for host in self.shared_state.all_hosts:
+                if host.ip == target_ip:
+                    target_label = f"{host.hostname or target_ip} ({target_ip})"
+                    break
+            else:
+                target_label = target_ip
+
         # Process discoveries from result dict (even if task failed)
         # Workers serialize discoveries and send them regardless of success/failure
         if isinstance(result, dict):
@@ -1574,7 +1706,7 @@ class RedTeamDispatcher:
             discovered_hosts = result.get("discovered_hosts")
             if isinstance(discovered_hosts, list) and discovered_hosts:
                 logger.info(
-                    f"Processing {len(discovered_hosts)} discovered hosts from {source_agent}"
+                    f"Processing {len(discovered_hosts)} discovered hosts from {target_label}"
                 )
                 for h in discovered_hosts:
                     if not isinstance(h, dict):
@@ -1591,7 +1723,7 @@ class RedTeamDispatcher:
             discovered_credentials = result.get("discovered_credentials")
             if isinstance(discovered_credentials, list) and discovered_credentials:
                 logger.info(
-                    f"Processing {len(discovered_credentials)} discovered credentials from {source_agent}"
+                    f"Processing {len(discovered_credentials)} discovered credentials from {target_label}"
                 )
                 for c in discovered_credentials:
                     if not isinstance(c, dict):
@@ -1608,7 +1740,7 @@ class RedTeamDispatcher:
             discovered_hashes = result.get("discovered_hashes")
             if isinstance(discovered_hashes, list) and discovered_hashes:
                 logger.info(
-                    f"Processing {len(discovered_hashes)} discovered hashes from {source_agent}"
+                    f"Processing {len(discovered_hashes)} discovered hashes from {target_label}"
                 )
                 for h in discovered_hashes:
                     if not isinstance(h, dict):

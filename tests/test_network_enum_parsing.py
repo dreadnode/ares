@@ -43,6 +43,52 @@ def test_enumerate_users_records_users_hosts_and_credentials(monkeypatch):
     assert ("danj", "P@ssw0rd123!", "contoso.local") in credentials
 
 
+def test_enumerate_users_uses_smb_domain_over_task_param(monkeypatch):
+    """Domain from SMB output should take precedence over task parameter.
+
+    Bug: When a recon task is dispatched with domain=sevenkingdoms.local but
+    the target is actually in north.sevenkingdoms.local, credentials should
+    be recorded with the domain from the SMB output (north.sevenkingdoms.local),
+    not the task parameter.
+    """
+    tool = NetworkEnumerationTools()
+    state = SharedRedTeamState(operation_id="op-test-domain-priority")
+    state.target = Target(ip="10.1.2.240", domain="sevenkingdoms.local")
+    tool.set_state(state)
+
+    # SMB output shows domain:north.sevenkingdoms.local (the actual domain)
+    outputs = [
+        (
+            "netexec smb --users",
+            "SMB 10.1.2.240 445 WINTERFELL [*] Windows 10 / Server 2019 Build 17763 x64 "
+            "(name:WINTERFELL) (domain:north.sevenkingdoms.local) (signing:True) (SMBv1:None)\n"
+            "SMB 10.1.2.240 445 WINTERFELL samwell.tarly 2026-01-28 22:50:43 0 "
+            "Samwell Tarly (Password : Heartsbane)",
+        ),
+    ]
+
+    monkeypatch.setattr(tool, "_run_user_enum_commands", lambda *_args, **_kwargs: outputs)
+
+    # Task is called with domain=sevenkingdoms.local (wrong for this target)
+    tool.enumerate_users(
+        target="10.1.2.240",
+        username="",
+        password="",
+        domain="sevenkingdoms.local",  # Task parameter (should be overridden)
+    )
+
+    # Credential should use north.sevenkingdoms.local from SMB output, not sevenkingdoms.local
+    credentials = {(cred.username, cred.password, cred.domain) for cred in state.credentials}
+    assert ("samwell.tarly", "Heartsbane", "north.sevenkingdoms.local") in credentials
+
+    # User should also have correct domain
+    users = {(user.username, user.domain) for user in state.users}
+    assert ("samwell.tarly", "north.sevenkingdoms.local") in users
+
+    # Domain should be added to all_domains
+    assert "north.sevenkingdoms.local" in state.all_domains
+
+
 def test_smb_sweep_srv_lookup_and_smbclient_shares(monkeypatch):
     tool = NetworkEnumerationTools()
     state = SharedRedTeamState(operation_id="op-test-enum2")
