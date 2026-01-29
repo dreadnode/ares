@@ -198,7 +198,8 @@ class OperationRecoveryManager:
             # Debug: log state counts before checkpoint
             logger.info(
                 f"Checkpointing state: hosts={len(state.all_hosts)}, "
-                f"creds={len(state.all_credentials)}, hashes={len(state.all_hashes)}"
+                f"users={len(state.all_users)}, creds={len(state.all_credentials)}, "
+                f"hashes={len(state.all_hashes)}"
             )
             await self._redis_client.set(key, state.to_bytes())
 

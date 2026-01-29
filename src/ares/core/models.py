@@ -782,7 +782,8 @@ class SharedRedTeamState:
     def add_credential(self, credential: Credential, source_agent: str) -> bool:
         """Add credential if not duplicate. Returns True if added."""
         username = credential.username.strip()
-        domain = credential.domain.strip()
+        # Normalize domain to lowercase for consistency
+        domain = credential.domain.strip().lower()
         password = credential.password.strip()
         if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
             logger.debug(f"Credential rejected: invalid username '{username}' from {source_agent}")
@@ -831,19 +832,26 @@ class SharedRedTeamState:
             logger.debug(f"User rejected: empty username for domain {domain}")
             return False
         normalized = username.strip()
+        # Normalize domain to lowercase for consistency
+        normalized_domain = (domain or "").strip().lower()
         if not normalized or normalized.lower() in {"(none)", "none", "null", "(null)"}:
-            logger.debug(f"User rejected: invalid username '{normalized}' for domain {domain}")
+            logger.debug(
+                f"User rejected: invalid username '{normalized}' for domain {normalized_domain}"
+            )
             return False
         if "/" in normalized or "\\" in normalized or normalized.endswith(".txt"):
-            logger.debug(f"User rejected: path artifact '{normalized}' for domain {domain}")
+            logger.debug(
+                f"User rejected: path artifact '{normalized}' for domain {normalized_domain}"
+            )
             return False
         for existing in self.all_users:
-            if existing.username == normalized and existing.domain == domain:
-                logger.debug(f"User rejected: duplicate {domain}\\{normalized}")
+            existing_domain = (existing.domain or "").lower()
+            if existing.username == normalized and existing_domain == normalized_domain:
+                logger.debug(f"User rejected: duplicate {normalized_domain}\\{normalized}")
                 return False
-        self.all_users.append(User(username=normalized, domain=domain))
-        self.add_domain(domain)
-        logger.debug(f"User added: {domain}\\{normalized}")
+        self.all_users.append(User(username=normalized, domain=normalized_domain))
+        self.add_domain(normalized_domain)
+        logger.debug(f"User added: {normalized_domain}\\{normalized}")
         return True
 
     def add_domain(self, domain: str) -> bool:
@@ -887,18 +895,15 @@ class SharedRedTeamState:
                     f"Hash rejected: duplicate hash for {domain}\\{username} ({hash_type}) from {source_agent}"
                 )
                 return False
-            # For AS-REP and Kerberoast, dedupe by user since each request generates different hash
+            # For AS-REP, dedupe by user since each request generates different hash but same password
+            # NOTE: Don't dedupe Kerberoast by user - same user can have multiple SPNs with different
+            # encryption types (RC4 vs AES), and we want to keep all of them for cracking flexibility
             existing_value = existing.hash_value or ""
             existing_is_asrep = (existing.hash_type or "").strip().lower() in {
                 "as-rep",
                 "asrep",
                 "krb5asrep",
             } or existing_value.startswith("$krb5asrep$")
-            existing_is_kerberoast = (existing.hash_type or "").strip().lower() in {
-                "kerberoast",
-                "krb5tgs",
-                "tgs-rep",
-            } or existing_value.startswith("$krb5tgs$")
 
             if is_asrep and existing_is_asrep:
                 existing_user = (existing.username or "").strip().lower()
@@ -906,14 +911,6 @@ class SharedRedTeamState:
                 if existing_user == username and existing_domain == domain:
                     logger.debug(
                         f"Hash rejected: duplicate AS-REP user {domain}\\{username} from {source_agent}"
-                    )
-                    return False
-            if is_kerberoast and existing_is_kerberoast:
-                existing_user = (existing.username or "").strip().lower()
-                existing_domain = (existing.domain or "").strip().lower()
-                if existing_user == username and existing_domain == domain:
-                    logger.debug(
-                        f"Hash rejected: duplicate Kerberoast user {domain}\\{username} from {source_agent}"
                     )
                     return False
         self.add_domain(hash_obj.domain)

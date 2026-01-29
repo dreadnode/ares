@@ -173,10 +173,10 @@ class CredentialDiscoveryTools(Toolset):
             if "password" not in stripped.lower():
                 continue
 
-            pass_match = re.search(r"Password\s*:\s*([^\s\)]+)", stripped, re.IGNORECASE)
+            pass_match = re.search(r"Password\s*:\s*([^\s()]+)", stripped, re.IGNORECASE)
             if not pass_match:
                 continue
-            password = pass_match.group(1).strip()
+            password = pass_match.group(1).strip().rstrip(".,;:!?()")
 
             username = ""
             account_inline = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)
@@ -208,15 +208,17 @@ class CredentialDiscoveryTools(Toolset):
     def _extract_password_from_description(self, username: str, description: str) -> str | None:
         if not description:
             return None
-        match = re.search(r"(?:password|pass|pwd)\s*[:=]\s*([^\s,;]+)", description, re.IGNORECASE)
+        match = re.search(
+            r"(?:password|pass|pwd)\s*[:=]\s*([^\s,;()]+)", description, re.IGNORECASE
+        )
         if match:
-            return match.group(1)
+            return match.group(1).rstrip(".,;:!?")
         if username:
             user_match = re.search(
-                rf"{re.escape(username)}\s*[:/\-]\s*([^\s,;]+)", description, re.IGNORECASE
+                rf"{re.escape(username)}\s*[:/\-]\s*([^\s,;()]+)", description, re.IGNORECASE
             )
             if user_match:
-                return user_match.group(1)
+                return user_match.group(1).rstrip(".,;:!?")
         return None
 
     def _iter_description_entries(self, raw_output: str) -> list[tuple[str, str]]:

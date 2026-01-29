@@ -216,10 +216,10 @@ class NetworkEnumerationTools(Toolset):
             if "password" not in stripped.lower():
                 continue
 
-            pass_match = re.search(r"Password\s*:\s*([^\s\)]+)", stripped, re.IGNORECASE)
+            pass_match = re.search(r"Password\s*:\s*([^\s()]+)", stripped, re.IGNORECASE)
             if not pass_match:
                 continue
-            password = pass_match.group(1).strip()
+            password = pass_match.group(1).strip().rstrip(".,;:!?()")
 
             username = ""
             account_inline = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)

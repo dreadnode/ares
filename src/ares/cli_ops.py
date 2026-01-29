@@ -396,14 +396,15 @@ async def loot(
                 seen_cred_keys.add(cred_key)
                 unique_creds.append(cred)
 
-        # Deduplicate hashes by normalized domain+username+hash_type
-        seen_hash_keys: set[tuple[str, str, str]] = set()
+        # Deduplicate hashes by normalized domain+username+hash_type+hash_value
+        seen_hash_keys: set[tuple[str, str, str, str]] = set()
         unique_hashes = []
         for h in state.all_hashes:
             hash_key = (
                 h.domain.strip().lower(),
                 h.username.strip().lower(),
                 h.hash_type.strip().lower(),
+                h.hash_value.strip().lower(),
             )
             if hash_key not in seen_hash_keys:
                 seen_hash_keys.add(hash_key)

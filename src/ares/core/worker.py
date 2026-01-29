@@ -664,7 +664,8 @@ def generate_prompt_from_task(  # noqa: PLR0912
             )
         # Check if this is a low_hanging_fruit task
         has_sysvol = any(t in techniques for t in ("sysvol_script_search", "gpp_password_finder"))
-        has_low_hanging = "low_hanging_fruit" in reason.lower() or has_sysvol
+        has_spray = any(t in techniques for t in ("username_as_password", "password_spray"))
+        has_low_hanging = "low_hanging_fruit" in reason.lower() or has_sysvol or has_spray
 
         if has_low_hanging and payload.get("password"):
             # Low hanging fruit with creds - prioritize SYSVOL/GPP
@@ -681,6 +682,54 @@ def generate_prompt_from_task(  # noqa: PLR0912
                 "3. ldap_search_descriptions(...) - check for passwords in LDAP descriptions\n"
                 "4. username_as_password(...) - check for user=password accounts\n\n"
                 "These are HIGH SUCCESS RATE techniques that find hardcoded credentials.\n"
+                "Report any credentials found immediately."
+            )
+            state_context = format_state_context(state, "credential_access", current_target=dc_ip)
+            return base_prompt + state_context
+
+        # Specific username_as_password task (for new users without creds)
+        is_username_spray = "username_as_password" in techniques and "new_users" in reason.lower()
+        if is_username_spray:
+            username = payload.get("username") or ""
+            password = payload.get("password") or ""
+            cred_line = ""
+            if username and password:
+                cred_line = (
+                    f"**Use these credentials for user enumeration:**\n"
+                    f"Username: {username}\n"
+                    f"Password: {password}\n\n"
+                )
+            base_prompt = (
+                "Perform USERNAME_AS_PASSWORD spray to find weak credentials:\n"
+                f"Domain: {payload.get('domain', '')}\n"
+                f"DC IP: {dc_ip or 'N/A'}\n"
+                f"Task ID: {task.task_id}\n\n"
+                f"{cred_line}"
+                "**EXECUTE username_as_password:**\n"
+                f"1. First save users: save_users_to_file(target='{dc_ip}', username='{username}', password='{password}', domain='{payload.get('domain', '')}')\n"
+                f"2. Then spray: username_as_password(target='{dc_ip}', domain='{payload.get('domain', '')}', users_file='/tmp/users.txt')\n\n"
+                "This tests if users have username=password (e.g., hodor:hodor).\n"
+                "Zero lockout risk, one attempt per user.\n"
+                "Report any credentials found immediately."
+            )
+            state_context = format_state_context(state, "credential_access", current_target=dc_ip)
+            return base_prompt + state_context
+
+        # Low hanging fruit WITHOUT credentials - use anonymous/null session techniques
+        if has_low_hanging and not payload.get("password") and not payload.get("hash_value"):
+            base_prompt = (
+                "Perform LOW HANGING FRUIT credential discovery (NO CREDENTIALS):\n"
+                f"Domain: {payload.get('domain', '')}\n"
+                f"DC IP: {dc_ip or 'N/A'}\n"
+                f"Task ID: {task.task_id}\n\n"
+                "**CRITICAL: These techniques work WITHOUT credentials to discover passwords:**\n"
+                "1. username_as_password(target=DC_IP, domain=DOMAIN) - HIGH SUCCESS RATE\n"
+                "   Tests if users have username=password (e.g., hodor:hodor)\n"
+                "   Zero lockout risk, one attempt per user\n\n"
+                "2. password_spray(target=DC_IP, domain=DOMAIN, password='Password1')  # pragma: allowlist secret\n"
+                "   Try common passwords: Password1, Welcome1, Summer2024, Winter2024, Company123\n\n"
+                "3. password_policy(target=DC_IP, domain=DOMAIN) - Check lockout before spraying\n\n"
+                "These are the FIRST techniques to run when you have no credentials.\n"
                 "Report any credentials found immediately."
             )
             state_context = format_state_context(state, "credential_access", current_target=dc_ip)
