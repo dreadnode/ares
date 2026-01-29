@@ -996,11 +996,21 @@ class RedTeamDispatcher:
     def _find_domain_controller_ip(self, domain: str) -> str:
         """Find DC IP for the specified domain."""
         domain_lower = domain.lower() if domain else ""
-        dc_service_tokens = ("88/tcp", "389/tcp", "53/tcp", "kerberos", "ldap")
+        # Port tokens must match at start of service string to avoid
+        # substring issues (e.g., "389/tcp" matching "3389/tcp")
+        dc_port_prefixes = ("88/tcp", "389/tcp", "53/tcp")
+        dc_service_names = ("kerberos", "ldap")
 
         def _has_dc_services(host: Host) -> bool:
-            services = " ".join(host.services).lower()
-            return any(token in services for token in dc_service_tokens)
+            for svc in host.services:
+                svc_lower = svc.lower()
+                # Check if service starts with a DC port
+                if any(svc_lower.startswith(port) for port in dc_port_prefixes):
+                    return True
+                # Check if service contains DC service name
+                if any(name in svc_lower for name in dc_service_names):
+                    return True
+            return False
 
         # Check target first
         if self.shared_state.target and self.shared_state.target.ip:

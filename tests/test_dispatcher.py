@@ -274,3 +274,183 @@ class TestMssqlScanning:
         creds = dispatcher._find_sql_credentials()
 
         assert len(creds) == 5
+
+
+class TestFindDomainControllerIp:
+    """Tests for DC IP detection to prevent substring matching bugs."""
+
+    def test_does_not_match_3389_as_389(self):
+        """Port 3389 (RDP) should NOT match as port 389 (LDAP)."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-1")
+        # sql01 has RDP (3389) but NOT LDAP (389)
+        dispatcher._shared_state.all_hosts.append(
+            Host(
+                ip="10.1.2.146",
+                hostname="sql01.contoso.local",
+                services=["1433/tcp ms-sql-s", "3389/tcp ms-wbt-server", "445/tcp smb"],
+            )
+        )
+        # dc01 is the actual DC with Kerberos services
+        dispatcher._shared_state.all_hosts.append(
+            Host(
+                ip="10.1.2.240",
+                hostname="dc01.contoso.local",
+                services=["88/tcp kerberos-sec", "389/tcp ldap", "53/tcp domain"],
+            )
+        )
+
+        dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
+
+        # Should return dc01 (the actual DC), NOT sql01
+        assert dc_ip == "10.1.2.240"
+
+    def test_matches_exact_port_389(self):
+        """Port 389 should be detected as LDAP."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-2")
+        dispatcher._shared_state.all_hosts.append(
+            Host(
+                ip="10.0.0.1",
+                hostname="dc01.contoso.local",
+                services=["389/tcp ldap", "88/tcp kerberos"],
+            )
+        )
+
+        dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
+
+        assert dc_ip == "10.0.0.1"
+
+    def test_matches_kerberos_service_name(self):
+        """Service containing 'kerberos' should match."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-3")
+        dispatcher._shared_state.all_hosts.append(
+            Host(
+                ip="10.0.0.2",
+                hostname="dc02.contoso.local",
+                services=["88/tcp kerberos-sec"],
+            )
+        )
+
+        dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
+
+        assert dc_ip == "10.0.0.2"
+
+    def test_matches_ldap_service_name(self):
+        """Service containing 'ldap' should match."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-4")
+        dispatcher._shared_state.all_hosts.append(
+            Host(
+                ip="10.0.0.3",
+                hostname="dc03.contoso.local",
+                services=["389/tcp ldap"],
+            )
+        )
+
+        dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
+
+        assert dc_ip == "10.0.0.3"
+
+    def test_host_without_dc_services_not_selected(self):
+        """Host with only RDP/SMB should not be selected as DC."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-5")
+        dispatcher._shared_state.all_hosts.append(
+            Host(
+                ip="10.0.0.4",
+                hostname="workstation.contoso.local",
+                services=["3389/tcp ms-wbt-server", "445/tcp smb", "135/tcp msrpc"],
+            )
+        )
+
+        dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
+
+        # Should return empty - no DC found
+        assert dc_ip == ""
+
+    def test_prefers_host_with_dc_in_hostname(self):
+        """Host with 'dc' in hostname should be preferred."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-6")
+        dispatcher._shared_state.all_hosts.append(
+            Host(
+                ip="10.0.0.5",
+                hostname="app-srv01.contoso.local",
+                services=["88/tcp kerberos", "389/tcp ldap"],
+            )
+        )
+        dispatcher._shared_state.all_hosts.append(
+            Host(
+                ip="10.0.0.6",
+                hostname="dc01.contoso.local",
+                services=["445/tcp smb"],  # Even without DC services
+            )
+        )
+
+        dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
+
+        # Should prefer dc01 due to hostname
+        assert dc_ip == "10.0.0.6"
+
+    def test_multi_domain_scenario(self):
+        """Multi-domain scenario - ensure correct DC detection.
+
+        The critical bug was that sql01 (with port 3389) was incorrectly
+        detected as a DC because '389/tcp' matched as substring of '3389/tcp'.
+        """
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-multi")
+        # Simulate multi-domain environment - sql01 first (has 3389 RDP, NOT a DC)
+        dispatcher._shared_state.all_hosts.extend(
+            [
+                Host(
+                    ip="10.1.2.146",
+                    hostname="sql01.corp.contoso.local",
+                    services=[
+                        "1433/tcp ms-sql-s",
+                        "139/tcp netbios-ssn",
+                        "80/tcp http",
+                        "135/tcp msrpc",
+                        "445/tcp smb",
+                        "3389/tcp ms-wbt-server",
+                    ],
+                ),
+                Host(
+                    ip="10.1.2.240",
+                    hostname="dc01.corp.contoso.local",
+                    services=[
+                        "139/tcp netbios-ssn",
+                        "88/tcp kerberos-sec",
+                        "135/tcp msrpc",
+                        "445/tcp smb",
+                        "3389/tcp ms-wbt-server",
+                        "53/tcp domain",
+                        "389/tcp ldap",
+                    ],
+                ),
+                Host(
+                    ip="10.1.2.183",
+                    hostname="dc01.contoso.local",
+                    services=[
+                        "139/tcp netbios-ssn",
+                        "88/tcp kerberos-sec",
+                        "80/tcp http",
+                        "135/tcp msrpc",
+                        "3389/tcp ms-wbt-server",
+                        "445/tcp smb",
+                        "53/tcp domain",
+                        "389/tcp ldap",
+                    ],
+                ),
+            ]
+        )
+
+        # Test corp.contoso.local -> must be dc01.corp.contoso.local, NOT sql01
+        # This is the critical test - sql01 was incorrectly selected before the fix
+        corp_dc = dispatcher._find_domain_controller_ip("corp.contoso.local")
+        assert corp_dc == "10.1.2.240", (
+            f"Expected dc01.corp.contoso.local (10.1.2.240), got {corp_dc}"
+        )
+        assert corp_dc != "10.1.2.146", "BUG: sql01 selected - 3389 matched as 389!"
