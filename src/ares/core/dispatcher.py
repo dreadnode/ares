@@ -581,16 +581,22 @@ class RedTeamDispatcher:
         # Find any SQL-related credentials we have
         sql_creds = self._find_sql_credentials()
 
+        # Only queue MSSQL vulnerability if we have valid credentials
+        if not sql_creds:
+            logger.info(
+                f"Skipping MSSQL vulnerability for {host.ip} ({host.hostname}) - "
+                "no valid SQL credentials available yet"
+            )
+            return
+
         # Queue MSSQL vulnerability for exploitation
         details: dict[str, Any] = {
             "hostname": host.hostname,
             "services": host.services,
-            "note": "Auto-detected MSSQL service. Check for linked servers and impersonation.",
+            "available_credentials": sql_creds,
+            "note": f"Auto-detected MSSQL service with {len(sql_creds)} potential SQL credential(s). "
+            "Check for linked servers and impersonation.",
         }
-
-        if sql_creds:
-            details["available_credentials"] = sql_creds
-            details["note"] += f" Found {len(sql_creds)} potential SQL credential(s)."
 
         await self.queue_vulnerability(
             vuln_type="mssql_linked_server",
@@ -672,16 +678,22 @@ class RedTeamDispatcher:
             # Find SQL credentials
             sql_creds = self._find_sql_credentials()
 
+            # Only queue if we have valid credentials
+            if not sql_creds:
+                logger.debug(
+                    f"Periodic scan: skipping MSSQL vulnerability for {host.ip} ({host.hostname}) - "
+                    "no valid SQL credentials available"
+                )
+                continue
+
             # Queue MSSQL vulnerability
             details: dict[str, Any] = {
                 "hostname": host.hostname,
                 "services": host.services,
-                "note": "Auto-detected MSSQL service. Check for linked servers and impersonation.",
+                "available_credentials": sql_creds,
+                "note": f"Auto-detected MSSQL service with {len(sql_creds)} potential SQL credential(s). "
+                "Check for linked servers and impersonation.",
             }
-
-            if sql_creds:
-                details["available_credentials"] = sql_creds
-                details["note"] += f" Found {len(sql_creds)} potential SQL credential(s)."
 
             await self.queue_vulnerability(
                 vuln_type="mssql_linked_server",
@@ -691,7 +703,8 @@ class RedTeamDispatcher:
             )
             queued += 1
             logger.warning(
-                f"Periodic scan: queued MSSQL vulnerability for {host.ip} ({host.hostname})"
+                f"Periodic scan: queued MSSQL vulnerability for {host.ip} ({host.hostname}) "
+                f"with {len(sql_creds)} SQL credentials"
             )
 
         return queued
