@@ -281,6 +281,38 @@ class TestCleanupOrphanedTasks:
         assert "task_001" in result
 
 
+class TestScanForMssqlHosts:
+    """Tests for scan_for_mssql_hosts method."""
+
+    @pytest.mark.asyncio
+    async def test_scan_no_hosts_returns_no_new_found(self, orchestrator_tools, shared_state):
+        """Test scan when no hosts exist."""
+        orchestrator_tools.dispatcher.scan_hosts_for_mssql = AsyncMock(return_value=0)
+
+        result = await orchestrator_tools.scan_for_mssql_hosts()
+
+        assert "no new MSSQL hosts found" in result
+
+    @pytest.mark.asyncio
+    async def test_scan_queues_new_mssql_vulnerabilities(self, orchestrator_tools, shared_state):
+        """Test scan queues vulnerabilities when MSSQL hosts found."""
+        orchestrator_tools.dispatcher.scan_hosts_for_mssql = AsyncMock(return_value=2)
+
+        result = await orchestrator_tools.scan_for_mssql_hosts()
+
+        assert "queued 2 new MSSQL vulnerability" in result
+        assert "get_vulnerability_queue_status()" in result
+
+    @pytest.mark.asyncio
+    async def test_scan_single_mssql_host(self, orchestrator_tools, shared_state):
+        """Test scan with single MSSQL host."""
+        orchestrator_tools.dispatcher.scan_hosts_for_mssql = AsyncMock(return_value=1)
+
+        result = await orchestrator_tools.scan_for_mssql_hosts()
+
+        assert "queued 1 new MSSQL vulnerability" in result
+
+
 class TestCredentialHandling:
     """Tests for credential guardrails and reporting."""
 

@@ -204,3 +204,78 @@ async def test_process_operation_request_missing_model_publishes_failed():
     calls = service._publish_operation_status.await_args_list
     assert calls[-1].args[1] == "failed"
     assert "No model specified" in calls[-1].args[2]["error"]
+
+
+@pytest.mark.asyncio
+async def test_process_operation_request_fetches_env_vars_from_separate_key():
+    """Test that env_vars are fetched from separate Redis key when not in request."""
+    service = OrchestratorService(redis_url="redis://", namespace="test")
+    service._publish_operation_status = AsyncMock()
+
+    # Create a mock task queue with client
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(
+        return_value=json.dumps({"OPENAI_API_KEY": "test-key"}).encode()  # pragma: allowlist secret
+    )
+    mock_client.delete = AsyncMock()
+    service.task_queue = SimpleNamespace(_client=mock_client)
+
+    request_data = {
+        "operation_id": "op-env-separate",
+        "target_domain": "contoso.local",
+        "target_ips": ["192.168.56.1"],
+        "model": "test-model",
+        # Note: no env_vars in request - should be fetched from Redis
+    }
+
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch(
+            "ares.core.orchestrator_service.run_multi_agent_operation",
+            new=AsyncMock(return_value={"ok": True}),
+        ),
+    ):
+        await service._process_operation_request(request_data)
+        # Verify env var was set from the separate key
+        assert os.environ.get("OPENAI_API_KEY") == "test-key"  # pragma: allowlist secret
+
+    # Verify the separate key was fetched
+    mock_client.get.assert_awaited_with("ares:operation:op-env-separate:env_vars")
+    # Verify the key was deleted after reading (security)
+    mock_client.delete.assert_awaited_with("ares:operation:op-env-separate:env_vars")
+
+
+@pytest.mark.asyncio
+async def test_process_operation_request_uses_inline_env_vars_when_present():
+    """Test that inline env_vars in request take precedence (backward compatibility)."""
+    service = OrchestratorService(redis_url="redis://", namespace="test")
+    service._publish_operation_status = AsyncMock()
+
+    # Create a mock task queue (should not be called for env_vars)
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock()
+    service.task_queue = SimpleNamespace(_client=mock_client)
+
+    request_data = {
+        "operation_id": "op-env-inline",
+        "target_domain": "contoso.local",
+        "target_ips": ["192.168.56.1"],
+        "model": "test-model",
+        "env_vars": {"INLINE_KEY": "inline-value"},  # inline takes precedence
+    }
+
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch(
+            "ares.core.orchestrator_service.run_multi_agent_operation",
+            new=AsyncMock(return_value={"ok": True}),
+        ),
+    ):
+        await service._process_operation_request(request_data)
+        # Verify inline env var was used
+        assert os.environ.get("INLINE_KEY") == "inline-value"
+
+    # Should NOT fetch from separate key when env_vars present in request
+    # The get call should not have been made for env_vars key
+    for call in mock_client.get.await_args_list:
+        assert "env_vars" not in str(call)

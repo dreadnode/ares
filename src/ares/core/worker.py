@@ -15,6 +15,7 @@ import os
 import random
 import re
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -666,6 +667,9 @@ class RedisWorkerAgent:
         self._pointer_switched = False
         self._run_agent_in_thread = self.role == AgentRole.ACL
         self._state_refresh_client = None
+        # Threaded heartbeat to avoid blocking by sync tool execution
+        self._heartbeat_thread: threading.Thread | None = None
+        self._heartbeat_stop_event = threading.Event()
 
     def _run_agent_sync(self, prompt: str) -> Any:
         """Run the async agent in a dedicated event loop (thread-safe helper)."""
@@ -764,20 +768,31 @@ class RedisWorkerAgent:
         """Start the Redis worker loop."""
         self._running = True
         self._pointer_switched = False
+        self._heartbeat_stop_event.clear()
         logger.info(f"Redis worker {self.agent_name} starting...")
 
-        # Start heartbeat task
-        heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        # Start heartbeat in a separate thread to avoid blocking by sync tool execution.
+        # Tools call blocking code (future.result()) which prevents asyncio tasks from running.
+        self._heartbeat_thread = threading.Thread(
+            target=self._threaded_heartbeat_loop,
+            name=f"{self.agent_name}-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+        logger.debug(f"Heartbeat thread started for {self.agent_name}")
 
         try:
             await self._worker_loop()
         finally:
             self._running = False
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
+            # Signal heartbeat thread to stop and wait for it
+            self._heartbeat_stop_event.set()
+            if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+                self._heartbeat_thread.join(timeout=5.0)
+                if self._heartbeat_thread.is_alive():
+                    logger.warning(
+                        f"Heartbeat thread for {self.agent_name} did not stop gracefully"
+                    )
 
     async def stop(self) -> None:
         """Stop the worker loop."""
@@ -1663,47 +1678,84 @@ class RedisWorkerAgent:
         except Exception as e:
             logger.warning(f"[{self.agent_name}] Failed to write task trace: {e}")
 
-    async def _heartbeat_loop(self) -> None:
-        """Send heartbeats to Redis with automatic reconnection on failure."""
+    def _threaded_heartbeat_loop(self) -> None:
+        """Send heartbeats from a dedicated thread to avoid blocking by sync tool execution.
+
+        Tools call blocking code (e.g., future.result() in remote.py) which prevents
+        asyncio tasks from running. By running heartbeats in a separate thread with
+        its own event loop, we ensure heartbeats continue even when the main thread
+        is blocked by tool execution.
+        """
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        # Create a dedicated task queue for heartbeats (can't share async connections across threads)
+        heartbeat_queue: RedisTaskQueue | None = None
         retry_delay = 1.0
         max_retry_delay = 60.0
 
-        while self._running:
-            try:
-                status = "busy" if self._current_task else "idle"
-                await self.task_queue.send_heartbeat(
-                    agent_name=self.agent_name,
-                    status=status,
-                    current_task=self._current_task,
-                    pod_name=self.pod_name,
-                    role=self.role.value,
-                    operation_id=self.operation_id,
-                )
-                # Reset retry delay on success
-                retry_delay = 1.0
+        try:
+            while not self._heartbeat_stop_event.is_set() and self._running:
+                try:
+                    # Lazily connect on first use or reconnect if needed
+                    if heartbeat_queue is None or not heartbeat_queue._connected:
+                        redis_url = self.redis_url or get_redis_url()
+                        heartbeat_queue = RedisTaskQueue(redis_url)
+                        loop.run_until_complete(heartbeat_queue.connect())
+                        logger.debug(f"Heartbeat thread connected to Redis for {self.agent_name}")
 
-            except Exception as e:
-                error_str = str(e).lower()
-                is_connection_error = any(
-                    keyword in error_str
-                    for keyword in [
-                        "connection",
-                        "connect",
-                        "closed",
-                        "timeout",
-                        "broken pipe",
-                        "reset",
-                    ]
-                )
+                    status = "busy" if self._current_task else "idle"
+                    loop.run_until_complete(
+                        heartbeat_queue.send_heartbeat(
+                            agent_name=self.agent_name,
+                            status=status,
+                            current_task=self._current_task,
+                            pod_name=self.pod_name,
+                            role=self.role.value,
+                            operation_id=self.operation_id,
+                        )
+                    )
+                    # Reset retry delay on success
+                    retry_delay = 1.0
 
-                if is_connection_error:
-                    logger.warning(f"Heartbeat connection error, will retry: {e}")
-                    await asyncio.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 2, max_retry_delay)
-                    continue  # Skip the regular sleep and retry immediately
-                logger.warning(f"Heartbeat failed: {e}")
+                except Exception as e:
+                    error_str = str(e).lower()
+                    is_connection_error = any(
+                        keyword in error_str
+                        for keyword in [
+                            "connection",
+                            "connect",
+                            "closed",
+                            "timeout",
+                            "broken pipe",
+                            "reset",
+                        ]
+                    )
 
-            await asyncio.sleep(15)
+                    if is_connection_error:
+                        logger.warning(f"Heartbeat connection error, will retry: {e}")
+                        # Mark queue as disconnected to force reconnection
+                        if heartbeat_queue:
+                            heartbeat_queue._connected = False
+                        # Wait with exponential backoff before retry
+                        self._heartbeat_stop_event.wait(retry_delay)
+                        retry_delay = min(retry_delay * 2, max_retry_delay)
+                        continue  # Skip the regular sleep and retry immediately
+                    logger.warning(f"Heartbeat failed: {e}")
+
+                # Wait 15 seconds or until stop event is set
+                self._heartbeat_stop_event.wait(15)
+
+        finally:
+            # Clean up
+            if heartbeat_queue:
+                try:
+                    loop.run_until_complete(heartbeat_queue.disconnect())
+                except Exception:
+                    pass
+            loop.close()
+            logger.debug(f"Heartbeat thread stopped for {self.agent_name}")
 
 
 class WorkerAgent:
@@ -1739,6 +1791,9 @@ class WorkerAgent:
         self._current_task: str | None = None
         self._tasks_completed = 0
         self._run_agent_in_thread = self.role == AgentRole.ACL
+        # Threaded heartbeat to avoid blocking by sync tool execution
+        self._heartbeat_thread: threading.Thread | None = None
+        self._heartbeat_stop_event = threading.Event()
 
     def _run_agent_sync(self, prompt: str) -> Any:
         """Run the async agent in a dedicated event loop (thread-safe helper)."""
@@ -1754,20 +1809,31 @@ class WorkerAgent:
         """Start the worker loop."""
         self._running = True
         self._pointer_switched = False
+        self._heartbeat_stop_event.clear()
         logger.info(f"Worker {self.agent_name} starting...")
 
-        # Start heartbeat task
-        heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        # Start heartbeat in a separate thread to avoid blocking by sync tool execution.
+        # Tools call blocking code (future.result()) which prevents asyncio tasks from running.
+        self._heartbeat_thread = threading.Thread(
+            target=self._threaded_heartbeat_loop,
+            name=f"{self.agent_name}-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+        logger.debug(f"Heartbeat thread started for {self.agent_name}")
 
         try:
             await self._worker_loop()
         finally:
             self._running = False
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
+            # Signal heartbeat thread to stop and wait for it
+            self._heartbeat_stop_event.set()
+            if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+                self._heartbeat_thread.join(timeout=5.0)
+                if self._heartbeat_thread.is_alive():
+                    logger.warning(
+                        f"Heartbeat thread for {self.agent_name} did not stop gracefully"
+                    )
 
     async def stop(self) -> None:
         """Stop the worker loop."""
@@ -1935,44 +2001,63 @@ class WorkerAgent:
             return str(result.content)
         return str(result)
 
-    async def _heartbeat_loop(self) -> None:
-        """Send periodic heartbeats to dispatcher with automatic reconnection on failure."""
+    def _threaded_heartbeat_loop(self) -> None:
+        """Send heartbeats from a dedicated thread to avoid blocking by sync tool execution.
+
+        Tools call blocking code (e.g., future.result() in remote.py) which prevents
+        asyncio tasks from running. By running heartbeats in a separate thread with
+        its own event loop, we ensure heartbeats continue even when the main thread
+        is blocked by tool execution.
+        """
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
         retry_delay = 1.0
         max_retry_delay = 60.0
 
-        while self._running:
-            try:
-                status = "busy" if self._current_task else "idle"
-                await self.dispatcher.heartbeat(
-                    agent_name=self.agent_name,
-                    status=status,
-                    current_task=self._current_task,
-                )
-                # Reset retry delay on success
-                retry_delay = 1.0
+        try:
+            while not self._heartbeat_stop_event.is_set() and self._running:
+                try:
+                    status = "busy" if self._current_task else "idle"
+                    loop.run_until_complete(
+                        self.dispatcher.heartbeat(
+                            agent_name=self.agent_name,
+                            status=status,
+                            current_task=self._current_task,
+                        )
+                    )
+                    # Reset retry delay on success
+                    retry_delay = 1.0
 
-            except Exception as e:
-                error_str = str(e).lower()
-                is_connection_error = any(
-                    keyword in error_str
-                    for keyword in [
-                        "connection",
-                        "connect",
-                        "closed",
-                        "timeout",
-                        "broken pipe",
-                        "reset",
-                    ]
-                )
+                except Exception as e:
+                    error_str = str(e).lower()
+                    is_connection_error = any(
+                        keyword in error_str
+                        for keyword in [
+                            "connection",
+                            "connect",
+                            "closed",
+                            "timeout",
+                            "broken pipe",
+                            "reset",
+                        ]
+                    )
 
-                if is_connection_error:
-                    logger.warning(f"Heartbeat connection error, will retry: {e}")
-                    await asyncio.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 2, max_retry_delay)
-                    continue  # Skip the regular sleep and retry immediately
-                logger.warning(f"Heartbeat failed: {e}")
+                    if is_connection_error:
+                        logger.warning(f"Heartbeat connection error, will retry: {e}")
+                        # Wait with exponential backoff before retry
+                        self._heartbeat_stop_event.wait(retry_delay)
+                        retry_delay = min(retry_delay * 2, max_retry_delay)
+                        continue  # Skip the regular sleep and retry immediately
+                    logger.warning(f"Heartbeat failed: {e}")
 
-            await asyncio.sleep(15)
+                # Wait 15 seconds or until stop event is set
+                self._heartbeat_stop_event.wait(15)
+
+        finally:
+            loop.close()
+            logger.debug(f"Heartbeat thread stopped for {self.agent_name}")
 
 
 async def run_worker(  # noqa: PLR0912

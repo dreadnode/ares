@@ -572,7 +572,7 @@ class RedTeamDispatcher:
             return
 
         # Check if we already have an MSSQL vuln queued for this host
-        existing_vulns = self.shared_state.vulnerabilities
+        existing_vulns = self.shared_state.discovered_vulnerabilities.values()
         for vuln in existing_vulns:
             if vuln.target == host.ip and vuln.vuln_type.startswith("mssql_"):
                 logger.debug(f"MSSQL vulnerability already queued for {host.ip}")
@@ -614,7 +614,7 @@ class RedTeamDispatcher:
         sql_creds: list[dict[str, str]] = []
         seen: set[str] = set()
 
-        for cred in self.shared_state.credentials:
+        for cred in self.shared_state.all_credentials:
             key = f"{cred.domain}\\{cred.username}"
             if key in seen:
                 continue
@@ -663,7 +663,7 @@ class RedTeamDispatcher:
             # Check if we already have an MSSQL vuln queued for this host
             already_queued = any(
                 vuln.target == host.ip and vuln.vuln_type.startswith("mssql_")
-                for vuln in self.shared_state.vulnerabilities
+                for vuln in self.shared_state.discovered_vulnerabilities.values()
             )
 
             if already_queued:

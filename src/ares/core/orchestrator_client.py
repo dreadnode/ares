@@ -94,6 +94,16 @@ async def submit_operation(
         if not task_queue._client:
             raise RuntimeError("Redis connection not established")
 
+        # Store env_vars separately to avoid exposing secrets in the main queue
+        # The orchestrator will read and delete this key when processing
+        if env_vars:
+            env_vars_key = f"ares:operation:{operation_id}:env_vars"
+            await task_queue._client.set(env_vars_key, json.dumps(env_vars))
+            # Set TTL of 1 hour in case operation is never processed
+            await task_queue._client.expire(env_vars_key, 3600)
+            # Remove env_vars from request - orchestrator will fetch from separate key
+            request = {k: v for k, v in request.items() if k != "env_vars"}
+
         await task_queue._client.rpush(operations_queue, json.dumps(request))
         logger.success(f"Operation {operation_id} submitted to orchestrator service")
 

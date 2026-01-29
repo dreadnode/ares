@@ -25,7 +25,7 @@ def red_team_state() -> RedTeamState:
     """Create a basic red team state for testing."""
     return RedTeamState(
         operation_id="op-test-sysvol",
-        target=Target(ip="192.168.56.10", hostname="dc01", domain="test.local"),
+        target=Target(ip="192.168.56.10", hostname="dc01", domain="contoso.local"),
         started_at=datetime.now(timezone.utc),
         stage=InvestigationStage.TRIAGE,
         hosts=[],
@@ -60,7 +60,7 @@ class TestSysvolScriptSearch:
             target="192.168.56.10",
             username="admin",
             password="password",  # Placeholder  # pragma: allowlist secret
-            domain="test.local",
+            domain="contoso.local",
         )
 
         assert "placeholder password" in result.lower()
@@ -78,7 +78,7 @@ class TestSysvolScriptSearch:
                 target="192.168.56.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
             )
 
         assert "No obvious passwords found" in result
@@ -110,7 +110,7 @@ class TestSysvolScriptSearch:
                 target="192.168.56.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
             )
 
         # If password found, should contain alert
@@ -122,7 +122,7 @@ class TestSysvolScriptSearch:
         tools = SharePilferingTools()
         tools.set_state(shared_state)
 
-        script_content = r"net use * \\server\share /user:DOMAIN\svc_backup P@ssw0rd123"
+        script_content = r"net use * \\server\share /user:CONTOSO\svc-backup P@ssw0rd123"
 
         with patch("ares.tools.red.credential_discovery.run_tool") as mock_run:
 
@@ -144,14 +144,14 @@ class TestSysvolScriptSearch:
                 target="192.168.56.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
             )
 
         # Check if credentials were extracted
         if "POTENTIAL PASSWORDS FOUND" in result:
             # Credential should be added to state
             creds = shared_state.all_credentials
-            svc_backup_creds = [c for c in creds if c.username == "svc_backup"]
+            svc_backup_creds = [c for c in creds if c.username == "svc-backup"]
             if svc_backup_creds:
                 assert svc_backup_creds[0].password == "P@ssw0rd123"  # pragma: allowlist secret
 
@@ -167,7 +167,7 @@ class TestSysvolScriptSearch:
                 target="192.168.56.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
             )
 
         assert "failed" in result.lower()
@@ -194,7 +194,7 @@ class TestSysvolScriptSearch:
                 target="192.168.56.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
             )
 
         # Should search for common script extensions
@@ -220,7 +220,7 @@ class TestSysvolScriptSearchPatterns:
                 target="192.168.56.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
             )
 
         # Should process without error
@@ -238,7 +238,7 @@ class TestSysvolScriptSearchPatterns:
                 target="192.168.56.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
             )
 
         assert result is not None
@@ -255,7 +255,175 @@ class TestSysvolScriptSearchPatterns:
                 target="192.168.56.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
             )
 
         assert result is not None
+
+    def test_powershell_variable_same_line(self, shared_state: SharedRedTeamState):
+        """Should extract credentials from PowerShell $var = 'value' format on same line."""
+        tools = SharePilferingTools()
+        tools.set_state(shared_state)
+
+        # PowerShell format with both on same line
+        script_content = (
+            '$user = "CONTOSO\\svc-sql"; $password = "SuperSecret123"'  # pragma: allowlist secret
+        )
+
+        with (
+            patch("ares.tools.red.credential_discovery.run_tool") as mock_run,
+            patch("ares.tools.red.credential_discovery.store_remote_artifact") as mock_store,
+        ):
+            mock_store.return_value = True
+
+            def side_effect(cmd, timeout_seconds=300):
+                cmd_str = " ".join(cmd)
+                if "ls" in cmd_str and "*.ps1" in cmd_str:
+                    return ("script.ps1", "", 0)
+                if "get" in cmd_str:
+                    return ("", "", 0)
+                if "grep" in cmd_str:
+                    return (script_content, "", 0)
+                if "netexec" in cmd_str:
+                    return ("", "", 0)
+                return ("", "", 0)
+
+            mock_run.side_effect = side_effect
+
+            result = tools.sysvol_script_search(
+                target="192.168.56.10",
+                username="admin",
+                password="RealP@ss123!",  # pragma: allowlist secret
+                domain="contoso.local",
+            )
+
+        # Should find credentials
+        assert "POTENTIAL PASSWORDS FOUND" in result
+        creds = [c for c in shared_state.all_credentials if c.username == "svc-sql"]
+        assert len(creds) == 1
+        assert creds[0].password == "SuperSecret123"  # pragma: allowlist secret
+        assert creds[0].domain == "CONTOSO"
+
+    def test_powershell_variable_multi_line(self, shared_state: SharedRedTeamState):
+        """Should extract credentials from PowerShell vars on separate lines."""
+        tools = SharePilferingTools()
+        tools.set_state(shared_state)
+
+        with (
+            patch("ares.tools.red.credential_discovery.run_tool") as mock_run,
+            patch("ares.tools.red.credential_discovery.store_remote_artifact") as mock_store,
+        ):
+            mock_store.return_value = True
+
+            def side_effect(cmd, timeout_seconds=300):
+                cmd_str = " ".join(cmd)
+                if "ls" in cmd_str and "*.ps1" in cmd_str:
+                    return ("script.ps1", "", 0)
+                if "get" in cmd_str:
+                    return ("", "", 0)
+                if "grep" in cmd_str:
+                    # Return both lines (simulating grep with context or both matching)
+                    return (
+                        '$user = "CONTOSO\\alans"\n$password = "D1rect0r2024!"',  # pragma: allowlist secret
+                        "",
+                        0,
+                    )
+                if "netexec" in cmd_str:
+                    return ("", "", 0)
+                return ("", "", 0)
+
+            mock_run.side_effect = side_effect
+
+            result = tools.sysvol_script_search(
+                target="192.168.56.10",
+                username="admin",
+                password="RealP@ss123!",  # pragma: allowlist secret
+                domain="contoso.local",
+            )
+
+        # Should find the credential
+        assert "POTENTIAL PASSWORDS FOUND" in result
+        creds = [c for c in shared_state.all_credentials if c.username == "alans"]
+        assert len(creds) == 1, f"Expected 1 cred, got {len(creds)}: {shared_state.all_credentials}"
+        assert creds[0].password == "D1rect0r2024!"  # pragma: allowlist secret
+        assert creds[0].domain == "CONTOSO"
+
+    def test_extracts_domain_from_user_variable(self, shared_state: SharedRedTeamState):
+        """Should correctly parse DOMAIN\\user format from $user variable."""
+        tools = SharePilferingTools()
+        tools.set_state(shared_state)
+
+        script_content = (
+            '$user = "CONTOSO\\karimm"\n$password = "C0ntr0ller#2024"'  # pragma: allowlist secret
+        )
+
+        with (
+            patch("ares.tools.red.credential_discovery.run_tool") as mock_run,
+            patch("ares.tools.red.credential_discovery.store_remote_artifact") as mock_store,
+        ):
+            mock_store.return_value = True
+
+            def side_effect(cmd, timeout_seconds=300):
+                cmd_str = " ".join(cmd)
+                if "ls" in cmd_str and "*.ps1" in cmd_str:
+                    return ("creds.ps1", "", 0)
+                if "get" in cmd_str:
+                    return ("", "", 0)
+                if "grep" in cmd_str:
+                    return (script_content, "", 0)
+                if "netexec" in cmd_str:
+                    return ("", "", 0)
+                return ("", "", 0)
+
+            mock_run.side_effect = side_effect
+
+            tools.sysvol_script_search(
+                target="192.168.56.10",
+                username="admin",
+                password="RealP@ss123!",  # pragma: allowlist secret
+                domain="contoso.local",
+            )
+
+        creds = [c for c in shared_state.all_credentials if c.username == "karimm"]
+        assert len(creds) == 1
+        assert creds[0].domain == "CONTOSO"
+        assert creds[0].password == "C0ntr0ller#2024"  # pragma: allowlist secret
+
+    def test_credential_added_to_shared_state(self, shared_state: SharedRedTeamState):
+        """Credentials found should be added to shared state for all agents."""
+        tools = SharePilferingTools()
+        tools.set_state(shared_state)
+
+        initial_cred_count = len(shared_state.all_credentials)
+
+        script_content = "user = danj\npassword = P@ssword2024!"
+
+        with (
+            patch("ares.tools.red.credential_discovery.run_tool") as mock_run,
+            patch("ares.tools.red.credential_discovery.store_remote_artifact") as mock_store,
+        ):
+            mock_store.return_value = True
+
+            def side_effect(cmd, timeout_seconds=300):
+                cmd_str = " ".join(cmd)
+                if "ls" in cmd_str and "*.bat" in cmd_str:
+                    return ("setup.bat", "", 0)
+                if "get" in cmd_str:
+                    return ("", "", 0)
+                if "grep" in cmd_str:
+                    return (script_content, "", 0)
+                if "netexec" in cmd_str:
+                    return ("", "", 0)
+                return ("", "", 0)
+
+            mock_run.side_effect = side_effect
+
+            tools.sysvol_script_search(
+                target="192.168.56.10",
+                username="admin",
+                password="RealP@ss123!",  # pragma: allowlist secret
+                domain="contoso.local",
+            )
+
+        # Should have added credentials
+        assert len(shared_state.all_credentials) > initial_cred_count

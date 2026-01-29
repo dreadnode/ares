@@ -656,7 +656,7 @@ class TestOrchestratorWorkerFlow:
             ),
             dispatcher.request_acl_analysis(
                 target_user="user1",
-                domain="test.local",
+                domain="contoso.local",
                 source_agent="orchestrator",
             ),
         )

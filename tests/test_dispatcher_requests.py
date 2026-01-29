@@ -43,7 +43,7 @@ class TestReconRequestInMemory:
         # Submit recon request
         task_id = await dispatcher.request_recon(
             source_agent="orchestrator",
-            domain="test.local",
+            domain="contoso.local",
             target_ips=["10.0.0.1", "10.0.0.2"],
             username="testuser",
             password="testpass",  # pragma: allowlist secret  # pragma: allowlist secret
@@ -62,7 +62,7 @@ class TestReconRequestInMemory:
         assert isinstance(msg, ReconRequest)
         assert msg.type.value == "recon_request"
         assert msg.task_id == task_id
-        assert msg.domain == "test.local"
+        assert msg.domain == "contoso.local"
         assert msg.target_ips == ["10.0.0.1", "10.0.0.2"]
         assert msg.username == "testuser"
         assert msg.password == "testpass"  # pragma: allowlist secret
@@ -78,7 +78,7 @@ class TestReconRequestInMemory:
         # Don't register any agent
         task_id = await dispatcher.request_recon(
             source_agent="orchestrator",
-            domain="test.local",
+            domain="contoso.local",
         )
 
         assert task_id == ""
@@ -99,7 +99,7 @@ class TestReconRequestInMemory:
 
         task_id = await dispatcher.request_recon(
             source_agent="orchestrator",
-            domain="test.local",
+            domain="contoso.local",
             target_ips=["10.0.0.1"],
         )
 
@@ -124,7 +124,7 @@ class TestReconRequestInMemory:
 
         task_id = await dispatcher.request_recon(
             source_agent="orchestrator",
-            domain="test.local",
+            domain="contoso.local",
             username="admin",
             hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
         )
@@ -157,7 +157,7 @@ class TestCredentialAccessRequestInMemory:
 
         task_id = await dispatcher.request_credential_access(
             source_agent="orchestrator",
-            domain="test.local",
+            domain="contoso.local",
             target_ips=["10.0.0.5"],
             username="testuser",
             password="testpass",  # pragma: allowlist secret

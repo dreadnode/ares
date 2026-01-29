@@ -409,13 +409,25 @@ class OrchestratorService:
         except Exception as e:
             logger.warning(f"Failed to persist model overrides for {operation_id}: {e}")
 
-    async def _process_operation_request(self, request_data: dict[str, Any]) -> None:
+    async def _process_operation_request(self, request_data: dict[str, Any]) -> None:  # noqa: PLR0912
         """Process an operation request.
 
         Args:
             request_data: Operation request data from Redis
         """
         try:
+            # Fetch env_vars from separate key if not in request (security: secrets stored separately)
+            if not request_data.get("env_vars") and request_data.get("operation_id"):
+                env_vars_key = f"ares:operation:{request_data['operation_id']}:env_vars"
+                if self.task_queue and self.task_queue._client:
+                    env_vars_data = await self.task_queue._client.get(env_vars_key)
+                    if env_vars_data:
+                        env_vars_str = self._decode_redis_value(env_vars_data)
+                        request_data["env_vars"] = json.loads(env_vars_str)
+                        # Delete the key immediately after reading to minimize exposure
+                        await self.task_queue._client.delete(env_vars_key)
+                        logger.debug(f"Loaded and deleted env_vars from {env_vars_key}")
+
             self._log_env_vars(request_data.get("env_vars"))
 
             # Parse request

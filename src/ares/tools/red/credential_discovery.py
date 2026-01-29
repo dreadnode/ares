@@ -1682,11 +1682,15 @@ class SharePilferingTools(Toolset):
     """Tools for searching SMB shares for sensitive files and credentials."""
 
     state: AnyRedTeamState | None = None
+    dispatcher: Any | None = None
     _PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = PLACEHOLDER_PASSWORDS
 
     def set_state(self, state: AnyRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
+
+    def set_dispatcher(self, dispatcher) -> None:
+        self.dispatcher = dispatcher
 
     def _resolve_password(
         self,
@@ -1695,6 +1699,25 @@ class SharePilferingTools(Toolset):
         password: str | None,
     ) -> str | None:
         return resolve_password(self.state, username, domain, password)
+
+    def _add_credential(
+        self,
+        username: str,
+        password: str,
+        domain: str,
+        source: str,
+        is_admin: bool = False,
+    ) -> None:
+        if not self.state or not username:
+            return
+        cred = Credential(
+            username=username,
+            password=password,
+            domain=domain,
+            source=source,
+            is_admin=is_admin,
+        )
+        add_credential_to_state(self.state, cred, "credential_access", self.dispatcher)
 
     @dn.tool_method
     def smbclient_spider(
@@ -1999,26 +2022,38 @@ class SharePilferingTools(Toolset):
                             "sysvol_script",
                         )
 
-                    # Look for patterns like: password=value or pwd:value
+                    # Look for patterns like: password=value, pwd:value, $password="value"  # pragma: allowlist secret
                     pwd_match = re.search(
-                        r"(?:password|passwd|pwd)\s*[=:]\s*[\"']?([^\s\"']+)[\"']?",
+                        r"(?:\$?(?:password|passwd|pwd))\s*[=:]\s*[\"']?([^\s\"']+)[\"']?",
                         line,
                         re.IGNORECASE,
                     )
                     if pwd_match:
                         found_pass = pwd_match.group(1)
-                        # Look for associated username on same line
+                        # Look for associated username - first on same line
                         user_match = re.search(
-                            r"(?:user|username|usr)\s*[=:]\s*[\"']?([^\s\"']+)[\"']?",
+                            r"(?:\$?(?:user|username|usr))\s*[=:]\s*[\"']?([^\s\"']+)[\"']?",
                             line,
                             re.IGNORECASE,
                         )
+                        # If not found on same line, search full output (handles multi-line scripts)
+                        if not user_match:
+                            user_match = re.search(
+                                r"(?:\$?(?:user|username|usr))\s*[=:]\s*[\"']?([^\s\"']+)[\"']?",
+                                credential_output,
+                                re.IGNORECASE,
+                            )
                         if user_match:
                             found_user = user_match.group(1)
+                            # Handle DOMAIN\user format
+                            if "\\" in found_user:
+                                found_domain, found_user = found_user.rsplit("\\", 1)
+                            else:
+                                found_domain = domain
                             self._add_credential(
                                 found_user,
                                 found_pass,
-                                domain,
+                                found_domain,
                                 "sysvol_script",
                             )
 

@@ -111,6 +111,7 @@ Constrained -> queue_vulnerability_for_exploitation(vuln_type="constrained_deleg
 ```
 Port 1433 open -> queue_vulnerability_for_exploitation(vuln_type="mssql_linked_server", ...)
 ```
+**IMPORTANT:** Call `scan_for_mssql_hosts()` periodically to auto-detect MSSQL services discovered by workers!
 
 ## Coordination Rules
 
@@ -121,11 +122,13 @@ Port 1433 open -> queue_vulnerability_for_exploitation(vuln_type="mssql_linked_s
 
 2. **CRITICAL: Credential Expansion Loop**
    - EVERY TIME you find ANY credential:
-     a. dispatch_credential_access for secretsdump on ALL DCs
-     b. dispatch_credential_access for kerberoast
-     c. dispatch_credential_access for asrep_roast
-     d. dispatch_crack_hash for any new hashes
-     e. Repeat with newly cracked credentials
+     a. **FIRST**: dispatch_credential_access(task_type="low_hanging_fruit") for GPP/SYSVOL passwords
+     b. dispatch_credential_access for secretsdump on ALL DCs
+     c. dispatch_credential_access for kerberoast
+     d. dispatch_credential_access for asrep_roast
+     e. dispatch_crack_hash for any new hashes
+     f. **PERIODICALLY**: scan_for_mssql_hosts() to detect SQL servers
+     g. Repeat with newly cracked credentials
 
 3. **Use Queue for Vulnerabilities**
    - ALWAYS use queue_vulnerability_for_exploitation() for ADCS, delegation, MSSQL

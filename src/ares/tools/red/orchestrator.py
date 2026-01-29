@@ -159,8 +159,8 @@ class OrchestratorTools(Toolset):
         techniques = technique_map.get(task_type, [task_type])
 
         # Get domain from shared state if not provided
-        if not domain and self.shared_state.domains:
-            domain = next(iter(self.shared_state.domains))
+        if not domain and self.shared_state.all_domains:
+            domain = next(iter(self.shared_state.all_domains))
 
         task_id = await self.dispatcher.request_recon(
             source_agent=self._agent_name,
@@ -288,8 +288,8 @@ class OrchestratorTools(Toolset):
         techniques = technique_map.get(task_type, [task_type])
 
         # Get domain from shared state if not provided
-        if not domain and self.shared_state.domains:
-            domain = next(iter(self.shared_state.domains))
+        if not domain and self.shared_state.all_domains:
+            domain = next(iter(self.shared_state.all_domains))
 
         task_id = await self.dispatcher.request_credential_access(
             source_agent=self._agent_name,
@@ -1179,6 +1179,29 @@ class OrchestratorTools(Toolset):
             lines.append(f"\n✓ Succeeded: {len(status['succeeded'])} vulnerabilities")
 
         return "\n".join(lines)
+
+    @dn.tool_method
+    async def scan_for_mssql_hosts(self) -> str:
+        """
+        Scan all discovered hosts for MSSQL services and auto-queue vulnerabilities.
+
+        This scans all hosts in shared state for MSSQL indicators (port 1433, ms-sql, etc.)
+        and automatically queues mssql_linked_server vulnerabilities for exploitation.
+
+        **CALL THIS PERIODICALLY** to catch MSSQL hosts discovered by workers.
+
+        Returns:
+            Status message with number of new MSSQL vulnerabilities queued.
+        """
+        queued = await self.dispatcher.scan_hosts_for_mssql()
+
+        if queued > 0:
+            return (
+                f"✓ MSSQL scan complete: queued {queued} new MSSQL vulnerability(ies).\n"
+                "Use get_vulnerability_queue_status() to see queued items.\n"
+                "MSSQL exploitation will run automatically or dispatch manually with dispatch_privesc_exploit()."
+            )
+        return "✓ MSSQL scan complete: no new MSSQL hosts found (or already queued)."
 
     @dn.tool_method
     async def register_discovered_host(

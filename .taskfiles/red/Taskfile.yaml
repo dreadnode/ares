@@ -336,6 +336,184 @@ tasks:
         kubectl cp -n {{.K8S_NAMESPACE}} "$POD:$REMOTE_PATH" "{{.REPORT_DIR}}/{{.OPERATION_ID}}_report.md"
         echo "Report copied to: {{.REPORT_DIR}}/{{.OPERATION_ID}}_report.md"
 
+  multi:local:
+    desc: "Run multi-agent red team operation using .env file (usage: task red:multi:local TARGET=dreadgoad [DOMAIN=example.local])"
+    silent: true
+    vars:
+      TARGET: '{{.TARGET | default ""}}'
+      DOMAIN: '{{.DOMAIN | default "example.local"}}'
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      RESUME: '{{.RESUME | default "false"}}'
+      # Computed vars (no 1Password - uses .env)
+      ARES_MODEL:
+        sh: |
+          if [ -n "{{.MODEL_ALL}}" ]; then
+            echo "{{.MODEL_ALL}}"
+          else
+            echo "{{.MODEL}}"
+          fi
+      MODEL_ARG:
+        sh: |
+          if [ -n "{{.MODEL_ORCHESTRATOR}}" ]; then
+            echo "{{.MODEL_ORCHESTRATOR}}"
+          elif [ -n "{{.MODEL_ALL}}" ]; then
+            echo "{{.MODEL_ALL}}"
+          else
+            echo "{{.MODEL}}"
+          fi
+      RESOLVED_TARGETS:
+        sh: |
+          TARGET="{{.TARGET}}"
+          if echo "$TARGET" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "$TARGET"
+          else
+            aws ec2 describe-instances \
+              --profile "{{.TARGET_PROFILE}}" \
+              --region "{{.TARGET_REGION}}" \
+              --filters "Name=instance-state-name,Values=running" \
+              --query "Reservations[*].Instances[?contains(Tags[?Key==\`Name\`].Value|[0], \`$TARGET\`)].PrivateIpAddress" \
+              --output text | tr '\t\n' ',' | sed 's/,$//'
+          fi
+      OPERATION_ID_COMPUTED:
+        sh: |
+          if [ -n "{{.OPERATION_ID}}" ]; then
+            echo "{{.OPERATION_ID}}"
+          else
+            echo "op-$(date +%Y%m%d-%H%M%S)"
+          fi
+      REDIS_URL:
+        sh: |
+          REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+          if [ -n "$REDIS_PASS" ]; then
+            echo "redis://:${REDIS_PASS}@redis:6379"
+          else
+            echo "redis://redis:6379"
+          fi
+      LOGFILE:
+        sh: echo "{{.LOG_DIR}}/red-multi-{{.OPERATION_ID_COMPUTED}}-$(date +%Y%m%d-%H%M%S).log"
+    preconditions:
+      - sh: test -n "{{.TARGET}}"
+        msg: "TARGET variable is required. Usage: task red:multi:local TARGET=dreadgoad"
+      - sh: test -n "{{.RESOLVED_TARGETS}}"
+        msg: "No running EC2 instances found matching Name tag filter: {{.TARGET}}"
+      - sh: test -f .env
+        msg: ".env file not found"
+    cmds:
+      # Load .env
+      - cmd: |
+          set -a
+          . ./.env
+          set +a
+        silent: true
+
+      # Show target resolution status
+      - cmd: |
+          TARGET="{{.TARGET}}"
+          if echo "$TARGET" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "Using direct IP(s): {{.RESOLVED_TARGETS}}"
+          else
+            echo "Resolved '{{.TARGET}}' via AWS EC2 ({{.TARGET_PROFILE}}/{{.TARGET_REGION}})"
+            TARGET_COUNT=$(echo "{{.RESOLVED_TARGETS}}" | tr ',' '\n' | wc -l | xargs)
+            echo "Found $TARGET_COUNT target(s): {{.RESOLVED_TARGETS}}"
+          fi
+        silent: false
+
+      # Show operation details
+      - cmd: |
+          echo ""
+          echo "Operation ID: {{.OPERATION_ID_COMPUTED}}"
+          echo "Target domain: {{.DOMAIN}}"
+          echo "Target IPs: {{.RESOLVED_TARGETS}}"
+          echo "K8s namespace: {{.K8S_NAMESPACE}}"
+          echo "Using .env for credentials"
+          if [ "{{.RESUME}}" = "true" ]; then
+            echo "Resuming from checkpoint"
+          fi
+          echo "Logging to: {{.LOGFILE}}"
+          echo ""
+        silent: false
+
+      # Create log directory
+      - cmd: mkdir -p {{.LOG_DIR}}
+        silent: true
+
+      # Pin workers to this operation ID
+      - cmd: |
+          set -euo pipefail
+          echo "Setting active operation pointer in Redis..."
+          REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
+          if [ -z "$REDIS_POD" ]; then
+            echo "No Redis pod found in namespace {{.K8S_NAMESPACE}}"
+            exit 1
+          fi
+          REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+          REDIS_ENV=()
+          if [ -n "$REDIS_PASS" ]; then
+            REDIS_ENV=(env REDISCLI_AUTH="$REDIS_PASS")
+          fi
+          kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" \
+            redis-cli set ares:operation:active "{{.OPERATION_ID_COMPUTED}}" >/dev/null
+          echo "Set ares:operation:active -> {{.OPERATION_ID_COMPUTED}}"
+        silent: false
+
+      # Submit operation (source .env for credentials)
+      - cmd: |
+          set -a
+          . ./.env
+          set +a
+
+          echo "Submitting operation to orchestrator service..."
+
+          RESOLVED_TARGETS_LIST=$(echo "{{.RESOLVED_TARGETS}}" | tr ',' ' ')
+          IPS_ARGS=""
+          for ip in $RESOLVED_TARGETS_LIST; do
+            IPS_ARGS="$IPS_ARGS --ips $ip"
+          done
+
+          RESUME_FLAG=""
+          if [ "{{.RESUME}}" = "true" ]; then
+            RESUME_FLAG="--resume"
+          fi
+
+          kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
+            env OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
+            ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+            DREADNODE_API_KEY="${DREADNODE_API_KEY:-}" \
+            DREADNODE_SERVER_URL="{{.DREADNODE_SERVER_URL}}" \
+            DREADNODE_ORGANIZATION="{{.DREADNODE_ORGANIZATION}}" \
+            DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
+            DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
+            GRAFANA_SERVICE_ACCOUNT_TOKEN="${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}" \
+            ARES_MODEL="{{.ARES_MODEL}}" \
+            ARES_ORCHESTRATOR_MODEL="{{.MODEL_ORCHESTRATOR}}" \
+            ARES_WORKER_MODEL="{{.MODEL_WORKER}}" \
+            ARES_AGENT_RECON_MODEL="{{.MODEL_RECON}}" \
+            ARES_AGENT_CREDENTIAL_ACCESS_MODEL="{{.MODEL_CREDENTIAL_ACCESS}}" \
+            ARES_AGENT_CRACKER_MODEL="{{.MODEL_CRACKER}}" \
+            ARES_AGENT_ACL_MODEL="{{.MODEL_ACL}}" \
+            ARES_AGENT_PRIVESC_MODEL="{{.MODEL_PRIVESC}}" \
+            ARES_AGENT_LATERAL_MODEL="{{.MODEL_LATERAL}}" \
+            ARES_AGENT_COERCION_MODEL="{{.MODEL_COERCION}}" \
+            GRAFANA_URL="{{.GRAFANA_URL}}" \
+            python -m ares.cli_ops submit "{{.TARGET}}" "{{.DOMAIN}}" \
+            $IPS_ARGS \
+            --operation-id "{{.OPERATION_ID_COMPUTED}}" \
+            --model "{{.MODEL_ARG}}" \
+            --max-steps {{.MAX_STEPS_RED}} \
+            --redis-url "{{.REDIS_URL}}" \
+            $RESUME_FLAG \
+            2>&1 | tee -a "{{.LOGFILE}}"
+        silent: false
+
+      # Follow logs
+      - cmd: |
+          echo ""
+          echo "Following orchestrator logs (Ctrl+C to stop)..."
+          echo "Operation ID: {{.OPERATION_ID_COMPUTED}}"
+          echo ""
+          kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | tee -a "{{.LOGFILE}}"
+        silent: false
+
   multi:resume:
     desc: "Resume a multi-agent operation from checkpoint (usage: task red:multi:resume OPERATION_ID=op-xxx DOMAIN=target.local TARGETS=192.168.1.10)"
     silent: true
@@ -352,6 +530,30 @@ tasks:
         msg: "TARGETS variable is required"
     cmds:
       - task: multi
+        vars:
+          OPERATION_ID: "{{.OPERATION_ID}}"
+          DOMAIN: "{{.DOMAIN}}"
+          TARGET: "{{.TARGETS}}"
+          RESUME: "true"
+
+  multi:resume:local:
+    desc: "Resume a multi-agent operation using .env file (usage: task red:multi:resume:local OPERATION_ID=op-xxx DOMAIN=target.local TARGETS=192.168.1.10)"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      DOMAIN: '{{.DOMAIN | default ""}}'
+      TARGETS: '{{.TARGETS | default ""}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.DOMAIN}}"
+        msg: "DOMAIN variable is required"
+      - sh: test -n "{{.TARGETS}}"
+        msg: "TARGETS variable is required"
+      - sh: test -f .env
+        msg: ".env file not found"
+    cmds:
+      - task: multi:local
         vars:
           OPERATION_ID: "{{.OPERATION_ID}}"
           DOMAIN: "{{.DOMAIN}}"
