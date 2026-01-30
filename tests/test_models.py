@@ -773,8 +773,8 @@ class TestResolveNetBIOSToFQDN:
         state = SharedRedTeamState(operation_id="test-op")
         state.target = Target(ip="10.1.2.1", domain="corp.contoso.local")
 
-        # Should resolve "north" to "corp.contoso.local"
-        result = state._resolve_netbios_to_fqdn("north")
+        # Should resolve "corp" to "corp.contoso.local"
+        result = state._resolve_netbios_to_fqdn("corp")
         assert result == "corp.contoso.local"
 
     def test_resolves_netbios_from_existing_credentials(self) -> None:
@@ -791,8 +791,8 @@ class TestResolveNetBIOSToFQDN:
             )
         ]
 
-        # Should resolve "north" to "corp.contoso.local"
-        result = state._resolve_netbios_to_fqdn("north")
+        # Should resolve "corp" to "corp.contoso.local"
+        result = state._resolve_netbios_to_fqdn("corp")
         assert result == "corp.contoso.local"
 
     def test_resolves_netbios_from_known_domains(self) -> None:
@@ -802,8 +802,8 @@ class TestResolveNetBIOSToFQDN:
         state = SharedRedTeamState(operation_id="test-op")
         state.all_domains = ["corp.contoso.local", "fabrikam.local"]
 
-        # Should resolve "north" to "corp.contoso.local"
-        result = state._resolve_netbios_to_fqdn("north")
+        # Should resolve "corp" to "corp.contoso.local"
+        result = state._resolve_netbios_to_fqdn("corp")
         assert result == "corp.contoso.local"
 
     def test_returns_original_when_no_match(self) -> None:
@@ -825,7 +825,7 @@ class TestResolveNetBIOSToFQDN:
         state.target = Target(ip="10.1.2.1", domain="CORP.CONTOSO.LOCAL")
 
         # Lowercase input should match uppercase domain
-        result = state._resolve_netbios_to_fqdn("north")
+        result = state._resolve_netbios_to_fqdn("corp")
         assert result == "corp.contoso.local"
 
     def test_handles_empty_state(self) -> None:
@@ -848,12 +848,12 @@ class TestResolveNetBIOSToFQDN:
             Credential(
                 username="test",
                 password="test",  # pragma: allowlist secret
-                domain="north.otherdomain.local",
+                domain="corp.otherdomain.local",
             )
         ]
 
         # Should use target.domain since it's checked first
-        result = state._resolve_netbios_to_fqdn("north")
+        result = state._resolve_netbios_to_fqdn("corp")
         assert result == "corp.contoso.local"
 
 
