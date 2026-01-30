@@ -587,7 +587,8 @@ class CertipyTools(Toolset):
 
         try:
             logger.info(f"[*] Enumerating ADCS in {domain}")
-            stdout, stderr, _ = run_tool(cmd, timeout_seconds=180, target_role="recon")
+            # Run locally on privesc agent (certipy is installed there, not on recon)
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=300)
 
             result = stdout + "\n" + (stderr or "")
 

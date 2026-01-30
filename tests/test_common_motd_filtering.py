@@ -258,16 +258,17 @@ class TestFilterUsersFileRemote:
         assert "admin" in cmd_str
         assert "bob" in cmd_str
 
-    def test_all_users_filtered_returns_error(self):
-        """Should return error when all users are filtered out."""
+    def test_all_users_filtered_returns_original_file(self):
+        """Should return original file when only MOTD garbage is present (let netexec handle it)."""
         file_content = "┏━━━━━━━━━━━━━━━━┓\nmessage from kali\n"
 
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.return_value = MockRunResult(stdout=file_content, return_code=0)
             filtered_path, error = filter_users_file_remote("/tmp/users.txt", set())
 
-        assert filtered_path == ""
-        assert "all users already have credentials" in error
+        # Returns original file with no error - let spray proceed
+        assert filtered_path == "/tmp/users.txt"
+        assert error is None
 
     def test_deduplicates_users(self):
         """Should deduplicate users (case-insensitive)."""

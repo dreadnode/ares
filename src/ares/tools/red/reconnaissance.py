@@ -219,7 +219,8 @@ class NetworkEnumerationTools(Toolset):
             pass_match = re.search(r"Password\s*:\s*([^\s()]+)", stripped, re.IGNORECASE)
             if not pass_match:
                 continue
-            password = pass_match.group(1).strip().rstrip(".,;:!?()")
+            # Only strip clearly trailing punctuation, not ! which is common in passwords
+            password = pass_match.group(1).strip().rstrip(".,;:()")
 
             username = ""
             account_inline = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)

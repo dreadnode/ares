@@ -1618,6 +1618,36 @@ class RedisWorkerAgent:
             payload.get("wordlist") or "/usr/share/wordlists/rockyou.txt"
         )
 
+        # Skip if password is already known for this user
+        if self.shared_state and username:
+            for cred in self.shared_state.all_credentials:
+                cred_user = cred.username.lower() if cred.username else ""
+                cred_domain = (cred.domain or "").lower()
+                if (
+                    cred_user == username.lower()
+                    and cred_domain == domain.lower()
+                    and cred.password
+                ):
+                    logger.info(
+                        f"[{self.agent_name}] Skipping crack task for {domain}\\{username} - "
+                        f"password already known"
+                    )
+                    await self.task_queue.send_result(
+                        task_id=task.task_id,
+                        success=True,
+                        payload={
+                            "output": f"Skipped - password already known for {domain}\\{username}",
+                            "task_type": task.task_type,
+                            "credential": {
+                                "username": username,
+                                "password": cred.password,
+                                "domain": domain,
+                            },
+                        },
+                        worker_pod=self.pod_name,
+                    )
+                    return
+
         if not hash_value:
             await self.task_queue.send_result(
                 task_id=task.task_id,

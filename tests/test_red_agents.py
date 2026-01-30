@@ -46,7 +46,7 @@ async def test_create_multi_agent_ensemble_uses_env_models(monkeypatch):
             operation_id="op-2",
             target_ip="192.168.56.2",
             dispatcher=dispatcher,
-            roles=[AgentRole.RECON, AgentRole.CRACKER],
+            roles=[AgentRole.ORCHESTRATOR, AgentRole.CRACKER],
         )
 
     assert mock_create.call_count == 2

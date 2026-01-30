@@ -33,6 +33,7 @@ from ares.core.models import (
     RedTeamState,
     SharedRedTeamState,
     Target,
+    TaskStatus,
 )
 from ares.core.recovery import OperationRecoveryManager
 from ares.core.task_queue import RedisTaskQueue
@@ -996,6 +997,7 @@ async def _auto_mssql_detection(
 async def _auto_adcs_enumeration(  # noqa: PLR0912
     dispatcher: RedTeamDispatcher,
     check_interval: float = 45.0,
+    max_retries: int = 3,
 ) -> None:
     """
     Background task that automatically runs ADCS enumeration when:
@@ -1008,9 +1010,12 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
     Args:
         dispatcher: The dispatcher instance
         check_interval: Seconds between ADCS checks
+        max_retries: Maximum retry attempts per server
     """
-    enumerated_servers: set[str] = set()  # Track servers we've already enumerated
-    enumerated_creds: set[tuple[str, str, str]] = set()  # Track (server, user, domain) combos
+    # Track (server, user, domain) -> (task_id, attempt_count, last_attempt_time)
+    adcs_attempts: dict[tuple[str, str, str], tuple[str, int, float]] = {}
+    successful_servers: set[str] = set()  # Servers with successful enumeration
+    retry_cooldown = 120.0  # Wait 2 minutes before retrying failed tasks
 
     while True:
         try:
@@ -1043,15 +1048,50 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                 if cred.domain:
                     domains.add(cred.domain)
 
+            current_time = asyncio.get_event_loop().time()
+
             # Try to enumerate each ADCS server with available credentials
             for server_ip, server_hostname in adcs_servers:
+                # Skip servers we've already successfully enumerated
+                if server_ip in successful_servers:
+                    continue
+
                 for cred in state.all_credentials:
                     if not cred.password:
                         continue
 
                     cred_key = (server_ip, cred.username, cred.domain or "")
-                    if cred_key in enumerated_creds:
-                        continue
+
+                    # Check if we've already attempted with this credential
+                    if cred_key in adcs_attempts:
+                        task_id, attempt_count, last_attempt = adcs_attempts[cred_key]
+
+                        # Check if the task completed successfully
+                        task_info = state.pending_tasks.get(task_id)
+                        if task_info and task_info.status == TaskStatus.COMPLETED:
+                            successful_servers.add(server_ip)
+                            logger.info(f"ADCS enumeration succeeded for {server_ip}")
+                            break
+
+                        # Skip if max retries reached
+                        if attempt_count >= max_retries:
+                            continue
+
+                        # Skip if still in cooldown
+                        if current_time - last_attempt < retry_cooldown:
+                            continue
+
+                        # Check if task failed (not in pending_tasks means it completed/failed)
+                        if task_id not in state.pending_tasks:
+                            logger.warning(
+                                f"🔄 Auto-ADCS: Retrying {server_ip} with {cred.domain}\\{cred.username} "
+                                f"(attempt {attempt_count + 1}/{max_retries})"
+                            )
+                        else:
+                            # Task still in progress
+                            continue
+                    else:
+                        attempt_count = 0
 
                     # Find the best domain for this enumeration
                     target_domain = cred.domain
@@ -1077,10 +1117,9 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                     )
 
                     if task_id:
-                        enumerated_creds.add(cred_key)
-                        enumerated_servers.add(server_ip)
+                        adcs_attempts[cred_key] = (task_id, attempt_count + 1, current_time)
                         logger.info(f"ADCS enumeration task {task_id} dispatched for {server_ip}")
-                        # Only need to enumerate once per server with valid creds
+                        # Only dispatch one task per server per cycle
                         break
 
         except asyncio.CancelledError:

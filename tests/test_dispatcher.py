@@ -101,6 +101,14 @@ class TestMssqlScanning:
         dispatcher._shared_state.all_hosts.append(
             Host(ip="192.168.56.20", hostname="sql01", services=["tcp/1433"])
         )
+        # Add SQL credentials (required for queueing MSSQL vulnerabilities)
+        dispatcher._shared_state.all_credentials.append(
+            Credential(
+                username="sa",
+                password="Password123!",  # pragma: allowlist secret
+                domain="",
+            )
+        )
         dispatcher.queue_vulnerability = AsyncMock()
 
         queued = await dispatcher.scan_hosts_for_mssql()
@@ -118,6 +126,14 @@ class TestMssqlScanning:
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-mssql-4")
         dispatcher._shared_state.all_hosts.append(
             Host(ip="192.168.56.30", hostname="db01", services=["ms-sql-s"])
+        )
+        # Add SQL credentials (required for queueing MSSQL vulnerabilities)
+        dispatcher._shared_state.all_credentials.append(
+            Credential(
+                username="sa",
+                password="Password123!",  # pragma: allowlist secret
+                domain="",
+            )
         )
         dispatcher.queue_vulnerability = AsyncMock()
 
@@ -162,6 +178,14 @@ class TestMssqlScanning:
                 Host(ip="192.168.56.52", hostname="sql02", services=["sqlserver/1433"]),
                 Host(ip="192.168.56.53", hostname="dc01", services=["ldap/389"]),
             ]
+        )
+        # Add SQL credentials (required for queueing MSSQL vulnerabilities)
+        dispatcher._shared_state.all_credentials.append(
+            Credential(
+                username="sa",
+                password="Password123!",  # pragma: allowlist secret
+                domain="",
+            )
         )
         dispatcher.queue_vulnerability = AsyncMock()
 

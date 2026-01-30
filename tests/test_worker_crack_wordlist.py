@@ -131,6 +131,6 @@ async def test_crack_task_uses_gz_wordlist(monkeypatch):
 
     await worker._execute_crack_task(task)
 
-    assert captured["wordlist_path"] == tmp_wordlist
+    assert captured["wordlist_path"] == str(tmp_wordlist)
     gzip_open.assert_called()
     task_queue.send_result.assert_awaited()

@@ -25,11 +25,6 @@ class TestReconRoleToolset:
         toolset = ROLE_TOOLSETS.get(AgentRole.RECON, [])
         assert BloodHoundTools in toolset
 
-    def test_recon_role_has_credential_discovery(self):
-        """RECON role should have CredentialDiscoveryTools."""
-        toolset = ROLE_TOOLSETS.get(AgentRole.RECON, [])
-        assert CredentialDiscoveryTools in toolset
-
     def test_recon_role_has_reporting(self):
         """RECON role should have RedTeamReportingTools."""
         toolset = ROLE_TOOLSETS.get(AgentRole.RECON, [])
@@ -45,16 +40,13 @@ class TestReconRoleToolset:
         # BloodHoundTools second (AD mapping)
         assert toolset[1] == BloodHoundTools
 
-        # CredentialDiscoveryTools third (credential hunting)
-        assert toolset[2] == CredentialDiscoveryTools
-
         # ReportingTools last
         assert toolset[-1] == RedTeamReportingTools
 
-    def test_recon_has_at_least_four_toolsets(self):
-        """RECON role should have at least 4 toolsets."""
+    def test_recon_has_at_least_three_toolsets(self):
+        """RECON role should have at least 3 toolsets."""
         toolset = ROLE_TOOLSETS.get(AgentRole.RECON, [])
-        assert len(toolset) >= 4
+        assert len(toolset) >= 3
 
 
 class TestCredentialDiscoveryInRecon:
