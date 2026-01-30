@@ -985,8 +985,8 @@ class CredentialHarvestingTools(Toolset):
             Extracted credentials including NTLM hashes, Kerberos keys, and secrets
 
         Example:
-            >>> secretsdump("192.168.1.100", "admin", password="pass")  # pragma: allowlist secret
-            >>> secretsdump("192.168.1.100", "admin", hash="aad3b4...")
+            >>> secretsdump("192.168.56.100", "admin", password="pass")  # pragma: allowlist secret
+            >>> secretsdump("192.168.56.100", "admin", hash="aad3b4...")
             >>> secretsdump("domain.local", "admin", no_pass=True)
         """
         resolved_password = self._resolve_password(username, domain, password)
@@ -1109,7 +1109,7 @@ class CredentialHarvestingTools(Toolset):
             Kerberos TGS hashes for service accounts that can be cracked offline
 
         Example:
-            >>> kerberoast("example.local", "user", "pass", "192.168.1.100")
+            >>> kerberoast("example.local", "user", "pass", "192.168.56.100")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -1342,7 +1342,7 @@ class CredentialHarvestingTools(Toolset):
             AS-REP hashes for vulnerable user accounts
 
         Example:
-            >>> asrep_roast("example.local", "user", "pass", "192.168.1.100")
+            >>> asrep_roast("example.local", "user", "pass", "192.168.56.100")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -1418,8 +1418,8 @@ class CredentialHarvestingTools(Toolset):
             Results showing which targets the account has admin access on
 
         Example:
-            >>> domain_admin_checker("192.168.1.100 192.168.1.101", "Administrator", password="P@ss")  # pragma: allowlist secret
-            >>> domain_admin_checker("192.168.1.100 192.168.1.101", "Administrator", hash="aad3b4...")
+            >>> domain_admin_checker("192.168.56.100 192.168.56.101", "Administrator", password="P@ss")  # pragma: allowlist secret
+            >>> domain_admin_checker("192.168.56.100 192.168.56.101", "Administrator", hash="aad3b4...")
         """
         resolved_password = self._resolve_password(username, "", password or None)
         if (

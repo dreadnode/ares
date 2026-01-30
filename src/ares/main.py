@@ -383,8 +383,8 @@ async def redteam(
         target_ip: Primary target IP address for the red team operation
 
     Example:
-        uv run python -m src.main redteam 192.168.1.100
-        uv run python -m src.main redteam 192.168.1.100 --args.model YOUR_MODEL
+        uv run python -m src.main redteam 192.168.56.100
+        uv run python -m src.main redteam 192.168.56.100 --args.model YOUR_MODEL
     """
     args = args or Args()
     dn_args = dn_args or DreadnodeArgs()

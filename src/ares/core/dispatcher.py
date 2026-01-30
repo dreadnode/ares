@@ -2118,7 +2118,7 @@ class RedTeamDispatcher:
             if not stripped:
                 continue
 
-            # Parse host from SMB line prefix: "SMB  192.168.1.1  445  HOSTNAME  ..."
+            # Parse host from SMB line prefix: "SMB  192.168.56.1  445  HOSTNAME  ..."
             if stripped.startswith("SMB"):
                 smb_match = re.match(r"^SMB\s+(\d+\.\d+\.\d+\.\d+)\s+", stripped)
                 if smb_match:

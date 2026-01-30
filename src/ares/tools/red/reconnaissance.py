@@ -408,8 +408,8 @@ class NetworkEnumerationTools(Toolset):
             Detailed nmap scan output showing discovered services and versions
 
         Example:
-            >>> result = nmap_scan("192.168.1.2")
-            >>> result = nmap_scan("192.168.1.2 192.168.1.3 192.168.1.4")
+            >>> result = nmap_scan("192.168.56.2")
+            >>> result = nmap_scan("192.168.56.2 192.168.56.3 192.168.56.4")
         """
 
         def _parse_nmap_hosts(output: str) -> list[Host]:
@@ -709,8 +709,8 @@ class NetworkEnumerationTools(Toolset):
             List of discovered user accounts with details
 
         Example:
-            >>> enumerate_users("192.168.1.100", "user", "pass", "DOMAIN")
-            >>> enumerate_users("192.168.1.100", "", "", "")  # null session
+            >>> enumerate_users("192.168.56.100", "user", "pass", "DOMAIN")
+            >>> enumerate_users("192.168.56.100", "", "", "")  # null session
         """
         # Import here to avoid circular import
         from ares.tools.red.credential_discovery import CredentialHarvestingTools
@@ -876,7 +876,7 @@ class NetworkEnumerationTools(Toolset):
             List of discovered shares with access permissions
 
         Example:
-            >>> enumerate_shares("192.168.1.100", "DOMAIN", "user", "pass")
+            >>> enumerate_shares("192.168.56.100", "DOMAIN", "user", "pass")
         """
 
         def _parse_netexec_hosts(output: str) -> list[Host]:

@@ -13,7 +13,7 @@ async def test_command_output_parses_users_hosts_and_passwords_from_output():
     dispatcher = RedTeamDispatcher()
     dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-parse")
     dispatcher._shared_state.target = Target(
-        ip="10.9.8.7",
+        ip="192.168.58.7",
         domain="contoso.local",
     )
 
@@ -25,8 +25,8 @@ async def test_command_output_parses_users_hosts_and_passwords_from_output():
     )
 
     output = """
-SMB                      10.9.8.7        445    APP-SRV01        [*] Windows 10 / Server 2019 Build 17763 x64 (name:APP-SRV01) (domain:contoso.local) (signing:True) (SMBv1:None)
-SMB                      10.9.8.7        445    APP-SRV01        danj                  2026-01-13 21:03:31 0       Dan Jump (Password : P@ssw0rd123!)
+SMB                      192.168.58.7        445    APP-SRV01        [*] Windows 10 / Server 2019 Build 17763 x64 (name:APP-SRV01) (domain:contoso.local) (signing:True) (SMBv1:None)
+SMB                      192.168.58.7        445    APP-SRV01        danj                  2026-01-13 21:03:31 0       Dan Jump (Password : P@ssw0rd123!)
 user:[adamb] rid:[0x45f]
 Account: danj Name: (null) Desc: Dan Jump (Password : P@ssw0rd123!)
 """
@@ -57,7 +57,7 @@ def test_add_host_prefers_fqdn_over_ptr_hostname():
 
     state.add_host(
         Host(
-            ip="10.1.2.10",
+            ip="192.168.58.10",
             hostname="IP-10-1-2-10.us-west-2.compute.internal",
             os="Unknown",
             roles=[],
@@ -66,7 +66,7 @@ def test_add_host_prefers_fqdn_over_ptr_hostname():
     )
     state.add_host(
         Host(
-            ip="10.1.2.10",
+            ip="192.168.58.10",
             hostname="dc01.corp.contoso.local",
             os="Windows Server 2019",
             roles=[],
@@ -83,7 +83,7 @@ async def test_recon_output_parses_users_hosts_and_passwords():
     dispatcher = RedTeamDispatcher()
     dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-recon-parse")
     dispatcher._shared_state.target = Target(
-        ip="10.9.8.7",
+        ip="192.168.58.7",
         domain="contoso.local",
     )
 
@@ -95,8 +95,8 @@ async def test_recon_output_parses_users_hosts_and_passwords():
     )
 
     output = """
-SMB                      10.9.8.7        445    APP-SRV01        [*] Windows 10 / Server 2019 Build 17763 x64 (name:APP-SRV01) (domain:contoso.local) (signing:True) (SMBv1:None)
-SMB                      10.9.8.7        445    APP-SRV01        danj                  2026-01-13 21:03:31 0       Dan Jump (Password : P@ssw0rd123!)
+SMB                      192.168.58.7        445    APP-SRV01        [*] Windows 10 / Server 2019 Build 17763 x64 (name:APP-SRV01) (domain:contoso.local) (signing:True) (SMBv1:None)
+SMB                      192.168.58.7        445    APP-SRV01        danj                  2026-01-13 21:03:31 0       Dan Jump (Password : P@ssw0rd123!)
 user:[adamb] rid:[0x45f]
 Account: danj Name: (null) Desc: Dan Jump (Password : P@ssw0rd123!)
 """
@@ -158,7 +158,7 @@ async def test_string_tool_result_updates_hosts():
     dispatcher = RedTeamDispatcher()
     dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-string-output")
     dispatcher._shared_state.target = Target(
-        ip="10.9.8.7",
+        ip="192.168.58.7",
         domain="contoso.local",
     )
 
@@ -170,7 +170,7 @@ async def test_string_tool_result_updates_hosts():
     )
 
     output = (
-        "SMB 10.9.8.7 445 APP-SRV01 [*] Windows 10 / Server 2019 "
+        "SMB 192.168.58.7 445 APP-SRV01 [*] Windows 10 / Server 2019 "
         "Build 17763 x64 (name:APP-SRV01) (domain:contoso.local)"
     )
 

@@ -63,8 +63,8 @@ class GoldenTicketTools(Toolset):
             Domain SID and list of domain users (look for "[*] Domain SID is: ...")
 
         Example:
-            >>> get_sid("child.example.local", "user", "pass", "192.168.1.100")
-            >>> get_sid("parent.example.local", "user", "pass", "192.168.1.101")
+            >>> get_sid("child.example.local", "user", "pass", "192.168.56.100")
+            >>> get_sid("parent.example.local", "user", "pass", "192.168.56.101")
         """
         if dc_ip:
             cmd = ["impacket-lookupsid", f"{domain}/{username}:{password}@{dc_ip}"]

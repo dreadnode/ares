@@ -122,7 +122,7 @@ task ares:investigate ALERT=test-alerts/example-alert.json
 task -y ares:red TARGET=dreadgoad
 
 # Red Team: Direct IP target (bypasses EC2 discovery)
-task ares:red: TARGET=192.168.1.100
+task ares:red: TARGET=192.168.56.100
 
 # View investigation reports
 task ares:reports:list        # List all reports
@@ -212,10 +212,10 @@ For direct IP targeting (bypasses EC2 discovery):
 
 ```bash
 # Direct IP address
-task ares:red: TARGET=192.168.1.100
+task ares:red: TARGET=192.168.56.100
 
 # Or via CLI
-uv run python -m ares red-team 192.168.1.100 \
+uv run python -m ares red-team 192.168.56.100 \
   --args.model claude-sonnet-4-20250514 \
   --args.max-steps 30 \
   --args.report-dir ./reports
@@ -435,12 +435,12 @@ pytest --cov=src tests/
 
 **Multi-Agent Model Overrides:**
 
-| Variable | Required | Description |
-| --- | --- | --- |
-| `ARES_MODEL` | No | Default model for all multi-agent roles |
-| `ARES_ORCHESTRATOR_MODEL` | No | Override orchestrator model |
-| `ARES_WORKER_MODEL` | No | Override all worker models |
-| `ARES_AGENT_<ROLE>_MODEL` | No | Role-specific model override (e.g., `ARES_AGENT_RECON_MODEL`) |
+| Variable                  | Required | Description                                                   |
+| ------------------------- | -------- | ------------------------------------------------------------- |
+| `ARES_MODEL`              | No       | Default model for all multi-agent roles                       |
+| `ARES_ORCHESTRATOR_MODEL` | No       | Override orchestrator model                                   |
+| `ARES_WORKER_MODEL`       | No       | Override all worker models                                    |
+| `ARES_AGENT_<ROLE>_MODEL` | No       | Role-specific model override (e.g., `ARES_AGENT_RECON_MODEL`) |
 
 Precedence (highest first): `ARES_AGENT_<ROLE>_MODEL` >
 `ARES_ORCHESTRATOR_MODEL`/`ARES_WORKER_MODEL` > `ARES_MODEL` > config file.
@@ -485,7 +485,7 @@ uv run python -m ares \
   --dn-args.project ares-soc
 
 # Via command line (red team)
-uv run python -m ares red-team 192.168.1.100 \
+uv run python -m ares red-team 192.168.56.100 \
   --dn-args.project ares-redteam
 
 # Via environment variable

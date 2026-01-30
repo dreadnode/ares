@@ -343,7 +343,7 @@ class TestRedBlueCorrelator:
                 technique_id=f"T100{i}",
                 technique_name=f"Technique {i}",
                 action=f"Action {i}",
-                target_ip=f"192.168.1.{100 + i}",  # Different IPs
+                target_ip=f"192.168.56.{100 + i}",  # Different IPs
                 target_host=None,
                 credential_used=None,
                 success=True,
@@ -358,7 +358,7 @@ class TestRedBlueCorrelator:
                 alert_name=f"Alert {i}",
                 technique_id=f"T100{i}",
                 severity="high",
-                target_ip=f"192.168.1.{100 + i}",  # Matching IPs
+                target_ip=f"192.168.56.{100 + i}",  # Matching IPs
                 target_host=None,
                 investigation_id=f"inv-{i}",
                 status="completed",
@@ -449,7 +449,7 @@ class TestRedBlueCorrelator:
                 technique_id=f"T105{i}",  # Different technique per activity
                 technique_name=f"Technique {i}",
                 action=f"Action {i}",
-                target_ip=f"192.168.1.{100 + i}",  # Different targets
+                target_ip=f"192.168.56.{100 + i}",  # Different targets
                 target_host=None,
                 credential_used=None,
                 success=True,
@@ -464,7 +464,7 @@ class TestRedBlueCorrelator:
                 alert_name=f"Alert {i}",
                 technique_id=f"T105{i}",  # Matching technique
                 severity="high",
-                target_ip=f"192.168.1.{100 + i}",  # Matching targets
+                target_ip=f"192.168.56.{100 + i}",  # Matching targets
                 target_host=None,
                 investigation_id=f"inv-{i}",
                 status="completed",

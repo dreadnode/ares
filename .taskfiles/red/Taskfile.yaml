@@ -535,7 +535,7 @@ tasks:
         silent: false
 
   multi:resume:
-    desc: "Resume a multi-agent operation from checkpoint (usage: task red:multi:resume OPERATION_ID=op-xxx DOMAIN=target.local TARGETS=192.168.1.10)"
+    desc: "Resume a multi-agent operation from checkpoint (usage: task red:multi:resume OPERATION_ID=op-xxx DOMAIN=target.local TARGETS=192.168.56.10)"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
@@ -557,7 +557,7 @@ tasks:
           RESUME: "true"
 
   multi:resume:local:
-    desc: "Resume a multi-agent operation using .env file (usage: task red:multi:resume:local OPERATION_ID=op-xxx DOMAIN=target.local TARGETS=192.168.1.10)"
+    desc: "Resume a multi-agent operation using .env file (usage: task red:multi:resume:local OPERATION_ID=op-xxx DOMAIN=target.local TARGETS=192.168.56.10)"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
@@ -829,7 +829,7 @@ tasks:
           2>&1 | tee -a "$LOGFILE"
 
   single:local:
-    desc: "Run single-agent red team using .env file (usage: task red:single:local TARGET=192.168.1.100)"
+    desc: "Run single-agent red team using .env file (usage: task red:single:local TARGET=192.168.56.100)"
     silent: true
     vars:
       TARGET: '{{.TARGET | default ""}}'
@@ -842,7 +842,7 @@ tasks:
           fi
     preconditions:
       - sh: test -n "{{.TARGET}}"
-        msg: "TARGET variable is required. Usage: task red:single:local TARGET=192.168.1.100"
+        msg: "TARGET variable is required. Usage: task red:single:local TARGET=192.168.56.100"
       - sh: test -f .env
         msg: ".env file not found"
     cmds:

@@ -113,9 +113,9 @@ def sample_credentials():
 def sample_hosts():
     """Create sample hosts for testing."""
     return [
-        Host(ip="192.168.1.10", hostname="DC01", os="Windows Server 2019"),
-        Host(ip="192.168.1.20", hostname="WEB01", os="Windows Server 2016"),
-        Host(ip="192.168.1.30", hostname="DB01", os="Windows Server 2019"),
+        Host(ip="192.168.56.10", hostname="DC01", os="Windows Server 2019"),
+        Host(ip="192.168.56.20", hostname="WEB01", os="Windows Server 2016"),
+        Host(ip="192.168.56.30", hostname="DB01", os="Windows Server 2019"),
     ]
 
 

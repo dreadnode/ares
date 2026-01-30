@@ -485,7 +485,7 @@ class OrchestratorTools(Toolset):
         Example:
             # Move to target using hash
             >>> dispatch_lateral_movement(
-            ...     target_host="192.168.1.10",
+            ...     target_host="192.168.56.10",
             ...     username="Administrator",
             ...     hash_value="aad3b435b51404ee:...",
             ...     domain="corp.local"
@@ -1229,7 +1229,7 @@ class OrchestratorTools(Toolset):
 
         Example:
             >>> register_discovered_host(
-            ...     ip="192.168.1.10",
+            ...     ip="192.168.56.10",
             ...     hostname="DC01",
             ...     os="Windows Server 2019",
             ...     roles=["DC"],
