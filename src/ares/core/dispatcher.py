@@ -1121,15 +1121,23 @@ class RedTeamDispatcher:
                     credential = cred
         return credential
 
-    def _find_domain_controller_ip(self, domain: str) -> str:
-        """Find DC IP for the specified domain."""
+    def _find_domain_controller_ip(self, domain: str) -> str:  # noqa: PLR0912
+        """Find DC IP for the specified domain.
+
+        Detection priority:
+        1. Hosts with explicit DC roles (AD DC, DC, Domain Controller) matching domain
+        2. Hosts with DC-like services (Kerberos 88, LDAP 389) matching domain
+        3. Hosts with "dc" in hostname matching domain
+        4. Fallback: any host with DC role/services (cross-domain, logged as warning)
+        """
         domain_lower = domain.lower() if domain else ""
         # Port tokens must match at start of service string to avoid
         # substring issues (e.g., "389/tcp" matching "3389/tcp")
-        dc_port_prefixes = ("88/tcp", "389/tcp", "53/tcp")
+        dc_port_prefixes = ("88/tcp", "389/tcp")
         dc_service_names = ("kerberos", "ldap")
 
         def _has_dc_services(host: Host) -> bool:
+            """Check if host has DC-specific services (Kerberos, LDAP)."""
             for svc in host.services:
                 svc_lower = svc.lower()
                 # Check if service starts with a DC port
@@ -1140,34 +1148,79 @@ class RedTeamDispatcher:
                     return True
             return False
 
-        # Check target first
+        def _has_dc_role(host: Host) -> bool:
+            """Check if host has DC role assigned (from SRV lookup or BloodHound)."""
+            roles_str = str(host.roles).lower()
+            return any(
+                marker in roles_str
+                for marker in ("dc", "domain controller", "ad dc", "domaincontroller")
+            )
+
+        def _hostname_matches_domain(hostname: str, domain: str) -> bool:
+            """Check if hostname belongs to the domain."""
+            if not hostname or not domain:
+                return False
+            hostname_lower = hostname.lower()
+            domain_lower_check = domain.lower()
+            # Direct match: hostname ends with domain (e.g., dc01.example.com for example.com)
+            if hostname_lower.endswith(f".{domain_lower_check}"):
+                return True
+            # Exact match: hostname is just the domain
+            return hostname_lower == domain_lower_check
+
+        # Check target first (if it belongs to this domain)
         if self.shared_state.target and self.shared_state.target.ip:
             target_ip = self.shared_state.target.ip
             target_hostname = (self.shared_state.target.hostname or "").lower()
-            if target_hostname and target_hostname.endswith(domain_lower):
+            if target_hostname and _hostname_matches_domain(target_hostname, domain_lower):
                 return target_ip
             for host in self.shared_state.all_hosts:
                 if host.ip == target_ip:
                     hostname = (host.hostname or "").lower()
-                    if hostname.endswith(domain_lower) and _has_dc_services(host):
+                    if _hostname_matches_domain(hostname, domain_lower) and _has_dc_services(host):
                         return host.ip
-        # Search all hosts by explicit DC markers
+
+        # Priority 1: Search hosts with explicit DC roles that belong to this domain
+        # These come from SRV lookup (_ldap._tcp.domain) or BloodHound
         for host in self.shared_state.all_hosts:
-            if (
-                "dc" in (host.hostname or "").lower()
-                or "domain controller" in str(host.roles).lower()
-            ):
+            hostname = (host.hostname or "").lower()
+            if _has_dc_role(host) and _hostname_matches_domain(hostname, domain_lower):
+                logger.debug(f"DC IP found via role: {host.ip} ({hostname})")
                 return host.ip
-        # Fallback: infer DC from services on hosts within the domain
+
+        # Priority 2: Infer DC from services on hosts within the domain
+        # Hosts advertising Kerberos (88) or LDAP (389) are likely DCs
         if domain_lower:
             for host in self.shared_state.all_hosts:
                 hostname = (host.hostname or "").lower()
-                if hostname.endswith(domain_lower) and _has_dc_services(host):
+                if _hostname_matches_domain(hostname, domain_lower) and _has_dc_services(host):
+                    logger.debug(f"DC IP found via services: {host.ip} ({hostname})")
                     return host.ip
-        # Last resort: any host advertising DC-like services
+
+        # Priority 3: Search hosts with "dc" in hostname that belong to this domain
+        for host in self.shared_state.all_hosts:
+            hostname = (host.hostname or "").lower()
+            if "dc" in hostname and _hostname_matches_domain(hostname, domain_lower):
+                logger.debug(f"DC IP found via hostname pattern: {host.ip} ({hostname})")
+                return host.ip
+
+        # Priority 4: Fallback - hosts with DC roles (any domain) - log warning
+        for host in self.shared_state.all_hosts:
+            if _has_dc_role(host):
+                logger.warning(
+                    f"DC IP fallback (no domain match): {host.ip} ({host.hostname}) for domain {domain}"
+                )
+                return host.ip
+
+        # Priority 5: Any host with DC-like services (risky, may be wrong) - log warning
         for host in self.shared_state.all_hosts:
             if _has_dc_services(host):
+                logger.warning(
+                    f"DC IP last resort (services only): {host.ip} ({host.hostname}) for domain {domain}"
+                )
                 return host.ip
+
+        logger.warning(f"No DC IP found for domain {domain}")
         return ""
 
     async def request_acl_analysis(

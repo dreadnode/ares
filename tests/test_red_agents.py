@@ -353,3 +353,75 @@ Certificate Authorities
 
         success_found = any("EXPLOITATION SUCCESSFUL" in msg for msg in feedback_messages)
         assert success_found, "certipy_req with .pfx output should trigger exploitation success"
+
+
+class TestRoleHooks:
+    """Tests for create_role_hooks function."""
+
+    def test_all_roles_get_unstall_hooks(self):
+        """Test that all roles receive unstall hooks with role-specific guidance."""
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        roles_to_test = [
+            AgentRole.ORCHESTRATOR,
+            AgentRole.RECON,
+            AgentRole.CREDENTIAL_ACCESS,
+            AgentRole.CRACKER,
+            AgentRole.ACL,
+            AgentRole.PRIVESC,
+            AgentRole.LATERAL,
+            AgentRole.COERCION,
+        ]
+
+        for role in roles_to_test:
+            hooks = create_role_hooks(role, dispatcher, shared_state)
+            # All roles should have at least one hook (unstall hook)
+            assert len(hooks) > 0, f"Role {role} should have hooks"
+
+    def test_credential_access_unstall_feedback(self):
+        """Test that CREDENTIAL_ACCESS role has specific unstall guidance."""
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.CREDENTIAL_ACCESS, dispatcher, shared_state)
+
+        # Find the unstall hook (it's a retry_with_feedback hook)
+        # We can't easily inspect the hook's feedback directly, but we can verify
+        # the hook was created for the right event type
+        assert len(hooks) > 0
+
+    def test_cracker_unstall_feedback(self):
+        """Test that CRACKER role has specific unstall guidance."""
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.CRACKER, dispatcher, shared_state)
+
+        # Cracker should have unstall hook
+        assert len(hooks) > 0
+
+    def test_lateral_unstall_feedback(self):
+        """Test that LATERAL role has specific unstall guidance."""
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.LATERAL, dispatcher, shared_state)
+
+        # Lateral should have unstall hook
+        assert len(hooks) > 0
+
+    def test_privesc_has_exploitation_tracking_hook(self):
+        """Test that PRIVESC role includes exploitation tracking hook."""
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.PRIVESC, dispatcher, shared_state)
+
+        # PRIVESC should have multiple hooks (exploitation tracking + unstall)
+        assert len(hooks) >= 2, "PRIVESC should have exploitation tracking and unstall hooks"

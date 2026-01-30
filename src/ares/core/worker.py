@@ -756,7 +756,63 @@ def generate_prompt_from_task(  # noqa: PLR0912
             )
             return base_prompt + state_context
 
-        # Low hanging fruit WITHOUT credentials - use anonymous/null session techniques
+        # EXPLICIT TECHNIQUE ENFORCEMENT FOR NO-CRED TASKS
+        # When techniques are specified without credentials, still enforce them
+        no_cred_techniques = not payload.get("password") and not payload.get("hash_value")
+        if techniques and no_cred_techniques:
+            # Build technique-specific instructions for no-cred scenarios
+            technique_instructions = []
+            no_cred_technique_map = {
+                "asrep_roast": (
+                    f"asrep_roast(target='{dc_ip}', domain='{payload.get('domain', '')}') "
+                    "- find users without Kerberos pre-auth"
+                ),
+                "username_as_password": (
+                    f"username_as_password(target='{dc_ip}', domain='{payload.get('domain', '')}') "
+                    "- test if users have username=password (e.g., hodor:hodor)"
+                ),
+                "password_spray": (
+                    f"password_spray(target='{dc_ip}', domain='{payload.get('domain', '')}', "
+                    "password='Password1') - try common passwords"  # pragma: allowlist secret
+                ),
+                "kerberos_user_enum_noauth": (
+                    f"kerberos_user_enum_noauth(target='{dc_ip}', domain='{payload.get('domain', '')}') "
+                    "- enumerate valid usernames via Kerberos"
+                ),
+            }
+
+            for i, technique in enumerate(techniques, 1):
+                if technique in no_cred_technique_map:
+                    technique_instructions.append(f"{i}. {no_cred_technique_map[technique]}")
+                else:
+                    technique_instructions.append(f"{i}. {technique}(...)")
+
+            if technique_instructions:
+                base_prompt = (
+                    "**MANDATORY TECHNIQUE EXECUTION (NO CREDENTIALS)**\n\n"
+                    f"Domain: {payload.get('domain', '')}\n"
+                    f"DC IP: {dc_ip or 'N/A'}\n"
+                    f"Targets: {', '.join(targets) if targets else 'N/A'}\n"
+                    f"Task ID: {task.task_id}\n\n"
+                    "⚠️ **CRITICAL: YOU MUST EXECUTE THESE TECHNIQUES IN ORDER:**\n"
+                    "⚠️ **DO NOT run smb_sweep or other slow recon first!**\n"
+                    "⚠️ **Complete assigned techniques BEFORE doing anything else.**\n\n"
+                    + "\n".join(technique_instructions)
+                    + "\n\n"
+                    "**WORKFLOW:**\n"
+                    "1. Execute EACH technique above in order\n"
+                    "2. Report ANY credentials/hashes found immediately\n"
+                    "3. Only after completing ALL assigned techniques, mark task complete\n\n"
+                    "**DO NOT:**\n"
+                    "- Run smb_sweep (wastes 5+ minutes, not your job)\n"
+                    "- Do additional enumeration before completing assigned techniques\n"
+                )
+                state_context = format_state_context(
+                    state, "credential_access", current_target=dc_ip
+                )
+                return base_prompt + state_context
+
+        # Fallback: Low hanging fruit WITHOUT credentials - use anonymous/null session techniques
         if has_low_hanging and not payload.get("password") and not payload.get("hash_value"):
             base_prompt = (
                 "Perform LOW HANGING FRUIT credential discovery (NO CREDENTIALS):\n"
@@ -775,6 +831,94 @@ def generate_prompt_from_task(  # noqa: PLR0912
             )
             state_context = format_state_context(state, "credential_access", current_target=dc_ip)
             return base_prompt + state_context
+
+        # EXPLICIT TECHNIQUE ENFORCEMENT: When techniques are specified, run ONLY those first
+        # This prevents the agent from getting distracted by recon (smb_sweep, etc.)
+        has_creds = payload.get("password") or (hash_is_pth and hash_value)
+        if techniques and has_creds:
+            # Build technique-specific instructions
+            technique_instructions = []
+            # Determine credential parameter (password or hash)
+            cred_param = (
+                f"password='{payload.get('password')}'"
+                if payload.get("password")
+                else f"hashes='{hash_value}'"
+            )
+            cred_display = (
+                payload.get("password") if payload.get("password") else f"[HASH] {hash_value}"
+            )
+
+            technique_map = {
+                "sysvol_script_search": (
+                    f"sysvol_script_search(target='{dc_ip}', username='{payload.get('username')}', "
+                    f"{cred_param}, domain='{payload.get('domain', '')}') "
+                    "- ~2 seconds, finds hardcoded passwords in login scripts"
+                ),
+                "gpp_password_finder": (
+                    f"gpp_password_finder(target='{dc_ip}', username='{payload.get('username')}', "
+                    f"{cred_param}, domain='{payload.get('domain', '')}') "
+                    "- ~2 seconds, finds GPP/cpassword credentials"
+                ),
+                "ldap_search_descriptions": (
+                    f"ldap_search_descriptions(target='{dc_ip}', username='{payload.get('username')}', "
+                    f"{cred_param}, domain='{payload.get('domain', '')}') "
+                    "- finds passwords in LDAP description fields"
+                ),
+                "kerberoast": (
+                    f"kerberoast(target='{dc_ip}', username='{payload.get('username')}', "
+                    f"{cred_param}, domain='{payload.get('domain', '')}') "
+                    "- service account hashes"
+                ),
+                "secretsdump": (
+                    f"secretsdump(target='{dc_ip}', username='{payload.get('username')}', "
+                    f"{cred_param}, domain='{payload.get('domain', '')}') "
+                    "- dump hashes (requires admin)"
+                ),
+                "lsassy": (
+                    f"lsassy(target='{dc_ip}', username='{payload.get('username')}', "
+                    f"{cred_param}, domain='{payload.get('domain', '')}') "
+                    "- LSASS memory dump"
+                ),
+                "laps_dump": (
+                    f"laps_dump(target='{dc_ip}', username='{payload.get('username')}', "
+                    f"{cred_param}, domain='{payload.get('domain', '')}') "
+                    "- LAPS local admin passwords"
+                ),
+            }
+
+            for i, technique in enumerate(techniques, 1):
+                if technique in technique_map:
+                    technique_instructions.append(f"{i}. {technique_map[technique]}")
+                else:
+                    technique_instructions.append(f"{i}. {technique}(...)")
+
+            if technique_instructions:
+                base_prompt = (
+                    "**MANDATORY TECHNIQUE EXECUTION**\n\n"
+                    f"Domain: {payload.get('domain', '')}\n"
+                    f"DC IP: {dc_ip or 'N/A'}\n"
+                    f"Targets: {', '.join(targets) if targets else 'N/A'}\n"
+                    f"Username: {payload.get('username') or 'N/A'}\n"
+                    f"Credential: {cred_display}\n"
+                    f"Task ID: {task.task_id}\n\n"
+                    "⚠️ **CRITICAL: YOU MUST EXECUTE THESE TECHNIQUES IN ORDER:**\n"
+                    "⚠️ **DO NOT run smb_sweep, kerberos_user_enum, or other recon first!**\n"
+                    "⚠️ **These techniques are FAST (~2-5 seconds each) and HIGH VALUE.**\n\n"
+                    + "\n".join(technique_instructions)
+                    + "\n\n"
+                    "**WORKFLOW:**\n"
+                    "1. Execute EACH technique above in order - they are FAST\n"
+                    "2. Report ANY credentials found immediately\n"
+                    "3. Only after completing ALL assigned techniques, mark task complete\n\n"
+                    "**DO NOT:**\n"
+                    "- Run smb_sweep (wastes 5+ minutes)\n"
+                    "- Run kerberos_user_enum_noauth (not your job)\n"
+                    "- Do additional recon before completing assigned techniques\n"
+                )
+                state_context = format_state_context(
+                    state, "credential_access", current_target=dc_ip
+                )
+                return base_prompt + state_context
 
         base_prompt = (
             "Perform credential access against the target environment:\n"

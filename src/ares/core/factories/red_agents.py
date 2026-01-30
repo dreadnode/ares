@@ -310,7 +310,7 @@ def create_role_hooks(
 
         hooks.append(track_exploitation)
 
-    # Unstall hook for all roles
+    # Unstall hook for all roles - provides context-specific guidance when agent stalls
     role_feedback = {
         AgentRole.ORCHESTRATOR: (
             "You seem stuck. As orchestrator, focus on:\n"
@@ -326,11 +326,25 @@ def create_role_hooks(
             "3. Run BloodHound collection if credentials available\n"
             "4. Report findings back to orchestrator"
         ),
+        AgentRole.CREDENTIAL_ACCESS: (
+            "You seem stuck. As credential access agent, focus on:\n"
+            "1. LOW-HANGING FRUIT: gpp_password_finder, sysvol_script_search on DCs\n"
+            "2. KERBEROAST: kerberoast service accounts (look for sql_svc, svc_*, etc.)\n"
+            "3. AS-REP ROAST: asrep_roast users without pre-auth\n"
+            "4. LDAP SEARCH: ldap_search_descriptions for passwords in descriptions\n"
+            "5. LAPS: laps_dump if we have read access\n"
+            "6. SHARES: Enumerate accessible shares for scripts/configs with creds\n"
+            "7. If you have admin on a host, run secretsdump to harvest creds\n"
+            "8. Use task_complete when no more credential sources available"
+        ),
         AgentRole.CRACKER: (
-            "You seem stuck. As cracker, focus on:\n"
-            "1. Process pending crack requests from your queue\n"
-            "2. Try different wordlists or rules\n"
-            "3. Report results back to orchestrator"
+            "You seem stuck. As cracker agent, focus on:\n"
+            "1. Check the hash type and pick the right hashcat mode\n"
+            "2. Try rockyou.txt first with common rules (best64, d3ad0ne)\n"
+            "3. For Kerberos hashes (TGS/AS-REP): mode 18200/23 with wordlists\n"
+            "4. For NTLM: mode 1000, try pass-the-hash if cracking fails\n"
+            "5. Report cracked passwords with report_cracked_credential\n"
+            "6. Use task_complete when cracking exhausted or successful"
         ),
         AgentRole.ACL: (
             "You seem stuck. As ACL exploiter, focus on:\n"
@@ -347,25 +361,28 @@ def create_role_hooks(
         ),
         AgentRole.LATERAL: (
             "You seem stuck. As lateral agent, focus on:\n"
-            "1. Process lateral movement requests\n"
-            "2. Try different methods: psexec, evil-winrm, wmi\n"
-            "3. Run secretsdump on successful access\n"
-            "4. Report new credentials back"
+            "1. TRY ALL CREDENTIALS from shared state against the target\n"
+            "2. Methods to try in order: evil-winrm (5985), psexec (445), wmiexec (135)\n"
+            "3. If you get access: run secretsdump IMMEDIATELY to harvest creds\n"
+            "4. If target is a DC: secretsdump will get NTDS.dit → krbtgt hash → golden ticket\n"
+            "5. Check for MSSQL (1433): linked servers can pivot across domains\n"
+            "6. Report ALL new credentials found with appropriate tools\n"
+            "7. Use task_complete when access achieved or all methods exhausted"
         ),
         AgentRole.COERCION: (
-            "You seem stuck. As coercion, focus on:\n"
+            "You seem stuck. As coercion agent, focus on:\n"
             "1. Start responder/mitm6 if not running\n"
             "2. Use coercion techniques (petitpotam, coercer)\n"
             "3. Report captured hashes"
         ),
     }
 
-    if role not in (AgentRole.CREDENTIAL_ACCESS, AgentRole.LATERAL, AgentRole.CRACKER):
-        unstall_hook = retry_with_feedback(
-            event_type=AgentStalled,
-            feedback=role_feedback.get(role, "Try a different approach."),
-        )
-        hooks.append(unstall_hook)
+    # All roles get unstall hooks with role-specific guidance
+    unstall_hook = retry_with_feedback(
+        event_type=AgentStalled,
+        feedback=role_feedback.get(role, "Try a different approach."),
+    )
+    hooks.append(unstall_hook)
 
     return hooks
 

@@ -36,8 +36,8 @@ def derive_redis_url(namespace: str, host: str = "redis", port: int = 6379) -> s
 class AgentConfig:
     """Configuration for a specific agent role."""
 
-    model: str = "claude-sonnet-4-20250514"
-    max_steps: int = 100
+    model: str = "gpt-4.1"
+    max_steps: int = 200
     pod_selector: str = ""
     capabilities: list[str] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)
@@ -157,7 +157,7 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         if isinstance(agent_data, dict):
             agents[role] = AgentConfig(
                 model=_resolve_env(agent_data.get("model", "")),
-                max_steps=agent_data.get("max_steps", 100),
+                max_steps=agent_data.get("max_steps", 200),
                 pod_selector=agent_data.get("pod_selector", ""),
                 capabilities=agent_data.get("capabilities", []),
                 tools=agent_data.get("tools", []),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -130,3 +131,297 @@ def test_build_redteam_report_state_uses_exploitation_status_counts():
 
     assert report_state.vulnerability_count == 4
     assert report_state.exploited_count == 2
+
+
+class TestAutoBloodHound:
+    """Tests for automatic BloodHound collection."""
+
+    @pytest.mark.asyncio
+    async def test_auto_bloodhound_dispatches_on_credentials(self, monkeypatch):
+        """Test that BloodHound collection is dispatched when credentials are discovered."""
+        from ares.core.models import Credential, Target
+        from ares.core.orchestrator import _auto_bloodhound
+
+        # Setup mock dispatcher
+        state = SharedRedTeamState(
+            operation_id="op-bloodhound",
+            target=Target(ip="192.168.56.10", domain="test.local"),
+        )
+        # Add a credential
+        state.all_credentials.append(
+            Credential(
+                username="testuser",
+                password="TestPass123",  # pragma: allowlist secret
+                domain="test.local",
+                source="test",
+            )
+        )
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher.request_recon = AsyncMock(return_value="task-123")
+
+        # Run auto_bloodhound for one cycle
+        task = asyncio.create_task(_auto_bloodhound(dispatcher, check_interval=0.1))
+
+        # Let it run one iteration
+        await asyncio.sleep(0.2)
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should have dispatched BloodHound task
+        dispatcher.request_recon.assert_called_once()
+        call_kwargs = dispatcher.request_recon.call_args.kwargs
+        assert "bloodhound" in call_kwargs.get("reason", "")
+        assert "bloodhound" in call_kwargs.get("techniques", [])
+
+    @pytest.mark.asyncio
+    async def test_auto_bloodhound_skips_when_no_credentials(self, monkeypatch):
+        """Test that BloodHound is not dispatched without credentials."""
+        from ares.core.models import Target
+        from ares.core.orchestrator import _auto_bloodhound
+
+        state = SharedRedTeamState(
+            operation_id="op-no-creds",
+            target=Target(ip="192.168.56.11", domain="test.local"),
+        )
+        # No credentials
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher.request_recon = AsyncMock(return_value="task-123")
+
+        task = asyncio.create_task(_auto_bloodhound(dispatcher, check_interval=0.1))
+
+        await asyncio.sleep(0.2)
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should NOT have dispatched
+        dispatcher.request_recon.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_auto_bloodhound_stops_when_complete(self):
+        """Test that BloodHound automation stops when operation is complete."""
+        from ares.core.models import Credential, Target
+        from ares.core.orchestrator import _auto_bloodhound
+
+        state = SharedRedTeamState(
+            operation_id="op-complete",
+            target=Target(ip="192.168.56.12", domain="test.local"),
+        )
+        state.completed = True
+        state.all_credentials.append(
+            Credential(
+                username="user",
+                password="pass",  # pragma: allowlist secret
+                domain="test.local",
+                source="test",
+            )  # pragma: allowlist secret
+        )
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher.request_recon = AsyncMock(return_value="task-123")
+
+        # Should exit immediately when completed=True
+        await _auto_bloodhound(dispatcher, check_interval=0.1)
+
+        # Should NOT dispatch when completed
+        dispatcher.request_recon.assert_not_called()
+
+
+class TestAutoCoercion:
+    """Tests for automatic coercion attacks."""
+
+    @pytest.mark.asyncio
+    async def test_auto_coercion_esc8_when_adcs_found(self):
+        """Test that ESC8 coercion is dispatched when ADCS server is detected."""
+        from ares.core.models import Credential, Host, Target
+        from ares.core.orchestrator import _auto_coercion
+
+        state = SharedRedTeamState(
+            operation_id="op-esc8",
+            target=Target(ip="192.168.56.13", domain="test.local"),
+        )
+        # Add a credential to enable coercion
+        state.all_credentials.append(
+            Credential(
+                username="user",
+                password="pass",  # pragma: allowlist secret
+                domain="test.local",
+                source="test",
+            )  # pragma: allowlist secret
+        )
+        # Add DC host
+        dc_host = Host(ip="192.168.56.14", hostname="DC01", roles=["DC"])
+        state.all_hosts.append(dc_host)
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher.request_coercion = AsyncMock(return_value="task-456")
+        # Mock find_adcs_servers to return an ADCS server
+        dispatcher.find_adcs_servers = MagicMock(return_value=[("192.168.56.15", "ADCS01")])
+
+        task = asyncio.create_task(_auto_coercion(dispatcher, check_interval=0.1))
+
+        await asyncio.sleep(0.2)
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should have dispatched ESC8 coercion (may dispatch LDAPS relay too)
+        assert dispatcher.request_coercion.call_count >= 1
+        # Check the first call was ESC8
+        first_call_kwargs = dispatcher.request_coercion.call_args_list[0].kwargs
+        payload = first_call_kwargs.get("payload_override", {})
+        assert payload.get("attack_type") == "esc8"
+        assert "192.168.56.15" in payload.get("adcs_server", "")
+
+    @pytest.mark.asyncio
+    async def test_auto_coercion_ldaps_relay_to_dc(self):
+        """Test that LDAPS relay coercion is dispatched to DCs."""
+        from ares.core.models import Credential, Host, Target
+        from ares.core.orchestrator import _auto_coercion
+
+        state = SharedRedTeamState(
+            operation_id="op-ldaps",
+            target=Target(ip="192.168.56.16", domain="test.local"),
+        )
+        state.all_credentials.append(
+            Credential(
+                username="user",
+                password="pass",  # pragma: allowlist secret
+                domain="test.local",
+                source="test",
+            )  # pragma: allowlist secret
+        )
+        # Add DC
+        dc_host = Host(ip="192.168.56.17", hostname="DC02", roles=["Domain Controller"])
+        state.all_hosts.append(dc_host)
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher.request_coercion = AsyncMock(return_value="task-789")
+        dispatcher.find_adcs_servers = MagicMock(return_value=[])  # No ADCS
+
+        task = asyncio.create_task(_auto_coercion(dispatcher, check_interval=0.01))
+
+        # Give it time to complete at least one cycle
+        await asyncio.sleep(0.1)
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should have dispatched LDAPS relay coercion
+        assert dispatcher.request_coercion.call_count >= 1
+        call_kwargs = dispatcher.request_coercion.call_args.kwargs
+        payload = call_kwargs.get("payload_override", {})
+        assert payload.get("attack_type") == "ldaps_relay"
+
+    @pytest.mark.asyncio
+    async def test_auto_coercion_waits_for_credentials(self):
+        """Test that coercion waits for credentials before starting."""
+        from ares.core.models import Host, Target
+        from ares.core.orchestrator import _auto_coercion
+
+        state = SharedRedTeamState(
+            operation_id="op-wait",
+            target=Target(ip="192.168.56.18", domain="test.local"),
+        )
+        # No credentials yet
+        dc_host = Host(ip="192.168.56.19", hostname="DC03", roles=["DC"])
+        state.all_hosts.append(dc_host)
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher.request_coercion = AsyncMock(return_value="task-999")
+        dispatcher.find_adcs_servers = MagicMock(return_value=[])
+
+        task = asyncio.create_task(_auto_coercion(dispatcher, check_interval=0.1))
+
+        await asyncio.sleep(0.2)
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should NOT have dispatched without credentials
+        dispatcher.request_coercion.assert_not_called()
+
+
+class TestWaitForCrackTasks:
+    """Tests for crack task grace period."""
+
+    @pytest.mark.asyncio
+    async def test_wait_for_crack_tasks_waits_until_complete(self):
+        """Test that _wait_for_crack_tasks waits for running crack tasks to complete."""
+        from ares.core.models import TaskInfo, TaskStatus
+        from ares.core.orchestrator import _wait_for_crack_tasks
+
+        state = SharedRedTeamState(operation_id="op-crack")
+        # Add a running crack task
+        crack_task = TaskInfo(
+            task_id="crack-001",
+            task_type="crack",
+            source_agent="cracker",
+            status=TaskStatus.IN_PROGRESS,
+        )
+        state.pending_tasks["crack-001"] = crack_task
+
+        dispatcher = SimpleNamespace(shared_state=state)
+
+        # Start wait in background
+        wait_task = asyncio.create_task(_wait_for_crack_tasks(dispatcher, timeout=5.0))
+
+        # Wait a bit, then mark task complete
+        await asyncio.sleep(0.1)
+        state.pending_tasks.pop("crack-001")  # Simulate completion
+
+        # Should complete without timeout
+        await wait_task
+
+    @pytest.mark.asyncio
+    async def test_wait_for_crack_tasks_times_out(self):
+        """Test that _wait_for_crack_tasks respects timeout."""
+        from ares.core.models import TaskInfo, TaskStatus
+        from ares.core.orchestrator import _wait_for_crack_tasks
+
+        state = SharedRedTeamState(operation_id="op-crack-timeout")
+        # Add a crack task that won't complete
+        crack_task = TaskInfo(
+            task_id="crack-002",
+            task_type="crack",
+            source_agent="cracker",
+            status=TaskStatus.IN_PROGRESS,
+        )
+        state.pending_tasks["crack-002"] = crack_task
+
+        dispatcher = SimpleNamespace(shared_state=state)
+
+        # Should timeout after 0.5 seconds
+        await _wait_for_crack_tasks(dispatcher, timeout=0.5, check_interval=0.1)
+
+        # Task should still be in pending (not removed)
+        assert "crack-002" in state.pending_tasks
+
+    @pytest.mark.asyncio
+    async def test_wait_for_crack_tasks_returns_immediately_when_none(self):
+        """Test that _wait_for_crack_tasks returns immediately when no crack tasks."""
+        from ares.core.orchestrator import _wait_for_crack_tasks
+
+        state = SharedRedTeamState(operation_id="op-no-crack")
+        dispatcher = SimpleNamespace(shared_state=state)
+
+        # Should return immediately
+        await _wait_for_crack_tasks(dispatcher, timeout=5.0)
