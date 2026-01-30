@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from enum import Enum, IntEnum
 from typing import Any
 
+from loguru import logger
 from pydantic import Field, computed_field
 from rigging import Model
 from rigging.model import element, wrapped
@@ -453,6 +454,8 @@ class Hash(Model):
     hash_type: str = "NTLM"
     domain: str = ""
     cracked_password: str = ""
+    source: str = ""
+    discovered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class Share(Model):
@@ -488,6 +491,7 @@ class RedTeamState:
     tested_credentials: set[str] = field(default_factory=set)
     timeline: list[TimelineEvent] = field(default_factory=list)
     identified_techniques: set[str] = field(default_factory=set)
+    pending_credential_findings: set[str] = field(default_factory=set)
 
     # Success flags
     has_domain_admin: bool = False
@@ -519,7 +523,8 @@ class RedTeamState:
 class AgentRole(Enum):
     """Specialized roles for multi-agent red team operations."""
 
-    RECON = "recon"
+    ORCHESTRATOR = "orchestrator"  # Central coordinator, dispatches to workers
+    RECON = "recon"  # Network scanning, enumeration, BloodHound
     CREDENTIAL_ACCESS = "credential_access"
     CRACKER = "cracker"
     ACL = "acl"
@@ -631,6 +636,7 @@ class SharedRedTeamState:
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Global discoveries (aggregated from all agents)
+    all_domains: list[str] = field(default_factory=list)
     all_credentials: list[Credential] = field(default_factory=list)
     all_hashes: list[Hash] = field(default_factory=list)
     all_hosts: list[Host] = field(default_factory=list)
@@ -658,41 +664,404 @@ class SharedRedTeamState:
     # Timeline for cross-agent correlation
     operation_timeline: list[TimelineEvent] = field(default_factory=list)
     identified_techniques: set[str] = field(default_factory=set)
+    pending_credential_findings: set[str] = field(default_factory=set)
+
+    # Shared artifacts storage (base64-encoded file contents)
+    # Key format: "category/filename" -> base64 content
+    # Example: "sysvol/login.bat" -> "QmF0Y2ggZmlsZSBjb250ZW50..."
+    downloaded_artifacts: dict[str, str] = field(default_factory=dict)
+
+    # Transient dispatcher reference for real-time publishing (NOT pickled)
+    _dispatcher: Any = field(default=None, init=False, repr=False, compare=False)
+
+    def __getstate__(self):
+        """Exclude _dispatcher from pickling."""
+        state = self.__dict__.copy()
+        state.pop("_dispatcher", None)
+        return state
+
+    def __setstate__(self, state):
+        """Restore state without dispatcher."""
+        self.__dict__.update(state)
+        self._dispatcher = None
+
+    def set_dispatcher(self, dispatcher) -> None:
+        """Set dispatcher for real-time publishing of discoveries."""
+        object.__setattr__(self, "_dispatcher", dispatcher)
+
+    def _publish_async(self, coro) -> None:
+        """Fire-and-forget async publish to Redis."""
+        if not self._dispatcher:
+            return
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+            asyncio.ensure_future(coro, loop=loop)  # noqa: RUF006 - fire-and-forget
+        except RuntimeError:
+            # No event loop, skip real-time publish
+            pass
+
+    def store_artifact(self, key: str, content: bytes | str, source_agent: str = "") -> bool:
+        """Store a downloaded artifact in shared state.
+
+        Args:
+            key: Artifact key (e.g., "sysvol/login.bat" or "loot/ntds.dit")
+            content: File content as bytes or string
+            source_agent: Agent that downloaded the artifact
+
+        Returns:
+            True if stored, False if duplicate or too large
+        """
+        import base64
+
+        # Limit artifact size to 10MB (Redis Sentinel provides robust storage)
+        max_size = 10 * 1024 * 1024
+        if isinstance(content, str):
+            content_bytes = content.encode("utf-8", errors="replace")
+        else:
+            content_bytes = content
+
+        if len(content_bytes) > max_size:
+            logger.warning(f"Artifact '{key}' too large ({len(content_bytes)} bytes), skipping")
+            return False
+
+        if key in self.downloaded_artifacts:
+            logger.debug(f"Artifact '{key}' already exists, skipping")
+            return False
+
+        encoded = base64.b64encode(content_bytes).decode("ascii")
+        self.downloaded_artifacts[key] = encoded
+        logger.info(f"Artifact stored: {key} ({len(content_bytes)} bytes) from {source_agent}")
+        return True
+
+    def get_artifact(self, key: str) -> bytes | None:
+        """Retrieve a downloaded artifact from shared state.
+
+        Args:
+            key: Artifact key
+
+        Returns:
+            File content as bytes, or None if not found
+        """
+        import base64
+
+        encoded = self.downloaded_artifacts.get(key)
+        if not encoded:
+            return None
+        return base64.b64decode(encoded)
+
+    def get_artifact_text(self, key: str, encoding: str = "utf-8") -> str | None:
+        """Retrieve a downloaded artifact as text.
+
+        Args:
+            key: Artifact key
+            encoding: Text encoding (default utf-8)
+
+        Returns:
+            File content as string, or None if not found
+        """
+        content = self.get_artifact(key)
+        if content is None:
+            return None
+        return content.decode(encoding, errors="replace")
+
+    def list_artifacts(self, prefix: str = "") -> list[str]:
+        """List all artifact keys, optionally filtered by prefix.
+
+        Args:
+            prefix: Optional prefix filter (e.g., "sysvol/")
+
+        Returns:
+            List of artifact keys
+        """
+        if not prefix:
+            return list(self.downloaded_artifacts.keys())
+        return [k for k in self.downloaded_artifacts if k.startswith(prefix)]
+
+    def _resolve_netbios_to_fqdn(self, netbios_name: str) -> str:
+        """Resolve a NetBIOS domain name to its FQDN equivalent.
+
+        When netexec outputs 'CONTOSO\\user:password', we capture 'CONTOSO' as the domain.
+        This method resolves it to 'contoso.local' if we know the mapping.
+
+        Args:
+            netbios_name: The NetBIOS domain name (e.g., 'CONTOSO')
+
+        Returns:
+            The FQDN if found, otherwise the original NetBIOS name
+        """
+        netbios_lower = netbios_name.lower()
+
+        # Check if target.domain starts with the NetBIOS name
+        if self.target and self.target.domain:
+            target_domain = self.target.domain.lower()
+            if target_domain.startswith(netbios_lower + "."):
+                return target_domain
+
+        # Check existing credentials for a matching FQDN pattern
+        for cred in self.all_credentials:
+            cred_domain = (cred.domain or "").lower()
+            if cred_domain.startswith(netbios_lower + "."):
+                return cred_domain
+
+        # Check known domains for a matching FQDN pattern
+        for known_domain in self.all_domains:
+            known_lower = known_domain.lower()
+            if known_lower.startswith(netbios_lower + "."):
+                return known_lower
+
+        # No FQDN found, return original
+        return netbios_lower
 
     def add_credential(self, credential: Credential, source_agent: str) -> bool:
         """Add credential if not duplicate. Returns True if added."""
         username = credential.username.strip()
+        # Normalize domain to lowercase for consistency
+        domain = credential.domain.strip().lower()
+        # Resolve NetBIOS domain names (e.g., "CONTOSO") to FQDN (e.g., "contoso.local")
+        if domain and "." not in domain:
+            domain = self._resolve_netbios_to_fqdn(domain)
+        password = credential.password.strip()
         if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
+            logger.debug(f"Credential rejected: invalid username '{username}' from {source_agent}")
             return False
-        key = f"{credential.domain}:{credential.username}:{credential.password}".lower()
+        # Reject credentials without passwords (use add_hash for hashes)
+        if not password:
+            logger.debug(
+                f"Credential rejected: empty password for '{username}' from {source_agent}"
+            )
+            return False
+        # Guard against file-path artifacts (e.g., /tmp/users.txt) leaking in.
+        if "/" in username or "\\" in username or username.endswith(".txt"):
+            logger.debug(f"Credential rejected: path artifact '{username}' from {source_agent}")
+            return False
+        self.add_user(username, domain)
+        self.add_domain(domain)
+        key = f"{domain}:{username}:{password}".lower()
         for existing in self.all_credentials:
-            existing_key = f"{existing.domain}:{existing.username}:{existing.password}".lower()
+            existing_key = f"{existing.domain.strip()}:{existing.username.strip()}:{existing.password.strip()}".lower()
             if key == existing_key:
+                pending_key = f"{domain}:{username}".lower()
+                self.pending_credential_findings.discard(pending_key)
+                logger.debug(
+                    f"Credential rejected: duplicate {domain}\\{username} from {source_agent}"
+                )
                 return False
+        credential.username = username
+        credential.domain = domain
+        credential.password = password
         credential.source = f"{source_agent}:{credential.source}"
         self.all_credentials.append(credential)
+        pending_key = f"{domain}:{username}".lower()
+        self.pending_credential_findings.discard(pending_key)
+        logger.info(f"Credential added: {domain}\\{username} (source: {source_agent})")
+
+        # Real-time checkpoint to Redis (don't call publish_credential - that would re-add)
+        if self._dispatcher:
+            self._dispatcher.signal_credential_access()
+            self._publish_async(self._dispatcher._checkpoint())
+
+        return True
+
+    def add_user(self, username: str, domain: str) -> bool:
+        """Add user if not duplicate. Returns True if added."""
+        if not username:
+            logger.debug(f"User rejected: empty username for domain {domain}")
+            return False
+        normalized = username.strip()
+        # Normalize domain to lowercase for consistency
+        normalized_domain = (domain or "").strip().lower()
+        # Resolve NetBIOS domain names to FQDN
+        if normalized_domain and "." not in normalized_domain:
+            normalized_domain = self._resolve_netbios_to_fqdn(normalized_domain)
+        if not normalized or normalized.lower() in {"(none)", "none", "null", "(null)"}:
+            logger.debug(
+                f"User rejected: invalid username '{normalized}' for domain {normalized_domain}"
+            )
+            return False
+        if "/" in normalized or "\\" in normalized or normalized.endswith(".txt"):
+            logger.debug(
+                f"User rejected: path artifact '{normalized}' for domain {normalized_domain}"
+            )
+            return False
+        for existing in self.all_users:
+            existing_domain = (existing.domain or "").lower()
+            if existing.username == normalized and existing_domain == normalized_domain:
+                logger.debug(f"User rejected: duplicate {normalized_domain}\\{normalized}")
+                return False
+        self.all_users.append(User(username=normalized, domain=normalized_domain))
+        self.add_domain(normalized_domain)
+        logger.debug(f"User added: {normalized_domain}\\{normalized}")
+        return True
+
+    def add_domain(self, domain: str) -> bool:
+        """Add domain if not duplicate. Returns True if added."""
+        normalized = (domain or "").strip().lower()
+        if not normalized:
+            return False
+        if any(existing.lower() == normalized for existing in self.all_domains):
+            return False
+        self.all_domains.append(normalized)
         return True
 
     def add_hash(self, hash_obj: Hash, source_agent: str) -> bool:
         """Add hash if not duplicate. Returns True if added."""
+        hash_type = (hash_obj.hash_type or "").strip().lower()
+        username = (hash_obj.username or "").strip().lower()
+        domain = (hash_obj.domain or "").strip().lower()
+        # Resolve NetBIOS domain names to FQDN
+        if domain and "." not in domain:
+            domain = self._resolve_netbios_to_fqdn(domain)
+        hash_value = hash_obj.hash_value or ""
+
+        # Detect hash type from value if type is unknown/missing
+        # AS-REP hashes start with $krb5asrep$
+        is_asrep = hash_type in {"as-rep", "asrep", "krb5asrep"} or hash_value.startswith(
+            "$krb5asrep$"
+        )
+        # Kerberoast hashes start with $krb5tgs$
+        is_kerberoast = hash_type in {"kerberoast", "krb5tgs", "tgs-rep"} or hash_value.startswith(
+            "$krb5tgs$"
+        )
+
+        # Normalize hash_type based on detected format
+        if is_asrep and hash_type not in {"as-rep", "asrep", "krb5asrep"}:
+            hash_obj.hash_type = "AS-REP"
+            hash_type = "as-rep"
+        elif is_kerberoast and hash_type not in {"kerberoast", "krb5tgs", "tgs-rep"}:
+            hash_obj.hash_type = "Kerberoast"
+            hash_type = "kerberoast"
+
         for existing in self.all_hashes:
-            if existing.hash_value == hash_obj.hash_value:
+            if existing.hash_value == hash_value:
+                logger.debug(
+                    f"Hash rejected: duplicate hash for {domain}\\{username} ({hash_type}) from {source_agent}"
+                )
                 return False
+            # For AS-REP, dedupe by user since each request generates different hash but same password
+            # NOTE: Don't dedupe Kerberoast by user - same user can have multiple SPNs with different
+            # encryption types (RC4 vs AES), and we want to keep all of them for cracking flexibility
+            existing_value = existing.hash_value or ""
+            existing_is_asrep = (existing.hash_type or "").strip().lower() in {
+                "as-rep",
+                "asrep",
+                "krb5asrep",
+            } or existing_value.startswith("$krb5asrep$")
+
+            if is_asrep and existing_is_asrep:
+                existing_user = (existing.username or "").strip().lower()
+                existing_domain = (existing.domain or "").strip().lower()
+                if existing_user == username and existing_domain == domain:
+                    logger.debug(
+                        f"Hash rejected: duplicate AS-REP user {domain}\\{username} from {source_agent}"
+                    )
+                    return False
+        # Update hash_obj with normalized values (including resolved domain)
+        hash_obj.domain = domain
+        hash_obj.username = username
+        self.add_domain(domain)
+        if not getattr(hash_obj, "source", ""):
+            hash_obj.source = source_agent
+        else:
+            hash_obj.source = f"{source_agent}:{hash_obj.source}"
+        if not getattr(hash_obj, "discovered_at", None):
+            hash_obj.discovered_at = datetime.now(timezone.utc)
         self.all_hashes.append(hash_obj)
+        logger.info(f"Hash added: {domain}\\{username} ({hash_type}) (source: {source_agent})")
+
+        # Real-time checkpoint to Redis (don't call publish_hash - that would re-add)
+        if self._dispatcher:
+            self._dispatcher.signal_credential_access()
+            self._publish_async(self._dispatcher._checkpoint())
+
         return True
 
-    def add_host(self, host: Host) -> bool:
+    def add_host(self, host: Host) -> bool:  # noqa: PLR0912
         """Add host if not duplicate. Returns True if added."""
+        if not host.ip or not host.ip.strip():
+            logger.debug("Host rejected: empty IP address")
+            return False
+        host.ip = host.ip.strip()
+        host.hostname = host.hostname.strip()
+        if host.hostname:
+            hostname_lower = host.hostname.lower()
+            if hostname_lower.startswith("ip-") and "compute.internal" in hostname_lower:
+                host.hostname = ""
         for existing in self.all_hosts:
             if existing.ip == host.ip:
+                # Merge stronger hostname/OS details instead of dropping updates.
+                existing_hostname = (existing.hostname or "").strip()
+                if existing_hostname:
+                    existing_lower = existing_hostname.lower()
+                    if existing_lower.startswith("ip-") and "compute.internal" in existing_lower:
+                        existing_hostname = ""
+                        existing.hostname = ""
+                new_hostname = (host.hostname or "").strip()
+                if new_hostname:
+                    existing_lower = existing_hostname.lower()
+                    existing_is_short = "." not in existing_hostname
+                    new_is_fqdn = "." in new_hostname
+                    existing_is_ptr = (
+                        existing_lower.startswith("ip-") and "compute.internal" in existing_lower
+                    )
+                    if (
+                        not existing_hostname
+                        or existing_is_ptr
+                        or (existing_is_short and new_is_fqdn)
+                    ):
+                        existing.hostname = new_hostname
+                if host.os and (not existing.os or existing.os.lower() == "unknown"):
+                    existing.os = host.os
+                if host.roles:
+                    existing.roles = list({*existing.roles, *host.roles})
+                if host.services:
+                    existing.services = list({*existing.services, *host.services})
+                logger.debug(f"Host merged: {host.ip} (existing, updated details)")
                 return False
         self.all_hosts.append(host)
+        logger.debug(f"Host added: {host.ip} ({host.hostname or 'no hostname'})")
+
+        # Real-time checkpoint to Redis (don't call publish_host - that would re-add)
+        if self._dispatcher:
+            self._publish_async(self._dispatcher._checkpoint())
+
+        return True
+
+    def add_share(self, share: Share) -> bool:
+        """Add share if not duplicate. Returns True if added."""
+        host = (share.host or "").strip().lower()
+        name = (share.name or "").strip().lower()
+        if not host or not name:
+            logger.debug(f"Share rejected: empty host or name (host='{host}', name='{name}')")
+            return False
+        for existing in self.all_shares:
+            if (existing.host or "").strip().lower() == host and (
+                existing.name or ""
+            ).strip().lower() == name:
+                logger.debug(f"Share rejected: duplicate {host}/{name}")
+                return False
+        self.all_shares.append(share)
+        logger.debug(f"Share added: {host}/{name}")
+
+        # Real-time checkpoint to Redis
+        if self._dispatcher:
+            self._publish_async(self._dispatcher._checkpoint())
+
         return True
 
     def add_vulnerability(self, vuln: VulnerabilityInfo) -> bool:
-        """Add vulnerability if not duplicate. Returns True if added."""
+        """Add vulnerability if not duplicate. Returns True if added.
+
+        Deduplicates by both vuln_id AND (vuln_type, target) to prevent
+        logical duplicates with different UUIDs.
+        """
         if vuln.vuln_id in self.discovered_vulnerabilities:
             return False
+        # Also check for same (type, target) combination to prevent logical duplicates
+        for existing in self.discovered_vulnerabilities.values():
+            if existing.vuln_type == vuln.vuln_type and existing.target == vuln.target:
+                return False
         self.discovered_vulnerabilities[vuln.vuln_id] = vuln
         return True
 
@@ -776,6 +1145,7 @@ class SharedRedTeamState:
         """Generate summary for reporting."""
         return {
             "operation_id": self.operation_id,
+            "domain_count": len(self.all_domains),
             "host_count": len(self.all_hosts),
             "credential_count": len(self.all_credentials),
             "hash_count": len(self.all_hashes),
@@ -783,6 +1153,7 @@ class SharedRedTeamState:
             "exploited_count": len(self.exploited_vulnerabilities),
             "pending_tasks": len(self.pending_tasks),
             "completed_tasks": len(self.completed_tasks),
+            "pending_credential_findings": len(self.pending_credential_findings),
             "has_domain_admin": self.has_domain_admin,
             "has_golden_ticket": self.has_golden_ticket,
             "registered_agents": list(self.registered_agents.keys()),
@@ -792,6 +1163,14 @@ class SharedRedTeamState:
         """Serialize state for Redis storage."""
         import pickle  # nosec B403
 
+        for host in self.all_hosts:
+            hostname = (host.hostname or "").strip()
+            if not hostname:
+                continue
+            lowered = hostname.lower()
+            if lowered.startswith("ip-") and "compute.internal" in lowered:
+                host.hostname = ""
+
         return pickle.dumps(self)  # nosec B301
 
     @classmethod
@@ -799,7 +1178,67 @@ class SharedRedTeamState:
         """Deserialize state from Redis."""
         import pickle  # nosec B403
 
-        return pickle.loads(data)  # noqa: S301  # nosec B301
+        state = pickle.loads(data)  # noqa: S301  # nosec B301
+        if not hasattr(state, "all_domains"):
+            state.all_domains = []
+        if not hasattr(state, "pending_credential_findings"):
+            state.pending_credential_findings = set()
+        if not hasattr(state, "downloaded_artifacts"):
+            state.downloaded_artifacts = {}
+        state.all_credentials = cls._dedupe_credentials(state.all_credentials)
+        if not state.all_domains:
+            state.all_domains = cls._extract_domains(state)
+        return state
+
+    @staticmethod
+    def _dedupe_credentials(credentials: list[Credential]) -> list[Credential]:
+        """Deduplicate credentials by domain:username:password key."""
+        deduped: list[Credential] = []
+        seen: set[str] = set()
+        for cred in credentials:
+            username = (cred.username or "").strip()
+            domain = (cred.domain or "").strip()
+            password = (cred.password or "").strip()
+            key = f"{domain}:{username}:{password}".lower()
+            if not username or key in seen:
+                continue
+            seen.add(key)
+            cred.username = username
+            cred.domain = domain
+            cred.password = password
+            deduped.append(cred)
+        return deduped
+
+    @staticmethod
+    def _extract_domains(state: SharedRedTeamState) -> list[str]:  # noqa: PLR0912
+        """Extract all domains from state objects."""
+        domains: set[str] = set()
+        if state.target and state.target.domain:
+            domains.add(state.target.domain.strip().lower())
+        # Extract from target hostname (e.g., dc.example.local -> example.local)
+        if state.target and state.target.hostname:
+            hostname = state.target.hostname.strip().lower()
+            if "." in hostname:
+                parts = hostname.split(".")
+                if len(parts) > 1:
+                    domains.add(".".join(parts[1:]))
+        for user in state.all_users:
+            if user.domain:
+                domains.add(user.domain.strip().lower())
+        for cred in state.all_credentials:
+            if cred.domain:
+                domains.add(cred.domain.strip().lower())
+        for h in state.all_hashes:
+            if h.domain:
+                domains.add(h.domain.strip().lower())
+        # Extract domains from host FQDNs (e.g., dc01.contoso.local -> contoso.local)
+        for host in state.all_hosts:
+            hostname = (host.hostname or "").strip().lower()
+            if "." in hostname:
+                parts = hostname.split(".")
+                if len(parts) > 1:
+                    domains.add(".".join(parts[1:]))
+        return sorted(domains)
 
 
 @dataclass

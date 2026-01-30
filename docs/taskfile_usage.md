@@ -49,7 +49,7 @@ Or run the Red Team agent against a target:
 task -y ares:red TARGET=dreadgoad
 
 # Or use a direct IP address
-task ares:red: TARGET=192.168.1.100
+task ares:red: TARGET=192.168.56.100
 ```
 
 This will:
@@ -148,7 +148,7 @@ task -y ares:red TARGET=dreadgoad PROFILE=production REGION=us-east-1
 Run Red Team agent against a direct IP address (bypasses EC2 discovery).
 
 ```bash
-task ares:red: TARGET=192.168.1.100
+task ares:red: TARGET=192.168.56.100
 ```
 
 #### `task ares:red:local: TARGET=<ip>`
@@ -156,7 +156,7 @@ task ares:red: TARGET=192.168.1.100
 Run Red Team using `.env` file instead of 1Password.
 
 ```bash
-task ares:red:local: TARGET=192.168.1.100
+task ares:red:local: TARGET=192.168.56.100
 ```
 
 #### Multi-Agent Operations
@@ -202,16 +202,16 @@ task ares:red:multi TARGET=dreadgoad DOMAIN=sevenkingdoms.local \
 
 **Variables:**
 
-| Variable | Default | Description |
-| -------- | ------- | ----------- |
-| `TARGET` | *(required)* | EC2 Name tag filter or IP address |
-| `DOMAIN` | `example.local` | Active Directory domain name |
-| `OPERATION_ID` | `op-YYYYMMDD-HHMMSS` | Custom operation ID (auto-generated) |
-| `RESUME` | `false` | Resume from checkpoint (`true`/`false`) |
-| `TARGET_PROFILE` | `lab` | AWS profile for EC2 discovery |
-| `TARGET_REGION` | `us-west-2` | AWS region for EC2 discovery |
-| `K8S_NAMESPACE` | `attack-simulation` | Kubernetes namespace for agents |
-| `MODEL_ALL` | *(see below)* | Override all agent models |
+| Variable         | Default              | Description                             |
+| ---------------- | -------------------- | --------------------------------------- |
+| `TARGET`         | _(required)_         | EC2 Name tag filter or IP address       |
+| `DOMAIN`         | `example.local`      | Active Directory domain name            |
+| `OPERATION_ID`   | `op-YYYYMMDD-HHMMSS` | Custom operation ID (auto-generated)    |
+| `RESUME`         | `false`              | Resume from checkpoint (`true`/`false`) |
+| `TARGET_PROFILE` | `lab`                | AWS profile for EC2 discovery           |
+| `TARGET_REGION`  | `us-west-2`          | AWS region for EC2 discovery            |
+| `K8S_NAMESPACE`  | `attack-simulation`  | Kubernetes namespace for agents         |
+| `MODEL_ALL`      | _(see below)_        | Override all agent models               |
 
 **Managing Operations:**
 
@@ -398,28 +398,28 @@ Sample technique:
 
 All tasks support the following configuration variables:
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `MODEL` | `gpt-5.2` | LLM model to use |
-| `MODEL_ALL` | `""` | Override all agents with one model value |
-| `MODEL_ORCHESTRATOR` | `""` | Override multi-agent orchestrator model |
-| `MODEL_WORKER` | `""` | Override multi-agent worker models |
-| `MODEL_RECON` | `""` | Override recon agent model |
-| `MODEL_CREDENTIAL_ACCESS` | `""` | Override credential access agent model |
-| `MODEL_CRACKER` | `""` | Override cracker agent model |
-| `MODEL_ACL` | `""` | Override ACL agent model |
-| `MODEL_PRIVESC` | `""` | Override PrivEsc agent model |
-| `MODEL_LATERAL` | `""` | Override lateral agent model |
-| `MODEL_COERCION` | `""` | Override coercion agent model |
-| `GRAFANA_URL` | `https://grafana.dev.plundr.ai` | Grafana URL for alerts |
-| `POLL_INTERVAL` | `30` | Seconds between alert polls |
-| `MAX_STEPS` | `50` | Maximum agent steps for polling mode (Taskfile override, code default is 30) |
-| `MAX_STEPS_ONCE` | `15` | Maximum agent steps for once/investigate modes |
-| `REPORT_DIR` | `./reports` | Directory for markdown reports |
-| `DREADNODE_SERVER_URL` | `https://platform.dev.plundr.ai/` | Dreadnode platform URL |
-| `DREADNODE_ORGANIZATION` | `ares` | Dreadnode organization name |
-| `DREADNODE_WORKSPACE` | `ares-protocol` | Dreadnode workspace name |
-| `DREADNODE_PROJECT` | `ares-soc` | Dreadnode project name |
+| Variable                  | Default                           | Description                                                                  |
+| ------------------------- | --------------------------------- | ---------------------------------------------------------------------------- |
+| `MODEL`                   | `gpt-5.2`                         | LLM model to use                                                             |
+| `MODEL_ALL`               | `""`                              | Override all agents with one model value                                     |
+| `MODEL_ORCHESTRATOR`      | `""`                              | Override multi-agent orchestrator model                                      |
+| `MODEL_WORKER`            | `""`                              | Override multi-agent worker models                                           |
+| `MODEL_RECON`             | `""`                              | Override recon agent model                                                   |
+| `MODEL_CREDENTIAL_ACCESS` | `""`                              | Override credential access agent model                                       |
+| `MODEL_CRACKER`           | `""`                              | Override cracker agent model                                                 |
+| `MODEL_ACL`               | `""`                              | Override ACL agent model                                                     |
+| `MODEL_PRIVESC`           | `""`                              | Override PrivEsc agent model                                                 |
+| `MODEL_LATERAL`           | `""`                              | Override lateral agent model                                                 |
+| `MODEL_COERCION`          | `""`                              | Override coercion agent model                                                |
+| `GRAFANA_URL`             | `https://grafana.dev.plundr.ai`   | Grafana URL for alerts                                                       |
+| `POLL_INTERVAL`           | `30`                              | Seconds between alert polls                                                  |
+| `MAX_STEPS`               | `50`                              | Maximum agent steps for polling mode (Taskfile override, code default is 30) |
+| `MAX_STEPS_ONCE`          | `15`                              | Maximum agent steps for once/investigate modes                               |
+| `REPORT_DIR`              | `./reports`                       | Directory for markdown reports                                               |
+| `DREADNODE_SERVER_URL`    | `https://platform.dev.plundr.ai/` | Dreadnode platform URL                                                       |
+| `DREADNODE_ORGANIZATION`  | `ares`                            | Dreadnode organization name                                                  |
+| `DREADNODE_WORKSPACE`     | `ares-protocol`                   | Dreadnode workspace name                                                     |
+| `DREADNODE_PROJECT`       | `ares-soc`                        | Dreadnode project name                                                       |
 
 **Model precedence (multi-agent):**
 
@@ -447,13 +447,13 @@ The agent has multiple timeout layers:
 - Hard timeout: `max_steps × 60 seconds` (1 minute per step)
 - Watchdog thread: Force-exits if timeout exceeded
 
-| Mode | Default Steps | Max Timeout |
-| --- | --- | --- |
-| `ares:blue:once:` | 15 | ~15 minutes |
-| `ares:blue:local:once:` | 15 | ~15 minutes |
-| `ares:investigate` | 15 | ~15 minutes |
-| `ares:blue:` (polling) | 50 | ~50 minutes per alert |
-| `ares:blue:local:` (polling) | 50 | ~50 minutes per alert |
+| Mode                         | Default Steps | Max Timeout           |
+| ---------------------------- | ------------- | --------------------- |
+| `ares:blue:once:`            | 15            | ~15 minutes           |
+| `ares:blue:local:once:`      | 15            | ~15 minutes           |
+| `ares:investigate`           | 15            | ~15 minutes           |
+| `ares:blue:` (polling)       | 50            | ~50 minutes per alert |
+| `ares:blue:local:` (polling) | 50            | ~50 minutes per alert |
 
 **Example with custom variables:**
 
@@ -585,7 +585,7 @@ task ares:reports:latest
 task -y ares:red TARGET=dreadgoad
 
 # Or target a specific IP directly
-task ares:red: TARGET=192.168.1.100
+task ares:red: TARGET=192.168.56.100
 
 # 2. Monitor progress (reports generated on completion)
 task ares:reports:latest

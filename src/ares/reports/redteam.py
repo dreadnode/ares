@@ -122,7 +122,7 @@ class RedTeamReportGenerator:
             summary_parts.append(
                 "\n\n**Attack Path:**\n"
                 "The operation successfully achieved privileged access through systematic "
-                "enumeration, credential harvesting, and lateral movement techniques. "
+                "recon, credential harvesting, and lateral movement techniques. "
                 "Detailed attack timeline is provided below."
             )
 

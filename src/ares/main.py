@@ -383,8 +383,8 @@ async def redteam(
         target_ip: Primary target IP address for the red team operation
 
     Example:
-        uv run python -m src.main redteam 192.168.1.100
-        uv run python -m src.main redteam 192.168.1.100 --args.model YOUR_MODEL
+        uv run python -m src.main redteam 192.168.56.100
+        uv run python -m src.main redteam 192.168.56.100 --args.model YOUR_MODEL
     """
     args = args or Args()
     dn_args = dn_args or DreadnodeArgs()
@@ -515,7 +515,7 @@ async def multi_agent(
     - ACL: BloodHound analysis and ACL abuse
     - PrivEsc: ADCS, delegation, MSSQL exploitation
     - Lateral: Lateral movement and credential harvesting
-    - Coercion: Network poisoning (responder, mitm6)
+    - Coercion: Network coercion (responder, mitm6)
 
     Args:
         target_domain: Target domain (e.g., example.local)
@@ -690,13 +690,13 @@ async def worker(
     - Reports results back to the orchestrator
 
     Worker roles:
-    - recon: Enumeration and reconnaissance
+    - recon: Recon and reconnaissance
     - credential_access: Active credential attacks (AS-REP roasting, Kerberoasting, LSASS dumping)
     - cracker: Hash cracking with hashcat/john
     - acl: BloodHound analysis and ACL abuse
     - privesc: ADCS, delegation, MSSQL exploitation
     - lateral: Lateral movement and credential harvesting
-    - coercion: Network poisoning (responder, mitm6)
+    - coercion: Network coercion (responder, mitm6)
 
     Args:
         role: Worker role (recon, credential_access, cracker, acl, privesc, lateral, coercion)
@@ -745,6 +745,12 @@ async def worker(
     if not model and not operation_id:
         logger.info("No model specified - will fetch from operation config after discovery")
     max_steps = worker_args.max_steps if worker_args.max_steps > 0 else agent_config.max_steps
+    if role == "lateral" and max_steps < 300:
+        max_steps = 300
+    if role == "cracker" and max_steps < 150:
+        max_steps = 150
+    if role == "acl" and max_steps < 150:
+        max_steps = 150  # ACL analysis requires complex path finding
 
     # Configure Dreadnode (optional - don't fail if platform unavailable)
     dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")

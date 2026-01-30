@@ -29,9 +29,10 @@ class MessageType(Enum):
     CRACK_REQUEST = "crack_request"
     LATERAL_REQUEST = "lateral_request"
     EXPLOIT_REQUEST = "exploit_request"
-    POISON_REQUEST = "poison_request"
+    COERCION_REQUEST = "coercion_request"
     ACL_ANALYSIS_REQUEST = "acl_analysis_request"
     CREDENTIAL_ACCESS_REQUEST = "credential_access_request"
+    RECON_REQUEST = "recon_request"
 
     # Task responses - report results back
     TASK_COMPLETE = "task_complete"
@@ -183,6 +184,7 @@ class CredentialAccessRequest(AgentMessage):
     task_id: str = Field(default_factory=generate_task_id)
     target_ips: list[str] = Field(default_factory=list)
     domain: str = ""
+    dc_ip: str = ""
     username: str = ""
     password: str | None = None
     hash_value: str | None = None
@@ -190,10 +192,26 @@ class CredentialAccessRequest(AgentMessage):
     callback_agent: str = ""
 
 
-class PoisonRequest(AgentMessage):
-    """Request network poisoning."""
+class ReconRequest(AgentMessage):
+    """Request reconnaissance actions (nmap, user enumeration, BloodHound)."""
 
-    type: MessageType = MessageType.POISON_REQUEST
+    type: MessageType = MessageType.RECON_REQUEST
+    task_id: str = Field(default_factory=generate_task_id)
+    target_ips: list[str] = Field(default_factory=list)
+    domain: str = ""
+    dc_ip: str = ""
+    username: str = ""
+    password: str | None = None
+    hash_value: str | None = None
+    reason: str | None = None  # e.g., "network_scan", "bloodhound", "user_enum"
+    techniques: list[str] = Field(default_factory=list)
+    callback_agent: str = ""
+
+
+class CoercionRequest(AgentMessage):
+    """Request network coercion."""
+
+    type: MessageType = MessageType.COERCION_REQUEST
     task_id: str = Field(default_factory=generate_task_id)
     interface: str = "eth0"
     techniques: list[str] = Field(default_factory=lambda: ["LLMNR", "NBT-NS", "mDNS"])
@@ -322,7 +340,7 @@ def create_message(message_type: MessageType, source_agent: str, **kwargs) -> Ag
         MessageType.LATERAL_REQUEST: LateralMovementRequest,
         MessageType.EXPLOIT_REQUEST: ExploitRequest,
         MessageType.ACL_ANALYSIS_REQUEST: ACLAnalysisRequest,
-        MessageType.POISON_REQUEST: PoisonRequest,
+        MessageType.COERCION_REQUEST: CoercionRequest,
         MessageType.TASK_COMPLETE: TaskComplete,
         MessageType.TASK_FAILED: TaskFailed,
         MessageType.TASK_PROGRESS: TaskProgress,
@@ -340,15 +358,12 @@ def create_message(message_type: MessageType, source_agent: str, **kwargs) -> Ag
 
 
 __all__ = [
-    # Task requests
     "ACLAnalysisRequest",
-    # Coordination
     "AgentHeartbeat",
-    # Base class
     "AgentMessage",
     "AgentRegistered",
+    "CoercionRequest",
     "CrackRequest",
-    # Discovery messages
     "CredentialDiscovered",
     "DomainAdminAchieved",
     "ExploitRequest",
@@ -356,18 +371,14 @@ __all__ = [
     "HashDiscovered",
     "HostDiscovered",
     "LateralMovementRequest",
-    # Enums
     "MessageType",
     "OperationAbort",
     "OperationComplete",
-    "PoisonRequest",
     "PriorityChange",
-    # Task responses
     "TaskComplete",
     "TaskFailed",
     "TaskProgress",
     "VulnerabilityFound",
-    # Utilities
     "create_message",
     "generate_message_id",
     "generate_task_id",

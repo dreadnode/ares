@@ -137,13 +137,14 @@ class TestAgentTemplates:
 
         assert "TestAlert" in result
 
-    def test_redteam_recon_template_includes_vulnerability_queue(self) -> None:
-        """Test redteam recon template renders with vulnerability queue guidance."""
+    def test_redteam_recon_template_includes_core_responsibilities(self) -> None:
+        """Test redteam recon template renders with core responsibilities."""
         loader = get_template_loader()
         result = loader.render("redteam/agents/recon.md.jinja")
 
-        assert "queue_vulnerability_for_exploitation" in result
-        assert "get_vulnerability_queue_status" in result
+        assert "Network Scanning" in result
+        assert "User Enumeration" in result
+        assert "task_complete" in result
 
     def test_redteam_coercion_template_renders(self) -> None:
         """Test redteam coercion template renders without errors."""

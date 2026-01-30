@@ -103,7 +103,7 @@ def state_with_in_progress_tasks():
     )
     state.pending_tasks["task_005"] = TaskInfo(
         task_id="task_005",
-        task_type="poison",
+        task_type="coercion",
         assigned_agent="coercion",
         status=TaskStatus.RETRYING,  # Retrying tasks are requeued without incrementing
         created_at=datetime.now(timezone.utc),
@@ -263,7 +263,7 @@ def state_for_resume_prompt():
     # Add uncracked hash (empty cracked_password means not cracked)
     state.all_hashes = [
         Hash(
-            username="svc_account",
+            username="svc-sql",
             hash_value="aad3b435:31d6cfe0",
             hash_type="NTLM",
             domain="CORP",
@@ -593,7 +593,7 @@ class TestOperationResumeHelperGetUncrackedHashes:
         hashes = helper.get_uncracked_hashes()
 
         assert len(hashes) == 1
-        assert hashes[0]["username"] == "svc_account"
+        assert hashes[0]["username"] == "svc-sql"
         assert hashes[0]["hash_type"] == "NTLM"
 
 

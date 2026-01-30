@@ -20,10 +20,11 @@ from loguru import logger
 from ares.core.models import RedTeamState
 from ares.core.templates import get_template_loader
 from ares.integrations.mitre import MITREAttackClient
-from ares.tools.red.network import (
+from ares.tools.red import (
     ACLExploitTools,
     BloodHoundTools,
     CertipyTools,
+    CoercionNetworkTools,
     CoercionTools,
     CrackingTools,
     CredentialDiscoveryTools,
@@ -245,7 +246,7 @@ async def vulnerability_discovery_hook(event: ToolEnd):  # noqa: PLR0912
     if any(esc in result for esc in ["ESC2", "ESC3", "ESC6"]):
         redirects.append(
             "⚠️ ADCS vulnerability found (ESC2/3/6)!\n"
-            "→ Investigate this path - may require relay attack or additional enumeration"
+            "→ Investigate this path - may require relay attack or additional recon"
         )
 
     # ACL Abuse Paths
@@ -269,7 +270,7 @@ async def vulnerability_discovery_hook(event: ToolEnd):  # noqa: PLR0912
         redirects.append(
             "🔐 FORCECHANGEPASSWORD ACL FOUND!\n"
             "→ Use force_change_password or bloodyad_set_password to reset target's password\n"
-            "→ Then use the new credentials for further enumeration!"
+            "→ Then use the new credentials for further recon!"
         )
 
     # Delegation
@@ -596,7 +597,7 @@ def complete_operation(summary: str) -> str:
 
     Use this tool when you have:
     - Exhausted all credential sources
-    - Attempted enumeration on all discovered targets
+    - Attempted recon on all discovered targets
     - Cracked all obtainable hashes
     - Generated golden ticket (if krbtgt hash was found)
     - Achieved domain admin access (or determined it's not possible)
@@ -677,6 +678,9 @@ def create_redteam_agent(
     coercion_tools = CoercionTools()
     coercion_tools.set_state(state)
 
+    coercion_network_tools = CoercionNetworkTools()
+    coercion_network_tools.set_state(state)
+
     mssql_tools = MSSQLTools()
     mssql_tools.set_state(state)
 
@@ -705,6 +709,7 @@ def create_redteam_agent(
         delegation_tools,
         # Exploitation tools
         coercion_tools,
+        coercion_network_tools,
         mssql_tools,
         acl_tools,
         cve_tools,

@@ -98,7 +98,7 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
         Example:
             >>> record_evidence(
             ...     evidence_type="ip",
-            ...     value="192.168.1.100",
+            ...     value="192.168.56.100",
             ...     source="Loki query: {job='auth'}",
             ...     timestamp="2024-01-15T14:30:00Z",
             ...     pyramid_level=2,
@@ -337,7 +337,7 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
         Example:
             >>> get_suggested_evidence()
             [
-                {'type': 'ip', 'value': '192.168.1.100', 'source_query_id': 'q-0001'},
+                {'type': 'ip', 'value': '192.168.56.100', 'source_query_id': 'q-0001'},
                 {'type': 'hostname', 'value': 'dc01.domain.local', 'source_query_id': 'q-0001'},
                 {'type': 'user', 'value': 'DOMAIN\\\\admin', 'source_query_id': 'q-0002'},
             ]
@@ -741,8 +741,8 @@ class QuestionEngineTools(Toolset):  # type: ignore[misc]
         Available recipes:
         - password_spray: Detect password spray attacks
         - credential_stuffing: Detect credential stuffing
-        - share_enumeration: Detect network share enumeration
-        - ldap_enumeration: Detect LDAP/AD enumeration
+        - share_enumeration: Detect network share recon
+        - ldap_enumeration: Detect LDAP/AD recon
         - kerberos_attacks: Detect Kerberoasting, AS-REP roasting, etc.
         - dcsync: Detect DCSync attacks
         - pass_the_hash: Detect pass-the-hash attacks

@@ -62,7 +62,7 @@ class OperationConfig:
     agents: dict[str, AgentConfig] = field(default_factory=dict)
 
     # Timeouts
-    agent_heartbeat_timeout: int = 30
+    agent_heartbeat_timeout: int = 180
     task_timeout: int = 300
     operation_timeout: int = 7200
 
@@ -281,6 +281,11 @@ def get_namespace() -> str:
     return load_config().namespace
 
 
+def get_agent_heartbeat_timeout() -> int:
+    """Get the agent heartbeat timeout (seconds) from config."""
+    return load_config().agent_heartbeat_timeout
+
+
 def clear_config_cache() -> None:
     """Clear the cached configuration (useful for testing)."""
     global _cached_config
@@ -294,6 +299,7 @@ __all__ = [
     "clear_config_cache",
     "derive_redis_url",
     "get_agent_config",
+    "get_agent_heartbeat_timeout",
     "get_namespace",
     "get_redis_url",
     "load_config",

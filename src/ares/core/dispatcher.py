@@ -8,6 +8,7 @@ running in Kubernetes pods.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from asyncio import PriorityQueue, Queue
 from datetime import datetime, timezone
@@ -15,10 +16,12 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from ares.core.config import get_agent_heartbeat_timeout
 from ares.core.messages import (
     ACLAnalysisRequest,
     AgentMessage,
     AgentRegistered,
+    CoercionRequest,
     CrackRequest,
     CredentialAccessRequest,
     CredentialDiscovered,
@@ -30,7 +33,7 @@ from ares.core.messages import (
     LateralMovementRequest,
     MessageType,
     OperationComplete,
-    PoisonRequest,
+    ReconRequest,
     TaskComplete,
     TaskFailed,
     VulnerabilityFound,
@@ -42,12 +45,15 @@ from ares.core.models import (
     Credential,
     Hash,
     Host,
+    Share,
     SharedRedTeamState,
     TaskInfo,
     TaskResult,
     TaskStatus,
+    User,
     VulnerabilityInfo,
 )
+from ares.core.recovery import _merge_state
 from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue
 from ares.core.task_queue import TaskResult as QueueTaskResult
@@ -98,6 +104,8 @@ class RedTeamDispatcher:
         self._redis_client = None
         self._heartbeat_task: asyncio.Task | None = None
         self._message_processor_task: asyncio.Task | None = None
+        self._agent_heartbeat_timeout = get_agent_heartbeat_timeout()
+        self._credential_access_event = asyncio.Event()
 
         # Redis task queue for cross-pod communication
         self._task_queue: RedisTaskQueue | None = None
@@ -121,10 +129,12 @@ class RedTeamDispatcher:
             "rbcd": 9,
             "mssql_impersonation": 10,
             "mssql_linked": 11,
-            "gpo_abuse": 12,
-            "laps_abuse": 13,
-            "dcsync": 14,
-            "shadow_credentials": 15,
+            "mssql_linked_server": 11,  # Alias for mssql_linked
+            "mssql_xp_cmdshell": 12,
+            "gpo_abuse": 13,
+            "laps_abuse": 14,
+            "dcsync": 15,
+            "shadow_credentials": 16,
         }
 
         # Task completion futures for wait_for_task
@@ -276,12 +286,22 @@ class RedTeamDispatcher:
 
         # Role-specific subscriptions
         role_subscriptions = {
-            AgentRole.RECON: {
+            AgentRole.ORCHESTRATOR: {
+                # Orchestrator receives all task status updates and discoveries
                 MessageType.TASK_COMPLETE,
                 MessageType.TASK_FAILED,
+                MessageType.TASK_PROGRESS,
                 MessageType.VULNERABILITY_FOUND,
                 MessageType.HASH_DISCOVERED,
                 MessageType.HOST_DISCOVERED,
+                MessageType.USER_DISCOVERED,
+                MessageType.SHARE_DISCOVERED,
+                MessageType.GOLDEN_TICKET_FORGED,
+            },
+            AgentRole.RECON: {
+                MessageType.RECON_REQUEST,
+                MessageType.TASK_COMPLETE,
+                MessageType.TASK_FAILED,
             },
             AgentRole.CRACKER: {
                 MessageType.CRACK_REQUEST,
@@ -303,7 +323,7 @@ class RedTeamDispatcher:
                 MessageType.HOST_DISCOVERED,
             },
             AgentRole.COERCION: {
-                MessageType.POISON_REQUEST,
+                MessageType.COERCION_REQUEST,
             },
         }
 
@@ -394,9 +414,11 @@ class RedTeamDispatcher:
         Returns:
             True if credential was new and added.
         """
+        self._add_user(credential.username, credential.domain)
         added = self.shared_state.add_credential(credential, source_agent)
 
         if added:
+            self.signal_credential_access()
             await self._broadcast(
                 CredentialDiscovered(
                     source_agent=source_agent,
@@ -410,6 +432,10 @@ class RedTeamDispatcher:
             )
             await self._checkpoint()
             logger.info(f"Credential published: {credential.domain}\\{credential.username}")
+        else:
+            logger.debug(
+                f"Credential not published (duplicate/invalid): {credential.domain}\\{credential.username}"
+            )
 
         return added
 
@@ -433,6 +459,7 @@ class RedTeamDispatcher:
         added = self.shared_state.add_hash(hash_obj, source_agent)
 
         if added:
+            self.signal_credential_access()
             await self._broadcast(
                 HashDiscovered(
                     source_agent=source_agent,
@@ -448,8 +475,47 @@ class RedTeamDispatcher:
             logger.info(
                 f"Hash published: {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type})"
             )
+        else:
+            logger.debug(
+                f"Hash not published (duplicate): {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type})"
+            )
 
         return added
+
+    async def publish_share(self, share: Share, source_agent: str) -> bool:
+        """
+        Record share discovery in shared state.
+
+        Args:
+            share: The discovered share.
+            source_agent: Agent that discovered it.
+
+        Returns:
+            True if share was new and added.
+        """
+        added = self.shared_state.add_share(share)
+        if added:
+            await self._checkpoint()
+            logger.info(f"Share recorded: {share.host}/{share.name}")
+        else:
+            logger.debug(f"Share not published (duplicate/invalid): {share.host}/{share.name}")
+        return added
+
+    def signal_credential_access(self) -> None:
+        """Wake credential access loop when new credentials or hashes appear."""
+        self._credential_access_event.set()
+
+    async def wait_for_credential_access_signal(self, timeout: float) -> None:
+        """Wait for new credential activity or a timeout."""
+        if self._credential_access_event.is_set():
+            self._credential_access_event.clear()
+            return
+        try:
+            await asyncio.wait_for(self._credential_access_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return
+        finally:
+            self._credential_access_event.clear()
 
     async def publish_host(self, host: Host, source_agent: str) -> bool:
         """
@@ -479,7 +545,284 @@ class RedTeamDispatcher:
             await self._checkpoint()
             logger.info(f"Host published: {host.ip} ({host.hostname})")
 
+            # Auto-detect MSSQL and queue vulnerability for exploitation
+            await self._auto_detect_mssql(host, source_agent)
+        else:
+            logger.debug(f"Host not published (duplicate/merged): {host.ip} ({host.hostname})")
+
         return added
+
+    async def _auto_detect_mssql(self, host: Host, source_agent: str) -> None:
+        """
+        Auto-detect MSSQL service on host and queue vulnerability for exploitation.
+
+        Checks for MSSQL indicators in services list and automatically queues
+        an mssql_linked_server vulnerability for the privesc agent to exploit.
+        """
+        services_lower = [s.lower() for s in host.services]
+
+        # Check for MSSQL indicators
+        has_mssql = any(
+            indicator in svc
+            for svc in services_lower
+            for indicator in ("mssql", "1433", "ms-sql", "sqlserver")
+        )
+
+        if not has_mssql:
+            return
+
+        # Check if we already have an MSSQL vuln queued for this host
+        existing_vulns = self.shared_state.discovered_vulnerabilities.values()
+        for vuln in existing_vulns:
+            if vuln.target == host.ip and vuln.vuln_type.startswith("mssql_"):
+                logger.debug(f"MSSQL vulnerability already queued for {host.ip}")
+                return
+
+        # Find any SQL-related credentials we have
+        sql_creds = self._find_sql_credentials()
+
+        # Only queue MSSQL vulnerability if we have valid credentials
+        if not sql_creds:
+            logger.info(
+                f"Skipping MSSQL vulnerability for {host.ip} ({host.hostname}) - "
+                "no valid SQL credentials available yet"
+            )
+            return
+
+        # Queue MSSQL vulnerability for exploitation
+        details: dict[str, Any] = {
+            "hostname": host.hostname,
+            "services": host.services,
+            "available_credentials": sql_creds,
+            "note": f"Auto-detected MSSQL service with {len(sql_creds)} potential SQL credential(s). "
+            "Check for linked servers and impersonation.",
+        }
+
+        await self.queue_vulnerability(
+            vuln_type="mssql_linked_server",
+            target=host.ip,
+            details=details,
+            discovered_by=source_agent,
+        )
+        logger.warning(
+            f"Auto-queued MSSQL vulnerability for {host.ip} ({host.hostname}) - "
+            f"found {len(sql_creds)} potential SQL creds"
+        )
+
+    def _find_sql_credentials(self) -> list[dict[str, str]]:
+        """
+        Find credentials that might work for MSSQL authentication.
+
+        Returns credentials for:
+        - Users with 'sql' in username (e.g., sql_svc)
+        - Domain users (can auth to SQL via Windows auth)
+        """
+        sql_creds: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        for cred in self.shared_state.all_credentials:
+            key = f"{cred.domain}\\{cred.username}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            # Prioritize SQL service accounts
+            is_sql_account = "sql" in cred.username.lower()
+
+            sql_creds.append(
+                {
+                    "username": cred.username,
+                    "password": cred.password,
+                    "domain": cred.domain,
+                    "is_sql_account": str(is_sql_account),
+                }
+            )
+
+        # Sort to prioritize SQL accounts
+        sql_creds.sort(key=lambda x: x.get("is_sql_account", "False") != "True")
+        return sql_creds[:5]  # Return top 5 candidates
+
+    async def scan_hosts_for_mssql(self) -> int:
+        """
+        Scan all known hosts for MSSQL services and queue vulnerabilities.
+
+        This method should be called periodically by the orchestrator to catch
+        MSSQL hosts discovered by worker agents that didn't go through publish_host.
+
+        Returns:
+            Number of new MSSQL vulnerabilities queued.
+        """
+        queued = 0
+        for host in self.shared_state.all_hosts:
+            services_lower = [s.lower() for s in host.services]
+
+            # Check for MSSQL indicators
+            has_mssql = any(
+                indicator in svc
+                for svc in services_lower
+                for indicator in ("mssql", "1433", "ms-sql", "sqlserver")
+            )
+
+            if not has_mssql:
+                continue
+
+            # Check if we already have an MSSQL vuln queued for this host
+            already_queued = any(
+                vuln.target == host.ip and vuln.vuln_type.startswith("mssql_")
+                for vuln in self.shared_state.discovered_vulnerabilities.values()
+            )
+
+            if already_queued:
+                continue
+
+            # Find SQL credentials
+            sql_creds = self._find_sql_credentials()
+
+            # Only queue if we have valid credentials
+            if not sql_creds:
+                logger.debug(
+                    f"Periodic scan: skipping MSSQL vulnerability for {host.ip} ({host.hostname}) - "
+                    "no valid SQL credentials available"
+                )
+                continue
+
+            # Queue MSSQL vulnerability
+            details: dict[str, Any] = {
+                "hostname": host.hostname,
+                "services": host.services,
+                "available_credentials": sql_creds,
+                "note": f"Auto-detected MSSQL service with {len(sql_creds)} potential SQL credential(s). "
+                "Check for linked servers and impersonation.",
+            }
+
+            await self.queue_vulnerability(
+                vuln_type="mssql_linked_server",
+                target=host.ip,
+                details=details,
+                discovered_by="mssql_scanner",
+            )
+            queued += 1
+            logger.warning(
+                f"Periodic scan: queued MSSQL vulnerability for {host.ip} ({host.hostname}) "
+                f"with {len(sql_creds)} SQL credentials"
+            )
+
+        return queued
+
+    def find_adcs_servers(self) -> list[tuple[str, str]]:
+        """
+        Find ADCS servers from discovered shares (CertEnroll indicator).
+
+        Returns:
+            List of (ip, hostname) tuples for hosts with CertEnroll shares.
+        """
+        adcs_servers: list[tuple[str, str]] = []
+        seen_hosts: set[str] = set()
+
+        for share in self.shared_state.all_shares:
+            if share.name and share.name.lower() == "certenroll":
+                host_ip = share.host
+                if host_ip and host_ip not in seen_hosts:
+                    # Find hostname from all_hosts
+                    hostname = ""
+                    for h in self.shared_state.all_hosts:
+                        if h.ip == host_ip:
+                            hostname = h.hostname or ""
+                            break
+                    adcs_servers.append((host_ip, hostname))
+                    seen_hosts.add(host_ip)
+
+        return adcs_servers
+
+    async def request_adcs_enumeration(
+        self,
+        source_agent: str,
+        target_ip: str,
+        domain: str,
+        username: str,
+        password: str,
+    ) -> str:
+        """
+        Request ADCS enumeration (certipy_find) on a target CA server.
+
+        This dispatches a task to the PRIVESC agent to run certipy_find
+        and discover ADCS vulnerabilities (ESC1-ESC15).
+
+        Args:
+            source_agent: Agent making the request.
+            target_ip: IP of the ADCS server (CA).
+            domain: Target domain.
+            username: Username for authentication.
+            password: Password for authentication.
+
+        Returns:
+            Task ID for tracking.
+        """
+        dc_ip = self._find_domain_controller_ip(domain)
+        payload = {
+            "vuln_type": "adcs_enumerate",
+            "vuln_id": f"adcs_enumerate_{target_ip}_{hash(f'{domain}{username}') % 10000:04d}",
+            "target": target_ip,
+            "domain": domain,
+            "dc_ip": dc_ip or target_ip,
+            "username": username,
+            "password": password,
+            "note": "Auto-detected ADCS server (CertEnroll share). Run certipy_find to enumerate ESC1-ESC15 vulnerabilities.",
+        }
+
+        # Use Redis task queue if available (Kubernetes multi-pod mode)
+        if self._task_queue:
+            task_id = await self._task_queue.submit_task(
+                task_type="exploit",
+                target_role="privesc",
+                payload=payload,
+                source_agent=source_agent,
+            )
+
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type="exploit",
+                assigned_agent="privesc",
+                params=payload,
+            )
+            self.shared_state.pending_tasks[task_id] = task_info
+            self._redis_task_ids.add(task_id)
+
+            logger.info(f"ADCS enumeration task {task_id} submitted to Redis queue for {target_ip}")
+            return task_id
+
+        # Fallback to in-memory queue (single-process mode)
+        task_id = generate_task_id()
+        privesc_agent = self._role_queues.get(AgentRole.PRIVESC)
+
+        if not privesc_agent:
+            logger.warning("No privesc agent registered, cannot route ADCS enumeration")
+            return ""
+
+        from ares.core.messages import ExploitRequest
+
+        task_info = TaskInfo(
+            task_id=task_id,
+            task_type="exploit",
+            assigned_agent=privesc_agent,
+            params=payload,
+        )
+        self.shared_state.pending_tasks[task_id] = task_info
+
+        await self._message_queues[privesc_agent].put(
+            ExploitRequest(
+                source_agent=source_agent,
+                task_id=task_id,
+                vuln_type="adcs_enumerate",
+                vuln_id=payload["vuln_id"],
+                target=target_ip,
+                params=payload,
+                callback_agent=source_agent,
+            )
+        )
+
+        logger.info(f"ADCS enumeration request {task_id} sent to {privesc_agent}")
+        return task_id
 
     async def publish_vulnerability(
         self,
@@ -639,6 +982,14 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        if not target_host or not target_host.strip():
+            logger.warning(
+                "Skipping lateral movement for %s\\%s: empty target_host",
+                domain,
+                username,
+            )
+            return ""
+
         resolved_password = password
         resolved_hash = hash_value
         resolved_domain = domain
@@ -757,6 +1108,68 @@ class RedTeamDispatcher:
         logger.info(f"Lateral movement request {task_id} sent to {lateral_agent}")
         return task_id
 
+    def _find_domain_credential(self, domain: str) -> Credential | None:
+        """Find a credential for the specified domain."""
+        domain_lower = domain.lower() if domain else ""
+        credential = None
+        for cred in self.shared_state.all_credentials:
+            cred_domain = cred.domain.lower() if cred.domain else ""
+            if cred_domain == domain_lower or domain_lower in cred_domain:
+                if cred.password:  # Prefer credentials with passwords
+                    return cred
+                if not credential:
+                    credential = cred
+        return credential
+
+    def _find_domain_controller_ip(self, domain: str) -> str:
+        """Find DC IP for the specified domain."""
+        domain_lower = domain.lower() if domain else ""
+        # Port tokens must match at start of service string to avoid
+        # substring issues (e.g., "389/tcp" matching "3389/tcp")
+        dc_port_prefixes = ("88/tcp", "389/tcp", "53/tcp")
+        dc_service_names = ("kerberos", "ldap")
+
+        def _has_dc_services(host: Host) -> bool:
+            for svc in host.services:
+                svc_lower = svc.lower()
+                # Check if service starts with a DC port
+                if any(svc_lower.startswith(port) for port in dc_port_prefixes):
+                    return True
+                # Check if service contains DC service name
+                if any(name in svc_lower for name in dc_service_names):
+                    return True
+            return False
+
+        # Check target first
+        if self.shared_state.target and self.shared_state.target.ip:
+            target_ip = self.shared_state.target.ip
+            target_hostname = (self.shared_state.target.hostname or "").lower()
+            if target_hostname and target_hostname.endswith(domain_lower):
+                return target_ip
+            for host in self.shared_state.all_hosts:
+                if host.ip == target_ip:
+                    hostname = (host.hostname or "").lower()
+                    if hostname.endswith(domain_lower) and _has_dc_services(host):
+                        return host.ip
+        # Search all hosts by explicit DC markers
+        for host in self.shared_state.all_hosts:
+            if (
+                "dc" in (host.hostname or "").lower()
+                or "domain controller" in str(host.roles).lower()
+            ):
+                return host.ip
+        # Fallback: infer DC from services on hosts within the domain
+        if domain_lower:
+            for host in self.shared_state.all_hosts:
+                hostname = (host.hostname or "").lower()
+                if hostname.endswith(domain_lower) and _has_dc_services(host):
+                    return host.ip
+        # Last resort: any host advertising DC-like services
+        for host in self.shared_state.all_hosts:
+            if _has_dc_services(host):
+                return host.ip
+        return ""
+
     async def request_acl_analysis(
         self,
         target_user: str,
@@ -778,11 +1191,25 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        # Find credential and DC for this domain
+        credential = self._find_domain_credential(domain)
+        dc_ip = self._find_domain_controller_ip(domain)
+
         payload = {
             "target_user": target_user,
             "domain": domain,
             "find_path_to": find_path_to,
+            "dc_ip": dc_ip,
         }
+        if credential:
+            payload["username"] = credential.username
+            payload["password"] = credential.password or ""
+            if not credential.password:
+                # Check for hash
+                for h in self.shared_state.all_hashes:
+                    if h.username == credential.username:
+                        payload["hash"] = h.hash_value
+                        break
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
@@ -835,6 +1262,114 @@ class RedTeamDispatcher:
         logger.info(f"ACL analysis request {task_id} sent to {acl_agent}")
         return task_id
 
+    async def request_recon(
+        self,
+        source_agent: str,
+        domain: str,
+        target_ips: list[str] | None = None,
+        username: str = "",
+        password: str | None = None,
+        hash_value: str | None = None,
+        reason: str | None = None,
+        techniques: list[str] | None = None,
+    ) -> str:
+        """
+        Request reconnaissance actions (nmap, user enumeration, BloodHound).
+
+        Uses Redis task queue for cross-pod communication when available.
+
+        Args:
+            source_agent: Agent making the request.
+            domain: Target domain.
+            target_ips: Target IPs for scanning/enumeration.
+            username: Optional username for authenticated enumeration.
+            password: Optional password for authenticated enumeration.
+            hash_value: Optional NTLM hash for pass-the-hash.
+            reason: Reason for the recon request (e.g., "network_scan", "bloodhound").
+            techniques: Optional list of techniques to prioritize.
+
+        Returns:
+            Task ID for tracking.
+        """
+        dc_ip = self._find_domain_controller_ip(domain)
+        payload = {
+            "domain": domain,
+            "target_ips": target_ips or [],
+            "dc_ip": dc_ip,
+            "username": username,
+            "password": password,
+            "hash_value": hash_value,
+            "reason": reason,
+            "techniques": techniques or [],
+        }
+
+        # Use Redis task queue if available (Kubernetes multi-pod mode)
+        if self._task_queue:
+            task_id = await self._task_queue.submit_task(
+                task_type="recon",
+                target_role="recon",
+                payload=payload,
+                source_agent=source_agent,
+            )
+
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type="recon",
+                assigned_agent="recon",
+                params=payload,
+            )
+            self.shared_state.pending_tasks[task_id] = task_info
+            self._redis_task_ids.add(task_id)
+
+            cred_label = username or "unauthenticated"
+            if hash_value and not password:
+                cred_label = f"{cred_label} (hash)"
+            if password:
+                cred_label = f"{cred_label} (password)"
+            reason_label = f" reason={reason}" if reason else ""
+            logger.info(
+                "Recon task {} submitted to Redis queue for {}{}",
+                task_id,
+                cred_label,
+                reason_label,
+            )
+            return task_id
+
+        # Fallback to in-memory queue (single-process mode)
+        task_id = generate_task_id()
+        recon_agent = self._role_queues.get(AgentRole.RECON)
+
+        if not recon_agent:
+            logger.warning("No recon agent registered, cannot route request")
+            return ""
+
+        task_info = TaskInfo(
+            task_id=task_id,
+            task_type="recon",
+            assigned_agent=recon_agent,
+            params=payload,
+        )
+        self.shared_state.pending_tasks[task_id] = task_info
+
+        await self._message_queues[recon_agent].put(
+            ReconRequest(
+                source_agent=source_agent,
+                task_id=task_id,
+                domain=domain,
+                target_ips=payload["target_ips"],
+                dc_ip=dc_ip,
+                username=username,
+                password=password,
+                hash_value=hash_value,
+                reason=reason,
+                techniques=payload["techniques"],
+                callback_agent=source_agent,
+            )
+        )
+
+        logger.info(f"Recon request {task_id} sent to {recon_agent}")
+        return task_id
+
     async def request_credential_access(
         self,
         source_agent: str,
@@ -843,6 +1378,9 @@ class RedTeamDispatcher:
         username: str = "",
         password: str | None = None,
         hash_value: str | None = None,
+        hash_type: str | None = None,
+        credential_source: str | None = None,
+        reason: str | None = None,
         techniques: list[str] | None = None,
     ) -> str:
         """
@@ -862,12 +1400,17 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        dc_ip = self._find_domain_controller_ip(domain)
         payload = {
             "domain": domain,
             "target_ips": target_ips or [],
+            "dc_ip": dc_ip,
             "username": username,
             "password": password,
             "hash_value": hash_value,
+            "hash_type": hash_type,
+            "credential_source": credential_source,
+            "reason": reason,
             "techniques": techniques or [],
         }
 
@@ -889,7 +1432,22 @@ class RedTeamDispatcher:
             self.shared_state.pending_tasks[task_id] = task_info
             self._redis_task_ids.add(task_id)
 
-            logger.info(f"Credential access task {task_id} submitted to Redis queue")
+            cred_label = username or "no-cred"
+            if hash_value and not password:
+                cred_label = f"{cred_label} (hash)"
+            if password:
+                cred_label = f"{cred_label} (password)"
+            reason_label = f" reason={reason}" if reason else ""
+            source_label = f" source={credential_source}" if credential_source else ""
+            hash_label = f" hash_type={hash_type}" if hash_type else ""
+            logger.info(
+                "Credential access task {} submitted to Redis queue for {}{}{}{}",
+                task_id,
+                cred_label,
+                reason_label,
+                source_label,
+                hash_label,
+            )
             return task_id
 
         # Fallback to in-memory queue (single-process mode)
@@ -914,6 +1472,7 @@ class RedTeamDispatcher:
                 task_id=task_id,
                 domain=domain,
                 target_ips=payload["target_ips"],
+                dc_ip=dc_ip,
                 username=username,
                 password=password,
                 hash_value=hash_value,
@@ -1007,39 +1566,46 @@ class RedTeamDispatcher:
         logger.info(f"Exploit request {task_id} for {vuln_type} sent to {privesc_agent}")
         return task_id
 
-    async def request_poisoning(
+    async def request_coercion(
         self,
         source_agent: str,
         interface: str = "eth0",
         techniques: list[str] | None = None,
         duration: int = 300,
+        payload_override: dict[str, Any] | None = None,
     ) -> str:
         """
-        Request the coercion agent to start network poisoning.
+        Request the coercion agent to start network coercion.
 
         Uses Redis task queue for cross-pod communication when available.
 
         Args:
             source_agent: Agent making the request.
             interface: Network interface.
-            techniques: Poisoning techniques to use.
+            techniques: Coercion techniques to use.
             duration: How long to run (seconds).
+            payload_override: Optional dict to merge/override default payload.
+                             Use for ESC8-specific coercion (petitpotam, coercer).
 
         Returns:
             Task ID for tracking.
         """
         techniques = techniques or ["LLMNR", "NBT-NS", "mDNS"]
 
-        payload = {
+        payload: dict[str, Any] = {
             "interface": interface,
             "techniques": techniques,
             "duration": duration,
         }
 
+        # Merge payload_override for ESC8-specific coercion (petitpotam, etc.)
+        if payload_override:
+            payload.update(payload_override)
+
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
             task_id = await self._task_queue.submit_task(
-                task_type="poison",
+                task_type="coercion",
                 target_role="coercion",
                 payload=payload,
                 source_agent=source_agent,
@@ -1062,7 +1628,7 @@ class RedTeamDispatcher:
         coercion_agent = self._role_queues.get(AgentRole.COERCION)
 
         if not coercion_agent:
-            logger.warning("No coercion agent registered, cannot route poison request")
+            logger.warning("No coercion agent registered, cannot route coercion request")
             return ""
 
         task_info = TaskInfo(
@@ -1074,7 +1640,7 @@ class RedTeamDispatcher:
         self.shared_state.pending_tasks[task_id] = task_info
 
         await self._message_queues[coercion_agent].put(
-            PoisonRequest(
+            CoercionRequest(
                 source_agent=source_agent,
                 task_id=task_id,
                 interface=interface,
@@ -1084,7 +1650,7 @@ class RedTeamDispatcher:
             )
         )
 
-        logger.info(f"Poisoning request {task_id} sent to {coercion_agent}")
+        logger.info(f"Coercion request {task_id} sent to {coercion_agent}")
         return task_id
 
     # Task Completion
@@ -1133,9 +1699,116 @@ class RedTeamDispatcher:
         )
         self.shared_state.completed_tasks[task_id] = task_result
 
+        output = ""
+
+        # Resolve target host for better logging
+        target_label = source_agent
+        task_params = task_info.params or {}
+        target_ip = task_params.get("target") or task_params.get("target_host")
+        if not target_ip and task_params.get("target_ips"):
+            target_ips = task_params.get("target_ips", [])
+            if target_ips:
+                target_ip = target_ips[0] if isinstance(target_ips, list) else target_ips
+        if target_ip:
+            # Look up hostname from shared state
+            for host in self.shared_state.all_hosts:
+                if host.ip == target_ip:
+                    target_label = f"{host.hostname or target_ip} ({target_ip})"
+                    break
+            else:
+                target_label = target_ip
+
+        # Process discoveries from result dict (even if task failed)
+        # Workers serialize discoveries and send them regardless of success/failure
+        if isinstance(result, dict):
+            # Process serialized state discoveries from worker's local state first
+            # These should be processed even on failure since workers preserve discoveries
+            discovered_hosts = result.get("discovered_hosts")
+            if isinstance(discovered_hosts, list) and discovered_hosts:
+                logger.info(
+                    f"Processing {len(discovered_hosts)} discovered hosts from {target_label}"
+                )
+                for h in discovered_hosts:
+                    if not isinstance(h, dict):
+                        continue
+                    host = Host(
+                        ip=h.get("ip", ""),
+                        hostname=h.get("hostname", ""),
+                        os=h.get("os", ""),
+                        roles=h.get("roles", []),
+                        services=h.get("services", []),
+                    )
+                    await self.publish_host(host, source_agent)
+
+            discovered_credentials = result.get("discovered_credentials")
+            if isinstance(discovered_credentials, list) and discovered_credentials:
+                logger.info(
+                    f"Processing {len(discovered_credentials)} discovered credentials from {target_label}"
+                )
+                for c in discovered_credentials:
+                    if not isinstance(c, dict):
+                        continue
+                    credential = Credential(
+                        username=c.get("username", ""),
+                        password=c.get("password", ""),
+                        domain=c.get("domain", ""),
+                        source=c.get("source", f"worker:{source_agent}"),
+                        is_admin=c.get("is_admin", False),
+                    )
+                    await self.publish_credential(credential, source_agent)
+
+            discovered_hashes = result.get("discovered_hashes")
+            if isinstance(discovered_hashes, list) and discovered_hashes:
+                logger.info(
+                    f"Processing {len(discovered_hashes)} discovered hashes from {target_label}"
+                )
+                for h in discovered_hashes:
+                    if not isinstance(h, dict):
+                        continue
+                    hash_obj = Hash(
+                        username=h.get("username", ""),
+                        hash_value=h.get("hash_value", ""),
+                        hash_type=h.get("hash_type", "NTLM"),
+                        domain=h.get("domain", ""),
+                        cracked_password=h.get("cracked_password", ""),
+                        source=h.get("source", ""),
+                    )
+                    await self.publish_hash(hash_obj, source_agent)
+                    if hash_obj.cracked_password:
+                        cracked_cred = Credential(
+                            username=hash_obj.username,
+                            password=hash_obj.cracked_password,
+                            domain=hash_obj.domain,
+                            source=f"cracked:{source_agent}",
+                            is_admin=False,
+                        )
+                        await self.publish_credential(cracked_cred, source_agent)
+
+            discovered_shares = result.get("discovered_shares")
+            if isinstance(discovered_shares, list):
+                for s in discovered_shares:
+                    if not isinstance(s, dict):
+                        continue
+                    share = Share(
+                        host=s.get("host", ""),
+                        name=s.get("name", ""),
+                        permissions=s.get("permissions", ""),
+                        comment=s.get("comment", ""),
+                    )
+                    await self.publish_share(share, source_agent)
+
+            discovered_users = result.get("discovered_users")
+            if isinstance(discovered_users, list):
+                for u in discovered_users:
+                    if not isinstance(u, dict):
+                        continue
+                    self._add_user(u.get("username", ""), u.get("domain", ""))
+
+        # Process additional result fields only on success
         if success and isinstance(result, dict):
             cred_data = result.get("credential")
             if isinstance(cred_data, dict):
+                self._add_user(cred_data.get("username", ""), cred_data.get("domain", ""))
                 credential = Credential(
                     username=cred_data.get("username", ""),
                     password=cred_data.get("password", ""),
@@ -1149,6 +1822,7 @@ class RedTeamDispatcher:
                 for cred in creds_data:
                     if not isinstance(cred, dict):
                         continue
+                    self._add_user(cred.get("username", ""), cred.get("domain", ""))
                     credential = Credential(
                         username=cred.get("username", ""),
                         password=cred.get("password", ""),
@@ -1200,6 +1874,79 @@ class RedTeamDispatcher:
                         )
                         await self.publish_credential(cracked_cred, source_agent)
 
+            share_data = result.get("share")
+            if isinstance(share_data, dict):
+                share = Share(
+                    host=share_data.get("host", share_data.get("host_ip", "")),
+                    name=share_data.get("name", share_data.get("share_name", "")),
+                    permissions=share_data.get("permissions", ""),
+                    comment=share_data.get("comment", share_data.get("description", "")),
+                )
+                await self.publish_share(share, source_agent)
+            shares_data = result.get("shares")
+            if isinstance(shares_data, list):
+                for s in shares_data:
+                    if not isinstance(s, dict):
+                        continue
+                    share = Share(
+                        host=s.get("host", s.get("host_ip", "")),
+                        name=s.get("name", s.get("share_name", "")),
+                        permissions=s.get("permissions", ""),
+                        comment=s.get("comment", s.get("description", "")),
+                    )
+                    await self.publish_share(share, source_agent)
+
+            stdout = result.get("stdout", "")
+            stderr = result.get("stderr", "")
+            output_field = result.get("output", "")
+            output_parts = []
+            for chunk in (stdout, stderr, output_field):
+                if isinstance(chunk, str) and chunk.strip():
+                    output_parts.append(chunk.strip())
+            output = "\n".join(output_parts).strip()
+        elif success and isinstance(result, str):
+            output = result.strip()
+
+        if output:
+            domain = ""
+            if self.shared_state.target and self.shared_state.target.domain:
+                domain = self.shared_state.target.domain
+
+            for host in self._extract_hosts_from_output(output):
+                if hasattr(self.shared_state, "add_host"):
+                    self.shared_state.add_host(host)
+                elif not any(h.ip == host.ip for h in self.shared_state.all_hosts):
+                    self.shared_state.all_hosts.append(host)
+
+            for username in self._extract_users_from_output(output):
+                self._add_user(username, domain)
+
+            creds = self._extract_plaintext_passwords_from_output(output)
+            if "password :" in output.lower() and not creds and domain:
+                self.shared_state.pending_credential_findings.add(f"{domain}:unknown")
+            for username, password in creds:
+                if domain:
+                    self.shared_state.pending_credential_findings.add(
+                        f"{domain}:{username}".lower()
+                    )
+                self._add_user(username, domain)
+                credential = Credential(
+                    username=username,
+                    password=password,
+                    domain=domain,
+                    source="user_description",
+                    is_admin=False,
+                )
+                await self.publish_credential(credential, source_agent)
+
+            # Extract shares from netexec --shares output
+            for share in self._extract_shares_from_output(output):
+                await self.publish_share(share, source_agent)
+
+            # Extract hashes (Kerberoast, AS-REP, NTLM) from tool output
+            for hash_obj in self._extract_hashes_from_output(output):
+                await self.publish_hash(hash_obj, source_agent)
+
         # Broadcast completion
         if success:
             await self._broadcast(
@@ -1223,6 +1970,285 @@ class RedTeamDispatcher:
 
         await self._checkpoint()
         logger.info(f"Task {task_id} completed: success={success}")
+
+    def _add_user(self, username: str, domain: str) -> bool:
+        if not username:
+            return False
+        normalized = username.strip()
+        if not normalized or normalized.lower() in {"(none)", "none", "null", "(null)"}:
+            return False
+        if "/" in normalized or "\\" in normalized or normalized.endswith(".txt"):
+            return False
+        for existing in self.shared_state.all_users:
+            if existing.username == normalized and existing.domain == domain:
+                return False
+        self.shared_state.all_users.append(User(username=normalized, domain=domain))
+        return True
+
+    def _extract_hosts_from_output(self, output: str) -> list[Host]:
+        if not output:
+            return []
+        hosts: list[Host] = []
+        seen: set[str] = set()
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            smb_match = re.search(
+                r"SMB\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+([A-Za-z0-9_.-]+)\s+\[\*\]\s+(.+)",
+                stripped,
+            )
+            if not smb_match:
+                continue
+            ip = smb_match.group(1)
+            host_col = smb_match.group(2)
+            details = smb_match.group(3)
+            name_match = re.search(r"\(name:([^)]+)\)", details)
+            domain_match = re.search(r"\(domain:([^)]+)\)", details)
+            domain = domain_match.group(1) if domain_match else ""
+            hostname = name_match.group(1) if name_match else host_col
+            if domain and hostname and not hostname.lower().endswith(domain.lower()):
+                hostname = f"{hostname.lower()}.{domain}"
+            os_match = re.search(r"^\s*([^(]+?)\s+\(name:", details)
+            os_name = os_match.group(1).strip() if os_match else "Unknown"
+            if ip in seen:
+                continue
+            seen.add(ip)
+            hosts.append(
+                Host(
+                    ip=ip,
+                    hostname=hostname,
+                    os=os_name,
+                    roles=[],
+                    services=[],
+                )
+            )
+        return hosts
+
+    def _extract_users_from_output(self, output: str) -> list[str]:
+        if not output:
+            return []
+        users: list[str] = []
+        seen: set[str] = set()
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            for match in re.findall(r"user:\[([^\]]+)\]", stripped, re.IGNORECASE):
+                user = match.strip()
+                if user and user not in seen:
+                    users.append(user)
+                    seen.add(user)
+            account_match = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)
+            if account_match:
+                user = account_match.group(1).strip()
+                if user and user not in seen:
+                    users.append(user)
+                    seen.add(user)
+            sam_match = re.search(r"samaccountname:\s*([A-Za-z0-9_.-]+)", stripped, re.IGNORECASE)
+            if sam_match:
+                user = sam_match.group(1).strip()
+                if user and user not in seen:
+                    users.append(user)
+                    seen.add(user)
+            smb_match = re.search(
+                r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.-]+)\s+\d{4}-\d{2}-\d{2}",
+                stripped,
+            )
+            if smb_match:
+                user = smb_match.group(1).strip()
+                if user and user not in seen:
+                    users.append(user)
+                    seen.add(user)
+        return users
+
+    def _extract_plaintext_passwords_from_output(self, output: str) -> list[tuple[str, str]]:  # noqa: PLR0912
+        if not output:
+            return []
+        creds: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        current_user = ""
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            user_match = re.search(r"user:\[([^\]]+)\]", stripped, re.IGNORECASE)
+            if user_match:
+                current_user = user_match.group(1).strip()
+            account_match = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)
+            if account_match:
+                current_user = account_match.group(1).strip()
+            sam_match = re.search(r"samaccountname:\s*([A-Za-z0-9_.-]+)", stripped, re.IGNORECASE)
+            if sam_match:
+                current_user = sam_match.group(1).strip()
+            if "password" not in stripped.lower():
+                continue
+            pass_match = re.search(r"Password\s*:\s*([^\s\)]+)", stripped, re.IGNORECASE)
+            if not pass_match:
+                continue
+            password = pass_match.group(1).strip()
+            username = ""
+            smb_match = re.search(
+                r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.-]+)\s+\d{4}-\d{2}-\d{2}.*Password\s*:\s*",
+                stripped,
+            )
+            if smb_match:
+                username = smb_match.group(1).strip()
+            elif current_user:
+                username = current_user
+            if not username:
+                continue
+            if "/" in username or "\\" in username or username.endswith(".txt"):
+                continue
+            if "/" in password or "\\" in password or password.endswith(".txt"):
+                continue
+            key = (username, password)
+            if key in seen:
+                continue
+            seen.add(key)
+            creds.append(key)
+        return creds
+
+    def _extract_shares_from_output(  # noqa: PLR0912
+        self, output: str, default_host: str = ""
+    ) -> list[Share]:
+        """Extract shares from netexec --shares output."""
+        if not output:
+            return []
+        shares: list[Share] = []
+        seen: set[tuple[str, str]] = set()
+        in_table = False
+        current_host = default_host
+
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # Parse host from SMB line prefix: "SMB  192.168.56.1  445  HOSTNAME  ..."
+            if stripped.startswith("SMB"):
+                smb_match = re.match(r"^SMB\s+(\d+\.\d+\.\d+\.\d+)\s+", stripped)
+                if smb_match:
+                    current_host = smb_match.group(1)
+                # Strip SMB prefix to get body
+                body = re.sub(r"^SMB\s+\S+\s+\d+\s+\S+\s+", "", stripped).strip()
+                if not body:
+                    continue
+                lower = body.lower()
+                # Detect share table header
+                if lower.startswith("share") and "permission" in lower:
+                    in_table = True
+                    continue
+                # Skip separator lines
+                if in_table and set(body) <= {"-", " "}:
+                    continue
+                # End of table
+                if in_table and (body.startswith("[") or lower.startswith("smb")):
+                    in_table = False
+                    continue
+                if not in_table:
+                    continue
+                # Parse share row
+                parts = body.split(None, 2)
+                if not parts:
+                    continue
+                name = parts[0].strip()
+                if not name or name.lower() == "share":
+                    continue
+                permissions = parts[1].strip() if len(parts) > 1 else ""
+                comment = parts[2].strip() if len(parts) > 2 else ""
+                key = (current_host.lower(), name.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                shares.append(
+                    Share(
+                        host=current_host,
+                        name=name,
+                        permissions=permissions,
+                        comment=comment,
+                    )
+                )
+        return shares
+
+    def _extract_hashes_from_output(self, output: str) -> list[Hash]:
+        """Extract Kerberos hashes (TGS, AS-REP) from tool output."""
+        if not output:
+            return []
+        hashes: list[Hash] = []
+        seen: set[str] = set()
+
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # Match Kerberoast TGS hashes: $krb5tgs$23$*username$domain$...
+            tgs_match = re.search(
+                r"(\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^$]+\$[a-fA-F0-9$]+)",
+                stripped,
+            )
+            if tgs_match:
+                hash_value = tgs_match.group(1)
+                username = tgs_match.group(2)
+                domain = tgs_match.group(3)
+                if hash_value not in seen:
+                    seen.add(hash_value)
+                    hashes.append(
+                        Hash(
+                            username=username,
+                            hash_value=hash_value,
+                            hash_type="TGS",
+                            domain=domain,
+                        )
+                    )
+                continue
+
+            # Match AS-REP hashes: $krb5asrep$23$username@domain:...
+            asrep_match = re.search(
+                r"(\$krb5asrep\$\d+\$([^@:]+)@([^:]+):[a-fA-F0-9$]+)",
+                stripped,
+            )
+            if asrep_match:
+                hash_value = asrep_match.group(1)
+                username = asrep_match.group(2)
+                domain = asrep_match.group(3)
+                if hash_value not in seen:
+                    seen.add(hash_value)
+                    hashes.append(
+                        Hash(
+                            username=username,
+                            hash_value=hash_value,
+                            hash_type="AS-REP",
+                            domain=domain,
+                        )
+                    )
+                continue
+
+            # Match NTLM hashes from secretsdump: domain\user:rid:lmhash:nthash:::
+            ntlm_match = re.search(
+                r"([^\\:\s]+)\\([^:\\]+):\d+:([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::",
+                stripped,
+            )
+            if ntlm_match:
+                domain = ntlm_match.group(1)
+                username = ntlm_match.group(2)
+                lm_hash = ntlm_match.group(3)
+                nt_hash = ntlm_match.group(4)
+                # Use NT hash (more useful), include LM if not empty
+                hash_value = f"{lm_hash}:{nt_hash}"
+                if hash_value not in seen:
+                    seen.add(hash_value)
+                    hashes.append(
+                        Hash(
+                            username=username,
+                            hash_value=hash_value,
+                            hash_type="NTLM",
+                            domain=domain,
+                        )
+                    )
+
+        return hashes
 
     # Domain Admin Achievement
 
@@ -1372,7 +2398,8 @@ class RedTeamDispatcher:
             # Check for stale heartbeats
             for agent_name, agent_info in list(self._agents.items()):
                 elapsed = (now - agent_info.last_heartbeat).total_seconds()
-                if elapsed > 60 and agent_info.status != "offline":
+                stale_threshold = max(60, self._agent_heartbeat_timeout)
+                if elapsed > stale_threshold and agent_info.status != "offline":
                     logger.warning(
                         f"Agent {agent_name} heartbeat stale ({elapsed:.0f}s) - marking offline"
                     )
@@ -1437,14 +2464,39 @@ class RedTeamDispatcher:
     # State Persistence
 
     async def _checkpoint(self) -> None:
-        """Save state checkpoint to Redis if available."""
+        """Save state checkpoint to Redis if available.
+
+        IMPORTANT: This method merges with existing Redis state before writing
+        to prevent race conditions where multiple workers/orchestrator overwrite
+        each other's discoveries. All state is additive (credentials, hosts, etc.)
+        so merging is safe and ensures no discoveries are lost.
+        """
         if self._redis_client is None:
             return
 
         try:
             key = f"ares:operation:{self.shared_state.operation_id}:state"
+
+            # Merge with existing state to prevent overwrites from other workers
+            existing_data = await self._redis_client.get(key)
+            if existing_data:
+                try:
+                    existing_state = SharedRedTeamState.from_bytes(existing_data)
+                    _merge_state(self.shared_state, existing_state)
+                except Exception as exc:
+                    logger.warning(f"Failed to merge existing checkpoint state: {exc}")
+
+            # Debug: log state counts after merge
+            logger.debug(
+                f"[Dispatcher checkpoint] hosts={len(self.shared_state.all_hosts)}, "
+                f"creds={len(self.shared_state.all_credentials)}, hashes={len(self.shared_state.all_hashes)}"
+            )
             await self._redis_client.set(key, self.shared_state.to_bytes())
             await self._redis_client.expire(key, 86400)  # 24 hour TTL
+
+            # Publish state update notification via pub/sub for real-time worker sync
+            if self._task_queue:
+                await self._task_queue.publish_state_update(self.shared_state.operation_id)
         except Exception as e:
             logger.warning(f"Failed to checkpoint state: {e}")
 
@@ -1500,6 +2552,11 @@ class RedTeamDispatcher:
         succeeded: set[str] = set(self.shared_state.exploited_vulnerabilities)
         failed: dict[str, dict[str, Any]] = {}
 
+        # Track (type, target) tuples to avoid logical duplicates with different UUIDs
+        seen_type_target: set[tuple[str, str]] = {
+            (v.vuln_type, v.target) for v in discovered.values()
+        }
+
         if self._redis_client is not None:
             try:
                 import json
@@ -1522,6 +2579,15 @@ class RedTeamDispatcher:
                         continue
                     vuln_type = data.get("type", "unknown")
                     target = data.get("target", "unknown")
+                    # Skip if we already have a vulnerability with same (type, target)
+                    type_target_key = (vuln_type, target)
+                    if type_target_key in seen_type_target:
+                        logger.debug(
+                            f"Skipping duplicate vulnerability {vuln_id} - "
+                            f"already have {vuln_type} for {target}"
+                        )
+                        continue
+                    seen_type_target.add(type_target_key)
                     discovered_by = data.get("discovered_by", "unknown")
                     details = data.get("details") or {}
                     priority = self._vulnerability_priorities.get(vuln_type, 99)

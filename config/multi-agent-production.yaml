@@ -15,14 +15,15 @@ agents:
     model: "gpt-5.2"
     # model: "claude-sonnet-4-20250514"
     max_steps: 200
-    pod_selector: "ares.dreadnode.io/role=recon"
+    pod_selector: "app.kubernetes.io/name=ares-orchestrator"
     tools:
+      - dispatch_recon
       - dispatch_credential_access
       - dispatch_crack_hash
       - dispatch_acl_analysis
       - dispatch_lateral_movement
       - dispatch_privesc_exploit
-      - start_poisoning
+      - start_coercion
       - trigger_credential_expansion
       - queue_vulnerability_for_exploitation
       - get_pending_tasks
@@ -72,17 +73,20 @@ agents:
     max_steps: 100
     pod_selector: "ares.dreadnode.io/role=credential_access"
     capabilities:
+      - netexec
+      - ldapsearch
       - impacket-getnpusers
       - impacket-secretsdump
       - targeted_kerberoast
       - lsassy
       - sprayhound
       - rpcclient
+      - smbclient
 
   cracker:
     model: "gpt-5.2"
     # model: "claude-sonnet-4-20250514"
-    max_steps: 50
+    max_steps: 150
     pod_selector: "ares.dreadnode.io/role=cracker"
     capabilities:
       - hashcat
@@ -93,7 +97,7 @@ agents:
   acl:
     model: "gpt-5.2"
     # model: "claude-sonnet-4-20250514"
-    max_steps: 50
+    max_steps: 150  # ACL analysis requires complex path finding
     pod_selector: "ares.dreadnode.io/role=acl"
     capabilities:
       - bloodyad
@@ -133,7 +137,7 @@ agents:
   lateral:
     model: "gpt-5.2"
     # model: "claude-sonnet-4-20250514"
-    max_steps: 200
+    max_steps: 300
     pod_selector: "ares.dreadnode.io/role=lateral"
     capabilities:
       - evil-winrm
@@ -164,12 +168,12 @@ agents:
 
 # Timeout configurations
 timeouts:
-  agent_heartbeat: 30  # seconds - agent considered offline after this
+  agent_heartbeat: 180  # seconds - agent considered offline after this
   task_timeout: 300  # seconds - default task timeout
   operation_timeout: 7200  # seconds - 2 hours max operation time
   lateral_movement: 180  # seconds
   hash_cracking: 600  # seconds - 10 minutes
-  exploitation: 300  # seconds
+  exploitation: 900  # seconds - ACL tasks can take 10+ minutes
 
 # Recovery configuration
 recovery:

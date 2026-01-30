@@ -13,7 +13,7 @@ from typing import Any
 from loguru import logger
 from pydantic import BaseModel
 
-from ares.core.config import get_redis_url
+from ares.core.config import get_agent_heartbeat_timeout, get_redis_url
 from ares.core.redis_client import create_redis_client, get_redis_sentinel_config
 
 
@@ -21,7 +21,7 @@ class TaskMessage(BaseModel):
     """Task message structure for Redis queues."""
 
     task_id: str
-    task_type: str  # crack, lateral, acl_analysis, exploit, poison
+    task_type: str  # crack, lateral, acl_analysis, exploit, coercion
     source_agent: str
     target_agent: str  # Role: credential_access, cracker, lateral, acl, privesc, coercion
     payload: dict[str, Any]
@@ -91,6 +91,7 @@ class RedisTaskQueue:
     TASK_STATUS_PREFIX = "ares:task_status"
     TASK_STATUS_TTL = 60 * 60 * 24  # 24 hours
     LOCK_PREFIX = "ares:lock"
+    STATE_UPDATE_CHANNEL_PREFIX = "ares:state:updates"
 
     # TTLs
     # Task results kept 24 hours for long operations, recovery, and debugging
@@ -101,6 +102,7 @@ class RedisTaskQueue:
         self.redis_url = redis_url or get_redis_url()
         self._client = None
         self._connected = False
+        self._heartbeat_ttl = max(self.HEARTBEAT_TTL, get_agent_heartbeat_timeout() * 2)
 
     @property
     def redis(self):
@@ -451,7 +453,7 @@ class RedisTaskQueue:
         )
 
         try:
-            await self._client.set(heartbeat_key, data, ex=self.HEARTBEAT_TTL)
+            await self._client.set(heartbeat_key, data, ex=self._heartbeat_ttl)
         except Exception as e:
             error_str = str(e).lower()
             if any(
@@ -720,6 +722,90 @@ class RedisTaskQueue:
             ):
                 self._handle_connection_error(e)
             raise
+
+    # === Pub/Sub Methods for Real-Time State Updates ===
+
+    def _state_update_channel(self, operation_id: str) -> str:
+        """Get the pub/sub channel for state updates."""
+        return f"{self.STATE_UPDATE_CHANNEL_PREFIX}:{operation_id}"
+
+    async def publish_state_update(self, operation_id: str) -> int:
+        """
+        Publish a state update notification to subscribers.
+
+        Workers subscribed to this channel will refresh their shared state
+        from Redis when they receive this notification.
+
+        Args:
+            operation_id: The operation ID
+
+        Returns:
+            Number of subscribers that received the message
+        """
+        if not self._connected:
+            await self.connect()
+
+        channel = self._state_update_channel(operation_id)
+        message = json.dumps(
+            {
+                "type": "state_update",
+                "operation_id": operation_id,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        try:
+            count = await self._client.publish(channel, message)
+            logger.debug(f"State update published to {channel} ({count} subscribers)")
+            return count
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(
+                keyword in error_str
+                for keyword in [
+                    "connection",
+                    "connect",
+                    "closed",
+                    "timeout",
+                    "broken pipe",
+                    "reset",
+                ]
+            ):
+                self._handle_connection_error(e)
+            # Don't raise - pub/sub failures shouldn't break the main flow
+            logger.warning(f"Failed to publish state update: {e}")
+            return 0
+
+    async def subscribe_state_updates(self, operation_id: str):
+        """
+        Subscribe to state update notifications for an operation.
+
+        This returns a pubsub object that can be used to listen for messages.
+        The caller is responsible for iterating over messages and closing.
+
+        Args:
+            operation_id: The operation ID to subscribe to
+
+        Returns:
+            Redis pubsub object with active subscription
+
+        Example:
+            pubsub = await queue.subscribe_state_updates(operation_id)
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    # Refresh state from Redis
+                    ...
+            await pubsub.unsubscribe()
+            await pubsub.aclose()
+        """
+        if not self._connected:
+            await self.connect()
+
+        channel = self._state_update_channel(operation_id)
+        pubsub = self._client.pubsub()
+        await pubsub.subscribe(channel)
+        logger.info(f"Subscribed to state updates on {channel}")
+        return pubsub
 
 
 __all__ = [

@@ -6,12 +6,12 @@ Ares is an autonomous security operations agent with dual capabilities:
 
 ## Quick Links
 
-- [Project README](../README.md)
 - [Taskfile Usage Guide](taskfile_usage.md)
 - [Grafana MCP Integration](grafana_mcp_usage.md)
 - [Prompt Templates](prompt_templates.md)
 - [Contributing Guide](contributing.md)
-- [Security Policy](../SECURITY.md)
+- [Blue Team Operations](blue.md)
+- [Red Team Operations](red.md)
 
 ## Overview
 
@@ -50,8 +50,8 @@ Built with the [Dreadnode Agent SDK](https://github.com/dreadnode/agent-sdk).
 
 ## Getting Started
 
-See the [README](../README.md) for installation instructions and usage
-examples.
+For installation instructions and usage examples, see the project README in the
+root directory or visit the GitHub repository.
 
 ## Repository Layout
 

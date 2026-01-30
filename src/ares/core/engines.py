@@ -314,7 +314,7 @@ class MITRENavigator:
 
         This is CRITICAL for understanding the full attack chain.
         When we detect a technique like DCSync (T1003.006), we need to
-        investigate what came BEFORE - enumeration, brute force, share access, etc.
+        investigate what came BEFORE - recon, brute force, share access, etc.
         """
         questions = []
         loader = get_template_loader()

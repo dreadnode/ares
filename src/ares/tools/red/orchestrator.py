@@ -6,7 +6,7 @@ and dispatch tasks to specialized worker agents.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import dreadnode as dn
 from dreadnode.agent.tools import Toolset
@@ -77,6 +77,254 @@ class OrchestratorTools(Toolset):
         self.shared_state.completed = True
         logger.success(f"🎯 Multi-agent operation completed: {summary}")
         return f"✓ Operation marked as complete. Summary: {summary}"
+
+    @dn.tool_method
+    async def dispatch_recon(
+        self,
+        task_type: str,
+        targets: str = "",
+        domain: str = "",
+        username: str = "",
+        password: str = "",
+        hash_value: str = "",
+        details: str = "{}",
+        wait_for_result: bool = False,
+        timeout: float = 600.0,
+    ) -> str:
+        """
+        Dispatch reconnaissance tasks to the RECON agent.
+
+        The RECON agent specializes in network scanning, enumeration, and
+        attack path discovery. Use this to delegate:
+        - Network scanning (nmap)
+        - User and share enumeration
+        - Domain information gathering
+        - BloodHound collection and analysis
+
+        Args:
+            task_type: Type of reconnaissance task:
+                - "network_scan": Run nmap to discover live hosts and services
+                - "user_enumeration": Enumerate domain users
+                - "share_enumeration": Enumerate network shares
+                - "domain_info": Gather domain controller and trust information
+                - "bloodhound": Run BloodHound collection and analysis (requires creds)
+            targets: Comma-separated target IPs, hostnames, or CIDR ranges (e.g., "10.0.0.0/24,10.0.1.5")
+            domain: Target domain (e.g., "corp.local")
+            username: Username for authenticated enumeration (optional)
+            password: Password for authenticated enumeration (optional)
+            hash_value: NTLM hash for pass-the-hash (optional)
+            details: JSON string with additional parameters (e.g., '{"ports": "80,443,445"}')
+            wait_for_result: If True, wait for task completion
+            timeout: Max time to wait if wait_for_result=True (seconds, default 600 for long scans)
+
+        Returns:
+            Task ID for tracking, or result if wait_for_result=True
+
+        Example:
+            # Initial network scan
+            >>> dispatch_recon(
+            ...     task_type="network_scan",
+            ...     targets="10.0.0.0/24",
+            ...     details='{"ports": "top-1000"}'
+            ... )
+
+            # User enumeration (unauthenticated)
+            >>> dispatch_recon(
+            ...     task_type="user_enumeration",
+            ...     targets="10.0.0.1",
+            ...     domain="corp.local"
+            ... )
+
+            # BloodHound with credentials
+            >>> dispatch_recon(
+            ...     task_type="bloodhound",
+            ...     targets="10.0.0.1",
+            ...     domain="corp.local",
+            ...     username="user1",
+            ...     password="P@ssw0rd"  # pragma: allowlist secret
+            ... )
+        """
+        # Parse targets into list
+        target_ips = [t.strip() for t in targets.split(",") if t.strip()] if targets else []
+
+        # Map task_type to techniques
+        technique_map = {
+            "network_scan": ["nmap_scan"],
+            "user_enumeration": ["enumerate_users"],
+            "share_enumeration": ["enumerate_shares"],
+            "domain_info": ["get_domain_info"],
+            "bloodhound": ["run_bloodhound"],
+        }
+
+        techniques = technique_map.get(task_type, [task_type])
+
+        # Get domain from shared state if not provided
+        if not domain and self.shared_state.all_domains:
+            domain = next(iter(self.shared_state.all_domains))
+
+        task_id = await self.dispatcher.request_recon(
+            source_agent=self._agent_name,
+            domain=domain,
+            target_ips=target_ips or None,
+            username=username or "",
+            password=password or None,
+            hash_value=hash_value or None,
+            reason=task_type,
+            techniques=techniques,
+        )
+
+        if not task_id:
+            return "✗ Failed to dispatch recon - no recon agent available"
+
+        logger.info(f"Dispatched recon ({task_type}): {task_id}")
+
+        if not wait_for_result:
+            target_info = f", Targets: {targets}" if targets else ""
+            cred_info = f", User: {username}" if username else ""
+            return (
+                f"✓ Recon task dispatched: {task_id}\n"
+                f"Type: {task_type}{target_info}{cred_info}\n"
+                f"Techniques: {', '.join(techniques)}"
+            )
+
+        # Wait for result via Redis queue
+        result = await self.dispatcher.wait_for_redis_result(task_id, timeout=timeout)
+
+        if result is None:
+            return f"⏳ Recon task {task_id} timed out after {timeout}s"
+
+        if result.success:
+            return f"✓ Recon complete: {result.result}"
+        return f"✗ Recon failed: {result.error}"
+
+    @dn.tool_method
+    async def dispatch_credential_access(
+        self,
+        task_type: str,
+        targets: str = "",
+        domain: str = "",
+        username: str = "",
+        password: str = "",
+        hash_value: str = "",
+        details: str = "{}",
+        wait_for_result: bool = False,
+        timeout: float = 300.0,
+    ) -> str:
+        """
+        Dispatch credential access tasks to the CREDENTIAL_ACCESS agent.
+
+        The credential access agent specializes in password attacks, hash
+        extraction, and credential discovery. Use this to delegate:
+        - Low-hanging fruit attacks (username=password, password spray, LDAP descriptions)
+        - Hash extraction (secretsdump, kerberoast, asrep_roast)
+        - Share pilfering (GPP passwords, SYSVOL scripts)
+
+        Args:
+            task_type: Type of credential access task:
+                - "low_hanging_fruit": Run username_as_password, password_spray,
+                  ldap_search_descriptions, sysvol_script_search, gpp_password_finder
+                - "secretsdump": Extract hashes from target (requires admin creds)
+                - "kerberoast": Find and roast service accounts with SPNs
+                - "asrep_roast": Find accounts without pre-auth required
+                - "lsassy": Dump LSASS memory (requires admin access)
+                - "share_spider": Search accessible shares for credentials
+            targets: Comma-separated target IPs or hostnames (e.g., "10.0.0.1,10.0.0.2")
+            domain: Target domain (e.g., "corp.local")
+            username: Username for authenticated actions (optional)
+            password: Password for authenticated actions (optional)
+            hash_value: NTLM hash for pass-the-hash (optional)
+            details: JSON string with additional parameters (e.g., '{"users_file": "/tmp/users.txt"}')
+            wait_for_result: If True, wait for task completion
+            timeout: Max time to wait if wait_for_result=True (seconds)
+
+        Returns:
+            Task ID for tracking, or result if wait_for_result=True
+
+        Example:
+            # Low-hanging fruit after user enumeration
+            >>> dispatch_credential_access(
+            ...     task_type="low_hanging_fruit",
+            ...     targets="10.0.0.1",
+            ...     domain="corp.local",
+            ...     details='{"users_file": "/tmp/users.txt"}'
+            ... )
+
+            # Secretsdump with credentials
+            >>> dispatch_credential_access(
+            ...     task_type="secretsdump",
+            ...     targets="10.0.0.1,10.0.0.2",
+            ...     domain="corp.local",
+            ...     username="admin",
+            ...     password="P@ssw0rd"  # pragma: allowlist secret
+            ... )
+
+            # Kerberoast to find service accounts
+            >>> dispatch_credential_access(
+            ...     task_type="kerberoast",
+            ...     domain="corp.local",
+            ...     username="user1",
+            ...     password="password123"  # pragma: allowlist secret
+            ... )
+        """
+        # Parse targets into list
+        target_ips = [t.strip() for t in targets.split(",") if t.strip()] if targets else []
+
+        # Map task_type to techniques
+        technique_map = {
+            "low_hanging_fruit": [
+                "username_as_password",
+                "password_spray",
+                "ldap_search_descriptions",
+                "sysvol_script_search",
+                "gpp_password_finder",
+            ],
+            "secretsdump": ["secretsdump"],
+            "kerberoast": ["kerberoast"],
+            "asrep_roast": ["asrep_roast"],
+            "lsassy": ["lsassy"],
+            "share_spider": ["share_spider"],
+        }
+
+        techniques = technique_map.get(task_type, [task_type])
+
+        # Get domain from shared state if not provided
+        if not domain and self.shared_state.all_domains:
+            domain = next(iter(self.shared_state.all_domains))
+
+        task_id = await self.dispatcher.request_credential_access(
+            source_agent=self._agent_name,
+            domain=domain,
+            target_ips=target_ips or None,
+            username=username or "",
+            password=password or None,
+            hash_value=hash_value or None,
+            reason=task_type,
+            techniques=techniques,
+        )
+
+        if not task_id:
+            return "✗ Failed to dispatch credential access - no credential_access agent available"
+
+        logger.info(f"Dispatched credential access ({task_type}): {task_id}")
+
+        if not wait_for_result:
+            target_info = f", Targets: {targets}" if targets else ""
+            cred_info = f", User: {username}" if username else ""
+            return (
+                f"✓ Credential access task dispatched: {task_id}\n"
+                f"Type: {task_type}{target_info}{cred_info}\n"
+                f"Techniques: {', '.join(techniques)}"
+            )
+
+        # Wait for result via Redis queue
+        result = await self.dispatcher.wait_for_redis_result(task_id, timeout=timeout)
+
+        if result is None:
+            return f"⏳ Credential access task {task_id} timed out after {timeout}s"
+
+        if result.success:
+            return f"✓ Credential access complete: {result.result}"
+        return f"✗ Credential access failed: {result.error}"
 
     @dn.tool_method
     async def dispatch_crack_hash(
@@ -237,7 +485,7 @@ class OrchestratorTools(Toolset):
         Example:
             # Move to target using hash
             >>> dispatch_lateral_movement(
-            ...     target_host="192.168.1.10",
+            ...     target_host="192.168.56.10",
             ...     username="Administrator",
             ...     hash_value="aad3b435b51404ee:...",
             ...     domain="corp.local"
@@ -361,7 +609,7 @@ class OrchestratorTools(Toolset):
         return f"✗ Exploitation failed: {result.error}"
 
     @dn.tool_method
-    async def start_poisoning(
+    async def start_coercion(
         self,
         interface: str = "eth0",
         techniques: str = "LLMNR,NBT-NS,mDNS",
@@ -370,22 +618,22 @@ class OrchestratorTools(Toolset):
         timeout: float = 600.0,
     ) -> str:
         """
-        Request the coercion agent to start network poisoning.
+        Request the coercion agent to start network coercion.
 
         The coercion agent will run responder/mitm6 to capture hashes.
 
         Args:
             interface: Network interface to use
-            techniques: Comma-separated poisoning techniques (LLMNR, NBT-NS, mDNS)
+            techniques: Comma-separated coercion techniques (LLMNR, NBT-NS, mDNS)
             duration: How long to run in seconds (default: 300)
-            wait_for_result: If True, wait for poisoning to complete
+            wait_for_result: If True, wait for coercion to complete
             timeout: Max time to wait if wait_for_result=True (seconds)
 
         Returns:
             Task ID for tracking, or result if wait_for_result=True
 
         Example:
-            >>> start_poisoning(
+            >>> start_coercion(
             ...     interface="eth0",
             ...     techniques="LLMNR,NBT-NS",
             ...     duration=600
@@ -393,7 +641,7 @@ class OrchestratorTools(Toolset):
         """
         tech_list = [t.strip() for t in techniques.split(",")]
 
-        task_id = await self.dispatcher.request_poisoning(
+        task_id = await self.dispatcher.request_coercion(
             source_agent=self._agent_name,
             interface=interface,
             techniques=tech_list,
@@ -401,25 +649,133 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to start poisoning - no coercion agent available"
+            return "✗ Failed to start coercion - no coercion agent available"
 
-        logger.info(f"Dispatched poisoning: {task_id}")
+        logger.info(f"Dispatched coercion: {task_id}")
 
         if not wait_for_result:
             return (
-                f"✓ Poisoning started: {task_id}\n"
+                f"✓ Coercion started: {task_id}\n"
                 f"Techniques: {', '.join(tech_list)}, Duration: {duration}s"
             )
 
-        # Wait for result via Redis queue (longer timeout for poisoning)
+        # Wait for result via Redis queue (longer timeout for coercion)
         result = await self.dispatcher.wait_for_redis_result(task_id, timeout=timeout)
 
         if result is None:
-            return f"⏳ Poisoning {task_id} timed out after {timeout}s"
+            return f"⏳ Coercion {task_id} timed out after {timeout}s"
 
         if result.success:
-            return f"✓ Poisoning complete: {result.result}"
-        return f"✗ Poisoning failed: {result.error}"
+            return f"✓ Coercion complete: {result.result}"
+        return f"✗ Coercion failed: {result.error}"
+
+    @dn.tool_method
+    async def dispatch_esc8_attack(
+        self,
+        ca_host: str,
+        dc_ip: str,
+        domain: str,
+        username: str,
+        password: str,
+        attacker_ip: str,
+        ca_name: str = "",
+    ) -> str:
+        """
+        Dispatch ESC8 relay attack (ADCS Web Enrollment exploitation).
+
+        ESC8 requires coordination between PRIVESC (relay listener) and COERCION (petitpotam).
+        This tool dispatches both tasks in the correct sequence:
+        1. PRIVESC starts certipy relay to listen for relayed auth
+        2. COERCION runs petitpotam to coerce DC to authenticate to relay
+
+        Args:
+            ca_host: Certificate Authority host (where web enrollment is enabled)
+            dc_ip: Domain controller IP (target for petitpotam coercion)
+            domain: Target domain
+            username: Username with domain access
+            password: Password for authentication
+            attacker_ip: Attacker IP where relay listener will run
+            ca_name: Optional CA name (auto-detected if not provided)
+
+        Returns:
+            Status of both dispatched tasks
+
+        Example:
+            >>> dispatch_esc8_attack(
+            ...     ca_host="dc01.corp.local",
+            ...     dc_ip="192.168.56.10",
+            ...     domain="corp.local",
+            ...     username="user",
+            ...     password="pass",  # pragma: allowlist secret
+            ...     attacker_ip="192.168.56.100"
+            ... )
+        """
+        results = []
+
+        # Step 1: Dispatch ESC8 exploit to PRIVESC (starts relay listener)
+        exploit_params = {
+            "ca_host": ca_host,
+            "ca_name": ca_name or ca_host,
+            "dc_ip": dc_ip,
+            "domain": domain,
+            "username": username,
+            "password": password,
+            "attacker_ip": attacker_ip,
+            "coerce_target": dc_ip,  # Tell privesc where to expect coerced auth from
+        }
+
+        privesc_task_id = await self.dispatcher.request_exploit(
+            vuln_type="ADCS_ESC8",
+            vuln_id=f"ADCS_ESC8_{ca_host}",
+            target=ca_host,
+            source_agent=self._agent_name,
+            params=exploit_params,
+        )
+
+        if privesc_task_id:
+            results.append(f"✓ Relay listener task dispatched to PRIVESC: {privesc_task_id}")
+            logger.info(f"ESC8 relay task {privesc_task_id} dispatched to privesc")
+        else:
+            results.append("✗ Failed to dispatch relay listener - no privesc agent available")
+
+        # Step 2: Dispatch petitpotam to COERCION
+        # Use request_coercion with petitpotam-specific parameters
+        coercion_payload = {
+            "coercion_type": "petitpotam",
+            "target": dc_ip,
+            "listener": attacker_ip,
+            "username": username,
+            "password": password,
+            "domain": domain,
+            "note": f"ESC8 attack - coerce DC to authenticate to relay at {attacker_ip}",
+        }
+
+        coercion_task_id = await self.dispatcher.request_coercion(
+            source_agent=self._agent_name,
+            interface="",  # Not needed for petitpotam
+            techniques=["petitpotam"],  # Signal petitpotam-style coercion
+            duration=60,
+            payload_override=coercion_payload,
+        )
+
+        if coercion_task_id:
+            results.append(f"✓ PetitPotam coercion task dispatched to COERCION: {coercion_task_id}")
+            logger.info(f"ESC8 coercion task {coercion_task_id} dispatched to coercion")
+        else:
+            results.append("✗ Failed to dispatch coercion - no coercion agent available")
+
+        # Provide next steps
+        results.append("")
+        results.append("📋 ESC8 Attack Workflow:")
+        results.append("  1. PRIVESC will start certipy relay listener")
+        results.append("  2. COERCION will run petitpotam against DC")
+        results.append("  3. DC authenticates to relay, capturing certificate")
+        results.append("  4. PRIVESC uses certipy_auth with captured cert for NTLM hash")
+        results.append("")
+        results.append("→ Monitor with get_pending_tasks()")
+        results.append("→ Check results with get_all_hashes() after completion")
+
+        return "\n".join(results)
 
     @dn.tool_method
     def get_pending_tasks(self) -> str:
@@ -468,7 +824,7 @@ class OrchestratorTools(Toolset):
 
         Example:
             # Clean up specific orphaned tasks
-            >>> cleanup_orphaned_tasks(["poison_ab0056ff310a", "exploit_fe7b6d76ce4b"])
+            >>> cleanup_orphaned_tasks(["coercion_ab0056ff310a", "exploit_fe7b6d76ce4b"])
 
             # Clean up all stale tasks
             >>> cleanup_orphaned_tasks()
@@ -933,6 +1289,29 @@ class OrchestratorTools(Toolset):
         return "\n".join(lines)
 
     @dn.tool_method
+    async def scan_for_mssql_hosts(self) -> str:
+        """
+        Scan all discovered hosts for MSSQL services and auto-queue vulnerabilities.
+
+        This scans all hosts in shared state for MSSQL indicators (port 1433, ms-sql, etc.)
+        and automatically queues mssql_linked_server vulnerabilities for exploitation.
+
+        **CALL THIS PERIODICALLY** to catch MSSQL hosts discovered by workers.
+
+        Returns:
+            Status message with number of new MSSQL vulnerabilities queued.
+        """
+        queued = await self.dispatcher.scan_hosts_for_mssql()
+
+        if queued > 0:
+            return (
+                f"✓ MSSQL scan complete: queued {queued} new MSSQL vulnerability(ies).\n"
+                "Use get_vulnerability_queue_status() to see queued items.\n"
+                "MSSQL exploitation will run automatically or dispatch manually with dispatch_privesc_exploit()."
+            )
+        return "✓ MSSQL scan complete: no new MSSQL hosts found (or already queued)."
+
+    @dn.tool_method
     async def register_discovered_host(
         self,
         ip: str,
@@ -944,7 +1323,7 @@ class OrchestratorTools(Toolset):
         """
         Register a newly discovered host with all agents.
 
-        Use this when network enumeration discovers new systems.
+        Use this when network recon discovers new systems.
 
         Args:
             ip: IP address of the host
@@ -958,7 +1337,7 @@ class OrchestratorTools(Toolset):
 
         Example:
             >>> register_discovered_host(
-            ...     ip="192.168.1.10",
+            ...     ip="192.168.56.10",
             ...     hostname="DC01",
             ...     os="Windows Server 2019",
             ...     roles=["DC"],
@@ -1037,7 +1416,16 @@ class CrackerCallbackTools(Toolset):
         await self.dispatcher.complete_task(
             task_id=task_id,
             success=True,
-            result={"username": username, "password": password, "method": method},
+            result={
+                "credential": {
+                    "username": username,
+                    "password": password,
+                    "domain": domain,
+                    "source": f"cracked:{method}",
+                },
+                "original_hash": original_hash,
+                "method": method,
+            },
             source_agent=self._agent_name,
         )
 
@@ -1087,6 +1475,28 @@ class LateralCallbackTools(Toolset):
             raise RuntimeError("Dispatcher not set")
         return self._dispatcher
 
+    async def _send_via_task_queue(
+        self,
+        task_id: str,
+        *,
+        success: bool,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> bool:
+        task_queue = self.dispatcher.task_queue
+        if not task_queue:
+            return False
+        if task_id in self.dispatcher.shared_state.pending_tasks:
+            return False
+        await task_queue.send_result(
+            task_id=task_id,
+            success=success,
+            result=result,
+            error=error,
+            worker_pod=self._agent_name,
+        )
+        return True
+
     @dn.tool_method
     async def report_lateral_success(
         self,
@@ -1094,6 +1504,7 @@ class LateralCallbackTools(Toolset):
         target_host: str,
         method: str,
         new_credentials: str = "",
+        new_hashes: str = "",
     ) -> str:
         """
         Report successful lateral movement.
@@ -1102,26 +1513,60 @@ class LateralCallbackTools(Toolset):
             task_id: The original lateral movement task ID
             target_host: Host that was accessed
             method: Method used (psexec/winrm/etc)
-            new_credentials: Any new credentials found (JSON format)
+            new_credentials: Any new credentials found (JSON format, list of dicts with
+                username, password, domain, source fields)
+            new_hashes: Any new hashes found (JSON format, list of dicts with
+                username, hash_value, hash_type, domain fields)
 
         Returns:
             Confirmation message
         """
         import json
 
-        result = {
+        result: dict[str, Any] = {
             "target_host": target_host,
             "method": method,
             "success": True,
         }
 
-        # Parse and broadcast new credentials
+        # Parse credentials and include in result for complete_task to publish
         if new_credentials:
             try:
                 creds = json.loads(new_credentials)
-                result["new_credentials_count"] = len(creds) if isinstance(creds, list) else 1
+                if isinstance(creds, list):
+                    result["credentials"] = creds
+                elif isinstance(creds, dict):
+                    result["credential"] = creds
             except json.JSONDecodeError:
-                pass
+                logger.warning(f"Failed to parse new_credentials JSON: {new_credentials[:200]}")
+
+        # Parse hashes and include in result for complete_task to publish
+        if new_hashes:
+            try:
+                hashes = json.loads(new_hashes)
+                if isinstance(hashes, list):
+                    result["hashes"] = hashes
+                elif isinstance(hashes, dict):
+                    result["hash"] = hashes
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse new_hashes JSON: {new_hashes[:200]}")
+
+        # Calculate extra message for reporting
+        cred_count = len(result.get("credentials", [])) or (1 if "credential" in result else 0)
+        hash_count = len(result.get("hashes", [])) or (1 if "hash" in result else 0)
+        extras = []
+        if cred_count:
+            extras.append(f"{cred_count} credential(s)")
+        if hash_count:
+            extras.append(f"{hash_count} hash(es)")
+        extra_msg = f" with {', '.join(extras)}" if extras else ""
+
+        if await self._send_via_task_queue(
+            task_id,
+            success=True,
+            result=result,
+        ):
+            return f"✓ Lateral movement to {target_host} reported{extra_msg}"
 
         await self.dispatcher.complete_task(
             task_id=task_id,
@@ -1130,7 +1575,7 @@ class LateralCallbackTools(Toolset):
             source_agent=self._agent_name,
         )
 
-        return f"✓ Lateral movement to {target_host} reported"
+        return f"✓ Lateral movement to {target_host} reported{extra_msg}"
 
     @dn.tool_method
     async def report_lateral_failed(
@@ -1150,10 +1595,18 @@ class LateralCallbackTools(Toolset):
         Returns:
             Confirmation message
         """
+        error = f"Lateral to {target_host} failed: {reason}"
+        if await self._send_via_task_queue(
+            task_id,
+            success=False,
+            error=error,
+        ):
+            return f"✗ Lateral movement failed: {reason}"
+
         await self.dispatcher.complete_task(
             task_id=task_id,
             success=False,
-            error=f"Lateral to {target_host} failed: {reason}",
+            error=error,
             source_agent=self._agent_name,
         )
 

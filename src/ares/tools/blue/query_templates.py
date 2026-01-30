@@ -18,7 +18,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
     These templates encode detection logic for Active Directory attacks,
     specifically aligned with the techniques used by the Ares red team agent:
-    - Network enumeration (nmap, user/share enumeration)
+    - Network recon (nmap, user/share recon)
     - Credential access (secretsdump, kerberoasting, AS-REP roasting)
     - Lateral movement (pass-the-hash, psexec, wmi)
     - Privilege escalation (ADCS, delegation, golden ticket)
@@ -217,10 +217,10 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         domain_controller: str | None = None,
         hours_back: int | None = None,
     ) -> dict[str, Any]:
-        """Detect Active Directory user enumeration.
+        """Detect Active Directory user recon.
 
         Detects reconnaissance performed by red team's enumerate_users tool (netexec --users).
-        Looks for LDAP queries, net user commands, and SMB-based enumeration.
+        Looks for LDAP queries, net user commands, and SMB-based recon.
 
         MITRE ATT&CK: T1087.002 (Account Discovery: Domain Account)
 
@@ -229,7 +229,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             hours_back: Hours of logs to search (default: 1 hour).
 
         Returns:
-            Query results with user enumeration indicators.
+            Query results with user recon indicators.
         """
         dn.log_metric("query_template_user_enum", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
@@ -257,7 +257,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         logql = f"{selector} {event_filter} {tool_filter}"
 
-        logger.info(f"User enumeration detection: {logql}")
+        logger.info(f"User recon detection: {logql}")
 
         result = await self._query_loki(logql, start_time, end_time, limit=500)
         result["_query_template"] = "user_enumeration"
@@ -272,7 +272,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         target_host: str | None = None,
         hours_back: int | None = None,
     ) -> dict[str, Any]:
-        """Detect SMB share enumeration.
+        """Detect SMB share recon.
 
         Detects reconnaissance performed by red team's enumerate_shares tool (netexec --shares).
         Looks for share listing, access attempts, and smbclient activity.
@@ -284,7 +284,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             hours_back: Hours of logs to search (default: 1 hour).
 
         Returns:
-            Query results with share enumeration indicators.
+            Query results with share recon indicators.
         """
         dn.log_metric("query_template_share_enum", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
@@ -311,7 +311,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         logql = f"{selector} {event_filter} {tool_filter}"
 
-        logger.info(f"Share enumeration detection: {logql}")
+        logger.info(f"Share recon detection: {logql}")
 
         result = await self._query_loki(logql, start_time, end_time, limit=500)
         result["_query_template"] = "share_enumeration"
@@ -840,7 +840,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_bloodhound", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # LDAP enumeration patterns, BloodHound/SharpHound signatures
+        # LDAP recon patterns, BloodHound/SharpHound signatures
         logql = (
             '{job=~".+"}'
             ' |~ "(?i)(bloodhound|sharphound|adexplorer|ldap.*query)"'
@@ -956,7 +956,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         self,
         hours_back: int = 4,
     ) -> dict[str, Any]:
-        """Detect Certipy certificate template enumeration.
+        """Detect Certipy certificate template recon.
 
         Detects red team's certipy_find tool scanning for vulnerable certificate
         templates. This is the reconnaissance phase before ADCS exploitation.
@@ -967,12 +967,12 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             hours_back: Hours of logs to search.
 
         Returns:
-            Query results with Certipy enumeration indicators.
+            Query results with Certipy recon indicators.
         """
         dn.log_metric("query_template_certipy_enum", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Certipy enumeration queries LDAP for certificate templates
+        # Certipy recon queries LDAP for certificate templates
         # Look for: msPKI-Certificate-Name-Flag, msPKI-Enrollment-Flag queries
         logql = (
             '{job=~".+"}'
@@ -980,7 +980,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             ' |~ "(?i)(mspki|pkienrollmentservice|certificatetemplates|pki)"'
         )
 
-        logger.info(f"Certipy enumeration detection: {logql}")
+        logger.info(f"Certipy recon detection: {logql}")
 
         result = await self._query_loki(logql, start_time, end_time, limit=500)
         result["_query_template"] = "certipy_enumeration"
@@ -1160,7 +1160,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         self,
         hours_back: int = 4,
     ) -> dict[str, Any]:
-        """Detect BloodHound domain trust and forest enumeration.
+        """Detect BloodHound domain trust and forest recon.
 
         BloodHound queries for cross-domain trust relationships and forest
         topology to map potential attack paths.
@@ -1176,7 +1176,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_bh_domain", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # BloodHound domain enumeration LDAP queries:
+        # BloodHound domain recon LDAP queries:
         # - trusteddomain objectclass queries
         # - crossRef objects for forest structure
         logql = (
@@ -1185,7 +1185,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             ' |~ "(?i)(trusteddomain|crossref|trusttype|trustdirection|trustattributes)"'
         )
 
-        logger.info(f"BloodHound domain enumeration detection: {logql}")
+        logger.info(f"BloodHound domain recon detection: {logql}")
 
         result = await self._query_loki(logql, start_time, end_time, limit=500)
         result["_query_template"] = "bloodhound_domain_enum"
@@ -1199,7 +1199,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         self,
         hours_back: int = 4,
     ) -> dict[str, Any]:
-        """Detect BloodHound ACL/DACL enumeration.
+        """Detect BloodHound ACL/DACL recon.
 
         BloodHound's ACL collection queries for nTSecurityDescriptor on AD
         objects to find privilege escalation paths via ACL abuse.
@@ -1210,7 +1210,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             hours_back: Hours of logs to search.
 
         Returns:
-            Query results with ACL enumeration indicators.
+            Query results with ACL recon indicators.
         """
         dn.log_metric("query_template_bh_acl", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
@@ -1224,7 +1224,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             ' |~ "(?i)(ntsecuritydescriptor|dacl|securitydescriptor|allowedtoactonbehalf)"'
         )
 
-        logger.info(f"BloodHound ACL enumeration detection: {logql}")
+        logger.info(f"BloodHound ACL recon detection: {logql}")
 
         result = await self._query_loki(logql, start_time, end_time, limit=500)
         result["_query_template"] = "bloodhound_acl_enum"
@@ -1238,7 +1238,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         self,
         hours_back: int = 4,
     ) -> dict[str, Any]:
-        """Detect BloodHound session enumeration.
+        """Detect BloodHound session recon.
 
         BloodHound enumerates active user sessions on computers using
         NetSessionEnum and NetWkstaUserEnum APIs to map where users are logged in.
@@ -1254,7 +1254,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_bh_session", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Session enumeration APIs:
+        # Session recon APIs:
         # - NetSessionEnum (srvsvc)
         # - NetWkstaUserEnum (wkssvc)
         logql = (
@@ -1263,7 +1263,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             ' |~ "(?i)(enum|bloodhound|sharphound|session.*collection)"'
         )
 
-        logger.info(f"BloodHound session enumeration detection: {logql}")
+        logger.info(f"BloodHound session recon detection: {logql}")
 
         result = await self._query_loki(logql, start_time, end_time, limit=500)
         result["_query_template"] = "bloodhound_session_enum"
@@ -1277,7 +1277,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         self,
         hours_back: int = 4,
     ) -> dict[str, Any]:
-        """Detect BloodHound GPO enumeration.
+        """Detect BloodHound GPO recon.
 
         BloodHound enumerates Group Policy Objects to find GPO-based attack
         paths and privilege escalation opportunities.
@@ -1293,7 +1293,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_bh_gpo", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # GPO enumeration queries:
+        # GPO recon queries:
         # - groupPolicyContainer objectclass
         # - gPLink, gPCFileSysPath attributes
         logql = (
@@ -1302,7 +1302,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             ' |~ "(?i)(grouppolicycontainer|gplink|gpcfilesyspath|gpo)"'
         )
 
-        logger.info(f"BloodHound GPO enumeration detection: {logql}")
+        logger.info(f"BloodHound GPO recon detection: {logql}")
 
         result = await self._query_loki(logql, start_time, end_time, limit=500)
         result["_query_template"] = "bloodhound_gpo_enum"
@@ -1316,7 +1316,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         self,
         hours_back: int = 4,
     ) -> dict[str, Any]:
-        """Detect BloodHound computer enumeration.
+        """Detect BloodHound computer recon.
 
         BloodHound queries for computer objects with specific attributes
         to identify targets for lateral movement.
@@ -1332,7 +1332,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_bh_computer", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Computer enumeration with BloodHound-specific attributes:
+        # Computer recon with BloodHound-specific attributes:
         # - operatingsystem, operatingsystemversion
         # - serviceprincipalname, msds-allowedtodelegateto
         logql = (
@@ -1341,7 +1341,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             ' |~ "(?i)(objectclass=computer|operatingsystem|serviceprincipalname|allowedtodelegateto)"'
         )
 
-        logger.info(f"BloodHound computer enumeration detection: {logql}")
+        logger.info(f"BloodHound computer recon detection: {logql}")
 
         result = await self._query_loki(logql, start_time, end_time, limit=500)
         result["_query_template"] = "bloodhound_computer_enum"
@@ -1680,7 +1680,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         Ntlmrelayx intercepts NTLM authentication and relays it to target
         services like SMB, LDAP, HTTP for unauthorized access.
 
-        MITRE ATT&CK: T1557.001 (LLMNR/NBT-NS Poisoning and SMB Relay)
+        MITRE ATT&CK: T1557.001 (LLMNR/NBT-NS Coercion and SMB Relay)
 
         Args:
             hours_back: Hours of logs to search.
@@ -1718,7 +1718,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     ) -> dict[str, Any]:
         """Detect impacket-smbclient share access.
 
-        Smbclient provides interactive SMB access for enumeration and
+        Smbclient provides interactive SMB access for recon and
         file operations on remote shares.
 
         MITRE ATT&CK: T1021.002 (SMB/Windows Admin Shares)
@@ -1735,7 +1735,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         # Smbclient patterns:
         # - Interactive SMB session characteristics
-        # - Multiple share enumeration
+        # - Multiple share recon
         # - File browsing patterns
         logql = (
             '{job=~".+"}'
@@ -1858,7 +1858,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             },
             {
                 "name": "detect_user_enumeration",
-                "description": "Detect AD user account enumeration",
+                "description": "Detect AD user account recon",
                 "mitre": "T1087.002",
                 "tactic": "discovery",
                 "red_team_tool": "enumerate_users",
@@ -1947,7 +1947,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             },
             {
                 "name": "detect_bloodhound_collection",
-                "description": "Detect BloodHound AD enumeration",
+                "description": "Detect BloodHound AD recon",
                 "mitre": "T1087",
                 "tactic": "discovery",
                 "red_team_tool": "run_bloodhound",
@@ -1972,7 +1972,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             # ADCS/Certipy Specific (ESC attacks)
             {
                 "name": "detect_certipy_enumeration",
-                "description": "Detect Certipy certificate template enumeration",
+                "description": "Detect Certipy certificate template recon",
                 "mitre": "T1649",
                 "tactic": "discovery",
                 "red_team_tool": "certipy_find",
@@ -2009,7 +2009,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             # BloodHound Specific LDAP Queries
             {
                 "name": "detect_bloodhound_domain_enum",
-                "description": "Detect BloodHound domain trust enumeration",
+                "description": "Detect BloodHound domain trust recon",
                 "mitre": "T1482",
                 "tactic": "discovery",
                 "red_team_tool": "run_bloodhound",
@@ -2023,21 +2023,21 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             },
             {
                 "name": "detect_bloodhound_session_enum",
-                "description": "Detect BloodHound session enumeration (NetSessionEnum)",
+                "description": "Detect BloodHound session recon (NetSessionEnum)",
                 "mitre": "T1033",
                 "tactic": "discovery",
                 "red_team_tool": "run_bloodhound",
             },
             {
                 "name": "detect_bloodhound_gpo_enum",
-                "description": "Detect BloodHound GPO enumeration",
+                "description": "Detect BloodHound GPO recon",
                 "mitre": "T1615",
                 "tactic": "discovery",
                 "red_team_tool": "run_bloodhound",
             },
             {
                 "name": "detect_bloodhound_computer_enum",
-                "description": "Detect BloodHound computer object enumeration",
+                "description": "Detect BloodHound computer object recon",
                 "mitre": "T1018",
                 "tactic": "discovery",
                 "red_team_tool": "run_bloodhound",

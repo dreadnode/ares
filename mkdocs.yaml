@@ -6,8 +6,19 @@ site_url: https://rigging.dreadnode.io
 repo_url: https://github.com/dreadnode/your-project-here
 
 nav:
-  - Home:
-      - index.md
+  - Home: index.md
+  - User Guides:
+      - Taskfile Usage: taskfile_usage.md
+      - Remote Development: remote-development.md
+      - Grafana MCP Integration: grafana_mcp_usage.md
+      - Prompt Templates: prompt_templates.md
+  - Operations:
+      - Blue Team: blue.md
+      - Red Team: red.md
+  - Development:
+      - Contributing: contributing.md
+  - Topics:
+      - Grafana MCP Setup: topics/grafana-mcp-setup.md
 
 theme:
   logo: assets/logo_black.png

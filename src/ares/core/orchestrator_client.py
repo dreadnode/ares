@@ -23,6 +23,7 @@ async def submit_operation(
     model: str | None = None,
     max_steps: int = 200,
     checkpoint_interval: int = 60,
+    report_dir: str | None = None,
     redis_url: str | None = None,
     operations_queue: str = "ares:operations",
     wait_for_completion: bool = False,
@@ -44,6 +45,7 @@ async def submit_operation(
         model: LLM model to use
         max_steps: Maximum agent steps
         checkpoint_interval: Seconds between checkpoints
+        report_dir: Directory for markdown reports (orchestrator-side)
         redis_url: Redis connection URL (default: from config)
         operations_queue: Redis queue name for operations
         wait_for_completion: If True, wait for operation to complete
@@ -69,6 +71,7 @@ async def submit_operation(
         "model": model or os.environ.get("ARES_ORCHESTRATOR_MODEL") or os.environ.get("ARES_MODEL"),
         "max_steps": max_steps,
         "checkpoint_interval": checkpoint_interval,
+        "report_dir": report_dir,
         "submitted_at": datetime.now(timezone.utc).isoformat(),
         "env_vars": env_vars,
     }
@@ -90,6 +93,16 @@ async def submit_operation(
         # Push operation request to queue
         if not task_queue._client:
             raise RuntimeError("Redis connection not established")
+
+        # Store env_vars separately to avoid exposing secrets in the main queue
+        # The orchestrator will read and delete this key when processing
+        if env_vars:
+            env_vars_key = f"ares:operation:{operation_id}:env_vars"
+            await task_queue._client.set(env_vars_key, json.dumps(env_vars))
+            # Set TTL of 1 hour in case operation is never processed
+            await task_queue._client.expire(env_vars_key, 3600)
+            # Remove env_vars from request - orchestrator will fetch from separate key
+            request = {k: v for k, v in request.items() if k != "env_vars"}
 
         await task_queue._client.rpush(operations_queue, json.dumps(request))
         logger.success(f"Operation {operation_id} submitted to orchestrator service")
