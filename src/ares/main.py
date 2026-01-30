@@ -523,7 +523,7 @@ async def multi_agent(
 
     Example:
         uv run ares multi-agent example.local "192.168.56.10,192.168.56.11"
-        uv run ares multi-agent corp.local "10.0.0.1" --multi-args.redis-url redis://redis:6379
+        uv run ares multi-agent corp.local "192.0.2.1" --multi-args.redis-url redis://redis:6379
     """
     import uuid
 

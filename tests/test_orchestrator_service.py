@@ -79,9 +79,9 @@ async def test_recover_orphaned_operation_runs_and_publishes_status():
 
     state = SharedRedTeamState(
         operation_id="op-123",
-        target=Target(ip="192.168.56.1", domain="contoso.local"),
+        target=Target(ip="192.168.58.1", domain="contoso.local"),
     )
-    state.all_hosts.append(Host(ip="192.168.56.1", hostname="dc01"))
+    state.all_hosts.append(Host(ip="192.168.58.1", hostname="dc01"))
     state.all_credentials.append(
         Credential(
             username="danj",
@@ -110,7 +110,7 @@ async def test_recover_orphaned_operation_runs_and_publishes_status():
     mock_run.assert_awaited_once()
     _, kwargs = mock_run.call_args
     assert kwargs["target_domain"] == "contoso.local"
-    assert kwargs["target_ips"] == ["192.168.56.1"]
+    assert kwargs["target_ips"] == ["192.168.58.1"]
     assert kwargs["resume_from_checkpoint"] is True
     assert kwargs["initial_credential"].username == "danj"
 
@@ -160,7 +160,7 @@ async def test_process_operation_request_sets_env_vars():
     request_data = {
         "operation_id": "op-env",
         "target_domain": "contoso.local",
-        "target_ips": ["192.168.56.1"],
+        "target_ips": ["192.168.58.1"],
         "model": "test-model",
         "env_vars": {"OPENAI_API_KEY": "test-key", "EMPTY": ""},  # pragma: allowlist secret
     }
@@ -188,7 +188,7 @@ async def test_process_operation_request_missing_model_publishes_failed():
     request_data = {
         "operation_id": "op-missing-model",
         "target_domain": "contoso.local",
-        "target_ips": ["192.168.56.2"],
+        "target_ips": ["192.168.58.2"],
     }
 
     with (
@@ -223,7 +223,7 @@ async def test_process_operation_request_fetches_env_vars_from_separate_key():
     request_data = {
         "operation_id": "op-env-separate",
         "target_domain": "contoso.local",
-        "target_ips": ["192.168.56.1"],
+        "target_ips": ["192.168.58.1"],
         "model": "test-model",
         # Note: no env_vars in request - should be fetched from Redis
     }
@@ -259,7 +259,7 @@ async def test_process_operation_request_uses_inline_env_vars_when_present():
     request_data = {
         "operation_id": "op-env-inline",
         "target_domain": "contoso.local",
-        "target_ips": ["192.168.56.1"],
+        "target_ips": ["192.168.58.1"],
         "model": "test-model",
         "env_vars": {"INLINE_KEY": "inline-value"},  # inline takes precedence
     }

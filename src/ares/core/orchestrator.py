@@ -166,6 +166,15 @@ async def _load_or_initialize_state(
     )
     if target_domain:
         state.add_domain(target_domain)
+
+    # Add all target IPs as placeholder hosts so scanners can track them
+    # Services will be merged when recon discovers them
+    for ip in target_ips:
+        placeholder_host = Host(ip=ip, hostname="", os="Unknown", roles=[], services=[])
+        state.add_host(placeholder_host)
+    if target_ips:
+        logger.info(f"Added {len(target_ips)} target IPs as placeholder hosts")
+
     if initial_credential:
         state.add_credential(initial_credential, "initial")
         dispatcher.signal_credential_access()
@@ -418,6 +427,12 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         asyncio.create_task(_auto_share_spider(dispatcher), name="auto_share_spider"),
         asyncio.create_task(_auto_bloodhound(dispatcher), name="auto_bloodhound"),
         asyncio.create_task(_auto_coercion(dispatcher), name="auto_coercion"),
+        asyncio.create_task(
+            _auto_delegation_enumeration(dispatcher), name="auto_delegation_enumeration"
+        ),
+        asyncio.create_task(
+            _auto_unknown_host_enumeration(dispatcher), name="auto_unknown_host_enumeration"
+        ),
     ]
 
     # Build initial prompt for orchestrator
@@ -968,8 +983,6 @@ async def _auto_mssql_detection(
         dispatcher: The dispatcher instance
         check_interval: Seconds between MSSQL scans
     """
-    scanned_hosts: set[str] = set()
-
     while True:
         try:
             await asyncio.sleep(check_interval)
@@ -981,19 +994,19 @@ async def _auto_mssql_detection(
                 logger.debug("Operation complete, stopping MSSQL detection")
                 break
 
-            # Check for new hosts we haven't scanned
-            current_hosts = {h.ip for h in state.all_hosts}
-            new_hosts = current_hosts - scanned_hosts
+            # Skip if no hosts discovered yet
+            if not state.all_hosts:
+                logger.debug("MSSQL scanner: no hosts discovered yet")
+                continue
 
-            if new_hosts:
-                logger.debug(f"MSSQL scanner: checking {len(new_hosts)} new host(s)")
-                queued = await dispatcher.scan_hosts_for_mssql()
-                scanned_hosts.update(current_hosts)
+            # Always scan all hosts - dispatcher handles deduplication via already_queued check
+            # This ensures we catch hosts whose services were updated after initial discovery
+            queued = await dispatcher.scan_hosts_for_mssql()
 
-                if queued > 0:
-                    logger.warning(
-                        f"🗄️ Auto-detected MSSQL: queued {queued} vulnerability(ies) for exploitation"
-                    )
+            if queued > 0:
+                logger.warning(
+                    f"🗄️ Auto-detected MSSQL: queued {queued} vulnerability(ies) for exploitation"
+                )
 
         except asyncio.CancelledError:
             break
@@ -1638,20 +1651,43 @@ async def _auto_credential_access(  # noqa: PLR0912
                     continue
                 if crack_key in processed_crack_hashes:
                     continue
+
+                # Determine priority based on hash type
+                # Kerberoast hashes have higher priority - service accounts often have weak passwords
+                # AS-REP hashes also get boosted priority
+                crack_priority = 5  # Default priority
+                hash_value_lower = hash_obj.hash_value.lower()
+                hash_type_upper = (hash_obj.hash_type or "").upper()
+
+                if "$krb5tgs$" in hash_value_lower or "KERBEROAST" in hash_type_upper:
+                    crack_priority = 2  # High priority - service accounts often weak
+                    logger.info(
+                        f"Kerberoast hash detected for {hash_obj.domain}\\{hash_obj.username}, "
+                        f"boosting crack priority to {crack_priority}"
+                    )
+                elif "$krb5asrep$" in hash_value_lower or "ASREP" in hash_type_upper:
+                    crack_priority = 3  # Medium-high priority
+                    logger.info(
+                        f"AS-REP hash detected for {hash_obj.domain}\\{hash_obj.username}, "
+                        f"boosting crack priority to {crack_priority}"
+                    )
+
                 crack_task_id = await dispatcher.request_crack(
                     hash_value=hash_obj.hash_value,
                     hash_type=hash_obj.hash_type,
                     source_agent="orchestrator",
                     username=hash_obj.username,
                     domain=hash_obj.domain,
+                    priority=crack_priority,
                 )
                 if crack_task_id:
                     processed_crack_hashes.add(crack_key)
                     logger.info(
-                        "Auto crack dispatched for {}\\{} ({})",
+                        "Auto crack dispatched for {}\\{} ({}, priority={})",
                         hash_obj.domain or "(unknown)",
                         hash_obj.username,
                         hash_obj.hash_type or "unknown",
+                        crack_priority,
                     )
 
         except asyncio.CancelledError:
@@ -1837,6 +1873,170 @@ async def _auto_coercion(  # noqa: PLR0912
             break
         except Exception as e:
             logger.error(f"Auto coercion error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_delegation_enumeration(
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 60.0,
+) -> None:
+    """
+    Background task that automatically runs delegation enumeration for discovered credentials.
+
+    When credentials are discovered, dispatches find_delegation tasks to enumerate:
+    - Unconstrained delegation (machines that can impersonate any user)
+    - Constrained delegation (machines that can impersonate to specific services)
+
+    These are high-value targets for privilege escalation.
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between checks for new credentials
+    """
+    # Track processed credentials as (domain, username)
+    processed_creds: set[tuple[str, str]] = set()
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # Skip if operation is complete
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping delegation enumeration")
+                break
+
+            # Need credentials to enumerate delegation
+            if not state.all_credentials:
+                logger.debug("Auto-delegation: waiting for credentials")
+                continue
+
+            # Find new credentials with passwords
+            for cred in state.all_credentials:
+                if not cred.password:
+                    continue
+
+                cred_key = ((cred.domain or "").lower(), cred.username.lower())
+
+                if cred_key in processed_creds:
+                    continue
+
+                # Get domain for this credential
+                domain = cred.domain or (state.target.domain if state.target else "")
+                if not domain:
+                    continue
+
+                # Dispatch delegation enumeration to PRIVESC agent (has DelegationTools)
+                logger.info(
+                    f"🔍 Auto-delegation: Running find_delegation for {cred.domain}\\{cred.username}"
+                )
+
+                task_id = await dispatcher.request_privesc_enumeration(
+                    source_agent="orchestrator",
+                    domain=domain,
+                    username=cred.username,
+                    password=cred.password,
+                    techniques=["find_delegation"],
+                )
+
+                if task_id:
+                    processed_creds.add(cred_key)
+                    logger.info(
+                        f"Auto-delegation task {task_id} dispatched for {cred.domain}\\{cred.username}"
+                    )
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto delegation enumeration error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_unknown_host_enumeration(
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 120.0,
+    max_hosts_per_cycle: int = 5,
+) -> None:
+    """
+    Background task that re-scans hosts with incomplete service information.
+
+    When hosts have empty services or unknown OS, this task dispatches
+    nmap_scan and smb_enumeration to fill in the gaps.
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between checks (less critical, so longer interval)
+        max_hosts_per_cycle: Maximum hosts to re-scan per cycle
+    """
+    # Track hosts we've already re-scanned
+    rescanned_hosts: set[str] = set()
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # Skip if operation is complete
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping unknown host enumeration")
+                break
+
+            # Find hosts with incomplete info
+            incomplete_hosts = [
+                host
+                for host in state.all_hosts
+                if host.ip
+                and host.ip not in rescanned_hosts
+                and (
+                    not host.services  # No services discovered
+                    or (host.os or "").lower() in ("", "unknown")  # No OS info
+                )
+            ]
+
+            if not incomplete_hosts:
+                logger.debug("Auto-scan: no hosts with incomplete info")
+                continue
+
+            # Limit to max_hosts_per_cycle
+            hosts_to_scan = incomplete_hosts[:max_hosts_per_cycle]
+            target_ips = [h.ip for h in hosts_to_scan]
+
+            # Get domain context
+            domain = state.target.domain if state.target else ""
+            if not domain:
+                # Try to infer from credentials or hosts
+                for cred in state.all_credentials:
+                    if cred.domain:
+                        domain = cred.domain
+                        break
+
+            logger.info(
+                f"🔍 Auto-scan: Re-scanning {len(target_ips)} hosts with incomplete info: {target_ips}"
+            )
+
+            # Dispatch recon for incomplete hosts
+            task_id = await dispatcher.request_recon(
+                source_agent="orchestrator",
+                domain=domain,
+                target_ips=target_ips,
+                reason="incomplete_host_rescan",
+                techniques=["nmap_scan", "smb_enumeration"],
+            )
+
+            if task_id:
+                # Mark these hosts as rescanned
+                for ip in target_ips:
+                    rescanned_hosts.add(ip)
+                logger.info(
+                    f"Auto-scan task {task_id} dispatched for {len(target_ips)} incomplete hosts"
+                )
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto unknown host enumeration error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
 
 

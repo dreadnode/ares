@@ -142,11 +142,11 @@ def test_extract_users_filters_motd_garbage():
     outputs = [
         (
             "netexec smb --users",
-            "SMB 192.168.56.1 445 DC [*] CONTOSO\\admin (SidTypeUser)\n"
+            "SMB 192.168.58.1 445 DC [*] CONTOSO\\admin (SidTypeUser)\n"
             "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
             "┃ This is a minimal installation of Kali Linux. ┃\n"
             "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n"
-            "SMB 192.168.56.1 445 DC CONTOSO\\john.doe (SidTypeUser)\n",
+            "SMB 192.168.58.1 445 DC CONTOSO\\john.doe (SidTypeUser)\n",
         ),
     ]
 
@@ -199,9 +199,9 @@ def test_extract_users_filters_path_like_strings():
     outputs = [
         (
             "netexec smb --rid-brute",
-            "SMB 192.168.56.1 445 DC CONTOSO\\bob_smith (SidTypeUser)\n"
+            "SMB 192.168.58.1 445 DC CONTOSO\\bob_smith (SidTypeUser)\n"
             "/tmp/users.txt\n"
-            "SMB 192.168.56.1 445 DC CONTOSO\\alice_jones (SidTypeUser)\n",
+            "SMB 192.168.58.1 445 DC CONTOSO\\alice_jones (SidTypeUser)\n",
         ),
     ]
 
@@ -225,7 +225,7 @@ def test_extract_users_handles_mixed_garbage_and_valid():
     outputs = [
         (
             "netexec smb --users",
-            "SMB 192.168.56.1 445 DC [*] CONTOSO\\admin (SidTypeUser)\n",
+            "SMB 192.168.58.1 445 DC [*] CONTOSO\\admin (SidTypeUser)\n",
         ),
         (
             "kali motd pollution",

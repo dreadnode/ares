@@ -22,7 +22,7 @@ async def test_run_multi_agent_operation_requires_model(monkeypatch):
         await run_multi_agent_operation(
             operation_id="op-1",
             target_domain="contoso.local",
-            target_ips=["192.168.56.1"],
+            target_ips=["192.168.58.1"],
         )
 
 
@@ -100,7 +100,7 @@ async def test_run_multi_agent_operation_skips_wait_when_completed(monkeypatch):
     await run_multi_agent_operation(
         operation_id="op-2",
         target_domain="contoso.local",
-        target_ips=["192.168.56.2"],
+        target_ips=["192.168.58.2"],
         model="test-model",
     )
 
@@ -113,7 +113,7 @@ def test_build_redteam_report_state_uses_exploitation_status_counts():
 
     state = SharedRedTeamState(
         operation_id="op-3",
-        target=Target(ip="192.168.56.3", domain="contoso.local"),
+        target=Target(ip="192.168.58.3", domain="contoso.local"),
     )
     vuln = VulnerabilityInfo(
         vuln_id="ADCS_ESC1_dc01",
@@ -145,14 +145,14 @@ class TestAutoBloodHound:
         # Setup mock dispatcher
         state = SharedRedTeamState(
             operation_id="op-bloodhound",
-            target=Target(ip="192.168.56.10", domain="test.local"),
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
         )
         # Add a credential
         state.all_credentials.append(
             Credential(
                 username="testuser",
                 password="TestPass123",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
                 source="test",
             )
         )
@@ -186,7 +186,7 @@ class TestAutoBloodHound:
 
         state = SharedRedTeamState(
             operation_id="op-no-creds",
-            target=Target(ip="192.168.56.11", domain="test.local"),
+            target=Target(ip="192.168.58.11", domain="contoso.local"),
         )
         # No credentials
 
@@ -214,14 +214,14 @@ class TestAutoBloodHound:
 
         state = SharedRedTeamState(
             operation_id="op-complete",
-            target=Target(ip="192.168.56.12", domain="test.local"),
+            target=Target(ip="192.168.58.12", domain="contoso.local"),
         )
         state.completed = True
         state.all_credentials.append(
             Credential(
                 username="user",
                 password="pass",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
                 source="test",
             )  # pragma: allowlist secret
         )
@@ -247,25 +247,25 @@ class TestAutoCoercion:
 
         state = SharedRedTeamState(
             operation_id="op-esc8",
-            target=Target(ip="192.168.56.13", domain="test.local"),
+            target=Target(ip="192.168.58.13", domain="contoso.local"),
         )
         # Add a credential to enable coercion
         state.all_credentials.append(
             Credential(
                 username="user",
                 password="pass",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
                 source="test",
             )  # pragma: allowlist secret
         )
         # Add DC host
-        dc_host = Host(ip="192.168.56.14", hostname="DC01", roles=["DC"])
+        dc_host = Host(ip="192.168.58.14", hostname="DC01", roles=["DC"])
         state.all_hosts.append(dc_host)
 
         dispatcher = SimpleNamespace(shared_state=state)
         dispatcher.request_coercion = AsyncMock(return_value="task-456")
         # Mock find_adcs_servers to return an ADCS server
-        dispatcher.find_adcs_servers = MagicMock(return_value=[("192.168.56.15", "ADCS01")])
+        dispatcher.find_adcs_servers = MagicMock(return_value=[("192.168.58.15", "ADCS01")])
 
         task = asyncio.create_task(_auto_coercion(dispatcher, check_interval=0.1))
 
@@ -283,7 +283,7 @@ class TestAutoCoercion:
         first_call_kwargs = dispatcher.request_coercion.call_args_list[0].kwargs
         payload = first_call_kwargs.get("payload_override", {})
         assert payload.get("attack_type") == "esc8"
-        assert "192.168.56.15" in payload.get("adcs_server", "")
+        assert "192.168.58.15" in payload.get("adcs_server", "")
 
     @pytest.mark.asyncio
     async def test_auto_coercion_ldaps_relay_to_dc(self):
@@ -293,18 +293,18 @@ class TestAutoCoercion:
 
         state = SharedRedTeamState(
             operation_id="op-ldaps",
-            target=Target(ip="192.168.56.16", domain="test.local"),
+            target=Target(ip="192.168.58.16", domain="contoso.local"),
         )
         state.all_credentials.append(
             Credential(
                 username="user",
                 password="pass",  # pragma: allowlist secret
-                domain="test.local",
+                domain="contoso.local",
                 source="test",
             )  # pragma: allowlist secret
         )
         # Add DC
-        dc_host = Host(ip="192.168.56.17", hostname="DC02", roles=["Domain Controller"])
+        dc_host = Host(ip="192.168.58.17", hostname="DC02", roles=["Domain Controller"])
         state.all_hosts.append(dc_host)
 
         dispatcher = SimpleNamespace(shared_state=state)
@@ -336,10 +336,10 @@ class TestAutoCoercion:
 
         state = SharedRedTeamState(
             operation_id="op-wait",
-            target=Target(ip="192.168.56.18", domain="test.local"),
+            target=Target(ip="192.168.58.18", domain="contoso.local"),
         )
         # No credentials yet
-        dc_host = Host(ip="192.168.56.19", hostname="DC03", roles=["DC"])
+        dc_host = Host(ip="192.168.58.19", hostname="DC03", roles=["DC"])
         state.all_hosts.append(dc_host)
 
         dispatcher = SimpleNamespace(shared_state=state)
@@ -425,3 +425,411 @@ class TestWaitForCrackTasks:
 
         # Should return immediately
         await _wait_for_crack_tasks(dispatcher, timeout=5.0)
+
+
+class TestAutoDelegationEnumeration:
+    """Tests for _auto_delegation_enumeration background task."""
+
+    @pytest.mark.asyncio
+    async def test_auto_delegation_dispatches_on_credentials(self):
+        """_auto_delegation_enumeration should dispatch find_delegation when credentials discovered."""
+        from ares.core.models import Credential, Target
+        from ares.core.orchestrator import _auto_delegation_enumeration
+
+        dispatcher = SimpleNamespace()
+        dispatcher.shared_state = SharedRedTeamState(operation_id="op-test-delegation-1")
+        dispatcher.shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # Add a credential with password
+        dispatcher.shared_state.all_credentials.append(
+            Credential(
+                username="testuser",
+                password="P@ssw0rd!",  # pragma: allowlist secret
+                domain="contoso.local",
+                source="kerberoast",
+            )
+        )
+
+        # Mock request_privesc_enumeration
+        dispatcher.request_privesc_enumeration = AsyncMock(return_value="task-delegation-1")
+
+        # Run one iteration with short interval
+        task = asyncio.create_task(_auto_delegation_enumeration(dispatcher, check_interval=0.01))
+
+        # Wait briefly for task to process
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should have dispatched delegation enumeration
+        dispatcher.request_privesc_enumeration.assert_awaited_once()
+        call_kwargs = dispatcher.request_privesc_enumeration.call_args.kwargs
+        assert call_kwargs["domain"] == "contoso.local"
+        assert call_kwargs["username"] == "testuser"
+        assert call_kwargs["password"] == "P@ssw0rd!"  # pragma: allowlist secret
+        assert call_kwargs["techniques"] == ["find_delegation"]
+
+    @pytest.mark.asyncio
+    async def test_auto_delegation_waits_for_credentials(self):
+        """_auto_delegation_enumeration should wait until credentials exist."""
+        from ares.core.orchestrator import _auto_delegation_enumeration
+
+        dispatcher = SimpleNamespace()
+        dispatcher.shared_state = SharedRedTeamState(operation_id="op-test-delegation-2")
+        dispatcher.request_privesc_enumeration = AsyncMock()
+
+        # Run one iteration with no credentials
+        task = asyncio.create_task(_auto_delegation_enumeration(dispatcher, check_interval=0.01))
+
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should not have dispatched anything
+        dispatcher.request_privesc_enumeration.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_auto_delegation_processes_credential_only_once(self):
+        """_auto_delegation_enumeration should not re-process same credential."""
+        from ares.core.models import Credential, Target
+        from ares.core.orchestrator import _auto_delegation_enumeration
+
+        dispatcher = SimpleNamespace()
+        dispatcher.shared_state = SharedRedTeamState(operation_id="op-test-delegation-3")
+        dispatcher.shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # Add a credential
+        dispatcher.shared_state.all_credentials.append(
+            Credential(
+                username="testuser",
+                password="P@ssw0rd!",  # pragma: allowlist secret
+                domain="contoso.local",
+                source="kerberoast",
+            )
+        )
+
+        dispatcher.request_privesc_enumeration = AsyncMock(return_value="task-delegation-1")
+
+        # Run multiple iterations
+        task = asyncio.create_task(_auto_delegation_enumeration(dispatcher, check_interval=0.01))
+
+        await asyncio.sleep(0.1)  # Let multiple iterations run
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should only have dispatched once (not on every iteration)
+        assert dispatcher.request_privesc_enumeration.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_auto_delegation_stops_when_complete(self):
+        """_auto_delegation_enumeration should stop when operation completes."""
+        from ares.core.orchestrator import _auto_delegation_enumeration
+
+        dispatcher = SimpleNamespace()
+        dispatcher.shared_state = SharedRedTeamState(operation_id="op-test-delegation-4")
+        dispatcher.shared_state.completed = True  # Mark as complete
+
+        # Should exit immediately
+        await _auto_delegation_enumeration(dispatcher, check_interval=0.01)
+
+        # No assertions needed - test is that it doesn't hang
+
+
+class TestAutoUnknownHostEnumeration:
+    """Tests for _auto_unknown_host_enumeration background task."""
+
+    @pytest.mark.asyncio
+    async def test_auto_unknown_host_rescans_incomplete_hosts(self):
+        """_auto_unknown_host_enumeration should re-scan hosts with missing service info."""
+        from ares.core.models import Host, Target
+        from ares.core.orchestrator import _auto_unknown_host_enumeration
+
+        dispatcher = SimpleNamespace()
+        dispatcher.shared_state = SharedRedTeamState(operation_id="op-test-unknown-1")
+        dispatcher.shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # Add host with no services (incomplete)
+        dispatcher.shared_state.all_hosts.append(
+            Host(ip="192.168.58.50", hostname="unknown01", services=[])
+        )
+
+        dispatcher.request_recon = AsyncMock(return_value="task-recon-1")
+
+        # Run one iteration
+        task = asyncio.create_task(
+            _auto_unknown_host_enumeration(dispatcher, check_interval=0.01, max_hosts_per_cycle=5)
+        )
+
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should have dispatched recon
+        dispatcher.request_recon.assert_awaited_once()
+        call_kwargs = dispatcher.request_recon.call_args.kwargs
+        assert "192.168.58.50" in call_kwargs["target_ips"]
+        assert call_kwargs["reason"] == "incomplete_host_rescan"
+        assert "nmap_scan" in call_kwargs["techniques"]
+        assert "smb_enumeration" in call_kwargs["techniques"]
+
+    @pytest.mark.asyncio
+    async def test_auto_unknown_host_rescans_unknown_os(self):
+        """_auto_unknown_host_enumeration should re-scan hosts with unknown OS."""
+        from ares.core.models import Host, Target
+        from ares.core.orchestrator import _auto_unknown_host_enumeration
+
+        dispatcher = SimpleNamespace()
+        dispatcher.shared_state = SharedRedTeamState(operation_id="op-test-unknown-2")
+        dispatcher.shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # Add host with unknown OS
+        dispatcher.shared_state.all_hosts.append(
+            Host(
+                ip="192.168.58.60",
+                hostname="unknown02",
+                services=["445/tcp smb"],
+                os="unknown",  # Unknown OS
+            )
+        )
+
+        dispatcher.request_recon = AsyncMock(return_value="task-recon-2")
+
+        task = asyncio.create_task(
+            _auto_unknown_host_enumeration(dispatcher, check_interval=0.01, max_hosts_per_cycle=5)
+        )
+
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should have dispatched recon for unknown OS
+        dispatcher.request_recon.assert_awaited_once()
+        call_kwargs = dispatcher.request_recon.call_args.kwargs
+        assert "192.168.58.60" in call_kwargs["target_ips"]
+
+    @pytest.mark.asyncio
+    async def test_auto_unknown_host_limits_per_cycle(self):
+        """_auto_unknown_host_enumeration should limit hosts scanned per cycle."""
+        from ares.core.models import Host, Target
+        from ares.core.orchestrator import _auto_unknown_host_enumeration
+
+        dispatcher = SimpleNamespace()
+        dispatcher.shared_state = SharedRedTeamState(operation_id="op-test-unknown-3")
+        dispatcher.shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # Add 10 incomplete hosts
+        for i in range(10):
+            dispatcher.shared_state.all_hosts.append(
+                Host(ip=f"192.168.58.{100 + i}", hostname=f"host{i}", services=[])
+            )
+
+        dispatcher.request_recon = AsyncMock(return_value="task-recon-3")
+
+        task = asyncio.create_task(
+            _auto_unknown_host_enumeration(
+                dispatcher,
+                check_interval=0.01,
+                max_hosts_per_cycle=3,  # Limit to 3
+            )
+        )
+
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should only scan 3 hosts per cycle (first call should have 3 hosts)
+        assert dispatcher.request_recon.await_count >= 1
+        # Check first call had exactly 3 hosts
+        first_call_kwargs = dispatcher.request_recon.call_args_list[0].kwargs
+        assert len(first_call_kwargs["target_ips"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_auto_unknown_host_does_not_rescan_twice(self):
+        """_auto_unknown_host_enumeration should not re-scan same host multiple times."""
+        from ares.core.models import Host, Target
+        from ares.core.orchestrator import _auto_unknown_host_enumeration
+
+        dispatcher = SimpleNamespace()
+        dispatcher.shared_state = SharedRedTeamState(operation_id="op-test-unknown-4")
+        dispatcher.shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # Add incomplete host
+        dispatcher.shared_state.all_hosts.append(
+            Host(ip="192.168.58.70", hostname="host01", services=[])
+        )
+
+        dispatcher.request_recon = AsyncMock(return_value="task-recon-4")
+
+        # Run multiple iterations
+        task = asyncio.create_task(
+            _auto_unknown_host_enumeration(dispatcher, check_interval=0.01, max_hosts_per_cycle=5)
+        )
+
+        await asyncio.sleep(0.1)
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should only scan once (not on every iteration)
+        assert dispatcher.request_recon.await_count == 1
+
+
+class TestHashCrackingPriority:
+    """Tests for priority-based hash cracking."""
+
+    @pytest.mark.asyncio
+    async def test_kerberoast_hash_gets_high_priority(self):
+        """Kerberoast hashes should get priority 2 (high)."""
+        from ares.core.dispatcher import RedTeamDispatcher
+        from ares.core.models import Hash, Host, Target
+        from ares.core.orchestrator import _auto_credential_access
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-priority-1")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # Add at least 1 host (required by _auto_credential_access)
+        dispatcher._shared_state.all_hosts.append(
+            Host(ip="192.168.58.10", hostname="dc01", roles=["DC"])
+        )
+
+        # Add Kerberoast hash
+        dispatcher._shared_state.all_hashes.append(
+            Hash(
+                username="svc_sql",
+                hash_value="$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$...",
+                hash_type="Kerberoast",
+                domain="contoso.local",
+            )
+        )
+
+        dispatcher.request_crack = AsyncMock(return_value="task-crack-1")
+
+        # Run one iteration
+        task = asyncio.create_task(_auto_credential_access(dispatcher, check_interval=0.01))
+
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should have dispatched crack with priority=2
+        dispatcher.request_crack.assert_awaited_once()
+        call_kwargs = dispatcher.request_crack.call_args.kwargs
+        assert call_kwargs["priority"] == 2
+
+    @pytest.mark.asyncio
+    async def test_asrep_hash_gets_medium_priority(self):
+        """AS-REP hashes should get priority 3 (medium-high)."""
+        from ares.core.dispatcher import RedTeamDispatcher
+        from ares.core.models import Hash, Host, Target
+        from ares.core.orchestrator import _auto_credential_access
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-priority-2")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # Add at least 1 host
+        dispatcher._shared_state.all_hosts.append(
+            Host(ip="192.168.58.10", hostname="dc01", roles=["DC"])
+        )
+
+        # Add AS-REP hash
+        dispatcher._shared_state.all_hashes.append(
+            Hash(
+                username="user_no_preauth",
+                hash_value="$krb5asrep$23$user_no_preauth@CONTOSO.LOCAL:...",
+                hash_type="ASREP",
+                domain="contoso.local",
+            )
+        )
+
+        dispatcher.request_crack = AsyncMock(return_value="task-crack-2")
+
+        task = asyncio.create_task(_auto_credential_access(dispatcher, check_interval=0.01))
+
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should have dispatched crack with priority=3
+        dispatcher.request_crack.assert_awaited_once()
+        call_kwargs = dispatcher.request_crack.call_args.kwargs
+        assert call_kwargs["priority"] == 3
+
+    @pytest.mark.asyncio
+    async def test_normal_hash_gets_default_priority(self):
+        """Normal hashes (NTLM, etc.) should get default priority 5."""
+        from ares.core.dispatcher import RedTeamDispatcher
+        from ares.core.models import Hash, Host, Target
+        from ares.core.orchestrator import _auto_credential_access
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-priority-3")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # Add at least 1 host
+        dispatcher._shared_state.all_hosts.append(
+            Host(ip="192.168.58.10", hostname="dc01", roles=["DC"])
+        )
+
+        # Add normal NTLM hash
+        dispatcher._shared_state.all_hashes.append(
+            Hash(
+                username="testuser",
+                hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                hash_type="NTLM",
+                domain="contoso.local",
+            )
+        )
+
+        dispatcher.request_crack = AsyncMock(return_value="task-crack-3")
+
+        task = asyncio.create_task(_auto_credential_access(dispatcher, check_interval=0.01))
+
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should have dispatched crack with default priority=5
+        dispatcher.request_crack.assert_awaited_once()
+        call_kwargs = dispatcher.request_crack.call_args.kwargs
+        assert call_kwargs["priority"] == 5

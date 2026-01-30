@@ -460,13 +460,16 @@ async def loot(
             print(f"  - {domain}")
         print()
 
-        # Hosts
-        print(f"Hosts ({len(state.all_hosts)}):")
+        # Hosts (with DC indicator from is_dc field)
+        dcs = [h for h in state.all_hosts if h.is_dc]
+        print(f"Hosts ({len(state.all_hosts)}, {len(dcs)} DCs):")
         for host in state.all_hosts:
             parts = [p for p in [host.hostname, host.ip] if p]
             line = " / ".join(parts) if parts else "(unknown)"
             if host.os:
                 line = f"{line} [{host.os}]"
+            if host.is_dc:
+                line = f"{line} [DC]"
             print(f"  - {line}")
         print()
 

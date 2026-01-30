@@ -108,7 +108,7 @@ class OrchestratorTools(Toolset):
                 - "share_enumeration": Enumerate network shares
                 - "domain_info": Gather domain controller and trust information
                 - "bloodhound": Run BloodHound collection and analysis (requires creds)
-            targets: Comma-separated target IPs, hostnames, or CIDR ranges (e.g., "10.0.0.0/24,10.0.1.5")
+            targets: Comma-separated target IPs, hostnames, or CIDR ranges (e.g., "192.0.2.0/24,192.0.2.5")
             domain: Target domain (e.g., "corp.local")
             username: Username for authenticated enumeration (optional)
             password: Password for authenticated enumeration (optional)
@@ -124,21 +124,21 @@ class OrchestratorTools(Toolset):
             # Initial network scan
             >>> dispatch_recon(
             ...     task_type="network_scan",
-            ...     targets="10.0.0.0/24",
+            ...     targets="192.0.2.0/24",
             ...     details='{"ports": "top-1000"}'
             ... )
 
             # User enumeration (unauthenticated)
             >>> dispatch_recon(
             ...     task_type="user_enumeration",
-            ...     targets="10.0.0.1",
+            ...     targets="192.0.2.1",
             ...     domain="corp.local"
             ... )
 
             # BloodHound with credentials
             >>> dispatch_recon(
             ...     task_type="bloodhound",
-            ...     targets="10.0.0.1",
+            ...     targets="192.0.2.1",
             ...     domain="corp.local",
             ...     username="user1",
             ...     password="P@ssw0rd"  # pragma: allowlist secret
@@ -228,7 +228,7 @@ class OrchestratorTools(Toolset):
                 - "asrep_roast": Find accounts without pre-auth required
                 - "lsassy": Dump LSASS memory (requires admin access)
                 - "share_spider": Search accessible shares for credentials
-            targets: Comma-separated target IPs or hostnames (e.g., "10.0.0.1,10.0.0.2")
+            targets: Comma-separated target IPs or hostnames (e.g., "192.0.2.1,192.0.2.2")
             domain: Target domain (e.g., "corp.local")
             username: Username for authenticated actions (optional)
             password: Password for authenticated actions (optional)
@@ -244,7 +244,7 @@ class OrchestratorTools(Toolset):
             # Low-hanging fruit after user enumeration
             >>> dispatch_credential_access(
             ...     task_type="low_hanging_fruit",
-            ...     targets="10.0.0.1",
+            ...     targets="192.0.2.1",
             ...     domain="corp.local",
             ...     details='{"users_file": "/tmp/users.txt"}'
             ... )
@@ -252,7 +252,7 @@ class OrchestratorTools(Toolset):
             # Secretsdump with credentials
             >>> dispatch_credential_access(
             ...     task_type="secretsdump",
-            ...     targets="10.0.0.1,10.0.0.2",
+            ...     targets="192.0.2.1,192.0.2.2",
             ...     domain="corp.local",
             ...     username="admin",
             ...     password="P@ssw0rd"  # pragma: allowlist secret

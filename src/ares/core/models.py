@@ -425,6 +425,33 @@ class Host(Model):
     os: str = ""
     roles: list[str] = wrapped("roles", element(tag="role", default=[]))
     services: list[str] = wrapped("services", element(tag="service", default=[]))
+    is_dc: bool = False
+
+    def detect_dc(self) -> bool:
+        """Detect if this host is a domain controller based on services/hostname/roles.
+
+        Returns True if host appears to be a DC based on:
+        - "dc" in hostname
+        - "domain controller" in roles
+        - Kerberos (88/tcp) or LDAP (389/tcp) services
+        """
+        hostname_lower = (self.hostname or "").lower()
+        roles_lower = " ".join(self.roles).lower() if self.roles else ""
+        if "dc" in hostname_lower or "domain controller" in roles_lower:
+            return True
+        dc_port_prefixes = ("88/tcp", "389/tcp")
+        dc_service_names = ("kerberos", "ldap")
+        for svc in self.services:
+            svc_lower = svc.lower()
+            if any(svc_lower.startswith(port) for port in dc_port_prefixes):
+                return True
+            if any(name in svc_lower for name in dc_service_names):
+                return True
+        return False
+
+    def update_dc_status(self) -> None:
+        """Update is_dc flag based on current services/hostname/roles."""
+        self.is_dc = self.detect_dc()
 
 
 class User(Model):
@@ -896,14 +923,69 @@ class SharedRedTeamState:
         return True
 
     def add_domain(self, domain: str) -> bool:
-        """Add domain if not duplicate. Returns True if added."""
+        """Add domain if not duplicate. Returns True if added.
+
+        When a new FQDN domain is added, retroactively normalizes any existing
+        credentials/users/hashes that have a matching NetBIOS domain name.
+        """
         normalized = (domain or "").strip().lower()
         if not normalized:
             return False
         if any(existing.lower() == normalized for existing in self.all_domains):
             return False
         self.all_domains.append(normalized)
+
+        # If this is an FQDN (has a dot), retroactively normalize any
+        # credentials/users/hashes with matching NetBIOS domain
+        if "." in normalized:
+            self._retroactive_domain_normalize(normalized)
+
         return True
+
+    def _retroactive_domain_normalize(self, fqdn: str) -> None:
+        """Normalize existing credentials/users/hashes when a new FQDN is discovered.
+
+        For example, if fqdn="north.sevenkingdoms.local", this will update any
+        credentials with domain="north" to use the FQDN instead.
+        """
+        # Extract NetBIOS portion (e.g., "north" from "north.sevenkingdoms.local")
+        netbios = fqdn.split(".")[0]
+        if not netbios:
+            return
+
+        updated_creds = 0
+        updated_users = 0
+        updated_hashes = 0
+
+        # Update credentials with matching NetBIOS domain
+        for cred in self.all_credentials:
+            cred_domain = (cred.domain or "").strip().lower()
+            if cred_domain == netbios:
+                cred.domain = fqdn
+                updated_creds += 1
+
+        # Update users with matching NetBIOS domain
+        for user in self.all_users:
+            user_domain = (user.domain or "").strip().lower()
+            if user_domain == netbios:
+                user.domain = fqdn
+                updated_users += 1
+
+        # Update hashes with matching NetBIOS domain
+        for hash_obj in self.all_hashes:
+            hash_domain = (hash_obj.domain or "").strip().lower()
+            if hash_domain == netbios:
+                hash_obj.domain = fqdn
+                updated_hashes += 1
+
+        if updated_creds or updated_users or updated_hashes:
+            logger.info(
+                f"Retroactive domain normalize '{netbios}' -> '{fqdn}': "
+                f"{updated_creds} creds, {updated_users} users, {updated_hashes} hashes"
+            )
+
+        # Now deduplicate credentials that may now be duplicates after normalization
+        self.all_credentials = self._dedupe_credentials(self.all_credentials)
 
     def add_hash(self, hash_obj: Hash, source_agent: str) -> bool:
         """Add hash if not duplicate. Returns True if added."""
@@ -1017,10 +1099,18 @@ class SharedRedTeamState:
                     existing.roles = list({*existing.roles, *host.roles})
                 if host.services:
                     existing.services = list({*existing.services, *host.services})
-                logger.debug(f"Host merged: {host.ip} (existing, updated details)")
+                # Update DC status after merge (new services/hostname may reveal it's a DC)
+                existing.update_dc_status()
+                logger.debug(
+                    f"Host merged: {host.ip} (existing, updated details, is_dc={existing.is_dc})"
+                )
                 return False
+        # Set DC status before adding
+        host.update_dc_status()
         self.all_hosts.append(host)
-        logger.debug(f"Host added: {host.ip} ({host.hostname or 'no hostname'})")
+        logger.debug(
+            f"Host added: {host.ip} ({host.hostname or 'no hostname'}, is_dc={host.is_dc})"
+        )
 
         # Real-time checkpoint to Redis (don't call publish_host - that would re-add)
         if self._dispatcher:

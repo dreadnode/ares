@@ -921,10 +921,10 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
 
         state = SharedRedTeamState(
             operation_id="op-enforce",
-            target=Target(ip="192.168.56.100", domain="test.local"),
+            target=Target(ip="192.168.58.100", domain="contoso.local"),
         )
         # Add a DC host
-        dc = Host(ip="192.168.56.101", hostname="DC01", roles=["DC"])
+        dc = Host(ip="192.168.58.101", hostname="DC01", roles=["DC"])
         state.all_hosts.append(dc)
 
         task = TaskInfo(
@@ -932,7 +932,7 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
             task_type="credential_access",
             source_agent="orchestrator",
             payload={
-                "domain": "test.local",
+                "domain": "contoso.local",
                 "username": "testuser",
                 "password": "TestPass123",  # pragma: allowlist secret
                 "techniques": ["sysvol_script_search", "gpp_password_finder"],
@@ -954,9 +954,9 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
 
         state = SharedRedTeamState(
             operation_id="op-nocred",
-            target=Target(ip="192.168.56.102", domain="test.local"),
+            target=Target(ip="192.168.58.102", domain="contoso.local"),
         )
-        dc = Host(ip="192.168.56.103", hostname="DC02", roles=["DC"])
+        dc = Host(ip="192.168.58.103", hostname="DC02", roles=["DC"])
         state.all_hosts.append(dc)
 
         task = TaskInfo(
@@ -964,7 +964,7 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
             task_type="credential_access",
             source_agent="orchestrator",
             payload={
-                "domain": "test.local",
+                "domain": "contoso.local",
                 "techniques": ["asrep_roast", "username_as_password"],
             },
         )
@@ -983,9 +983,9 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
 
         state = SharedRedTeamState(
             operation_id="op-complete",
-            target=Target(ip="192.168.56.104", domain="test.local"),
+            target=Target(ip="192.168.58.104", domain="contoso.local"),
         )
-        dc = Host(ip="192.168.56.105", hostname="DC03", roles=["DC"])
+        dc = Host(ip="192.168.58.105", hostname="DC03", roles=["DC"])
         state.all_hosts.append(dc)
 
         # Test with-creds techniques
@@ -1005,7 +1005,7 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
                 task_type="credential_access",
                 source_agent="orchestrator",
                 payload={
-                    "domain": "test.local",
+                    "domain": "contoso.local",
                     "username": "user",
                     "password": "pass",  # pragma: allowlist secret
                     "techniques": [technique],
@@ -1025,9 +1025,9 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
 
         state = SharedRedTeamState(
             operation_id="op-taskid",
-            target=Target(ip="192.168.56.106", domain="test.local"),
+            target=Target(ip="192.168.58.106", domain="contoso.local"),
         )
-        dc = Host(ip="192.168.56.107", hostname="DC04", roles=["DC"])
+        dc = Host(ip="192.168.58.107", hostname="DC04", roles=["DC"])
         state.all_hosts.append(dc)
 
         task = TaskInfo(
@@ -1035,7 +1035,7 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
             task_type="credential_access",
             source_agent="orchestrator",
             payload={
-                "domain": "test.local",
+                "domain": "contoso.local",
                 "username": "user",
                 "password": "pass",  # pragma: allowlist secret
                 "techniques": ["kerberoast"],
@@ -1054,9 +1054,9 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
 
         state = SharedRedTeamState(
             operation_id="op-fallback",
-            target=Target(ip="192.168.56.108", domain="test.local"),
+            target=Target(ip="192.168.58.108", domain="contoso.local"),
         )
-        dc = Host(ip="192.168.56.109", hostname="DC05", roles=["DC"])
+        dc = Host(ip="192.168.58.109", hostname="DC05", roles=["DC"])
         state.all_hosts.append(dc)
 
         task = TaskInfo(
@@ -1064,7 +1064,7 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
             task_type="credential_access",
             source_agent="orchestrator",
             payload={
-                "domain": "test.local",
+                "domain": "contoso.local",
                 "username": "user",
                 "password": "pass",  # pragma: allowlist secret
                 # No techniques specified
@@ -1084,9 +1084,9 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
 
         state = SharedRedTeamState(
             operation_id="op-hash",
-            target=Target(ip="192.168.56.110", domain="test.local"),
+            target=Target(ip="192.168.58.110", domain="contoso.local"),
         )
-        dc = Host(ip="192.168.56.111", hostname="DC06", roles=["DC"])
+        dc = Host(ip="192.168.58.111", hostname="DC06", roles=["DC"])
         state.all_hosts.append(dc)
 
         task = TaskInfo(
@@ -1094,7 +1094,7 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
             task_type="credential_access",
             source_agent="orchestrator",
             payload={
-                "domain": "test.local",
+                "domain": "contoso.local",
                 "username": "admin",
                 "hash_value": "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
                 "hash_type": "ntlm",
@@ -1108,6 +1108,92 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
         assert "MANDATORY TECHNIQUE EXECUTION" in prompt
         assert "secretsdump" in prompt
         assert "hashes=" in prompt  # Should use hash parameter
+
+    def test_generate_prompt_handles_privesc_enumeration(self):
+        """Test that privesc_enumeration task type generates correct prompt."""
+        from ares.core.models import Host, SharedRedTeamState, Target, TaskInfo
+        from ares.core.worker import generate_prompt_from_task
+
+        state = SharedRedTeamState(
+            operation_id="op-privesc-enum",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+        # Add DC to state
+        dc = Host(
+            ip="192.168.58.240",
+            hostname="dc01.contoso.local",
+            roles=["DC"],
+            services=["389/tcp ldap", "88/tcp kerberos"],
+        )
+        state.all_hosts.append(dc)
+
+        task = TaskInfo(
+            task_id="task-privesc-enum-001",
+            task_type="privesc_enumeration",
+            source_agent="orchestrator",
+            payload={
+                "domain": "contoso.local",
+                "dc_ip": "192.168.58.240",
+                "username": "testuser",
+                "password": "P@ssw0rd!",  # pragma: allowlist secret
+                "techniques": ["find_delegation"],
+            },
+        )
+
+        prompt = generate_prompt_from_task(task, state, "privesc")
+
+        # Verify prompt structure
+        assert "Run privilege escalation enumeration:" in prompt
+        assert "Domain: contoso.local" in prompt
+        assert "DC IP: 192.168.58.240" in prompt
+        assert "Username: testuser" in prompt
+        assert "Password: P@ssw0rd!" in prompt  # pragma: allowlist secret
+        assert "Task ID: task-privesc-enum-001" in prompt
+
+        # Verify technique instructions
+        assert "EXECUTE THESE ENUMERATION TECHNIQUES:" in prompt
+        assert "find_delegation" in prompt
+        assert "Find accounts with Kerberos delegation" in prompt
+
+        # Verify workflow instructions
+        assert "WORKFLOW:" in prompt
+        assert "Execute each technique in order" in prompt
+        assert "Delegation findings are HIGH VALUE" in prompt
+
+    def test_generate_prompt_handles_multiple_privesc_techniques(self):
+        """Test that privesc_enumeration supports multiple techniques."""
+        from ares.core.models import Host, SharedRedTeamState, Target, TaskInfo
+        from ares.core.worker import generate_prompt_from_task
+
+        state = SharedRedTeamState(
+            operation_id="op-privesc-multi",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+        dc = Host(
+            ip="192.168.58.240",
+            hostname="dc01.contoso.local",
+            roles=["DC"],
+        )
+        state.all_hosts.append(dc)
+
+        task = TaskInfo(
+            task_id="task-privesc-enum-002",
+            task_type="privesc_enumeration",
+            source_agent="orchestrator",
+            payload={
+                "domain": "contoso.local",
+                "dc_ip": "192.168.58.240",
+                "username": "admin",
+                "password": "AdminP@ss!",  # pragma: allowlist secret
+                "techniques": ["find_delegation", "find_trusts"],
+            },
+        )
+
+        prompt = generate_prompt_from_task(task, state, "privesc")
+
+        # Verify both techniques are included
+        assert "1. find_delegation" in prompt
+        assert "2. find_trusts" in prompt or "find_trusts(...)" in prompt
 
 
 if __name__ == "__main__":

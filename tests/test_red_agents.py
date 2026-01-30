@@ -28,7 +28,7 @@ async def test_create_multi_agent_ensemble_requires_model(monkeypatch):
     with pytest.raises(ValueError, match="No model specified"):
         await create_multi_agent_ensemble(
             operation_id="op-1",
-            target_ip="192.168.56.1",
+            target_ip="192.168.58.1",
             dispatcher=dispatcher,
             roles=[AgentRole.RECON],
         )
@@ -47,7 +47,7 @@ async def test_create_multi_agent_ensemble_uses_env_models(monkeypatch):
 
         await create_multi_agent_ensemble(
             operation_id="op-2",
-            target_ip="192.168.56.2",
+            target_ip="192.168.58.2",
             dispatcher=dispatcher,
             roles=[AgentRole.ORCHESTRATOR, AgentRole.CRACKER],
         )

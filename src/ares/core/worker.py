@@ -132,12 +132,7 @@ def format_state_context(  # noqa: PLR0912
             services_lower = " ".join(host.services).lower() if host.services else ""
             roles_lower = " ".join(host.roles).lower() if host.roles else ""
 
-            is_dc = (
-                "dc" in hostname_lower
-                or "domain controller" in roles_lower
-                or "88/tcp" in services_lower
-                or "389/tcp" in services_lower
-            )
+            # Use persisted is_dc field from Host model
             is_mssql = (
                 "mssql" in services_lower or "1433" in services_lower or "sql" in hostname_lower
             )
@@ -147,7 +142,7 @@ def format_state_context(  # noqa: PLR0912
                 or "certenroll" in services_lower
             )
 
-            if is_dc:
+            if host.is_dc:
                 dcs.append(host)
             elif is_mssql:
                 mssql_hosts.append(host)
@@ -1046,6 +1041,42 @@ def generate_prompt_from_task(  # noqa: PLR0912
         state_context = format_state_context(state, "coercion")
         return base_prompt + state_context
 
+    if task.task_type == "privesc_enumeration":
+        domain = payload.get("domain", "")
+        dc_ip = payload.get("dc_ip", "")
+        username = payload.get("username", "")
+        password = payload.get("password", "")
+        techniques = payload.get("techniques", [])
+
+        technique_instructions = []
+        for i, technique in enumerate(techniques, 1):
+            if technique == "find_delegation":
+                technique_instructions.append(
+                    f"{i}. find_delegation(domain='{domain}', username='{username}', "
+                    f"password='{password}', dc_ip='{dc_ip}') - Find accounts with Kerberos delegation"
+                )
+            else:
+                technique_instructions.append(f"{i}. {technique}(...)")
+
+        base_prompt = (
+            f"Run privilege escalation enumeration:\n"
+            f"Domain: {domain}\n"
+            f"DC IP: {dc_ip or 'N/A'}\n"
+            f"Username: {username}\n"
+            f"Password: {password}\n"
+            f"Task ID: {task.task_id}\n\n"
+            "**EXECUTE THESE ENUMERATION TECHNIQUES:**\n"
+            + "\n".join(technique_instructions)
+            + "\n\n"
+            "**WORKFLOW:**\n"
+            "1. Execute each technique in order\n"
+            "2. Report any delegation misconfigurations found\n"
+            "3. Mark task complete with findings\n\n"
+            "Delegation findings are HIGH VALUE for privilege escalation paths."
+        )
+        state_context = format_state_context(state, "privesc", current_target=dc_ip)
+        return base_prompt + state_context
+
     # "command" tasks are handled specially - executed directly, not via agent
     if task.task_type == "command":
         # Return None to signal direct execution
@@ -1687,6 +1718,7 @@ class RedisWorkerAgent:
         local_creds = list(self.shared_state.all_credentials)
         local_hashes = list(self.shared_state.all_hashes)
         local_users = list(self.shared_state.all_users)
+        local_weaknesses = list(self.shared_state.all_weaknesses)
 
         current = self.shared_state
         for attr in (
@@ -1728,6 +1760,9 @@ class RedisWorkerAgent:
             current.add_hash(hash_obj, self.agent_name)
         for user in local_users:
             current.add_user(user.username, user.domain)
+        for weakness in local_weaknesses:
+            if weakness not in current.all_weaknesses:
+                current.all_weaknesses.append(weakness)
 
         # Merge dynamic tracking attributes (set via object.__setattr__)
         # These track queried hosts and tested credentials to avoid duplicates

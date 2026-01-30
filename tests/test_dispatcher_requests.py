@@ -44,7 +44,7 @@ class TestReconRequestInMemory:
         task_id = await dispatcher.request_recon(
             source_agent="orchestrator",
             domain="contoso.local",
-            target_ips=["10.0.0.1", "10.0.0.2"],
+            target_ips=["192.168.58.1", "192.168.58.2"],
             username="testuser",
             password="testpass",  # pragma: allowlist secret  # pragma: allowlist secret
             reason="network_scan",
@@ -63,7 +63,7 @@ class TestReconRequestInMemory:
         assert msg.type.value == "recon_request"
         assert msg.task_id == task_id
         assert msg.domain == "contoso.local"
-        assert msg.target_ips == ["10.0.0.1", "10.0.0.2"]
+        assert msg.target_ips == ["192.168.58.1", "192.168.58.2"]
         assert msg.username == "testuser"
         assert msg.password == "testpass"  # pragma: allowlist secret
         assert msg.reason == "network_scan"
@@ -100,7 +100,7 @@ class TestReconRequestInMemory:
         task_id = await dispatcher.request_recon(
             source_agent="orchestrator",
             domain="contoso.local",
-            target_ips=["10.0.0.1"],
+            target_ips=["192.168.58.1"],
         )
 
         # Task should be in pending tasks
@@ -158,7 +158,7 @@ class TestCredentialAccessRequestInMemory:
         task_id = await dispatcher.request_credential_access(
             source_agent="orchestrator",
             domain="contoso.local",
-            target_ips=["10.0.0.5"],
+            target_ips=["192.168.58.5"],
             username="testuser",
             password="testpass",  # pragma: allowlist secret
             reason="secretsdump",
@@ -174,3 +174,154 @@ class TestCredentialAccessRequestInMemory:
         assert isinstance(msg, CredentialAccessRequest)
         assert msg.type.value == "credential_access_request"
         assert msg.task_id == task_id
+
+
+class TestPrivescEnumerationRequestInMemory:
+    """Tests for request_privesc_enumeration in-memory fallback."""
+
+    @pytest.mark.asyncio
+    async def test_request_privesc_enumeration_inmemory_queues_message(self, started_dispatcher):
+        """request_privesc_enumeration should queue an ExploitRequest message in-memory mode."""
+        from ares.core.messages import ExploitRequest
+        from ares.core.models import Host
+
+        dispatcher = started_dispatcher
+
+        # Register a privesc agent
+        agent_info = AgentInfo(
+            name="privesc-agent",
+            pod_name="privesc-0",
+            role=AgentRole.PRIVESC,
+            capabilities={"delegation_tools"},
+        )
+        await dispatcher.register(agent_info)
+
+        # Add a DC to state so _find_domain_controller_ip works
+        dispatcher.shared_state.all_hosts.append(
+            Host(
+                ip="192.168.58.240",
+                hostname="dc01.contoso.local",
+                services=["389/tcp ldap", "88/tcp kerberos"],
+            )
+        )
+
+        # Submit privesc enumeration request
+        task_id = await dispatcher.request_privesc_enumeration(
+            source_agent="orchestrator",
+            domain="contoso.local",
+            username="testuser",
+            password="testpass",  # pragma: allowlist secret
+            techniques=["find_delegation"],
+        )
+
+        assert task_id != ""
+        assert task_id.startswith("task-")
+
+        # Message should be in in-memory queue
+        messages = await dispatcher.get_messages("privesc-agent")
+        assert len(messages) == 1
+
+        msg = messages[0]
+        assert isinstance(msg, ExploitRequest)
+        assert msg.task_id == task_id
+        assert msg.vuln_type == "PRIVESC_ENUMERATION"
+        assert msg.params["domain"] == "contoso.local"
+        assert msg.params["username"] == "testuser"
+        assert msg.params["password"] == "testpass"  # pragma: allowlist secret
+        assert msg.params["techniques"] == ["find_delegation"]
+        assert msg.callback_agent == "orchestrator"
+
+    @pytest.mark.asyncio
+    async def test_request_privesc_enumeration_no_agent_returns_empty(self, started_dispatcher):
+        """request_privesc_enumeration should return empty string if no privesc agent registered."""
+        dispatcher = started_dispatcher
+
+        # Don't register any agent
+        task_id = await dispatcher.request_privesc_enumeration(
+            source_agent="orchestrator",
+            domain="contoso.local",
+            username="testuser",
+            password="testpass",  # pragma: allowlist secret
+        )
+
+        assert task_id == ""
+
+    @pytest.mark.asyncio
+    async def test_request_privesc_enumeration_creates_pending_task(self, started_dispatcher):
+        """request_privesc_enumeration should create a pending task entry."""
+        from ares.core.models import Host
+
+        dispatcher = started_dispatcher
+
+        # Register a privesc agent
+        agent_info = AgentInfo(
+            name="privesc-agent",
+            pod_name="privesc-0",
+            role=AgentRole.PRIVESC,
+            capabilities={"delegation_tools"},
+        )
+        await dispatcher.register(agent_info)
+
+        # Add a DC to state
+        dispatcher.shared_state.all_hosts.append(
+            Host(
+                ip="192.168.58.240",
+                hostname="dc01.contoso.local",
+                services=["389/tcp ldap"],
+            )
+        )
+
+        task_id = await dispatcher.request_privesc_enumeration(
+            source_agent="orchestrator",
+            domain="contoso.local",
+            username="admin",
+            password="P@ssw0rd!",  # pragma: allowlist secret
+            techniques=["find_delegation"],
+        )
+
+        # Task should be in pending tasks
+        assert task_id in dispatcher.shared_state.pending_tasks
+        task_info = dispatcher.shared_state.pending_tasks[task_id]
+        assert task_info.task_type == "privesc_enumeration"
+        assert task_info.assigned_agent == "privesc-agent"
+
+    @pytest.mark.asyncio
+    async def test_request_privesc_enumeration_with_multiple_techniques(self, started_dispatcher):
+        """request_privesc_enumeration should support multiple enumeration techniques."""
+        from ares.core.messages import ExploitRequest
+        from ares.core.models import Host
+
+        dispatcher = started_dispatcher
+
+        agent_info = AgentInfo(
+            name="privesc-agent",
+            pod_name="privesc-0",
+            role=AgentRole.PRIVESC,
+            capabilities={"delegation_tools"},
+        )
+        await dispatcher.register(agent_info)
+
+        dispatcher.shared_state.all_hosts.append(
+            Host(
+                ip="192.168.58.10",
+                hostname="dc01.contoso.local",
+                services=["389/tcp ldap"],
+            )
+        )
+
+        task_id = await dispatcher.request_privesc_enumeration(
+            source_agent="orchestrator",
+            domain="contoso.local",
+            username="admin",
+            password="P@ssw0rd!",  # pragma: allowlist secret
+            techniques=["find_delegation", "find_trusts"],
+        )
+
+        assert task_id
+
+        messages = await dispatcher.get_messages("privesc-agent")
+        assert len(messages) == 1
+
+        msg = messages[0]
+        assert isinstance(msg, ExploitRequest)
+        assert msg.params["techniques"] == ["find_delegation", "find_trusts"]

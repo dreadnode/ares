@@ -686,7 +686,7 @@ class RedTeamDispatcher:
                 )
                 continue
 
-            # Queue MSSQL vulnerability
+            # Queue MSSQL vulnerabilities (both linked server and impersonation)
             details: dict[str, Any] = {
                 "hostname": host.hostname,
                 "services": host.services,
@@ -695,16 +695,34 @@ class RedTeamDispatcher:
                 "Check for linked servers and impersonation.",
             }
 
+            # Queue mssql_linked_server vulnerability
             await self.queue_vulnerability(
                 vuln_type="mssql_linked_server",
                 target=host.ip,
                 details=details,
                 discovered_by="mssql_scanner",
             )
-            queued += 1
+
+            # Also queue mssql_impersonation vulnerability
+            # This checks for sa/dbo impersonation rights which can lead to privilege escalation
+            impersonation_details: dict[str, Any] = {
+                "hostname": host.hostname,
+                "services": host.services,
+                "available_credentials": sql_creds,
+                "note": f"Auto-detected MSSQL service with {len(sql_creds)} potential SQL credential(s). "
+                "Check for impersonation rights (EXECUTE AS) to sa, dbo, or other privileged logins.",
+            }
+            await self.queue_vulnerability(
+                vuln_type="mssql_impersonation",
+                target=host.ip,
+                details=impersonation_details,
+                discovered_by="mssql_scanner",
+            )
+
+            queued += 2  # Queued both linked_server and impersonation
             logger.warning(
-                f"Periodic scan: queued MSSQL vulnerability for {host.ip} ({host.hostname}) "
-                f"with {len(sql_creds)} SQL credentials"
+                f"Periodic scan: queued MSSQL vulnerabilities (linked_server + impersonation) for "
+                f"{host.ip} ({host.hostname}) with {len(sql_creds)} SQL credentials"
             )
 
         return queued
@@ -1617,6 +1635,100 @@ class RedTeamDispatcher:
         )
 
         logger.info(f"Exploit request {task_id} for {vuln_type} sent to {privesc_agent}")
+        return task_id
+
+    async def request_privesc_enumeration(
+        self,
+        source_agent: str,
+        domain: str,
+        username: str,
+        password: str,
+        techniques: list[str] | None = None,
+    ) -> str:
+        """
+        Request PRIVESC agent to run enumeration tasks (e.g., find_delegation).
+
+        This routes enumeration tasks that require PRIVESC tools (like DelegationTools)
+        to the correct agent, rather than RECON which doesn't have these tools.
+
+        Args:
+            source_agent: Agent making the request.
+            domain: Target domain.
+            username: Username for authenticated enumeration.
+            password: Password for authentication.
+            techniques: List of enumeration techniques (e.g., ["find_delegation"]).
+
+        Returns:
+            Task ID for tracking.
+        """
+        dc_ip = self._find_domain_controller_ip(domain)
+        payload = {
+            "domain": domain,
+            "dc_ip": dc_ip,
+            "username": username,
+            "password": password,
+            "techniques": techniques or [],
+        }
+
+        # Use Redis task queue if available (Kubernetes multi-pod mode)
+        if self._task_queue:
+            task_id = await self._task_queue.submit_task(
+                task_type="privesc_enumeration",
+                target_role="privesc",
+                payload=payload,
+                source_agent=source_agent,
+            )
+
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type="privesc_enumeration",
+                assigned_agent="privesc",
+                params=payload,
+            )
+            self.shared_state.pending_tasks[task_id] = task_info
+            self._redis_task_ids.add(task_id)
+
+            logger.info(
+                f"Privesc enumeration task {task_id} submitted to Redis queue "
+                f"for {domain}\\{username}, techniques={techniques}"
+            )
+            return task_id
+
+        # Fallback to in-memory queue (single-process mode)
+        task_id = generate_task_id()
+        privesc_agent = self._role_queues.get(AgentRole.PRIVESC)
+
+        if not privesc_agent:
+            logger.warning("No privesc agent registered, cannot route enumeration request")
+            return ""
+
+        task_info = TaskInfo(
+            task_id=task_id,
+            task_type="privesc_enumeration",
+            assigned_agent=privesc_agent,
+            params=payload,
+        )
+        self.shared_state.pending_tasks[task_id] = task_info
+
+        # Use ExploitRequest with special vuln_type for in-memory queue
+        await self._message_queues[privesc_agent].put(
+            ExploitRequest(
+                source_agent=source_agent,
+                task_id=task_id,
+                vuln_type="PRIVESC_ENUMERATION",
+                vuln_id=f"enum-{task_id}",
+                target=dc_ip or domain,
+                params={
+                    "domain": domain,
+                    "username": username,
+                    "password": password,
+                    "techniques": techniques or [],
+                },
+                callback_agent=source_agent,
+            )
+        )
+
+        logger.info(f"Privesc enumeration request {task_id} sent to {privesc_agent}")
         return task_id
 
     async def request_coercion(

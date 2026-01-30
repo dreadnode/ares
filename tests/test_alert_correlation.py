@@ -76,13 +76,13 @@ class TestAlertCluster:
         cluster = AlertCluster(cluster_id="cluster-0001")
 
         alert = {
-            "labels": {"instance": "192.168.56.100:9090"},
+            "labels": {"instance": "192.168.58.100:9090"},
             "fingerprint": "abc123",
         }
         cluster.add_alert(alert)
 
         # Should not add IP as hostname
-        assert "192.168.56.100" not in cluster.common_hosts
+        assert "192.168.58.100" not in cluster.common_hosts
 
     def test_add_alert_extracts_users_from_labels(self) -> None:
         """Test that add_alert extracts users from various label keys."""
@@ -133,15 +133,15 @@ class TestAlertCluster:
 
         alert = {
             "labels": {
-                "ip": "192.168.56.100",
-                "source_ip": "192.168.56.50",
+                "ip": "192.168.58.100",
+                "source_ip": "192.168.58.50",
             },
             "fingerprint": "abc123",
         }
         cluster.add_alert(alert)
 
-        assert "192.168.56.100" in cluster.common_ips
-        assert "192.168.56.50" in cluster.common_ips
+        assert "192.168.58.100" in cluster.common_ips
+        assert "192.168.58.50" in cluster.common_ips
 
     def test_add_alert_extracts_techniques_string(self) -> None:
         """Test that add_alert extracts MITRE techniques as string."""
@@ -249,9 +249,9 @@ class TestAlertCluster:
     def test_similarity_score_ip_match(self) -> None:
         """Test similarity score with matching IP."""
         cluster = AlertCluster(cluster_id="cluster-0001")
-        cluster.common_ips.add("192.168.56.100")
+        cluster.common_ips.add("192.168.58.100")
 
-        alert = {"labels": {"ip": "192.168.56.100"}}
+        alert = {"labels": {"ip": "192.168.58.100"}}
         score = cluster.similarity_score(alert)
 
         assert score >= 0.2  # IP match gives 0.2
@@ -299,13 +299,13 @@ class TestAlertCluster:
         cluster = AlertCluster(cluster_id="cluster-0001")
         cluster.common_hosts.add("server01")
         cluster.common_users.add("admin")
-        cluster.common_ips.add("192.168.56.100")
+        cluster.common_ips.add("192.168.58.100")
 
         alert = {
             "labels": {
                 "hostname": "server01",
                 "user": "admin",
-                "ip": "192.168.56.100",
+                "ip": "192.168.58.100",
             }
         }
         score = cluster.similarity_score(alert)
@@ -319,7 +319,7 @@ class TestAlertCluster:
         cluster = AlertCluster(cluster_id="cluster-0001")
         cluster.common_hosts.add("server01")
         cluster.common_users.add("admin")
-        cluster.common_ips.add("192.168.56.100")
+        cluster.common_ips.add("192.168.58.100")
         cluster.techniques.add("T1059.001")
         cluster.time_range = (
             datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc),
@@ -330,7 +330,7 @@ class TestAlertCluster:
             "labels": {
                 "hostname": "server01",
                 "user": "admin",
-                "ip": "192.168.56.100",
+                "ip": "192.168.58.100",
                 "mitre_technique": "T1059.001",
             },
             "startsAt": "2024-01-15T10:30:00Z",
@@ -365,7 +365,7 @@ class TestAlertCluster:
         cluster.alerts = [{"id": 1}, {"id": 2}]
         cluster.common_hosts = {"server01", "server02"}
         cluster.common_users = {"admin"}
-        cluster.common_ips = {"192.168.56.100"}
+        cluster.common_ips = {"192.168.58.100"}
         cluster.techniques = {"T1059.001"}
         cluster.time_range = (
             datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc),
@@ -489,14 +489,14 @@ class TestAlertCorrelator:
 
         # Alert with exactly 0.3 similarity (IP match = 0.2, below threshold)
         alert2 = {
-            "labels": {"ip": "192.168.56.100"},
+            "labels": {"ip": "192.168.58.100"},
             "fingerprint": "def456",
         }
         # This has different host, only IP would match (0.2 < 0.3 threshold)
         # So it should create a new cluster
 
         # But first, add an IP to make it matchable
-        correlator.clusters[0].common_ips.add("192.168.56.100")
+        correlator.clusters[0].common_ips.add("192.168.58.100")
 
         correlator.add_alert(alert2)
 
@@ -680,7 +680,7 @@ class TestAlertCorrelatorIntegration:
                 "labels": {
                     "hostname": "DC01",
                     "user": "admin",
-                    "source_ip": "192.168.56.100",
+                    "source_ip": "192.168.58.100",
                 },
                 "startsAt": "2024-01-15T10:10:00Z",
                 "fingerprint": "auth3",
@@ -736,7 +736,7 @@ class TestAlertCorrelatorIntegration:
                 "labels": {
                     "hostname": "WORKSTATION01",
                     "user": "danj",
-                    "source_ip": "192.168.56.10",
+                    "source_ip": "192.168.58.10",
                 },
                 "fingerprint": "lat1",
             },
@@ -744,7 +744,7 @@ class TestAlertCorrelatorIntegration:
                 "labels": {
                     "hostname": "SERVER01",
                     "user": "danj",
-                    "source_ip": "192.168.56.10",
+                    "source_ip": "192.168.58.10",
                 },
                 "fingerprint": "lat2",
             },
@@ -752,7 +752,7 @@ class TestAlertCorrelatorIntegration:
                 "labels": {
                     "hostname": "DC01",
                     "user": "danj",
-                    "source_ip": "192.168.56.10",
+                    "source_ip": "192.168.58.10",
                 },
                 "fingerprint": "lat3",
             },

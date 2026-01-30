@@ -50,7 +50,7 @@ def sample_state():
     """Create a sample SharedRedTeamState for testing."""
     return SharedRedTeamState(
         operation_id="test-op-001",
-        target=Target(ip="192.168.56.100", hostname="dc01"),
+        target=Target(ip="192.168.58.100", hostname="dc01"),
     )
 
 
@@ -59,7 +59,7 @@ def state_with_in_progress_tasks():
     """Create a state with in-progress tasks for recovery testing."""
     state = SharedRedTeamState(
         operation_id="test-op-002",
-        target=Target(ip="192.168.56.100", hostname="dc01"),
+        target=Target(ip="192.168.58.100", hostname="dc01"),
     )
 
     # Add some in-progress tasks
@@ -79,7 +79,7 @@ def state_with_in_progress_tasks():
         assigned_agent="lateral",
         status=TaskStatus.IN_PROGRESS,
         created_at=datetime.now(timezone.utc),
-        params={"target_host": "192.168.56.50"},
+        params={"target_host": "192.168.58.50"},
         retry_count=2,  # Already retried twice
         max_retries=3,
     )
@@ -120,7 +120,7 @@ def state_with_max_retries_exceeded():
     """Create a state with tasks that have exceeded max retries."""
     state = SharedRedTeamState(
         operation_id="test-op-003",
-        target=Target(ip="192.168.56.100", hostname="dc01"),
+        target=Target(ip="192.168.58.100", hostname="dc01"),
     )
 
     # Add a task that has already hit max retries
@@ -143,7 +143,7 @@ def state_with_retrying_tasks():
     """Create a state with tasks in RETRYING status."""
     state = SharedRedTeamState(
         operation_id="test-op-004",
-        target=Target(ip="192.168.56.100", hostname="dc01"),
+        target=Target(ip="192.168.58.100", hostname="dc01"),
     )
 
     state.pending_tasks["task_retry_1"] = TaskInfo(
@@ -177,7 +177,7 @@ def state_with_failed_tasks():
     """Create a state with permanently failed tasks."""
     state = SharedRedTeamState(
         operation_id="test-op-005",
-        target=Target(ip="192.168.56.100", hostname="dc01"),
+        target=Target(ip="192.168.58.100", hostname="dc01"),
     )
 
     state.pending_tasks["task_failed_1"] = TaskInfo(
@@ -211,7 +211,7 @@ def state_for_resume_prompt():
     """Create a comprehensive state for resume prompt testing."""
     state = SharedRedTeamState(
         operation_id="test-op-resume",
-        target=Target(ip="192.168.56.100", hostname="dc01"),
+        target=Target(ip="192.168.58.100", hostname="dc01"),
     )
 
     # Add some credentials and hosts
@@ -221,8 +221,8 @@ def state_for_resume_prompt():
         Credential(username="admin", password="pass", domain="CORP"),  # pragma: allowlist secret
     ]
     state.all_hosts = [
-        Host(ip="192.168.56.100", hostname="dc01"),
-        Host(ip="192.168.56.101", hostname="web01"),
+        Host(ip="192.168.58.100", hostname="dc01"),
+        Host(ip="192.168.58.101", hostname="web01"),
     ]
 
     # Add retrying task
