@@ -715,6 +715,47 @@ def generate_prompt_from_task(  # noqa: PLR0912
             state_context = format_state_context(state, "credential_access", current_target=dc_ip)
             return base_prompt + state_context
 
+        # Share spider task - search SMB shares for credentials
+        is_share_spider = "share_spider" in techniques
+        if is_share_spider and payload.get("password"):
+            username = payload.get("username") or ""
+            password = payload.get("password") or ""
+            domain = payload.get("domain") or ""
+            target_ip = targets[0] if targets else ""
+            # Extract share name from reason if present (auto_share_spider_SHARENAME)
+            share_name = ""
+            if "auto_share_spider_" in reason.lower():
+                share_name = reason.lower().split("auto_share_spider_")[-1]
+
+            base_prompt = (
+                "**SHARE SPIDER TASK - Search SMB shares for credentials**\n\n"
+                f"Target: {target_ip}\n"
+                f"Domain: {domain}\n"
+                f"Username: {username}\n"
+                f"Password: {password}\n"
+                f"Share hint: {share_name or 'enumerate all readable shares'}\n"
+                f"Task ID: {task.task_id}\n\n"
+                "**INSTRUCTIONS:**\n"
+                f"1. Use smbclient_spider(target='{target_ip}', share='{share_name or 'all'}', "
+                f"username='{username}', password='{password}', domain='{domain}')\n"
+                "2. Look for interesting files containing credentials:\n"
+                "   - *.txt files (passwords, connection strings)\n"
+                "   - *.xml, *.ini, *.config files (configuration with creds)\n"
+                "   - *.ps1, *.bat, *.cmd files (scripts with hardcoded passwords)\n"
+                "3. If files are found, use smb_download_file to retrieve them\n"
+                "4. Parse downloaded files for credentials\n\n"
+                "**COMMON FINDINGS:**\n"
+                "- Service account passwords in config files\n"
+                "- Database connection strings with credentials\n"
+                "- Admin passwords in deployment scripts\n"
+                "- User credentials in text files (e.g., secret.txt)\n\n"
+                "Report any credentials found immediately!"
+            )
+            state_context = format_state_context(
+                state, "credential_access", current_target=target_ip
+            )
+            return base_prompt + state_context
+
         # Low hanging fruit WITHOUT credentials - use anonymous/null session techniques
         if has_low_hanging and not payload.get("password") and not payload.get("hash_value"):
             base_prompt = (

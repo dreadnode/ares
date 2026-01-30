@@ -779,11 +779,49 @@ class SharedRedTeamState:
             return list(self.downloaded_artifacts.keys())
         return [k for k in self.downloaded_artifacts if k.startswith(prefix)]
 
+    def _resolve_netbios_to_fqdn(self, netbios_name: str) -> str:
+        """Resolve a NetBIOS domain name to its FQDN equivalent.
+
+        When netexec outputs 'NORTH\\user:password', we capture 'NORTH' as the domain.
+        This method resolves it to 'north.sevenkingdoms.local' if we know the mapping.
+
+        Args:
+            netbios_name: The NetBIOS domain name (e.g., 'north')
+
+        Returns:
+            The FQDN if found, otherwise the original NetBIOS name
+        """
+        netbios_lower = netbios_name.lower()
+
+        # Check if target.domain starts with the NetBIOS name
+        if self.target and self.target.domain:
+            target_domain = self.target.domain.lower()
+            if target_domain.startswith(netbios_lower + "."):
+                return target_domain
+
+        # Check existing credentials for a matching FQDN pattern
+        for cred in self.all_credentials:
+            cred_domain = (cred.domain or "").lower()
+            if cred_domain.startswith(netbios_lower + "."):
+                return cred_domain
+
+        # Check known domains for a matching FQDN pattern
+        for known_domain in self.all_domains:
+            known_lower = known_domain.lower()
+            if known_lower.startswith(netbios_lower + "."):
+                return known_lower
+
+        # No FQDN found, return original
+        return netbios_lower
+
     def add_credential(self, credential: Credential, source_agent: str) -> bool:
         """Add credential if not duplicate. Returns True if added."""
         username = credential.username.strip()
         # Normalize domain to lowercase for consistency
         domain = credential.domain.strip().lower()
+        # Resolve NetBIOS domain names (e.g., "north") to FQDN (e.g., "north.sevenkingdoms.local")
+        if domain and "." not in domain:
+            domain = self._resolve_netbios_to_fqdn(domain)
         password = credential.password.strip()
         if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
             logger.debug(f"Credential rejected: invalid username '{username}' from {source_agent}")
@@ -834,6 +872,9 @@ class SharedRedTeamState:
         normalized = username.strip()
         # Normalize domain to lowercase for consistency
         normalized_domain = (domain or "").strip().lower()
+        # Resolve NetBIOS domain names to FQDN
+        if normalized_domain and "." not in normalized_domain:
+            normalized_domain = self._resolve_netbios_to_fqdn(normalized_domain)
         if not normalized or normalized.lower() in {"(none)", "none", "null", "(null)"}:
             logger.debug(
                 f"User rejected: invalid username '{normalized}' for domain {normalized_domain}"
@@ -869,6 +910,9 @@ class SharedRedTeamState:
         hash_type = (hash_obj.hash_type or "").strip().lower()
         username = (hash_obj.username or "").strip().lower()
         domain = (hash_obj.domain or "").strip().lower()
+        # Resolve NetBIOS domain names to FQDN
+        if domain and "." not in domain:
+            domain = self._resolve_netbios_to_fqdn(domain)
         hash_value = hash_obj.hash_value or ""
 
         # Detect hash type from value if type is unknown/missing
@@ -913,7 +957,10 @@ class SharedRedTeamState:
                         f"Hash rejected: duplicate AS-REP user {domain}\\{username} from {source_agent}"
                     )
                     return False
-        self.add_domain(hash_obj.domain)
+        # Update hash_obj with normalized values (including resolved domain)
+        hash_obj.domain = domain
+        hash_obj.username = username
+        self.add_domain(domain)
         if not getattr(hash_obj, "source", ""):
             hash_obj.source = source_agent
         else:
@@ -1004,9 +1051,17 @@ class SharedRedTeamState:
         return True
 
     def add_vulnerability(self, vuln: VulnerabilityInfo) -> bool:
-        """Add vulnerability if not duplicate. Returns True if added."""
+        """Add vulnerability if not duplicate. Returns True if added.
+
+        Deduplicates by both vuln_id AND (vuln_type, target) to prevent
+        logical duplicates with different UUIDs.
+        """
         if vuln.vuln_id in self.discovered_vulnerabilities:
             return False
+        # Also check for same (type, target) combination to prevent logical duplicates
+        for existing in self.discovered_vulnerabilities.values():
+            if existing.vuln_type == vuln.vuln_type and existing.target == vuln.target:
+                return False
         self.discovered_vulnerabilities[vuln.vuln_id] = vuln
         return True
 

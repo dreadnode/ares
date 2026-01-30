@@ -264,15 +264,18 @@ tasks:
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops tasks "{{.OPERATION_ID}}" --task-status running $ROLE_ARG
 
   multi:tasks:list:
-    desc: "List tasks for an operation (usage: task red:multi:tasks:list OPERATION_ID=op-xxx [ROLE=lateral] [STATUS=running])"
+    desc: "List tasks for an operation (usage: task red:multi:tasks:list OPERATION_ID=op-xxx [ROLE=lateral] [STATUS=pending|in_progress|running|completed|failed|all])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       ROLE: '{{.ROLE | default ""}}'
       STATUS: '{{.STATUS | default "running"}}'
+      VALID_STATUSES: "pending in_progress running completed failed cancelled retrying all"
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
+      - sh: echo "{{.VALID_STATUSES}}" | grep -qw "{{.STATUS}}"
+        msg: "Invalid STATUS '{{.STATUS}}'. Valid values: pending, in_progress, running, completed, failed, cancelled, retrying, all"
     cmds:
       - |
         ROLE_ARG=""

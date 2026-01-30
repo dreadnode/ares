@@ -2545,6 +2545,11 @@ class RedTeamDispatcher:
         succeeded: set[str] = set(self.shared_state.exploited_vulnerabilities)
         failed: dict[str, dict[str, Any]] = {}
 
+        # Track (type, target) tuples to avoid logical duplicates with different UUIDs
+        seen_type_target: set[tuple[str, str]] = {
+            (v.vuln_type, v.target) for v in discovered.values()
+        }
+
         if self._redis_client is not None:
             try:
                 import json
@@ -2567,6 +2572,15 @@ class RedTeamDispatcher:
                         continue
                     vuln_type = data.get("type", "unknown")
                     target = data.get("target", "unknown")
+                    # Skip if we already have a vulnerability with same (type, target)
+                    type_target_key = (vuln_type, target)
+                    if type_target_key in seen_type_target:
+                        logger.debug(
+                            f"Skipping duplicate vulnerability {vuln_id} - "
+                            f"already have {vuln_type} for {target}"
+                        )
+                        continue
+                    seen_type_target.add(type_target_key)
                     discovered_by = data.get("discovered_by", "unknown")
                     details = data.get("details") or {}
                     priority = self._vulnerability_priorities.get(vuln_type, 99)

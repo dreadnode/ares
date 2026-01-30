@@ -761,3 +761,213 @@ class TestExtractDomains:
         # Should not raise, should return empty list
         domains = SharedRedTeamState._extract_domains(state)
         assert domains == []
+
+
+class TestResolveNetBIOSToFQDN:
+    """Tests for SharedRedTeamState._resolve_netbios_to_fqdn."""
+
+    def test_resolves_netbios_from_target_domain(self) -> None:
+        """Test that NetBIOS name is resolved using target.domain."""
+        from ares.core.models import SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="10.1.2.1", domain="north.sevenkingdoms.local")
+
+        # Should resolve "north" to "north.sevenkingdoms.local"
+        result = state._resolve_netbios_to_fqdn("north")
+        assert result == "north.sevenkingdoms.local"
+
+    def test_resolves_netbios_from_existing_credentials(self) -> None:
+        """Test that NetBIOS name is resolved using existing credentials."""
+        from ares.core.models import Credential, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        # No target set, but we have a credential with FQDN
+        state.all_credentials = [
+            Credential(
+                username="jon.snow",
+                password="iknownothing",  # pragma: allowlist secret
+                domain="north.sevenkingdoms.local",
+            )
+        ]
+
+        # Should resolve "north" to "north.sevenkingdoms.local"
+        result = state._resolve_netbios_to_fqdn("north")
+        assert result == "north.sevenkingdoms.local"
+
+    def test_resolves_netbios_from_known_domains(self) -> None:
+        """Test that NetBIOS name is resolved using all_domains."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_domains = ["north.sevenkingdoms.local", "essos.local"]
+
+        # Should resolve "north" to "north.sevenkingdoms.local"
+        result = state._resolve_netbios_to_fqdn("north")
+        assert result == "north.sevenkingdoms.local"
+
+    def test_returns_original_when_no_match(self) -> None:
+        """Test that original NetBIOS name is returned when no FQDN match exists."""
+        from ares.core.models import SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="10.1.2.1", domain="essos.local")
+
+        # "north" doesn't match "essos.local", so return original
+        result = state._resolve_netbios_to_fqdn("north")
+        assert result == "north"
+
+    def test_case_insensitive_matching(self) -> None:
+        """Test that NetBIOS matching is case-insensitive."""
+        from ares.core.models import SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="10.1.2.1", domain="NORTH.SEVENKINGDOMS.LOCAL")
+
+        # Lowercase input should match uppercase domain
+        result = state._resolve_netbios_to_fqdn("north")
+        assert result == "north.sevenkingdoms.local"
+
+    def test_handles_empty_state(self) -> None:
+        """Test that empty state returns original NetBIOS name."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        result = state._resolve_netbios_to_fqdn("north")
+        assert result == "north"
+
+    def test_priority_target_domain_over_credentials(self) -> None:
+        """Test that target.domain takes priority over credentials."""
+        from ares.core.models import Credential, SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="10.1.2.1", domain="north.sevenkingdoms.local")
+        # Credential has a different FQDN for same NetBIOS name (shouldn't happen, but test priority)
+        state.all_credentials = [
+            Credential(
+                username="test",
+                password="test",  # pragma: allowlist secret
+                domain="north.otherdomain.local",
+            )
+        ]
+
+        # Should use target.domain since it's checked first
+        result = state._resolve_netbios_to_fqdn("north")
+        assert result == "north.sevenkingdoms.local"
+
+
+class TestAddCredentialNetBIOSResolution:
+    """Tests for add_credential NetBIOS to FQDN resolution."""
+
+    def test_credential_netbios_resolved_to_fqdn(self) -> None:
+        """Test that credential with NetBIOS domain is resolved to FQDN."""
+        from ares.core.models import Credential, SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="10.1.2.1", domain="north.sevenkingdoms.local")
+
+        # Add credential with NetBIOS domain "NORTH"
+        cred = Credential(
+            username="jeor.mormont",
+            password="_L0ngCl@w_",  # pragma: allowlist secret
+            domain="NORTH",  # NetBIOS name
+            source="share_spider",
+        )
+        result = state.add_credential(cred, "credential_access")
+
+        assert result is True
+        assert len(state.all_credentials) == 1
+        # Domain should be resolved to FQDN
+        assert state.all_credentials[0].domain == "north.sevenkingdoms.local"
+
+    def test_credential_fqdn_preserved(self) -> None:
+        """Test that credential with FQDN domain is not modified."""
+        from ares.core.models import Credential, SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="10.1.2.1", domain="north.sevenkingdoms.local")
+
+        # Add credential with FQDN domain
+        cred = Credential(
+            username="jon.snow",
+            password="iknownothing",  # pragma: allowlist secret
+            domain="north.sevenkingdoms.local",  # Already FQDN
+            source="kerberoast",
+        )
+        result = state.add_credential(cred, "credential_access")
+
+        assert result is True
+        assert len(state.all_credentials) == 1
+        assert state.all_credentials[0].domain == "north.sevenkingdoms.local"
+
+    def test_netbios_deduplication_with_fqdn(self) -> None:
+        """Test that NetBIOS credential is deduplicated against FQDN credential."""
+        from ares.core.models import Credential, SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="10.1.2.1", domain="north.sevenkingdoms.local")
+
+        # Add first credential with FQDN
+        cred1 = Credential(
+            username="jon.snow",
+            password="iknownothing",  # pragma: allowlist secret
+            domain="north.sevenkingdoms.local",
+            source="kerberoast",
+        )
+        result1 = state.add_credential(cred1, "credential_access")
+        assert result1 is True
+
+        # Add duplicate with NetBIOS domain - should be rejected as duplicate
+        cred2 = Credential(
+            username="jon.snow",
+            password="iknownothing",  # pragma: allowlist secret
+            domain="NORTH",  # NetBIOS will be resolved to FQDN
+            source="share_spider",
+        )
+        result2 = state.add_credential(cred2, "credential_access")
+        assert result2 is False  # Duplicate
+
+        assert len(state.all_credentials) == 1
+
+
+class TestAddHashNetBIOSResolution:
+    """Tests for add_hash NetBIOS to FQDN resolution."""
+
+    def test_hash_netbios_resolved_to_fqdn(self) -> None:
+        """Test that hash with NetBIOS domain is resolved to FQDN."""
+        from ares.core.models import Hash, SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="10.1.2.1", domain="north.sevenkingdoms.local")
+
+        hash_obj = Hash(
+            username="jeor.mormont",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            hash_type="NTLM",
+            domain="NORTH",  # NetBIOS name
+        )
+        result = state.add_hash(hash_obj, "secretsdump")
+
+        assert result is True
+        assert len(state.all_hashes) == 1
+        # Domain should be resolved to FQDN
+        assert state.all_hashes[0].domain == "north.sevenkingdoms.local"
+
+
+class TestAddUserNetBIOSResolution:
+    """Tests for add_user NetBIOS to FQDN resolution."""
+
+    def test_user_netbios_resolved_to_fqdn(self) -> None:
+        """Test that user with NetBIOS domain is resolved to FQDN."""
+        from ares.core.models import SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="10.1.2.1", domain="north.sevenkingdoms.local")
+
+        result = state.add_user("jeor.mormont", "NORTH")
+
+        assert result is True
+        assert len(state.all_users) == 1
+        # Domain should be resolved to FQDN
+        assert state.all_users[0].domain == "north.sevenkingdoms.local"

@@ -410,6 +410,7 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         asyncio.create_task(_auto_credential_access(dispatcher), name="auto_credential_access"),
         asyncio.create_task(_auto_mssql_detection(dispatcher), name="auto_mssql_detection"),
         asyncio.create_task(_auto_adcs_enumeration(dispatcher), name="auto_adcs_enumeration"),
+        asyncio.create_task(_auto_share_spider(dispatcher), name="auto_share_spider"),
     ]
 
     # Build initial prompt for orchestrator
@@ -1089,6 +1090,103 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
             await asyncio.sleep(check_interval)
 
 
+async def _auto_share_spider(
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 30.0,
+) -> None:
+    """
+    Background task that automatically spiders discovered shares for credentials.
+
+    When shares with READ access are discovered and we have valid credentials,
+    dispatch share_spider tasks to search for sensitive files like:
+    - Configuration files with passwords
+    - Scripts with hardcoded credentials
+    - Text files with credential information
+
+    This catches common GOAD scenarios like jeor.mormont creds in share files.
+    """
+    # Track which (host, share, cred) combos we've already spidered
+    spidered_shares: set[tuple[str, str, str, str]] = set()
+
+    while True:
+        try:
+            state = dispatcher.shared_state
+
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping auto share spider")
+                break
+
+            # Need credentials to spider shares (authenticated access)
+            if not state.all_credentials:
+                await asyncio.sleep(check_interval)
+                continue
+
+            # Find shares with READ access (excluding admin shares)
+            readable_shares = [
+                share
+                for share in state.all_shares
+                if share.permissions
+                and "READ" in share.permissions.upper()
+                and share.name.lower() not in ("ipc$", "print$")
+                # Skip admin shares - focus on custom shares like "all", "public"
+                and share.name.lower() not in ("admin$", "c$", "d$", "e$")
+            ]
+
+            if not readable_shares:
+                await asyncio.sleep(check_interval)
+                continue
+
+            # For each readable share, try to spider with available credentials
+            for share in readable_shares:
+                for cred in state.all_credentials:
+                    if not cred.password:
+                        continue  # Need password for SMB auth
+
+                    # Create unique key for this spider attempt
+                    spider_key = (
+                        share.host.lower(),
+                        share.name.lower(),
+                        cred.username.lower(),
+                        (cred.domain or "").lower(),
+                    )
+
+                    if spider_key in spidered_shares:
+                        continue
+
+                    # Dispatch share spider task
+                    domain = cred.domain or (state.target.domain if state.target else "")
+                    task_id = await dispatcher.request_credential_access(
+                        source_agent="orchestrator",
+                        domain=domain,
+                        target_ips=[share.host],
+                        username=cred.username,
+                        password=cred.password,
+                        reason=f"auto_share_spider_{share.name}",
+                        techniques=["share_spider"],
+                    )
+
+                    if task_id:
+                        spidered_shares.add(spider_key)
+                        logger.info(
+                            "🕷️ Auto share spider dispatched: {}\\{} -> {}/{} (task {})",
+                            cred.domain or "(local)",
+                            cred.username,
+                            share.host,
+                            share.name,
+                            task_id,
+                        )
+                        # Only spider each share once per credential - don't flood
+                        break
+
+            await asyncio.sleep(check_interval)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto share spider error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
 async def _auto_credential_access(  # noqa: PLR0912
     dispatcher: RedTeamDispatcher,
     check_interval: float = 60.0,
@@ -1279,6 +1377,28 @@ async def _auto_credential_access(  # noqa: PLR0912
                     credential_source=cred.source,
                     reason="new_credential",
                     techniques=["kerberoast", "secretsdump", "lsassy"],
+                )
+                # Also dispatch SYSVOL/GPP search separately (only needs DC targets)
+                # This is high-value low-hanging fruit that often contains hardcoded creds
+                dc_hosts = [
+                    h
+                    for h in domain_hosts
+                    if any(
+                        r in ("DC", "Domain Controller")
+                        for r in (
+                            next((host.roles for host in state.all_hosts if host.ip == h), []) or []
+                        )
+                    )
+                ] or domain_hosts[:1]  # Fall back to first host if no DC identified
+                await dispatcher.request_credential_access(
+                    source_agent="orchestrator",
+                    domain=domain_name,
+                    target_ips=dc_hosts,
+                    username=cred.username,
+                    password=cred.password,
+                    credential_source=cred.source,
+                    reason="sysvol_gpp_search",
+                    techniques=["sysvol_script_search", "gpp_password_finder"],
                 )
                 if task_id:
                     processed_creds.add(key)

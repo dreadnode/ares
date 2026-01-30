@@ -302,7 +302,8 @@ class TestSysvolScriptSearchPatterns:
         creds = [c for c in shared_state.all_credentials if c.username == "svc-sql"]
         assert len(creds) == 1
         assert creds[0].password == "SuperSecret123"  # pragma: allowlist secret
-        assert creds[0].domain == "CONTOSO"
+        # Domain is normalized to lowercase in add_credential
+        assert creds[0].domain.lower() == "contoso"
 
     def test_powershell_variable_multi_line(self, shared_state: SharedRedTeamState):
         """Should extract credentials from PowerShell vars on separate lines."""
@@ -346,7 +347,8 @@ class TestSysvolScriptSearchPatterns:
         creds = [c for c in shared_state.all_credentials if c.username == "alans"]
         assert len(creds) == 1, f"Expected 1 cred, got {len(creds)}: {shared_state.all_credentials}"
         assert creds[0].password == "D1rect0r2024!"  # pragma: allowlist secret
-        assert creds[0].domain == "CONTOSO"
+        # Domain is normalized to lowercase in add_credential
+        assert creds[0].domain.lower() == "contoso"
 
     def test_extracts_domain_from_user_variable(self, shared_state: SharedRedTeamState):
         """Should correctly parse DOMAIN\\user format from $user variable."""
@@ -386,7 +388,8 @@ class TestSysvolScriptSearchPatterns:
 
         creds = [c for c in shared_state.all_credentials if c.username == "karimm"]
         assert len(creds) == 1
-        assert creds[0].domain == "CONTOSO"
+        # Domain is normalized to lowercase in add_credential
+        assert creds[0].domain.lower() == "contoso"
         assert creds[0].password == "C0ntr0ller#2024"  # pragma: allowlist secret
 
     def test_credential_added_to_shared_state(self, shared_state: SharedRedTeamState):
