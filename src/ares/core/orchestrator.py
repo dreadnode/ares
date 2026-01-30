@@ -1103,7 +1103,7 @@ async def _auto_share_spider(
     - Scripts with hardcoded credentials
     - Text files with credential information
 
-    This catches common GOAD scenarios like jeor.mormont creds in share files.
+    This catches common scenarios like credentials stored in share files.
     """
     # Track which (host, share, cred) combos we've already spidered
     spidered_shares: set[tuple[str, str, str, str]] = set()

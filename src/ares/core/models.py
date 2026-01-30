@@ -782,11 +782,11 @@ class SharedRedTeamState:
     def _resolve_netbios_to_fqdn(self, netbios_name: str) -> str:
         """Resolve a NetBIOS domain name to its FQDN equivalent.
 
-        When netexec outputs 'NORTH\\user:password', we capture 'NORTH' as the domain.
-        This method resolves it to 'north.sevenkingdoms.local' if we know the mapping.
+        When netexec outputs 'CONTOSO\\user:password', we capture 'CONTOSO' as the domain.
+        This method resolves it to 'contoso.local' if we know the mapping.
 
         Args:
-            netbios_name: The NetBIOS domain name (e.g., 'north')
+            netbios_name: The NetBIOS domain name (e.g., 'CONTOSO')
 
         Returns:
             The FQDN if found, otherwise the original NetBIOS name
@@ -819,7 +819,7 @@ class SharedRedTeamState:
         username = credential.username.strip()
         # Normalize domain to lowercase for consistency
         domain = credential.domain.strip().lower()
-        # Resolve NetBIOS domain names (e.g., "north") to FQDN (e.g., "north.sevenkingdoms.local")
+        # Resolve NetBIOS domain names (e.g., "CONTOSO") to FQDN (e.g., "contoso.local")
         if domain and "." not in domain:
             domain = self._resolve_netbios_to_fqdn(domain)
         password = credential.password.strip()
@@ -1231,7 +1231,7 @@ class SharedRedTeamState:
         for h in state.all_hashes:
             if h.domain:
                 domains.add(h.domain.strip().lower())
-        # Extract domains from host FQDNs (e.g., meereen.essos.local -> essos.local)
+        # Extract domains from host FQDNs (e.g., dc01.contoso.local -> contoso.local)
         for host in state.all_hosts:
             hostname = (host.hostname or "").strip().lower()
             if "." in hostname:

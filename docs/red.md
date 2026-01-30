@@ -488,9 +488,9 @@ from ares.tools.red import SharePilferingTools
 tools = SharePilferingTools()
 result = tools.sysvol_script_search(
     target='10.1.2.240',
-    username='samwell.tarly',
-    password='Heartsbane',  # pragma: allowlist secret
-    domain='north.sevenkingdoms.local'
+    username='karimm',
+    password='C0ntr0ller#2024',  # pragma: allowlist secret
+    domain='contoso.local'
 )
 print(result)
 "
@@ -503,7 +503,7 @@ result = tools.secretsdump(
     target='10.1.2.240',
     username='administrator',
     password='AdminPass123',  # pragma: allowlist secret
-    domain='north.sevenkingdoms.local'
+    domain='contoso.local'
 )
 print(result)
 "
@@ -580,7 +580,7 @@ from ares.tools.red import SharePilferingTools
 
 # Create minimal state
 state = SharedRedTeamState(operation_id='test-op')
-state.target = Target(ip='10.1.2.240', hostname='winterfell', domain='north.sevenkingdoms.local')
+state.target = Target(ip='10.1.2.240', hostname='dc01', domain='contoso.local')
 
 # Initialize tools with state
 tools = SharePilferingTools()
@@ -589,9 +589,9 @@ tools.set_state(state)
 # Run tool - credentials found will be added to state
 result = tools.sysvol_script_search(
     target='10.1.2.240',
-    username='samwell.tarly',
-    password='Heartsbane',  # pragma: allowlist secret
-    domain='north.sevenkingdoms.local'
+    username='karimm',
+    password='C0ntr0ller#2024',  # pragma: allowlist secret
+    domain='contoso.local'
 )
 print(result)
 

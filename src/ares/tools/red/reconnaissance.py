@@ -612,7 +612,7 @@ class NetworkEnumerationTools(Toolset):
         Resolve domain controllers via SRV lookup and record them as hosts.
 
         Args:
-            domain: Active Directory domain (e.g., "sevenkingdoms.local")
+            domain: Active Directory domain (e.g., "contoso.local")
             dns_ip: DNS server IP to query
 
         Returns:

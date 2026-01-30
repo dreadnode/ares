@@ -150,7 +150,7 @@ async def submit(
     """Submit a multi-agent red team operation to the orchestrator service.
 
     Example:
-        ares-ops submit dreadgoad example.local --ips 10.0.4.90 10.0.4.129 --wait
+        ares-ops submit dreadgoad contoso.local --ips 10.0.4.90 10.0.4.129 --wait
     """
     # Resolve config defaults
     resolved_redis_url = redis_url or get_redis_url()

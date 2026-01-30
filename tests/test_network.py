@@ -285,7 +285,7 @@ class TestNetworkEnumerationTools:
         assert "Administrator" in result
 
     def test_enumerate_users_null_session(self, red_team_state: RedTeamState):
-        """Test user enumeration with null session using GOAD-like output."""
+        """Test user enumeration with null session using realistic output."""
         from ares.tools.red import NetworkEnumerationTools
 
         tools = NetworkEnumerationTools()
@@ -452,8 +452,8 @@ class TestCredentialHarvestingTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
-    def test_kerberos_user_enum_noauth_goad(self, red_team_state: RedTeamState):
-        """Test Kerberos no-auth user enumeration using GOAD-like output."""
+    def test_kerberos_user_enum_noauth(self, red_team_state: RedTeamState):
+        """Test Kerberos no-auth user enumeration using realistic output."""
         from ares.core.models import User
         from ares.tools.red import CredentialHarvestingTools
 
