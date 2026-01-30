@@ -4,14 +4,17 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from dreadnode.agent.events import ToolEnd
 
 from ares.core.config import AgentConfig
+from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.factories.red_agents import (
     create_agent_info,
     create_multi_agent_ensemble,
+    create_role_hooks,
     load_agent_instructions,
 )
-from ares.core.models import AgentRole
+from ares.core.models import AgentRole, SharedRedTeamState
 
 
 @pytest.mark.asyncio
@@ -246,3 +249,107 @@ class TestCapabilitiesFromConfig:
 
             info = create_agent_info(role, f"{role.value}-pod")
             assert info.role == role
+
+
+class TestPrivescTrackExploitationHook:
+    """Tests for the privesc track_exploitation hook."""
+
+    def _make_tool_end_event(self, tool_name: str, content: str) -> MagicMock:
+        """Helper to create a mock ToolEnd event."""
+        # Create a mock that behaves like ToolEnd
+        event = MagicMock(spec=ToolEnd)
+        event.tool_call = MagicMock()
+        event.tool_call.name = tool_name
+        event.message = MagicMock()
+        event.message.content = content
+        return event
+
+    @pytest.mark.asyncio
+    async def test_certipy_find_does_not_trigger_exploitation_success(self):
+        """Test that certipy_find (enumeration) does NOT trigger exploitation success.
+
+        This is a critical fix - certipy_find output always contains "certificate"
+        which was causing false positives. The hook should only fire for actual
+        exploitation tools like certipy_req, certipy_auth, etc.
+        """
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.PRIVESC, dispatcher, shared_state)
+
+        certipy_find_output = """
+Certificate Authorities
+  0
+    CA Name                             : corp-DC01-CA
+    DNS Name                            : dc01.corp.local
+    Certificate Subject                 : CN=corp-DC01-CA
+    [!] Vulnerabilities
+      ESC8                              : Web Enrollment is vulnerable
+        """
+
+        event = self._make_tool_end_event("certipy_find", certipy_find_output)
+
+        # Run all hooks and collect feedback
+        feedback_messages = []
+        for hook in hooks:
+            result = await hook(event)
+            if result:
+                feedback_messages.append(result)
+
+        # certipy_find should NOT trigger "EXPLOITATION SUCCESSFUL"
+        for msg in feedback_messages:
+            assert "EXPLOITATION SUCCESSFUL" not in msg, (
+                f"certipy_find should NOT trigger exploitation success hook. Got: {msg}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_certipy_auth_triggers_exploitation_success(self):
+        """Test that certipy_auth (actual exploitation) DOES trigger success."""
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.PRIVESC, dispatcher, shared_state)
+
+        # Simulate successful certipy_auth output
+        certipy_auth_output = """
+[*] Using principal: Administrator@corp.local
+[*] Got hash for 'Administrator@corp.local': aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0
+        """
+
+        event = self._make_tool_end_event("certipy_auth", certipy_auth_output)
+
+        feedback_messages = []
+        for hook in hooks:
+            result = await hook(event)
+            if result:
+                feedback_messages.append(result)
+
+        # certipy_auth with hash output SHOULD trigger success
+        success_found = any("EXPLOITATION SUCCESSFUL" in msg for msg in feedback_messages)
+        assert success_found, "certipy_auth with hash output should trigger exploitation success"
+
+    @pytest.mark.asyncio
+    async def test_certipy_req_with_pfx_triggers_success(self):
+        """Test that certipy_req with .pfx output triggers success."""
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.PRIVESC, dispatcher, shared_state)
+
+        certipy_req_output = """
+[*] Saved certificate and private key to 'administrator.pfx'
+        """
+
+        event = self._make_tool_end_event("certipy_req", certipy_req_output)
+
+        feedback_messages = []
+        for hook in hooks:
+            result = await hook(event)
+            if result:
+                feedback_messages.append(result)
+
+        success_found = any("EXPLOITATION SUCCESSFUL" in msg for msg in feedback_messages)
+        assert success_found, "certipy_req with .pfx output should trigger exploitation success"

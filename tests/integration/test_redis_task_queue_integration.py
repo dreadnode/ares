@@ -426,19 +426,24 @@ class TestRedisWorkerAgent:
     async def test_worker_processes_task(self, task_queue, mock_agent, mock_redis_client):
         """Test worker processes a task successfully."""
         worker = RedisWorkerAgent(
-            role=AgentRole.CRACKER,
+            role=AgentRole.LATERAL,
             task_queue=task_queue,
             agent=mock_agent,
-            agent_name="cracker-agent",
-            pod_name="cracker-0",
+            agent_name="lateral-agent",
+            pod_name="lateral-0",
         )
 
         task = TaskMessage(
-            task_id="crack_test",
-            task_type="crack",
+            task_id="lateral_test",
+            task_type="lateral",
             source_agent="orchestrator",
-            target_agent="cracker",
-            payload={"hash_value": "abc", "hash_type": "NTLM"},
+            target_agent="lateral",
+            payload={
+                "username": "admin",
+                "password": "password123",  # pragma: allowlist secret
+                "target_host": "192.168.56.100",
+                "domain": "test.local",
+            },
         )
 
         # Process task directly
@@ -457,20 +462,24 @@ class TestRedisWorkerAgent:
         mock_agent.run.side_effect = Exception("Agent crashed")
 
         worker = RedisWorkerAgent(
-            role=AgentRole.CRACKER,
+            role=AgentRole.LATERAL,
             task_queue=task_queue,
             agent=mock_agent,
-            agent_name="cracker-agent",
-            pod_name="cracker-0",
+            agent_name="lateral-agent",
+            pod_name="lateral-0",
         )
 
-        # Provide valid payload so prompt generation succeeds
         task = TaskMessage(
             task_id="crash_test",
-            task_type="crack",
+            task_type="lateral",
             source_agent="orchestrator",
-            target_agent="cracker",
-            payload={"hash_value": "abc123", "hash_type": "NTLM"},
+            target_agent="lateral",
+            payload={
+                "username": "admin",
+                "password": "password123",  # pragma: allowlist secret
+                "target_host": "192.168.56.100",
+                "domain": "test.local",
+            },
         )
 
         await worker._process_task(task)
@@ -777,9 +786,8 @@ class TestStatePersistence:
             status="idle",
         )
 
-        # Verify set was called with expiry
         call_args = mock_redis_client.set.call_args
-        assert call_args.kwargs.get("ex") == 60  # HEARTBEAT_TTL
+        assert call_args.kwargs.get("ex") == task_queue._heartbeat_ttl
 
     @pytest.mark.asyncio
     async def test_result_expiry(self, task_queue, mock_redis_client):

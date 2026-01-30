@@ -174,6 +174,91 @@ Certificate Authorities
             assert "ESC8" in result
             assert "RELAY" in result.upper()
 
+    def test_certipy_find_queues_esc8_vulnerability(self):
+        """Test that certipy_find queues ESC8 vulnerability to state when detected."""
+        from ares.core.models import SharedRedTeamState
+        from ares.tools.red.kerberos_attacks import CertipyTools
+
+        tools = CertipyTools()
+        # Use real SharedRedTeamState to test add_vulnerability
+        state = SharedRedTeamState(operation_id="test-op")
+        tools.state = state
+
+        # Simulate certipy output with ESC8 vulnerability
+        esc8_output = """
+Certificate Authorities
+  0
+    CA Name                             : corp-DC01-CA
+    DNS Name                            : dc01.corp.local
+    Web Enrollment                      : Enabled
+    [!] Vulnerabilities
+      ESC8                              : Web Enrollment is vulnerable to NTLM relay
+        """
+
+        with patch("ares.tools.red.kerberos_attacks.run_tool") as mock_run_tool:
+            mock_run_tool.return_value = (esc8_output, "", 0)
+
+            result = tools.certipy_find(
+                domain="corp.local",
+                username="testuser",
+                password="TestPass123",  # pragma: allowlist secret
+                dc_ip="192.168.58.1",
+            )
+
+            # Should detect ESC8 vulnerability
+            assert "ESC8" in result
+
+            # Vulnerability should be queued to state
+            assert len(state.discovered_vulnerabilities) == 1, (
+                "ESC8 vulnerability should be queued to state"
+            )
+
+            # Check vulnerability details
+            vuln = next(iter(state.discovered_vulnerabilities.values()))
+            assert vuln.vuln_type == "ADCS_ESC8"
+            assert "corp-DC01-CA" in str(vuln.details.get("ca_name", ""))
+            assert vuln.priority == 3  # ESC8 has priority 3
+            assert vuln.discovered_by == "certipy_find"
+
+    def test_certipy_find_esc8_deduplication(self):
+        """Test that certipy_find doesn't queue duplicate ESC8 vulnerabilities."""
+        from ares.core.models import SharedRedTeamState
+        from ares.tools.red.kerberos_attacks import CertipyTools
+
+        tools = CertipyTools()
+        state = SharedRedTeamState(operation_id="test-op")
+        tools.state = state
+
+        esc8_output = """
+Certificate Authorities
+  0
+    CA Name                             : domain-CA
+    DNS Name                            : ca.domain.local
+    Web Enrollment                      : Enabled
+        """
+
+        with patch("ares.tools.red.kerberos_attacks.run_tool") as mock_run_tool:
+            mock_run_tool.return_value = (esc8_output, "", 0)
+
+            # Run certipy_find twice
+            tools.certipy_find(
+                domain="domain.local",
+                username="testuser",
+                password="TestPass123",  # pragma: allowlist secret
+                dc_ip="192.168.58.1",
+            )
+            tools.certipy_find(
+                domain="domain.local",
+                username="testuser",
+                password="TestPass123",  # pragma: allowlist secret
+                dc_ip="192.168.58.1",
+            )
+
+            # Should still only have 1 vulnerability (deduplicated by target)
+            assert len(state.discovered_vulnerabilities) == 1, (
+                "ESC8 vulnerabilities should be deduplicated"
+            )
+
 
 class TestCertipyToolAvailability:
     """Tests verifying certipy is available on correct agent."""

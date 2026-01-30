@@ -286,8 +286,20 @@ def create_role_hooks(
             )
 
             # Check for successful ADCS exploitation
-            if "certipy" in tool_name and (
-                "success" in result.lower() or "certificate" in result.lower()
+            certipy_exploitation_tools = {
+                "certipy_request",
+                "certipy_req",
+                "certipy_req_esc1",
+                "certipy_auth",
+                "certipy_shadow",
+                "certipy_shadow_auto",
+                "certipy_relay",
+                "certipy_relay_esc8",
+            }
+            if tool_name in certipy_exploitation_tools and (
+                "success" in result.lower()
+                or ".pfx" in result.lower()
+                or ("hash" in result.lower() and ":" in result)
             ):
                 return (
                     "✅ ADCS EXPLOITATION SUCCESSFUL!\n"

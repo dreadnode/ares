@@ -17,7 +17,7 @@ from typing import ClassVar
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 
-from ares.core.models import Hash, TimelineEvent
+from ares.core.models import Hash, SharedRedTeamState, TimelineEvent, VulnerabilityInfo
 from ares.tools.red.common import (
     PLACEHOLDER_PASSWORDS,
     AnyRedTeamState,
@@ -512,6 +512,92 @@ class CertipyTools(Toolset):
         if block not in self.state.weaknesses:
             self.state.weaknesses.append(block)
 
+    def _queue_esc8_vulnerability(
+        self,
+        certipy_output: str,
+        domain: str,
+        dc_ip: str,
+        username: str,
+        password: str | None,
+    ) -> None:
+        """
+        Queue ESC8 vulnerability for exploitation when detected.
+
+        ESC8 requires a two-step attack:
+        1. Start certipy_relay_esc8 to listen for relayed auth
+        2. Use coercion (petitpotam/coercer) to force DC authentication
+
+        This method adds the vulnerability to state so the orchestrator
+        can dispatch the necessary coercion tasks.
+        """
+        if not self.state:
+            logger.warning("Cannot queue ESC8 vulnerability: no state available")
+            return
+
+        # Extract CA information from certipy output
+        ca_name = None
+        ca_host = None
+
+        # Look for CA name in output (e.g., "CA Name: corp-DC01-CA")
+        ca_match = re.search(r"CA Name\s*:\s*([^\n\r]+)", certipy_output, re.IGNORECASE)
+        if ca_match:
+            ca_name = ca_match.group(1).strip()
+
+        # Look for CA host/DNS (e.g., "DNS Name: dc01.corp.local")
+        dns_match = re.search(
+            r"(?:DNS Name|Web Services|Web Enrollment)\s*:\s*([^\n\r]+)",
+            certipy_output,
+            re.IGNORECASE,
+        )
+        if dns_match:
+            ca_host = dns_match.group(1).strip()
+
+        # Create unique vulnerability ID
+        vuln_id = f"ADCS_ESC8_{domain}_{uuid.uuid4().hex[:8]}"
+
+        # Build details for exploitation
+        details: dict[str, str | list[str] | None] = {
+            "ca_name": ca_name,
+            "ca_host": ca_host or dc_ip,
+            "domain": domain,
+            "dc_ip": dc_ip,
+            "username": username,
+            "password": password,
+            "attack_steps": [
+                "1. Start certipy_relay_esc8 to listen on attacker interface",
+                "2. Use petitpotam or coercer to coerce DC authentication to attacker",
+                "3. Relay will capture DC machine certificate",
+                "4. Use certipy_auth with captured certificate to get DC machine hash",
+                "5. Use hash for DCSync or pass-the-hash",
+            ],
+            "note": "ESC8 requires COERCION agent to force authentication. "
+            "Dispatch coercion task after starting relay.",
+        }
+
+        # Create and add vulnerability to state
+        vuln = VulnerabilityInfo(
+            vuln_id=vuln_id,
+            vuln_type="ADCS_ESC8",
+            target=ca_host or dc_ip,
+            discovered_by="certipy_find",
+            details=details,
+            priority=3,  # High priority - ADCS_ESC8 is priority 3 in dispatcher
+            recommended_agent="privesc",
+        )
+
+        if not isinstance(self.state, SharedRedTeamState):
+            logger.debug("State does not support add_vulnerability (not SharedRedTeamState)")
+            return
+
+        added = self.state.add_vulnerability(vuln)
+        if added:
+            logger.warning(
+                f"[!] ESC8 vulnerability queued for exploitation: {vuln_id} "
+                f"(CA: {ca_name or 'unknown'}, host: {ca_host or dc_ip})"
+            )
+        else:
+            logger.debug(f"ESC8 vulnerability already queued for {domain}")
+
     @dn.tool_method
     def certipy_find(
         self,
@@ -615,9 +701,14 @@ class CertipyTools(Toolset):
                 if "🚨" not in result:
                     result = (
                         "🚨 ESC8 DETECTED - WEB ENROLLMENT RELAY POSSIBLE!\n"
-                        "\u2192 Use ntlmrelayx to relay coerced auth to the CA\n"
-                        "\u2192 See certipy_relay for exploitation\n\n" + result
+                        "\u2192 Use certipy_relay_esc8 to set up relay listener\n"
+                        "\u2192 Use petitpotam or coercer to coerce DC authentication\n"
+                        "\u2192 Then use certipy_auth with the captured certificate\n\n" + result
                     )
+
+                # Auto-queue ESC8 vulnerability for exploitation
+                # This ensures the orchestrator knows to dispatch coercion tasks
+                self._queue_esc8_vulnerability(result, domain, dc_ip, username, resolved_password)
 
             return result
 
