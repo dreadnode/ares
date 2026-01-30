@@ -1418,6 +1418,7 @@ class RedisWorkerAgent:
                     success=False,
                     error=f"Unsupported task type: {task.task_type}",
                     worker_pod=self.pod_name,
+                    agent_name=self.agent_name,
                 )
                 return
 
@@ -1520,6 +1521,7 @@ class RedisWorkerAgent:
                     result=result_payload,
                     error=agent_error,
                     worker_pod=self.pod_name,
+                    agent_name=self.agent_name,
                 )
                 try:
                     await self.task_queue.set_task_status(
@@ -1557,6 +1559,7 @@ class RedisWorkerAgent:
                 success=True,
                 result=result_payload,
                 worker_pod=self.pod_name,
+                agent_name=self.agent_name,
             )
             try:
                 await self.task_queue.set_task_status(
@@ -1589,6 +1592,7 @@ class RedisWorkerAgent:
                     result=fatal_result if fatal_result else None,
                     error=f"FATAL: {type(e).__name__}: {e!s}",
                     worker_pod=self.pod_name,
+                    agent_name=self.agent_name,
                 )
                 await self.task_queue.set_task_status(
                     task_id=task.task_id,
@@ -1623,6 +1627,7 @@ class RedisWorkerAgent:
                 result=exception_result if exception_result else None,
                 error=f"{type(e).__name__}: {e!s}",
                 worker_pod=self.pod_name,
+                agent_name=self.agent_name,
             )
             try:
                 await self.task_queue.set_task_status(
@@ -1779,7 +1784,7 @@ class RedisWorkerAgent:
                     await self.task_queue.send_result(
                         task_id=task.task_id,
                         success=True,
-                        payload={
+                        result={
                             "output": f"Skipped - password already known for {domain}\\{username}",
                             "task_type": task.task_type,
                             "credential": {
@@ -1789,6 +1794,7 @@ class RedisWorkerAgent:
                             },
                         },
                         worker_pod=self.pod_name,
+                        agent_name=self.agent_name,
                     )
                     return
 
@@ -1798,6 +1804,7 @@ class RedisWorkerAgent:
                 success=False,
                 error="Missing hash_value in crack task payload",
                 worker_pod=self.pod_name,
+                agent_name=self.agent_name,
             )
             return
 
@@ -1877,6 +1884,7 @@ class RedisWorkerAgent:
                 success=True,
                 result=result_payload,
                 worker_pod=self.pod_name,
+                agent_name=self.agent_name,
             )
             return
 
@@ -1886,6 +1894,7 @@ class RedisWorkerAgent:
             result=result_payload,
             error="Cracking failed: no password found",
             worker_pod=self.pod_name,
+            agent_name=self.agent_name,
         )
 
     def _resolve_wordlist_path(self, wordlist_path: str) -> str:
@@ -1976,6 +1985,7 @@ class RedisWorkerAgent:
                     "return_code": result.returncode,
                 },
                 worker_pod=self.pod_name,
+                agent_name=self.agent_name,
             )
             try:
                 await self.task_queue.set_task_status(
@@ -1999,6 +2009,7 @@ class RedisWorkerAgent:
                 success=False,
                 error=f"Command timed out after {timeout}s",
                 worker_pod=self.pod_name,
+                agent_name=self.agent_name,
             )
             try:
                 await self.task_queue.set_task_status(
@@ -2021,6 +2032,7 @@ class RedisWorkerAgent:
                 success=False,
                 error=str(e),
                 worker_pod=self.pod_name,
+                agent_name=self.agent_name,
             )
             try:
                 await self.task_queue.set_task_status(

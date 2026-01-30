@@ -44,6 +44,7 @@ class TaskResult(BaseModel):
     error: str | None = None
     completed_at: datetime | None = None
     worker_pod: str | None = None
+    agent_name: str | None = None
 
     def __init__(self, **data):
         if data.get("completed_at") is None:
@@ -364,6 +365,7 @@ class RedisTaskQueue:
         result: dict[str, Any] | None = None,
         error: str | None = None,
         worker_pod: str | None = None,
+        agent_name: str | None = None,
     ) -> None:
         """
         Send task result back to orchestrator.
@@ -374,6 +376,7 @@ class RedisTaskQueue:
             result: Task result data
             error: Error message if failed
             worker_pod: Pod that processed the task
+            agent_name: Logical agent name (e.g., 'ares-enum')
 
         Raises:
             Exception: Re-raises connection errors after marking connection as failed
@@ -387,6 +390,7 @@ class RedisTaskQueue:
             result=result,
             error=error,
             worker_pod=worker_pod,
+            agent_name=agent_name,
         )
 
         result_key = self._result_queue_key(task_id)

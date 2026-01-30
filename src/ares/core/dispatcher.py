@@ -2509,7 +2509,7 @@ class RedTeamDispatcher:
                         success=result.success,
                         result=result.result,
                         error=result.error,
-                        source_agent=result.worker_pod or "unknown",
+                        source_agent=result.agent_name or result.worker_pod or "unknown",
                     )
             except Exception as e:  # noqa: PERF203
                 logger.warning(f"Error checking result for task {task_id}: {e}")
