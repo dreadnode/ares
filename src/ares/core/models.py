@@ -664,6 +664,10 @@ class SharedRedTeamState:
 
     # Global discoveries (aggregated from all agents)
     all_domains: list[str] = field(default_factory=list)
+    # Authoritative NetBIOS to FQDN mapping from AD crossRef objects
+    # Key: lowercase NetBIOS name (e.g., "north"), Value: FQDN (e.g., "north.sevenkingdoms.local")
+    # Populated by querying CN=Partitions,CN=Configuration via LDAP
+    netbios_to_fqdn: dict[str, str] = field(default_factory=dict)
     all_credentials: list[Credential] = field(default_factory=list)
     all_hashes: list[Hash] = field(default_factory=list)
     all_hosts: list[Host] = field(default_factory=list)
@@ -812,6 +816,12 @@ class SharedRedTeamState:
         When netexec outputs 'CONTOSO\\user:password', we capture 'CONTOSO' as the domain.
         This method resolves it to 'contoso.local' if we know the mapping.
 
+        Resolution order (first match wins):
+        1. Authoritative mapping from AD crossRef objects (netbios_to_fqdn dict)
+        2. Known domains that start with the NetBIOS name
+        3. Existing credentials with matching domain prefix
+        4. Target domain if it matches (fallback)
+
         Args:
             netbios_name: The NetBIOS domain name (e.g., 'CONTOSO')
 
@@ -820,23 +830,32 @@ class SharedRedTeamState:
         """
         netbios_lower = netbios_name.lower()
 
-        # Check if target.domain starts with the NetBIOS name
-        if self.target and self.target.domain:
-            target_domain = self.target.domain.lower()
-            if target_domain.startswith(netbios_lower + "."):
-                return target_domain
+        # 1. Check authoritative mapping from AD crossRef objects (PREFERRED)
+        # This is populated by querying CN=Partitions,CN=Configuration via LDAP
+        if netbios_lower in self.netbios_to_fqdn:
+            return self.netbios_to_fqdn[netbios_lower]
 
-        # Check existing credentials for a matching FQDN pattern
+        # 2. Check known domains for a matching FQDN pattern
+        # Prefer more specific (longer) matches to avoid parent/child domain confusion
+        matching_domains = [
+            d.lower() for d in self.all_domains if d.lower().startswith(netbios_lower + ".")
+        ]
+        if matching_domains:
+            # Return the most specific (longest) match
+            return max(matching_domains, key=len)
+
+        # 3. Check existing credentials for a matching FQDN pattern
         for cred in self.all_credentials:
             cred_domain = (cred.domain or "").lower()
             if cred_domain.startswith(netbios_lower + "."):
                 return cred_domain
 
-        # Check known domains for a matching FQDN pattern
-        for known_domain in self.all_domains:
-            known_lower = known_domain.lower()
-            if known_lower.startswith(netbios_lower + "."):
-                return known_lower
+        # 4. Check if target.domain starts with the NetBIOS name (least preferred)
+        # This can be wrong in multi-domain forests where target is root but cred is from child
+        if self.target and self.target.domain:
+            target_domain = self.target.domain.lower()
+            if target_domain.startswith(netbios_lower + "."):
+                return target_domain
 
         # No FQDN found, return original
         return netbios_lower
@@ -939,6 +958,46 @@ class SharedRedTeamState:
         # credentials/users/hashes with matching NetBIOS domain
         if "." in normalized:
             self._retroactive_domain_normalize(normalized)
+
+        return True
+
+    def add_netbios_mapping(self, netbios: str, fqdn: str) -> bool:
+        """Add an authoritative NetBIOS to FQDN mapping from AD crossRef objects.
+
+        This mapping is used by _resolve_netbios_to_fqdn to correctly resolve
+        NetBIOS domain names (e.g., "NORTH") to their FQDN (e.g., "north.sevenkingdoms.local").
+
+        Args:
+            netbios: The NetBIOS domain name (e.g., "NORTH")
+            fqdn: The fully qualified domain name (e.g., "north.sevenkingdoms.local")
+
+        Returns:
+            True if added, False if already exists with same value
+        """
+        netbios_lower = netbios.strip().lower()
+        fqdn_lower = fqdn.strip().lower()
+
+        if not netbios_lower or not fqdn_lower:
+            return False
+
+        existing = self.netbios_to_fqdn.get(netbios_lower)
+        if existing == fqdn_lower:
+            return False
+
+        if existing and existing != fqdn_lower:
+            logger.warning(
+                f"NetBIOS mapping conflict: '{netbios_lower}' was '{existing}', "
+                f"updating to '{fqdn_lower}'"
+            )
+
+        self.netbios_to_fqdn[netbios_lower] = fqdn_lower
+        logger.info(f"NetBIOS mapping added: {netbios_lower} -> {fqdn_lower}")
+
+        # Also add the FQDN to all_domains if not already present
+        self.add_domain(fqdn_lower)
+
+        # Retroactively normalize any credentials/users/hashes with this NetBIOS domain
+        self._retroactive_domain_normalize(fqdn_lower)
 
         return True
 

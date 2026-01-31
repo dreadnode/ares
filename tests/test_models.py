@@ -837,24 +837,141 @@ class TestResolveNetBIOSToFQDN:
         result = state._resolve_netbios_to_fqdn("north")
         assert result == "north"
 
-    def test_priority_target_domain_over_credentials(self) -> None:
-        """Test that target.domain takes priority over credentials."""
-        from ares.core.models import Credential, SharedRedTeamState, Target
+    def test_priority_netbios_mapping_over_target_domain(self) -> None:
+        """Test that netbios_to_fqdn mapping takes priority over target.domain."""
+        from ares.core.models import SharedRedTeamState, Target
 
         state = SharedRedTeamState(operation_id="test-op")
-        state.target = Target(ip="192.168.58.1", domain="corp.contoso.local")
-        # Credential has a different FQDN for same NetBIOS name (shouldn't happen, but test priority)
+        state.target = Target(ip="192.168.58.1", domain="sevenkingdoms.local")
+        # Authoritative mapping from AD crossRef objects
+        state.netbios_to_fqdn = {"north": "north.sevenkingdoms.local"}
+
+        # Should use netbios_to_fqdn mapping (highest priority)
+        result = state._resolve_netbios_to_fqdn("north")
+        assert result == "north.sevenkingdoms.local"
+
+    def test_priority_known_domains_over_target(self) -> None:
+        """Test that all_domains takes priority over target.domain for more specific matches."""
+        from ares.core.models import SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="192.168.58.1", domain="sevenkingdoms.local")
+        # Known domains includes the child domain
+        state.all_domains = ["north.sevenkingdoms.local", "sevenkingdoms.local"]
+
+        # Should prefer the more specific match from all_domains
+        result = state._resolve_netbios_to_fqdn("north")
+        assert result == "north.sevenkingdoms.local"
+
+    def test_prefers_longest_domain_match(self) -> None:
+        """Test that the longest (most specific) domain match is preferred."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        # Multiple domains that could match "north"
+        state.all_domains = [
+            "north.local",  # shorter
+            "north.sevenkingdoms.local",  # longer, more specific
+        ]
+
+        result = state._resolve_netbios_to_fqdn("north")
+        # Should prefer the longest match
+        assert result == "north.sevenkingdoms.local"
+
+
+class TestAddNetBIOSMapping:
+    """Tests for SharedRedTeamState.add_netbios_mapping."""
+
+    def test_adds_new_mapping(self) -> None:
+        """Test adding a new NetBIOS to FQDN mapping."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        result = state.add_netbios_mapping("NORTH", "north.sevenkingdoms.local")
+
+        assert result is True
+        assert state.netbios_to_fqdn["north"] == "north.sevenkingdoms.local"
+        # Should also add to all_domains
+        assert "north.sevenkingdoms.local" in state.all_domains
+
+    def test_normalizes_case(self) -> None:
+        """Test that NetBIOS names are normalized to lowercase."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        state.add_netbios_mapping("NORTH", "NORTH.SEVENKINGDOMS.LOCAL")
+
+        # Both should be lowercase
+        assert "north" in state.netbios_to_fqdn
+        assert state.netbios_to_fqdn["north"] == "north.sevenkingdoms.local"
+
+    def test_returns_false_for_duplicate(self) -> None:
+        """Test that adding duplicate mapping returns False."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        result1 = state.add_netbios_mapping("NORTH", "north.sevenkingdoms.local")
+        result2 = state.add_netbios_mapping("north", "north.sevenkingdoms.local")
+
+        assert result1 is True
+        assert result2 is False
+
+    def test_retroactively_normalizes_credentials(self) -> None:
+        """Test that adding mapping retroactively normalizes existing credentials."""
+        from ares.core.models import Credential, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        # Add credential with NetBIOS domain (no FQDN match yet)
         state.all_credentials = [
             Credential(
-                username="test",
-                password="test",  # pragma: allowlist secret
-                domain="corp.otherdomain.local",
+                username="samwell.tarly",
+                password="Heartsbane",  # pragma: allowlist secret
+                domain="north",
+                source="kerberoast",
             )
         ]
 
-        # Should use target.domain since it's checked first
-        result = state._resolve_netbios_to_fqdn("corp")
-        assert result == "corp.contoso.local"
+        # Now add the authoritative mapping
+        state.add_netbios_mapping("NORTH", "north.sevenkingdoms.local")
+
+        # Credential should be retroactively normalized
+        assert state.all_credentials[0].domain == "north.sevenkingdoms.local"
+
+    def test_multi_domain_forest_scenario(self) -> None:
+        """Test realistic multi-domain forest with parent and child domains."""
+        from ares.core.models import Credential, SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="192.168.58.10", domain="sevenkingdoms.local")
+
+        # Add authoritative mappings (as would come from AD crossRef query)
+        state.add_netbios_mapping("SEVENKINGDOMS", "sevenkingdoms.local")
+        state.add_netbios_mapping("NORTH", "north.sevenkingdoms.local")
+        state.add_netbios_mapping("ESSOS", "essos.sevenkingdoms.local")
+
+        # Now credentials should resolve correctly
+        cred_forest_root = Credential(
+            username="cersei.lannister",
+            password="WildFire123",  # pragma: allowlist secret
+            domain="SEVENKINGDOMS",
+            source="test",
+        )
+        cred_child = Credential(
+            username="samwell.tarly",
+            password="Heartsbane",  # pragma: allowlist secret
+            domain="NORTH",
+            source="test",
+        )
+
+        state.add_credential(cred_forest_root, "test")
+        state.add_credential(cred_child, "test")
+
+        # Each should resolve to correct domain
+        assert state.all_credentials[0].domain == "sevenkingdoms.local"
+        assert state.all_credentials[1].domain == "north.sevenkingdoms.local"
 
 
 class TestAddCredentialNetBIOSResolution:

@@ -2115,24 +2115,27 @@ Initial credential: {cred_info}
 
 Your objectives:
 1. Run nmap_scan on all targets to discover services
-2. LOW-HANGING FRUIT (do these early!):
+2. **MULTI-DOMAIN SETUP (run early with first credential!):**
+   - enumerate_domain_netbios_mappings: Query AD for NetBIOS->FQDN domain mappings
+   - This ensures credentials from child domains resolve correctly (e.g., NORTH -> north.sevenkingdoms.local)
+3. LOW-HANGING FRUIT (do these early!):
    - ldap_search_descriptions: Find passwords stored in user description fields
    - password_spray with common passwords (Password1, Welcome1, Summer2024, etc.)
    - username_as_password: Test if users have username as password (e.g., user1:user1)
-3. Enumerate users and shares with netexec/enum4linux-ng/rpcclient/smbclient
-4. If no creds, run Kerberos user recon with kerberos_user_enum_noauth
-5. Run certipy_find to discover ADCS vulnerabilities
-6. Run run_bloodhound for ACL analysis and attack path discovery
-7. **CRITICAL CREDENTIAL EXPANSION (run IMMEDIATELY after finding ANY credentials):**
+4. Enumerate users and shares with netexec/enum4linux-ng/rpcclient/smbclient
+5. If no creds, run Kerberos user recon with kerberos_user_enum_noauth
+6. Run certipy_find to discover ADCS vulnerabilities
+7. Run run_bloodhound for ACL analysis and attack path discovery
+8. **CRITICAL CREDENTIAL EXPANSION (run IMMEDIATELY after finding ANY credentials):**
    - Use secretsdump on ALL domain controllers to dump hashes
    - Use kerberoast to find service accounts with weak passwords
    - Use asrep_roast to find accounts without Kerberos pre-auth
    - Check secretsdump output for krbtgt or Administrator hashes
    - If krbtgt hash found → Generate golden ticket → Announce Domain Admin
    - If Administrator hash found → Test DA access → Announce Domain Admin
-8. Coordinate with specialized agents to exploit discovered vulnerabilities
-9. Use trigger_credential_expansion after getting new credentials
-10. Continue until Domain Admin access achieved
+9. Coordinate with specialized agents to exploit discovered vulnerabilities
+10. Use trigger_credential_expansion after getting new credentials
+11. Continue until Domain Admin access achieved
 
 Priority vulnerabilities to look for:
 - Passwords in LDAP description fields (QUICK WIN - check first!)

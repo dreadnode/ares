@@ -1447,6 +1447,103 @@ class PostureValidationTools(Toolset):
             return "SIDHistory entries detected:\n" + output
         return output or "No SIDHistory entries detected"
 
+    @dn.tool_method
+    def enumerate_domain_netbios_mappings(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        domain: str,
+    ) -> str:
+        """Query AD Configuration partition for NetBIOS to FQDN domain mappings.
+
+        This queries the crossRef objects in CN=Partitions,CN=Configuration to get
+        the authoritative mapping between NetBIOS domain names (e.g., "NORTH") and
+        their FQDNs (e.g., "north.sevenkingdoms.local").
+
+        IMPORTANT: Run this early in enumeration to ensure correct domain resolution
+        for credentials discovered in multi-domain forests.
+
+        Args:
+            target: Domain controller IP address
+            username: Username for LDAP authentication
+            password: Password for authentication
+            domain: Target domain (e.g., 'sevenkingdoms.local')
+
+        Returns:
+            Summary of discovered NetBIOS to FQDN mappings
+        """
+        from ares.core.models import SharedRedTeamState
+
+        # Build the Configuration naming context DN
+        # For domain "sevenkingdoms.local", this becomes:
+        # CN=Partitions,CN=Configuration,DC=sevenkingdoms,DC=local
+        domain_parts = domain.split(".")
+        config_dn = "CN=Partitions,CN=Configuration," + ",".join(
+            [f"DC={part}" for part in domain_parts]
+        )
+
+        cmd = [
+            "ldapsearch",
+            "-x",
+            "-H",
+            f"ldap://{target}",
+            "-D",
+            f"{username}@{domain}",
+            "-w",
+            password,
+            "-b",
+            config_dn,
+            "(objectClass=crossRef)",
+            "nETBIOSName",
+            "dnsRoot",
+        ]
+
+        stdout, stderr, returncode = run_tool(cmd, timeout_seconds=60)
+        output = (stdout or "") + ("\n" + stderr if stderr else "")
+
+        if returncode != 0 or "ldap_bind" in output.lower():
+            return f"[!] LDAP query failed: {output}"
+
+        # Parse the LDIF output for nETBIOSName and dnsRoot pairs
+        mappings: list[tuple[str, str]] = []
+        current_netbios = None
+        current_dnsroot = None
+
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if line.lower().startswith("netbiosname:"):
+                current_netbios = line.split(":", 1)[1].strip()
+            elif line.lower().startswith("dnsroot:"):
+                current_dnsroot = line.split(":", 1)[1].strip()
+
+            # When we have both values, store the mapping
+            if current_netbios and current_dnsroot:
+                mappings.append((current_netbios, current_dnsroot))
+                current_netbios = None
+                current_dnsroot = None
+
+        if not mappings:
+            return "[!] No NetBIOS mappings found in crossRef objects"
+
+        # Store mappings in shared state
+        added_count = 0
+        if self.state and isinstance(self.state, SharedRedTeamState):
+            for netbios, fqdn in mappings:
+                if self.state.add_netbios_mapping(netbios, fqdn):
+                    added_count += 1
+
+        # Format output
+        lines = ["NetBIOS to FQDN Domain Mappings (from AD Configuration):"]
+        for netbios, fqdn in mappings:
+            lines.append(f"  {netbios} -> {fqdn}")
+
+        if added_count > 0:
+            lines.append(f"\n✓ Added {added_count} new mappings to shared state")
+            lines.append("  Credentials with NetBIOS domains will now resolve correctly")
+
+        return "\n".join(lines)
+
 
 class BloodHoundTools(Toolset):
     """Tools for ACL recon and privilege escalation path discovery."""
