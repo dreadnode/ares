@@ -154,7 +154,7 @@ class Evidence(Model):
     validated: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for storage (backward compatible)."""
+        """Convert to dictionary for storage."""
         return self.model_dump(mode="json")
 
 
@@ -180,7 +180,7 @@ class TimelineEvent(Model):
     source: str = "investigation"
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for storage (backward compatible)."""
+        """Convert to dictionary for storage."""
         return self.model_dump(mode="json")
 
 
@@ -269,7 +269,7 @@ class InvestigativeQuestion(Model):
         return other.generated_from_question_id != self.id
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for storage (backward compatible)."""
+        """Convert to dictionary for storage."""
         # Use custom format to match original API
         return {
             "id": self.id,
@@ -1066,6 +1066,7 @@ class SharedRedTeamState:
             return False
         host.ip = host.ip.strip()
         host.hostname = host.hostname.strip()
+
         if host.hostname:
             hostname_lower = host.hostname.lower()
             if hostname_lower.startswith("ip-") and "compute.internal" in hostname_lower:
@@ -1275,6 +1276,9 @@ class SharedRedTeamState:
             state.pending_credential_findings = set()
         if not hasattr(state, "downloaded_artifacts"):
             state.downloaded_artifacts = {}
+        for host in state.all_hosts:
+            if not hasattr(host, "is_dc"):
+                host.update_dc_status()
         state.all_credentials = cls._dedupe_credentials(state.all_credentials)
         if not state.all_domains:
             state.all_domains = cls._extract_domains(state)

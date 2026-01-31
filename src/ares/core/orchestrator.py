@@ -430,9 +430,6 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         asyncio.create_task(
             _auto_delegation_enumeration(dispatcher), name="auto_delegation_enumeration"
         ),
-        asyncio.create_task(
-            _auto_unknown_host_enumeration(dispatcher), name="auto_unknown_host_enumeration"
-        ),
     ]
 
     # Build initial prompt for orchestrator
@@ -1390,7 +1387,8 @@ async def _auto_credential_access(  # noqa: PLR0912
     processed_hashes: set[tuple[str, str, str]] = set()
     processed_crack_hashes: set[tuple[str, str, str, str]] = set()
     processed_no_cred_domains: set[str] = set()
-    processed_spray_domains: set[str] = set()  # Domains we've run username_as_password on
+    processed_username_spray_domains: set[str] = set()  # Domains we've run username_as_password on
+    processed_password_spray_domains: set[str] = set()  # Domains we've run password_spray on
     last_user_count: dict[str, int] = {}  # Track user counts per domain to detect new users
 
     while True:
@@ -1463,8 +1461,21 @@ async def _auto_credential_access(  # noqa: PLR0912
                 and not state.all_hashes
                 and any(domain not in processed_no_cred_domains for domain in domains)
             )
+            # Check if any domain has users but hasn't had password spray run yet
+            has_unsprayed_users = any(
+                domain not in processed_password_spray_domains
+                and sum(1 for u in state.all_users if (u.domain or "").lower() == domain.lower())
+                >= 3
+                for domain in domains
+            )
 
-            if not (has_new_creds or has_new_hashes or has_new_cracks or has_new_domains):
+            if not (
+                has_new_creds
+                or has_new_hashes
+                or has_new_cracks
+                or has_new_domains
+                or has_unsprayed_users
+            ):
                 await dispatcher.wait_for_credential_access_signal(check_interval)
                 continue
 
@@ -1495,15 +1506,6 @@ async def _auto_credential_access(  # noqa: PLR0912
             # Check for new users without credentials - run username_as_password on them
             # This catches cases like hodor:hodor where username equals password
             for domain in sorted(domains):
-                if domain in processed_spray_domains:
-                    # Only re-run if we've discovered significantly more users
-                    current_count = sum(
-                        1 for u in state.all_users if (u.domain or "").lower() == domain.lower()
-                    )
-                    prev_count = last_user_count.get(domain.lower(), 0)
-                    if current_count <= prev_count + 5:  # Need at least 5 new users to re-spray
-                        continue
-
                 # Find users in this domain that don't have credentials
                 domain_users = [
                     u.username
@@ -1517,17 +1519,24 @@ async def _auto_credential_access(  # noqa: PLR0912
                 }
                 users_without_creds = [u for u in domain_users if u.lower() not in users_with_creds]
 
-                if len(users_without_creds) >= 3:  # Only spray if we have enough users
-                    domain_hosts = hosts_by_domain.get(domain.lower(), []) or host_ips
+                # Find an existing credential for this domain to use for user enumeration
+                enum_cred = None
+                for c in state.all_credentials:
+                    if (c.domain or "").lower() == domain.lower() and c.password:
+                        enum_cred = c
+                        break
 
-                    # Find an existing credential for this domain to use for user enumeration
-                    # username_as_password needs creds to enumerate users before spraying
-                    enum_cred = None
-                    for c in state.all_credentials:
-                        if (c.domain or "").lower() == domain.lower() and c.password:
-                            enum_cred = c
-                            break
+                domain_hosts = hosts_by_domain.get(domain.lower(), []) or host_ips
 
+                # Run username_as_password if we have enough users and haven't done it yet
+                should_run_username_spray = domain not in processed_username_spray_domains
+                if domain in processed_username_spray_domains:
+                    # Re-run if we've discovered significantly more users
+                    current_count = len(domain_users)
+                    prev_count = last_user_count.get(domain.lower(), 0)
+                    should_run_username_spray = current_count > prev_count + 5
+
+                if should_run_username_spray and len(users_without_creds) >= 3:
                     task_id = await dispatcher.request_credential_access(
                         source_agent="orchestrator",
                         domain=domain,
@@ -1538,7 +1547,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                         techniques=["username_as_password"],
                     )
                     if task_id:
-                        processed_spray_domains.add(domain)
+                        processed_username_spray_domains.add(domain)
                         last_user_count[domain.lower()] = len(domain_users)
                         logger.info(
                             "Auto username_as_password dispatched for %d users without creds in %s (using %s for enum)",
@@ -1547,6 +1556,26 @@ async def _auto_credential_access(  # noqa: PLR0912
                             f"{enum_cred.domain}\\{enum_cred.username}"
                             if enum_cred
                             else "null session",
+                        )
+
+                # Run password_spray with common passwords if we have users and haven't done it
+                # This is separate from username_as_password - we spray common passwords
+                if domain not in processed_password_spray_domains and len(domain_users) >= 3:
+                    task_id = await dispatcher.request_credential_access(
+                        source_agent="orchestrator",
+                        domain=domain,
+                        target_ips=domain_hosts,
+                        username=enum_cred.username if enum_cred else "",
+                        password=enum_cred.password if enum_cred else None,
+                        reason="low_hanging_fruit_password_spray",
+                        techniques=["password_spray"],
+                    )
+                    if task_id:
+                        processed_password_spray_domains.add(domain)
+                        logger.info(
+                            "Auto password_spray dispatched for %d users in %s",
+                            len(domain_users),
+                            domain,
                         )
 
             for cred in state.all_credentials:
@@ -1950,93 +1979,6 @@ async def _auto_delegation_enumeration(
             break
         except Exception as e:
             logger.error(f"Auto delegation enumeration error: {e}", exc_info=True)
-            await asyncio.sleep(check_interval)
-
-
-async def _auto_unknown_host_enumeration(
-    dispatcher: RedTeamDispatcher,
-    check_interval: float = 120.0,
-    max_hosts_per_cycle: int = 5,
-) -> None:
-    """
-    Background task that re-scans hosts with incomplete service information.
-
-    When hosts have empty services or unknown OS, this task dispatches
-    nmap_scan and smb_enumeration to fill in the gaps.
-
-    Args:
-        dispatcher: The dispatcher instance
-        check_interval: Seconds between checks (less critical, so longer interval)
-        max_hosts_per_cycle: Maximum hosts to re-scan per cycle
-    """
-    # Track hosts we've already re-scanned
-    rescanned_hosts: set[str] = set()
-
-    while True:
-        try:
-            await asyncio.sleep(check_interval)
-
-            state = dispatcher.shared_state
-
-            # Skip if operation is complete
-            if state.completed or state.has_domain_admin:
-                logger.debug("Operation complete, stopping unknown host enumeration")
-                break
-
-            # Find hosts with incomplete info
-            incomplete_hosts = [
-                host
-                for host in state.all_hosts
-                if host.ip
-                and host.ip not in rescanned_hosts
-                and (
-                    not host.services  # No services discovered
-                    or (host.os or "").lower() in ("", "unknown")  # No OS info
-                )
-            ]
-
-            if not incomplete_hosts:
-                logger.debug("Auto-scan: no hosts with incomplete info")
-                continue
-
-            # Limit to max_hosts_per_cycle
-            hosts_to_scan = incomplete_hosts[:max_hosts_per_cycle]
-            target_ips = [h.ip for h in hosts_to_scan]
-
-            # Get domain context
-            domain = state.target.domain if state.target else ""
-            if not domain:
-                # Try to infer from credentials or hosts
-                for cred in state.all_credentials:
-                    if cred.domain:
-                        domain = cred.domain
-                        break
-
-            logger.info(
-                f"🔍 Auto-scan: Re-scanning {len(target_ips)} hosts with incomplete info: {target_ips}"
-            )
-
-            # Dispatch recon for incomplete hosts
-            task_id = await dispatcher.request_recon(
-                source_agent="orchestrator",
-                domain=domain,
-                target_ips=target_ips,
-                reason="incomplete_host_rescan",
-                techniques=["nmap_scan", "smb_enumeration"],
-            )
-
-            if task_id:
-                # Mark these hosts as rescanned
-                for ip in target_ips:
-                    rescanned_hosts.add(ip)
-                logger.info(
-                    f"Auto-scan task {task_id} dispatched for {len(target_ips)} incomplete hosts"
-                )
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Auto unknown host enumeration error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
 
 

@@ -41,6 +41,7 @@ async def test_run_multi_agent_operation_skips_wait_when_completed(monkeypatch):
         discovered_vulnerabilities=[],
         exploited_vulnerabilities=[],
         completed_tasks=[],
+        pending_tasks={},
     )
 
     dispatcher = SimpleNamespace(shared_state=shared_state)
@@ -374,7 +375,7 @@ class TestWaitForCrackTasks:
         crack_task = TaskInfo(
             task_id="crack-001",
             task_type="crack",
-            source_agent="cracker",
+            assigned_agent="cracker",
             status=TaskStatus.IN_PROGRESS,
         )
         state.pending_tasks["crack-001"] = crack_task
@@ -402,7 +403,7 @@ class TestWaitForCrackTasks:
         crack_task = TaskInfo(
             task_id="crack-002",
             task_type="crack",
-            source_agent="cracker",
+            assigned_agent="cracker",
             status=TaskStatus.IN_PROGRESS,
         )
         state.pending_tasks["crack-002"] = crack_task
@@ -547,160 +548,6 @@ class TestAutoDelegationEnumeration:
         # No assertions needed - test is that it doesn't hang
 
 
-class TestAutoUnknownHostEnumeration:
-    """Tests for _auto_unknown_host_enumeration background task."""
-
-    @pytest.mark.asyncio
-    async def test_auto_unknown_host_rescans_incomplete_hosts(self):
-        """_auto_unknown_host_enumeration should re-scan hosts with missing service info."""
-        from ares.core.models import Host, Target
-        from ares.core.orchestrator import _auto_unknown_host_enumeration
-
-        dispatcher = SimpleNamespace()
-        dispatcher.shared_state = SharedRedTeamState(operation_id="op-test-unknown-1")
-        dispatcher.shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
-
-        # Add host with no services (incomplete)
-        dispatcher.shared_state.all_hosts.append(
-            Host(ip="192.168.58.50", hostname="unknown01", services=[])
-        )
-
-        dispatcher.request_recon = AsyncMock(return_value="task-recon-1")
-
-        # Run one iteration
-        task = asyncio.create_task(
-            _auto_unknown_host_enumeration(dispatcher, check_interval=0.01, max_hosts_per_cycle=5)
-        )
-
-        await asyncio.sleep(0.05)
-        task.cancel()
-
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-        # Should have dispatched recon
-        dispatcher.request_recon.assert_awaited_once()
-        call_kwargs = dispatcher.request_recon.call_args.kwargs
-        assert "192.168.58.50" in call_kwargs["target_ips"]
-        assert call_kwargs["reason"] == "incomplete_host_rescan"
-        assert "nmap_scan" in call_kwargs["techniques"]
-        assert "smb_enumeration" in call_kwargs["techniques"]
-
-    @pytest.mark.asyncio
-    async def test_auto_unknown_host_rescans_unknown_os(self):
-        """_auto_unknown_host_enumeration should re-scan hosts with unknown OS."""
-        from ares.core.models import Host, Target
-        from ares.core.orchestrator import _auto_unknown_host_enumeration
-
-        dispatcher = SimpleNamespace()
-        dispatcher.shared_state = SharedRedTeamState(operation_id="op-test-unknown-2")
-        dispatcher.shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
-
-        # Add host with unknown OS
-        dispatcher.shared_state.all_hosts.append(
-            Host(
-                ip="192.168.58.60",
-                hostname="unknown02",
-                services=["445/tcp smb"],
-                os="unknown",  # Unknown OS
-            )
-        )
-
-        dispatcher.request_recon = AsyncMock(return_value="task-recon-2")
-
-        task = asyncio.create_task(
-            _auto_unknown_host_enumeration(dispatcher, check_interval=0.01, max_hosts_per_cycle=5)
-        )
-
-        await asyncio.sleep(0.05)
-        task.cancel()
-
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-        # Should have dispatched recon for unknown OS
-        dispatcher.request_recon.assert_awaited_once()
-        call_kwargs = dispatcher.request_recon.call_args.kwargs
-        assert "192.168.58.60" in call_kwargs["target_ips"]
-
-    @pytest.mark.asyncio
-    async def test_auto_unknown_host_limits_per_cycle(self):
-        """_auto_unknown_host_enumeration should limit hosts scanned per cycle."""
-        from ares.core.models import Host, Target
-        from ares.core.orchestrator import _auto_unknown_host_enumeration
-
-        dispatcher = SimpleNamespace()
-        dispatcher.shared_state = SharedRedTeamState(operation_id="op-test-unknown-3")
-        dispatcher.shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
-
-        # Add 10 incomplete hosts
-        for i in range(10):
-            dispatcher.shared_state.all_hosts.append(
-                Host(ip=f"192.168.58.{100 + i}", hostname=f"host{i}", services=[])
-            )
-
-        dispatcher.request_recon = AsyncMock(return_value="task-recon-3")
-
-        task = asyncio.create_task(
-            _auto_unknown_host_enumeration(
-                dispatcher,
-                check_interval=0.01,
-                max_hosts_per_cycle=3,  # Limit to 3
-            )
-        )
-
-        await asyncio.sleep(0.05)
-        task.cancel()
-
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-        # Should only scan 3 hosts per cycle (first call should have 3 hosts)
-        assert dispatcher.request_recon.await_count >= 1
-        # Check first call had exactly 3 hosts
-        first_call_kwargs = dispatcher.request_recon.call_args_list[0].kwargs
-        assert len(first_call_kwargs["target_ips"]) == 3
-
-    @pytest.mark.asyncio
-    async def test_auto_unknown_host_does_not_rescan_twice(self):
-        """_auto_unknown_host_enumeration should not re-scan same host multiple times."""
-        from ares.core.models import Host, Target
-        from ares.core.orchestrator import _auto_unknown_host_enumeration
-
-        dispatcher = SimpleNamespace()
-        dispatcher.shared_state = SharedRedTeamState(operation_id="op-test-unknown-4")
-        dispatcher.shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
-
-        # Add incomplete host
-        dispatcher.shared_state.all_hosts.append(
-            Host(ip="192.168.58.70", hostname="host01", services=[])
-        )
-
-        dispatcher.request_recon = AsyncMock(return_value="task-recon-4")
-
-        # Run multiple iterations
-        task = asyncio.create_task(
-            _auto_unknown_host_enumeration(dispatcher, check_interval=0.01, max_hosts_per_cycle=5)
-        )
-
-        await asyncio.sleep(0.1)
-        task.cancel()
-
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-        # Should only scan once (not on every iteration)
-        assert dispatcher.request_recon.await_count == 1
-
-
 class TestHashCrackingPriority:
     """Tests for priority-based hash cracking."""
 
@@ -731,6 +578,7 @@ class TestHashCrackingPriority:
         )
 
         dispatcher.request_crack = AsyncMock(return_value="task-crack-1")
+        dispatcher.request_credential_access = AsyncMock(return_value="task-cred-1")
 
         # Run one iteration
         task = asyncio.create_task(_auto_credential_access(dispatcher, check_interval=0.01))
@@ -775,6 +623,7 @@ class TestHashCrackingPriority:
         )
 
         dispatcher.request_crack = AsyncMock(return_value="task-crack-2")
+        dispatcher.request_credential_access = AsyncMock(return_value="task-cred-2")
 
         task = asyncio.create_task(_auto_credential_access(dispatcher, check_interval=0.01))
 
@@ -818,6 +667,7 @@ class TestHashCrackingPriority:
         )
 
         dispatcher.request_crack = AsyncMock(return_value="task-crack-3")
+        dispatcher.request_credential_access = AsyncMock(return_value="task-cred-3")
 
         task = asyncio.create_task(_auto_credential_access(dispatcher, check_interval=0.01))
 

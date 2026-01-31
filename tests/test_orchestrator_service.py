@@ -247,7 +247,7 @@ async def test_process_operation_request_fetches_env_vars_from_separate_key():
 
 @pytest.mark.asyncio
 async def test_process_operation_request_uses_inline_env_vars_when_present():
-    """Test that inline env_vars in request take precedence (backward compatibility)."""
+    """Test that inline env_vars in request take precedence."""
     service = OrchestratorService(redis_url="redis://", namespace="test")
     service._publish_operation_status = AsyncMock()
 

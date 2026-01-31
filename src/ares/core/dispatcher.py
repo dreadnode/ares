@@ -642,6 +642,53 @@ class RedTeamDispatcher:
         sql_creds.sort(key=lambda x: x.get("is_sql_account", "False") != "True")
         return sql_creds[:5]  # Return top 5 candidates
 
+    def _ensure_credential_in_state(
+        self,
+        username: str,
+        domain: str,
+        password: str | None = None,
+        hash_value: str | None = None,
+        source: str = "task_dispatch",
+    ) -> bool:
+        """
+        Ensure a credential is saved to shared state when dispatching tasks.
+
+        This prevents credentials from being "lost" when they're only in task payloads
+        but not in the shared state that other agents can see.
+
+        Args:
+            username: Username for the credential.
+            domain: Domain for the credential.
+            password: Optional password.
+            hash_value: Optional NTLM hash.
+            source: Source identifier for the credential.
+
+        Returns:
+            True if credential was added, False if it already existed or was invalid.
+        """
+        if not username:
+            return False
+        # Only create Credential if we have a password (Credential requires password field)
+        # Hash-only credentials are tracked separately in all_hashes
+        if not password:
+            return False
+
+        # Create credential object
+        credential = Credential(
+            username=username,
+            domain=domain or "",
+            password=password,
+            source=source,
+        )
+
+        # add_credential handles deduplication
+        added = self.shared_state.add_credential(credential, source)
+        if added:
+            logger.info(
+                f"Auto-saved credential to shared state: {domain}\\{username} (source={source})"
+            )
+        return added
+
     async def scan_hosts_for_mssql(self) -> int:
         """
         Scan all known hosts for MSSQL services and queue vulnerabilities.
@@ -776,6 +823,14 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        # Auto-save credential to shared state so other agents can use it
+        self._ensure_credential_in_state(
+            username=username,
+            domain=domain,
+            password=password,
+            source="adcs_enumeration",
+        )
+
         dc_ip = self._find_domain_controller_ip(domain)
         payload = {
             "vuln_type": "adcs_enumerate",
@@ -1054,6 +1109,15 @@ class RedTeamDispatcher:
                         username,
                     )
 
+        # Auto-save credential to shared state so other agents can use it
+        self._ensure_credential_in_state(
+            username=username,
+            domain=resolved_domain or domain,
+            password=resolved_password,
+            hash_value=resolved_hash,
+            source="lateral_movement",
+        )
+
         payload = {
             "target_host": target_host,
             "username": username,
@@ -1144,8 +1208,8 @@ class RedTeamDispatcher:
 
         Detection priority:
         1. Hosts with explicit DC roles (AD DC, DC, Domain Controller) matching domain
-        2. Hosts with DC-like services (Kerberos 88, LDAP 389) matching domain
-        3. Hosts with "dc" in hostname matching domain
+        2. Hosts with "dc" in hostname matching domain (strong indicator)
+        3. Hosts with DC-like services (Kerberos 88, LDAP 389) matching domain
         4. Fallback: any host with DC role/services (cross-domain, logged as warning)
         """
         domain_lower = domain.lower() if domain else ""
@@ -1206,7 +1270,15 @@ class RedTeamDispatcher:
                 logger.debug(f"DC IP found via role: {host.ip} ({hostname})")
                 return host.ip
 
-        # Priority 2: Infer DC from services on hosts within the domain
+        # Priority 2: Search hosts with "dc" in hostname that belong to this domain
+        # A host named "dc01" is almost certainly a DC (strong indicator)
+        for host in self.shared_state.all_hosts:
+            hostname = (host.hostname or "").lower()
+            if "dc" in hostname and _hostname_matches_domain(hostname, domain_lower):
+                logger.debug(f"DC IP found via hostname pattern: {host.ip} ({hostname})")
+                return host.ip
+
+        # Priority 3: Infer DC from services on hosts within the domain
         # Hosts advertising Kerberos (88) or LDAP (389) are likely DCs
         if domain_lower:
             for host in self.shared_state.all_hosts:
@@ -1214,13 +1286,6 @@ class RedTeamDispatcher:
                 if _hostname_matches_domain(hostname, domain_lower) and _has_dc_services(host):
                     logger.debug(f"DC IP found via services: {host.ip} ({hostname})")
                     return host.ip
-
-        # Priority 3: Search hosts with "dc" in hostname that belong to this domain
-        for host in self.shared_state.all_hosts:
-            hostname = (host.hostname or "").lower()
-            if "dc" in hostname and _hostname_matches_domain(hostname, domain_lower):
-                logger.debug(f"DC IP found via hostname pattern: {host.ip} ({hostname})")
-                return host.ip
 
         # Priority 4: Fallback - hosts with DC roles (any domain) - log warning
         for host in self.shared_state.all_hosts:
@@ -1362,6 +1427,15 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        # Auto-save credential to shared state so other agents can use it
+        self._ensure_credential_in_state(
+            username=username,
+            domain=domain,
+            password=password,
+            hash_value=hash_value,
+            source=f"recon_{reason or 'task'}",
+        )
+
         dc_ip = self._find_domain_controller_ip(domain)
         payload = {
             "domain": domain,
@@ -1471,6 +1545,15 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        # Auto-save credential to shared state so other agents can use it
+        self._ensure_credential_in_state(
+            username=username,
+            domain=domain,
+            password=password,
+            hash_value=hash_value,
+            source=f"credential_access_{reason or 'task'}",
+        )
+
         dc_ip = self._find_domain_controller_ip(domain)
         payload = {
             "domain": domain,
@@ -1661,6 +1744,14 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        # Auto-save credential to shared state so other agents can use it
+        self._ensure_credential_in_state(
+            username=username,
+            domain=domain,
+            password=password,
+            source="privesc_enumeration",
+        )
+
         dc_ip = self._find_domain_controller_ip(domain)
         payload = {
             "domain": domain,

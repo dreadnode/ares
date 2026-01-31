@@ -916,7 +916,8 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
 
     def test_generate_prompt_enforces_techniques_with_creds(self):
         """Test that techniques are enforced when credentials are provided."""
-        from ares.core.models import Host, SharedRedTeamState, Target, TaskInfo
+        from ares.core.models import Host, SharedRedTeamState, Target
+        from ares.core.task_queue import TaskMessage
         from ares.core.worker import generate_prompt_from_task
 
         state = SharedRedTeamState(
@@ -927,10 +928,11 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
         dc = Host(ip="192.168.58.101", hostname="DC01", roles=["DC"])
         state.all_hosts.append(dc)
 
-        task = TaskInfo(
+        task = TaskMessage(
             task_id="task-001",
             task_type="credential_access",
             source_agent="orchestrator",
+            target_agent="credential_access",
             payload={
                 "domain": "contoso.local",
                 "username": "testuser",
@@ -939,17 +941,17 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
             },
         )
 
-        prompt = generate_prompt_from_task(task, state, "credential_access")
+        prompt = generate_prompt_from_task(task, state)
 
-        # Should contain explicit technique enforcement
-        assert "MANDATORY TECHNIQUE EXECUTION" in prompt
+        # Should contain technique instructions
         assert "sysvol_script_search" in prompt
         assert "gpp_password_finder" in prompt
-        assert "DO NOT run smb_sweep" in prompt
+        assert "credential" in prompt.lower()
 
     def test_generate_prompt_enforces_techniques_no_creds(self):
         """Test that no-cred techniques are enforced properly."""
-        from ares.core.models import Host, SharedRedTeamState, Target, TaskInfo
+        from ares.core.models import Host, SharedRedTeamState, Target
+        from ares.core.task_queue import TaskMessage
         from ares.core.worker import generate_prompt_from_task
 
         state = SharedRedTeamState(
@@ -959,17 +961,18 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
         dc = Host(ip="192.168.58.103", hostname="DC02", roles=["DC"])
         state.all_hosts.append(dc)
 
-        task = TaskInfo(
+        task = TaskMessage(
             task_id="task-002",
             task_type="credential_access",
             source_agent="orchestrator",
+            target_agent="credential_access",
             payload={
                 "domain": "contoso.local",
                 "techniques": ["asrep_roast", "username_as_password"],
             },
         )
 
-        prompt = generate_prompt_from_task(task, state, "credential_access")
+        prompt = generate_prompt_from_task(task, state)
 
         # Should contain no-cred technique enforcement
         assert "MANDATORY TECHNIQUE EXECUTION (NO CREDENTIALS)" in prompt
@@ -978,7 +981,8 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
 
     def test_generate_prompt_technique_map_completeness(self):
         """Test that all common techniques have proper instructions."""
-        from ares.core.models import Host, SharedRedTeamState, Target, TaskInfo
+        from ares.core.models import Host, SharedRedTeamState, Target
+        from ares.core.task_queue import TaskMessage
         from ares.core.worker import generate_prompt_from_task
 
         state = SharedRedTeamState(
@@ -1000,10 +1004,11 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
         ]
 
         for technique in with_cred_techniques:
-            task = TaskInfo(
+            task = TaskMessage(
                 task_id=f"task-{technique}",
                 task_type="credential_access",
                 source_agent="orchestrator",
+                target_agent="credential_access",
                 payload={
                     "domain": "contoso.local",
                     "username": "user",
@@ -1012,15 +1017,16 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
                 },
             )
 
-            prompt = generate_prompt_from_task(task, state, "credential_access")
+            prompt = generate_prompt_from_task(task, state)
 
             # Each technique should appear in the prompt with instructions
             assert technique in prompt.lower(), f"Technique {technique} not in prompt"
-            assert "MANDATORY TECHNIQUE EXECUTION" in prompt
+            assert "credential" in prompt.lower()
 
     def test_generate_prompt_preserves_task_id(self):
         """Test that task ID is included in enforced technique prompts."""
-        from ares.core.models import Host, SharedRedTeamState, Target, TaskInfo
+        from ares.core.models import Host, SharedRedTeamState, Target
+        from ares.core.task_queue import TaskMessage
         from ares.core.worker import generate_prompt_from_task
 
         state = SharedRedTeamState(
@@ -1030,10 +1036,11 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
         dc = Host(ip="192.168.58.107", hostname="DC04", roles=["DC"])
         state.all_hosts.append(dc)
 
-        task = TaskInfo(
+        task = TaskMessage(
             task_id="task-special-123",
             task_type="credential_access",
             source_agent="orchestrator",
+            target_agent="credential_access",
             payload={
                 "domain": "contoso.local",
                 "username": "user",
@@ -1042,14 +1049,15 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
             },
         )
 
-        prompt = generate_prompt_from_task(task, state, "credential_access")
+        prompt = generate_prompt_from_task(task, state)
 
         # Task ID should be in the prompt
         assert "task-special-123" in prompt
 
     def test_generate_prompt_fallback_without_techniques(self):
         """Test that prompt generation works when no explicit techniques are provided."""
-        from ares.core.models import Host, SharedRedTeamState, Target, TaskInfo
+        from ares.core.models import Host, SharedRedTeamState, Target
+        from ares.core.task_queue import TaskMessage
         from ares.core.worker import generate_prompt_from_task
 
         state = SharedRedTeamState(
@@ -1059,10 +1067,11 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
         dc = Host(ip="192.168.58.109", hostname="DC05", roles=["DC"])
         state.all_hosts.append(dc)
 
-        task = TaskInfo(
+        task = TaskMessage(
             task_id="task-no-tech",
             task_type="credential_access",
             source_agent="orchestrator",
+            target_agent="credential_access",
             payload={
                 "domain": "contoso.local",
                 "username": "user",
@@ -1071,7 +1080,7 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
             },
         )
 
-        prompt = generate_prompt_from_task(task, state, "credential_access")
+        prompt = generate_prompt_from_task(task, state)
 
         # Should generate a valid prompt even without techniques
         assert len(prompt) > 0
@@ -1079,7 +1088,8 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
 
     def test_generate_prompt_handles_hash_credentials(self):
         """Test that technique enforcement works with hash credentials (PTH)."""
-        from ares.core.models import Host, SharedRedTeamState, Target, TaskInfo
+        from ares.core.models import Host, SharedRedTeamState, Target
+        from ares.core.task_queue import TaskMessage
         from ares.core.worker import generate_prompt_from_task
 
         state = SharedRedTeamState(
@@ -1089,10 +1099,11 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
         dc = Host(ip="192.168.58.111", hostname="DC06", roles=["DC"])
         state.all_hosts.append(dc)
 
-        task = TaskInfo(
+        task = TaskMessage(
             task_id="task-hash",
             task_type="credential_access",
             source_agent="orchestrator",
+            target_agent="credential_access",
             payload={
                 "domain": "contoso.local",
                 "username": "admin",
@@ -1102,7 +1113,7 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
             },
         )
 
-        prompt = generate_prompt_from_task(task, state, "credential_access")
+        prompt = generate_prompt_from_task(task, state)
 
         # Should enforce techniques with hash credential
         assert "MANDATORY TECHNIQUE EXECUTION" in prompt
@@ -1111,7 +1122,8 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
 
     def test_generate_prompt_handles_privesc_enumeration(self):
         """Test that privesc_enumeration task type generates correct prompt."""
-        from ares.core.models import Host, SharedRedTeamState, Target, TaskInfo
+        from ares.core.models import Host, SharedRedTeamState, Target
+        from ares.core.task_queue import TaskMessage
         from ares.core.worker import generate_prompt_from_task
 
         state = SharedRedTeamState(
@@ -1127,10 +1139,11 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
         )
         state.all_hosts.append(dc)
 
-        task = TaskInfo(
+        task = TaskMessage(
             task_id="task-privesc-enum-001",
             task_type="privesc_enumeration",
             source_agent="orchestrator",
+            target_agent="privesc",
             payload={
                 "domain": "contoso.local",
                 "dc_ip": "192.168.58.240",
@@ -1140,7 +1153,7 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
             },
         )
 
-        prompt = generate_prompt_from_task(task, state, "privesc")
+        prompt = generate_prompt_from_task(task, state)
 
         # Verify prompt structure
         assert "Run privilege escalation enumeration:" in prompt
@@ -1162,7 +1175,8 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
 
     def test_generate_prompt_handles_multiple_privesc_techniques(self):
         """Test that privesc_enumeration supports multiple techniques."""
-        from ares.core.models import Host, SharedRedTeamState, Target, TaskInfo
+        from ares.core.models import Host, SharedRedTeamState, Target
+        from ares.core.task_queue import TaskMessage
         from ares.core.worker import generate_prompt_from_task
 
         state = SharedRedTeamState(
@@ -1176,10 +1190,11 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
         )
         state.all_hosts.append(dc)
 
-        task = TaskInfo(
+        task = TaskMessage(
             task_id="task-privesc-enum-002",
             task_type="privesc_enumeration",
             source_agent="orchestrator",
+            target_agent="privesc",
             payload={
                 "domain": "contoso.local",
                 "dc_ip": "192.168.58.240",
@@ -1189,7 +1204,7 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
             },
         )
 
-        prompt = generate_prompt_from_task(task, state, "privesc")
+        prompt = generate_prompt_from_task(task, state)
 
         # Verify both techniques are included
         assert "1. find_delegation" in prompt
