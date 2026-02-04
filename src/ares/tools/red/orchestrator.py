@@ -32,6 +32,13 @@ class OrchestratorTools(Toolset):
     _shared_state: SharedRedTeamState | None = None
     _agent_name: str = "orchestrator"
 
+    # Rate limiting for status check tools (prevent polling loops)
+    _pending_tasks_last_check: float = 0.0
+    _pending_tasks_cache: str = ""
+    _exploitation_status_last_check: float = 0.0
+    _exploitation_status_cache: str = ""
+    _STATUS_CACHE_TTL: float = 30.0  # 30 second cache
+
     def set_dispatcher(self, dispatcher: RedTeamDispatcher) -> None:
         """Set the dispatcher for inter-agent communication."""
         self._dispatcher = dispatcher
@@ -785,20 +792,36 @@ class OrchestratorTools(Toolset):
         Returns summary of tasks that have been dispatched but
         not yet completed.
 
+        Note: Results are cached for 30 seconds to prevent polling loops.
+        Take action before checking again.
+
         Returns:
             Formatted list of pending tasks
         """
+        import time
+
+        now = time.time()
+        if now - self._pending_tasks_last_check < self._STATUS_CACHE_TTL:
+            return (
+                self._pending_tasks_cache
+                + "\n\n⚠️ [Cached result - take action before checking again]"
+            )
+
         pending = self.shared_state.pending_tasks
 
         if not pending:
-            return "No pending tasks"
+            result = "No pending tasks"
+        else:
+            lines = ["📋 Pending Tasks:"]
+            for task_id, info in pending.items():
+                lines.append(
+                    f"  • {task_id}: {info.task_type} → {info.assigned_agent} [{info.status.value}]"
+                )
+            result = "\n".join(lines)
 
-        lines = ["📋 Pending Tasks:"]
-        for task_id, info in pending.items():
-            lines.append(
-                f"  • {task_id}: {info.task_type} → {info.assigned_agent} [{info.status.value}]"
-            )
-        return "\n".join(lines)
+        self._pending_tasks_last_check = now
+        self._pending_tasks_cache = result
+        return result
 
     @dn.tool_method
     async def cleanup_orphaned_tasks(  # noqa: PLR0912
@@ -956,9 +979,21 @@ class OrchestratorTools(Toolset):
 
         Critical for tracking attack surface coverage.
 
+        Note: Results are cached for 30 seconds to prevent polling loops.
+        Take action before checking again.
+
         Returns:
             Formatted vulnerability status
         """
+        import time
+
+        now = time.time()
+        if now - self._exploitation_status_last_check < self._STATUS_CACHE_TTL:
+            return (
+                self._exploitation_status_cache
+                + "\n\n⚠️ [Cached result - take action before checking again]"
+            )
+
         discovered = self.shared_state.discovered_vulnerabilities
         status = await self.dispatcher.get_exploitation_status()
 
@@ -966,7 +1001,10 @@ class OrchestratorTools(Toolset):
 
         if not discovered:
             lines.append("  No vulnerabilities discovered")
-            return "\n".join(lines)
+            result = "\n".join(lines)
+            self._exploitation_status_last_check = now
+            self._exploitation_status_cache = result
+            return result
 
         pending = []
         succeeded = []
@@ -1000,7 +1038,10 @@ class OrchestratorTools(Toolset):
             f"{status.get('total_failed', 0)} failed / {len(discovered)} discovered"
         )
 
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        self._exploitation_status_last_check = now
+        self._exploitation_status_cache = result
+        return result
 
     @dn.tool_method
     def get_agent_status(self) -> str:

