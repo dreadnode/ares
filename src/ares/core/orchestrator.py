@@ -430,6 +430,9 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         asyncio.create_task(
             _auto_delegation_enumeration(dispatcher), name="auto_delegation_enumeration"
         ),
+        asyncio.create_task(
+            _auto_local_admin_secretsdump(dispatcher), name="auto_local_admin_secretsdump"
+        ),
     ]
 
     # Build initial prompt for orchestrator
@@ -1015,7 +1018,7 @@ async def _auto_mssql_detection(
 async def _auto_adcs_enumeration(  # noqa: PLR0912
     dispatcher: RedTeamDispatcher,
     check_interval: float = 45.0,
-    max_retries: int = 5,
+    max_retries: int = 2,
 ) -> None:
     """
     Background task that automatically runs ADCS enumeration when:
@@ -1028,12 +1031,14 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
     Args:
         dispatcher: The dispatcher instance
         check_interval: Seconds between ADCS checks
-        max_retries: Maximum retry attempts per server
+        max_retries: Maximum retry attempts per server (reduced to avoid blocking privesc queue)
     """
     # Track (server, user, domain) -> (task_id, attempt_count, last_attempt_time)
     adcs_attempts: dict[tuple[str, str, str], tuple[str, int, float]] = {}
     successful_servers: set[str] = set()  # Servers with successful enumeration
+    failed_servers: set[str] = set()  # Servers that consistently fail - stop retrying
     retry_cooldown = 60.0  # Wait 1 minute before retrying failed tasks
+    stuck_task_timeout = 480.0  # Consider tasks stuck after 8 minutes
 
     while True:
         try:
@@ -1074,6 +1079,21 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                 if server_ip in successful_servers:
                     continue
 
+                # Skip servers that have consistently failed (stop wasting privesc queue time)
+                if server_ip in failed_servers:
+                    continue
+
+                # Count total failures for this server across all credentials
+                server_failure_count = sum(
+                    1 for k, v in adcs_attempts.items() if k[0] == server_ip and v[1] >= max_retries
+                )
+                if server_failure_count >= 2:
+                    logger.warning(
+                        f"⏭️ Auto-ADCS: Skipping {server_ip} - failed with multiple credentials"
+                    )
+                    failed_servers.add(server_ip)
+                    continue
+
                 for cred in state.all_credentials:
                     if not cred.password:
                         continue
@@ -1099,15 +1119,25 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                         if current_time - last_attempt < retry_cooldown:
                             continue
 
-                        # Check if task failed (not in pending_tasks means it completed/failed)
-                        if task_id not in state.pending_tasks:
-                            logger.info(
-                                f"🔄 Auto-ADCS: Retrying {server_ip} with {cred.domain}\\{cred.username} "
-                                f"(attempt {attempt_count + 1}/{max_retries})"
-                            )
-                        else:
-                            # Task still in progress
+                        # Check for stuck tasks (running > 8 minutes without completion)
+                        if task_id in state.pending_tasks:
+                            elapsed = current_time - last_attempt
+                            if elapsed > stuck_task_timeout:
+                                logger.warning(
+                                    f"⏰ Auto-ADCS: Task {task_id} stuck for {elapsed:.0f}s, "
+                                    f"marking {server_ip} as failed"
+                                )
+                                # Increment failure count to skip retries
+                                adcs_attempts[cred_key] = (task_id, max_retries, last_attempt)
+                                continue
+                            # Task still in progress and not stuck yet
                             continue
+
+                        # Task not in pending_tasks means it completed/failed
+                        logger.info(
+                            f"🔄 Auto-ADCS: Retrying {server_ip} with {cred.domain}\\{cred.username} "
+                            f"(attempt {attempt_count + 1}/{max_retries})"
+                        )
                     else:
                         attempt_count = 0
 
@@ -1905,7 +1935,7 @@ async def _auto_coercion(  # noqa: PLR0912
             await asyncio.sleep(check_interval)
 
 
-async def _auto_delegation_enumeration(
+async def _auto_delegation_enumeration(  # noqa: PLR0912
     dispatcher: RedTeamDispatcher,
     check_interval: float = 60.0,
 ) -> None:
@@ -1922,8 +1952,10 @@ async def _auto_delegation_enumeration(
         dispatcher: The dispatcher instance
         check_interval: Seconds between checks for new credentials
     """
-    # Track processed credentials as (domain, username)
+    # Track credentials that have completed successfully - only these won't be retried
     processed_creds: set[tuple[str, str]] = set()
+    # Track dispatched tasks: task_id -> cred_key (for checking completion status)
+    dispatched_tasks: dict[str, tuple[str, str]] = {}
 
     while True:
         try:
@@ -1935,6 +1967,43 @@ async def _auto_delegation_enumeration(
             if state.completed or state.has_domain_admin:
                 logger.debug("Operation complete, stopping delegation enumeration")
                 break
+
+            # Check for completed/failed tasks and update processed_creds accordingly
+            completed_task_ids = list(dispatched_tasks.keys())
+            for task_id in completed_task_ids:
+                cred_key = dispatched_tasks[task_id]
+
+                # Check if task is still pending (running)
+                if task_id in state.pending_tasks:
+                    continue  # Still running, check later
+
+                # Task finished - check if it succeeded or failed
+                task_result = state.completed_tasks.get(task_id)
+                if task_result:
+                    # Remove from dispatched regardless of outcome
+                    del dispatched_tasks[task_id]
+
+                    if task_result.success:
+                        # Task succeeded - mark credential as processed (won't retry)
+                        processed_creds.add(cred_key)
+                        logger.info(
+                            f"✅ Auto-delegation task {task_id} succeeded for "
+                            f"{cred_key[0]}\\{cred_key[1]}"
+                        )
+                    else:
+                        # Task failed - DON'T add to processed_creds so it can be retried
+                        logger.warning(
+                            f"❌ Auto-delegation task {task_id} failed for "
+                            f"{cred_key[0]}\\{cred_key[1]}: {task_result.error}. "
+                            f"Will retry on next cycle."
+                        )
+                else:
+                    # Task not in pending or completed - probably lost, allow retry
+                    logger.warning(
+                        f"⚠️ Auto-delegation task {task_id} missing for "
+                        f"{cred_key[0]}\\{cred_key[1]}, allowing retry"
+                    )
+                    del dispatched_tasks[task_id]
 
             # Need credentials to enumerate delegation
             if not state.all_credentials:
@@ -1948,7 +2017,12 @@ async def _auto_delegation_enumeration(
 
                 cred_key = ((cred.domain or "").lower(), cred.username.lower())
 
+                # Skip if already processed successfully
                 if cred_key in processed_creds:
+                    continue
+
+                # Skip if currently dispatched (task in flight)
+                if cred_key in dispatched_tasks.values():
                     continue
 
                 # Get domain for this credential
@@ -1970,7 +2044,8 @@ async def _auto_delegation_enumeration(
                 )
 
                 if task_id:
-                    processed_creds.add(cred_key)
+                    # Track as dispatched - will be marked processed only on success
+                    dispatched_tasks[task_id] = cred_key
                     logger.info(
                         f"Auto-delegation task {task_id} dispatched for {cred.domain}\\{cred.username}"
                     )
@@ -1979,6 +2054,206 @@ async def _auto_delegation_enumeration(
             break
         except Exception as e:
             logger.error(f"Auto delegation enumeration error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_local_admin_secretsdump(  # noqa: PLR0912
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 45.0,
+) -> None:
+    """
+    Background task that automatically runs secretsdump when local admin access is detected.
+
+    When BloodHound or CME identifies that a user has local admin rights on a host,
+    this workflow automatically dispatches secretsdump to harvest credentials.
+
+    This catches scenarios like:
+    - User is member of local Administrators group
+    - User has AdminTo relationship in BloodHound
+    - CME reports "Pwn3d!" for a credential/host combination
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between checks for admin access opportunities
+    """
+    # Track (host_ip, cred_key) -> task_id for deduplication
+    secretsdump_attempts: dict[tuple[str, str, str], str] = {}
+    successful_hosts: set[str] = set()  # Hosts where secretsdump succeeded
+    failed_attempts: dict[tuple[str, str, str], int] = {}  # Track failures for retry limiting
+    max_retries = 2
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # Skip if operation is complete
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping auto local admin secretsdump")
+                break
+
+            # Check completed tasks to update tracking
+            for key, task_id in list(secretsdump_attempts.items()):
+                host_ip, username, domain = key
+
+                # Check if task completed
+                if task_id not in state.pending_tasks:
+                    task_result = state.completed_tasks.get(task_id)
+                    if task_result and task_result.success:
+                        successful_hosts.add(host_ip)
+                        logger.info(
+                            f"✅ Auto-secretsdump succeeded on {host_ip} with {domain}\\{username}"
+                        )
+                    elif task_result and not task_result.success:
+                        failed_attempts[key] = failed_attempts.get(key, 0) + 1
+                        logger.warning(
+                            f"❌ Auto-secretsdump failed on {host_ip} with {domain}\\{username}: "
+                            f"{task_result.error} (attempt {failed_attempts[key]}/{max_retries})"
+                        )
+                    del secretsdump_attempts[key]
+
+            # Find credentials marked as admin
+            admin_creds = [c for c in state.all_credentials if c.is_admin and c.password]
+
+            if not admin_creds:
+                logger.debug("Auto-secretsdump: no admin credentials found yet")
+                continue
+
+            # For each admin credential, try to run secretsdump on relevant hosts
+            for cred in admin_creds:
+                cred_domain = cred.domain or ""
+
+                # Find hosts in the same domain or hosts where this cred was marked admin
+                target_hosts = []
+                for host in state.all_hosts:
+                    # Skip already successful hosts
+                    if host.ip in successful_hosts:
+                        continue
+
+                    # Skip hosts without IP
+                    if not host.ip:
+                        continue
+
+                    # Check if credential source mentions this host (e.g., "Pwn3d! on 192.168.58.10")
+                    source_lower = cred.source.lower()
+                    if host.ip in source_lower or (
+                        host.hostname and host.hostname.lower() in source_lower
+                    ):
+                        target_hosts.append(host)
+                        continue
+
+                    # Check if host is a DC for the credential's domain (high value target)
+                    if host.is_dc and cred_domain:
+                        hostname_lower = (host.hostname or "").lower()
+                        if cred_domain.lower() in hostname_lower:
+                            target_hosts.append(host)
+
+                for host in target_hosts:
+                    key = (host.ip, cred.username.lower(), cred_domain.lower())
+
+                    # Skip if already attempted and in-flight
+                    if key in secretsdump_attempts:
+                        continue
+
+                    # Skip if max retries reached
+                    if failed_attempts.get(key, 0) >= max_retries:
+                        continue
+
+                    # Dispatch secretsdump task
+                    logger.warning(
+                        f"🔓 Auto-secretsdump: Admin access detected for {cred_domain}\\{cred.username} "
+                        f"on {host.ip} ({host.hostname}), dispatching secretsdump"
+                    )
+
+                    task_id = await dispatcher.request_credential_access(
+                        source_agent="orchestrator",
+                        domain=cred_domain or (state.target.domain if state.target else ""),
+                        target_ips=[host.ip],
+                        username=cred.username,
+                        password=cred.password,
+                        reason="auto_local_admin_secretsdump",
+                        techniques=["secretsdump"],
+                    )
+
+                    if task_id:
+                        secretsdump_attempts[key] = task_id
+                        logger.info(
+                            f"Auto-secretsdump task {task_id} dispatched for "
+                            f"{cred_domain}\\{cred.username} -> {host.ip}"
+                        )
+
+            # Also check for BloodHound AdminTo relationships
+            # These are stored in discovered_vulnerabilities with local_admin type
+            for vuln_id, vuln in state.discovered_vulnerabilities.items():
+                if vuln.vuln_type not in ("local_admin", "AdminTo", "CanRDP"):
+                    continue
+
+                if vuln_id in state.exploited_vulnerabilities:
+                    continue
+
+                target_ip = vuln.target
+                if not target_ip or target_ip in successful_hosts:
+                    continue
+
+                # Get details about who has admin access
+                details = vuln.details or {}
+                admin_user = details.get("username") or details.get("principal")
+                admin_domain = details.get("domain", "")
+
+                if not admin_user:
+                    continue
+
+                # Find matching credential
+                matching_cred = None
+                for cred in state.all_credentials:
+                    if (
+                        cred.username.lower() == admin_user.lower()
+                        and cred.password
+                        and (not admin_domain or cred.domain.lower() == admin_domain.lower())
+                    ):
+                        matching_cred = cred
+                        break
+
+                if not matching_cred:
+                    logger.debug(
+                        f"Auto-secretsdump: Found {vuln.vuln_type} for {admin_user} on {target_ip} "
+                        f"but no matching password credential"
+                    )
+                    continue
+
+                key = (target_ip, admin_user.lower(), admin_domain.lower())
+
+                if key in secretsdump_attempts or failed_attempts.get(key, 0) >= max_retries:
+                    continue
+
+                logger.warning(
+                    f"🔓 Auto-secretsdump: BloodHound {vuln.vuln_type} detected - "
+                    f"{admin_domain}\\{admin_user} has admin on {target_ip}, dispatching secretsdump"
+                )
+
+                task_id = await dispatcher.request_credential_access(
+                    source_agent="orchestrator",
+                    domain=admin_domain or (state.target.domain if state.target else ""),
+                    target_ips=[target_ip],
+                    username=matching_cred.username,
+                    password=matching_cred.password,
+                    reason=f"auto_bloodhound_{vuln.vuln_type}",
+                    techniques=["secretsdump"],
+                )
+
+                if task_id:
+                    secretsdump_attempts[key] = task_id
+                    # Mark vulnerability as exploited to avoid re-processing
+                    state.mark_exploited(vuln_id)
+                    logger.info(
+                        f"Auto-secretsdump task {task_id} dispatched for BloodHound {vuln.vuln_type}"
+                    )
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto local admin secretsdump error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
 
 
@@ -2115,27 +2390,28 @@ Initial credential: {cred_info}
 
 Your objectives:
 1. Run nmap_scan on all targets to discover services
-2. **MULTI-DOMAIN SETUP (run early with first credential!):**
+2. **Run smb_sweep on all targets** - This captures Windows OS versions, FQDNs, and domain membership (CRITICAL for host identification)
+3. **MULTI-DOMAIN SETUP (run early with first credential!):**
    - enumerate_domain_netbios_mappings: Query AD for NetBIOS->FQDN domain mappings
-   - This ensures credentials from child domains resolve correctly (e.g., NORTH -> north.sevenkingdoms.local)
-3. LOW-HANGING FRUIT (do these early!):
+   - This ensures credentials from child domains resolve correctly (e.g., CORP -> corp.contoso.local)
+4. LOW-HANGING FRUIT (do these early!):
    - ldap_search_descriptions: Find passwords stored in user description fields
-   - password_spray with common passwords (Password1, Welcome1, Summer2024, etc.)
+   - password_spray with common passwords (Password1, Welcome1, Summer2024, Company123, Qwerty123, Passw0rd!, LetMeIn1)
    - username_as_password: Test if users have username as password (e.g., user1:user1)
-4. Enumerate users and shares with netexec/enum4linux-ng/rpcclient/smbclient
-5. If no creds, run Kerberos user recon with kerberos_user_enum_noauth
-6. Run certipy_find to discover ADCS vulnerabilities
-7. Run run_bloodhound for ACL analysis and attack path discovery
-8. **CRITICAL CREDENTIAL EXPANSION (run IMMEDIATELY after finding ANY credentials):**
+5. Enumerate users and shares with netexec/enum4linux-ng/rpcclient/smbclient
+6. If no creds, run Kerberos user recon with kerberos_user_enum_noauth
+7. Run certipy_find to discover ADCS vulnerabilities
+8. Run run_bloodhound for ACL analysis and attack path discovery
+9. **CRITICAL CREDENTIAL EXPANSION (run IMMEDIATELY after finding ANY credentials):**
    - Use secretsdump on ALL domain controllers to dump hashes
    - Use kerberoast to find service accounts with weak passwords
    - Use asrep_roast to find accounts without Kerberos pre-auth
    - Check secretsdump output for krbtgt or Administrator hashes
    - If krbtgt hash found → Generate golden ticket → Announce Domain Admin
    - If Administrator hash found → Test DA access → Announce Domain Admin
-9. Coordinate with specialized agents to exploit discovered vulnerabilities
-10. Use trigger_credential_expansion after getting new credentials
-11. Continue until Domain Admin access achieved
+10. Coordinate with specialized agents to exploit discovered vulnerabilities
+11. Use trigger_credential_expansion after getting new credentials
+12. Continue until Domain Admin access achieved
 
 Priority vulnerabilities to look for:
 - Passwords in LDAP description fields (QUICK WIN - check first!)
@@ -2164,6 +2440,12 @@ Remember:
 - **ALWAYS run secretsdump after finding ANY credentials**
 - Monitor progress with get_operation_summary
 - Announce domain admin when achieved with announce_domain_admin
+
+IMPORTANT - Avoid polling loops:
+- Do NOT repeatedly call get_pending_tasks or get_exploitation_status without taking action
+- If tasks are pending, wait for results OR dispatch new tasks - don't just keep checking status
+- Only check status after taking an action or after significant time has passed
+- Each step should make progress (dispatch task, exploit vuln, expand creds) - not just observe
 
 Let's begin the operation!
 """

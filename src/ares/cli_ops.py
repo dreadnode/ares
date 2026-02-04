@@ -881,6 +881,144 @@ async def backfill_domains(
         sys.exit(1)
 
 
+@app.command
+async def inject_credential(
+    operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
+    username: Annotated[str, cyclopts.Parameter(help="Username to inject")],
+    password: Annotated[str, cyclopts.Parameter(help="Password for the credential")],
+    *,
+    domain: Annotated[str, cyclopts.Parameter(help="Domain for the credential")] = "",
+    source: Annotated[str, cyclopts.Parameter(help="Source of the credential")] = "manual-inject",
+    is_admin: Annotated[bool, cyclopts.Parameter(help="Mark credential as admin")] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Inject a credential into an operation's shared state.
+
+    Example:
+        ares-ops inject-credential op-20250128-123456 svc_sql Password123 --domain corp.contoso.local
+    """
+    from ares.core.models import Credential, SharedRedTeamState
+
+    resolved_redis_url = redis_url or get_redis_url()
+
+    try:
+        client = await create_redis_client(resolved_redis_url, decode_responses=False)
+        key = f"ares:operation:{operation_id}:state"
+        data = await client.get(key)
+
+        if not data:
+            logger.error(f"No state found for operation: {operation_id}")
+            sys.exit(1)
+
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Create and add the credential
+        cred = Credential(
+            username=username,
+            password=password,
+            domain=domain,
+            source=source,
+            is_admin=is_admin,
+        )
+
+        added = state.add_credential(cred, source_agent=source)
+
+        if added:
+            # Save updated state
+            await client.set(key, state.to_bytes())
+            logger.success(f"Injected credential: {domain}\\{username}:{password}")
+        else:
+            logger.warning(f"Credential already exists: {domain}\\{username}")
+
+        await client.aclose()
+
+    except Exception as e:
+        logger.error(f"Failed to inject credential: {e}")
+        sys.exit(1)
+
+
+@app.command
+async def inject_vulnerability(
+    operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
+    vuln_type: Annotated[
+        str, cyclopts.Parameter(help="Vulnerability type (e.g., constrained_delegation)")
+    ],
+    target_ip: Annotated[str, cyclopts.Parameter(help="Target IP address")],
+    *,
+    target_hostname: Annotated[str, cyclopts.Parameter(help="Target hostname")] = "",
+    target_spn: Annotated[str, cyclopts.Parameter(help="Target SPN for delegation attacks")] = "",
+    account_name: Annotated[str, cyclopts.Parameter(help="Account name (for delegation)")] = "",
+    domain: Annotated[str, cyclopts.Parameter(help="Domain")] = "",
+    details: Annotated[str, cyclopts.Parameter(help="Additional details (JSON string)")] = "{}",
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Inject a vulnerability into an operation's shared state.
+
+    Example:
+        ares-ops inject-vulnerability op-xxx constrained_delegation 10.1.2.240 \\
+            --target-hostname srv01.corp.contoso.local \\
+            --target-spn "cifs/srv01.corp.contoso.local" \\
+            --account-name svc_sql \\
+            --domain corp.contoso.local
+    """
+    import json as json_module
+
+    from ares.core.models import SharedRedTeamState, VulnerabilityInfo
+
+    resolved_redis_url = redis_url or get_redis_url()
+
+    try:
+        client = await create_redis_client(resolved_redis_url, decode_responses=False)
+        key = f"ares:operation:{operation_id}:state"
+        data = await client.get(key)
+
+        if not data:
+            logger.error(f"No state found for operation: {operation_id}")
+            sys.exit(1)
+
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Parse additional details
+        try:
+            extra_details = json_module.loads(details) if details else {}
+        except json_module.JSONDecodeError:
+            extra_details = {}
+
+        # Build vulnerability details
+        vuln_details = {
+            "target_ip": target_ip,
+            "target_hostname": target_hostname,
+            "domain": domain,
+            **extra_details,
+        }
+
+        if target_spn:
+            vuln_details["target_spn"] = target_spn
+        if account_name:
+            vuln_details["account_name"] = account_name
+
+        vuln = VulnerabilityInfo(
+            vuln_id=f"{vuln_type}_{target_ip}_{account_name or 'manual'}",
+            vuln_type=vuln_type,
+            target=target_ip,
+            discovered_by="manual-inject",
+            details=vuln_details,
+        )
+
+        state.discovered_vulnerabilities[vuln.vuln_id] = vuln
+
+        # Save updated state
+        await client.set(key, state.to_bytes())
+        await client.aclose()
+
+        logger.success(f"Injected vulnerability: {vuln_type} on {target_ip}")
+        logger.info(f"Details: {vuln_details}")
+
+    except Exception as e:
+        logger.error(f"Failed to inject vulnerability: {e}")
+        sys.exit(1)
+
+
 def main() -> None:
     """Entry point for ares-ops CLI."""
     try:

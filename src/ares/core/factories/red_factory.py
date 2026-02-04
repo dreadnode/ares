@@ -428,8 +428,8 @@ def _track_exploitation(tool_name: str) -> None:
         "generate_golden_ticket": "krbtgt_hash",
         # Low-hanging fruit
         "ldap_search_descriptions": "ldap_description",
-        "username_as_password": "username_password",  # pragma: allowlist secret
-        "password_spray": "password_spray",  # pragma: allowlist secret
+        "username_as_password": "username_password",  # pragma: allowlist secret  # nosec B105
+        "password_spray": "password_spray",  # pragma: allowlist secret  # nosec B105
         "laps_dump": "laps",
     }
     if tool_name in exploitation_tools:

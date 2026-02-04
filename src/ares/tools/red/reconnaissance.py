@@ -1458,8 +1458,8 @@ class PostureValidationTools(Toolset):
         """Query AD Configuration partition for NetBIOS to FQDN domain mappings.
 
         This queries the crossRef objects in CN=Partitions,CN=Configuration to get
-        the authoritative mapping between NetBIOS domain names (e.g., "NORTH") and
-        their FQDNs (e.g., "north.sevenkingdoms.local").
+        the authoritative mapping between NetBIOS domain names (e.g., "CORP") and
+        their FQDNs (e.g., "corp.contoso.local").
 
         IMPORTANT: Run this early in enumeration to ensure correct domain resolution
         for credentials discovered in multi-domain forests.
@@ -1468,7 +1468,7 @@ class PostureValidationTools(Toolset):
             target: Domain controller IP address
             username: Username for LDAP authentication
             password: Password for authentication
-            domain: Target domain (e.g., 'sevenkingdoms.local')
+            domain: Target domain (e.g., 'contoso.local')
 
         Returns:
             Summary of discovered NetBIOS to FQDN mappings
@@ -1476,8 +1476,8 @@ class PostureValidationTools(Toolset):
         from ares.core.models import SharedRedTeamState
 
         # Build the Configuration naming context DN
-        # For domain "sevenkingdoms.local", this becomes:
-        # CN=Partitions,CN=Configuration,DC=sevenkingdoms,DC=local
+        # For domain "contoso.local", this becomes:
+        # CN=Partitions,CN=Configuration,DC=contoso,DC=local
         domain_parts = domain.split(".")
         config_dn = "CN=Partitions,CN=Configuration," + ",".join(
             [f"DC={part}" for part in domain_parts]

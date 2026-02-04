@@ -665,7 +665,7 @@ class SharedRedTeamState:
     # Global discoveries (aggregated from all agents)
     all_domains: list[str] = field(default_factory=list)
     # Authoritative NetBIOS to FQDN mapping from AD crossRef objects
-    # Key: lowercase NetBIOS name (e.g., "north"), Value: FQDN (e.g., "north.sevenkingdoms.local")
+    # Key: lowercase NetBIOS name (e.g., "corp"), Value: FQDN (e.g., "corp.contoso.local")
     # Populated by querying CN=Partitions,CN=Configuration via LDAP
     netbios_to_fqdn: dict[str, str] = field(default_factory=dict)
     all_credentials: list[Credential] = field(default_factory=list)
@@ -965,11 +965,11 @@ class SharedRedTeamState:
         """Add an authoritative NetBIOS to FQDN mapping from AD crossRef objects.
 
         This mapping is used by _resolve_netbios_to_fqdn to correctly resolve
-        NetBIOS domain names (e.g., "NORTH") to their FQDN (e.g., "north.sevenkingdoms.local").
+        NetBIOS domain names (e.g., "CORP") to their FQDN (e.g., "corp.contoso.local").
 
         Args:
-            netbios: The NetBIOS domain name (e.g., "NORTH")
-            fqdn: The fully qualified domain name (e.g., "north.sevenkingdoms.local")
+            netbios: The NetBIOS domain name (e.g., "CORP")
+            fqdn: The fully qualified domain name (e.g., "corp.contoso.local")
 
         Returns:
             True if added, False if already exists with same value
@@ -1004,10 +1004,10 @@ class SharedRedTeamState:
     def _retroactive_domain_normalize(self, fqdn: str) -> None:
         """Normalize existing credentials/users/hashes when a new FQDN is discovered.
 
-        For example, if fqdn="north.sevenkingdoms.local", this will update any
-        credentials with domain="north" to use the FQDN instead.
+        For example, if fqdn="corp.contoso.local", this will update any
+        credentials with domain="corp" to use the FQDN instead.
         """
-        # Extract NetBIOS portion (e.g., "north" from "north.sevenkingdoms.local")
+        # Extract NetBIOS portion (e.g., "corp" from "corp.contoso.local")
         netbios = fqdn.split(".")[0]
         if not netbios:
             return
@@ -1153,6 +1153,12 @@ class SharedRedTeamState:
                         or (existing_is_short and new_is_fqdn)
                     ):
                         existing.hostname = new_hostname
+                        # Extract domain from new FQDN hostname
+                        if new_is_fqdn:
+                            parts = new_hostname.lower().split(".")
+                            if len(parts) > 1:
+                                domain = ".".join(parts[1:])
+                                self.add_domain(domain)
                 if host.os and (not existing.os or existing.os.lower() == "unknown"):
                     existing.os = host.os
                 if host.roles:
@@ -1171,6 +1177,14 @@ class SharedRedTeamState:
         logger.debug(
             f"Host added: {host.ip} ({host.hostname or 'no hostname'}, is_dc={host.is_dc})"
         )
+
+        # Extract domain from FQDN hostname and add to all_domains
+        # e.g., srv01.corp.contoso.local -> corp.contoso.local
+        if host.hostname and "." in host.hostname:
+            parts = host.hostname.lower().split(".")
+            if len(parts) > 1:
+                domain = ".".join(parts[1:])
+                self.add_domain(domain)
 
         # Real-time checkpoint to Redis (don't call publish_host - that would re-add)
         if self._dispatcher:

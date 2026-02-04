@@ -616,11 +616,18 @@ class RedTeamDispatcher:
         Returns credentials for:
         - Users with 'sql' in username (e.g., sql_svc)
         - Domain users (can auth to SQL via Windows auth)
+
+        Note: Only returns credentials WITH passwords - MSSQL Windows auth
+        requires a password, not just a hash.
         """
         sql_creds: list[dict[str, str]] = []
         seen: set[str] = set()
 
         for cred in self.shared_state.all_credentials:
+            # Skip credentials without passwords - MSSQL needs actual passwords
+            if not cred.password:
+                continue
+
             key = f"{cred.domain}\\{cred.username}"
             if key in seen:
                 continue
@@ -1306,6 +1313,124 @@ class RedTeamDispatcher:
         logger.warning(f"No DC IP found for domain {domain}")
         return ""
 
+    def _extract_ticket_path_from_output(self, output: str) -> str:
+        """Extract .ccache ticket path from S4U attack or getTGT output.
+
+        Args:
+            output: Tool output containing ticket path
+
+        Returns:
+            Path to .ccache file, defaults to 'Administrator.ccache' if not found
+        """
+        if not output:
+            return "Administrator.ccache"
+
+        # Look for "Saving ticket in <path>.ccache" pattern
+        match = re.search(r"Saving ticket in ([^\s]+\.ccache)", output)
+        if match:
+            return match.group(1)
+
+        # Fallback: find any .ccache filename
+        match = re.search(r"([A-Za-z0-9_.-]+\.ccache)", output)
+        if match:
+            return match.group(1)
+
+        return "Administrator.ccache"
+
+    def _extract_host_from_spn(self, spn: str) -> str | None:
+        """Extract target host from SPN.
+
+        Args:
+            spn: Service Principal Name (e.g., 'cifs/DC01.domain.local')
+
+        Returns:
+            Host FQDN (e.g., 'DC01.domain.local') or None if not extractable
+        """
+        if not spn or "/" not in spn:
+            return None
+
+        # SPN format: service/host (e.g., cifs/DC01.domain.local)
+        parts = spn.split("/", 1)
+        if len(parts) == 2:
+            return parts[1]
+        return None
+
+    async def _auto_chain_s4u_lateral_movement(
+        self,
+        task_id: str,
+        task_info: TaskInfo,
+        result: dict[str, Any],
+        source_agent: str,
+    ) -> int:
+        """Auto-chain lateral movement after successful S4U attack.
+
+        When an S4U attack generates an Administrator ticket, this method
+        automatically dispatches secretsdump to harvest credentials using
+        the generated ticket.
+
+        Args:
+            task_id: ID of the completed task
+            task_info: Information about the completed task
+            result: Task result containing output
+            source_agent: Agent that completed the task
+
+        Returns:
+            Number of lateral movement tasks dispatched
+        """
+        # Only process constrained_delegation exploit tasks
+        if task_info.task_type != "exploit":
+            return 0
+
+        params = task_info.params or {}
+        if params.get("vuln_type") != "constrained_delegation":
+            return 0
+
+        # Check for .ccache in output
+        output = result.get("output", "") or result.get("stdout", "") or str(result)
+        if ".ccache" not in output:
+            logger.debug(f"No .ccache found in S4U output for task {task_id}")
+            return 0
+
+        # Extract ticket info
+        ticket_path = self._extract_ticket_path_from_output(output)
+        target_spn = params.get("target_spn", "")
+        target_host = self._extract_host_from_spn(target_spn)
+        domain = params.get("domain", "")
+
+        if not target_host:
+            logger.warning(f"Could not extract host from SPN: {target_spn}")
+            return 0
+
+        # Resolve target host to IP
+        target_ip: str | None = None
+        for host in self.shared_state.all_hosts:
+            if host.hostname and target_host.lower() in host.hostname.lower():
+                target_ip = host.ip
+                break
+
+        # If no IP found, use the hostname (Kerberos secretsdump supports hostnames)
+        target_for_secretsdump = target_ip or target_host
+
+        dc_ip = self._find_domain_controller_ip(domain)
+
+        logger.warning(f"🎫 S4U SUCCESS! Auto-chaining secretsdump: {ticket_path} -> {target_host}")
+
+        # Dispatch secretsdump with Kerberos ticket
+        await self.request_credential_access(
+            domain=domain,
+            source_agent="auto_s4u_chain",
+            target_ips=[target_for_secretsdump],
+            username="Administrator",
+            techniques=["secretsdump"],
+            reason="auto_s4u_chain",
+            extra_params={
+                "ticket_path": ticket_path,
+                "no_pass": True,  # nosec B105 - not a password, it's a flag
+                "dc_ip": dc_ip,
+            },
+        )
+        return 1
+
     async def request_acl_analysis(
         self,
         target_user: str,
@@ -1527,6 +1652,7 @@ class RedTeamDispatcher:
         credential_source: str | None = None,
         reason: str | None = None,
         techniques: list[str] | None = None,
+        extra_params: dict[str, Any] | None = None,
     ) -> str:
         """
         Request credential access actions (AS-REP roast, Kerberoast, secretsdump, LSASS).
@@ -1541,6 +1667,7 @@ class RedTeamDispatcher:
             password: Optional password for authenticated actions.
             hash_value: Optional NTLM hash for pass-the-hash actions.
             techniques: Optional list of techniques to prioritize.
+            extra_params: Optional additional parameters to pass (e.g., ticket_path, no_pass).
 
         Returns:
             Task ID for tracking.
@@ -1555,7 +1682,7 @@ class RedTeamDispatcher:
         )
 
         dc_ip = self._find_domain_controller_ip(domain)
-        payload = {
+        payload: dict[str, Any] = {
             "domain": domain,
             "target_ips": target_ips or [],
             "dc_ip": dc_ip,
@@ -1567,6 +1694,10 @@ class RedTeamDispatcher:
             "reason": reason,
             "techniques": techniques or [],
         }
+
+        # Merge extra_params (e.g., ticket_path, no_pass for Kerberos auth)
+        if extra_params:
+            payload.update(extra_params)
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
@@ -2203,6 +2334,41 @@ class RedTeamDispatcher:
             for hash_obj in self._extract_hashes_from_output(output):
                 await self.publish_hash(hash_obj, source_agent)
 
+            # Extract and auto-queue delegation vulnerabilities from findDelegation output
+            delegations = self._extract_delegation_from_output(output)
+            if delegations:
+                queued = await self._auto_queue_delegation_vulnerabilities(
+                    delegations, source_agent
+                )
+                if queued > 0:
+                    logger.warning(
+                        f"🎫 Auto-delegation: queued {queued} delegation vulnerability(ies) "
+                        f"for exploitation from {source_agent}"
+                    )
+
+            # Extract and auto-queue BloodHound vulnerabilities (GPO abuse, local admin, ACL)
+            bloodhound_vulns = self._extract_bloodhound_vulns_from_output(output)
+            if bloodhound_vulns:
+                queued = await self._auto_queue_bloodhound_vulnerabilities(
+                    bloodhound_vulns, source_agent
+                )
+                if queued > 0:
+                    logger.warning(
+                        f"🩸 Auto-BloodHound: queued {queued} vulnerability(ies) "
+                        f"for exploitation from {source_agent}"
+                    )
+
+        # Auto-chain lateral movement after successful S4U attack
+        if success and task_info.task_type == "exploit":
+            chained = await self._auto_chain_s4u_lateral_movement(
+                task_id=task_id,
+                task_info=task_info,
+                result=result if isinstance(result, dict) else {"output": str(result)},
+                source_agent=source_agent,
+            )
+            if chained > 0:
+                logger.warning(f"🎫 Auto-S4U-chain: dispatched {chained} lateral movement task(s)")
+
         # Broadcast completion
         if success:
             await self._broadcast(
@@ -2505,6 +2671,433 @@ class RedTeamDispatcher:
                     )
 
         return hashes
+
+    def _extract_delegation_from_output(  # noqa: PLR0912
+        self, output: str
+    ) -> list[dict[str, str]]:
+        """
+        Extract delegation findings from impacket-findDelegation output.
+
+        Output format:
+        AccountName          AccountType    DelegationType      DelegationRightsTo
+        -----------          -----------    ---------------     ------------------
+        svc_sql              user           Constrained         cifs/srv01.corp.contoso.local
+        WEB01$               computer       Unconstrained       N/A
+
+        Returns list of dicts with keys: account, account_type, delegation_type, target_spn
+        """
+        if not output:
+            return []
+
+        delegations: list[dict[str, str]] = []
+        seen: set[str] = set()
+        in_table = False
+
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            lower = stripped.lower()
+
+            # Detect table header
+            if "accountname" in lower and "delegationtype" in lower:
+                in_table = True
+                continue
+
+            # Skip separator lines (dashes)
+            if in_table and set(stripped) <= {"-", " "}:
+                continue
+
+            # Stop at non-table content
+            if in_table and stripped.startswith(("[", "Impacket")):
+                in_table = False
+                continue
+
+            if not in_table:
+                continue
+
+            # Parse table row - handle fixed-width columns with multi-word delegation types
+            # AccountName  AccountType  DelegationType                       DelegationRightsTo
+            # e.g.: "svc_sql Person Constrained w/ Protocol Transition CIFS/srv01..."
+            parts = stripped.split()
+            if len(parts) < 3:
+                continue
+
+            account = parts[0]
+            account_type = parts[1] if len(parts) > 1 else ""
+
+            # Find delegation type - look for Constrained/Unconstrained/RBCD keyword
+            delegation_type = ""
+            target_spn = ""
+            lower_line = stripped.lower()
+
+            if "unconstrained" in lower_line:
+                delegation_type = "unconstrained"
+            elif "constrained" in lower_line:
+                delegation_type = "constrained"
+            elif "rbcd" in lower_line:
+                delegation_type = "rbcd"
+            else:
+                continue  # Not a delegation line
+
+            # Extract target SPN - look for SPN pattern (service/host)
+            # SPNs look like: CIFS/srv01, HTTP/srv01.corp.contoso.local
+            for part in parts:
+                if "/" in part and not part.startswith("[") and part not in ("w/", "w/o"):
+                    # Validate it looks like an SPN (has letters after the /)
+                    slash_idx = part.find("/")
+                    if slash_idx < len(part) - 1 and part[slash_idx + 1].isalpha():
+                        target_spn = part
+                        break
+            # N/A means no specific target (unconstrained usually)
+            if target_spn == "N/A":
+                target_spn = ""
+
+            # Deduplicate by account+delegation_type
+            key = f"{account.lower()}:{delegation_type.lower()}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            delegations.append(
+                {
+                    "account": account,
+                    "account_type": account_type,
+                    "delegation_type": delegation_type,
+                    "target_spn": target_spn,
+                }
+            )
+
+        return delegations
+
+    async def _auto_queue_delegation_vulnerabilities(
+        self, delegations: list[dict[str, str]], source_agent: str
+    ) -> int:
+        """
+        Auto-queue delegation vulnerabilities for exploitation.
+
+        Args:
+            delegations: List of delegation findings from _extract_delegation_from_output
+            source_agent: Agent that discovered the delegation
+
+        Returns:
+            Number of vulnerabilities queued
+        """
+        queued = 0
+
+        for deleg in delegations:
+            account = deleg.get("account", "")
+            delegation_type = deleg.get("delegation_type", "").lower()
+            target_spn = deleg.get("target_spn", "")
+
+            if delegation_type == "constrained":
+                vuln_type = "constrained_delegation"
+            elif delegation_type == "unconstrained":
+                vuln_type = "unconstrained_delegation"
+            else:
+                continue
+
+            # Check if already queued
+            already_queued = any(
+                v.vuln_type == vuln_type and account.lower() in v.target.lower()
+                for v in self.shared_state.discovered_vulnerabilities.values()
+            )
+            if already_queued:
+                continue
+
+            # Find credential for this account (needed for S4U attack)
+            account_cred = None
+            account_lower = account.lower().rstrip("$")
+            for cred in self.shared_state.all_credentials:
+                if cred.username.lower() == account_lower and cred.password:
+                    account_cred = cred
+                    break
+
+            details: dict[str, Any] = {
+                "account": account,
+                "delegation_type": delegation_type,
+                "target_spn": target_spn,
+                "discovered_by": source_agent,
+            }
+
+            if account_cred:
+                details["username"] = account_cred.username
+                details["password"] = account_cred.password
+                details["domain"] = account_cred.domain
+
+            await self.queue_vulnerability(
+                vuln_type=vuln_type,
+                target=account,
+                details=details,
+                discovered_by=source_agent,
+            )
+
+            logger.warning(
+                f"🎫 Auto-queued {vuln_type} for {account} (target: {target_spn or 'any'})"
+            )
+            queued += 1
+
+            # Auto-dispatch S4U attack if we have credentials for constrained delegation
+            if account_cred and delegation_type == "constrained" and target_spn:
+                dc_ip = self._find_domain_controller_ip(account_cred.domain)
+                logger.warning(
+                    f"🚀 Auto-dispatching S4U attack for {account} -> {target_spn} "
+                    f"(have credentials, DC: {dc_ip})"
+                )
+                await self.request_exploit(
+                    vuln_type="constrained_delegation",
+                    vuln_id=f"cd_{account.lower()}",
+                    target=account,
+                    source_agent="auto_delegation",
+                    params={
+                        "account": account,
+                        "target_spn": target_spn,
+                        "domain": account_cred.domain,
+                        "username": account_cred.username,
+                        "password": account_cred.password,
+                        "dc_ip": dc_ip,
+                    },
+                )
+
+        return queued
+
+    def _extract_bloodhound_vulns_from_output(  # noqa: PLR0912
+        self, output: str
+    ) -> list[dict[str, Any]]:
+        """
+        Extract BloodHound-identified vulnerabilities from tool output.
+
+        Parses BloodHound JSON output and raw collection results for:
+        - GPO edit permissions (WriteProperty/WriteDacl on GPO) → gpo_abuse vuln
+        - Local admin memberships (AdminTo relationship) → local_admin vuln
+        - ACL abuse paths (GenericAll/GenericWrite on user/computer)
+
+        Returns list of dicts with keys: vuln_type, target, principal, details
+        """
+        if not output:
+            return []
+
+        vulns: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        output_lower = output.lower()
+
+        # Parse GPO-related patterns from BloodHound output
+        # BloodHound shows: "User X has WriteProperty on GPO Y"
+        # Or raw GPO names with permissions
+        gpo_patterns = [
+            r"(?:has\s+)?(?:writeproperty|writedacl|genericall|genericwrite)\s+(?:on|to)\s+(?:gpo\s+)?['\"]?([^'\"]+)['\"]?",
+            r"(?:gpo|group\s*policy)\s*[:=]\s*['\"]?([^'\"]+)['\"]?.*(?:writeproperty|writedacl|genericall)",
+            r"(?:can\s+)?(?:edit|modify|write)\s+(?:gpo|group\s*policy)\s+['\"]?([^'\"]+)['\"]?",
+        ]
+
+        for pattern in gpo_patterns:
+            for match in re.finditer(pattern, output_lower, re.IGNORECASE):
+                gpo_name = match.group(1).strip()
+                if not gpo_name or len(gpo_name) < 3:
+                    continue
+
+                key = f"gpo_abuse:{gpo_name.lower()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                vulns.append(
+                    {
+                        "vuln_type": "gpo_abuse",
+                        "target": gpo_name,
+                        "principal": "",  # Will need to extract from context
+                        "details": {
+                            "gpo_name": gpo_name,
+                            "description": f"GPO edit permissions detected on '{gpo_name}'",
+                        },
+                    }
+                )
+
+        # Parse local admin / AdminTo patterns
+        # BloodHound shows: "User X is local admin on Y" or "AdminTo" edges
+        admin_patterns = [
+            r"(\S+@\S+|\S+)\s+(?:is\s+)?(?:local\s*admin(?:istrator)?|AdminTo)\s+(?:on|→|->)\s+(\S+)",
+            r"(?:local\s*admin|AdminTo)\s*[:=]\s*(\S+)\s+(?:on|→|->)\s+(\S+)",
+            r"(\S+)\s+has\s+(?:local\s*)?admin(?:istrative)?\s+(?:access|rights)\s+(?:on|to)\s+(\S+)",
+        ]
+
+        for pattern in admin_patterns:
+            for match in re.finditer(pattern, output_lower, re.IGNORECASE):
+                principal = match.group(1).strip()
+                target = match.group(2).strip()
+
+                if not principal or not target or len(target) < 2:
+                    continue
+
+                key = f"local_admin:{principal.lower()}:{target.lower()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                vulns.append(
+                    {
+                        "vuln_type": "local_admin",
+                        "target": target,
+                        "principal": principal,
+                        "details": {
+                            "username": principal.split("@")[0] if "@" in principal else principal,
+                            "domain": principal.split("@")[1] if "@" in principal else "",
+                            "description": f"{principal} has local admin on {target}",
+                        },
+                    }
+                )
+
+        # Parse "Pwn3d!" output from CME/NetExec which indicates local admin
+        pwned_pattern = r"(\d{1,3}(?:\.\d{1,3}){3}).*Pwn3d!"
+        for match in re.finditer(pwned_pattern, output, re.IGNORECASE):
+            target_ip = match.group(1)
+
+            # Try to find associated credential from the same line or nearby context
+            line_match = re.search(rf".*{re.escape(target_ip)}.*", output)
+            if line_match:
+                line = line_match.group(0)
+                # Look for username pattern like "DOMAIN\user" or "user@domain"
+                cred_match = re.search(r"([A-Za-z0-9_.-]+)[\\/@]([A-Za-z0-9_.-]+)", line)
+                if cred_match:
+                    domain_or_user = cred_match.group(1)
+                    username = cred_match.group(2)
+
+                    key = f"local_admin:{username.lower()}:{target_ip}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    vulns.append(
+                        {
+                            "vuln_type": "local_admin",
+                            "target": target_ip,
+                            "principal": f"{domain_or_user}\\{username}",
+                            "details": {
+                                "username": username,
+                                "domain": domain_or_user,
+                                "description": f"Pwn3d! - {domain_or_user}\\{username} has admin on {target_ip}",
+                            },
+                        }
+                    )
+
+        # Parse ACL abuse patterns (GenericAll, GenericWrite on users/computers)
+        acl_patterns = [
+            r"(\S+)\s+(?:has\s+)?(?:genericall|genericwrite|writedacl|writeowner)\s+(?:on|to)\s+(?:user|computer)?\s*(\S+)",
+        ]
+
+        for pattern in acl_patterns:
+            for match in re.finditer(pattern, output_lower, re.IGNORECASE):
+                principal = match.group(1).strip()
+                target = match.group(2).strip()
+
+                if not principal or not target:
+                    continue
+
+                # Determine vuln type based on target type
+                # If target looks like a computer (ends with $, or FQDN pattern)
+                is_computer = target.endswith("$") or "." in target
+
+                key = f"acl_abuse:{principal.lower()}:{target.lower()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                vulns.append(
+                    {
+                        "vuln_type": "acl_abuse",
+                        "target": target,
+                        "principal": principal,
+                        "details": {
+                            "target_type": "computer" if is_computer else "user",
+                            "description": f"{principal} has dangerous ACL permissions on {target}",
+                        },
+                    }
+                )
+
+        return vulns
+
+    async def _auto_queue_bloodhound_vulnerabilities(
+        self, vulns: list[dict[str, Any]], source_agent: str
+    ) -> int:
+        """
+        Auto-queue BloodHound-discovered vulnerabilities for exploitation.
+
+        Args:
+            vulns: List of vulnerability findings from _extract_bloodhound_vulns_from_output
+            source_agent: Agent that discovered the vulnerabilities
+
+        Returns:
+            Number of vulnerabilities queued
+        """
+        queued = 0
+
+        for vuln in vulns:
+            vuln_type = vuln.get("vuln_type", "")
+            target = vuln.get("target", "")
+            principal = vuln.get("principal", "")
+            details = vuln.get("details", {})
+
+            if not vuln_type or not target:
+                continue
+
+            # Check if already queued
+            already_queued = any(
+                v.vuln_type == vuln_type and target.lower() in v.target.lower()
+                for v in self.shared_state.discovered_vulnerabilities.values()
+            )
+            if already_queued:
+                continue
+
+            # Try to find credential for the principal
+            principal_cred = None
+            if principal:
+                principal_name = principal.split("\\")[-1].split("@")[0].lower()
+                for cred in self.shared_state.all_credentials:
+                    if cred.username.lower() == principal_name and cred.password:
+                        principal_cred = cred
+                        break
+
+            # Enrich details with credential info
+            vuln_details: dict[str, Any] = dict(details)
+            vuln_details["discovered_by"] = source_agent
+            vuln_details["principal"] = principal
+
+            if principal_cred:
+                vuln_details["username"] = principal_cred.username
+                vuln_details["password"] = principal_cred.password
+                vuln_details["domain"] = principal_cred.domain
+
+            await self.queue_vulnerability(
+                vuln_type=vuln_type,
+                target=target,
+                details=vuln_details,
+                discovered_by=source_agent,
+            )
+
+            logger.warning(
+                f"🩸 Auto-queued BloodHound {vuln_type} for {target} "
+                f"(principal: {principal or 'unknown'})"
+            )
+            queued += 1
+
+            # For local_admin vulns, also update credential is_admin status
+            if vuln_type == "local_admin" and principal_cred:
+                # Mark the credential as admin
+                for cred in self.shared_state.all_credentials:
+                    if (
+                        cred.username.lower() == principal_cred.username.lower()
+                        and cred.domain.lower() == principal_cred.domain.lower()
+                    ):
+                        cred.is_admin = True
+                        cred.source = f"{cred.source}; admin on {target}"
+                        logger.info(
+                            f"Marked {cred.domain}\\{cred.username} as admin "
+                            f"(BloodHound: admin on {target})"
+                        )
+                        break
+
+        return queued
 
     # Domain Admin Achievement
 
@@ -2969,9 +3562,12 @@ class RedTeamDispatcher:
         """
         Get highest priority unexploited vulnerability.
 
+        Checks both the in-memory queue and shared state (for externally-injected vulns).
+
         Returns:
             Vulnerability data dict or None if queue empty
         """
+        # First check in-memory queue
         while not self._vulnerability_queue.empty():
             try:
                 priority, vuln_id, vuln_data = self._vulnerability_queue.get_nowait()
@@ -2984,6 +3580,25 @@ class RedTeamDispatcher:
 
             except asyncio.QueueEmpty:
                 break
+
+        # Also check shared state for externally-injected or checkpoint-restored vulns
+        # that weren't added to the in-memory queue
+        for vuln in sorted(
+            self.shared_state.discovered_vulnerabilities.values(),
+            key=lambda v: v.priority,
+        ):
+            if vuln.vuln_id in self.shared_state.exploited_vulnerabilities:
+                continue  # Already exploited
+
+            # Return vulnerability in expected format
+            return {
+                "id": vuln.vuln_id,
+                "priority": vuln.priority,
+                "type": vuln.vuln_type,
+                "target": vuln.target,
+                "details": vuln.details,
+                "discovered_by": vuln.discovered_by,
+            }
 
         return None
 

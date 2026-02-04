@@ -813,9 +813,9 @@ class TestResolveNetBIOSToFQDN:
         state = SharedRedTeamState(operation_id="test-op")
         state.target = Target(ip="192.168.58.1", domain="fabrikam.local")
 
-        # "north" doesn't match "fabrikam.local", so return original
-        result = state._resolve_netbios_to_fqdn("north")
-        assert result == "north"
+        # "corp" doesn't match "fabrikam.local", so return original
+        result = state._resolve_netbios_to_fqdn("corp")
+        assert result == "corp"
 
     def test_case_insensitive_matching(self) -> None:
         """Test that NetBIOS matching is case-insensitive."""
@@ -834,49 +834,49 @@ class TestResolveNetBIOSToFQDN:
 
         state = SharedRedTeamState(operation_id="test-op")
 
-        result = state._resolve_netbios_to_fqdn("north")
-        assert result == "north"
+        result = state._resolve_netbios_to_fqdn("corp")
+        assert result == "corp"
 
     def test_priority_netbios_mapping_over_target_domain(self) -> None:
         """Test that netbios_to_fqdn mapping takes priority over target.domain."""
         from ares.core.models import SharedRedTeamState, Target
 
         state = SharedRedTeamState(operation_id="test-op")
-        state.target = Target(ip="192.168.58.1", domain="sevenkingdoms.local")
+        state.target = Target(ip="192.168.58.1", domain="contoso.local")
         # Authoritative mapping from AD crossRef objects
-        state.netbios_to_fqdn = {"north": "north.sevenkingdoms.local"}
+        state.netbios_to_fqdn = {"corp": "corp.contoso.local"}
 
         # Should use netbios_to_fqdn mapping (highest priority)
-        result = state._resolve_netbios_to_fqdn("north")
-        assert result == "north.sevenkingdoms.local"
+        result = state._resolve_netbios_to_fqdn("corp")
+        assert result == "corp.contoso.local"
 
     def test_priority_known_domains_over_target(self) -> None:
         """Test that all_domains takes priority over target.domain for more specific matches."""
         from ares.core.models import SharedRedTeamState, Target
 
         state = SharedRedTeamState(operation_id="test-op")
-        state.target = Target(ip="192.168.58.1", domain="sevenkingdoms.local")
+        state.target = Target(ip="192.168.58.1", domain="contoso.local")
         # Known domains includes the child domain
-        state.all_domains = ["north.sevenkingdoms.local", "sevenkingdoms.local"]
+        state.all_domains = ["corp.contoso.local", "contoso.local"]
 
         # Should prefer the more specific match from all_domains
-        result = state._resolve_netbios_to_fqdn("north")
-        assert result == "north.sevenkingdoms.local"
+        result = state._resolve_netbios_to_fqdn("corp")
+        assert result == "corp.contoso.local"
 
     def test_prefers_longest_domain_match(self) -> None:
         """Test that the longest (most specific) domain match is preferred."""
         from ares.core.models import SharedRedTeamState
 
         state = SharedRedTeamState(operation_id="test-op")
-        # Multiple domains that could match "north"
+        # Multiple domains that could match "corp"
         state.all_domains = [
-            "north.local",  # shorter
-            "north.sevenkingdoms.local",  # longer, more specific
+            "corp.local",  # shorter
+            "corp.contoso.local",  # longer, more specific
         ]
 
-        result = state._resolve_netbios_to_fqdn("north")
+        result = state._resolve_netbios_to_fqdn("corp")
         # Should prefer the longest match
-        assert result == "north.sevenkingdoms.local"
+        assert result == "corp.contoso.local"
 
 
 class TestAddNetBIOSMapping:
@@ -888,12 +888,12 @@ class TestAddNetBIOSMapping:
 
         state = SharedRedTeamState(operation_id="test-op")
 
-        result = state.add_netbios_mapping("NORTH", "north.sevenkingdoms.local")
+        result = state.add_netbios_mapping("CORP", "corp.contoso.local")
 
         assert result is True
-        assert state.netbios_to_fqdn["north"] == "north.sevenkingdoms.local"
+        assert state.netbios_to_fqdn["corp"] == "corp.contoso.local"
         # Should also add to all_domains
-        assert "north.sevenkingdoms.local" in state.all_domains
+        assert "corp.contoso.local" in state.all_domains
 
     def test_normalizes_case(self) -> None:
         """Test that NetBIOS names are normalized to lowercase."""
@@ -901,11 +901,11 @@ class TestAddNetBIOSMapping:
 
         state = SharedRedTeamState(operation_id="test-op")
 
-        state.add_netbios_mapping("NORTH", "NORTH.SEVENKINGDOMS.LOCAL")
+        state.add_netbios_mapping("CORP", "CORP.CONTOSO.LOCAL")
 
         # Both should be lowercase
-        assert "north" in state.netbios_to_fqdn
-        assert state.netbios_to_fqdn["north"] == "north.sevenkingdoms.local"
+        assert "corp" in state.netbios_to_fqdn
+        assert state.netbios_to_fqdn["corp"] == "corp.contoso.local"
 
     def test_returns_false_for_duplicate(self) -> None:
         """Test that adding duplicate mapping returns False."""
@@ -913,8 +913,8 @@ class TestAddNetBIOSMapping:
 
         state = SharedRedTeamState(operation_id="test-op")
 
-        result1 = state.add_netbios_mapping("NORTH", "north.sevenkingdoms.local")
-        result2 = state.add_netbios_mapping("north", "north.sevenkingdoms.local")
+        result1 = state.add_netbios_mapping("CORP", "corp.contoso.local")
+        result2 = state.add_netbios_mapping("corp", "corp.contoso.local")
 
         assert result1 is True
         assert result2 is False
@@ -927,42 +927,42 @@ class TestAddNetBIOSMapping:
         # Add credential with NetBIOS domain (no FQDN match yet)
         state.all_credentials = [
             Credential(
-                username="samwell.tarly",
-                password="Heartsbane",  # pragma: allowlist secret
-                domain="north",
+                username="svc_backup",
+                password="BackupPass123",  # pragma: allowlist secret
+                domain="corp",
                 source="kerberoast",
             )
         ]
 
         # Now add the authoritative mapping
-        state.add_netbios_mapping("NORTH", "north.sevenkingdoms.local")
+        state.add_netbios_mapping("CORP", "corp.contoso.local")
 
         # Credential should be retroactively normalized
-        assert state.all_credentials[0].domain == "north.sevenkingdoms.local"
+        assert state.all_credentials[0].domain == "corp.contoso.local"
 
     def test_multi_domain_forest_scenario(self) -> None:
         """Test realistic multi-domain forest with parent and child domains."""
         from ares.core.models import Credential, SharedRedTeamState, Target
 
         state = SharedRedTeamState(operation_id="test-op")
-        state.target = Target(ip="192.168.58.10", domain="sevenkingdoms.local")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
 
         # Add authoritative mappings (as would come from AD crossRef query)
-        state.add_netbios_mapping("SEVENKINGDOMS", "sevenkingdoms.local")
-        state.add_netbios_mapping("NORTH", "north.sevenkingdoms.local")
-        state.add_netbios_mapping("ESSOS", "essos.sevenkingdoms.local")
+        state.add_netbios_mapping("CONTOSO", "contoso.local")
+        state.add_netbios_mapping("CORP", "corp.contoso.local")
+        state.add_netbios_mapping("FABRIKAM", "child.fabrikam.local")
 
         # Now credentials should resolve correctly
         cred_forest_root = Credential(
-            username="cersei.lannister",
-            password="WildFire123",  # pragma: allowlist secret
-            domain="SEVENKINGDOMS",
+            username="admin.user",
+            password="AdminPass456",  # pragma: allowlist secret
+            domain="CONTOSO",
             source="test",
         )
         cred_child = Credential(
-            username="samwell.tarly",
-            password="Heartsbane",  # pragma: allowlist secret
-            domain="NORTH",
+            username="svc_backup",
+            password="BackupPass123",  # pragma: allowlist secret
+            domain="CORP",
             source="test",
         )
 
@@ -970,8 +970,8 @@ class TestAddNetBIOSMapping:
         state.add_credential(cred_child, "test")
 
         # Each should resolve to correct domain
-        assert state.all_credentials[0].domain == "sevenkingdoms.local"
-        assert state.all_credentials[1].domain == "north.sevenkingdoms.local"
+        assert state.all_credentials[0].domain == "contoso.local"
+        assert state.all_credentials[1].domain == "corp.contoso.local"
 
 
 class TestAddCredentialNetBIOSResolution:
@@ -984,7 +984,6 @@ class TestAddCredentialNetBIOSResolution:
         state = SharedRedTeamState(operation_id="test-op")
         state.target = Target(ip="192.168.58.1", domain="corp.contoso.local")
 
-        # Add credential with NetBIOS domain "CORP"
         cred = Credential(
             username="alans",
             password="D1rect0r2024!",  # pragma: allowlist secret
@@ -995,7 +994,6 @@ class TestAddCredentialNetBIOSResolution:
 
         assert result is True
         assert len(state.all_credentials) == 1
-        # Domain should be resolved to FQDN
         assert state.all_credentials[0].domain == "corp.contoso.local"
 
     def test_credential_fqdn_preserved(self) -> None:
@@ -1005,7 +1003,6 @@ class TestAddCredentialNetBIOSResolution:
         state = SharedRedTeamState(operation_id="test-op")
         state.target = Target(ip="192.168.58.1", domain="corp.contoso.local")
 
-        # Add credential with FQDN domain
         cred = Credential(
             username="adamb",
             password="Op3rat0r2024!",  # pragma: allowlist secret
@@ -1025,7 +1022,6 @@ class TestAddCredentialNetBIOSResolution:
         state = SharedRedTeamState(operation_id="test-op")
         state.target = Target(ip="192.168.58.1", domain="corp.contoso.local")
 
-        # Add first credential with FQDN
         cred1 = Credential(
             username="adamb",
             password="Op3rat0r2024!",  # pragma: allowlist secret
@@ -1035,7 +1031,6 @@ class TestAddCredentialNetBIOSResolution:
         result1 = state.add_credential(cred1, "credential_access")
         assert result1 is True
 
-        # Add duplicate with NetBIOS domain - should be rejected as duplicate
         cred2 = Credential(
             username="adamb",
             password="Op3rat0r2024!",  # pragma: allowlist secret
@@ -1068,7 +1063,6 @@ class TestAddHashNetBIOSResolution:
 
         assert result is True
         assert len(state.all_hashes) == 1
-        # Domain should be resolved to FQDN
         assert state.all_hashes[0].domain == "corp.contoso.local"
 
 
@@ -1086,7 +1080,6 @@ class TestAddUserNetBIOSResolution:
 
         assert result is True
         assert len(state.all_users) == 1
-        # Domain should be resolved to FQDN
         assert state.all_users[0].domain == "corp.contoso.local"
 
 
@@ -1099,7 +1092,6 @@ class TestRetroactiveDomainNormalization:
 
         state = SharedRedTeamState(operation_id="test-op")
 
-        # Add credential with NetBIOS domain first
         cred = Credential(
             username="testuser",
             password="P@ssw0rd!",  # pragma: allowlist secret
@@ -1108,14 +1100,11 @@ class TestRetroactiveDomainNormalization:
         )
         state.add_credential(cred, "credential_access")
 
-        # Verify credential has NetBIOS domain
         assert state.all_credentials[0].domain == "contoso"
 
-        # Now add FQDN domain - should trigger retroactive normalization
         result = state.add_domain("contoso.local")
 
         assert result is True
-        # Credential should now have FQDN
         assert state.all_credentials[0].domain == "contoso.local"
 
     def test_add_domain_retroactively_normalizes_users(self) -> None:
@@ -1124,13 +1113,10 @@ class TestRetroactiveDomainNormalization:
 
         state = SharedRedTeamState(operation_id="test-op")
 
-        # Add user with NetBIOS domain
-        state.add_user("jonsnow", "contoso")
+        state.add_user("jsmith", "contoso")
 
-        # Verify user has NetBIOS domain
         assert state.all_users[0].domain == "contoso"
 
-        # Add FQDN - should normalize user
         state.add_domain("contoso.local")
 
         assert state.all_users[0].domain == "contoso.local"
@@ -1141,19 +1127,16 @@ class TestRetroactiveDomainNormalization:
 
         state = SharedRedTeamState(operation_id="test-op")
 
-        # Add hash with NetBIOS domain
         hash_obj = Hash(
-            username="jonsnow",
+            username="jsmith",
             hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
             hash_type="NTLM",
             domain="contoso",
         )
         state.add_hash(hash_obj, "secretsdump")
 
-        # Verify hash has NetBIOS domain
         assert state.all_hashes[0].domain == "contoso"
 
-        # Add FQDN - should normalize hash
         state.add_domain("contoso.local")
 
         assert state.all_hashes[0].domain == "contoso.local"

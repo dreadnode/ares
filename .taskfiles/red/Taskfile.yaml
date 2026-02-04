@@ -427,7 +427,7 @@ tasks:
       DOMAIN: '{{.DOMAIN | default "sevenkingdoms.local"}}'
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       RESUME: '{{.RESUME | default "false"}}'
-      MODEL_ALL: '{{.MODEL_ALL | default "gpt-4.1"}}'
+      MODEL_ALL: '{{.MODEL_ALL | default "gpt-5.2"}}'
       # Computed vars (no 1Password - uses .env)
       ARES_MODEL:
         sh: |
