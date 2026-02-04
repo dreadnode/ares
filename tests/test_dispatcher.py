@@ -493,3 +493,199 @@ class TestFindDomainControllerIp:
             f"Expected dc01.corp.contoso.local (10.1.2.240), got {corp_dc}"
         )
         assert corp_dc != "10.1.2.146", "BUG: sql01 selected - 3389 matched as 389!"
+
+
+class TestS4UAutoChaining:
+    """Tests for automatic lateral movement chaining after S4U attacks."""
+
+    def test_extract_ticket_path_from_output(self):
+        """Test extraction of .ccache path from S4U output."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-1")
+
+        # Standard impacket output format
+        output = """
+[*] Getting TGT for user@contoso.local
+[*] Impersonating Administrator@contoso.local
+[*] Using S4U2self to obtain a ST as Administrator
+[*] Using S4U2proxy to obtain a ST for cifs/DC01.contoso.local
+[*] Saving ticket in Administrator@cifs_DC01.contoso.local@CONTOSO.LOCAL.ccache
+        """
+
+        path = dispatcher._extract_ticket_path_from_output(output)
+
+        assert path == "Administrator@cifs_DC01.contoso.local@CONTOSO.LOCAL.ccache"
+
+    def test_extract_ticket_path_fallback(self):
+        """Test fallback when standard pattern not found."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-2")
+
+        # Output with just ccache filename mentioned
+        output = "Generated ticket saved as admin.ccache"
+
+        path = dispatcher._extract_ticket_path_from_output(output)
+
+        assert path == "admin.ccache"
+
+    def test_extract_ticket_path_default(self):
+        """Test default when no ccache found."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-3")
+
+        output = "Some output without a ticket"
+
+        path = dispatcher._extract_ticket_path_from_output(output)
+
+        assert path == "Administrator.ccache"
+
+    def test_extract_host_from_spn_cifs(self):
+        """Test extraction of host from CIFS SPN."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-4")
+
+        host = dispatcher._extract_host_from_spn("cifs/DC01.contoso.local")
+
+        assert host == "DC01.contoso.local"
+
+    def test_extract_host_from_spn_http(self):
+        """Test extraction of host from HTTP SPN."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-5")
+
+        host = dispatcher._extract_host_from_spn("http/web01.contoso.local")
+
+        assert host == "web01.contoso.local"
+
+    def test_extract_host_from_spn_invalid(self):
+        """Test extraction returns None for invalid SPN."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-6")
+
+        assert dispatcher._extract_host_from_spn("") is None
+        assert dispatcher._extract_host_from_spn("invalidspn") is None
+
+    @pytest.mark.asyncio
+    async def test_auto_chain_s4u_non_exploit_task_ignored(self):
+        """Test that non-exploit tasks are ignored."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-7")
+
+        from ares.core.models import TaskInfo
+
+        task_info = TaskInfo(
+            task_id="task-1",
+            task_type="recon",
+            assigned_agent="enum",
+            params={},
+        )
+
+        chained = await dispatcher._auto_chain_s4u_lateral_movement(
+            task_id="task-1",
+            task_info=task_info,
+            result={"output": "some output"},
+            source_agent="enum",
+        )
+
+        assert chained == 0
+
+    @pytest.mark.asyncio
+    async def test_auto_chain_s4u_non_constrained_delegation_ignored(self):
+        """Test that non-constrained-delegation exploits are ignored."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-8")
+
+        from ares.core.models import TaskInfo
+
+        task_info = TaskInfo(
+            task_id="task-1",
+            task_type="exploit",
+            assigned_agent="privesc",
+            params={"vuln_type": "adcs_esc1"},
+        )
+
+        chained = await dispatcher._auto_chain_s4u_lateral_movement(
+            task_id="task-1",
+            task_info=task_info,
+            result={"output": "Saving ticket in admin.ccache"},
+            source_agent="privesc",
+        )
+
+        assert chained == 0
+
+    @pytest.mark.asyncio
+    async def test_auto_chain_s4u_no_ccache_in_output_ignored(self):
+        """Test that S4U output without .ccache is ignored."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-9")
+
+        from ares.core.models import TaskInfo
+
+        task_info = TaskInfo(
+            task_id="task-1",
+            task_type="exploit",
+            assigned_agent="privesc",
+            params={"vuln_type": "constrained_delegation"},
+        )
+
+        chained = await dispatcher._auto_chain_s4u_lateral_movement(
+            task_id="task-1",
+            task_info=task_info,
+            result={"output": "Attack failed - no ticket generated"},
+            source_agent="privesc",
+        )
+
+        assert chained == 0
+
+    @pytest.mark.asyncio
+    async def test_auto_chain_s4u_dispatches_secretsdump(self):
+        """Test that successful S4U attack dispatches secretsdump."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-10")
+        dispatcher._shared_state.all_hosts.append(
+            Host(
+                ip="192.168.58.10",
+                hostname="dc01.contoso.local",
+                services=["88/tcp kerberos", "389/tcp ldap"],
+            )
+        )
+
+        # Mock the credential access request
+        dispatcher.request_credential_access = AsyncMock(return_value="task-cred-1")
+
+        from ares.core.models import TaskInfo
+
+        task_info = TaskInfo(
+            task_id="task-1",
+            task_type="exploit",
+            assigned_agent="privesc",
+            params={
+                "vuln_type": "constrained_delegation",
+                "target_spn": "cifs/DC01.contoso.local",
+                "domain": "contoso.local",
+            },
+        )
+
+        s4u_output = """
+[*] Getting TGT for svc_backup@contoso.local
+[*] Impersonating Administrator@contoso.local
+[*] Saving ticket in Administrator.ccache
+        """
+
+        chained = await dispatcher._auto_chain_s4u_lateral_movement(
+            task_id="task-1",
+            task_info=task_info,
+            result={"output": s4u_output},
+            source_agent="privesc",
+        )
+
+        assert chained == 1
+        dispatcher.request_credential_access.assert_called_once()
+
+        # Verify the call arguments
+        call_kwargs = dispatcher.request_credential_access.call_args.kwargs
+        assert call_kwargs["domain"] == "contoso.local"
+        assert call_kwargs["username"] == "Administrator"
+        assert call_kwargs["techniques"] == ["secretsdump"]
+        assert call_kwargs["extra_params"]["ticket_path"] == "Administrator.ccache"
+        assert call_kwargs["extra_params"]["no_pass"] is True

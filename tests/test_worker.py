@@ -1170,8 +1170,8 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
 
         # Verify workflow instructions
         assert "WORKFLOW:" in prompt
-        assert "Execute each technique in order" in prompt
-        assert "Delegation findings are HIGH VALUE" in prompt
+        assert "Execute each enumeration technique" in prompt
+        assert "CONSTRAINED DELEGATION" in prompt
 
     def test_generate_prompt_handles_multiple_privesc_techniques(self):
         """Test that privesc_enumeration supports multiple techniques."""

@@ -322,6 +322,78 @@ tasks:
     cmds:
       - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops backfill-domains "{{.OPERATION_ID}}"
 
+  multi:inject-credential:
+    desc: "Inject a credential into operation shared state (usage: task red:multi:inject-credential OPERATION_ID=op-xxx USERNAME=jon.snow PASSWORD=secret [DOMAIN=contoso.local])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      USERNAME: '{{.USERNAME | default ""}}'
+      PASSWORD: '{{.PASSWORD | default ""}}'
+      DOMAIN: '{{.DOMAIN | default ""}}'
+      SOURCE: '{{.SOURCE | default "manual-inject"}}'
+      IS_ADMIN: '{{.IS_ADMIN | default "false"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.USERNAME}}"
+        msg: "USERNAME variable is required"
+      - sh: test -n "{{.PASSWORD}}"
+        msg: "PASSWORD variable is required"
+    cmds:
+      - |
+        DOMAIN_ARG=""
+        if [ -n "{{.DOMAIN}}" ]; then
+          DOMAIN_ARG="--domain {{.DOMAIN}}"
+        fi
+        ADMIN_ARG=""
+        if [ "{{.IS_ADMIN}}" = "true" ]; then
+          ADMIN_ARG="--is-admin"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
+          python -m ares.cli_ops inject-credential "{{.OPERATION_ID}}" "{{.USERNAME}}" "{{.PASSWORD}}" \
+          $DOMAIN_ARG --source "{{.SOURCE}}" $ADMIN_ARG
+
+  multi:inject-vulnerability:
+    desc: "Inject a vulnerability into operation shared state (usage: task red:multi:inject-vulnerability OPERATION_ID=op-xxx VULN_TYPE=constrained_delegation TARGET_IP=10.1.2.240 ...)"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      VULN_TYPE: '{{.VULN_TYPE | default ""}}'
+      TARGET_IP: '{{.TARGET_IP | default ""}}'
+      TARGET_HOSTNAME: '{{.TARGET_HOSTNAME | default ""}}'
+      TARGET_SPN: '{{.TARGET_SPN | default ""}}'
+      ACCOUNT_NAME: '{{.ACCOUNT_NAME | default ""}}'
+      DOMAIN: '{{.DOMAIN | default ""}}'
+      DETAILS: '{{.DETAILS | default "{}"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.VULN_TYPE}}"
+        msg: "VULN_TYPE variable is required (e.g., constrained_delegation, esc8, smb_signing_disabled)"
+      - sh: test -n "{{.TARGET_IP}}"
+        msg: "TARGET_IP variable is required"
+    cmds:
+      - |
+        HOSTNAME_ARG=""
+        if [ -n "{{.TARGET_HOSTNAME}}" ]; then
+          HOSTNAME_ARG="--target-hostname {{.TARGET_HOSTNAME}}"
+        fi
+        SPN_ARG=""
+        if [ -n "{{.TARGET_SPN}}" ]; then
+          SPN_ARG="--target-spn '{{.TARGET_SPN}}'"
+        fi
+        ACCOUNT_ARG=""
+        if [ -n "{{.ACCOUNT_NAME}}" ]; then
+          ACCOUNT_ARG="--account-name {{.ACCOUNT_NAME}}"
+        fi
+        DOMAIN_ARG=""
+        if [ -n "{{.DOMAIN}}" ]; then
+          DOMAIN_ARG="--domain {{.DOMAIN}}"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
+          python -m ares.cli_ops inject-vulnerability "{{.OPERATION_ID}}" "{{.VULN_TYPE}}" "{{.TARGET_IP}}" \
+          $HOSTNAME_ARG $SPN_ARG $ACCOUNT_ARG $DOMAIN_ARG --details '{{.DETAILS}}'
+
   # ===========================================================================
   # Shell-based tasks (cannot be moved to Python)
   # ===========================================================================
