@@ -422,6 +422,9 @@ def _print_loot(state, *, json_output: bool = False) -> None:
     if json_output:
         output = {
             "operation_id": state.operation_id,
+            "has_domain_admin": state.has_domain_admin,
+            "domain_admin_path": state.domain_admin_path,
+            "has_golden_ticket": state.has_golden_ticket,
             "domains": list(getattr(state, "all_domains", [])),
             "hosts": [
                 {
@@ -467,6 +470,12 @@ def _print_loot(state, *, json_output: bool = False) -> None:
 
     # Human-readable output
     print(f"Operation: {state.operation_id}")
+    if state.has_domain_admin:
+        print("*** DOMAIN ADMIN ACHIEVED ***")
+        if state.domain_admin_path:
+            print(f"  Path: {state.domain_admin_path}")
+    if state.has_golden_ticket:
+        print("*** GOLDEN TICKET OBTAINED ***")
     print()
 
     # Domains
