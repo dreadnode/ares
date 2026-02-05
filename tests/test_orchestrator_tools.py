@@ -23,7 +23,7 @@ def shared_state():
     """Create a shared state for testing."""
     return SharedRedTeamState(
         operation_id="test-op",
-        target=Target(ip="192.168.56.100", hostname="dc01"),
+        target=Target(ip="192.168.58.100", hostname="dc01"),
     )
 
 

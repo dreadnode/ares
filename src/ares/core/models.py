@@ -154,7 +154,7 @@ class Evidence(Model):
     validated: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for storage (backward compatible)."""
+        """Convert to dictionary for storage."""
         return self.model_dump(mode="json")
 
 
@@ -180,7 +180,7 @@ class TimelineEvent(Model):
     source: str = "investigation"
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for storage (backward compatible)."""
+        """Convert to dictionary for storage."""
         return self.model_dump(mode="json")
 
 
@@ -269,7 +269,7 @@ class InvestigativeQuestion(Model):
         return other.generated_from_question_id != self.id
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for storage (backward compatible)."""
+        """Convert to dictionary for storage."""
         # Use custom format to match original API
         return {
             "id": self.id,
@@ -425,6 +425,33 @@ class Host(Model):
     os: str = ""
     roles: list[str] = wrapped("roles", element(tag="role", default=[]))
     services: list[str] = wrapped("services", element(tag="service", default=[]))
+    is_dc: bool = False
+
+    def detect_dc(self) -> bool:
+        """Detect if this host is a domain controller based on services/hostname/roles.
+
+        Returns True if host appears to be a DC based on:
+        - "dc" in hostname
+        - "domain controller" in roles
+        - Kerberos (88/tcp) or LDAP (389/tcp) services
+        """
+        hostname_lower = (self.hostname or "").lower()
+        roles_lower = " ".join(self.roles).lower() if self.roles else ""
+        if "dc" in hostname_lower or "domain controller" in roles_lower:
+            return True
+        dc_port_prefixes = ("88/tcp", "389/tcp")
+        dc_service_names = ("kerberos", "ldap")
+        for svc in self.services:
+            svc_lower = svc.lower()
+            if any(svc_lower.startswith(port) for port in dc_port_prefixes):
+                return True
+            if any(name in svc_lower for name in dc_service_names):
+                return True
+        return False
+
+    def update_dc_status(self) -> None:
+        """Update is_dc flag based on current services/hostname/roles."""
+        self.is_dc = self.detect_dc()
 
 
 class User(Model):
@@ -637,6 +664,10 @@ class SharedRedTeamState:
 
     # Global discoveries (aggregated from all agents)
     all_domains: list[str] = field(default_factory=list)
+    # Authoritative NetBIOS to FQDN mapping from AD crossRef objects
+    # Key: lowercase NetBIOS name (e.g., "corp"), Value: FQDN (e.g., "corp.contoso.local")
+    # Populated by querying CN=Partitions,CN=Configuration via LDAP
+    netbios_to_fqdn: dict[str, str] = field(default_factory=dict)
     all_credentials: list[Credential] = field(default_factory=list)
     all_hashes: list[Hash] = field(default_factory=list)
     all_hosts: list[Host] = field(default_factory=list)
@@ -665,6 +696,10 @@ class SharedRedTeamState:
     operation_timeline: list[TimelineEvent] = field(default_factory=list)
     identified_techniques: set[str] = field(default_factory=set)
     pending_credential_findings: set[str] = field(default_factory=set)
+
+    # Scan tracking: IPs/subnets that have already been nmap-scanned
+    # Prevents redundant nmap scans after hosts are discovered
+    scanned_targets: set[str] = field(default_factory=set)
 
     # Shared artifacts storage (base64-encoded file contents)
     # Key format: "category/filename" -> base64 content
@@ -785,6 +820,12 @@ class SharedRedTeamState:
         When netexec outputs 'CONTOSO\\user:password', we capture 'CONTOSO' as the domain.
         This method resolves it to 'contoso.local' if we know the mapping.
 
+        Resolution order (first match wins):
+        1. Authoritative mapping from AD crossRef objects (netbios_to_fqdn dict)
+        2. Known domains that start with the NetBIOS name
+        3. Existing credentials with matching domain prefix
+        4. Target domain if it matches (fallback)
+
         Args:
             netbios_name: The NetBIOS domain name (e.g., 'CONTOSO')
 
@@ -793,23 +834,32 @@ class SharedRedTeamState:
         """
         netbios_lower = netbios_name.lower()
 
-        # Check if target.domain starts with the NetBIOS name
-        if self.target and self.target.domain:
-            target_domain = self.target.domain.lower()
-            if target_domain.startswith(netbios_lower + "."):
-                return target_domain
+        # 1. Check authoritative mapping from AD crossRef objects (PREFERRED)
+        # This is populated by querying CN=Partitions,CN=Configuration via LDAP
+        if netbios_lower in self.netbios_to_fqdn:
+            return self.netbios_to_fqdn[netbios_lower]
 
-        # Check existing credentials for a matching FQDN pattern
+        # 2. Check known domains for a matching FQDN pattern
+        # Prefer more specific (longer) matches to avoid parent/child domain confusion
+        matching_domains = [
+            d.lower() for d in self.all_domains if d.lower().startswith(netbios_lower + ".")
+        ]
+        if matching_domains:
+            # Return the most specific (longest) match
+            return max(matching_domains, key=len)
+
+        # 3. Check existing credentials for a matching FQDN pattern
         for cred in self.all_credentials:
             cred_domain = (cred.domain or "").lower()
             if cred_domain.startswith(netbios_lower + "."):
                 return cred_domain
 
-        # Check known domains for a matching FQDN pattern
-        for known_domain in self.all_domains:
-            known_lower = known_domain.lower()
-            if known_lower.startswith(netbios_lower + "."):
-                return known_lower
+        # 4. Check if target.domain starts with the NetBIOS name (least preferred)
+        # This can be wrong in multi-domain forests where target is root but cred is from child
+        if self.target and self.target.domain:
+            target_domain = self.target.domain.lower()
+            if target_domain.startswith(netbios_lower + "."):
+                return target_domain
 
         # No FQDN found, return original
         return netbios_lower
@@ -896,14 +946,109 @@ class SharedRedTeamState:
         return True
 
     def add_domain(self, domain: str) -> bool:
-        """Add domain if not duplicate. Returns True if added."""
+        """Add domain if not duplicate. Returns True if added.
+
+        When a new FQDN domain is added, retroactively normalizes any existing
+        credentials/users/hashes that have a matching NetBIOS domain name.
+        """
         normalized = (domain or "").strip().lower()
         if not normalized:
             return False
         if any(existing.lower() == normalized for existing in self.all_domains):
             return False
         self.all_domains.append(normalized)
+
+        # If this is an FQDN (has a dot), retroactively normalize any
+        # credentials/users/hashes with matching NetBIOS domain
+        if "." in normalized:
+            self._retroactive_domain_normalize(normalized)
+
         return True
+
+    def add_netbios_mapping(self, netbios: str, fqdn: str) -> bool:
+        """Add an authoritative NetBIOS to FQDN mapping from AD crossRef objects.
+
+        This mapping is used by _resolve_netbios_to_fqdn to correctly resolve
+        NetBIOS domain names (e.g., "CORP") to their FQDN (e.g., "corp.contoso.local").
+
+        Args:
+            netbios: The NetBIOS domain name (e.g., "CORP")
+            fqdn: The fully qualified domain name (e.g., "corp.contoso.local")
+
+        Returns:
+            True if added, False if already exists with same value
+        """
+        netbios_lower = netbios.strip().lower()
+        fqdn_lower = fqdn.strip().lower()
+
+        if not netbios_lower or not fqdn_lower:
+            return False
+
+        existing = self.netbios_to_fqdn.get(netbios_lower)
+        if existing == fqdn_lower:
+            return False
+
+        if existing and existing != fqdn_lower:
+            logger.warning(
+                f"NetBIOS mapping conflict: '{netbios_lower}' was '{existing}', "
+                f"updating to '{fqdn_lower}'"
+            )
+
+        self.netbios_to_fqdn[netbios_lower] = fqdn_lower
+        logger.info(f"NetBIOS mapping added: {netbios_lower} -> {fqdn_lower}")
+
+        # Also add the FQDN to all_domains if not already present
+        self.add_domain(fqdn_lower)
+
+        # Retroactively normalize any credentials/users/hashes with this NetBIOS domain
+        self._retroactive_domain_normalize(fqdn_lower)
+
+        return True
+
+    def _retroactive_domain_normalize(self, fqdn: str) -> None:
+        """Normalize existing credentials/users/hashes when a new FQDN is discovered.
+
+        For example, if fqdn="corp.contoso.local", this will update any
+        credentials with domain="corp" to use the FQDN instead.
+        """
+        # Extract NetBIOS portion (e.g., "corp" from "corp.contoso.local")
+        netbios = fqdn.split(".", maxsplit=1)[0]
+        if not netbios:
+            return
+
+        updated_creds = 0
+        updated_users = 0
+        updated_hashes = 0
+
+        # Update credentials with matching NetBIOS domain
+        for cred in self.all_credentials:
+            cred_domain = (cred.domain or "").strip().lower()
+            if cred_domain == netbios:
+                cred.domain = fqdn
+                updated_creds += 1
+
+        # Update users with matching NetBIOS domain
+        for user in self.all_users:
+            user_domain = (user.domain or "").strip().lower()
+            if user_domain == netbios:
+                user.domain = fqdn
+                updated_users += 1
+
+        # Update hashes with matching NetBIOS domain
+        for hash_obj in self.all_hashes:
+            hash_domain = (hash_obj.domain or "").strip().lower()
+            if hash_domain == netbios:
+                hash_obj.domain = fqdn
+                updated_hashes += 1
+
+        if updated_creds or updated_users or updated_hashes:
+            logger.info(
+                f"Retroactive domain normalize '{netbios}' -> '{fqdn}': "
+                f"{updated_creds} creds, {updated_users} users, {updated_hashes} hashes"
+            )
+
+        # Now deduplicate credentials that may now be duplicates after normalization
+        self.all_credentials = self._dedupe_credentials(self.all_credentials)
 
     def add_hash(self, hash_obj: Hash, source_agent: str) -> bool:
         """Add hash if not duplicate. Returns True if added."""
@@ -970,6 +1115,27 @@ class SharedRedTeamState:
         self.all_hashes.append(hash_obj)
         logger.info(f"Hash added: {domain}\\{username} ({hash_type}) (source: {source_agent})")
 
+        # Auto-detect Domain Admin: krbtgt or Administrator NTLM hash = DA achieved
+        if (
+            hash_type == "ntlm"
+            and username in ("krbtgt", "administrator")
+            and not self.has_domain_admin
+        ):
+            self.has_domain_admin = True
+            self.domain_admin_path = f"secretsdump → {username} NTLM hash extracted from DC"
+            logger.warning(
+                f"🏆 DOMAIN ADMIN AUTO-DETECTED: {domain}\\{username} NTLM hash "
+                f"found in state (source: {source_agent})"
+            )
+            self.add_weakness(
+                f"### Domain Admin Achieved — {username} NTLM hash extracted\n"
+                f"**Vulnerability:** Full NTDS.DIT dump obtained via secretsdump, "
+                f"including the {username} NTLM hash which grants Domain Admin access.\n"
+                f"- **Affected Resource:** {domain} domain\n"
+                f"- **Discovery Method:** secretsdump (source: {source_agent})\n"
+                f"- **Impact:** Complete domain compromise. All domain user credentials exposed."
+            )
+
         # Real-time checkpoint to Redis (don't call publish_hash - that would re-add)
         if self._dispatcher:
             self._dispatcher.signal_credential_access()
@@ -984,6 +1150,7 @@ class SharedRedTeamState:
             return False
         host.ip = host.ip.strip()
         host.hostname = host.hostname.strip()
+
         if host.hostname:
             hostname_lower = host.hostname.lower()
             if hostname_lower.startswith("ip-") and "compute.internal" in hostname_lower:
@@ -1011,16 +1178,38 @@ class SharedRedTeamState:
                         or (existing_is_short and new_is_fqdn)
                     ):
                         existing.hostname = new_hostname
+                        # Extract domain from new FQDN hostname
+                        if new_is_fqdn:
+                            parts = new_hostname.lower().split(".")
+                            if len(parts) > 1:
+                                domain = ".".join(parts[1:])
+                                self.add_domain(domain)
                 if host.os and (not existing.os or existing.os.lower() == "unknown"):
                     existing.os = host.os
                 if host.roles:
                     existing.roles = list({*existing.roles, *host.roles})
                 if host.services:
                     existing.services = list({*existing.services, *host.services})
-                logger.debug(f"Host merged: {host.ip} (existing, updated details)")
+                # Update DC status after merge (new services/hostname may reveal it's a DC)
+                existing.update_dc_status()
+                logger.debug(
+                    f"Host merged: {host.ip} (existing, updated details, is_dc={existing.is_dc})"
+                )
                 return False
+        # Set DC status before adding
+        host.update_dc_status()
         self.all_hosts.append(host)
-        logger.debug(f"Host added: {host.ip} ({host.hostname or 'no hostname'})")
+        logger.debug(
+            f"Host added: {host.ip} ({host.hostname or 'no hostname'}, is_dc={host.is_dc})"
+        )
+
+        # Extract domain from FQDN hostname and add to all_domains
+        # e.g., srv01.corp.contoso.local -> corp.contoso.local
+        if host.hostname and "." in host.hostname:
+            parts = host.hostname.lower().split(".")
+            if len(parts) > 1:
+                domain = ".".join(parts[1:])
+                self.add_domain(domain)
 
         # Real-time checkpoint to Redis (don't call publish_host - that would re-add)
         if self._dispatcher:
@@ -1043,6 +1232,19 @@ class SharedRedTeamState:
                 return False
         self.all_shares.append(share)
         logger.debug(f"Share added: {host}/{name}")
+
+        # Real-time checkpoint to Redis
+        if self._dispatcher:
+            self._publish_async(self._dispatcher._checkpoint())
+
+        return True
+
+    def add_weakness(self, block: str) -> bool:
+        """Add weakness if not duplicate. Returns True if added. Triggers pub/sub."""
+        if not block or block in self.all_weaknesses:
+            return False
+        self.all_weaknesses.append(block)
+        logger.info(f"Weakness added: {block[:80]}...")
 
         # Real-time checkpoint to Redis
         if self._dispatcher:
@@ -1185,6 +1387,11 @@ class SharedRedTeamState:
             state.pending_credential_findings = set()
         if not hasattr(state, "downloaded_artifacts"):
             state.downloaded_artifacts = {}
+        if not hasattr(state, "scanned_targets"):
+            state.scanned_targets = set()
+        for host in state.all_hosts:
+            if not hasattr(host, "is_dc"):
+                host.update_dc_status()
         state.all_credentials = cls._dedupe_credentials(state.all_credentials)
         if not state.all_domains:
             state.all_domains = cls._extract_domains(state)

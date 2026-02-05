@@ -25,7 +25,7 @@ def red_team_state() -> RedTeamState:
     """Create a basic red team state for testing."""
     return RedTeamState(
         operation_id="op-test-sysvol",
-        target=Target(ip="192.168.56.10", hostname="dc01", domain="contoso.local"),
+        target=Target(ip="192.168.58.10", hostname="dc01", domain="contoso.local"),
         started_at=datetime.now(timezone.utc),
         stage=InvestigationStage.TRIAGE,
         hosts=[],
@@ -57,7 +57,7 @@ class TestSysvolScriptSearch:
         tools.set_state(red_team_state)
 
         result = tools.sysvol_script_search(
-            target="192.168.56.10",
+            target="192.168.58.10",
             username="admin",
             password="password",  # Placeholder  # pragma: allowlist secret
             domain="contoso.local",
@@ -75,7 +75,7 @@ class TestSysvolScriptSearch:
             mock_run.return_value = ("", "", 0)
 
             result = tools.sysvol_script_search(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
                 domain="contoso.local",
@@ -107,7 +107,7 @@ class TestSysvolScriptSearch:
             mock_run.side_effect = side_effect
 
             result = tools.sysvol_script_search(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
                 domain="contoso.local",
@@ -141,7 +141,7 @@ class TestSysvolScriptSearch:
             mock_run.side_effect = side_effect
 
             result = tools.sysvol_script_search(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
                 domain="contoso.local",
@@ -164,7 +164,7 @@ class TestSysvolScriptSearch:
             mock_run.side_effect = Exception("Connection failed")
 
             result = tools.sysvol_script_search(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
                 domain="contoso.local",
@@ -191,7 +191,7 @@ class TestSysvolScriptSearch:
             mock_run.side_effect = side_effect
 
             tools.sysvol_script_search(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
                 domain="contoso.local",
@@ -217,7 +217,7 @@ class TestSysvolScriptSearchPatterns:
             mock_run.return_value = ("password=MySecret", "", 0)
 
             result = tools.sysvol_script_search(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
                 domain="contoso.local",
@@ -235,7 +235,7 @@ class TestSysvolScriptSearchPatterns:
             mock_run.return_value = ("pwd:MySecret", "", 0)
 
             result = tools.sysvol_script_search(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
                 domain="contoso.local",
@@ -252,7 +252,7 @@ class TestSysvolScriptSearchPatterns:
             mock_run.return_value = ("cred=MySecret", "", 0)
 
             result = tools.sysvol_script_search(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
                 domain="contoso.local",
@@ -291,7 +291,7 @@ class TestSysvolScriptSearchPatterns:
             mock_run.side_effect = side_effect
 
             result = tools.sysvol_script_search(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
                 domain="contoso.local",
@@ -336,7 +336,7 @@ class TestSysvolScriptSearchPatterns:
             mock_run.side_effect = side_effect
 
             result = tools.sysvol_script_search(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
                 domain="contoso.local",
@@ -380,7 +380,7 @@ class TestSysvolScriptSearchPatterns:
             mock_run.side_effect = side_effect
 
             tools.sysvol_script_search(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
                 domain="contoso.local",
@@ -422,7 +422,7 @@ class TestSysvolScriptSearchPatterns:
             mock_run.side_effect = side_effect
 
             tools.sysvol_script_search(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="RealP@ss123!",  # pragma: allowlist secret
                 domain="contoso.local",

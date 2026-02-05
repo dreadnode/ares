@@ -206,23 +206,57 @@ class TestCrackSkipLogic:
 
 
 class TestCrackSkipInWorker:
-    """Integration-style tests verifying the skip is in the worker code."""
+    """Integration-style tests verifying the skip works in the worker code."""
 
-    def test_skip_logic_exists_in_worker(self):
-        """Verify the skip logic exists in the worker code."""
-        import inspect
+    @pytest.mark.asyncio
+    async def test_skip_when_password_already_known(self):
+        """Verify _execute_crack_task skips cracking when password is already known."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
 
+        from ares.core.models import AgentRole
+        from ares.core.task_queue import TaskMessage
         from ares.core.worker import RedisWorkerAgent
 
-        source = inspect.getsource(RedisWorkerAgent._execute_crack_task)
+        state = SharedRedTeamState(operation_id="op-skip-test")
+        state.all_credentials.append(
+            Credential(
+                username="testuser",
+                password="KnownPass!",  # pragma: allowlist secret
+                domain="contoso.local",
+                source="spray",
+            )
+        )
 
-        # Verify key parts of the skip logic are present
-        assert "already known" in source.lower() or "skip" in source.lower(), (
-            "_execute_crack_task should contain skip logic for already-known passwords"
+        task_queue = SimpleNamespace(send_result=AsyncMock())
+        worker = RedisWorkerAgent(
+            role=AgentRole.CRACKER,
+            task_queue=task_queue,
+            agent=AsyncMock(),
+            agent_name="ares-cracker",
+            shared_state=state,
         )
-        assert "all_credentials" in source, (
-            "_execute_crack_task should check shared_state.all_credentials"
+
+        task = TaskMessage(
+            task_id="task-skip",
+            task_type="crack",
+            source_agent="orchestrator",
+            target_agent="cracker",
+            payload={
+                "hash_value": "$krb5tgs$23$*testuser$contoso.local*",
+                "hash_type": "TGS",
+                "username": "testuser",
+                "domain": "contoso.local",
+            },
         )
+
+        await worker._execute_crack_task(task)
+
+        # Should have sent a success result indicating skip
+        task_queue.send_result.assert_awaited_once()
+        call_kwargs = task_queue.send_result.call_args.kwargs
+        assert call_kwargs["success"] is True
+        assert "already known" in call_kwargs["result"]["output"].lower()
 
 
 if __name__ == "__main__":

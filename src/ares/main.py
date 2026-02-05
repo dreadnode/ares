@@ -523,7 +523,7 @@ async def multi_agent(
 
     Example:
         uv run ares multi-agent example.local "192.168.56.10,192.168.56.11"
-        uv run ares multi-agent corp.local "10.0.0.1" --multi-args.redis-url redis://redis:6379
+        uv run ares multi-agent corp.local "192.0.2.1" --multi-args.redis-url redis://redis:6379
     """
     import uuid
 
@@ -802,7 +802,7 @@ async def worker(
     try:
         await run_worker(
             role=agent_role,
-            operation_id=operation_id if operation_id else None,
+            operation_id=operation_id or None,
             redis_url=redis_url,
             model=model or None,  # Pass None to let run_worker fetch from Redis
             max_steps=max_steps if max_steps > 0 else None,

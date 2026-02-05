@@ -173,7 +173,11 @@ class DelegationTools(Toolset):
     def _add_weakness(self, block: str) -> None:
         if not self.state or not block:
             return
-        if block not in self.state.weaknesses:
+        from ares.core.models import SharedRedTeamState
+
+        if isinstance(self.state, SharedRedTeamState):
+            self.state.add_weakness(block)
+        elif block not in self.state.weaknesses:
             self.state.weaknesses.append(block)
 
     @dn.tool_method
@@ -509,7 +513,11 @@ class CertipyTools(Toolset):
     def _add_weakness(self, block: str) -> None:
         if not self.state or not block:
             return
-        if block not in self.state.weaknesses:
+        from ares.core.models import SharedRedTeamState
+
+        if isinstance(self.state, SharedRedTeamState):
+            self.state.add_weakness(block)
+        elif block not in self.state.weaknesses:
             self.state.weaknesses.append(block)
 
     def _queue_esc8_vulnerability(

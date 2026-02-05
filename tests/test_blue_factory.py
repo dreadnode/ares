@@ -97,7 +97,7 @@ class TestCalculateBonusQueries:
             Evidence(
                 id="ev-1",
                 type="ip",
-                value="192.168.56.1",
+                value="192.168.58.1",
                 source="test",
                 timestamp=datetime.now(timezone.utc),
                 pyramid_level=PyramidLevel.IP_ADDRESSES,

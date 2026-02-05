@@ -16,7 +16,13 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from ares.core.config import get_agent_heartbeat_timeout
+from ares.core.config import (
+    get_agent_heartbeat_timeout,
+    get_max_concurrent_tasks,
+    get_rate_limit_backoff,
+    get_rate_limit_threshold,
+    get_task_dispatch_delay,
+)
 from ares.core.messages import (
     ACLAnalysisRequest,
     AgentMessage,
@@ -144,6 +150,12 @@ class RedTeamDispatcher:
         self._redis_task_ids: set[str] = set()
         self._result_consumer_task: asyncio.Task | None = None
 
+        # Rate limiting / throttling state
+        self._last_dispatch_time: float = 0.0
+        self._rate_limit_errors: int = 0
+        self._global_backoff_until: float = 0.0
+        self._throttle_lock = asyncio.Lock()
+
     async def start(self, operation_id: str) -> None:
         """
         Start the dispatcher for an operation.
@@ -210,6 +222,153 @@ class RedTeamDispatcher:
             await self._redis_client.close()
 
         logger.info("Dispatcher stopped")
+
+    # ==========================================================================
+    # Rate Limiting / Throttling
+    # ==========================================================================
+
+    async def _get_pending_task_count(self) -> int:
+        """Get the number of pending/in-progress tasks."""
+        if not self._shared_state:
+            return 0
+        # Clean up phantom empty-string task from throttle drops
+        self._shared_state.pending_tasks.pop("", None)
+        self._redis_task_ids.discard("")
+        pending = len(self._shared_state.pending_tasks)
+        in_progress = sum(
+            1
+            for t in self._shared_state.pending_tasks.values()
+            if t.status == TaskStatus.IN_PROGRESS
+        )
+        return pending + in_progress
+
+    async def _should_throttle(self) -> tuple[bool, float, str]:
+        """
+        Check if task dispatch should be throttled.
+
+        Returns:
+            Tuple of (should_wait, wait_seconds, reason)
+        """
+        now = asyncio.get_event_loop().time()
+
+        # Check global backoff (rate limit triggered)
+        if now < self._global_backoff_until:
+            wait_time = self._global_backoff_until - now
+            return (True, wait_time, "global rate limit backoff")
+
+        # Check concurrent task limit
+        max_tasks = get_max_concurrent_tasks()
+        pending_count = await self._get_pending_task_count()
+        if pending_count >= max_tasks:
+            return (True, 2.0, f"max concurrent tasks ({pending_count}/{max_tasks})")
+
+        # Check dispatch delay
+        dispatch_delay = get_task_dispatch_delay()
+        time_since_last = now - self._last_dispatch_time
+        if time_since_last < dispatch_delay:
+            wait_time = dispatch_delay - time_since_last
+            return (True, wait_time, "dispatch delay")
+
+        return (False, 0.0, "")
+
+    async def _throttled_submit_task(
+        self,
+        task_type: str,
+        target_role: str,
+        payload: dict[str, Any],
+        source_agent: str,
+        priority: int = 5,
+        max_wait: float = 60.0,
+    ) -> str:
+        """
+        Submit a task with throttling to prevent overwhelming the LLM API.
+
+        Args:
+            task_type: Type of task (e.g., "exploit", "recon")
+            target_role: Role to route to (e.g., "privesc", "lateral")
+            payload: Task payload dict
+            source_agent: Agent requesting the task
+            priority: Task priority (lower = higher priority)
+            max_wait: Maximum time to wait for throttle to clear
+
+        Returns:
+            Task ID if submitted, empty string on failure
+        """
+        if not self._task_queue:
+            logger.warning("No task queue available for throttled submit")
+            return ""
+
+        async with self._throttle_lock:
+            start_wait = asyncio.get_event_loop().time()
+            total_waited = 0.0
+
+            while total_waited < max_wait:
+                should_wait, wait_time, reason = await self._should_throttle()
+
+                if not should_wait:
+                    break
+
+                # Cap wait time to remaining max_wait
+                actual_wait = min(wait_time, max_wait - total_waited)
+                if actual_wait <= 0:
+                    break
+
+                logger.debug(f"Throttling task dispatch: {reason}, waiting {actual_wait:.1f}s")
+                await asyncio.sleep(actual_wait)
+                total_waited = asyncio.get_event_loop().time() - start_wait
+
+            # Final check - if still throttled due to max concurrent tasks, DO NOT submit
+            # Submitting anyway caused task storms that overwhelmed the TPM rate limit
+            # EXCEPTION: never drop exploit tasks - they are critical path to DA
+            should_wait, _, reason = await self._should_throttle()
+            if should_wait and "max concurrent tasks" in reason:
+                if task_type == "exploit":
+                    logger.warning(
+                        f"Task throttle at {reason} but ALLOWING exploit task "
+                        f"(critical priority - never drop exploits)"
+                    )
+                else:
+                    logger.warning(
+                        f"Task throttle timeout ({max_wait}s) - DROPPING {task_type} task "
+                        f"due to {reason}. Will be retried on next orchestrator cycle."
+                    )
+                    return ""
+
+            # Update last dispatch time
+            self._last_dispatch_time = asyncio.get_event_loop().time()
+
+            # Submit the task (call underlying queue directly, not recursively)
+            return await self._task_queue.submit_task(
+                task_type=task_type,
+                target_role=target_role,
+                payload=payload,
+                source_agent=source_agent,
+                priority=priority,
+            )
+
+    def record_rate_limit_error(self) -> None:
+        """
+        Record a rate limit error and potentially trigger global backoff.
+
+        Call this when a worker reports a rate limit error.
+        """
+        self._rate_limit_errors += 1
+        threshold = get_rate_limit_threshold()
+
+        if self._rate_limit_errors >= threshold:
+            backoff = get_rate_limit_backoff()
+            self._global_backoff_until = asyncio.get_event_loop().time() + backoff
+            logger.warning(
+                f"Rate limit threshold reached ({self._rate_limit_errors} errors), "
+                f"applying {backoff}s global backoff"
+            )
+            # Reset error count after applying backoff
+            self._rate_limit_errors = 0
+
+    def clear_rate_limit_backoff(self) -> None:
+        """Clear rate limit state after successful task completion."""
+        if self._rate_limit_errors > 0:
+            self._rate_limit_errors = max(0, self._rate_limit_errors - 1)
 
     @property
     def shared_state(self) -> SharedRedTeamState:
@@ -616,11 +775,18 @@ class RedTeamDispatcher:
         Returns credentials for:
         - Users with 'sql' in username (e.g., sql_svc)
         - Domain users (can auth to SQL via Windows auth)
+
+        Note: Only returns credentials WITH passwords - MSSQL Windows auth
+        requires a password, not just a hash.
         """
         sql_creds: list[dict[str, str]] = []
         seen: set[str] = set()
 
         for cred in self.shared_state.all_credentials:
+            # Skip credentials without passwords - MSSQL needs actual passwords
+            if not cred.password:
+                continue
+
             key = f"{cred.domain}\\{cred.username}"
             if key in seen:
                 continue
@@ -641,6 +807,53 @@ class RedTeamDispatcher:
         # Sort to prioritize SQL accounts
         sql_creds.sort(key=lambda x: x.get("is_sql_account", "False") != "True")
         return sql_creds[:5]  # Return top 5 candidates
+
+    def _ensure_credential_in_state(
+        self,
+        username: str,
+        domain: str,
+        password: str | None = None,
+        hash_value: str | None = None,
+        source: str = "task_dispatch",
+    ) -> bool:
+        """
+        Ensure a credential is saved to shared state when dispatching tasks.
+
+        This prevents credentials from being "lost" when they're only in task payloads
+        but not in the shared state that other agents can see.
+
+        Args:
+            username: Username for the credential.
+            domain: Domain for the credential.
+            password: Optional password.
+            hash_value: Optional NTLM hash.
+            source: Source identifier for the credential.
+
+        Returns:
+            True if credential was added, False if it already existed or was invalid.
+        """
+        if not username:
+            return False
+        # Only create Credential if we have a password (Credential requires password field)
+        # Hash-only credentials are tracked separately in all_hashes
+        if not password:
+            return False
+
+        # Create credential object
+        credential = Credential(
+            username=username,
+            domain=domain or "",
+            password=password,
+            source=source,
+        )
+
+        # add_credential handles deduplication
+        added = self.shared_state.add_credential(credential, source)
+        if added:
+            logger.info(
+                f"Auto-saved credential to shared state: {domain}\\{username} (source={source})"
+            )
+        return added
 
     async def scan_hosts_for_mssql(self) -> int:
         """
@@ -686,7 +899,7 @@ class RedTeamDispatcher:
                 )
                 continue
 
-            # Queue MSSQL vulnerability
+            # Queue MSSQL vulnerabilities (both linked server and impersonation)
             details: dict[str, Any] = {
                 "hostname": host.hostname,
                 "services": host.services,
@@ -695,16 +908,34 @@ class RedTeamDispatcher:
                 "Check for linked servers and impersonation.",
             }
 
+            # Queue mssql_linked_server vulnerability
             await self.queue_vulnerability(
                 vuln_type="mssql_linked_server",
                 target=host.ip,
                 details=details,
                 discovered_by="mssql_scanner",
             )
-            queued += 1
+
+            # Also queue mssql_impersonation vulnerability
+            # This checks for sa/dbo impersonation rights which can lead to privilege escalation
+            impersonation_details: dict[str, Any] = {
+                "hostname": host.hostname,
+                "services": host.services,
+                "available_credentials": sql_creds,
+                "note": f"Auto-detected MSSQL service with {len(sql_creds)} potential SQL credential(s). "
+                "Check for impersonation rights (EXECUTE AS) to sa, dbo, or other privileged logins.",
+            }
+            await self.queue_vulnerability(
+                vuln_type="mssql_impersonation",
+                target=host.ip,
+                details=impersonation_details,
+                discovered_by="mssql_scanner",
+            )
+
+            queued += 2  # Queued both linked_server and impersonation
             logger.warning(
-                f"Periodic scan: queued MSSQL vulnerability for {host.ip} ({host.hostname}) "
-                f"with {len(sql_creds)} SQL credentials"
+                f"Periodic scan: queued MSSQL vulnerabilities (linked_server + impersonation) for "
+                f"{host.ip} ({host.hostname}) with {len(sql_creds)} SQL credentials"
             )
 
         return queued
@@ -758,6 +989,14 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        # Auto-save credential to shared state so other agents can use it
+        self._ensure_credential_in_state(
+            username=username,
+            domain=domain,
+            password=password,
+            source="adcs_enumeration",
+        )
+
         dc_ip = self._find_domain_controller_ip(domain)
         payload = {
             "vuln_type": "adcs_enumerate",
@@ -772,12 +1011,14 @@ class RedTeamDispatcher:
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="exploit",
                 target_role="privesc",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -899,13 +1140,15 @@ class RedTeamDispatcher:
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="crack",
                 target_role="cracker",
                 payload=payload,
                 source_agent=source_agent,
                 priority=priority,
             )
+            if not task_id:
+                return ""
 
             # Track in shared state
             task_info = TaskInfo(
@@ -1036,6 +1279,15 @@ class RedTeamDispatcher:
                         username,
                     )
 
+        # Auto-save credential to shared state so other agents can use it
+        self._ensure_credential_in_state(
+            username=username,
+            domain=resolved_domain or domain,
+            password=resolved_password,
+            hash_value=resolved_hash,
+            source="lateral_movement",
+        )
+
         payload = {
             "target_host": target_host,
             "username": username,
@@ -1056,12 +1308,14 @@ class RedTeamDispatcher:
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="lateral",
                 target_role="lateral",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1121,15 +1375,23 @@ class RedTeamDispatcher:
                     credential = cred
         return credential
 
-    def _find_domain_controller_ip(self, domain: str) -> str:
-        """Find DC IP for the specified domain."""
+    def _find_domain_controller_ip(self, domain: str) -> str:  # noqa: PLR0912
+        """Find DC IP for the specified domain.
+
+        Detection priority:
+        1. Hosts with explicit DC roles (AD DC, DC, Domain Controller) matching domain
+        2. Hosts with "dc" in hostname matching domain (strong indicator)
+        3. Hosts with DC-like services (Kerberos 88, LDAP 389) matching domain
+        4. Fallback: any host with DC role/services (cross-domain, logged as warning)
+        """
         domain_lower = domain.lower() if domain else ""
         # Port tokens must match at start of service string to avoid
         # substring issues (e.g., "389/tcp" matching "3389/tcp")
-        dc_port_prefixes = ("88/tcp", "389/tcp", "53/tcp")
+        dc_port_prefixes = ("88/tcp", "389/tcp")
         dc_service_names = ("kerberos", "ldap")
 
         def _has_dc_services(host: Host) -> bool:
+            """Check if host has DC-specific services (Kerberos, LDAP)."""
             for svc in host.services:
                 svc_lower = svc.lower()
                 # Check if service starts with a DC port
@@ -1140,35 +1402,199 @@ class RedTeamDispatcher:
                     return True
             return False
 
-        # Check target first
+        def _has_dc_role(host: Host) -> bool:
+            """Check if host has DC role assigned (from SRV lookup or BloodHound)."""
+            roles_str = str(host.roles).lower()
+            return any(
+                marker in roles_str
+                for marker in ("dc", "domain controller", "ad dc", "domaincontroller")
+            )
+
+        def _hostname_matches_domain(hostname: str, domain: str) -> bool:
+            """Check if hostname belongs to the domain."""
+            if not hostname or not domain:
+                return False
+            hostname_lower = hostname.lower()
+            domain_lower_check = domain.lower()
+            # Direct match: hostname ends with domain (e.g., dc01.example.com for example.com)
+            if hostname_lower.endswith(f".{domain_lower_check}"):
+                return True
+            # Exact match: hostname is just the domain
+            return hostname_lower == domain_lower_check
+
+        # Check target first (if it belongs to this domain)
         if self.shared_state.target and self.shared_state.target.ip:
             target_ip = self.shared_state.target.ip
             target_hostname = (self.shared_state.target.hostname or "").lower()
-            if target_hostname and target_hostname.endswith(domain_lower):
+            if target_hostname and _hostname_matches_domain(target_hostname, domain_lower):
                 return target_ip
             for host in self.shared_state.all_hosts:
                 if host.ip == target_ip:
                     hostname = (host.hostname or "").lower()
-                    if hostname.endswith(domain_lower) and _has_dc_services(host):
+                    if _hostname_matches_domain(hostname, domain_lower) and _has_dc_services(host):
                         return host.ip
-        # Search all hosts by explicit DC markers
+
+        # Priority 1: Search hosts with explicit DC roles that belong to this domain
+        # These come from SRV lookup (_ldap._tcp.domain) or BloodHound
         for host in self.shared_state.all_hosts:
-            if (
-                "dc" in (host.hostname or "").lower()
-                or "domain controller" in str(host.roles).lower()
-            ):
+            hostname = (host.hostname or "").lower()
+            if _has_dc_role(host) and _hostname_matches_domain(hostname, domain_lower):
+                logger.debug(f"DC IP found via role: {host.ip} ({hostname})")
                 return host.ip
-        # Fallback: infer DC from services on hosts within the domain
+
+        # Priority 2: Search hosts with "dc" in hostname that belong to this domain
+        # A host named "dc01" is almost certainly a DC (strong indicator)
+        for host in self.shared_state.all_hosts:
+            hostname = (host.hostname or "").lower()
+            if "dc" in hostname and _hostname_matches_domain(hostname, domain_lower):
+                logger.debug(f"DC IP found via hostname pattern: {host.ip} ({hostname})")
+                return host.ip
+
+        # Priority 3: Infer DC from services on hosts within the domain
+        # Hosts advertising Kerberos (88) or LDAP (389) are likely DCs
         if domain_lower:
             for host in self.shared_state.all_hosts:
                 hostname = (host.hostname or "").lower()
-                if hostname.endswith(domain_lower) and _has_dc_services(host):
+                if _hostname_matches_domain(hostname, domain_lower) and _has_dc_services(host):
+                    logger.debug(f"DC IP found via services: {host.ip} ({hostname})")
                     return host.ip
-        # Last resort: any host advertising DC-like services
+
+        # Priority 4: Fallback - hosts with DC roles (any domain) - log warning
+        for host in self.shared_state.all_hosts:
+            if _has_dc_role(host):
+                logger.warning(
+                    f"DC IP fallback (no domain match): {host.ip} ({host.hostname}) for domain {domain}"
+                )
+                return host.ip
+
+        # Priority 5: Any host with DC-like services (risky, may be wrong) - log warning
         for host in self.shared_state.all_hosts:
             if _has_dc_services(host):
+                logger.warning(
+                    f"DC IP last resort (services only): {host.ip} ({host.hostname}) for domain {domain}"
+                )
                 return host.ip
+
+        logger.warning(f"No DC IP found for domain {domain}")
         return ""
+
+    def _extract_ticket_path_from_output(self, output: str) -> str:
+        """Extract .ccache ticket path from S4U attack or getTGT output.
+
+        Args:
+            output: Tool output containing ticket path
+
+        Returns:
+            Path to .ccache file, defaults to 'Administrator.ccache' if not found
+        """
+        if not output:
+            return "Administrator.ccache"
+
+        # Look for "Saving ticket in <path>.ccache" pattern
+        match = re.search(r"Saving ticket in ([^\s]+\.ccache)", output)
+        if match:
+            return match.group(1)
+
+        # Fallback: find any .ccache filename
+        match = re.search(r"([A-Za-z0-9_.-]+\.ccache)", output)
+        if match:
+            return match.group(1)
+
+        return "Administrator.ccache"
+
+    def _extract_host_from_spn(self, spn: str) -> str | None:
+        """Extract target host from SPN.
+
+        Args:
+            spn: Service Principal Name (e.g., 'cifs/DC01.domain.local')
+
+        Returns:
+            Host FQDN (e.g., 'DC01.domain.local') or None if not extractable
+        """
+        if not spn or "/" not in spn:
+            return None
+
+        # SPN format: service/host (e.g., cifs/DC01.domain.local)
+        parts = spn.split("/", 1)
+        if len(parts) == 2:
+            return parts[1]
+        return None
+
+    async def _auto_chain_s4u_lateral_movement(
+        self,
+        task_id: str,
+        task_info: TaskInfo,
+        result: dict[str, Any],
+        source_agent: str,
+    ) -> int:
+        """Auto-chain lateral movement after successful S4U attack.
+
+        When an S4U attack generates an Administrator ticket, this method
+        automatically dispatches secretsdump to harvest credentials using
+        the generated ticket.
+
+        Args:
+            task_id: ID of the completed task
+            task_info: Information about the completed task
+            result: Task result containing output
+            source_agent: Agent that completed the task
+
+        Returns:
+            Number of lateral movement tasks dispatched
+        """
+        # Only process constrained_delegation exploit tasks
+        if task_info.task_type != "exploit":
+            return 0
+
+        params = task_info.params or {}
+        if params.get("vuln_type") != "constrained_delegation":
+            return 0
+
+        # Check for .ccache in output
+        output = result.get("output", "") or result.get("stdout", "") or str(result)
+        if ".ccache" not in output:
+            logger.debug(f"No .ccache found in S4U output for task {task_id}")
+            return 0
+
+        # Extract ticket info
+        ticket_path = self._extract_ticket_path_from_output(output)
+        target_spn = params.get("target_spn", "")
+        target_host = self._extract_host_from_spn(target_spn)
+        domain = params.get("domain", "")
+
+        if not target_host:
+            logger.warning(f"Could not extract host from SPN: {target_spn}")
+            return 0
+
+        # Resolve target host to IP
+        target_ip: str | None = None
+        for host in self.shared_state.all_hosts:
+            if host.hostname and target_host.lower() in host.hostname.lower():
+                target_ip = host.ip
+                break
+
+        # If no IP found, use the hostname (Kerberos secretsdump supports hostnames)
+        target_for_secretsdump = target_ip or target_host
+
+        dc_ip = self._find_domain_controller_ip(domain)
+
+        logger.warning(f"🎫 S4U SUCCESS! Auto-chaining secretsdump: {ticket_path} -> {target_host}")
+
+        # Dispatch secretsdump with Kerberos ticket
+        await self.request_credential_access(
+            domain=domain,
+            source_agent="auto_s4u_chain",
+            target_ips=[target_for_secretsdump],
+            username="Administrator",
+            techniques=["secretsdump"],
+            reason="auto_s4u_chain",
+            extra_params={
+                "ticket_path": ticket_path,
+                "no_pass": True,  # nosec B105 - not a password, it's a flag
+                "dc_ip": dc_ip,
+            },
+        )
+        return 1
 
     async def request_acl_analysis(
         self,
@@ -1213,12 +1639,14 @@ class RedTeamDispatcher:
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="acl_analysis",
                 target_role="acl",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1291,6 +1719,15 @@ class RedTeamDispatcher:
         Returns:
             Task ID for tracking.
         """
+        # Auto-save credential to shared state so other agents can use it
+        self._ensure_credential_in_state(
+            username=username,
+            domain=domain,
+            password=password,
+            hash_value=hash_value,
+            source=f"recon_{reason or 'task'}",
+        )
+
         dc_ip = self._find_domain_controller_ip(domain)
         payload = {
             "domain": domain,
@@ -1305,12 +1742,14 @@ class RedTeamDispatcher:
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="recon",
                 target_role="recon",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1382,6 +1821,7 @@ class RedTeamDispatcher:
         credential_source: str | None = None,
         reason: str | None = None,
         techniques: list[str] | None = None,
+        extra_params: dict[str, Any] | None = None,
     ) -> str:
         """
         Request credential access actions (AS-REP roast, Kerberoast, secretsdump, LSASS).
@@ -1396,12 +1836,22 @@ class RedTeamDispatcher:
             password: Optional password for authenticated actions.
             hash_value: Optional NTLM hash for pass-the-hash actions.
             techniques: Optional list of techniques to prioritize.
+            extra_params: Optional additional parameters to pass (e.g., ticket_path, no_pass).
 
         Returns:
             Task ID for tracking.
         """
+        # Auto-save credential to shared state so other agents can use it
+        self._ensure_credential_in_state(
+            username=username,
+            domain=domain,
+            password=password,
+            hash_value=hash_value,
+            source=f"credential_access_{reason or 'task'}",
+        )
+
         dc_ip = self._find_domain_controller_ip(domain)
-        payload = {
+        payload: dict[str, Any] = {
             "domain": domain,
             "target_ips": target_ips or [],
             "dc_ip": dc_ip,
@@ -1414,14 +1864,20 @@ class RedTeamDispatcher:
             "techniques": techniques or [],
         }
 
+        # Merge extra_params (e.g., ticket_path, no_pass for Kerberos auth)
+        if extra_params:
+            payload.update(extra_params)
+
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="credential_access",
                 target_role="credential_access",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1514,14 +1970,28 @@ class RedTeamDispatcher:
             **(params or {}),
         }
 
+        # Ensure dc_ip is resolved for exploit tasks that need it
+        if not payload.get("dc_ip") and payload.get("domain"):
+            dc_ip = self._find_domain_controller_ip(payload["domain"])
+            if not dc_ip:
+                # Use target_ip from payload or primary target as fallback
+                dc_ip = payload.get("target_ip", "")
+            if not dc_ip and self.shared_state.target:
+                dc_ip = self.shared_state.target.ip
+            if dc_ip:
+                payload["dc_ip"] = dc_ip
+                logger.info(f"Resolved dc_ip={dc_ip} for exploit {vuln_type}")
+
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="exploit",
                 target_role="privesc",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1533,6 +2003,10 @@ class RedTeamDispatcher:
             self._redis_task_ids.add(task_id)
 
             logger.info(f"Exploit task {task_id} for {vuln_type} submitted to Redis queue")
+
+            # Record exploited vulnerability as a weakness
+            self._record_exploit_weakness(vuln_type, target, payload)
+
             return task_id
 
         # Fallback to in-memory queue (single-process mode)
@@ -1564,6 +2038,156 @@ class RedTeamDispatcher:
         )
 
         logger.info(f"Exploit request {task_id} for {vuln_type} sent to {privesc_agent}")
+        return task_id
+
+    def _record_exploit_weakness(
+        self, vuln_type: str, target: str, payload: dict[str, Any]
+    ) -> None:
+        """Record an exploited vulnerability as a weakness for the report."""
+        domain = payload.get("domain", "")
+        hostname = payload.get("target_hostname", target)
+        account = payload.get("account_name") or payload.get("account", "")
+
+        weakness_map = {
+            "constrained_delegation": (
+                f"### Constrained Delegation — {account}@{domain}\n"
+                f"**Vulnerability:** Account {account} has constrained delegation rights "
+                f"(msDS-AllowedToDelegateTo), allowing S4U impersonation of any user "
+                f"to the target service.\n"
+                f"- **Affected Resource:** {hostname} ({target})\n"
+                f"- **Discovery Method:** Injected/findDelegation enumeration\n"
+                f"- **Impact:** Attacker can impersonate Administrator via S4U attack, "
+                f"then use the ticket for secretsdump or remote execution on the target."
+            ),
+            "mssql_impersonation": (
+                f"### MSSQL Impersonation — sa on {hostname}\n"
+                f"**Vulnerability:** A domain user can EXECUTE AS LOGIN = 'sa' on the "
+                f"MSSQL instance, escalating to sysadmin.\n"
+                f"- **Affected Resource:** {hostname} ({target})\n"
+                f"- **Discovery Method:** MSSQL enum_impersonate\n"
+                f"- **Impact:** Full SQL Server control, xp_cmdshell for OS command execution."
+            ),
+            "esc8": (
+                f"### ADCS ESC8 — Web Enrollment Relay on {hostname}\n"
+                f"**Vulnerability:** ADCS web enrollment endpoint is vulnerable to "
+                f"NTLM relay (ESC8).\n"
+                f"- **Affected Resource:** {hostname} ({target})\n"
+                f"- **Discovery Method:** certipy find\n"
+                f"- **Impact:** Relay authentication to obtain certificates for domain accounts."
+            ),
+        }
+
+        block = weakness_map.get(vuln_type)
+        if block:
+            self.shared_state.add_weakness(block)
+
+    async def request_privesc_enumeration(
+        self,
+        source_agent: str,
+        domain: str,
+        username: str,
+        password: str,
+        techniques: list[str] | None = None,
+    ) -> str:
+        """
+        Request PRIVESC agent to run enumeration tasks (e.g., find_delegation).
+
+        This routes enumeration tasks that require PRIVESC tools (like DelegationTools)
+        to the correct agent, rather than RECON which doesn't have these tools.
+
+        Args:
+            source_agent: Agent making the request.
+            domain: Target domain.
+            username: Username for authenticated enumeration.
+            password: Password for authentication.
+            techniques: List of enumeration techniques (e.g., ["find_delegation"]).
+
+        Returns:
+            Task ID for tracking.
+        """
+        # Auto-save credential to shared state so other agents can use it
+        self._ensure_credential_in_state(
+            username=username,
+            domain=domain,
+            password=password,
+            source="privesc_enumeration",
+        )
+
+        dc_ip = self._find_domain_controller_ip(domain)
+        # Fallback: use target IP if we know it (e.g. from target config)
+        if not dc_ip and self.shared_state.target and self.shared_state.target.ip:
+            # Try the primary target IP as DC for the target domain
+            dc_ip = self.shared_state.target.ip
+            logger.warning(f"DC IP fallback: using primary target IP {dc_ip} for {domain}")
+        payload = {
+            "domain": domain,
+            "dc_ip": dc_ip,
+            "username": username,
+            "password": password,
+            "techniques": techniques or [],
+        }
+
+        # Use Redis task queue if available (Kubernetes multi-pod mode)
+        if self._task_queue:
+            task_id = await self._throttled_submit_task(
+                task_type="privesc_enumeration",
+                target_role="privesc",
+                payload=payload,
+                source_agent=source_agent,
+            )
+            if not task_id:
+                return ""
+
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type="privesc_enumeration",
+                assigned_agent="privesc",
+                params=payload,
+            )
+            self.shared_state.pending_tasks[task_id] = task_info
+            self._redis_task_ids.add(task_id)
+
+            logger.info(
+                f"Privesc enumeration task {task_id} submitted to Redis queue "
+                f"for {domain}\\{username}, techniques={techniques}"
+            )
+            return task_id
+
+        # Fallback to in-memory queue (single-process mode)
+        task_id = generate_task_id()
+        privesc_agent = self._role_queues.get(AgentRole.PRIVESC)
+
+        if not privesc_agent:
+            logger.warning("No privesc agent registered, cannot route enumeration request")
+            return ""
+
+        task_info = TaskInfo(
+            task_id=task_id,
+            task_type="privesc_enumeration",
+            assigned_agent=privesc_agent,
+            params=payload,
+        )
+        self.shared_state.pending_tasks[task_id] = task_info
+
+        # Use ExploitRequest with special vuln_type for in-memory queue
+        await self._message_queues[privesc_agent].put(
+            ExploitRequest(
+                source_agent=source_agent,
+                task_id=task_id,
+                vuln_type="PRIVESC_ENUMERATION",
+                vuln_id=f"enum-{task_id}",
+                target=dc_ip or domain,
+                params={
+                    "domain": domain,
+                    "username": username,
+                    "password": password,
+                    "techniques": techniques or [],
+                },
+                callback_agent=source_agent,
+            )
+        )
+
+        logger.info(f"Privesc enumeration request {task_id} sent to {privesc_agent}")
         return task_id
 
     async def request_coercion(
@@ -1604,12 +2228,14 @@ class RedTeamDispatcher:
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="coercion",
                 target_role="coercion",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1698,6 +2324,20 @@ class RedTeamDispatcher:
             error=error,
         )
         self.shared_state.completed_tasks[task_id] = task_result
+
+        # Mark targets as scanned after successful nmap recon
+        if success and task_info.task_type == "recon":
+            params = task_info.params or {}
+            techniques = params.get("techniques", [])
+            if "nmap_scan" in techniques:
+                scanned_ips = params.get("target_ips", [])
+                if scanned_ips:
+                    for ip in scanned_ips:
+                        self.shared_state.scanned_targets.add(ip)
+                    logger.info(
+                        f"Marked {len(scanned_ips)} targets as scanned: "
+                        f"{', '.join(scanned_ips[:5])}{'...' if len(scanned_ips) > 5 else ''}"
+                    )
 
         output = ""
 
@@ -1946,6 +2586,41 @@ class RedTeamDispatcher:
             # Extract hashes (Kerberoast, AS-REP, NTLM) from tool output
             for hash_obj in self._extract_hashes_from_output(output):
                 await self.publish_hash(hash_obj, source_agent)
+
+            # Extract and auto-queue delegation vulnerabilities from findDelegation output
+            delegations = self._extract_delegation_from_output(output)
+            if delegations:
+                queued = await self._auto_queue_delegation_vulnerabilities(
+                    delegations, source_agent
+                )
+                if queued > 0:
+                    logger.warning(
+                        f"🎫 Auto-delegation: queued {queued} delegation vulnerability(ies) "
+                        f"for exploitation from {source_agent}"
+                    )
+
+            # Extract and auto-queue BloodHound vulnerabilities (GPO abuse, local admin, ACL)
+            bloodhound_vulns = self._extract_bloodhound_vulns_from_output(output)
+            if bloodhound_vulns:
+                queued = await self._auto_queue_bloodhound_vulnerabilities(
+                    bloodhound_vulns, source_agent
+                )
+                if queued > 0:
+                    logger.warning(
+                        f"🩸 Auto-BloodHound: queued {queued} vulnerability(ies) "
+                        f"for exploitation from {source_agent}"
+                    )
+
+        # Auto-chain lateral movement after successful S4U attack
+        if success and task_info.task_type == "exploit":
+            chained = await self._auto_chain_s4u_lateral_movement(
+                task_id=task_id,
+                task_info=task_info,
+                result=result if isinstance(result, dict) else {"output": str(result)},
+                source_agent=source_agent,
+            )
+            if chained > 0:
+                logger.warning(f"🎫 Auto-S4U-chain: dispatched {chained} lateral movement task(s)")
 
         # Broadcast completion
         if success:
@@ -2235,7 +2910,6 @@ class RedTeamDispatcher:
                 username = ntlm_match.group(2)
                 lm_hash = ntlm_match.group(3)
                 nt_hash = ntlm_match.group(4)
-                # Use NT hash (more useful), include LM if not empty
                 hash_value = f"{lm_hash}:{nt_hash}"
                 if hash_value not in seen:
                     seen.add(hash_value)
@@ -2247,8 +2921,471 @@ class RedTeamDispatcher:
                             domain=domain,
                         )
                     )
+                continue
+
+            # Match non-domain-prefixed NTLM: user:rid:lmhash:nthash:::
+            # (SAM dump entries like Administrator:500:lmhash:nthash:::)
+            ntlm_plain = re.match(
+                r"([^:\\$\s]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::",
+                stripped,
+            )
+            if ntlm_plain:
+                username = ntlm_plain.group(1)
+                lm_hash = ntlm_plain.group(3)
+                nt_hash = ntlm_plain.group(4)
+                hash_value = f"{lm_hash}:{nt_hash}"
+                if hash_value not in seen:
+                    seen.add(hash_value)
+                    hashes.append(
+                        Hash(
+                            username=username,
+                            hash_value=hash_value,
+                            hash_type="NTLM",
+                            domain="",
+                        )
+                    )
 
         return hashes
+
+    def _extract_delegation_from_output(  # noqa: PLR0912
+        self, output: str
+    ) -> list[dict[str, str]]:
+        """
+        Extract delegation findings from impacket-findDelegation output.
+
+        Output format:
+        AccountName          AccountType    DelegationType      DelegationRightsTo
+        -----------          -----------    ---------------     ------------------
+        svc_sql              user           Constrained         cifs/srv01.corp.contoso.local
+        WEB01$               computer       Unconstrained       N/A
+
+        Returns list of dicts with keys: account, account_type, delegation_type, target_spn
+        """
+        if not output:
+            return []
+
+        delegations: list[dict[str, str]] = []
+        seen: set[str] = set()
+        in_table = False
+
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            lower = stripped.lower()
+
+            # Detect table header
+            if "accountname" in lower and "delegationtype" in lower:
+                in_table = True
+                continue
+
+            # Skip separator lines (dashes)
+            if in_table and set(stripped) <= {"-", " "}:
+                continue
+
+            # Stop at non-table content
+            if in_table and stripped.startswith(("[", "Impacket")):
+                in_table = False
+                continue
+
+            if not in_table:
+                continue
+
+            # Parse table row - handle fixed-width columns with multi-word delegation types
+            # AccountName  AccountType  DelegationType                       DelegationRightsTo
+            # e.g.: "svc_sql Person Constrained w/ Protocol Transition CIFS/srv01..."
+            parts = stripped.split()
+            if len(parts) < 3:
+                continue
+
+            account = parts[0]
+            account_type = parts[1] if len(parts) > 1 else ""
+
+            # Find delegation type - look for Constrained/Unconstrained/RBCD keyword
+            delegation_type = ""
+            target_spn = ""
+            lower_line = stripped.lower()
+
+            if "unconstrained" in lower_line:
+                delegation_type = "unconstrained"
+            elif "constrained" in lower_line:
+                delegation_type = "constrained"
+            elif "rbcd" in lower_line:
+                delegation_type = "rbcd"
+            else:
+                continue  # Not a delegation line
+
+            # Extract target SPN - look for SPN pattern (service/host)
+            # SPNs look like: CIFS/srv01, HTTP/srv01.corp.contoso.local
+            for part in parts:
+                if "/" in part and not part.startswith("[") and part not in ("w/", "w/o"):
+                    # Validate it looks like an SPN (has letters after the /)
+                    slash_idx = part.find("/")
+                    if slash_idx < len(part) - 1 and part[slash_idx + 1].isalpha():
+                        target_spn = part
+                        break
+            # N/A means no specific target (unconstrained usually)
+            if target_spn == "N/A":
+                target_spn = ""
+
+            # Deduplicate by account+delegation_type
+            key = f"{account.lower()}:{delegation_type.lower()}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            delegations.append(
+                {
+                    "account": account,
+                    "account_type": account_type,
+                    "delegation_type": delegation_type,
+                    "target_spn": target_spn,
+                }
+            )
+
+        return delegations
+
+    async def _auto_queue_delegation_vulnerabilities(  # noqa: PLR0912
+        self, delegations: list[dict[str, str]], source_agent: str
+    ) -> int:
+        """
+        Auto-queue delegation vulnerabilities for exploitation.
+
+        Args:
+            delegations: List of delegation findings from _extract_delegation_from_output
+            source_agent: Agent that discovered the delegation
+
+        Returns:
+            Number of vulnerabilities queued
+        """
+        queued = 0
+
+        for deleg in delegations:
+            account = deleg.get("account", "")
+            delegation_type = deleg.get("delegation_type", "").lower()
+            target_spn = deleg.get("target_spn", "")
+
+            if delegation_type == "constrained":
+                vuln_type = "constrained_delegation"
+            elif delegation_type == "unconstrained":
+                vuln_type = "unconstrained_delegation"
+            else:
+                continue
+
+            # Check if already queued
+            already_queued = any(
+                v.vuln_type == vuln_type and account.lower() in v.target.lower()
+                for v in self.shared_state.discovered_vulnerabilities.values()
+            )
+            if already_queued:
+                continue
+
+            # Find credential for this account (needed for S4U attack)
+            account_cred = None
+            account_lower = account.lower().rstrip("$")
+            for cred in self.shared_state.all_credentials:
+                if cred.username.lower() == account_lower and cred.password:
+                    account_cred = cred
+                    break
+
+            details: dict[str, Any] = {
+                "account": account,
+                "delegation_type": delegation_type,
+                "target_spn": target_spn,
+                "discovered_by": source_agent,
+            }
+
+            if account_cred:
+                details["username"] = account_cred.username
+                details["password"] = account_cred.password
+                details["domain"] = account_cred.domain
+
+            await self.queue_vulnerability(
+                vuln_type=vuln_type,
+                target=account,
+                details=details,
+                discovered_by=source_agent,
+            )
+
+            logger.warning(
+                f"🎫 Auto-queued {vuln_type} for {account} (target: {target_spn or 'any'})"
+            )
+            queued += 1
+
+            # Auto-dispatch S4U attack if we have credentials for constrained delegation
+            if account_cred and delegation_type == "constrained" and target_spn:
+                dc_ip = self._find_domain_controller_ip(account_cred.domain)
+                # Fallback: extract DC IP from target SPN hostname or vulnerability details
+                if not dc_ip:
+                    spn_host = target_spn.split("/", 1)[-1] if "/" in target_spn else ""
+                    for host in self.shared_state.all_hosts:
+                        if host.hostname and spn_host and host.hostname.lower() == spn_host.lower():
+                            dc_ip = host.ip
+                            break
+                        if host.ip == details.get("target_ip"):
+                            dc_ip = host.ip
+                            break
+                # Last resort: use target_ip from vulnerability details directly
+                if not dc_ip:
+                    dc_ip = details.get("target_ip", "")
+                logger.warning(
+                    f"🚀 Auto-dispatching S4U attack for {account} -> {target_spn} "
+                    f"(have credentials, DC: {dc_ip})"
+                )
+                await self.request_exploit(
+                    vuln_type="constrained_delegation",
+                    vuln_id=f"cd_{account.lower()}",
+                    target=account,
+                    source_agent="auto_delegation",
+                    params={
+                        "account": account,
+                        "target_spn": target_spn,
+                        "domain": account_cred.domain,
+                        "username": account_cred.username,
+                        "password": account_cred.password,
+                        "dc_ip": dc_ip,
+                    },
+                )
+
+        return queued
+
+    def _extract_bloodhound_vulns_from_output(  # noqa: PLR0912
+        self, output: str
+    ) -> list[dict[str, Any]]:
+        """
+        Extract BloodHound-identified vulnerabilities from tool output.
+
+        Parses BloodHound JSON output and raw collection results for:
+        - GPO edit permissions (WriteProperty/WriteDacl on GPO) → gpo_abuse vuln
+        - Local admin memberships (AdminTo relationship) → local_admin vuln
+        - ACL abuse paths (GenericAll/GenericWrite on user/computer)
+
+        Returns list of dicts with keys: vuln_type, target, principal, details
+        """
+        if not output:
+            return []
+
+        vulns: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        output_lower = output.lower()
+
+        # Parse GPO-related patterns from BloodHound output
+        # BloodHound shows: "User X has WriteProperty on GPO Y"
+        # Or raw GPO names with permissions
+        gpo_patterns = [
+            r"(?:has\s+)?(?:writeproperty|writedacl|genericall|genericwrite)\s+(?:on|to)\s+(?:gpo\s+)?['\"]?([^'\"]+)['\"]?",
+            r"(?:gpo|group\s*policy)\s*[:=]\s*['\"]?([^'\"]+)['\"]?.*(?:writeproperty|writedacl|genericall)",
+            r"(?:can\s+)?(?:edit|modify|write)\s+(?:gpo|group\s*policy)\s+['\"]?([^'\"]+)['\"]?",
+        ]
+
+        for pattern in gpo_patterns:
+            for match in re.finditer(pattern, output_lower, re.IGNORECASE):
+                gpo_name = match.group(1).strip()
+                if not gpo_name or len(gpo_name) < 3:
+                    continue
+
+                key = f"gpo_abuse:{gpo_name.lower()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                vulns.append(
+                    {
+                        "vuln_type": "gpo_abuse",
+                        "target": gpo_name,
+                        "principal": "",  # Will need to extract from context
+                        "details": {
+                            "gpo_name": gpo_name,
+                            "description": f"GPO edit permissions detected on '{gpo_name}'",
+                        },
+                    }
+                )
+
+        # Parse local admin / AdminTo patterns
+        # BloodHound shows: "User X is local admin on Y" or "AdminTo" edges
+        admin_patterns = [
+            r"(\S+@\S+|\S+)\s+(?:is\s+)?(?:local\s*admin(?:istrator)?|AdminTo)\s+(?:on|→|->)\s+(\S+)",
+            r"(?:local\s*admin|AdminTo)\s*[:=]\s*(\S+)\s+(?:on|→|->)\s+(\S+)",
+            r"(\S+)\s+has\s+(?:local\s*)?admin(?:istrative)?\s+(?:access|rights)\s+(?:on|to)\s+(\S+)",
+        ]
+
+        for pattern in admin_patterns:
+            for match in re.finditer(pattern, output_lower, re.IGNORECASE):
+                principal = match.group(1).strip()
+                target = match.group(2).strip()
+
+                if not principal or not target or len(target) < 2:
+                    continue
+
+                key = f"local_admin:{principal.lower()}:{target.lower()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                vulns.append(
+                    {
+                        "vuln_type": "local_admin",
+                        "target": target,
+                        "principal": principal,
+                        "details": {
+                            "username": principal.split("@")[0] if "@" in principal else principal,
+                            "domain": principal.split("@")[1] if "@" in principal else "",
+                            "description": f"{principal} has local admin on {target}",
+                        },
+                    }
+                )
+
+        # Parse "Pwn3d!" output from CME/NetExec which indicates local admin
+        pwned_pattern = r"(\d{1,3}(?:\.\d{1,3}){3}).*Pwn3d!"
+        for match in re.finditer(pwned_pattern, output, re.IGNORECASE):
+            target_ip = match.group(1)
+
+            # Try to find associated credential from the same line or nearby context
+            line_match = re.search(rf".*{re.escape(target_ip)}.*", output)
+            if line_match:
+                line = line_match.group(0)
+                # Look for username pattern like "DOMAIN\user" or "user@domain"
+                cred_match = re.search(r"([A-Za-z0-9_.-]+)[\\/@]([A-Za-z0-9_.-]+)", line)
+                if cred_match:
+                    domain_or_user = cred_match.group(1)
+                    username = cred_match.group(2)
+
+                    key = f"local_admin:{username.lower()}:{target_ip}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    vulns.append(
+                        {
+                            "vuln_type": "local_admin",
+                            "target": target_ip,
+                            "principal": f"{domain_or_user}\\{username}",
+                            "details": {
+                                "username": username,
+                                "domain": domain_or_user,
+                                "description": f"Pwn3d! - {domain_or_user}\\{username} has admin on {target_ip}",
+                            },
+                        }
+                    )
+
+        # Parse ACL abuse patterns (GenericAll, GenericWrite on users/computers)
+        acl_patterns = [
+            r"(\S+)\s+(?:has\s+)?(?:genericall|genericwrite|writedacl|writeowner)\s+(?:on|to)\s+(?:user|computer)?\s*(\S+)",
+        ]
+
+        for pattern in acl_patterns:
+            for match in re.finditer(pattern, output_lower, re.IGNORECASE):
+                principal = match.group(1).strip()
+                target = match.group(2).strip()
+
+                if not principal or not target:
+                    continue
+
+                # Determine vuln type based on target type
+                # If target looks like a computer (ends with $, or FQDN pattern)
+                is_computer = target.endswith("$") or "." in target
+
+                key = f"acl_abuse:{principal.lower()}:{target.lower()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                vulns.append(
+                    {
+                        "vuln_type": "acl_abuse",
+                        "target": target,
+                        "principal": principal,
+                        "details": {
+                            "target_type": "computer" if is_computer else "user",
+                            "description": f"{principal} has dangerous ACL permissions on {target}",
+                        },
+                    }
+                )
+
+        return vulns
+
+    async def _auto_queue_bloodhound_vulnerabilities(
+        self, vulns: list[dict[str, Any]], source_agent: str
+    ) -> int:
+        """
+        Auto-queue BloodHound-discovered vulnerabilities for exploitation.
+
+        Args:
+            vulns: List of vulnerability findings from _extract_bloodhound_vulns_from_output
+            source_agent: Agent that discovered the vulnerabilities
+
+        Returns:
+            Number of vulnerabilities queued
+        """
+        queued = 0
+
+        for vuln in vulns:
+            vuln_type = vuln.get("vuln_type", "")
+            target = vuln.get("target", "")
+            principal = vuln.get("principal", "")
+            details = vuln.get("details", {})
+
+            if not vuln_type or not target:
+                continue
+
+            # Check if already queued
+            already_queued = any(
+                v.vuln_type == vuln_type and target.lower() in v.target.lower()
+                for v in self.shared_state.discovered_vulnerabilities.values()
+            )
+            if already_queued:
+                continue
+
+            # Try to find credential for the principal
+            principal_cred = None
+            if principal:
+                principal_name = principal.split("\\")[-1].split("@")[0].lower()
+                for cred in self.shared_state.all_credentials:
+                    if cred.username.lower() == principal_name and cred.password:
+                        principal_cred = cred
+                        break
+
+            # Enrich details with credential info
+            vuln_details: dict[str, Any] = dict(details)
+            vuln_details["discovered_by"] = source_agent
+            vuln_details["principal"] = principal
+
+            if principal_cred:
+                vuln_details["username"] = principal_cred.username
+                vuln_details["password"] = principal_cred.password
+                vuln_details["domain"] = principal_cred.domain
+
+            await self.queue_vulnerability(
+                vuln_type=vuln_type,
+                target=target,
+                details=vuln_details,
+                discovered_by=source_agent,
+            )
+
+            logger.warning(
+                f"🩸 Auto-queued BloodHound {vuln_type} for {target} "
+                f"(principal: {principal or 'unknown'})"
+            )
+            queued += 1
+
+            # For local_admin vulns, also update credential is_admin status
+            if vuln_type == "local_admin" and principal_cred:
+                # Mark the credential as admin
+                for cred in self.shared_state.all_credentials:
+                    if (
+                        cred.username.lower() == principal_cred.username.lower()
+                        and cred.domain.lower() == principal_cred.domain.lower()
+                    ):
+                        cred.is_admin = True
+                        cred.source = f"{cred.source}; admin on {target}"
+                        logger.info(
+                            f"Marked {cred.domain}\\{cred.username} as admin "
+                            f"(BloodHound: admin on {target})"
+                        )
+                        break
+
+        return queued
 
     # Domain Admin Achievement
 
@@ -2447,6 +3584,29 @@ class RedTeamDispatcher:
                         f"success={result.success}"
                     )
 
+                    # Track rate limit status for adaptive throttling
+                    if result.success:
+                        self.clear_rate_limit_backoff()
+                    elif result.error:
+                        error_str = str(result.error).lower()
+                        rate_limit_indicators = [
+                            "rate limit",
+                            "rate_limit",
+                            "ratelimit",
+                            "too many requests",
+                            "429",
+                            "quota exceeded",
+                            "tokens per min",
+                            "requests per min",
+                            "tpm limit",
+                            "rpm limit",
+                        ]
+                        if any(ind in error_str for ind in rate_limit_indicators):
+                            logger.warning(
+                                f"Task {task_id} failed with rate limit error - triggering backoff"
+                            )
+                            self.record_rate_limit_error()
+
                     # Remove from tracking set
                     self._redis_task_ids.discard(task_id)
 
@@ -2456,7 +3616,7 @@ class RedTeamDispatcher:
                         success=result.success,
                         result=result.result,
                         error=result.error,
-                        source_agent=result.worker_pod or "unknown",
+                        source_agent=result.agent_name or result.worker_pod or "unknown",
                     )
             except Exception as e:  # noqa: PERF203
                 logger.warning(f"Error checking result for task {task_id}: {e}")
@@ -2713,9 +3873,12 @@ class RedTeamDispatcher:
         """
         Get highest priority unexploited vulnerability.
 
+        Checks both the in-memory queue and shared state (for externally-injected vulns).
+
         Returns:
             Vulnerability data dict or None if queue empty
         """
+        # First check in-memory queue
         while not self._vulnerability_queue.empty():
             try:
                 priority, vuln_id, vuln_data = self._vulnerability_queue.get_nowait()
@@ -2728,6 +3891,25 @@ class RedTeamDispatcher:
 
             except asyncio.QueueEmpty:
                 break
+
+        # Also check shared state for externally-injected or checkpoint-restored vulns
+        # that weren't added to the in-memory queue
+        for vuln in sorted(
+            self.shared_state.discovered_vulnerabilities.values(),
+            key=lambda v: v.priority,
+        ):
+            if vuln.vuln_id in self.shared_state.exploited_vulnerabilities:
+                continue  # Already exploited
+
+            # Return vulnerability in expected format
+            return {
+                "id": vuln.vuln_id,
+                "priority": vuln.priority,
+                "type": vuln.vuln_type,
+                "target": vuln.target,
+                "details": vuln.details,
+                "discovered_by": vuln.discovered_by,
+            }
 
         return None
 
@@ -2926,6 +4108,7 @@ class RedTeamDispatcher:
         target_role: str,
         payload: dict[str, Any],
         timeout: float = 300.0,
+        source_agent: str = "orchestrator",
     ) -> QueueTaskResult | None:
         """
         Submit task and wait for result.
@@ -2938,6 +4121,7 @@ class RedTeamDispatcher:
             target_role: Role to handle the task (cracker, lateral, privesc, etc.)
             payload: Task-specific data
             timeout: Maximum wait time in seconds
+            source_agent: Agent submitting the task
 
         Returns:
             QueueTaskResult or None if timeout/not available
@@ -2946,10 +4130,11 @@ class RedTeamDispatcher:
             logger.error("Task queue not initialized - Redis URL required for dispatch_and_wait")
             return None
 
-        task_id = await self._task_queue.submit_task(
+        task_id = await self._throttled_submit_task(
             task_type=task_type,
             target_role=target_role,
             payload=payload,
+            source_agent=source_agent,
         )
 
         return await self._task_queue.wait_for_result(task_id, timeout=timeout)

@@ -319,9 +319,9 @@ class TestRedteamCommand:
 
             args = Args(model="test-model", report_dir=str(tmp_path))
 
-            await redteam("192.168.56.100", args=args)
+            await redteam("192.168.58.100", args=args)
 
-            mock_orchestrator.execute_operation.assert_called_once_with("192.168.56.100")
+            mock_orchestrator.execute_operation.assert_called_once_with("192.168.58.100")
 
     @pytest.mark.asyncio
     async def test_redteam_domain_admin_achieved(self, tmp_path: Path):
@@ -353,7 +353,7 @@ class TestRedteamCommand:
 
             args = Args(model="test-model", report_dir=str(tmp_path))
 
-            await redteam("192.168.56.100", args=args)
+            await redteam("192.168.58.100", args=args)
 
             mock_orchestrator.execute_operation.assert_called_once()
 
