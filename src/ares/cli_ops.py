@@ -1072,7 +1072,19 @@ async def backfill_domains(
         await client.aclose()
 
         added = [d for d in domains if d not in before]
-        print(f"Backfilled domains ({len(added)}): {', '.join(added) if added else 'None'}")
+        if added:
+            # Notify subscribers so orchestrator/workers pick it up instantly
+            from ares.core.task_queue import RedisTaskQueue
+
+            tq = RedisTaskQueue(resolved_redis_url)
+            await tq.connect()
+            n = await tq.publish_state_update(operation_id)
+            await tq.disconnect()
+            print(
+                f"Backfilled domains ({len(added)}): {', '.join(added)} ({n} subscribers notified)"
+            )
+        else:
+            print("Backfilled domains (0): None")
 
     except Exception as e:
         logger.error(f"Failed to backfill domains: {e}")
@@ -1124,11 +1136,21 @@ async def inject_credential(
         if added:
             # Save updated state
             await client.set(key, state.to_bytes())
-            logger.success(f"Injected credential: {domain}\\{username}:{password}")
-        else:
-            logger.warning(f"Credential already exists: {domain}\\{username}")
+            await client.aclose()
 
-        await client.aclose()
+            # Notify subscribers so orchestrator/workers pick it up instantly
+            from ares.core.task_queue import RedisTaskQueue
+
+            tq = RedisTaskQueue(resolved_redis_url)
+            await tq.connect()
+            n = await tq.publish_state_update(operation_id)
+            await tq.disconnect()
+            logger.success(
+                f"Injected credential: {domain}\\{username}:{password} ({n} subscribers notified)"
+            )
+        else:
+            await client.aclose()
+            logger.warning(f"Credential already exists: {domain}\\{username}")
 
     except Exception as e:
         logger.error(f"Failed to inject credential: {e}")
@@ -1209,7 +1231,17 @@ async def inject_vulnerability(
         await client.set(key, state.to_bytes())
         await client.aclose()
 
-        logger.success(f"Injected vulnerability: {vuln_type} on {target_ip}")
+        # Notify subscribers so orchestrator/workers pick it up instantly
+        from ares.core.task_queue import RedisTaskQueue
+
+        tq = RedisTaskQueue(resolved_redis_url)
+        await tq.connect()
+        n = await tq.publish_state_update(operation_id)
+        await tq.disconnect()
+
+        logger.success(
+            f"Injected vulnerability: {vuln_type} on {target_ip} ({n} subscribers notified)"
+        )
         logger.info(f"Details: {vuln_details}")
 
     except Exception as e:
