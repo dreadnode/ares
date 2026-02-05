@@ -14,13 +14,16 @@ Example usage for LLM output parsing:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+import types
+from dataclasses import dataclass, field, is_dataclass
+from dataclasses import fields as dc_fields
 from datetime import datetime, timezone
 from enum import Enum, IntEnum
-from typing import Any
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from loguru import logger
-from pydantic import Field, computed_field
+from pydantic import BaseModel, Field, computed_field
 from rigging import Model
 from rigging.model import element, wrapped
 
@@ -632,6 +635,100 @@ class AgentInfo:
     last_heartbeat: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+# =========================================================================
+# JSON serialization helpers for SharedRedTeamState
+# =========================================================================
+
+# Fields to exclude from JSON serialization (transient runtime references)
+_EXCLUDED_FIELDS = frozenset({"_dispatcher"})
+
+
+def _to_json(val: Any) -> Any:
+    """Recursively convert a value to JSON-safe types."""
+    if val is None or isinstance(val, (str, int, float, bool)):
+        return val
+    if isinstance(val, datetime):
+        return val.isoformat()
+    if isinstance(val, Enum):
+        return val.value
+    if isinstance(val, set):
+        return sorted(_to_json(v) for v in val)
+    if isinstance(val, BaseModel):
+        return val.model_dump(mode="json")
+    if is_dataclass(val) and not isinstance(val, type):
+        return {
+            f.name: _to_json(getattr(val, f.name))
+            for f in dc_fields(val)
+            if f.name not in _EXCLUDED_FIELDS
+        }
+    if isinstance(val, dict):
+        return {str(k): _to_json(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple)):
+        return [_to_json(v) for v in val]
+    return str(val)
+
+
+def _from_json(val: Any, hint: type) -> Any:  # noqa: PLR0912
+    """Reconstruct a typed value from JSON using the type annotation."""
+    origin = get_origin(hint)
+    args = get_args(hint)
+
+    # Handle Optional[X] / X | None  (Union with NoneType)
+    if origin is Union or origin is types.UnionType:
+        if val is None:
+            return None
+        non_none = [a for a in args if a is not type(None)]
+        if non_none:
+            return _from_json(val, non_none[0])
+        return val
+
+    # Primitives / Any
+    if hint in (str, int, float, bool, type(None)) or hint is Any:
+        return val
+
+    # datetime
+    if hint is datetime:
+        if isinstance(val, str):
+            return datetime.fromisoformat(val)
+        return val
+
+    # Enum subclasses
+    if isinstance(hint, type) and issubclass(hint, Enum):
+        return hint(val)
+
+    # Pydantic BaseModel (rigging.Model inherits from this)
+    if isinstance(hint, type) and issubclass(hint, BaseModel):
+        return hint.model_validate(val)
+
+    # set[T]
+    if origin is set:
+        elem_type = args[0] if args else Any
+        return {_from_json(v, elem_type) for v in val}
+
+    # list[T]
+    if origin is list:
+        elem_type = args[0] if args else Any
+        return [_from_json(v, elem_type) for v in val]
+
+    # dict[K, V]
+    if origin is dict:
+        val_type = args[1] if len(args) > 1 else Any
+        return {k: _from_json(v, val_type) for k, v in val.items()}
+
+    # dataclass
+    if is_dataclass(hint):
+        hints = get_type_hints(hint)
+        kwargs = {}
+        for f in dc_fields(hint):
+            if f.name in _EXCLUDED_FIELDS:
+                continue
+            if f.name in val:
+                kwargs[f.name] = _from_json(val[f.name], hints[f.name])
+        return hint(**kwargs)
+
+    return val
+
+
 @dataclass
 class SharedRedTeamState:
     """
@@ -706,19 +803,8 @@ class SharedRedTeamState:
     # Example: "sysvol/login.bat" -> "QmF0Y2ggZmlsZSBjb250ZW50..."
     downloaded_artifacts: dict[str, str] = field(default_factory=dict)
 
-    # Transient dispatcher reference for real-time publishing (NOT pickled)
+    # Transient dispatcher reference for real-time publishing (NOT serialized)
     _dispatcher: Any = field(default=None, init=False, repr=False, compare=False)
-
-    def __getstate__(self):
-        """Exclude _dispatcher from pickling."""
-        state = self.__dict__.copy()
-        state.pop("_dispatcher", None)
-        return state
-
-    def __setstate__(self, state):
-        """Restore state without dispatcher."""
-        self.__dict__.update(state)
-        self._dispatcher = None
 
     def set_dispatcher(self, dispatcher) -> None:
         """Set dispatcher for real-time publishing of discoveries."""
@@ -1362,9 +1448,7 @@ class SharedRedTeamState:
         }
 
     def to_bytes(self) -> bytes:
-        """Serialize state for Redis storage."""
-        import pickle  # nosec B403
-
+        """Serialize state for Redis storage (JSON format)."""
         for host in self.all_hosts:
             hostname = (host.hostname or "").strip()
             if not hostname:
@@ -1373,25 +1457,17 @@ class SharedRedTeamState:
             if lowered.startswith("ip-") and "compute.internal" in lowered:
                 host.hostname = ""
 
-        return pickle.dumps(self)  # nosec B301
+        data = _to_json(self)
+        data["_v"] = 1
+        return json.dumps(data, separators=(",", ":")).encode("utf-8")
 
     @classmethod
     def from_bytes(cls, data: bytes) -> SharedRedTeamState:
-        """Deserialize state from Redis."""
-        import pickle  # nosec B403
+        """Deserialize state from Redis (JSON)."""
+        raw = json.loads(data)
+        raw.pop("_v", None)
+        state = _from_json(raw, cls)
 
-        state = pickle.loads(data)  # noqa: S301  # nosec B301
-        if not hasattr(state, "all_domains"):
-            state.all_domains = []
-        if not hasattr(state, "pending_credential_findings"):
-            state.pending_credential_findings = set()
-        if not hasattr(state, "downloaded_artifacts"):
-            state.downloaded_artifacts = {}
-        if not hasattr(state, "scanned_targets"):
-            state.scanned_targets = set()
-        for host in state.all_hosts:
-            if not hasattr(host, "is_dc"):
-                host.update_dc_status()
         state.all_credentials = cls._dedupe_credentials(state.all_credentials)
         if not state.all_domains:
             state.all_domains = cls._extract_domains(state)
