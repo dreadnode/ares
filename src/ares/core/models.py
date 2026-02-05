@@ -1115,6 +1115,19 @@ class SharedRedTeamState:
         self.all_hashes.append(hash_obj)
         logger.info(f"Hash added: {domain}\\{username} ({hash_type}) (source: {source_agent})")
 
+        # Auto-detect Domain Admin: krbtgt or Administrator NTLM hash = DA achieved
+        if (
+            hash_type == "ntlm"
+            and username in ("krbtgt", "administrator")
+            and not self.has_domain_admin
+        ):
+            self.has_domain_admin = True
+            self.domain_admin_path = f"secretsdump → {username} NTLM hash extracted from DC"
+            logger.warning(
+                f"🏆 DOMAIN ADMIN AUTO-DETECTED: {domain}\\{username} NTLM hash "
+                f"found in state (source: {source_agent})"
+            )
+
         # Real-time checkpoint to Redis (don't call publish_hash - that would re-add)
         if self._dispatcher:
             self._dispatcher.signal_credential_access()

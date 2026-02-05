@@ -1257,11 +1257,19 @@ def generate_prompt_from_task(  # noqa: PLR0912
 
         # Special handling for constrained delegation (S4U attack)
         if vuln_type == "constrained_delegation":
-            account = payload.get("account", target)
+            account = payload.get("account") or payload.get("account_name") or target
             target_spn = payload.get("target_spn", "")
             domain = payload.get("domain", "")
-            username = payload.get("username", account)
+            username = payload.get("username") or payload.get("account_name") or account
             password = payload.get("password", "")
+
+            # Look up password from shared state if not in payload
+            if not password and state:
+                creds = getattr(state, "all_credentials", getattr(state, "credentials", []))
+                for cred in creds:
+                    if cred.username.lower() == username.lower() and cred.password:
+                        password = cred.password
+                        break
 
             # Find the DC for this domain
             dc_ip = payload.get("dc_ip", "")
