@@ -1012,7 +1012,7 @@ class SharedRedTeamState:
         credentials with domain="corp" to use the FQDN instead.
         """
         # Extract NetBIOS portion (e.g., "corp" from "corp.contoso.local")
-        netbios = fqdn.split(".")[0]
+        netbios = fqdn.split(".", maxsplit=1)[0]
         if not netbios:
             return
 

@@ -532,7 +532,7 @@ class OrchestratorTools(Toolset):
             return (
                 f"✗ Invalid lateral movement request: domain field contains backslash ('{domain}'). "
                 "The domain and username must be separate parameters. "
-                f"Please use domain='{domain.split(chr(92))[0]}' and username='{domain.split(chr(92))[1]}' separately."
+                f"Please use domain='{domain.split(chr(92), maxsplit=1)[0]}' and username='{domain.split(chr(92), maxsplit=1)[1]}' separately."
             )
 
         task_id = await self.dispatcher.request_lateral_movement(
@@ -957,7 +957,7 @@ class OrchestratorTools(Toolset):
             username = cred.username.strip()
             if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
                 continue
-            auth = cred.password if cred.password else "[hash]"
+            auth = cred.password or "[hash]"
             admin_tag = " ⚡ADMIN" if cred.is_admin else ""
             lines.append(f"  • {cred.domain}\\{cred.username}: {auth[:20]}...{admin_tag}")
             lines.append(f"    Source: {cred.source}")

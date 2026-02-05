@@ -207,7 +207,7 @@ async def credential_expansion_loop(  # noqa: PLR0912
                         target_host=host.ip,
                         username=cred.username,
                         source_agent="orchestrator",
-                        password=cred.password if cred.password else None,
+                        password=cred.password or None,
                         hash_value=hash_value,
                         domain=domain_override,
                     )

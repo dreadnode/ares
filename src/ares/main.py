@@ -802,7 +802,7 @@ async def worker(
     try:
         await run_worker(
             role=agent_role,
-            operation_id=operation_id if operation_id else None,
+            operation_id=operation_id or None,
             redis_url=redis_url,
             model=model or None,  # Pass None to let run_worker fetch from Redis
             max_steps=max_steps if max_steps > 0 else None,

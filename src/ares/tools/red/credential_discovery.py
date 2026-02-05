@@ -1517,7 +1517,7 @@ class CrackingTools(Toolset):
 
         for username_raw in sorted(usernames):
             username = (username_raw or "").strip()
-            if not username or username.lower() in {"guest"}:
+            if not username or username.lower() == "guest":
                 continue
             if "/" in username or "\\" in username or username.endswith(".txt"):
                 continue

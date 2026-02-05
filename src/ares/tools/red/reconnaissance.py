@@ -99,7 +99,7 @@ class NetworkEnumerationTools(Toolset):
             user = candidate.strip()
             if not user or user.endswith("$"):
                 return
-            if user.lower() in ("anonymous",):
+            if user.lower() == "anonymous":
                 return
             # Filter out Kali MOTD garbage and invalid usernames
             if is_motd_garbage(user):

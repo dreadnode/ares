@@ -327,7 +327,7 @@ class RedTeamReportingTools(Toolset):
 
         for cred in creds:
             admin_tag = " [ADMIN]" if cred.is_admin else ""
-            password_display = cred.password if cred.password else "[no password]"
+            password_display = cred.password or "[no password]"
             lines.append(f"- {cred.domain}\\{cred.username}:{password_display}{admin_tag}")
             if cred.source:
                 lines.append(f"  Source: {cred.source}")

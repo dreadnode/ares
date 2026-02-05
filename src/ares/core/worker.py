@@ -1029,9 +1029,7 @@ def generate_prompt_from_task(  # noqa: PLR0912
                 if payload.get("password")
                 else f"hashes='{hash_value}'"
             )
-            cred_display = (
-                payload.get("password") if payload.get("password") else f"[HASH] {hash_value}"
-            )
+            cred_display = payload.get("password") or f"[HASH] {hash_value}"
 
             technique_map = {
                 "sysvol_script_search": (
@@ -2051,7 +2049,7 @@ class RedisWorkerAgent:
                 await self.task_queue.send_result(
                     task_id=task.task_id,
                     success=False,
-                    result=fatal_result if fatal_result else None,
+                    result=fatal_result or None,
                     error=f"FATAL: {type(e).__name__}: {e!s}",
                     worker_pod=self.pod_name,
                     agent_name=self.agent_name,
@@ -2086,7 +2084,7 @@ class RedisWorkerAgent:
             await self.task_queue.send_result(
                 task_id=task.task_id,
                 success=False,
-                result=exception_result if exception_result else None,
+                result=exception_result or None,
                 error=f"{type(e).__name__}: {e!s}",
                 worker_pod=self.pod_name,
                 agent_name=self.agent_name,
@@ -3404,7 +3402,7 @@ async def run_worker(  # noqa: PLR0912
             dispatcher=dispatcher,
             pod_name=pod_name,
             max_steps=max_steps,
-            additional_tools=additional_tools if additional_tools else None,
+            additional_tools=additional_tools or None,
         )
 
         pointer_switched = False

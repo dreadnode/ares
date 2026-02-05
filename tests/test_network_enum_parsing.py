@@ -257,7 +257,7 @@ def test_add_user_validates_against_motd_garbage():
     def _add_user(user: str) -> None:
         from ares.tools.red.common import is_motd_garbage
 
-        if not user or user.lower() in ("anonymous",):
+        if not user or user.lower() == "anonymous":
             return
         if is_motd_garbage(user):
             return

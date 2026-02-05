@@ -47,7 +47,7 @@ def mock_mitre_client():
         "discovery": {"name": "Discovery"},
         "defense-evasion": {"name": "Defense Evasion"},
     }
-    client.get_technique.side_effect = lambda tid: client._techniques.get(tid)
+    client.get_technique.side_effect = client._techniques.get
     client.get_related_techniques.return_value = [
         {
             "technique_id": "T1078",
@@ -56,7 +56,7 @@ def mock_mitre_client():
             "relationship": "uses",
         }
     ]
-    client.get_tactic.side_effect = lambda tid: client._tactics.get(tid)
+    client.get_tactic.side_effect = client._tactics.get
     client.get_techniques_for_tactic.return_value = [
         {"technique_id": "T1003", "name": "OS Credential Dumping"}
     ]

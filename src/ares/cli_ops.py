@@ -235,7 +235,7 @@ async def submit(
             max_steps=max_steps,
             redis_url=resolved_redis_url,
             wait_for_completion=wait,
-            env_vars=env_vars if env_vars else None,
+            env_vars=env_vars or None,
         )
 
         logger.success(f"Operation submitted: {operation_id}")

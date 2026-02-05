@@ -203,6 +203,7 @@ ignore = [
     "SLF001",  # intentional for internal APIs
     "SIM105",  # style preference
     "S110",    # acceptable in cleanup code
+    "ASYNC240", # sync path ops are fine in our async functions (startup, cleanup)
     "PTH108",  # style preference
     "PTH110",  # style preference
     "PTH123",  # style preference
