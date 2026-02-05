@@ -4108,6 +4108,7 @@ class RedTeamDispatcher:
         target_role: str,
         payload: dict[str, Any],
         timeout: float = 300.0,
+        source_agent: str = "orchestrator",
     ) -> QueueTaskResult | None:
         """
         Submit task and wait for result.
@@ -4120,6 +4121,7 @@ class RedTeamDispatcher:
             target_role: Role to handle the task (cracker, lateral, privesc, etc.)
             payload: Task-specific data
             timeout: Maximum wait time in seconds
+            source_agent: Agent submitting the task
 
         Returns:
             QueueTaskResult or None if timeout/not available
@@ -4132,6 +4134,7 @@ class RedTeamDispatcher:
             task_type=task_type,
             target_role=target_role,
             payload=payload,
+            source_agent=source_agent,
         )
 
         return await self._task_queue.wait_for_result(task_id, timeout=timeout)
