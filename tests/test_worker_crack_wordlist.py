@@ -29,9 +29,9 @@ async def test_crack_task_resolves_relative_wordlist(monkeypatch):
             captured["wordlist_path"] = wordlist_path
             return "ok"
 
-    monkeypatch.setattr("ares.core.worker.CrackingTools", FakeCrackingTools)
+    monkeypatch.setattr("ares.core.worker._worker.CrackingTools", FakeCrackingTools)
     monkeypatch.setattr(
-        "ares.core.worker.RedisWorkerAgent._extract_cracked_password", lambda *_: "pw"
+        "ares.core.worker._worker.RedisWorkerAgent._extract_cracked_password", lambda *_: "pw"
     )
 
     def exists_side_effect(path):
@@ -88,9 +88,9 @@ async def test_crack_task_uses_gz_wordlist(monkeypatch):
             captured["wordlist_path"] = wordlist_path
             return "ok"
 
-    monkeypatch.setattr("ares.core.worker.CrackingTools", FakeCrackingTools)
+    monkeypatch.setattr("ares.core.worker._worker.CrackingTools", FakeCrackingTools)
     monkeypatch.setattr(
-        "ares.core.worker.RedisWorkerAgent._extract_cracked_password", lambda *_: "pw"
+        "ares.core.worker._worker.RedisWorkerAgent._extract_cracked_password", lambda *_: "pw"
     )
 
     tmp_seen = {"count": 0}

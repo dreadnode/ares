@@ -108,8 +108,10 @@ class KubernetesPodExecutor:
             raise RuntimeError(
                 "kubernetes package not installed. Install with: pip install kubernetes"
             ) from e
-        except Exception as e:
-            raise RuntimeError(f"Failed to initialize Kubernetes client: {e}") from e
+        except config.ConfigException as e:
+            raise RuntimeError(f"Failed to load Kubernetes config: {e}") from e
+        except client.ApiException as e:
+            raise RuntimeError(f"Kubernetes API error during initialization: {e}") from e
 
     async def get_pod_for_role(self, role: str) -> str | None:
         """
@@ -126,6 +128,8 @@ class KubernetesPodExecutor:
         await self._ensure_initialized()
         assert self._v1 is not None  # noqa: S101
 
+        from kubernetes.client import ApiException
+
         # Check cache first
         if role in self._pod_cache:
             # Verify pod still exists and is running
@@ -136,8 +140,12 @@ class KubernetesPodExecutor:
                 )
                 if pod.status.phase == "Running":
                     return self._pod_cache[role]
+            except (ApiException, OSError, AttributeError):
+                # Pod no longer exists or is not accessible, clear cache
+                # OSError for connection issues, AttributeError for mock/testing
+                del self._pod_cache[role]
             except Exception:
-                # Pod no longer exists, clear cache
+                # Catch-all for other k8s client errors (e.g., during testing)
                 del self._pod_cache[role]
 
         # Discover pod by label
@@ -156,7 +164,7 @@ class KubernetesPodExecutor:
                 logger.debug(f"Discovered pod for role {role}: {pod_name}")
                 return pod_name
 
-        except Exception as e:
+        except ApiException as e:
             logger.error(f"Failed to discover pod for role {role}: {e}")
 
         return None
@@ -285,8 +293,8 @@ class KubernetesPodExecutor:
 
         except asyncio.TimeoutError as e:
             raise PodExecutionError(f"Command timed out after {timeout} seconds") from e
-        except Exception as e:
-            raise PodExecutionError(f"Command execution error: {e}") from e
+        except OSError as e:
+            raise PodExecutionError(f"I/O error during command execution: {e}") from e
 
     async def wait_for_pod(self, role: str, timeout: int = 60) -> bool:
         """
@@ -321,6 +329,8 @@ class KubernetesPodExecutor:
         """
         Wait for all required pods to be ready.
 
+        Runs all role checks concurrently using asyncio.gather.
+
         Args:
             roles: List of roles to wait for.
             timeout: Maximum time to wait in seconds.
@@ -330,11 +340,15 @@ class KubernetesPodExecutor:
         """
         results: dict[str, bool] = {}
 
-        async def wait_for_role(role: str):
-            ready = await self.wait_for_pod(role, timeout)
-            results[role] = ready
-            return ready
+        async def wait_for_role(role: str) -> None:
+            try:
+                ready = await self.wait_for_pod(role, timeout)
+                results[role] = ready
+            except Exception as e:
+                logger.warning(f"Pod wait for role {role} failed: {e}")
+                results[role] = False
 
+        # Execute all role checks concurrently
         await asyncio.gather(*[wait_for_role(r) for r in roles])
 
         ready_count = sum(1 for r in results.values() if r)
@@ -366,6 +380,8 @@ class KubernetesPodExecutor:
         if not pod_name:
             raise PodNotAvailableError(f"No running pod for role: {role}")
 
+        from kubernetes.client import ApiException
+
         try:
             return self._v1.read_namespaced_pod_log(
                 name=pod_name,
@@ -373,7 +389,7 @@ class KubernetesPodExecutor:
                 tail_lines=tail_lines,
                 since_seconds=since_seconds,
             )
-        except Exception as e:
+        except ApiException as e:
             logger.error(f"Failed to get logs for {role}: {e}")
             raise PodExecutionError(f"Failed to get pod logs: {e}") from e
 
@@ -426,7 +442,7 @@ class KubernetesPodExecutor:
             logger.debug(f"Copied {local_path} to {pod_name}:{remote_path}")
             return True
 
-        except Exception as e:
+        except (OSError, PodExecutionError, PodNotAvailableError) as e:
             logger.error(f"Failed to copy file to pod: {e}")
             return False
 
@@ -474,7 +490,7 @@ class KubernetesPodExecutor:
             logger.debug(f"Copied {remote_path} to {local_path}")
             return True
 
-        except Exception as e:
+        except (OSError, PodExecutionError, PodNotAvailableError) as e:
             logger.error(f"Failed to copy file from pod: {e}")
             return False
 
@@ -496,6 +512,8 @@ class KubernetesPodExecutor:
         result: dict[str, list[str]] = {}
         label_selector = "ares.dreadnode.io/component=red-team"
 
+        from kubernetes.client import ApiException
+
         try:
             pods = self._v1.list_namespaced_pod(
                 namespace=self.namespace,
@@ -508,7 +526,7 @@ class KubernetesPodExecutor:
                     result[role] = []
                 result[role].append(pod.metadata.name)
 
-        except Exception as e:
+        except ApiException as e:
             logger.error(f"Failed to list pods: {e}")
 
         return result

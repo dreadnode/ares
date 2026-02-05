@@ -149,7 +149,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         with open(path) as f:
             data = yaml.safe_load(f)
             return data if isinstance(data, dict) else {}
-    except Exception as e:
+    except (OSError, yaml.YAMLError) as e:
         logger.warning(f"Failed to load config from {path}: {e}")
         return {}
 

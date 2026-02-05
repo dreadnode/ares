@@ -113,20 +113,43 @@ exclude = ["tests", ".hooks", "scripts"]
 
 [[tool.mypy.overrides]]
 module = ["ares.*"]
+# Disabled error codes are grouped by reason:
+#
+# External library compatibility (keep disabled):
+#   - import-untyped: Third-party libs without type stubs (boto3, kubernetes, etc.)
+#   - import-not-found: Optional dependencies not always installed
+#   - untyped-decorator: External decorators without type info (rigging, etc.)
+#
+# Dynamic patterns in agent/tool code (keep disabled for now):
+#   - attr-defined: Dynamic attribute access on state objects and tool responses
+#   - call-arg: Variable kwargs passed to LLM/tool APIs
+#   - misc: Catch-all for edge cases in dynamic code
+#   - valid-type: Complex type aliases with generics
+#
+# Incremental strictness (TODO: enable progressively):
+#   - type-arg: Missing generic type arguments (list vs list[str])
+#   - no-untyped-def: Functions missing return type annotations
+#   - no-untyped-call: Calls to untyped functions
+#   - no-any-return: Functions returning Any
+#   - list-item: List contains incompatible types
+#   - unused-ignore: Unused # type: ignore comments (enable after cleanup)
 disable_error_code = [
-    "unused-ignore",
+    # External library compatibility
     "import-untyped",
     "import-not-found",
+    "untyped-decorator",
+    # Dynamic patterns in agent/tool code
+    "attr-defined",
+    "call-arg",
+    "misc",
+    "valid-type",
+    # Incremental strictness (enable progressively)
     "type-arg",
     "no-untyped-def",
     "no-untyped-call",
     "no-any-return",
-    "attr-defined",
-    "call-arg",
     "list-item",
-    "misc",
-    "valid-type",
-    "untyped-decorator",
+    "unused-ignore",
 ]
 
 [tool.pyright]

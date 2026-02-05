@@ -212,7 +212,8 @@ class OperationRecoveryManager:
                 try:
                     existing_state = SharedRedTeamState.from_bytes(existing_data)
                     _merge_state(state, existing_state)
-                except Exception as exc:
+                except (ValueError, KeyError, TypeError) as exc:
+                    # ValueError: invalid data format, KeyError: missing fields, TypeError: type mismatch
                     logger.warning(f"Failed to merge existing checkpoint state: {exc}")
             # Debug: log state counts before checkpoint
             logger.info(
@@ -377,7 +378,8 @@ class OperationRecoveryManager:
             data = await self._redis_client.get(time_key)
             if data:
                 return datetime.fromisoformat(data.decode())
-        except Exception as e:
+        except (OSError, ValueError) as e:
+            # OSError: Redis connection issues, ValueError: invalid datetime format
             logger.warning(f"Failed to get checkpoint time: {e}")
 
         return None
@@ -398,7 +400,8 @@ class OperationRecoveryManager:
         try:
             key = f"ares:operation:{operation_id}:state"
             return await self._redis_client.exists(key) > 0
-        except Exception:
+        except OSError:
+            # Redis connection issue
             return False
 
     async def delete_checkpoint(self, operation_id: str) -> bool:
@@ -420,7 +423,8 @@ class OperationRecoveryManager:
             await self._redis_client.delete(key, time_key)
             logger.info(f"Deleted checkpoint for operation {operation_id}")
             return True
-        except Exception as e:
+        except OSError as e:
+            # Redis connection issue
             logger.error(f"Failed to delete checkpoint: {e}")
             return False
 
@@ -557,7 +561,8 @@ class OperationRecoveryManager:
 
             return operations
 
-        except Exception as e:
+        except OSError as e:
+            # Redis connection issue
             logger.error(f"Failed to list operations: {e}")
             return []
 
@@ -593,7 +598,8 @@ class OperationRecoveryManager:
 
             return removed
 
-        except Exception as e:
+        except (OSError, ValueError) as e:
+            # OSError: Redis connection, ValueError: datetime parsing
             logger.error(f"Failed to cleanup checkpoints: {e}")
             return 0
 

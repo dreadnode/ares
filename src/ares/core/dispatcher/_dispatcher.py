@@ -211,6 +211,10 @@ class RedTeamDispatcher:
             except asyncio.CancelledError:
                 pass
 
+        # Cleanup background publish tasks in shared state
+        if self._shared_state:
+            await self._shared_state.cleanup_background_tasks()
+
         # Disconnect task queue
         if self._task_queue:
             try:
