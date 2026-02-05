@@ -2865,7 +2865,6 @@ class RedTeamDispatcher:
                 username = ntlm_match.group(2)
                 lm_hash = ntlm_match.group(3)
                 nt_hash = ntlm_match.group(4)
-                # Use NT hash (more useful), include LM if not empty
                 hash_value = f"{lm_hash}:{nt_hash}"
                 if hash_value not in seen:
                     seen.add(hash_value)
@@ -2875,6 +2874,29 @@ class RedTeamDispatcher:
                             hash_value=hash_value,
                             hash_type="NTLM",
                             domain=domain,
+                        )
+                    )
+                continue
+
+            # Match non-domain-prefixed NTLM: user:rid:lmhash:nthash:::
+            # (SAM dump entries like Administrator:500:lmhash:nthash:::)
+            ntlm_plain = re.match(
+                r"([^:\\$\s]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::",
+                stripped,
+            )
+            if ntlm_plain:
+                username = ntlm_plain.group(1)
+                lm_hash = ntlm_plain.group(3)
+                nt_hash = ntlm_plain.group(4)
+                hash_value = f"{lm_hash}:{nt_hash}"
+                if hash_value not in seen:
+                    seen.add(hash_value)
+                    hashes.append(
+                        Hash(
+                            username=username,
+                            hash_value=hash_value,
+                            hash_type="NTLM",
+                            domain="",
                         )
                     )
 

