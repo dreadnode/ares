@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ares.core.models import SharedRedTeamState, Target, VulnerabilityInfo
+from ares.core.models import SharedRedTeamState, Target, TaskInfo, VulnerabilityInfo
 from ares.core.orchestrator import run_multi_agent_operation
 
 
@@ -451,8 +451,16 @@ class TestAutoDelegationEnumeration:
             )
         )
 
-        # Mock request_privesc_enumeration
-        dispatcher.request_privesc_enumeration = AsyncMock(return_value="task-delegation-1")
+        # Mock request_privesc_enumeration - also register in pending_tasks so
+        # the retry logic doesn't treat the task as "lost"
+        async def _mock_request(*args, **kwargs):
+            task_id = "task-delegation-1"
+            dispatcher.shared_state.pending_tasks[task_id] = TaskInfo(
+                task_id=task_id, task_type="find_delegation", assigned_agent="privesc"
+            )
+            return task_id
+
+        dispatcher.request_privesc_enumeration = AsyncMock(side_effect=_mock_request)
 
         # Run one iteration with short interval
         task = asyncio.create_task(_auto_delegation_enumeration(dispatcher, check_interval=0.01))
@@ -517,7 +525,16 @@ class TestAutoDelegationEnumeration:
             )
         )
 
-        dispatcher.request_privesc_enumeration = AsyncMock(return_value="task-delegation-1")
+        # Mock request_privesc_enumeration - register in pending_tasks so
+        # the retry logic doesn't treat the task as "lost"
+        async def _mock_request(*args, **kwargs):
+            task_id = "task-delegation-1"
+            dispatcher.shared_state.pending_tasks[task_id] = TaskInfo(
+                task_id=task_id, task_type="find_delegation", assigned_agent="privesc"
+            )
+            return task_id
+
+        dispatcher.request_privesc_enumeration = AsyncMock(side_effect=_mock_request)
 
         # Run multiple iterations
         task = asyncio.create_task(_auto_delegation_enumeration(dispatcher, check_interval=0.01))

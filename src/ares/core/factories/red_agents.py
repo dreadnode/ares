@@ -87,6 +87,7 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
         CVEExploitTools,
         GoldenTicketTools,
         TrustAttackTools,
+        LateralMovementTools,  # Added for kerberos_secretsdump after S4U attack
     ],
     AgentRole.LATERAL: [
         LateralMovementTools,

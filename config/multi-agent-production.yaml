@@ -8,6 +8,12 @@ operation:
   namespace: "attack-simulation"
   # redis_url is derived from namespace (redis://redis.{namespace}.svc.cluster.local:6379)
   checkpoint_interval: 60  # seconds
+  # Rate limiting - balance concurrency with 500k TPM budget
+  # 3 concurrent tasks allows recon + cred access + exploit in parallel
+  max_concurrent_tasks: 3
+  task_dispatch_delay: 2.0
+  rate_limit_backoff: 15.0
+  rate_limit_threshold: 2
 
 # Agent configurations
 agents:

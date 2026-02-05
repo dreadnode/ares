@@ -16,7 +16,13 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from ares.core.config import get_agent_heartbeat_timeout
+from ares.core.config import (
+    get_agent_heartbeat_timeout,
+    get_max_concurrent_tasks,
+    get_rate_limit_backoff,
+    get_rate_limit_threshold,
+    get_task_dispatch_delay,
+)
 from ares.core.messages import (
     ACLAnalysisRequest,
     AgentMessage,
@@ -144,6 +150,12 @@ class RedTeamDispatcher:
         self._redis_task_ids: set[str] = set()
         self._result_consumer_task: asyncio.Task | None = None
 
+        # Rate limiting / throttling state
+        self._last_dispatch_time: float = 0.0
+        self._rate_limit_errors: int = 0
+        self._global_backoff_until: float = 0.0
+        self._throttle_lock = asyncio.Lock()
+
     async def start(self, operation_id: str) -> None:
         """
         Start the dispatcher for an operation.
@@ -210,6 +222,153 @@ class RedTeamDispatcher:
             await self._redis_client.close()
 
         logger.info("Dispatcher stopped")
+
+    # ==========================================================================
+    # Rate Limiting / Throttling
+    # ==========================================================================
+
+    async def _get_pending_task_count(self) -> int:
+        """Get the number of pending/in-progress tasks."""
+        if not self._shared_state:
+            return 0
+        # Clean up phantom empty-string task from throttle drops
+        self._shared_state.pending_tasks.pop("", None)
+        self._redis_task_ids.discard("")
+        pending = len(self._shared_state.pending_tasks)
+        in_progress = sum(
+            1
+            for t in self._shared_state.pending_tasks.values()
+            if t.status == TaskStatus.IN_PROGRESS
+        )
+        return pending + in_progress
+
+    async def _should_throttle(self) -> tuple[bool, float, str]:
+        """
+        Check if task dispatch should be throttled.
+
+        Returns:
+            Tuple of (should_wait, wait_seconds, reason)
+        """
+        now = asyncio.get_event_loop().time()
+
+        # Check global backoff (rate limit triggered)
+        if now < self._global_backoff_until:
+            wait_time = self._global_backoff_until - now
+            return (True, wait_time, "global rate limit backoff")
+
+        # Check concurrent task limit
+        max_tasks = get_max_concurrent_tasks()
+        pending_count = await self._get_pending_task_count()
+        if pending_count >= max_tasks:
+            return (True, 2.0, f"max concurrent tasks ({pending_count}/{max_tasks})")
+
+        # Check dispatch delay
+        dispatch_delay = get_task_dispatch_delay()
+        time_since_last = now - self._last_dispatch_time
+        if time_since_last < dispatch_delay:
+            wait_time = dispatch_delay - time_since_last
+            return (True, wait_time, "dispatch delay")
+
+        return (False, 0.0, "")
+
+    async def _throttled_submit_task(
+        self,
+        task_type: str,
+        target_role: str,
+        payload: dict[str, Any],
+        source_agent: str,
+        priority: int = 5,
+        max_wait: float = 60.0,
+    ) -> str:
+        """
+        Submit a task with throttling to prevent overwhelming the LLM API.
+
+        Args:
+            task_type: Type of task (e.g., "exploit", "recon")
+            target_role: Role to route to (e.g., "privesc", "lateral")
+            payload: Task payload dict
+            source_agent: Agent requesting the task
+            priority: Task priority (lower = higher priority)
+            max_wait: Maximum time to wait for throttle to clear
+
+        Returns:
+            Task ID if submitted, empty string on failure
+        """
+        if not self._task_queue:
+            logger.warning("No task queue available for throttled submit")
+            return ""
+
+        async with self._throttle_lock:
+            start_wait = asyncio.get_event_loop().time()
+            total_waited = 0.0
+
+            while total_waited < max_wait:
+                should_wait, wait_time, reason = await self._should_throttle()
+
+                if not should_wait:
+                    break
+
+                # Cap wait time to remaining max_wait
+                actual_wait = min(wait_time, max_wait - total_waited)
+                if actual_wait <= 0:
+                    break
+
+                logger.debug(f"Throttling task dispatch: {reason}, waiting {actual_wait:.1f}s")
+                await asyncio.sleep(actual_wait)
+                total_waited = asyncio.get_event_loop().time() - start_wait
+
+            # Final check - if still throttled due to max concurrent tasks, DO NOT submit
+            # Submitting anyway caused task storms that overwhelmed the TPM rate limit
+            # EXCEPTION: never drop exploit tasks - they are critical path to DA
+            should_wait, _, reason = await self._should_throttle()
+            if should_wait and "max concurrent tasks" in reason:
+                if task_type == "exploit":
+                    logger.warning(
+                        f"Task throttle at {reason} but ALLOWING exploit task "
+                        f"(critical priority - never drop exploits)"
+                    )
+                else:
+                    logger.warning(
+                        f"Task throttle timeout ({max_wait}s) - DROPPING {task_type} task "
+                        f"due to {reason}. Will be retried on next orchestrator cycle."
+                    )
+                    return ""
+
+            # Update last dispatch time
+            self._last_dispatch_time = asyncio.get_event_loop().time()
+
+            # Submit the task (call underlying queue directly, not recursively)
+            return await self._task_queue.submit_task(
+                task_type=task_type,
+                target_role=target_role,
+                payload=payload,
+                source_agent=source_agent,
+                priority=priority,
+            )
+
+    def record_rate_limit_error(self) -> None:
+        """
+        Record a rate limit error and potentially trigger global backoff.
+
+        Call this when a worker reports a rate limit error.
+        """
+        self._rate_limit_errors += 1
+        threshold = get_rate_limit_threshold()
+
+        if self._rate_limit_errors >= threshold:
+            backoff = get_rate_limit_backoff()
+            self._global_backoff_until = asyncio.get_event_loop().time() + backoff
+            logger.warning(
+                f"Rate limit threshold reached ({self._rate_limit_errors} errors), "
+                f"applying {backoff}s global backoff"
+            )
+            # Reset error count after applying backoff
+            self._rate_limit_errors = 0
+
+    def clear_rate_limit_backoff(self) -> None:
+        """Clear rate limit state after successful task completion."""
+        if self._rate_limit_errors > 0:
+            self._rate_limit_errors = max(0, self._rate_limit_errors - 1)
 
     @property
     def shared_state(self) -> SharedRedTeamState:
@@ -852,12 +1011,14 @@ class RedTeamDispatcher:
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="exploit",
                 target_role="privesc",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -979,13 +1140,15 @@ class RedTeamDispatcher:
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="crack",
                 target_role="cracker",
                 payload=payload,
                 source_agent=source_agent,
                 priority=priority,
             )
+            if not task_id:
+                return ""
 
             # Track in shared state
             task_info = TaskInfo(
@@ -1145,12 +1308,14 @@ class RedTeamDispatcher:
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="lateral",
                 target_role="lateral",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1474,12 +1639,14 @@ class RedTeamDispatcher:
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="acl_analysis",
                 target_role="acl",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1575,12 +1742,14 @@ class RedTeamDispatcher:
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="recon",
                 target_role="recon",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1701,12 +1870,14 @@ class RedTeamDispatcher:
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="credential_access",
                 target_role="credential_access",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1799,14 +1970,28 @@ class RedTeamDispatcher:
             **(params or {}),
         }
 
+        # Ensure dc_ip is resolved for exploit tasks that need it
+        if not payload.get("dc_ip") and payload.get("domain"):
+            dc_ip = self._find_domain_controller_ip(payload["domain"])
+            if not dc_ip:
+                # Use target_ip from payload or primary target as fallback
+                dc_ip = payload.get("target_ip", "")
+            if not dc_ip and self.shared_state.target:
+                dc_ip = self.shared_state.target.ip
+            if dc_ip:
+                payload["dc_ip"] = dc_ip
+                logger.info(f"Resolved dc_ip={dc_ip} for exploit {vuln_type}")
+
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="exploit",
                 target_role="privesc",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1884,6 +2069,11 @@ class RedTeamDispatcher:
         )
 
         dc_ip = self._find_domain_controller_ip(domain)
+        # Fallback: use target IP if we know it (e.g. from target config)
+        if not dc_ip and self.shared_state.target and self.shared_state.target.ip:
+            # Try the primary target IP as DC for the target domain
+            dc_ip = self.shared_state.target.ip
+            logger.warning(f"DC IP fallback: using primary target IP {dc_ip} for {domain}")
         payload = {
             "domain": domain,
             "dc_ip": dc_ip,
@@ -1894,12 +2084,14 @@ class RedTeamDispatcher:
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="privesc_enumeration",
                 target_role="privesc",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1991,12 +2183,14 @@ class RedTeamDispatcher:
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
         if self._task_queue:
-            task_id = await self._task_queue.submit_task(
+            task_id = await self._throttled_submit_task(
                 task_type="coercion",
                 target_role="coercion",
                 payload=payload,
                 source_agent=source_agent,
             )
+            if not task_id:
+                return ""
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -2085,6 +2279,20 @@ class RedTeamDispatcher:
             error=error,
         )
         self.shared_state.completed_tasks[task_id] = task_result
+
+        # Mark targets as scanned after successful nmap recon
+        if success and task_info.task_type == "recon":
+            params = task_info.params or {}
+            techniques = params.get("techniques", [])
+            if "nmap_scan" in techniques:
+                scanned_ips = params.get("target_ips", [])
+                if scanned_ips:
+                    for ip in scanned_ips:
+                        self.shared_state.scanned_targets.add(ip)
+                    logger.info(
+                        f"Marked {len(scanned_ips)} targets as scanned: "
+                        f"{', '.join(scanned_ips[:5])}{'...' if len(scanned_ips) > 5 else ''}"
+                    )
 
         output = ""
 
@@ -2771,7 +2979,7 @@ class RedTeamDispatcher:
 
         return delegations
 
-    async def _auto_queue_delegation_vulnerabilities(
+    async def _auto_queue_delegation_vulnerabilities(  # noqa: PLR0912
         self, delegations: list[dict[str, str]], source_agent: str
     ) -> int:
         """
@@ -2841,6 +3049,19 @@ class RedTeamDispatcher:
             # Auto-dispatch S4U attack if we have credentials for constrained delegation
             if account_cred and delegation_type == "constrained" and target_spn:
                 dc_ip = self._find_domain_controller_ip(account_cred.domain)
+                # Fallback: extract DC IP from target SPN hostname or vulnerability details
+                if not dc_ip:
+                    spn_host = target_spn.split("/", 1)[-1] if "/" in target_spn else ""
+                    for host in self.shared_state.all_hosts:
+                        if host.hostname and spn_host and host.hostname.lower() == spn_host.lower():
+                            dc_ip = host.ip
+                            break
+                        if host.ip == details.get("target_ip"):
+                            dc_ip = host.ip
+                            break
+                # Last resort: use target_ip from vulnerability details directly
+                if not dc_ip:
+                    dc_ip = details.get("target_ip", "")
                 logger.warning(
                     f"🚀 Auto-dispatching S4U attack for {account} -> {target_spn} "
                     f"(have credentials, DC: {dc_ip})"
@@ -3295,6 +3516,29 @@ class RedTeamDispatcher:
                         f"Result consumer received result for task {task_id}: "
                         f"success={result.success}"
                     )
+
+                    # Track rate limit status for adaptive throttling
+                    if result.success:
+                        self.clear_rate_limit_backoff()
+                    elif result.error:
+                        error_str = str(result.error).lower()
+                        rate_limit_indicators = [
+                            "rate limit",
+                            "rate_limit",
+                            "ratelimit",
+                            "too many requests",
+                            "429",
+                            "quota exceeded",
+                            "tokens per min",
+                            "requests per min",
+                            "tpm limit",
+                            "rpm limit",
+                        ]
+                        if any(ind in error_str for ind in rate_limit_indicators):
+                            logger.warning(
+                                f"Task {task_id} failed with rate limit error - triggering backoff"
+                            )
+                            self.record_rate_limit_error()
 
                     # Remove from tracking set
                     self._redis_task_ids.discard(task_id)
@@ -3817,7 +4061,7 @@ class RedTeamDispatcher:
             logger.error("Task queue not initialized - Redis URL required for dispatch_and_wait")
             return None
 
-        task_id = await self._task_queue.submit_task(
+        task_id = await self._throttled_submit_task(
             task_type=task_type,
             target_role=target_role,
             payload=payload,

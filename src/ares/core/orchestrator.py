@@ -43,8 +43,8 @@ from ares.reports.redteam import RedTeamReportGenerator
 from ares.tools.red import RedTeamReportingTools
 from ares.tools.red.orchestrator import OrchestratorTools
 
-# Default max runtime in seconds (30 minutes), configurable via ARES_MAX_RUNTIME env var
-DEFAULT_MAX_RUNTIME = float(os.environ.get("ARES_MAX_RUNTIME", "1800"))
+# Default max runtime in seconds (60 minutes), configurable via ARES_MAX_RUNTIME env var
+DEFAULT_MAX_RUNTIME = float(os.environ.get("ARES_MAX_RUNTIME", "3600"))
 
 # Grace period for running crack tasks when operation is completing (5 minutes)
 CRACK_TASK_GRACE_PERIOD = float(os.environ.get("ARES_CRACK_GRACE_PERIOD", "300"))
@@ -2389,7 +2389,7 @@ Target IPs: {", ".join(target_ips)}
 Initial credential: {cred_info}
 
 Your objectives:
-1. Run nmap_scan on all targets to discover services
+1. Run nmap_scan on all targets to discover services (ONCE - do NOT re-scan targets that have already been scanned)
 2. **Run smb_sweep on all targets** - This captures Windows OS versions, FQDNs, and domain membership (CRITICAL for host identification)
 3. **MULTI-DOMAIN SETUP (run early with first credential!):**
    - enumerate_domain_netbios_mappings: Query AD for NetBIOS->FQDN domain mappings

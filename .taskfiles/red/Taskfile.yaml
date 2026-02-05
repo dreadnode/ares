@@ -225,15 +225,17 @@ tasks:
   # ===========================================================================
 
   multi:loot:
-    desc: "Dump users, credentials, and hosts from Redis state (usage: task red:multi:loot OPERATION_ID=op-xxx)"
+    desc: "Dump users, credentials, and hosts from Redis state (usage: task red:multi:loot OPERATION_ID=op-xxx [WATCH=10] [DIFF=true])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      WATCH: '{{.WATCH | default "0"}}'
+      DIFF: '{{.DIFF | default "false"}}'
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required. Usage: task red:multi:loot OPERATION_ID=op-xxx"
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops loot "{{.OPERATION_ID}}"
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops loot "{{.OPERATION_ID}}" {{if ne .WATCH "0"}}--watch {{.WATCH}}{{end}} {{if eq .DIFF "true"}}--diff{{end}}
 
   multi:status:
     desc: "Check multi-agent operation status (usage: task red:multi:status OPERATION_ID=op-xxx)"
@@ -380,7 +382,7 @@ tasks:
         fi
         SPN_ARG=""
         if [ -n "{{.TARGET_SPN}}" ]; then
-          SPN_ARG="--target-spn '{{.TARGET_SPN}}'"
+          SPN_ARG="--target-spn {{.TARGET_SPN}}"
         fi
         ACCOUNT_ARG=""
         if [ -n "{{.ACCOUNT_NAME}}" ]; then
@@ -587,6 +589,10 @@ tasks:
             ARES_AGENT_LATERAL_MODEL="{{.MODEL_LATERAL}}" \
             ARES_AGENT_COERCION_MODEL="{{.MODEL_COERCION}}" \
             GRAFANA_URL="{{.GRAFANA_URL}}" \
+            ARES_MAX_CONCURRENT_TASKS=1 \
+            ARES_TASK_DISPATCH_DELAY=3.0 \
+            ARES_RATE_LIMIT_BACKOFF=15.0 \
+            ARES_RATE_LIMIT_THRESHOLD=2 \
             python -m ares.cli_ops submit "{{.TARGET}}" "{{.DOMAIN}}" \
             $IPS_ARGS \
             --operation-id "{{.OPERATION_ID_COMPUTED}}" \

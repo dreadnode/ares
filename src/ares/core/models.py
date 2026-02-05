@@ -697,6 +697,10 @@ class SharedRedTeamState:
     identified_techniques: set[str] = field(default_factory=set)
     pending_credential_findings: set[str] = field(default_factory=set)
 
+    # Scan tracking: IPs/subnets that have already been nmap-scanned
+    # Prevents redundant nmap scans after hosts are discovered
+    scanned_targets: set[str] = field(default_factory=set)
+
     # Shared artifacts storage (base64-encoded file contents)
     # Key format: "category/filename" -> base64 content
     # Example: "sysvol/login.bat" -> "QmF0Y2ggZmlsZSBjb250ZW50..."
@@ -1349,6 +1353,8 @@ class SharedRedTeamState:
             state.pending_credential_findings = set()
         if not hasattr(state, "downloaded_artifacts"):
             state.downloaded_artifacts = {}
+        if not hasattr(state, "scanned_targets"):
+            state.scanned_targets = set()
         for host in state.all_hosts:
             if not hasattr(host, "is_dc"):
                 host.update_dc_status()

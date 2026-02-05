@@ -165,6 +165,28 @@ class OrchestratorTools(Toolset):
 
         techniques = technique_map.get(task_type, [task_type])
 
+        # Deduplicate network scans: skip targets already scanned with nmap
+        if task_type == "network_scan" and target_ips:
+            already_scanned = set(self.shared_state.scanned_targets)
+            # Fallback: also treat IPs as scanned if they already have services in shared state
+            # (handles case where orchestrator restarted before _complete_task could mark them)
+            hosts_with_services = {h.ip for h in self.shared_state.all_hosts if h.services}
+            already_scanned |= hosts_with_services
+            unscanned = [ip for ip in target_ips if ip not in already_scanned]
+            if not unscanned:
+                scanned_hosts = len(self.shared_state.all_hosts)
+                return (
+                    f"✓ All targets already scanned ({len(target_ips)} targets). "
+                    f"{scanned_hosts} hosts in shared state. "
+                    f"No new nmap scan needed."
+                )
+            if len(unscanned) < len(target_ips):
+                skipped = len(target_ips) - len(unscanned)
+                logger.info(
+                    f"Skipping {skipped} already-scanned targets, scanning {len(unscanned)} new"
+                )
+                target_ips = unscanned
+
         # Get domain from shared state if not provided
         if not domain and self.shared_state.all_domains:
             domain = next(iter(self.shared_state.all_domains))
@@ -1081,6 +1103,7 @@ class OrchestratorTools(Toolset):
         summary = state.to_summary()
         status = await self.dispatcher.get_exploitation_status()
 
+        scanned = state.scanned_targets
         lines = [
             "📊 OPERATION SUMMARY",
             "=" * 40,
@@ -1088,6 +1111,7 @@ class OrchestratorTools(Toolset):
             "",
             "📈 Discovery Metrics:",
             f"  • Hosts discovered: {summary['host_count']}",
+            f"  • Targets scanned (nmap): {len(scanned)}",
             f"  • Credentials found: {summary['credential_count']}",
             f"  • Hashes captured: {summary['hash_count']}",
             "",
