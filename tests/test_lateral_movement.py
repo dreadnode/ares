@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ares.core.models import SharedRedTeamState, Target
 from ares.tools.red.lateral_movement import LateralMovementTools, MSSQLTools
 
 
@@ -330,6 +331,171 @@ contoso.local\\Administrator:500:aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe
             )
 
         assert "failed" in result.lower()
+
+    def test_secretsdump_kerberos_auto_extracts_hashes_to_shared_state(self):
+        """Test that secretsdump_kerberos auto-extracts hashes into SharedRedTeamState."""
+        tools = LateralMovementTools()
+        state = SharedRedTeamState(operation_id="op-test-hash-extract")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        tools.set_state(state)
+
+        mock_stdout = (
+            "[*] Dumping local SAM hashes (uid:rid:lmhash:nthash)\n"
+            "Administrator:500:"
+            "aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889:::\n"  # pragma: allowlist secret
+            "[*] Dumping Domain Credentials (domain\\uid:rid:lmhash:nthash)\n"
+            "contoso.local\\krbtgt:502:"
+            "aad3b435b51404eeaad3b435b51404ee:9d765b482771505cbe97411065964d5f:::"
+        )
+
+        with patch("ares.tools.red.lateral_movement.run_tool") as mock_run:
+            mock_run.return_value = (mock_stdout, "", 0)
+
+            tools.secretsdump_kerberos(
+                target="dc01.contoso.local",
+                username="Administrator",
+                domain="contoso.local",
+                ticket_path="Administrator.ccache",
+                dc_ip="192.168.58.10",
+            )
+
+        # Hashes should be in shared state (add_hash normalizes to lowercase)
+        usernames = {h.username for h in state.all_hashes}
+        assert "administrator" in usernames
+        assert "krbtgt" in usernames
+
+    def test_secretsdump_kerberos_no_state_does_not_crash(self):
+        """Test that secretsdump without state set doesn't crash on hash extraction."""
+        tools = LateralMovementTools()
+        # state is None by default
+
+        mock_stdout = "Administrator:500:aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889:::"  # pragma: allowlist secret
+
+        with patch("ares.tools.red.lateral_movement.run_tool") as mock_run:
+            mock_run.return_value = (mock_stdout, "", 0)
+
+            result = tools.secretsdump_kerberos(
+                target="dc01.contoso.local",
+                username="Administrator",
+                domain="contoso.local",
+            )
+
+        # Should not crash, output still returned
+        assert "Administrator" in result
+
+
+class TestExtractNtlmHashesToState:
+    """Tests for _extract_ntlm_hashes_to_state method."""
+
+    def _make_tools_with_shared_state(self) -> tuple[LateralMovementTools, SharedRedTeamState]:
+        tools = LateralMovementTools()
+        state = SharedRedTeamState(operation_id="op-test-extract")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        tools.set_state(state)
+        return tools, state
+
+    def test_extracts_domain_prefixed_hashes(self):
+        """Test extraction of DOMAIN\\user:rid:lmhash:nthash::: format."""
+        tools, state = self._make_tools_with_shared_state()
+        output = (
+            "contoso.local\\Administrator:500:"
+            "aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889:::\n"
+            "contoso.local\\jdoe:1103:"
+            "aad3b435b51404eeaad3b435b51404ee:abcdef0123456789abcdef0123456789:::"
+        )
+
+        tools._extract_ntlm_hashes_to_state(output, "contoso.local")
+
+        # add_hash normalizes usernames to lowercase
+        usernames = {h.username for h in state.all_hashes}
+        assert "administrator" in usernames
+        assert "jdoe" in usernames
+        domains = {h.domain for h in state.all_hashes}
+        assert "contoso.local" in domains
+
+    def test_extracts_plain_sam_hashes_with_fallback_domain(self):
+        """Test extraction of user:rid:lmhash:nthash::: uses provided domain."""
+        tools, state = self._make_tools_with_shared_state()
+        output = "localadmin:500:aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889:::"  # pragma: allowlist secret
+
+        tools._extract_ntlm_hashes_to_state(output, "contoso.local")
+
+        assert len(state.all_hashes) == 1
+        h = state.all_hashes[0]
+        assert h.username == "localadmin"
+        assert h.domain == "contoso.local"  # Falls back to function arg
+        assert "secretsdump" in h.source
+
+    def test_skips_guest_with_empty_nt_hash(self):
+        """Test that Guest account with null NT hash is skipped."""
+        tools, state = self._make_tools_with_shared_state()
+        # 31d6cfe0d16ae931b73c59d7e0c089c0 is the empty/null NT hash
+        output = "Guest:501:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::"  # pragma: allowlist secret
+
+        tools._extract_ntlm_hashes_to_state(output, "contoso.local")
+
+        assert len(state.all_hashes) == 0
+
+    def test_skips_machine_accounts(self):
+        """Test that machine accounts (ending in $) are skipped."""
+        tools, state = self._make_tools_with_shared_state()
+        output = (
+            "contoso.local\\DC01$:1000:"
+            "aad3b435b51404eeaad3b435b51404ee:abcdef0123456789abcdef0123456789:::"
+        )
+
+        tools._extract_ntlm_hashes_to_state(output, "contoso.local")
+
+        assert len(state.all_hashes) == 0
+
+    def test_skips_comment_and_status_lines(self):
+        """Test that [*] status and # comment lines are ignored."""
+        tools, state = self._make_tools_with_shared_state()
+        output = (
+            "[*] Target system bootKey: 0x1234567890abcdef\n"
+            "# This is a comment\n"
+            "[*] Dumping local SAM hashes (uid:rid:lmhash:nthash)\n"
+            "admin:500:aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889:::"  # pragma: allowlist secret
+        )
+
+        tools._extract_ntlm_hashes_to_state(output, "contoso.local")
+
+        assert len(state.all_hashes) == 1
+        assert state.all_hashes[0].username == "admin"
+
+    def test_empty_output_is_noop(self):
+        """Test that empty or None output doesn't crash."""
+        tools, state = self._make_tools_with_shared_state()
+
+        tools._extract_ntlm_hashes_to_state("", "contoso.local")
+        assert len(state.all_hashes) == 0
+
+        tools._extract_ntlm_hashes_to_state(None, "contoso.local")
+        assert len(state.all_hashes) == 0
+
+    def test_hash_value_format_is_lm_colon_nt(self):
+        """Test that extracted hash_value is in lm:nt format."""
+        tools, state = self._make_tools_with_shared_state()
+        output = "admin:500:aabbccdd11223344aabbccdd11223344:fc525c9683e8fe067095ba2ddc971889:::"  # pragma: allowlist secret
+
+        tools._extract_ntlm_hashes_to_state(output, "contoso.local")
+
+        assert len(state.all_hashes) == 1
+        assert (
+            state.all_hashes[0].hash_value
+            == "aabbccdd11223344aabbccdd11223344:fc525c9683e8fe067095ba2ddc971889"
+        )
+
+    def test_non_guest_with_null_hash_is_kept(self):
+        """Test that non-Guest users with null NT hash are still extracted."""
+        tools, state = self._make_tools_with_shared_state()
+        # Same null hash but for a non-Guest user
+        output = "testuser:1001:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::"  # pragma: allowlist secret
+
+        tools._extract_ntlm_hashes_to_state(output, "contoso.local")
+
+        assert len(state.all_hashes) == 1
+        assert state.all_hashes[0].username == "testuser"
 
 
 class TestMSSQLEnumImpersonation:
