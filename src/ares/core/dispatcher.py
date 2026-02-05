@@ -2003,6 +2003,10 @@ class RedTeamDispatcher:
             self._redis_task_ids.add(task_id)
 
             logger.info(f"Exploit task {task_id} for {vuln_type} submitted to Redis queue")
+
+            # Record exploited vulnerability as a weakness
+            self._record_exploit_weakness(vuln_type, target, payload)
+
             return task_id
 
         # Fallback to in-memory queue (single-process mode)
@@ -2035,6 +2039,47 @@ class RedTeamDispatcher:
 
         logger.info(f"Exploit request {task_id} for {vuln_type} sent to {privesc_agent}")
         return task_id
+
+    def _record_exploit_weakness(
+        self, vuln_type: str, target: str, payload: dict[str, Any]
+    ) -> None:
+        """Record an exploited vulnerability as a weakness for the report."""
+        domain = payload.get("domain", "")
+        hostname = payload.get("target_hostname", target)
+        account = payload.get("account_name") or payload.get("account", "")
+
+        weakness_map = {
+            "constrained_delegation": (
+                f"### Constrained Delegation — {account}@{domain}\n"
+                f"**Vulnerability:** Account {account} has constrained delegation rights "
+                f"(msDS-AllowedToDelegateTo), allowing S4U impersonation of any user "
+                f"to the target service.\n"
+                f"- **Affected Resource:** {hostname} ({target})\n"
+                f"- **Discovery Method:** Injected/findDelegation enumeration\n"
+                f"- **Impact:** Attacker can impersonate Administrator via S4U attack, "
+                f"then use the ticket for secretsdump or remote execution on the target."
+            ),
+            "mssql_impersonation": (
+                f"### MSSQL Impersonation — sa on {hostname}\n"
+                f"**Vulnerability:** A domain user can EXECUTE AS LOGIN = 'sa' on the "
+                f"MSSQL instance, escalating to sysadmin.\n"
+                f"- **Affected Resource:** {hostname} ({target})\n"
+                f"- **Discovery Method:** MSSQL enum_impersonate\n"
+                f"- **Impact:** Full SQL Server control, xp_cmdshell for OS command execution."
+            ),
+            "esc8": (
+                f"### ADCS ESC8 — Web Enrollment Relay on {hostname}\n"
+                f"**Vulnerability:** ADCS web enrollment endpoint is vulnerable to "
+                f"NTLM relay (ESC8).\n"
+                f"- **Affected Resource:** {hostname} ({target})\n"
+                f"- **Discovery Method:** certipy find\n"
+                f"- **Impact:** Relay authentication to obtain certificates for domain accounts."
+            ),
+        }
+
+        block = weakness_map.get(vuln_type)
+        if block:
+            self.shared_state.add_weakness(block)
 
     async def request_privesc_enumeration(
         self,

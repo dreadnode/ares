@@ -1127,6 +1127,14 @@ class SharedRedTeamState:
                 f"🏆 DOMAIN ADMIN AUTO-DETECTED: {domain}\\{username} NTLM hash "
                 f"found in state (source: {source_agent})"
             )
+            self.add_weakness(
+                f"### Domain Admin Achieved — {username} NTLM hash extracted\n"
+                f"**Vulnerability:** Full NTDS.DIT dump obtained via secretsdump, "
+                f"including the {username} NTLM hash which grants Domain Admin access.\n"
+                f"- **Affected Resource:** {domain} domain\n"
+                f"- **Discovery Method:** secretsdump (source: {source_agent})\n"
+                f"- **Impact:** Complete domain compromise. All domain user credentials exposed."
+            )
 
         # Real-time checkpoint to Redis (don't call publish_hash - that would re-add)
         if self._dispatcher:
@@ -1224,6 +1232,19 @@ class SharedRedTeamState:
                 return False
         self.all_shares.append(share)
         logger.debug(f"Share added: {host}/{name}")
+
+        # Real-time checkpoint to Redis
+        if self._dispatcher:
+            self._publish_async(self._dispatcher._checkpoint())
+
+        return True
+
+    def add_weakness(self, block: str) -> bool:
+        """Add weakness if not duplicate. Returns True if added. Triggers pub/sub."""
+        if not block or block in self.all_weaknesses:
+            return False
+        self.all_weaknesses.append(block)
+        logger.info(f"Weakness added: {block[:80]}...")
 
         # Real-time checkpoint to Redis
         if self._dispatcher:

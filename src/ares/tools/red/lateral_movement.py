@@ -729,6 +729,17 @@ class LateralMovementTools(Toolset):
             logger.warning(
                 f"[+] Auto-extracted {extracted} NTLM hashes from secretsdump into state"
             )
+            # Record NTDS dump as a weakness
+            if isinstance(self.state, SharedRedTeamState):
+                self.state.add_weakness(
+                    f"### Full NTDS.DIT dump — {extracted} NTLM hashes extracted\n"
+                    f"**Vulnerability:** Secretsdump successfully dumped {extracted} "
+                    f"NTLM hashes from a domain controller, exposing all domain credentials.\n"
+                    f"- **Affected Resource:** {domain} domain controller\n"
+                    f"- **Discovery Method:** secretsdump (Kerberos auth via S4U/pass-the-ticket)\n"
+                    f"- **Impact:** All domain user password hashes compromised. "
+                    f"Enables pass-the-hash, golden ticket, and complete domain takeover."
+                )
 
 
 class MSSQLTools(Toolset):

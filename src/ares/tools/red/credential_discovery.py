@@ -87,7 +87,11 @@ class CredentialDiscoveryTools(Toolset):
     def _add_weakness(self, block: str) -> None:
         if not self.state or not block:
             return
-        if block not in self.state.weaknesses:
+        from ares.core.models import SharedRedTeamState
+
+        if isinstance(self.state, SharedRedTeamState):
+            self.state.add_weakness(block)
+        elif block not in self.state.weaknesses:
             self.state.weaknesses.append(block)
 
     def _add_credential(
@@ -1391,6 +1395,22 @@ class CredentialHarvestingTools(Toolset):
                         self.state.add_hash(hash_obj, "asrep_roast")
                     else:
                         self.state.hashes.append(hash_obj)
+
+                if matches:
+                    usernames = [
+                        m.split("$", 3)[3].split(":", 1)[0].split("@")[0]
+                        for m in matches
+                        if len(m.split("$", 3)) >= 4
+                    ]
+                    self._add_weakness(
+                        f"### AS-REP Roastable Accounts ({len(matches)} found)\n"
+                        f"**Vulnerability:** {len(matches)} account(s) have Kerberos "
+                        f"pre-authentication disabled, allowing offline password cracking.\n"
+                        f"- **Affected Resource:** {', '.join(usernames)}@{domain}\n"
+                        f"- **Discovery Method:** impacket-GetNPUsers (AS-REP roasting)\n"
+                        f"- **Impact:** Offline cracking may yield valid credentials for "
+                        f"lateral movement and privilege escalation."
+                    )
 
             return output
 
