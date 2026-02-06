@@ -36,8 +36,8 @@ def derive_redis_url(namespace: str, host: str = "redis", port: int = 6379) -> s
 class AgentConfig:
     """Configuration for a specific agent role."""
 
-    model: str = "claude-sonnet-4-20250514"
-    max_steps: int = 100
+    model: str = "gpt-5.2"
+    max_steps: int = 200
     pod_selector: str = ""
     capabilities: list[str] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)
@@ -70,6 +70,16 @@ class OperationConfig:
     recovery_enabled: bool = True
     max_retries: int = 3
     retry_delay: int = 10
+
+    # Rate limiting / throttling
+    # Maximum number of tasks that can be pending (in-flight) at once
+    max_concurrent_tasks: int = 8
+    # Minimum seconds between task dispatches (prevents burst dispatching)
+    task_dispatch_delay: float = 1.5
+    # Seconds to back off when global rate limit is detected
+    rate_limit_backoff: float = 30.0
+    # Number of rate limit errors before triggering global backoff
+    rate_limit_threshold: int = 3
 
     # Vulnerability priorities
     vulnerability_priorities: dict[str, int] = field(default_factory=dict)
@@ -157,7 +167,7 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         if isinstance(agent_data, dict):
             agents[role] = AgentConfig(
                 model=_resolve_env(agent_data.get("model", "")),
-                max_steps=agent_data.get("max_steps", 100),
+                max_steps=agent_data.get("max_steps", 200),
                 pod_selector=agent_data.get("pod_selector", ""),
                 capabilities=agent_data.get("capabilities", []),
                 tools=agent_data.get("tools", []),
@@ -182,6 +192,11 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         vulnerability_priorities=data.get("vulnerability_priorities", {}),
         grafana_url=_resolve_env(grafana.get("base_url", "")),
         grafana_api_key=_resolve_env(grafana.get("api_key", "")),
+        # Rate limiting from operation section
+        max_concurrent_tasks=operation.get("max_concurrent_tasks", 8),
+        task_dispatch_delay=operation.get("task_dispatch_delay", 1.5),
+        rate_limit_backoff=operation.get("rate_limit_backoff", 30.0),
+        rate_limit_threshold=operation.get("rate_limit_threshold", 3),
     )
 
 
@@ -195,7 +210,7 @@ def _resolve_env(value: str) -> str:
     return value
 
 
-def _apply_env_overrides(config: OperationConfig) -> OperationConfig:
+def _apply_env_overrides(config: OperationConfig) -> OperationConfig:  # noqa: PLR0912
     """Apply environment variable overrides to config."""
     # Check for explicit Redis URL override
     explicit_redis_url = os.environ.get("ARES_REDIS_URL") or os.environ.get("REDIS_URL")
@@ -215,6 +230,28 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:
         "GRAFANA_SERVICE_ACCOUNT_TOKEN"
     ):
         config.grafana_api_key = grafana_key
+
+    # Rate limiting overrides
+    if max_tasks := os.environ.get("ARES_MAX_CONCURRENT_TASKS"):
+        try:
+            config.max_concurrent_tasks = int(max_tasks)
+        except ValueError:
+            pass
+    if dispatch_delay := os.environ.get("ARES_TASK_DISPATCH_DELAY"):
+        try:
+            config.task_dispatch_delay = float(dispatch_delay)
+        except ValueError:
+            pass
+    if rate_backoff := os.environ.get("ARES_RATE_LIMIT_BACKOFF"):
+        try:
+            config.rate_limit_backoff = float(rate_backoff)
+        except ValueError:
+            pass
+    if rate_threshold := os.environ.get("ARES_RATE_LIMIT_THRESHOLD"):
+        try:
+            config.rate_limit_threshold = int(rate_threshold)
+        except ValueError:
+            pass
 
     # Model overrides (Viper-style precedence: role-specific > orchestrator/worker > global)
     global_model = os.environ.get("ARES_MODEL")
@@ -286,6 +323,26 @@ def get_agent_heartbeat_timeout() -> int:
     return load_config().agent_heartbeat_timeout
 
 
+def get_max_concurrent_tasks() -> int:
+    """Get maximum concurrent tasks allowed from config."""
+    return load_config().max_concurrent_tasks
+
+
+def get_task_dispatch_delay() -> float:
+    """Get minimum delay between task dispatches (seconds) from config."""
+    return load_config().task_dispatch_delay
+
+
+def get_rate_limit_backoff() -> float:
+    """Get rate limit backoff duration (seconds) from config."""
+    return load_config().rate_limit_backoff
+
+
+def get_rate_limit_threshold() -> int:
+    """Get number of rate limit errors before global backoff from config."""
+    return load_config().rate_limit_threshold
+
+
 def clear_config_cache() -> None:
     """Clear the cached configuration (useful for testing)."""
     global _cached_config
@@ -300,7 +357,11 @@ __all__ = [
     "derive_redis_url",
     "get_agent_config",
     "get_agent_heartbeat_timeout",
+    "get_max_concurrent_tasks",
     "get_namespace",
+    "get_rate_limit_backoff",
+    "get_rate_limit_threshold",
     "get_redis_url",
+    "get_task_dispatch_delay",
     "load_config",
 ]

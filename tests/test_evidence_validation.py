@@ -87,13 +87,13 @@ class TestStoreQueryResult:
     def test_store_extracts_values(self):
         """Test store extracts searchable values."""
         reset_evidence_validation()
-        data = {"ip": "192.168.56.100", "user": "admin@domain.local"}
+        data = {"ip": "192.168.58.100", "user": "admin@domain.local"}
         store_query_result("test", "query", data, 2)
 
         # Check via suggested IOCs
         suggestions = get_suggested_iocs()
         values = [s["value"] for s in suggestions]
-        assert any("192.168.56.100" in v for v in values)
+        assert any("192.168.58.100" in v for v in values)
 
     def test_store_respects_max_limit(self):
         """Test store respects MAX_STORED_RESULTS."""
@@ -112,14 +112,14 @@ class TestExtractSearchableValues:
 
     def test_extract_from_string(self):
         """Test extracting from string."""
-        values = _extract_searchable_values("192.168.56.100")
-        assert "192.168.56.100" in values
+        values = _extract_searchable_values("192.168.58.100")
+        assert "192.168.58.100" in values
 
     def test_extract_from_dict(self):
         """Test extracting from dictionary."""
-        data = {"ip": "192.168.56.1", "host": "server01.domain.local"}
+        data = {"ip": "192.168.58.1", "host": "server01.domain.local"}
         values = _extract_searchable_values(data)
-        assert "192.168.56.1" in values
+        assert "192.168.58.1" in values
         assert "server01.domain.local" in values
 
     def test_extract_from_list(self):
@@ -131,9 +131,9 @@ class TestExtractSearchableValues:
 
     def test_extract_nested(self):
         """Test extracting from nested structures."""
-        data = {"outer": {"inner": {"ip": "192.168.56.1"}}}
+        data = {"outer": {"inner": {"ip": "192.168.58.1"}}}
         values = _extract_searchable_values(data)
-        assert "192.168.56.1" in values
+        assert "192.168.58.1" in values
 
     def test_extract_depth_limit(self):
         """Test extraction respects depth limit."""
@@ -158,10 +158,10 @@ class TestExtractPatternsFromString:
 
     def test_extract_ipv4(self):
         """Test extracting IPv4 addresses."""
-        text = "Connection from 192.168.56.100 to 192.168.56.1"
+        text = "Connection from 192.168.58.100 to 192.168.58.1"
         patterns = _extract_patterns_from_string(text)
-        assert "192.168.56.100" in patterns
-        assert "192.168.56.1" in patterns
+        assert "192.168.58.100" in patterns
+        assert "192.168.58.1" in patterns
 
     def test_extract_hostname(self):
         """Test extracting hostnames."""
@@ -241,9 +241,9 @@ class TestValidateEvidenceValue:
     def test_validate_exact_match(self):
         """Test validating exact match."""
         reset_evidence_validation()
-        store_query_result("test", "query", {"ip": "192.168.56.100"}, 1)
+        store_query_result("test", "query", {"ip": "192.168.58.100"}, 1)
 
-        validated, query_id = validate_evidence_value("192.168.56.100")
+        validated, query_id = validate_evidence_value("192.168.58.100")
         assert validated is True
         assert query_id is not None
 
@@ -268,9 +268,9 @@ class TestValidateEvidenceValue:
     def test_validate_not_found(self):
         """Test validating value not in results."""
         reset_evidence_validation()
-        store_query_result("test", "query", {"ip": "192.168.56.100"}, 1)
+        store_query_result("test", "query", {"ip": "192.168.58.100"}, 1)
 
-        validated, query_id = validate_evidence_value("192.168.56.1")
+        validated, query_id = validate_evidence_value("192.168.58.1")
         assert validated is False
         assert query_id is None
 
@@ -287,7 +287,7 @@ class TestGetSuggestedIOCs:
     def test_returns_classified_iocs(self):
         """Test returns classified IOCs."""
         reset_evidence_validation()
-        store_query_result("test", "query", {"ip": "192.168.56.100"}, 1)
+        store_query_result("test", "query", {"ip": "192.168.58.100"}, 1)
 
         suggestions = get_suggested_iocs()
         ip_suggestions = [s for s in suggestions if s["type"] == "ip"]
@@ -306,11 +306,11 @@ class TestGetSuggestedIOCs:
     def test_deduplicates_values(self):
         """Test deduplicates values."""
         reset_evidence_validation()
-        store_query_result("test", "q1", {"ip": "192.168.56.100"}, 1)
-        store_query_result("test", "q2", {"ip": "192.168.56.100"}, 1)
+        store_query_result("test", "q1", {"ip": "192.168.58.100"}, 1)
+        store_query_result("test", "q2", {"ip": "192.168.58.100"}, 1)
 
         suggestions = get_suggested_iocs()
-        ip_values = [s["value"] for s in suggestions if s["value"] == "192.168.56.100"]
+        ip_values = [s["value"] for s in suggestions if s["value"] == "192.168.58.100"]
         # Should only appear once
         assert len(ip_values) <= 1
 
@@ -320,8 +320,8 @@ class TestClassifyIOC:
 
     def test_classify_ip(self):
         """Test classifying IP address."""
-        assert _classify_ioc("192.168.56.100") == "ip"
-        assert _classify_ioc("192.168.56.1") == "ip"
+        assert _classify_ioc("192.168.58.100") == "ip"
+        assert _classify_ioc("192.168.58.1") == "ip"
 
     def test_classify_hostname(self):
         """Test classifying hostname."""
@@ -467,7 +467,7 @@ class TestAutoExtractEvidenceFromQuery:
 
     def test_extract_ip_address(self):
         """Test extracting IP address evidence."""
-        result = {"ip": "192.168.56.100"}
+        result = {"ip": "192.168.58.100"}
         evidence = auto_extract_evidence_from_query(result, "test query")
 
         ip_evidence = [e for e in evidence if e["type"] == "ip"]
@@ -485,7 +485,7 @@ class TestAutoExtractEvidenceFromQuery:
 
     def test_extract_with_mitre_technique(self):
         """Test extracting with MITRE technique."""
-        result = {"ip": "192.168.56.100"}
+        result = {"ip": "192.168.58.100"}
         evidence = auto_extract_evidence_from_query(result, "test query", mitre_technique="T1003")
 
         ip_evidence = [e for e in evidence if e["type"] == "ip"]
@@ -494,7 +494,7 @@ class TestAutoExtractEvidenceFromQuery:
 
     def test_extract_validated_flag(self):
         """Test extracted evidence is marked validated."""
-        result = {"ip": "192.168.56.100"}
+        result = {"ip": "192.168.58.100"}
         evidence = auto_extract_evidence_from_query(result, "test query")
 
         for ev in evidence:
@@ -510,23 +510,23 @@ class TestAutoExtractEvidenceFromQuery:
 
     def test_extract_skips_short_values(self):
         """Test extraction skips very short values."""
-        result = {"short": "ab", "valid": "192.168.56.100"}
+        result = {"short": "ab", "valid": "192.168.58.100"}
         evidence = auto_extract_evidence_from_query(result, "test query")
 
         # Should have IP but not the short value
-        assert any(e["value"] == "192.168.56.100" for e in evidence)
+        assert any(e["value"] == "192.168.58.100" for e in evidence)
 
     def test_extract_deduplicates(self):
         """Test extraction deduplicates values."""
-        result = [{"ip": "192.168.56.100"}, {"ip": "192.168.56.100"}]
+        result = [{"ip": "192.168.58.100"}, {"ip": "192.168.58.100"}]
         evidence = auto_extract_evidence_from_query(result, "test query")
 
-        ip_values = [e["value"] for e in evidence if e["value"] == "192.168.56.100"]
+        ip_values = [e["value"] for e in evidence if e["value"] == "192.168.58.100"]
         assert len(ip_values) <= 1
 
     def test_extract_source_description(self):
         """Test source includes description."""
-        result = {"ip": "192.168.56.100"}
+        result = {"ip": "192.168.58.100"}
         evidence = auto_extract_evidence_from_query(result, "Loki query for auth logs")
 
         assert any("Loki query" in e["source"] for e in evidence)

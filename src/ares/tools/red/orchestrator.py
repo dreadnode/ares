@@ -32,6 +32,13 @@ class OrchestratorTools(Toolset):
     _shared_state: SharedRedTeamState | None = None
     _agent_name: str = "orchestrator"
 
+    # Rate limiting for status check tools (prevent polling loops)
+    _pending_tasks_last_check: float = 0.0
+    _pending_tasks_cache: str = ""
+    _exploitation_status_last_check: float = 0.0
+    _exploitation_status_cache: str = ""
+    _STATUS_CACHE_TTL: float = 30.0  # 30 second cache
+
     def set_dispatcher(self, dispatcher: RedTeamDispatcher) -> None:
         """Set the dispatcher for inter-agent communication."""
         self._dispatcher = dispatcher
@@ -108,7 +115,7 @@ class OrchestratorTools(Toolset):
                 - "share_enumeration": Enumerate network shares
                 - "domain_info": Gather domain controller and trust information
                 - "bloodhound": Run BloodHound collection and analysis (requires creds)
-            targets: Comma-separated target IPs, hostnames, or CIDR ranges (e.g., "10.0.0.0/24,10.0.1.5")
+            targets: Comma-separated target IPs, hostnames, or CIDR ranges (e.g., "192.0.2.0/24,192.0.2.5")
             domain: Target domain (e.g., "corp.local")
             username: Username for authenticated enumeration (optional)
             password: Password for authenticated enumeration (optional)
@@ -124,21 +131,21 @@ class OrchestratorTools(Toolset):
             # Initial network scan
             >>> dispatch_recon(
             ...     task_type="network_scan",
-            ...     targets="10.0.0.0/24",
+            ...     targets="192.0.2.0/24",
             ...     details='{"ports": "top-1000"}'
             ... )
 
             # User enumeration (unauthenticated)
             >>> dispatch_recon(
             ...     task_type="user_enumeration",
-            ...     targets="10.0.0.1",
+            ...     targets="192.0.2.1",
             ...     domain="corp.local"
             ... )
 
             # BloodHound with credentials
             >>> dispatch_recon(
             ...     task_type="bloodhound",
-            ...     targets="10.0.0.1",
+            ...     targets="192.0.2.1",
             ...     domain="corp.local",
             ...     username="user1",
             ...     password="P@ssw0rd"  # pragma: allowlist secret
@@ -157,6 +164,28 @@ class OrchestratorTools(Toolset):
         }
 
         techniques = technique_map.get(task_type, [task_type])
+
+        # Deduplicate network scans: skip targets already scanned with nmap
+        if task_type == "network_scan" and target_ips:
+            already_scanned = set(self.shared_state.scanned_targets)
+            # Fallback: also treat IPs as scanned if they already have services in shared state
+            # (handles case where orchestrator restarted before _complete_task could mark them)
+            hosts_with_services = {h.ip for h in self.shared_state.all_hosts if h.services}
+            already_scanned |= hosts_with_services
+            unscanned = [ip for ip in target_ips if ip not in already_scanned]
+            if not unscanned:
+                scanned_hosts = len(self.shared_state.all_hosts)
+                return (
+                    f"✓ All targets already scanned ({len(target_ips)} targets). "
+                    f"{scanned_hosts} hosts in shared state. "
+                    f"No new nmap scan needed."
+                )
+            if len(unscanned) < len(target_ips):
+                skipped = len(target_ips) - len(unscanned)
+                logger.info(
+                    f"Skipping {skipped} already-scanned targets, scanning {len(unscanned)} new"
+                )
+                target_ips = unscanned
 
         # Get domain from shared state if not provided
         if not domain and self.shared_state.all_domains:
@@ -228,7 +257,7 @@ class OrchestratorTools(Toolset):
                 - "asrep_roast": Find accounts without pre-auth required
                 - "lsassy": Dump LSASS memory (requires admin access)
                 - "share_spider": Search accessible shares for credentials
-            targets: Comma-separated target IPs or hostnames (e.g., "10.0.0.1,10.0.0.2")
+            targets: Comma-separated target IPs or hostnames (e.g., "192.0.2.1,192.0.2.2")
             domain: Target domain (e.g., "corp.local")
             username: Username for authenticated actions (optional)
             password: Password for authenticated actions (optional)
@@ -244,7 +273,7 @@ class OrchestratorTools(Toolset):
             # Low-hanging fruit after user enumeration
             >>> dispatch_credential_access(
             ...     task_type="low_hanging_fruit",
-            ...     targets="10.0.0.1",
+            ...     targets="192.0.2.1",
             ...     domain="corp.local",
             ...     details='{"users_file": "/tmp/users.txt"}'
             ... )
@@ -252,7 +281,7 @@ class OrchestratorTools(Toolset):
             # Secretsdump with credentials
             >>> dispatch_credential_access(
             ...     task_type="secretsdump",
-            ...     targets="10.0.0.1,10.0.0.2",
+            ...     targets="192.0.2.1,192.0.2.2",
             ...     domain="corp.local",
             ...     username="admin",
             ...     password="P@ssw0rd"  # pragma: allowlist secret
@@ -503,7 +532,7 @@ class OrchestratorTools(Toolset):
             return (
                 f"✗ Invalid lateral movement request: domain field contains backslash ('{domain}'). "
                 "The domain and username must be separate parameters. "
-                f"Please use domain='{domain.split(chr(92))[0]}' and username='{domain.split(chr(92))[1]}' separately."
+                f"Please use domain='{domain.split(chr(92), maxsplit=1)[0]}' and username='{domain.split(chr(92), maxsplit=1)[1]}' separately."
             )
 
         task_id = await self.dispatcher.request_lateral_movement(
@@ -785,20 +814,36 @@ class OrchestratorTools(Toolset):
         Returns summary of tasks that have been dispatched but
         not yet completed.
 
+        Note: Results are cached for 30 seconds to prevent polling loops.
+        Take action before checking again.
+
         Returns:
             Formatted list of pending tasks
         """
+        import time
+
+        now = time.time()
+        if now - self._pending_tasks_last_check < self._STATUS_CACHE_TTL:
+            return (
+                self._pending_tasks_cache
+                + "\n\n⚠️ [Cached result - take action before checking again]"
+            )
+
         pending = self.shared_state.pending_tasks
 
         if not pending:
-            return "No pending tasks"
+            result = "No pending tasks"
+        else:
+            lines = ["📋 Pending Tasks:"]
+            for task_id, info in pending.items():
+                lines.append(
+                    f"  • {task_id}: {info.task_type} → {info.assigned_agent} [{info.status.value}]"
+                )
+            result = "\n".join(lines)
 
-        lines = ["📋 Pending Tasks:"]
-        for task_id, info in pending.items():
-            lines.append(
-                f"  • {task_id}: {info.task_type} → {info.assigned_agent} [{info.status.value}]"
-            )
-        return "\n".join(lines)
+        self._pending_tasks_last_check = now
+        self._pending_tasks_cache = result
+        return result
 
     @dn.tool_method
     async def cleanup_orphaned_tasks(  # noqa: PLR0912
@@ -912,7 +957,7 @@ class OrchestratorTools(Toolset):
             username = cred.username.strip()
             if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
                 continue
-            auth = cred.password if cred.password else "[hash]"
+            auth = cred.password or "[hash]"
             admin_tag = " ⚡ADMIN" if cred.is_admin else ""
             lines.append(f"  • {cred.domain}\\{cred.username}: {auth[:20]}...{admin_tag}")
             lines.append(f"    Source: {cred.source}")
@@ -956,9 +1001,21 @@ class OrchestratorTools(Toolset):
 
         Critical for tracking attack surface coverage.
 
+        Note: Results are cached for 30 seconds to prevent polling loops.
+        Take action before checking again.
+
         Returns:
             Formatted vulnerability status
         """
+        import time
+
+        now = time.time()
+        if now - self._exploitation_status_last_check < self._STATUS_CACHE_TTL:
+            return (
+                self._exploitation_status_cache
+                + "\n\n⚠️ [Cached result - take action before checking again]"
+            )
+
         discovered = self.shared_state.discovered_vulnerabilities
         status = await self.dispatcher.get_exploitation_status()
 
@@ -966,7 +1023,10 @@ class OrchestratorTools(Toolset):
 
         if not discovered:
             lines.append("  No vulnerabilities discovered")
-            return "\n".join(lines)
+            result = "\n".join(lines)
+            self._exploitation_status_last_check = now
+            self._exploitation_status_cache = result
+            return result
 
         pending = []
         succeeded = []
@@ -1000,7 +1060,10 @@ class OrchestratorTools(Toolset):
             f"{status.get('total_failed', 0)} failed / {len(discovered)} discovered"
         )
 
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        self._exploitation_status_last_check = now
+        self._exploitation_status_cache = result
+        return result
 
     @dn.tool_method
     def get_agent_status(self) -> str:
@@ -1040,6 +1103,7 @@ class OrchestratorTools(Toolset):
         summary = state.to_summary()
         status = await self.dispatcher.get_exploitation_status()
 
+        scanned = state.scanned_targets
         lines = [
             "📊 OPERATION SUMMARY",
             "=" * 40,
@@ -1047,6 +1111,7 @@ class OrchestratorTools(Toolset):
             "",
             "📈 Discovery Metrics:",
             f"  • Hosts discovered: {summary['host_count']}",
+            f"  • Targets scanned (nmap): {len(scanned)}",
             f"  • Credentials found: {summary['credential_count']}",
             f"  • Hashes captured: {summary['hash_count']}",
             "",

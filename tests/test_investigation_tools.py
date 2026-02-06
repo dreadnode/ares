@@ -64,7 +64,7 @@ def investigation_state_with_evidence(sample_alert: dict) -> InvestigationState:
             Evidence(
                 id="ev-0000",
                 type="ip_address",
-                value="192.168.56.100",
+                value="192.168.58.100",
                 source="Query",
                 timestamp=datetime.now(timezone.utc),
                 pyramid_level=PyramidLevel.IP_ADDRESSES,
@@ -128,7 +128,7 @@ class TestRecordEvidence:
         tools = InvestigationTools()
         result = tools.record_evidence(
             evidence_type="ip",
-            value="192.168.56.100",
+            value="192.168.58.100",
             source="test",
             timestamp=None,
             pyramid_level=2,
@@ -148,7 +148,7 @@ class TestRecordEvidence:
                 mock_adjust.return_value = 0.8
                 result = tools.record_evidence(
                     evidence_type="ip",
-                    value="192.168.56.100",
+                    value="192.168.58.100",
                     source="Loki query",
                     timestamp="2024-01-15T14:30:00Z",
                     pyramid_level=2,
@@ -451,7 +451,7 @@ class TestGetSuggestedEvidence:
 
         with patch("ares.tools.blue.investigation.get_suggested_iocs") as mock_get:
             mock_get.return_value = [
-                {"type": "ip", "value": "192.168.56.100", "source_query_id": "q-0001"},
+                {"type": "ip", "value": "192.168.58.100", "source_query_id": "q-0001"},
                 {"type": "hostname", "value": "dc01.domain.local", "source_query_id": "q-0001"},
             ]
             result = tools.get_suggested_evidence()
@@ -567,7 +567,7 @@ class TestGetCorrelatedAlerts:
             "related_alerts": 3,
             "common_hosts": ["dc01.domain.local"],
             "common_users": ["admin"],
-            "common_ips": ["192.168.56.100"],
+            "common_ips": ["192.168.58.100"],
             "techniques_in_cluster": ["T1558.003"],
             "time_range": "2024-01-15T14:00:00Z to 2024-01-15T16:00:00Z",
         }

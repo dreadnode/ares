@@ -1,11 +1,7 @@
-"""Blue team investigation tools."""
+"""Blue team investigation tools.
 
-from ares.tools.blue.actions import CompletionTools, escalate_investigation
-from ares.tools.blue.grafana import GrafanaTools, connect_grafana_mcp
-from ares.tools.blue.investigation import InvestigationTools, QuestionEngineTools
-from ares.tools.blue.learning import LearningTools
-from ares.tools.blue.observability import LokiTools, PrometheusTools
-from ares.tools.blue.query_templates import QueryTemplateTools
+Imports are lazy to prevent loading blue team code in red team contexts.
+"""
 
 __all__ = [
     "CompletionTools",
@@ -19,3 +15,27 @@ __all__ = [
     "connect_grafana_mcp",
     "escalate_investigation",
 ]
+
+_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    "CompletionTools": ("ares.tools.blue.actions", "CompletionTools"),
+    "escalate_investigation": ("ares.tools.blue.actions", "escalate_investigation"),
+    "GrafanaTools": ("ares.tools.blue.grafana", "GrafanaTools"),
+    "connect_grafana_mcp": ("ares.tools.blue.grafana", "connect_grafana_mcp"),
+    "InvestigationTools": ("ares.tools.blue.investigation", "InvestigationTools"),
+    "QuestionEngineTools": ("ares.tools.blue.investigation", "QuestionEngineTools"),
+    "LearningTools": ("ares.tools.blue.learning", "LearningTools"),
+    "LokiTools": ("ares.tools.blue.observability", "LokiTools"),
+    "PrometheusTools": ("ares.tools.blue.observability", "PrometheusTools"),
+    "QueryTemplateTools": ("ares.tools.blue.query_templates", "QueryTemplateTools"),
+}
+
+
+def __getattr__(name: str):
+    if name in _LAZY_IMPORTS:
+        module_path, attr_name = _LAZY_IMPORTS[name]
+        import importlib
+
+        module = importlib.import_module(module_path)
+        return getattr(module, attr_name)
+
+    raise AttributeError(f"module 'ares.tools.blue' has no attribute {name!r}")

@@ -26,7 +26,7 @@ def red_team_state() -> RedTeamState:
     """Create a basic red team state for testing."""
     return RedTeamState(
         operation_id="op-test-001",
-        target=Target(ip="192.168.56.100", hostname="dc01", domain="contoso.local"),
+        target=Target(ip="192.168.58.100", hostname="dc01", domain="contoso.local"),
         started_at=datetime.now(timezone.utc),
         stage=InvestigationStage.TRIAGE,
         hosts=[],
@@ -178,7 +178,7 @@ class TestNetworkEnumerationTools:
         outputs = [
             (
                 "netexec smb --users",
-                "SMB 192.168.56.1 445 DC [*] CONTOSO\\alans (SidTypeUser)\n",
+                "SMB 192.168.58.1 445 DC [*] CONTOSO\\alans (SidTypeUser)\n",
             )
         ]
 
@@ -194,7 +194,7 @@ class TestNetworkEnumerationTools:
         outputs = [
             (
                 "netexec smb --rid-brute",
-                "SMB 192.168.56.1 445 DC CONTOSO\\svc-sql (SidTypeUser)\n",
+                "SMB 192.168.58.1 445 DC CONTOSO\\svc-sql (SidTypeUser)\n",
             )
         ]
 
@@ -215,11 +215,11 @@ class TestNetworkEnumerationTools:
                 stderr="",
                 return_code=0,
             )
-            result = tools.nmap_scan("192.168.56.100")
+            result = tools.nmap_scan("192.168.58.100")
 
         assert "PORT" in result
         assert "22/tcp" in result
-        assert "192.168.56.100" in red_team_state.queried_hosts
+        assert "192.168.58.100" in red_team_state.queried_hosts
 
     def test_nmap_scan_failure(self, red_team_state: RedTeamState):
         """Test nmap scan failure."""
@@ -232,7 +232,7 @@ class TestNetworkEnumerationTools:
             mock_run.return_value = MockRunResult(
                 stdout="", stderr="Host unreachable", return_code=1
             )
-            result = tools.nmap_scan("192.168.56.100")
+            result = tools.nmap_scan("192.168.58.100")
 
         assert "unreachable" in result.lower() or "failed" in result.lower()
 
@@ -245,7 +245,7 @@ class TestNetworkEnumerationTools:
 
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.side_effect = Exception("Connection error")
-            result = tools.nmap_scan("192.168.56.100")
+            result = tools.nmap_scan("192.168.58.100")
 
         assert "failed" in result.lower()
 
@@ -258,11 +258,11 @@ class TestNetworkEnumerationTools:
 
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.return_value = MockRunResult(stdout="Scan complete", return_code=0)
-            tools.nmap_scan("192.168.56.100 192.168.56.101")
+            tools.nmap_scan("192.168.58.100 192.168.58.101")
 
         # Both hosts should be tracked
-        assert "192.168.56.100" in red_team_state.queried_hosts
-        assert "192.168.56.101" in red_team_state.queried_hosts
+        assert "192.168.58.100" in red_team_state.queried_hosts
+        assert "192.168.58.101" in red_team_state.queried_hosts
 
     def test_enumerate_users_success(self, red_team_state: RedTeamState):
         """Test successful user enumeration."""
@@ -276,7 +276,7 @@ class TestNetworkEnumerationTools:
                 stdout="Administrator\nuser1\nuser2", return_code=0
             )
             result = tools.enumerate_users(
-                target="192.168.56.100",
+                target="192.168.58.100",
                 username="admin",
                 password="pass",  # pragma: allowlist secret
                 domain="TEST",
@@ -292,7 +292,7 @@ class TestNetworkEnumerationTools:
         tools.set_state(red_team_state)
 
         netexec_users = (
-            "SMB                      192.168.56.9        445    HQ-DC            "
+            "SMB                      192.168.58.9        445    HQ-DC            "
             "[*] Windows 10 / Server 2019 Build 17763 x64 (name:HQ-DC) "
             "(domain:marketing.bigco.com) (signing:True) (SMBv1:None) (Null Auth:True)\n"
         )
@@ -302,19 +302,19 @@ class TestNetworkEnumerationTools:
         access_denied = "result was NT_STATUS_ACCESS_DENIED\n"
         nmap_445 = (
             "Starting Nmap 7.98 ( https://nmap.org ) at 2026-01-20 17:43 +0000\n"
-            "Nmap scan report for ip-10-0-9-9.us-west-2.compute.internal (192.168.56.9)\n"
+            "Nmap scan report for ip-10-0-9-9.us-west-2.compute.internal (192.168.58.9)\n"
             "Host is up.\n\n"
             "PORT    STATE    SERVICE\n"
             "445/tcp filtered microsoft-ds\n\n"
             "Nmap done: 1 IP address (1 host up) scanned in 2.14 seconds\n"
         )
         rid_brute = (
-            "SMB                      192.168.56.9        445    HQ-DC            "
+            "SMB                      192.168.58.9        445    HQ-DC            "
             "[*] Windows 10 / Server 2019 Build 17763 x64 (name:HQ-DC) "
             "(domain:marketing.bigco.com) (signing:True) (SMBv1:None) (Null Auth:True)\n"
-            "SMB                      192.168.56.9        445    HQ-DC            "
+            "SMB                      192.168.58.9        445    HQ-DC            "
             "[+] marketing.bigco.com\\:\n"
-            "SMB                      192.168.56.9        445    HQ-DC            "
+            "SMB                      192.168.58.9        445    HQ-DC            "
             "[-] Error connecting: LSAD SessionError: code: 0xc0000022 - "
             "STATUS_ACCESS_DENIED - {Access Denied} A process has requested access "
             "to an object but has not been granted those access rights.\n"
@@ -337,7 +337,7 @@ class TestNetworkEnumerationTools:
                 MockRunResult(stdout=rid_brute, return_code=0),
                 MockRunResult(stdout=kerb_noauth, return_code=0),
             ]
-            result = tools.enumerate_users(target="192.168.56.100", username="", password="")
+            result = tools.enumerate_users(target="192.168.58.100", username="", password="")
 
         assert "SMB user enumeration did not return users" in result
         assert "445 filtered" in result
@@ -374,7 +374,7 @@ class TestCertipyTools:
             domain="contoso.local",
             username="user",
             password="password",  # pragma: allowlist secret
-            dc_ip="192.168.56.10",
+            dc_ip="192.168.58.10",
         )
 
         assert "placeholder" in result.lower()
@@ -389,7 +389,7 @@ class TestCertipyTools:
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.side_effect = Exception("Auth failed")
             result = tools.enumerate_users(
-                target="192.168.56.100",
+                target="192.168.58.100",
                 username="user",
                 password="wrong",  # pragma: allowlist secret
             )
@@ -408,7 +408,7 @@ class TestCertipyTools:
                 stdout="ADMIN$ READ,WRITE\nC$ READ\nSHARE1 READ", return_code=0
             )
             result = tools.enumerate_shares(
-                target="192.168.56.100",
+                target="192.168.58.100",
                 domain="TEST",
                 username="admin",
                 password="pass",  # pragma: allowlist secret
@@ -426,7 +426,7 @@ class TestCertipyTools:
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.side_effect = Exception("Connection refused")
             result = tools.enumerate_shares(
-                target="192.168.56.100",
+                target="192.168.58.100",
                 username="user",
                 password="pass",  # pragma: allowlist secret
             )
@@ -477,7 +477,7 @@ class TestCredentialHarvestingTools:
             mock_run.return_value = MockRunResult(stdout=getnpusers_output, return_code=0)
             result = tools.kerberos_user_enum_noauth(
                 domain="marketing.bigco.com",
-                dc_ip="192.168.56.9",
+                dc_ip="192.168.58.9",
                 users_file="",
             )
 
@@ -495,7 +495,7 @@ class TestCredentialHarvestingTools:
 
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.return_value = MockRunResult(stdout="open", return_code=0)
-            success, _msg = tools._check_smb_connectivity("192.168.56.100")
+            success, _msg = tools._check_smb_connectivity("192.168.58.100")
 
         assert success is True
 
@@ -508,7 +508,7 @@ class TestCredentialHarvestingTools:
 
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.return_value = MockRunResult(stdout="closed", return_code=1)
-            success, _msg = tools._check_smb_connectivity("192.168.56.100")
+            success, _msg = tools._check_smb_connectivity("192.168.58.100")
 
         assert success is False
 
@@ -672,7 +672,7 @@ class TestCoercionTools:
             mock_run.return_value = MockRunResult(
                 stdout="Successfully coerced authentication", return_code=0
             )
-            result = tools.petitpotam("192.168.56.10", "192.168.56.100")
+            result = tools.petitpotam("192.168.58.10", "192.168.58.100")
 
         assert "success" in result.lower()
         mock_run.assert_called_once()
@@ -687,8 +687,8 @@ class TestCoercionTools:
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.return_value = MockRunResult(stdout="Successfully coerced", return_code=0)
             result = tools.petitpotam(
-                "192.168.56.10",
-                "192.168.56.100",
+                "192.168.58.10",
+                "192.168.58.100",
                 username="user",
                 password="pass",  # pragma: allowlist secret
                 domain="contoso.local",
@@ -705,7 +705,7 @@ class TestCoercionTools:
 
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.side_effect = Exception("Connection refused")
-            result = tools.petitpotam("192.168.56.10", "192.168.56.100")
+            result = tools.petitpotam("192.168.58.10", "192.168.58.100")
 
         assert "failed" in result.lower()
 
@@ -721,8 +721,8 @@ class TestCoercionTools:
                 stdout="Triggered authentication via MS-EFSRPC", return_code=0
             )
             result = tools.coercer(
-                "192.168.56.10",
-                "192.168.56.100",
+                "192.168.58.10",
+                "192.168.58.100",
                 "user",
                 "pass",  # pragma: allowlist secret
                 "contoso.local",
@@ -740,8 +740,8 @@ class TestCoercionTools:
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.side_effect = Exception("Timeout")
             result = tools.coercer(
-                "192.168.56.10",
-                "192.168.56.100",
+                "192.168.58.10",
+                "192.168.58.100",
                 "user",
                 "pass",  # pragma: allowlist secret
                 "contoso.local",
@@ -778,7 +778,7 @@ class TestMSSQLTools:
         with patch("ares.tools.red.lateral_movement.run_tool") as mock_run:
             mock_run.return_value = ("nt authority\\system", "", 0)
             result = tools.mssql_command(
-                "192.168.56.22",
+                "192.168.58.22",
                 "user",
                 "pass",  # pragma: allowlist secret
                 "whoami",
@@ -797,7 +797,7 @@ class TestMSSQLTools:
         with patch("ares.tools.red.lateral_movement.run_tool") as mock_run:
             mock_run.side_effect = Exception("Connection refused")
             result = tools.mssql_command(
-                "192.168.56.22",
+                "192.168.58.22",
                 "user",
                 "pass",  # pragma: allowlist secret
                 "whoami",
@@ -815,7 +815,7 @@ class TestMSSQLTools:
         with patch("ares.tools.red.lateral_movement.run_tool") as mock_run:
             mock_run.return_value = ("configuration option 'xp_cmdshell' changed", "", 0)
             result = tools.mssql_enable_xp_cmdshell(
-                "192.168.56.22",
+                "192.168.58.22",
                 "user",
                 "pass",  # pragma: allowlist secret
                 domain="contoso.local",
@@ -833,7 +833,7 @@ class TestMSSQLTools:
         with patch("ares.tools.red.lateral_movement.run_tool") as mock_run:
             mock_run.side_effect = Exception("Access denied")
             result = tools.mssql_enable_xp_cmdshell(
-                "192.168.56.22",
+                "192.168.58.22",
                 "user",
                 "pass",  # pragma: allowlist secret
             )
@@ -875,7 +875,7 @@ class TestACLExploitTools:
                 "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
-                "192.168.56.10",
+                "192.168.58.10",
             )
 
         assert ".pfx" in result.lower() or "shadow" in result.lower()
@@ -894,7 +894,7 @@ class TestACLExploitTools:
                 "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
-                "192.168.56.10",
+                "192.168.58.10",
             )
 
         assert "failed" in result.lower()
@@ -916,7 +916,7 @@ class TestACLExploitTools:
                 "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
-                "192.168.56.10",
+                "192.168.58.10",
             )
 
         assert "added" in result.lower() or "success" in result.lower()
@@ -936,7 +936,7 @@ class TestACLExploitTools:
                 "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
-                "192.168.56.10",
+                "192.168.58.10",
             )
 
         assert "failed" in result.lower()
@@ -958,7 +958,7 @@ class TestACLExploitTools:
                 "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
-                "192.168.56.10",
+                "192.168.58.10",
             )
 
         assert "reset" in result.lower() or "changed" in result.lower()
@@ -978,7 +978,7 @@ class TestACLExploitTools:
                 "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
-                "192.168.56.10",
+                "192.168.58.10",
             )
 
         assert "failed" in result.lower()
@@ -1018,7 +1018,7 @@ class TestCVEExploitTools:
                 "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
-                "192.168.56.10",
+                "192.168.58.10",
                 "DC01",
             )
 
@@ -1037,7 +1037,7 @@ class TestCVEExploitTools:
                 "contoso.local",
                 "user",
                 "pass",  # pragma: allowlist secret
-                "192.168.56.10",
+                "192.168.58.10",
                 "DC01",
             )
 
@@ -1053,7 +1053,7 @@ class TestCVEExploitTools:
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.return_value = MockRunResult(stdout="DLL executed successfully", return_code=0)
             result = tools.printnightmare(
-                "192.168.56.22",
+                "192.168.58.22",
                 "user",
                 "pass",  # pragma: allowlist secret
                 "contoso.local",
@@ -1072,7 +1072,7 @@ class TestCVEExploitTools:
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.side_effect = Exception("Spooler disabled")
             result = tools.printnightmare(
-                "192.168.56.22",
+                "192.168.58.22",
                 "user",
                 "pass",  # pragma: allowlist secret
                 "contoso.local",
@@ -1185,7 +1185,7 @@ class TestLateralMovementTools:
                 stdout="test\\administrator\nDC01\n", return_code=0
             )
             result = tools.evil_winrm(
-                "192.168.56.10",
+                "192.168.58.10",
                 "administrator",
                 password="pass",  # pragma: allowlist secret
             )
@@ -1202,7 +1202,7 @@ class TestLateralMovementTools:
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.return_value = MockRunResult(stdout="nt authority\\system", return_code=0)
             result = tools.evil_winrm(
-                "192.168.56.10",
+                "192.168.58.10",
                 "administrator",
                 hash="aad3b435b51404eeaad3b435b51404ee",  # pragma: allowlist secret
             )
@@ -1216,7 +1216,7 @@ class TestLateralMovementTools:
         tools = LateralMovementTools()
         tools.set_state(red_team_state)
 
-        result = tools.evil_winrm("192.168.56.10", "administrator")
+        result = tools.evil_winrm("192.168.58.10", "administrator")
 
         assert "error" in result.lower()
 
@@ -1230,7 +1230,7 @@ class TestLateralMovementTools:
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.side_effect = Exception("WinRM disabled")
             result = tools.evil_winrm(
-                "192.168.56.10",
+                "192.168.58.10",
                 "administrator",
                 password="pass",  # pragma: allowlist secret
             )
@@ -1247,7 +1247,7 @@ class TestLateralMovementTools:
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.return_value = MockRunResult(stdout="nt authority\\system", return_code=0)
             result = tools.psexec(
-                "192.168.56.10",
+                "192.168.58.10",
                 "administrator",
                 password="pass",  # pragma: allowlist secret
                 domain="contoso.local",
@@ -1266,7 +1266,7 @@ class TestLateralMovementTools:
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.return_value = MockRunResult(stdout="C:\\Windows>", return_code=0)
             result = tools.psexec(
-                "192.168.56.10",
+                "192.168.58.10",
                 "administrator",
                 hash="aad3b435b51404eeaad3b435b51404ee",  # pragma: allowlist secret
             )
@@ -1283,7 +1283,7 @@ class TestLateralMovementTools:
         with patch("ares.tools.red.common.run_remote") as mock_run:
             mock_run.side_effect = Exception("SMB blocked")
             result = tools.psexec(
-                "192.168.56.10",
+                "192.168.58.10",
                 "administrator",
                 password="pass",  # pragma: allowlist secret
             )
@@ -1304,7 +1304,7 @@ class TestPostureValidationTools:
         output = "Target: LegacyGeneric:target=TERMSRV/host\n"
         with patch.object(tools, "_run_netexec_command", return_value=output):
             result = tools.check_credman_entries(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="pass",  # pragma: allowlist secret
                 domain="TEST",
@@ -1327,7 +1327,7 @@ class TestPostureValidationTools:
         )
         with patch.object(tools, "_run_netexec_command", return_value=output):
             result = tools.check_autologon_registry(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="pass",  # pragma: allowlist secret
                 domain="TEST",
@@ -1346,7 +1346,7 @@ class TestPostureValidationTools:
         output = "LmCompatibilityLevel    REG_DWORD    0x2\n"
         with patch.object(tools, "_run_netexec_command", return_value=output):
             result = tools.check_lm_compatibility_level(
-                target="192.168.56.10",
+                target="192.168.58.10",
                 username="admin",
                 password="pass",  # pragma: allowlist secret
                 domain="TEST",

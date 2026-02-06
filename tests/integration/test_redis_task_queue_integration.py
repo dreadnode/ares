@@ -153,7 +153,7 @@ class TestPromptGeneration:
             source_agent="orchestrator",
             target_agent="lateral",
             payload={
-                "target_host": "192.168.56.10",
+                "target_host": "192.168.58.10",
                 "username": "admin",
                 "domain": "contoso.local",
                 "password": "Password123",  # pragma: allowlist secret
@@ -163,7 +163,7 @@ class TestPromptGeneration:
 
         prompt = generate_prompt_from_task(task)
 
-        assert "192.168.56.10" in prompt
+        assert "192.168.58.10" in prompt
         assert "contoso.local\\admin" in prompt
         assert "password" in prompt.lower()
         assert "lateral_xyz" in prompt
@@ -296,7 +296,7 @@ class TestDispatcherRedisIntegration:
     async def test_request_lateral_uses_redis_queue(self, dispatcher_with_redis, mock_redis_client):
         """Test lateral movement request goes through Redis queue."""
         task_id = await dispatcher_with_redis.request_lateral_movement(
-            target_host="192.168.56.10",
+            target_host="192.168.58.10",
             username="admin",
             source_agent="orchestrator",
             password="Password123",  # pragma: allowlist secret
@@ -441,8 +441,8 @@ class TestRedisWorkerAgent:
             payload={
                 "username": "admin",
                 "password": "password123",  # pragma: allowlist secret
-                "target_host": "192.168.56.100",
-                "domain": "test.local",
+                "target_host": "192.168.58.100",
+                "domain": "contoso.local",
             },
         )
 
@@ -477,8 +477,8 @@ class TestRedisWorkerAgent:
             payload={
                 "username": "admin",
                 "password": "password123",  # pragma: allowlist secret
-                "target_host": "192.168.56.100",
-                "domain": "test.local",
+                "target_host": "192.168.58.100",
+                "domain": "contoso.local",
             },
         )
 
@@ -658,7 +658,7 @@ class TestOrchestratorWorkerFlow:
                 source_agent="orchestrator",
             ),
             dispatcher.request_lateral_movement(
-                target_host="192.168.56.10",
+                target_host="192.168.58.10",
                 username="admin",
                 password="TestPass123!",  # pragma: allowlist secret
                 source_agent="orchestrator",

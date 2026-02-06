@@ -345,8 +345,8 @@ class TestLateralMovementAnalyzer:
         """Test _looks_like_hostname rejects IP addresses."""
         analyzer = LateralMovementAnalyzer()
 
-        assert analyzer._looks_like_hostname("192.168.56.100") is False
-        assert analyzer._looks_like_hostname("192.168.56.1") is False
+        assert analyzer._looks_like_hostname("192.168.58.100") is False
+        assert analyzer._looks_like_hostname("192.168.58.1") is False
 
     def test_looks_like_hostname_invalid_no_dot(self) -> None:
         """Test _looks_like_hostname rejects strings without dots."""

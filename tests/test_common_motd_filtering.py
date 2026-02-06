@@ -115,9 +115,9 @@ class TestIsMOTDLine:
 
     def test_valid_netexec_lines_are_not_garbage(self):
         """Valid tool output lines should not be garbage."""
-        assert is_motd_line("SMB 192.168.56.1 445 DC [*] CONTOSO\\admin") is False
+        assert is_motd_line("SMB 192.168.58.1 445 DC [*] CONTOSO\\admin") is False
         assert is_motd_line("user:[administrator] rid:[0x1f4]") is False
-        assert is_motd_line("SMB 10.0.0.1 445 DC01 john.doe (SidTypeUser)") is False
+        assert is_motd_line("SMB 192.168.58.1 445 DC01 john.doe (SidTypeUser)") is False
 
     def test_valid_nmap_lines_are_not_garbage(self):
         """Valid nmap output lines should not be garbage."""

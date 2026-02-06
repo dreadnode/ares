@@ -74,7 +74,7 @@ class TestTaskMessage:
             task_type="lateral",
             source_agent="orchestrator",
             target_agent="lateral",
-            payload={"target_host": "192.168.56.10"},
+            payload={"target_host": "192.168.58.10"},
         )
 
         json_str = msg.model_dump_json()
@@ -82,7 +82,7 @@ class TestTaskMessage:
 
         assert parsed["task_id"] == "test_123"
         assert parsed["task_type"] == "lateral"
-        assert parsed["payload"]["target_host"] == "192.168.56.10"
+        assert parsed["payload"]["target_host"] == "192.168.58.10"
 
     def test_task_message_deserialization(self):
         """Test TaskMessage JSON deserialization."""
@@ -668,7 +668,7 @@ class TestRedisTaskQueueRequeue:
         returned_id = await task_queue.requeue_task(
             task_type="lateral",
             target_role="lateral",
-            payload={"target_host": "192.168.56.10"},
+            payload={"target_host": "192.168.58.10"},
             task_id=original_id,
             retry_count=2,
         )
@@ -706,7 +706,7 @@ class TestRedisTaskQueueRequeue:
         await task_queue.requeue_task(
             task_type="recon",
             target_role="recon",
-            payload={"target": "192.168.56.0/24"},
+            payload={"target": "192.168.58.0/24"},
             task_id="recon_retry_001",
             retry_count=1,
         )

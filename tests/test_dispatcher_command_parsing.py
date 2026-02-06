@@ -183,3 +183,136 @@ async def test_string_tool_result_updates_hosts():
 
     hostnames = {host.hostname for host in dispatcher.shared_state.all_hosts}
     assert "app-srv01.contoso.local" in hostnames
+
+
+class TestExtractHashesFromOutput:
+    """Tests for _extract_hashes_from_output including SAM dump format."""
+
+    def _make_dispatcher(self) -> RedTeamDispatcher:
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-hashes")
+        return dispatcher
+
+    def test_extracts_domain_prefixed_ntlm_hashes(self):
+        """Test extraction of domain\\user:rid:lmhash:nthash::: format."""
+        dispatcher = self._make_dispatcher()
+        output = (
+            "contoso.local\\Administrator:500:"
+            "aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889:::\n"
+            "contoso.local\\krbtgt:502:"
+            "aad3b435b51404eeaad3b435b51404ee:9d765b482771505cbe97411065964d5f:::"
+        )
+
+        hashes = dispatcher._extract_hashes_from_output(output)
+
+        assert len(hashes) == 2
+        usernames = {h.username for h in hashes}
+        assert "Administrator" in usernames
+        assert "krbtgt" in usernames
+        for h in hashes:
+            assert h.hash_type == "NTLM"
+            assert h.domain == "contoso.local"
+            assert ":" in h.hash_value  # lm:nt format
+
+    def test_extracts_sam_dump_ntlm_hashes(self):
+        """Test extraction of non-domain-prefixed SAM dump format: user:rid:lmhash:nthash:::"""
+        dispatcher = self._make_dispatcher()
+        output = (
+            "Administrator:500:"
+            "aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889:::\n"  # pragma: allowlist secret
+            "Guest:501:"
+            "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::\n"
+            "DefaultAccount:503:"
+            "aad3b435b51404eeaad3b435b51404ee:e2b07662e39b0a766c02db81f4e8d8f0:::"
+        )
+
+        hashes = dispatcher._extract_hashes_from_output(output)
+
+        assert len(hashes) == 3
+        usernames = {h.username for h in hashes}
+        assert "Administrator" in usernames
+        assert "Guest" in usernames
+        assert "DefaultAccount" in usernames
+        for h in hashes:
+            assert h.hash_type == "NTLM"
+            assert h.domain == ""  # SAM hashes have no domain
+
+    def test_mixed_domain_and_sam_hashes(self):
+        """Test output containing both domain-prefixed and SAM dump hashes."""
+        dispatcher = self._make_dispatcher()
+        output = (
+            "[*] Dumping local SAM hashes (uid:rid:lmhash:nthash)\n"
+            "Administrator:500:"
+            "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::\n"  # pragma: allowlist secret
+            "[*] Dumping Domain Credentials (domain\\uid:rid:lmhash:nthash)\n"
+            "contoso.local\\Administrator:500:"
+            "aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889:::"
+        )
+
+        hashes = dispatcher._extract_hashes_from_output(output)
+
+        assert len(hashes) == 2
+        domains = {h.domain for h in hashes}
+        assert "" in domains  # SAM entry
+        assert "contoso.local" in domains  # Domain entry
+
+    def test_deduplicates_identical_hashes(self):
+        """Test that identical hash values are deduplicated."""
+        dispatcher = self._make_dispatcher()
+        output = (
+            "Administrator:500:"
+            "aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889:::\n"
+            "Administrator:500:"
+            "aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889:::"
+        )
+
+        hashes = dispatcher._extract_hashes_from_output(output)
+
+        assert len(hashes) == 1
+
+    def test_sam_hash_does_not_match_machine_accounts(self):
+        """Test that machine accounts (ending in $) are not matched by SAM regex."""
+        dispatcher = self._make_dispatcher()
+        output = "DC01$:1000:aad3b435b51404eeaad3b435b51404ee:abcdef0123456789abcdef0123456789:::"
+
+        hashes = dispatcher._extract_hashes_from_output(output)
+
+        assert len(hashes) == 0
+
+    def test_domain_prefixed_continues_past_sam_regex(self):
+        """Test that domain-prefixed lines don't also match the SAM regex."""
+        dispatcher = self._make_dispatcher()
+        output = (
+            "contoso.local\\admin:500:"
+            "aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889:::"
+        )
+
+        hashes = dispatcher._extract_hashes_from_output(output)
+
+        # Should match exactly once (domain-prefixed), not twice
+        assert len(hashes) == 1
+        assert hashes[0].domain == "contoso.local"
+        assert hashes[0].username == "admin"
+
+    def test_empty_output_returns_empty(self):
+        """Test that empty output returns no hashes."""
+        dispatcher = self._make_dispatcher()
+        assert dispatcher._extract_hashes_from_output("") == []
+        assert dispatcher._extract_hashes_from_output(None) == []
+
+    def test_kerberoast_and_sam_hashes_coexist(self):
+        """Test output with both Kerberoast TGS and SAM dump hashes."""
+        dispatcher = self._make_dispatcher()
+        output = (
+            "$krb5tgs$23$*svc_sql$contoso.local$cifs/sql01.contoso.local*$"
+            "aabbccdd$112233445566778899aabbccddeeff\n"
+            "svc_sql:1105:"
+            "aad3b435b51404eeaad3b435b51404ee:abcdef0123456789abcdef0123456789:::"
+        )
+
+        hashes = dispatcher._extract_hashes_from_output(output)
+
+        assert len(hashes) == 2
+        types = {h.hash_type for h in hashes}
+        assert "TGS" in types
+        assert "NTLM" in types

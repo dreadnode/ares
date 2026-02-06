@@ -50,6 +50,25 @@ def _merge_state(target: SharedRedTeamState, existing: SharedRedTeamState) -> No
     # Timeline
     _merge_timeline(target, existing)
 
+    # Domain Admin / Golden Ticket flags (OR logic - once achieved, never regress)
+    if existing.has_domain_admin and not target.has_domain_admin:
+        target.has_domain_admin = True
+        target.domain_admin_path = existing.domain_admin_path or target.domain_admin_path
+    if existing.has_golden_ticket and not target.has_golden_ticket:
+        target.has_golden_ticket = True
+
+    # Safety net: scan merged hashes for DA indicators if flag not yet set
+    if not target.has_domain_admin:
+        for h in target.all_hashes:
+            ht = (h.hash_type or "").strip().lower()
+            un = (h.username or "").strip().lower()
+            if ht == "ntlm" and un in ("krbtgt", "administrator"):
+                target.has_domain_admin = True
+                target.domain_admin_path = (
+                    f"secretsdump → {un} NTLM hash found in state (detected during merge)"
+                )
+                break
+
     # Merge dynamic tracking attributes (set via object.__setattr__)
     for dynamic_attr in ("_queried_hosts", "_tested_credentials"):
         existing_value = getattr(existing, dynamic_attr, None)
@@ -199,7 +218,7 @@ class OperationRecoveryManager:
             logger.info(
                 f"Checkpointing state: hosts={len(state.all_hosts)}, "
                 f"users={len(state.all_users)}, creds={len(state.all_credentials)}, "
-                f"hashes={len(state.all_hashes)}"
+                f"hashes={len(state.all_hashes)}, domain_admin={state.has_domain_admin}"
             )
             await self._redis_client.set(key, state.to_bytes())
 
