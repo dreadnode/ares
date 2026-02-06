@@ -81,6 +81,11 @@ class OperationConfig:
     # Number of rate limit errors before triggering global backoff
     rate_limit_threshold: int = 3
 
+    # Phase detection thresholds (see PRIORITY.md)
+    lateral_movement_admin_creds_threshold: int = 3
+    lateral_movement_owned_hosts_threshold: int = 5
+    min_slots_per_role: int = 1
+
     # Vulnerability priorities
     vulnerability_priorities: dict[str, int] = field(default_factory=dict)
 
@@ -160,6 +165,7 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
     timeouts = data.get("timeouts", {})
     recovery = data.get("recovery", {})
     grafana = data.get("grafana", {})
+    phase_detection = data.get("phase_detection", {})
 
     # Build agent configs
     agents: dict[str, AgentConfig] = {}
@@ -197,6 +203,14 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         task_dispatch_delay=operation.get("task_dispatch_delay", 1.5),
         rate_limit_backoff=operation.get("rate_limit_backoff", 30.0),
         rate_limit_threshold=operation.get("rate_limit_threshold", 3),
+        # Phase detection thresholds
+        lateral_movement_admin_creds_threshold=phase_detection.get(
+            "lateral_movement_admin_creds", 3
+        ),
+        lateral_movement_owned_hosts_threshold=phase_detection.get(
+            "lateral_movement_owned_hosts", 5
+        ),
+        min_slots_per_role=phase_detection.get("min_slots_per_role", 1),
     )
 
 
@@ -343,6 +357,21 @@ def get_rate_limit_threshold() -> int:
     return load_config().rate_limit_threshold
 
 
+def get_lateral_movement_admin_creds_threshold() -> int:
+    """Get threshold for transitioning to lateral_movement phase (admin creds count)."""
+    return load_config().lateral_movement_admin_creds_threshold
+
+
+def get_lateral_movement_owned_hosts_threshold() -> int:
+    """Get threshold for transitioning to lateral_movement phase (owned hosts count)."""
+    return load_config().lateral_movement_owned_hosts_threshold
+
+
+def get_min_slots_per_role() -> int:
+    """Get minimum task slots guaranteed per worker role."""
+    return load_config().min_slots_per_role
+
+
 def clear_config_cache() -> None:
     """Clear the cached configuration (useful for testing)."""
     global _cached_config
@@ -357,7 +386,10 @@ __all__ = [
     "derive_redis_url",
     "get_agent_config",
     "get_agent_heartbeat_timeout",
+    "get_lateral_movement_admin_creds_threshold",
+    "get_lateral_movement_owned_hosts_threshold",
     "get_max_concurrent_tasks",
+    "get_min_slots_per_role",
     "get_namespace",
     "get_rate_limit_backoff",
     "get_rate_limit_threshold",

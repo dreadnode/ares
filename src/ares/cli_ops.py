@@ -606,10 +606,66 @@ def _print_diff(prev_snapshot: dict, curr_snapshot: dict, state) -> None:
     sys.stdout.flush()
 
 
+async def _resolve_latest_operation(redis_url: str) -> str | None:
+    """Resolve the latest operation ID (preferring running operations)."""
+    from ares.core.task_queue import RedisTaskQueue
+
+    client = await create_redis_client(redis_url, decode_responses=True)
+
+    all_ops: list[tuple[datetime | None, str, bool]] = []
+
+    # Check for running operations (have locks)
+    running_ops: set[str] = set()
+    lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
+    for key in lock_keys:
+        parts = key.split(":", 2)
+        if len(parts) >= 3:
+            running_ops.add(parts[2])
+
+    # Get all operations with state
+    state_keys = await client.keys("ares:operation:*:state")
+    for key in state_keys:
+        parts = key.split(":")
+        if len(parts) < 3:
+            continue
+        op_id = parts[2]
+        checkpoint = await client.get(f"ares:operation:{op_id}:checkpoint_time")
+        checkpoint_time = None
+        if checkpoint:
+            try:
+                checkpoint_time = datetime.fromisoformat(checkpoint)
+            except Exception:
+                pass
+        is_running = op_id in running_ops
+        all_ops.append((checkpoint_time, op_id, is_running))
+
+    await client.aclose()
+
+    if not all_ops:
+        return None
+
+    def pick_latest(items: list[tuple[datetime | None, str]]) -> str:
+        with_time = [(t, op) for t, op in items if t is not None]
+        if with_time:
+            with_time.sort(key=lambda x: x[0], reverse=True)  # type: ignore[arg-type]
+            return with_time[0][1]
+        items.sort(key=lambda x: x[1])
+        return items[0][1]
+
+    # Prefer running operations, then fall back to latest by checkpoint time
+    running = [(t, op) for t, op, is_running in all_ops if is_running]
+    if running:
+        return pick_latest(running)
+    return pick_latest([(t, op) for t, op, _ in all_ops])
+
+
 @app.command
 async def loot(
-    operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
+    operation_id: Annotated[str | None, cyclopts.Parameter(help="Operation ID")] = None,
     *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Use the latest operation (prefer running)")
+    ] = False,
     redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
     json_output: Annotated[bool, cyclopts.Parameter(help="Output as JSON")] = False,
     watch: Annotated[
@@ -624,11 +680,23 @@ async def loot(
 
     Examples:
         ares-ops loot op-20250128-123456
-        ares-ops loot op-20250128-123456 --watch 10
+        ares-ops loot --latest
+        ares-ops loot --latest --watch 10
         ares-ops loot op-20250128-123456 --diff --watch 5
     """
 
     resolved_redis_url = redis_url or get_redis_url()
+
+    # Resolve operation ID
+    if latest and not operation_id:
+        operation_id = await _resolve_latest_operation(resolved_redis_url)
+        if not operation_id:
+            logger.error("No operations found")
+            sys.exit(1)
+        logger.info(f"Using latest operation: {operation_id}")
+    elif not operation_id:
+        logger.error("Either operation_id or --latest is required")
+        sys.exit(1)
 
     # --diff implies --watch with a default interval
     if diff and watch == 0:

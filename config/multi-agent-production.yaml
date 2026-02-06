@@ -189,6 +189,15 @@ recovery:
   checkpoint_on_credential: true
   checkpoint_on_vulnerability: true
 
+# Phase detection thresholds (see PRIORITY.md for rationale)
+# Used to determine operation phase for task prioritization
+phase_detection:
+  # Transition to lateral_movement phase when:
+  lateral_movement_admin_creds: 3  # >= this many admin credentials
+  lateral_movement_owned_hosts: 5  # >= this many owned hosts
+  # Minimum slots per worker role (prevents starvation)
+  min_slots_per_role: 1
+
 # Vulnerability priorities (lower = higher priority)
 vulnerability_priorities:
   ADCS_ESC1: 1

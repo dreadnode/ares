@@ -41,11 +41,11 @@ The central framework for both blue and red team operations.
 
 ### Primary Components
 
-| File | Purpose |
+| File/Package | Purpose |
 | ---- | ------- |
-| `dispatcher.py` | Red team task dispatcher - orchestrates worker agents |
-| `worker.py` | Worker agent implementation for executing specialized tasks |
-| `orchestrator.py` | Multi-agent orchestration and coordination |
+| `dispatcher/` | Red team task dispatcher - orchestrates worker agents |
+| `worker/` | Worker agent implementation for executing specialized tasks |
+| `orchestrator/` | Multi-agent orchestration and coordination |
 | `models.py` | Data models (Credential, Host, Evidence, Target, etc.) |
 | `task_queue.py` | Redis-based task queue for multi-agent coordination |
 | `persistence.py` | State persistence and serialization |
@@ -246,6 +246,9 @@ Worker Pods:
 2. Workers are specialists with domain-specific tools
 3. Shared state via Redis
 
+**For detailed agent configuration (max_steps, tool classes, model selection):**
+See [Agent Quick Reference](red.md#agent-quick-reference) in `docs/red.md`.
+
 **Pod Labels:**
 
 - All agents: `ares.dreadnode.io/component=red-team`
@@ -292,10 +295,10 @@ Worker Pods:
 
 ### Key Files to Understand the System
 
-1. `docs/red.md` - Multi-agent architecture principles
+1. `docs/red.md` - Multi-agent architecture principles (includes Agent Quick Reference)
 2. `src/ares/core/models.py` - Data model definitions
-3. `src/ares/core/dispatcher.py` - Task coordination logic
-4. `src/ares/core/worker.py` - Worker agent implementation
+3. `src/ares/core/dispatcher/` - Task coordination logic
+4. `src/ares/core/worker/` - Worker agent implementation
 5. `config/multi-agent-production.yaml` - Agent configurations
 
 ### Entry Points to Understand Flow
@@ -303,7 +306,7 @@ Worker Pods:
 1. `src/ares/main.py` - CLI commands
 2. `src/ares/agents/red/pentester.py` - Red team orchestrator
 3. `src/ares/agents/blue/soc_investigator.py` - Blue team orchestrator
-4. `src/ares/core/orchestrator.py` - Multi-agent coordination
+4. `src/ares/core/orchestrator/` - Multi-agent coordination
 5. `src/ares/core/task_queue.py` - Message passing
 
 ### Core Dependencies

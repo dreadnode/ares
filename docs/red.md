@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD013 MD060 -->
+
 # Red Team Multi-Agent Architecture
 
 This document describes the design and operation of the Ares red team
@@ -65,6 +67,40 @@ All agents share state through Redis:
 - Hashes are tracked for cracking status
 - Hosts and vulnerabilities are cataloged
 - Task status is visible to all agents
+
+## Agent Quick Reference
+
+Quick reference table for all red team agents with their key configuration and
+tool assignments. For detailed responsibilities, see sections below.
+
+| Agent | Purpose | Pod Selector | Max Steps | Tool Classes |
+|-------|---------|--------------|-----------|--------------|
+| **ORCHESTRATOR** | Central coordinator (dispatches, never executes) | `app.kubernetes.io/name=ares-orchestrator` | 200 | `OrchestratorTools`, `RedTeamReportingTools` |
+| **RECON** | Network scanning, enumeration, BloodHound | `ares.dreadnode.io/role=recon` | 200 | `NetworkEnumerationTools`, `BloodHoundTools` |
+| **CREDENTIAL_ACCESS** | Password attacks, hash extraction | `ares.dreadnode.io/role=credential_access` | 100 | `CredentialDiscoveryTools`, `CredentialHarvestingTools`, `SharePilferingTools` |
+| **CRACKER** | Offline hash cracking | `ares.dreadnode.io/role=cracker` | 150 | `CrackingTools` |
+| **ACL** | AD ACL abuse attacks | `ares.dreadnode.io/role=acl` | 150 | `ACLExploitTools` |
+| **PRIVESC** | Privilege escalation exploitation | `ares.dreadnode.io/role=privesc` | 100 | `CertipyTools`, `DelegationTools`, `MSSQLTools`, `CVEExploitTools`, `GoldenTicketTools`, `TrustAttackTools` |
+| **LATERAL** | Host compromise, credential harvesting | `ares.dreadnode.io/role=lateral` | 300 | `LateralMovementTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `PostureValidationTools` |
+| **COERCION** | NTLM coercion and relay attacks | `ares.dreadnode.io/role=coercion` | 30 | `CoercionTools`, `CoercionNetworkTools` |
+
+### Configuration Sources
+
+- **Pod selectors**: `config/multi-agent-production.yaml`
+- **Tool assignments**: `src/ares/core/factories/red_agents.py` → `ROLE_TOOLSETS`
+- **Max steps defaults**: `src/ares/core/factories/red_agents.py` → `ROLE_MAX_STEPS`
+- **Agent instructions**: `src/ares/templates/redteam/agents/*.md.jinja`
+
+### Model Selection
+
+Models can be configured via environment variables (in order of precedence):
+
+| Variable | Scope |
+|----------|-------|
+| `ARES_AGENT_<ROLE>_MODEL` | Role-specific (e.g., `ARES_AGENT_PRIVESC_MODEL`) |
+| `ARES_ORCHESTRATOR_MODEL` | Orchestrator only |
+| `ARES_WORKER_MODEL` | All workers |
+| `ARES_MODEL` | Global default |
 
 ## Agent Roles and Responsibilities
 
@@ -368,6 +404,55 @@ Vulnerabilities are processed in priority order:
 | 11 | mssql_linked_server | Cross-domain pivot |
 | 12 | mssql_xp_cmdshell | Code execution |
 
+## Task Throttling and Phase-Aware Dispatch
+
+The dispatcher uses intelligent throttling to prevent LLM API rate limit storms
+while ensuring all worker agents stay productive.
+See [Phase Priority Guide](phase-priority.md) for detailed analysis.
+
+### Throttling Behavior
+
+1. **LLM Task Limit**: Only LLM-using tasks count against `max_concurrent_tasks`
+   - Non-LLM tasks (`crack`, `command`) always allowed
+2. **Per-Role Minimum Slots**: Each role gets at least `min_slots_per_role` tasks
+   - Prevents worker starvation - no agent sits completely idle
+3. **Phase-Aware Priority**: Tasks are boosted or lowered based on operation phase
+   - Early phase: RECON and COERCION boosted (network discovery, Responder)
+   - Mid phase: LATERAL and CREDENTIAL_ACCESS boosted (credential expansion)
+   - Late phase: EXPLOIT boosted (final push to DA)
+
+### Operation Phases
+
+The dispatcher automatically detects the current engagement phase:
+
+| Phase                 | Detection Criteria              | High-Priority Agents             |
+| --------------------- | ------------------------------- | -------------------------------- |
+| `initial_access`      | No credentials yet              | RECON, COERCION                  |
+| `enumeration`         | Have first valid creds          | CREDENTIAL_ACCESS, RECON         |
+| `privilege_escalation`| Vulns found OR admin creds      | PRIVESC, ACL, CREDENTIAL_ACCESS  |
+| `lateral_movement`    | 3+ admin creds OR 5+ owned      | LATERAL, CREDENTIAL_ACCESS       |
+| `domain_dominance`    | DA achieved OR krbtgt hash      | PRIVESC, LATERAL                 |
+
+### Configuration
+
+Phase detection thresholds in `config/multi-agent-production.yaml`:
+
+```yaml
+phase_detection:
+  lateral_movement_admin_creds: 3  # >= this many admin credentials
+  lateral_movement_owned_hosts: 5  # >= this many owned hosts
+  min_slots_per_role: 1            # minimum task slots per worker
+```
+
+### Phase Transition Logging
+
+The dispatcher logs phase transitions for observability:
+
+```text
+INFO | Operation phase transition: initial_access → enumeration
+INFO | Operation phase transition: enumeration → privilege_escalation
+```
+
 ## State Management
 
 ### Shared State Objects
@@ -604,11 +689,24 @@ for cred in state.all_credentials:
 
 ## File Reference
 
-- `src/ares/core/orchestrator.py` - Main orchestrator coordination engine
+**Core Components**:
+
+- `src/ares/core/orchestrator/` - Main orchestrator coordination engine
 - `src/ares/core/orchestrator_service.py` - Orchestrator service (K8s pod)
 - `src/ares/core/orchestrator_client.py` - Client for submitting operations
-- `src/ares/core/dispatcher.py` - Task routing and state management
+- `src/ares/core/dispatcher/` - Task routing, throttling, and state management
+- `src/ares/core/worker/` - Worker agent task loop
+- `src/ares/core/config.py` - Configuration loading (phase thresholds, rate limits)
+
+**Configuration**:
+
+- `config/multi-agent-production.yaml` - Production config (thresholds, timeouts)
+- `docs/phase-priority.md` - Expert analysis of agent utility by phase
+
+**Agent Templates**:
+
 - `src/ares/core/factories/red_agents.py` - Agent creation and toolset assignment
+- `src/ares/templates/redteam/agents/orchestrator.md.jinja` - Orchestrator instructions
 - `src/ares/templates/redteam/agents/recon.md.jinja` - RECON agent instructions
 - `src/ares/templates/redteam/agents/credential_access.md.jinja` - CRED_ACCESS
 - `src/ares/templates/redteam/agents/privesc.md.jinja` - PRIVESC instructions
@@ -616,6 +714,9 @@ for cred in state.all_credentials:
 - `src/ares/templates/redteam/agents/acl.md.jinja` - ACL instructions
 - `src/ares/templates/redteam/agents/cracker.md.jinja` - CRACKER instructions
 - `src/ares/templates/redteam/agents/coercion.md.jinja` - COERCION instructions
+
+**Tools**:
+
 - `src/ares/tools/red/` - Tool implementations
 
 ## Installed Tools by Agent Role
