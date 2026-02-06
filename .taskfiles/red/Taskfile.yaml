@@ -323,6 +323,17 @@ tasks:
     cmds:
       - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops cleanup --max-age-hours {{.MAX_AGE_HOURS}}
 
+  multi:delete:
+    desc: "Delete a specific operation and all its data (usage: task red:multi:delete OPERATION_ID=op-xxx)"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+    cmds:
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops delete "{{.OPERATION_ID}}" --force
+
   multi:backfill-domains:
     desc: "Backfill domain list into Redis state (usage: task red:multi:backfill-domains OPERATION_ID=op-xxx)"
     silent: true

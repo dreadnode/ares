@@ -429,6 +429,7 @@ class Host(Model):
     roles: list[str] = wrapped("roles", element(tag="role", default=[]))
     services: list[str] = wrapped("services", element(tag="service", default=[]))
     is_dc: bool = False
+    owned: bool = False
 
     def detect_dc(self) -> bool:
         """Detect if this host is a domain controller based on services/hostname/roles.

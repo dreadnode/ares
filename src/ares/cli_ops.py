@@ -1075,6 +1075,76 @@ async def cleanup(
 
 
 @app.command
+async def delete(
+    operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID to delete")],
+    *,
+    force: Annotated[bool, cyclopts.Parameter(help="Skip confirmation prompt")] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Delete an operation and all its associated data from Redis.
+
+    Example:
+        ares-ops delete op-20250128-123456
+        ares-ops delete op-20250128-123456 --force
+    """
+    resolved_redis_url = redis_url or get_redis_url()
+
+    try:
+        client = await create_redis_client(resolved_redis_url, decode_responses=True)
+
+        # Check if operation exists
+        state_key = f"ares:operation:{operation_id}:state"
+        exists = await client.exists(state_key)
+
+        if not exists:
+            logger.warning(f"Operation {operation_id} not found")
+            await client.aclose()
+            return
+
+        if not force:
+            confirm = input(f"Delete operation {operation_id}? [y/N]: ")
+            if confirm.lower() != "y":
+                print("Cancelled")
+                await client.aclose()
+                return
+
+        # Find all keys to delete
+        keys_to_delete = [
+            f"ares:operation:{operation_id}:state",
+            f"ares:operation:{operation_id}:checkpoint_time",
+            f"ares:operation:{operation_id}:lock",
+        ]
+
+        # Find task status keys for this operation
+        import json as json_module
+
+        task_keys = await client.keys("ares:task_status:*")
+        for key in task_keys:
+            raw = await client.get(key)
+            if raw:
+                try:
+                    data = json_module.loads(raw)
+                    if data.get("operation_id") == operation_id:
+                        keys_to_delete.append(key)
+                except (json_module.JSONDecodeError, ValueError):
+                    pass
+
+        # Delete all keys
+        deleted_count = 0
+        for key in keys_to_delete:
+            result = await client.delete(key)
+            deleted_count += result
+
+        await client.aclose()
+
+        logger.success(f"Deleted operation {operation_id} ({deleted_count} keys removed)")
+
+    except Exception as e:
+        logger.error(f"Failed to delete operation: {e}")
+        sys.exit(1)
+
+
+@app.command
 async def backfill_domains(
     operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
     *,

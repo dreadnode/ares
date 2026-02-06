@@ -1579,13 +1579,13 @@ async def _auto_credential_access(  # noqa: PLR0912
                     if task_id:
                         processed_username_spray_domains.add(domain)
                         last_user_count[domain.lower()] = len(domain_users)
-                        logger.info(
-                            "Auto username_as_password dispatched for %d users without creds in %s (using %s for enum)",
-                            len(users_without_creds),
-                            domain,
+                        cred_info = (
                             f"{enum_cred.domain}\\{enum_cred.username}"
                             if enum_cred
-                            else "null session",
+                            else "null session"
+                        )
+                        logger.info(
+                            f"Auto username_as_password dispatched for {len(users_without_creds)} users without creds in {domain} (using {cred_info} for enum)"
                         )
 
                 # Run password_spray with common passwords if we have users and haven't done it

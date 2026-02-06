@@ -18,23 +18,23 @@ from loguru import logger
 DEFAULT_NAMESPACE = "attack-simulation"
 
 
-def get_default_network_interface() -> str:  # noqa: PLR0912
+def get_default_network_interface() -> str:
     """
     Auto-detect the default network interface for coercion tools.
 
-    Detects the primary interface that has an IPv4 address. Falls back to 'eth0'
-    if detection fails. On AWS, this typically returns 'ens5' instead of 'eth0'.
+    Only runs on Linux (K8s pods with hostNetwork). On AWS, this typically
+    returns 'ens5' instead of 'eth0'.
 
     Returns:
         Network interface name (e.g., 'ens5', 'eth0', 'eno1').
     """
     import subprocess
 
-    # First, try to get the interface from environment variable
+    # Environment variable override
     if env_iface := os.environ.get("ARES_NETWORK_INTERFACE"):
         return env_iface
 
-    # Try to detect default route interface via 'ip route'
+    # Detect default route interface via 'ip route'
     try:
         result = subprocess.run(  # nosec B607
             ["ip", "route", "get", "8.8.8.8"],
@@ -44,33 +44,19 @@ def get_default_network_interface() -> str:  # noqa: PLR0912
             check=False,
         )
         if result.returncode == 0:
-            # Parse output like: "8.8.8.8 via 10.0.0.1 dev ens5 src 10.0.0.5 ..."
-            for part in result.stdout.split():
-                if part == "dev":
-                    idx = result.stdout.split().index("dev")
-                    if idx + 1 < len(result.stdout.split()):
-                        iface = result.stdout.split()[idx + 1]
-                        if iface and not iface.startswith("lo"):
-                            logger.debug(f"Auto-detected network interface: {iface}")
-                            return iface
+            # Parse: "8.8.8.8 via 10.0.0.1 dev ens5 src 10.0.0.5 ..."
+            parts = result.stdout.split()
+            if "dev" in parts:
+                idx = parts.index("dev")
+                if idx + 1 < len(parts):
+                    iface = parts[idx + 1]
+                    if iface and not iface.startswith("lo"):
+                        logger.debug(f"Auto-detected network interface: {iface}")
+                        return iface
     except (subprocess.SubprocessError, OSError, ValueError):
         pass
 
-    # Fallback: try netifaces if available
-    try:
-        import netifaces
-
-        gateways = netifaces.gateways()
-        default_gateway = gateways.get("default", {})
-        if netifaces.AF_INET in default_gateway:
-            iface = default_gateway[netifaces.AF_INET][1]
-            if iface and iface != "lo":
-                logger.debug(f"Auto-detected network interface via netifaces: {iface}")
-                return iface
-    except ImportError:
-        pass
-
-    # Final fallback: try to find first non-loopback interface with an IP
+    # Fallback: first non-loopback interface with an IP
     try:
         result = subprocess.run(  # nosec B607
             ["ip", "-o", "addr", "show"],
@@ -85,12 +71,11 @@ def get_default_network_interface() -> str:  # noqa: PLR0912
                 if len(parts) >= 4 and "inet " in line and "127.0.0.1" not in line:
                     iface = parts[1].rstrip(":")
                     if iface and not iface.startswith("lo"):
-                        logger.debug(f"Auto-detected network interface from ip addr: {iface}")
+                        logger.debug(f"Auto-detected network interface: {iface}")
                         return iface
     except (subprocess.SubprocessError, OSError):
         pass
 
-    # Absolute fallback
     logger.warning("Could not auto-detect network interface, falling back to eth0")
     return "eth0"
 

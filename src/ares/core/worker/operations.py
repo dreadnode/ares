@@ -218,7 +218,7 @@ async def get_operation_model_overrides(redis_url: str, operation_id: str) -> di
         data = json.loads(raw)
         if isinstance(data, dict):
             return {str(k): str(v) for k, v in data.items() if v}
-        logger.warning("Unexpected model overrides payload type: {}", type(data))
+        logger.warning(f"Unexpected model overrides payload type: {type(data)}")
         return None
     except Exception as e:
         logger.warning(f"Failed to read model overrides for {operation_id}: {e}")

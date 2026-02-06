@@ -119,7 +119,7 @@ class LateralMovementTools(Toolset):
             return "[!] Error: Either password or hash must be provided"
 
         if not (self._check_port(target, 5985) or self._check_port(target, 5986)):
-            logger.warning("WinRM not reachable on %s (ports 5985/5986 closed)", target)
+            logger.warning(f"WinRM not reachable on {target} (ports 5985/5986 closed)")
         resolved_password = self._resolve_password(username, domain, password)
         if (
             hash
