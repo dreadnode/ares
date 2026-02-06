@@ -1102,7 +1102,7 @@ async def delete(
             return
 
         if not force:
-            confirm = input(f"Delete operation {operation_id}? [y/N]: ")
+            confirm = await asyncio.to_thread(input, f"Delete operation {operation_id}? [y/N]: ")
             if confirm.lower() != "y":
                 print("Cancelled")
                 await client.aclose()

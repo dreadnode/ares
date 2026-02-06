@@ -351,7 +351,7 @@ def extract_host_from_spn(spn: str) -> str | None:
     if ":" in target:
         target = target.split(":")[0]
 
-    return target if target else None
+    return target or None
 
 
 __all__ = [
