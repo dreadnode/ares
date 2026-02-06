@@ -409,8 +409,8 @@ class NetworkEnumerationTools(Toolset):
             Detailed nmap scan output showing discovered services and versions
 
         Example:
-            >>> result = nmap_scan("192.168.56.2")
-            >>> result = nmap_scan("192.168.56.2 192.168.56.3 192.168.56.4")
+            >>> result = nmap_scan("192.168.58.2")
+            >>> result = nmap_scan("192.168.58.2 192.168.58.3 192.168.58.4")
         """
 
         def _parse_nmap_hosts(output: str) -> list[Host]:
@@ -547,7 +547,7 @@ class NetworkEnumerationTools(Toolset):
         Sweep SMB for Windows hosts using netexec and record host metadata.
 
         Args:
-            targets: Space-separated IPs or CIDR range (e.g., "10.1.2.0/24")
+            targets: Space-separated IPs or CIDR range (e.g., "192.168.58.0/24")
 
         Returns:
             netexec output for the sweep
@@ -710,8 +710,8 @@ class NetworkEnumerationTools(Toolset):
             List of discovered user accounts with details
 
         Example:
-            >>> enumerate_users("192.168.56.100", "user", "pass", "DOMAIN")
-            >>> enumerate_users("192.168.56.100", "", "", "")  # null session
+            >>> enumerate_users("192.168.58.100", "user", "pass", "DOMAIN")
+            >>> enumerate_users("192.168.58.100", "", "", "")  # null session
         """
         # Import here to avoid circular import
         from ares.tools.red.credential_discovery import CredentialHarvestingTools
@@ -877,7 +877,7 @@ class NetworkEnumerationTools(Toolset):
             List of discovered shares with access permissions
 
         Example:
-            >>> enumerate_shares("192.168.56.100", "DOMAIN", "user", "pass")
+            >>> enumerate_shares("192.168.58.100", "DOMAIN", "user", "pass")
         """
 
         def _parse_netexec_hosts(output: str) -> list[Host]:
@@ -1140,8 +1140,8 @@ class NetworkEnumerationTools(Toolset):
             Path to the users file and count of users saved
 
         Example:
-            >>> save_users_to_file("192.168.56.10", "", "", "")  # null session
-            >>> save_users_to_file("192.168.56.10", "user", "pass", "DOMAIN")
+            >>> save_users_to_file("192.168.58.10", "", "", "")  # null session
+            >>> save_users_to_file("192.168.58.10", "user", "pass", "DOMAIN")
         """
         try:
             outputs = self._run_user_enum_commands(target, username, password, domain)
@@ -1731,7 +1731,7 @@ class BloodHoundTools(Toolset):
             - recommended_actions: Specific next steps with tool parameters
 
         Example:
-            >>> run_bloodhound("example.local", "dave.lee", "ExamplePass123!", "192.168.56.10")
+            >>> run_bloodhound("example.local", "dave.lee", "ExamplePass123!", "192.168.58.10")
         """
         cmd = [
             "bloodhound-python",

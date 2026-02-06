@@ -18,7 +18,7 @@ def extract_hosts_from_output(output: str) -> list[Host]:
     """Extract hosts from netexec SMB output.
 
     Parses output like:
-        SMB  192.168.1.10  445  DC01  [*] Windows 10.0 Build... (name:DC01) (domain:CONTOSO.LOCAL)
+        SMB  192.168.58.10  445  DC01  [*] Windows 10.0 Build... (name:DC01) (domain:CONTOSO.LOCAL)
 
     Args:
         output: Raw command output containing SMB scan results.
@@ -220,10 +220,10 @@ def extract_shares_from_output(output: str, default_host: str = "") -> list[Shar
     """Extract shares from netexec --shares output.
 
     Parses output like:
-        SMB  192.168.1.10  445  DC01  Share     Permissions  Comment
-        SMB  192.168.1.10  445  DC01  -----     -----------  -------
-        SMB  192.168.1.10  445  DC01  ADMIN$    READ,WRITE   Remote Admin
-        SMB  192.168.1.10  445  DC01  C$        READ,WRITE   Default share
+        SMB  192.168.58.10  445  DC01  Share     Permissions  Comment
+        SMB  192.168.58.10  445  DC01  -----     -----------  -------
+        SMB  192.168.58.10  445  DC01  ADMIN$    READ,WRITE   Remote Admin
+        SMB  192.168.58.10  445  DC01  C$        READ,WRITE   Default share
 
     Args:
         output: Raw netexec --shares output.
@@ -245,7 +245,7 @@ def extract_shares_from_output(output: str, default_host: str = "") -> list[Shar
         if not stripped:
             continue
 
-        # Parse host from SMB line prefix: "SMB  192.168.56.1  445  HOSTNAME  ..."
+        # Parse host from SMB line prefix: "SMB  192.168.58.1  445  HOSTNAME  ..."
         if stripped.startswith("SMB"):
             smb_match = re.match(r"^SMB\s+(\d+\.\d+\.\d+\.\d+)\s+", stripped)
             if smb_match:

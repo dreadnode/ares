@@ -115,7 +115,7 @@ class OrchestratorTools(Toolset):
                 - "share_enumeration": Enumerate network shares
                 - "domain_info": Gather domain controller and trust information
                 - "bloodhound": Run BloodHound collection and analysis (requires creds)
-            targets: Comma-separated target IPs, hostnames, or CIDR ranges (e.g., "192.0.2.0/24,192.0.2.5")
+            targets: Comma-separated target IPs, hostnames, or CIDR ranges (e.g., "192.168.58.0/24,192.168.58.5")
             domain: Target domain (e.g., "corp.local")
             username: Username for authenticated enumeration (optional)
             password: Password for authenticated enumeration (optional)
@@ -131,21 +131,21 @@ class OrchestratorTools(Toolset):
             # Initial network scan
             >>> dispatch_recon(
             ...     task_type="network_scan",
-            ...     targets="192.0.2.0/24",
+            ...     targets="192.168.58.0/24",
             ...     details='{"ports": "top-1000"}'
             ... )
 
             # User enumeration (unauthenticated)
             >>> dispatch_recon(
             ...     task_type="user_enumeration",
-            ...     targets="192.0.2.1",
+            ...     targets="192.168.58.1",
             ...     domain="corp.local"
             ... )
 
             # BloodHound with credentials
             >>> dispatch_recon(
             ...     task_type="bloodhound",
-            ...     targets="192.0.2.1",
+            ...     targets="192.168.58.1",
             ...     domain="corp.local",
             ...     username="user1",
             ...     password="P@ssw0rd"  # pragma: allowlist secret
@@ -257,7 +257,7 @@ class OrchestratorTools(Toolset):
                 - "asrep_roast": Find accounts without pre-auth required
                 - "lsassy": Dump LSASS memory (requires admin access)
                 - "share_spider": Search accessible shares for credentials
-            targets: Comma-separated target IPs or hostnames (e.g., "192.0.2.1,192.0.2.2")
+            targets: Comma-separated target IPs or hostnames (e.g., "192.168.58.1,192.168.58.2")
             domain: Target domain (e.g., "corp.local")
             username: Username for authenticated actions (optional)
             password: Password for authenticated actions (optional)
@@ -273,7 +273,7 @@ class OrchestratorTools(Toolset):
             # Low-hanging fruit after user enumeration
             >>> dispatch_credential_access(
             ...     task_type="low_hanging_fruit",
-            ...     targets="192.0.2.1",
+            ...     targets="192.168.58.1",
             ...     domain="corp.local",
             ...     details='{"users_file": "/tmp/users.txt"}'
             ... )
@@ -281,7 +281,7 @@ class OrchestratorTools(Toolset):
             # Secretsdump with credentials
             >>> dispatch_credential_access(
             ...     task_type="secretsdump",
-            ...     targets="192.0.2.1,192.0.2.2",
+            ...     targets="192.168.58.1,192.168.58.2",
             ...     domain="corp.local",
             ...     username="admin",
             ...     password="P@ssw0rd"  # pragma: allowlist secret
@@ -514,7 +514,7 @@ class OrchestratorTools(Toolset):
         Example:
             # Move to target using hash
             >>> dispatch_lateral_movement(
-            ...     target_host="192.168.56.10",
+            ...     target_host="192.168.58.10",
             ...     username="Administrator",
             ...     hash_value="aad3b435b51404ee:...",
             ...     domain="corp.local"
@@ -732,11 +732,11 @@ class OrchestratorTools(Toolset):
         Example:
             >>> dispatch_esc8_attack(
             ...     ca_host="dc01.corp.local",
-            ...     dc_ip="192.168.56.10",
+            ...     dc_ip="192.168.58.10",
             ...     domain="corp.local",
             ...     username="user",
             ...     password="pass",  # pragma: allowlist secret
-            ...     attacker_ip="192.168.56.100"
+            ...     attacker_ip="192.168.58.100"
             ... )
         """
         results = []
@@ -1402,7 +1402,7 @@ class OrchestratorTools(Toolset):
 
         Example:
             >>> register_discovered_host(
-            ...     ip="192.168.56.10",
+            ...     ip="192.168.58.10",
             ...     hostname="DC01",
             ...     os="Windows Server 2019",
             ...     roles=["DC"],

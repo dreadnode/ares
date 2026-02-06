@@ -273,7 +273,7 @@ class CredentialDiscoveryTools(Toolset):
             Users with non-empty descriptions (check for passwords!)
 
         Example:
-            >>> ldap_search_descriptions("192.168.56.10", "example.local", "user", "pass")
+            >>> ldap_search_descriptions("192.168.58.10", "example.local", "user", "pass")
         """
         # Validate required credentials
         if not username or not username.strip():
@@ -380,8 +380,8 @@ class CredentialDiscoveryTools(Toolset):
             Successful authentications (look for valid credentials)
 
         Example:
-            >>> password_spray("192.168.56.10", "child.example.local", "Password1")  # auto-enumerate
-            >>> password_spray("192.168.56.10", "child.example.local", "Password1", "/tmp/users.txt")
+            >>> password_spray("192.168.58.10", "child.example.local", "Password1")  # auto-enumerate
+            >>> password_spray("192.168.58.10", "child.example.local", "Password1", "/tmp/users.txt")
         """
         try:
             if not users_file:
@@ -556,8 +556,8 @@ class CredentialDiscoveryTools(Toolset):
             Users with username=password combinations
 
         Example:
-            >>> username_as_password("192.168.56.10", "child.example.local")  # auto-enumerate
-            >>> username_as_password("192.168.56.10", "child.example.local", "/tmp/users.txt")
+            >>> username_as_password("192.168.58.10", "child.example.local")  # auto-enumerate
+            >>> username_as_password("192.168.58.10", "child.example.local", "/tmp/users.txt")
         """
         try:
             if not users_file:
@@ -677,7 +677,7 @@ class CredentialDiscoveryTools(Toolset):
             Password policy details from the domain controller
 
         Example:
-            >>> password_policy("192.168.56.10", "example.local", "user", "pass")
+            >>> password_policy("192.168.58.10", "example.local", "user", "pass")
         """
         cmd = [
             "netexec",
@@ -781,7 +781,7 @@ class CredentialDiscoveryTools(Toolset):
             LAPS passwords for computers where you have read access
 
         Example:
-            >>> laps_dump("192.168.56.10", "example.local", "user", "pass")
+            >>> laps_dump("192.168.58.10", "example.local", "user", "pass")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -991,8 +991,8 @@ class CredentialHarvestingTools(Toolset):
             Extracted credentials including NTLM hashes, Kerberos keys, and secrets
 
         Example:
-            >>> secretsdump("192.168.56.100", "admin", password="pass")  # pragma: allowlist secret
-            >>> secretsdump("192.168.56.100", "admin", hash="aad3b4...")
+            >>> secretsdump("192.168.58.100", "admin", password="pass")  # pragma: allowlist secret
+            >>> secretsdump("192.168.58.100", "admin", hash="aad3b4...")
             >>> secretsdump("dc01.domain.local", "Administrator", no_pass=True)
             >>> secretsdump("dc01.domain.local", "Administrator", no_pass=True, ticket_path="admin.ccache")
         """
@@ -1117,7 +1117,7 @@ class CredentialHarvestingTools(Toolset):
             Kerberos TGS hashes for service accounts that can be cracked offline
 
         Example:
-            >>> kerberoast("example.local", "user", "pass", "192.168.56.100")
+            >>> kerberoast("example.local", "user", "pass", "192.168.58.100")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -1350,7 +1350,7 @@ class CredentialHarvestingTools(Toolset):
             AS-REP hashes for vulnerable user accounts
 
         Example:
-            >>> asrep_roast("example.local", "user", "pass", "192.168.56.100")
+            >>> asrep_roast("example.local", "user", "pass", "192.168.58.100")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -1442,8 +1442,8 @@ class CredentialHarvestingTools(Toolset):
             Results showing which targets the account has admin access on
 
         Example:
-            >>> domain_admin_checker("192.168.56.100 192.168.56.101", "Administrator", password="P@ss")  # pragma: allowlist secret
-            >>> domain_admin_checker("192.168.56.100 192.168.56.101", "Administrator", hash="aad3b4...")
+            >>> domain_admin_checker("192.168.58.100 192.168.58.101", "Administrator", password="P@ss")  # pragma: allowlist secret
+            >>> domain_admin_checker("192.168.58.100 192.168.58.101", "Administrator", hash="aad3b4...")
         """
         resolved_password = self._resolve_password(username, "", password or None)
         if (
@@ -1776,7 +1776,7 @@ class SharePilferingTools(Toolset):
             List of interesting files found
 
         Example:
-            >>> smbclient_spider("192.168.56.10", "SYSVOL", "user", "pass", "domain.local")
+            >>> smbclient_spider("192.168.58.10", "SYSVOL", "user", "pass", "domain.local")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -1955,7 +1955,7 @@ class SharePilferingTools(Toolset):
             Decrypted GPP passwords if found
 
         Example:
-            >>> gpp_password_finder("192.168.56.10", "user", "pass", "domain.local")
+            >>> gpp_password_finder("192.168.58.10", "user", "pass", "domain.local")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -2020,7 +2020,7 @@ class SharePilferingTools(Toolset):
             Scripts containing potential credentials
 
         Example:
-            >>> sysvol_script_search("192.168.56.10", "user", "pass", "domain.local")
+            >>> sysvol_script_search("192.168.58.10", "user", "pass", "domain.local")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -2236,7 +2236,7 @@ class SharePilferingTools(Toolset):
             NTDS extraction results
 
         Example:
-            >>> ntds_dit_extract("192.168.56.10", "Administrator", password="P@ss", domain="domain.local")  # pragma: allowlist secret
+            >>> ntds_dit_extract("192.168.58.10", "Administrator", password="P@ss", domain="domain.local")  # pragma: allowlist secret
         """
         resolved_password = self._resolve_password(username, domain, password)
         if (

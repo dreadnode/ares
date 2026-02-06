@@ -150,7 +150,7 @@ async def submit(
     """Submit a multi-agent red team operation to the orchestrator service.
 
     Example:
-        ares-ops submit dreadgoad contoso.local --ips 10.0.4.90 10.0.4.129 --wait
+        ares-ops submit dreadgoad contoso.local --ips 192.168.58.90 192.168.58.129 --wait
     """
     # Resolve config defaults
     resolved_redis_url = redis_url or get_redis_url()
@@ -1184,7 +1184,7 @@ async def inject_vulnerability(
     """Inject a vulnerability into an operation's shared state.
 
     Example:
-        ares-ops inject-vulnerability op-xxx constrained_delegation 10.1.2.240 \\
+        ares-ops inject-vulnerability op-xxx constrained_delegation 192.168.58.240 \\
             --target-hostname srv01.corp.contoso.local \\
             --target-spn "cifs/srv01.corp.contoso.local" \\
             --account-name svc_sql \\
