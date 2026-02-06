@@ -383,8 +383,8 @@ async def redteam(
         target_ip: Primary target IP address for the red team operation
 
     Example:
-        uv run python -m src.main redteam 192.168.56.100
-        uv run python -m src.main redteam 192.168.56.100 --args.model YOUR_MODEL
+        uv run python -m src.main redteam 192.168.58.100
+        uv run python -m src.main redteam 192.168.58.100 --args.model YOUR_MODEL
     """
     args = args or Args()
     dn_args = dn_args or DreadnodeArgs()
@@ -522,8 +522,8 @@ async def multi_agent(
         target_ips: Comma-separated list of target IPs
 
     Example:
-        uv run ares multi-agent example.local "192.168.56.10,192.168.56.11"
-        uv run ares multi-agent corp.local "192.0.2.1" --multi-args.redis-url redis://redis:6379
+        uv run ares multi-agent example.local "192.168.58.10,192.168.58.11"
+        uv run ares multi-agent corp.local "192.168.58.1" --multi-args.redis-url redis://redis:6379
     """
     import uuid
 

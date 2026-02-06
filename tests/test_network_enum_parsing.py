@@ -27,7 +27,7 @@ def test_enumerate_users_records_users_hosts_and_credentials(monkeypatch):
     monkeypatch.setattr(tool, "_run_user_enum_commands", lambda *_args, **_kwargs: outputs)
 
     tool.enumerate_users(
-        target="192.168.568.7",
+        target="192.168.58.7",
         username="svc",
         password="notreal",  # pragma: allowlist secret
         domain="contoso.local",
@@ -53,16 +53,16 @@ def test_enumerate_users_uses_smb_domain_over_task_param(monkeypatch):
     """
     tool = NetworkEnumerationTools()
     state = SharedRedTeamState(operation_id="op-test-domain-priority")
-    state.target = Target(ip="192.168.568.240", domain="contoso.local")
+    state.target = Target(ip="192.168.58.240", domain="contoso.local")
     tool.set_state(state)
 
     # SMB output shows domain:corp.contoso.local (the actual domain)
     outputs = [
         (
             "netexec smb --users",
-            "SMB 192.168.568.240 445 DC01 [*] Windows 10 / Server 2019 Build 17763 x64 "
+            "SMB 192.168.58.240 445 DC01 [*] Windows 10 / Server 2019 Build 17763 x64 "
             "(name:DC01) (domain:corp.contoso.local) (signing:True) (SMBv1:None)\n"
-            "SMB 192.168.568.240 445 DC01 karimm 2026-01-28 22:50:43 0 "
+            "SMB 192.168.58.240 445 DC01 karimm 2026-01-28 22:50:43 0 "
             "Karim Mahmoud (Password : C0ntr0ller#2024)",
         ),
     ]
@@ -71,7 +71,7 @@ def test_enumerate_users_uses_smb_domain_over_task_param(monkeypatch):
 
     # Task is called with domain=contoso.local (wrong for this target)
     tool.enumerate_users(
-        target="192.168.568.240",
+        target="192.168.58.240",
         username="",
         password="",
         domain="contoso.local",  # Task parameter (should be overridden)

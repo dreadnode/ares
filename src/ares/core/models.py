@@ -429,6 +429,7 @@ class Host(Model):
     roles: list[str] = wrapped("roles", element(tag="role", default=[]))
     services: list[str] = wrapped("services", element(tag="service", default=[]))
     is_dc: bool = False
+    owned: bool = False
 
     def detect_dc(self) -> bool:
         """Detect if this host is a domain controller based on services/hostname/roles.
@@ -640,7 +641,8 @@ class AgentInfo:
 # =========================================================================
 
 # Fields to exclude from JSON serialization (transient runtime references)
-_EXCLUDED_FIELDS = frozenset({"_dispatcher"})
+# Fields excluded from JSON serialization (transient state, not persisted)
+_EXCLUDED_FIELDS = frozenset({"_dispatcher", "_background_tasks"})
 
 
 def _to_json(val: Any) -> Any:
@@ -806,22 +808,58 @@ class SharedRedTeamState:
     # Transient dispatcher reference for real-time publishing (NOT serialized)
     _dispatcher: Any = field(default=None, init=False, repr=False, compare=False)
 
+    # Background task tracking for proper cleanup (NOT serialized)
+    _background_tasks: set = field(default_factory=set, init=False, repr=False, compare=False)
+
     def set_dispatcher(self, dispatcher) -> None:
         """Set dispatcher for real-time publishing of discoveries."""
         object.__setattr__(self, "_dispatcher", dispatcher)
 
     def _publish_async(self, coro) -> None:
-        """Fire-and-forget async publish to Redis."""
+        """Publish to Redis with proper task tracking.
+
+        Creates a background task and tracks it for proper cleanup.
+        This prevents fire-and-forget tasks from being lost on shutdown.
+        """
         if not self._dispatcher:
             return
         try:
             import asyncio
 
             loop = asyncio.get_running_loop()
-            asyncio.ensure_future(coro, loop=loop)  # noqa: RUF006 - fire-and-forget
+            task = loop.create_task(coro)
+            # Track task for cleanup
+            self._background_tasks.add(task)
+            # Remove from tracking when done
+            task.add_done_callback(self._background_tasks.discard)
         except RuntimeError:
             # No event loop, skip real-time publish
             pass
+
+    async def cleanup_background_tasks(self) -> None:
+        """Cancel and await all pending background publish tasks.
+
+        Should be called during graceful shutdown to ensure all
+        checkpoint publishes complete or are properly cancelled.
+        """
+        import asyncio
+
+        if not self._background_tasks:
+            return
+
+        logger.debug(f"Cleaning up {len(self._background_tasks)} background tasks")
+
+        # Cancel all pending tasks
+        for task in self._background_tasks:
+            if not task.done():
+                task.cancel()
+
+        # Wait for all tasks to complete (cancelled or otherwise)
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+
+        self._background_tasks.clear()
+        logger.debug("Background tasks cleanup complete")
 
     def store_artifact(self, key: str, content: bytes | str, source_agent: str = "") -> bool:
         """Store a downloaded artifact in shared state.

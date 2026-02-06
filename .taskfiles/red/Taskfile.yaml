@@ -225,17 +225,27 @@ tasks:
   # ===========================================================================
 
   multi:loot:
-    desc: "Dump users, credentials, and hosts from Redis state (usage: task red:multi:loot OPERATION_ID=op-xxx [WATCH=10] [DIFF=true])"
+    desc: "Dump users, credentials, and hosts from Redis state (usage: task red:multi:loot [OPERATION_ID=op-xxx] [LATEST=true] [WATCH=10] [DIFF=true])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
       WATCH: '{{.WATCH | default "0"}}'
       DIFF: '{{.DIFF | default "false"}}'
     preconditions:
-      - sh: test -n "{{.OPERATION_ID}}"
-        msg: "OPERATION_ID variable is required. Usage: task red:multi:loot OPERATION_ID=op-xxx"
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required. Usage: task red:multi:loot OPERATION_ID=op-xxx  OR  task red:multi:loot LATEST=true"
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops loot "{{.OPERATION_ID}}" {{if ne .WATCH "0"}}--watch {{.WATCH}}{{end}} {{if eq .DIFF "true"}}--diff{{end}}
+      - |
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        OP_ID_ARG=""
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ID_ARG="{{.OPERATION_ID}}"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops loot $OP_ID_ARG $LATEST_FLAG {{if ne .WATCH "0"}}--watch {{.WATCH}}{{end}} {{if eq .DIFF "true"}}--diff{{end}}
 
   multi:status:
     desc: "Check multi-agent operation status (usage: task red:multi:status OPERATION_ID=op-xxx)"
@@ -312,6 +322,17 @@ tasks:
       MAX_AGE_HOURS: '{{.MAX_AGE_HOURS | default "24"}}'
     cmds:
       - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops cleanup --max-age-hours {{.MAX_AGE_HOURS}}
+
+  multi:delete:
+    desc: "Delete a specific operation and all its data (usage: task red:multi:delete OPERATION_ID=op-xxx)"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+    cmds:
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops delete "{{.OPERATION_ID}}" --force
 
   multi:backfill-domains:
     desc: "Backfill domain list into Redis state (usage: task red:multi:backfill-domains OPERATION_ID=op-xxx)"

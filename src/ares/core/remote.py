@@ -716,7 +716,7 @@ def run_remote(
         CommandResult with stdout, stderr, and return code
 
     Example:
-        >>> result = run_remote("netexec smb 10.1.2.219 --shares")
+        >>> result = run_remote("netexec smb 192.168.58.219 --shares")
         >>> print(result.stdout)
     """
     executor = get_executor()

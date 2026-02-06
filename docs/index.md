@@ -12,6 +12,7 @@ Ares is an autonomous security operations agent with dual capabilities:
 - [Contributing Guide](contributing.md)
 - [Blue Team Operations](blue.md)
 - [Red Team Operations](red.md)
+- [Red Team Phase Priority](phase-priority.md) - Agent utility by engagement phase
 
 ## Overview
 

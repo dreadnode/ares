@@ -28,7 +28,7 @@ async def test_run_multi_agent_operation_requires_model(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_multi_agent_operation_skips_wait_when_completed(monkeypatch):
-    from ares.core import orchestrator as orch
+    from ares.core.orchestrator import _orchestrator as orch
 
     shared_state = SimpleNamespace(
         completed=False,

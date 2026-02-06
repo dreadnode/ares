@@ -212,10 +212,11 @@ class TestRunWorkerModelResolution:
 
         with (
             patch(
-                "ares.core.worker.get_operation_model_overrides", new=AsyncMock(return_value=None)
+                "ares.core.worker._worker.get_operation_model_overrides",
+                new=AsyncMock(return_value=None),
             ),
-            patch("ares.core.worker.get_operation_model", new=AsyncMock(return_value=None)),
-            patch("ares.core.worker.logger") as mock_logger,
+            patch("ares.core.worker._worker.get_operation_model", new=AsyncMock(return_value=None)),
+            patch("ares.core.worker._worker.logger") as mock_logger,
         ):
             result = await run_worker(
                 role=AgentRole.RECON,
@@ -267,7 +268,8 @@ class TestRunWorkerCallbacks:
         ],
     )
     async def test_run_worker_adds_role_callback_tools(self, monkeypatch, role, callback_attr):
-        from ares.core import worker as worker_module
+        from ares.core.worker import _worker as worker_module
+        from ares.core.worker import run_worker
 
         created: dict[str, MagicMock] = {}
 
@@ -305,7 +307,7 @@ class TestRunWorkerCallbacks:
         worker_instance.start = AsyncMock()
         monkeypatch.setattr(worker_module, "WorkerAgent", MagicMock(return_value=worker_instance))
 
-        await worker_module.run_worker(
+        await run_worker(
             role=role,
             operation_id="op-1",
             discover_operation=False,
@@ -641,7 +643,7 @@ class TestDiscoverActiveOperationExponentialBackoff:
 
         with redis_patch, patch("asyncio.sleep", side_effect=capture_sleep):
             with patch("time.monotonic", return_value=1000.0):
-                with patch("ares.core.worker.random.uniform", return_value=0.5):
+                with patch("ares.core.worker._worker.random.uniform", return_value=0.5):
                     result = await discover_active_operation(
                         "redis://localhost:6379", max_wait=None
                     )
@@ -693,7 +695,7 @@ class TestDiscoverActiveOperationExponentialBackoff:
 
         with redis_patch, patch("asyncio.sleep", side_effect=capture_sleep):
             with patch("time.monotonic", return_value=1000.0):
-                with patch("ares.core.worker.random.uniform", return_value=0.5):
+                with patch("ares.core.worker._worker.random.uniform", return_value=0.5):
                     result = await discover_active_operation(
                         "redis://localhost:6379", max_wait=None
                     )
@@ -747,7 +749,7 @@ class TestDiscoverActiveOperationExponentialBackoff:
 
         with redis_patch, patch("asyncio.sleep", side_effect=capture_sleep):
             with patch("time.monotonic", return_value=1000.0):
-                with patch("ares.core.worker.random.uniform", return_value=0.5):
+                with patch("ares.core.worker._worker.random.uniform", return_value=0.5):
                     result = await discover_active_operation(
                         "redis://localhost:6379", max_wait=None
                     )
@@ -851,7 +853,7 @@ class TestDiscoverActiveOperationConnectionReuse:
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             with patch("time.monotonic", return_value=1000.0):
-                with patch("ares.core.worker.random.uniform", return_value=0.0):
+                with patch("ares.core.worker._worker.random.uniform", return_value=0.0):
                     result = await discover_active_operation(
                         "redis://localhost:6379", max_wait=None
                     )

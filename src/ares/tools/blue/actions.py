@@ -57,8 +57,8 @@ class CompletionTools(Toolset):  # type: ignore[misc]
             >>> await complete_investigation(
             ...     summary="Detected Kerberoasting attack targeting service accounts. "
             ...             "User dave.lee requested TGS tickets with RC4 encryption "
-            ...             "for multiple SPNs from host 10.0.4.186. Confidence: High.",
-            ...     attack_synopsis="At 14:30 UTC, user dave.lee from 10.0.4.186 "
+            ...             "for multiple SPNs from host 192.168.58.186. Confidence: High.",
+            ...     attack_synopsis="At 14:30 UTC, user dave.lee from 192.168.58.186 "
             ...                     "began requesting TGS tickets for service accounts. "
             ...                     "12 tickets requested with RC4 encryption over 5 minutes.",
             ...     recommendations=[

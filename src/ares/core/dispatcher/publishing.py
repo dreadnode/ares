@@ -1,0 +1,584 @@
+"""Discovery publishing for credentials, hosts, shares, and vulnerabilities.
+
+This module provides methods to publish discoveries to all agents and update
+shared state. Includes MSSQL auto-detection and ADCS enumeration support.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from loguru import logger
+
+from ares.core.messages import (
+    CredentialDiscovered,
+    ExploitRequest,
+    HashDiscovered,
+    HostDiscovered,
+    VulnerabilityFound,
+    generate_task_id,
+)
+from ares.core.models import (
+    AgentRole,
+    Credential,
+    Hash,
+    Host,
+    Share,
+    TaskInfo,
+    VulnerabilityInfo,
+)
+
+if TYPE_CHECKING:
+    from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+
+
+class PublishingMixin:
+    """Discovery publishing for credentials, hosts, shares, and vulnerabilities."""
+
+    async def publish_credential(
+        self: RedTeamDispatcher,
+        credential: Credential,
+        source_agent: str,
+        is_admin: bool = False,
+    ) -> bool:
+        """
+        Broadcast new credential to all agents.
+
+        Args:
+            credential: The discovered credential.
+            source_agent: Agent that discovered it.
+            is_admin: Whether this is an admin credential.
+
+        Returns:
+            True if credential was new and added.
+        """
+        self._add_user(credential.username, credential.domain)
+        added = self.shared_state.add_credential(credential, source_agent)
+
+        if added:
+            self.signal_credential_access()
+            await self._broadcast(
+                CredentialDiscovered(
+                    source_agent=source_agent,
+                    username=credential.username,
+                    password=credential.password,
+                    domain=credential.domain,
+                    is_admin=is_admin,
+                    discovery_method=credential.source,
+                ),
+                exclude=source_agent,
+            )
+            await self._checkpoint()
+            logger.info(f"Credential published: {credential.domain}\\{credential.username}")
+        else:
+            logger.debug(
+                f"Credential not published (duplicate/invalid): {credential.domain}\\{credential.username}"
+            )
+
+        return added
+
+    async def publish_hash(
+        self: RedTeamDispatcher,
+        hash_obj: Hash,
+        source_agent: str,
+        priority: int = 5,
+    ) -> bool:
+        """
+        Broadcast new hash to all agents.
+
+        Args:
+            hash_obj: The discovered hash.
+            source_agent: Agent that discovered it.
+            priority: Priority for cracking (1=krbtgt, 2=admin, 5=normal).
+
+        Returns:
+            True if hash was new and added.
+        """
+        added = self.shared_state.add_hash(hash_obj, source_agent)
+
+        if added:
+            self.signal_credential_access()
+            await self._broadcast(
+                HashDiscovered(
+                    source_agent=source_agent,
+                    username=hash_obj.username,
+                    hash_value=hash_obj.hash_value,
+                    hash_type=hash_obj.hash_type,
+                    domain=hash_obj.domain,
+                    priority=priority,
+                ),
+                exclude=source_agent,
+            )
+            await self._checkpoint()
+            logger.info(
+                f"Hash published: {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type})"
+            )
+        else:
+            logger.debug(
+                f"Hash not published (duplicate): {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type})"
+            )
+
+        return added
+
+    async def publish_share(self: RedTeamDispatcher, share: Share, source_agent: str) -> bool:
+        """
+        Record share discovery in shared state.
+
+        Args:
+            share: The discovered share.
+            source_agent: Agent that discovered it.
+
+        Returns:
+            True if share was new and added.
+        """
+        added = self.shared_state.add_share(share)
+        if added:
+            await self._checkpoint()
+            logger.info(f"Share recorded: {share.host}/{share.name}")
+        else:
+            logger.debug(f"Share not published (duplicate/invalid): {share.host}/{share.name}")
+        return added
+
+    def signal_credential_access(self: RedTeamDispatcher) -> None:
+        """Wake credential access loop when new credentials or hashes appear."""
+        self._credential_access_event.set()
+
+    async def wait_for_credential_access_signal(self: RedTeamDispatcher, timeout: float) -> None:
+        """Wait for new credential activity or a timeout."""
+        if self._credential_access_event.is_set():
+            self._credential_access_event.clear()
+            return
+        try:
+            await asyncio.wait_for(self._credential_access_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return
+        finally:
+            self._credential_access_event.clear()
+
+    async def publish_host(self: RedTeamDispatcher, host: Host, source_agent: str) -> bool:
+        """
+        Broadcast new host to all agents.
+
+        Args:
+            host: The discovered host.
+            source_agent: Agent that discovered it.
+
+        Returns:
+            True if host was new and added.
+        """
+        added = self.shared_state.add_host(host)
+
+        if added:
+            await self._broadcast(
+                HostDiscovered(
+                    source_agent=source_agent,
+                    ip=host.ip,
+                    hostname=host.hostname,
+                    os=host.os,
+                    roles=list(host.roles) if hasattr(host.roles, "__iter__") else [],
+                    services=list(host.services) if hasattr(host.services, "__iter__") else [],
+                ),
+                exclude=source_agent,
+            )
+            await self._checkpoint()
+            logger.info(f"Host published: {host.ip} ({host.hostname})")
+
+            # Auto-detect MSSQL and queue vulnerability for exploitation
+            await self._auto_detect_mssql(host, source_agent)
+        else:
+            logger.debug(f"Host not published (duplicate/merged): {host.ip} ({host.hostname})")
+
+        return added
+
+    async def _auto_detect_mssql(self: RedTeamDispatcher, host: Host, source_agent: str) -> None:
+        """
+        Auto-detect MSSQL service on host and queue vulnerability for exploitation.
+
+        Checks for MSSQL indicators in services list and automatically queues
+        an mssql_linked_server vulnerability for the privesc agent to exploit.
+        """
+        services_lower = [s.lower() for s in host.services]
+
+        # Check for MSSQL indicators
+        has_mssql = any(
+            indicator in svc
+            for svc in services_lower
+            for indicator in ("mssql", "1433", "ms-sql", "sqlserver")
+        )
+
+        if not has_mssql:
+            return
+
+        # Check if we already have an MSSQL vuln queued for this host
+        existing_vulns = self.shared_state.discovered_vulnerabilities.values()
+        for vuln in existing_vulns:
+            if vuln.target == host.ip and vuln.vuln_type.startswith("mssql_"):
+                logger.debug(f"MSSQL vulnerability already queued for {host.ip}")
+                return
+
+        # Find any SQL-related credentials we have
+        sql_creds = self._find_sql_credentials()
+
+        # Only queue MSSQL vulnerability if we have valid credentials
+        if not sql_creds:
+            logger.info(
+                f"Skipping MSSQL vulnerability for {host.ip} ({host.hostname}) - "
+                "no valid SQL credentials available yet"
+            )
+            return
+
+        # Queue MSSQL vulnerability for exploitation
+        details: dict[str, Any] = {
+            "hostname": host.hostname,
+            "services": host.services,
+            "available_credentials": sql_creds,
+            "note": f"Auto-detected MSSQL service with {len(sql_creds)} potential SQL credential(s). "
+            "Check for linked servers and impersonation.",
+        }
+
+        await self.queue_vulnerability(
+            vuln_type="mssql_linked_server",
+            target=host.ip,
+            details=details,
+            discovered_by=source_agent,
+        )
+        logger.warning(
+            f"Auto-queued MSSQL vulnerability for {host.ip} ({host.hostname}) - "
+            f"found {len(sql_creds)} potential SQL creds"
+        )
+
+    def _find_sql_credentials(self: RedTeamDispatcher) -> list[dict[str, str]]:
+        """
+        Find credentials that might work for MSSQL authentication.
+
+        Returns credentials for:
+        - Users with 'sql' in username (e.g., sql_svc)
+        - Domain users (can auth to SQL via Windows auth)
+
+        Note: Only returns credentials WITH passwords - MSSQL Windows auth
+        requires a password, not just a hash.
+        """
+        sql_creds: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        for cred in self.shared_state.all_credentials:
+            # Skip credentials without passwords - MSSQL needs actual passwords
+            if not cred.password:
+                continue
+
+            key = f"{cred.domain}\\{cred.username}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            # Prioritize SQL service accounts
+            is_sql_account = "sql" in cred.username.lower()
+
+            sql_creds.append(
+                {
+                    "username": cred.username,
+                    "password": cred.password,
+                    "domain": cred.domain,
+                    "is_sql_account": str(is_sql_account),
+                }
+            )
+
+        # Sort to prioritize SQL accounts
+        sql_creds.sort(key=lambda x: x.get("is_sql_account", "False") != "True")
+        return sql_creds[:5]  # Return top 5 candidates
+
+    def _ensure_credential_in_state(
+        self: RedTeamDispatcher,
+        username: str,
+        domain: str,
+        password: str | None = None,
+        hash_value: str | None = None,
+        source: str = "task_dispatch",
+    ) -> bool:
+        """
+        Ensure a credential is saved to shared state when dispatching tasks.
+
+        This prevents credentials from being "lost" when they're only in task payloads
+        but not in the shared state that other agents can see.
+
+        Args:
+            username: Username for the credential.
+            domain: Domain for the credential.
+            password: Optional password.
+            hash_value: Optional NTLM hash.
+            source: Source identifier for the credential.
+
+        Returns:
+            True if credential was added, False if it already existed or was invalid.
+        """
+        if not username:
+            return False
+        # Only create Credential if we have a password (Credential requires password field)
+        # Hash-only credentials are tracked separately in all_hashes
+        if not password:
+            return False
+
+        # Create credential object
+        credential = Credential(
+            username=username,
+            domain=domain or "",
+            password=password,
+            source=source,
+        )
+
+        # add_credential handles deduplication
+        added = self.shared_state.add_credential(credential, source)
+        if added:
+            logger.info(
+                f"Auto-saved credential to shared state: {domain}\\{username} (source={source})"
+            )
+        return added
+
+    async def scan_hosts_for_mssql(self: RedTeamDispatcher) -> int:
+        """
+        Scan all known hosts for MSSQL services and queue vulnerabilities.
+
+        This method should be called periodically by the orchestrator to catch
+        MSSQL hosts discovered by worker agents that didn't go through publish_host.
+
+        Returns:
+            Number of new MSSQL vulnerabilities queued.
+        """
+        queued = 0
+        for host in self.shared_state.all_hosts:
+            services_lower = [s.lower() for s in host.services]
+
+            # Check for MSSQL indicators
+            has_mssql = any(
+                indicator in svc
+                for svc in services_lower
+                for indicator in ("mssql", "1433", "ms-sql", "sqlserver")
+            )
+
+            if not has_mssql:
+                continue
+
+            # Check if we already have an MSSQL vuln queued for this host
+            already_queued = any(
+                vuln.target == host.ip and vuln.vuln_type.startswith("mssql_")
+                for vuln in self.shared_state.discovered_vulnerabilities.values()
+            )
+
+            if already_queued:
+                continue
+
+            # Find SQL credentials
+            sql_creds = self._find_sql_credentials()
+
+            # Only queue if we have valid credentials
+            if not sql_creds:
+                logger.debug(
+                    f"Periodic scan: skipping MSSQL vulnerability for {host.ip} ({host.hostname}) - "
+                    "no valid SQL credentials available"
+                )
+                continue
+
+            # Queue MSSQL vulnerabilities (both linked server and impersonation)
+            details: dict[str, Any] = {
+                "hostname": host.hostname,
+                "services": host.services,
+                "available_credentials": sql_creds,
+                "note": f"Auto-detected MSSQL service with {len(sql_creds)} potential SQL credential(s). "
+                "Check for linked servers and impersonation.",
+            }
+
+            # Queue mssql_linked_server vulnerability
+            await self.queue_vulnerability(
+                vuln_type="mssql_linked_server",
+                target=host.ip,
+                details=details,
+                discovered_by="mssql_scanner",
+            )
+
+            # Also queue mssql_impersonation vulnerability
+            # This checks for sa/dbo impersonation rights which can lead to privilege escalation
+            impersonation_details: dict[str, Any] = {
+                "hostname": host.hostname,
+                "services": host.services,
+                "available_credentials": sql_creds,
+                "note": f"Auto-detected MSSQL service with {len(sql_creds)} potential SQL credential(s). "
+                "Check for impersonation rights (EXECUTE AS) to sa, dbo, or other privileged logins.",
+            }
+            await self.queue_vulnerability(
+                vuln_type="mssql_impersonation",
+                target=host.ip,
+                details=impersonation_details,
+                discovered_by="mssql_scanner",
+            )
+
+            queued += 2  # Queued both linked_server and impersonation
+            logger.warning(
+                f"Periodic scan: queued MSSQL vulnerabilities (linked_server + impersonation) for "
+                f"{host.ip} ({host.hostname}) with {len(sql_creds)} SQL credentials"
+            )
+
+        return queued
+
+    def find_adcs_servers(self: RedTeamDispatcher) -> list[tuple[str, str]]:
+        """
+        Find ADCS servers from discovered shares (CertEnroll indicator).
+
+        Returns:
+            List of (ip, hostname) tuples for hosts with CertEnroll shares.
+        """
+        adcs_servers: list[tuple[str, str]] = []
+        seen_hosts: set[str] = set()
+
+        for share in self.shared_state.all_shares:
+            if share.name and share.name.lower() == "certenroll":
+                host_ip = share.host
+                if host_ip and host_ip not in seen_hosts:
+                    # Find hostname from all_hosts
+                    hostname = ""
+                    for h in self.shared_state.all_hosts:
+                        if h.ip == host_ip:
+                            hostname = h.hostname or ""
+                            break
+                    adcs_servers.append((host_ip, hostname))
+                    seen_hosts.add(host_ip)
+
+        return adcs_servers
+
+    async def request_adcs_enumeration(
+        self: RedTeamDispatcher,
+        source_agent: str,
+        target_ip: str,
+        domain: str,
+        username: str,
+        password: str,
+    ) -> str:
+        """
+        Request ADCS enumeration (certipy_find) on a target CA server.
+
+        This dispatches a task to the PRIVESC agent to run certipy_find
+        and discover ADCS vulnerabilities (ESC1-ESC15).
+
+        Args:
+            source_agent: Agent making the request.
+            target_ip: IP of the ADCS server (CA).
+            domain: Target domain.
+            username: Username for authentication.
+            password: Password for authentication.
+
+        Returns:
+            Task ID for tracking.
+        """
+        # Auto-save credential to shared state so other agents can use it
+        self._ensure_credential_in_state(
+            username=username,
+            domain=domain,
+            password=password,
+            source="adcs_enumeration",
+        )
+
+        dc_ip = self._find_domain_controller_ip(domain)
+        payload = {
+            "vuln_type": "adcs_enumerate",
+            "vuln_id": f"adcs_enumerate_{target_ip}_{hash(f'{domain}{username}') % 10000:04d}",
+            "target": target_ip,
+            "domain": domain,
+            "dc_ip": dc_ip or target_ip,
+            "username": username,
+            "password": password,
+            "note": "Auto-detected ADCS server (CertEnroll share). Run certipy_find to enumerate ESC1-ESC15 vulnerabilities.",
+        }
+
+        # Use Redis task queue if available (Kubernetes multi-pod mode)
+        if self._task_queue:
+            task_id = await self._throttled_submit_task(
+                task_type="exploit",
+                target_role="privesc",
+                payload=payload,
+                source_agent=source_agent,
+            )
+            if not task_id:
+                return ""
+
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type="exploit",
+                assigned_agent="privesc",
+                params=payload,
+            )
+            self.shared_state.pending_tasks[task_id] = task_info
+            self._redis_task_ids.add(task_id)
+
+            logger.info(f"ADCS enumeration task {task_id} submitted to Redis queue for {target_ip}")
+            return task_id
+
+        # Fallback to in-memory queue (single-process mode)
+        task_id = generate_task_id()
+        privesc_agent = self._role_queues.get(AgentRole.PRIVESC)
+
+        if not privesc_agent:
+            logger.warning("No privesc agent registered, cannot route ADCS enumeration")
+            return ""
+
+        task_info = TaskInfo(
+            task_id=task_id,
+            task_type="exploit",
+            assigned_agent=privesc_agent,
+            params=payload,
+        )
+        self.shared_state.pending_tasks[task_id] = task_info
+
+        await self._message_queues[privesc_agent].put(
+            ExploitRequest(
+                source_agent=source_agent,
+                task_id=task_id,
+                vuln_type="adcs_enumerate",
+                vuln_id=payload["vuln_id"],
+                target=target_ip,
+                params=payload,
+                callback_agent=source_agent,
+            )
+        )
+
+        logger.info(f"ADCS enumeration request {task_id} sent to {privesc_agent}")
+        return task_id
+
+    async def publish_vulnerability(
+        self: RedTeamDispatcher,
+        vuln: VulnerabilityInfo,
+        source_agent: str,
+    ) -> bool:
+        """
+        Broadcast new vulnerability to all agents.
+
+        Args:
+            vuln: The discovered vulnerability.
+            source_agent: Agent that discovered it.
+
+        Returns:
+            True if vulnerability was new and added.
+        """
+        added = self.shared_state.add_vulnerability(vuln)
+
+        if added:
+            await self._broadcast(
+                VulnerabilityFound(
+                    source_agent=source_agent,
+                    vuln_type=vuln.vuln_type,
+                    vuln_id=vuln.vuln_id,
+                    target=vuln.target,
+                    details=vuln.details,
+                    recommended_agent=vuln.recommended_agent,
+                    priority=vuln.priority,
+                ),
+                exclude=source_agent,
+            )
+            await self._checkpoint()
+            logger.warning(f"Vulnerability published: {vuln.vuln_type} on {vuln.target}")
+
+        return added
+
+
+# Import asyncio at module level for wait_for_credential_access_signal
+import asyncio  # noqa: E402
+
+__all__ = ["PublishingMixin"]

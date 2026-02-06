@@ -374,9 +374,10 @@ class LokiTools(Toolset):  # type: ignore[misc]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Convert exceptions to error results
-        processed_results = []
+        processed_results: list[dict] = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
+                logger.warning(f"Parallel query task failed: {result}")
                 processed_results.append(
                     {
                         "query": queries[i].get("logql", ""),

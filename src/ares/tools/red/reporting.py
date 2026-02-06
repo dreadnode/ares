@@ -181,7 +181,7 @@ class RedTeamReportingTools(Toolset):
             Confirmation of recorded host
 
         Example:
-            >>> record_compromised_host("192.168.56.22", "WORKSTATION1", "Windows 10", "local_admin", "Compromised via PsExec")
+            >>> record_compromised_host("192.168.58.22", "WORKSTATION1", "Windows 10", "local_admin", "Compromised via PsExec")
         """
         if not self.state:
             return "[!] No operation state available"
