@@ -103,6 +103,17 @@ class EvaluationResult:
     investigation_started: bool = False
     investigation_completed: bool = False
 
+    # Timing metrics (response time analysis)
+    time_to_first_evidence: float | None = None
+    time_to_technique_identification: float | None = None
+    time_to_ttp_elevation: float | None = None
+
+    # Cost tracking
+    total_tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
     # Metadata
     model: str = ""
     duration_seconds: float = 0.0
@@ -129,6 +140,15 @@ class EvaluationResult:
         if self.overall_score >= 0.6:
             return "D"
         return "F"
+
+    @property
+    def _investigation_status(self) -> str:
+        """Human-readable investigation status."""
+        if self.investigation_completed:
+            return "Completed"
+        if self.investigation_started:
+            return "Started"
+        return "Not Started"
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON export."""
@@ -177,9 +197,20 @@ class EvaluationResult:
                 "passed": self.passed,
                 "grade": self.grade,
             },
+            "timing": {
+                "duration_seconds": self.duration_seconds,
+                "time_to_first_evidence": self.time_to_first_evidence,
+                "time_to_technique_identification": self.time_to_technique_identification,
+                "time_to_ttp_elevation": self.time_to_ttp_elevation,
+            },
+            "cost": {
+                "total_tokens": self.total_tokens,
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "estimated_cost_usd": self.estimated_cost_usd,
+            },
             "metadata": {
                 "model": self.model,
-                "duration_seconds": self.duration_seconds,
                 "error": self.error,
             },
         }
@@ -196,13 +227,43 @@ class EvaluationResult:
             f"  Quality: {self.quality_score:.1%}",
             f"  Completeness: {self.completeness_score:.1%}",
             "",
-            f"IOC Detection: {self.ioc_detection_rate:.1%} ({len(self.found_iocs)}/{len(self.found_iocs) + len(self.missed_iocs)})",
-            f"Technique Coverage: {self.technique_coverage:.1%} ({len(self.found_techniques)}/{len(self.found_techniques) + len(self.missed_techniques)})",
+            (
+                f"IOC Detection: {self.ioc_detection_rate:.1%} "
+                f"({len(self.found_iocs)}/{len(self.found_iocs) + len(self.missed_iocs)})"
+            ),
+            (
+                f"Technique Coverage: {self.technique_coverage:.1%} "
+                f"({len(self.found_techniques)}/"
+                f"{len(self.found_techniques) + len(self.missed_techniques)})"
+            ),
             f"Pyramid Level: {self.highest_pyramid_level}/6",
             "",
             f"Alert Fired: {'Yes' if self.alert_fired else 'No'}",
-            f"Investigation: {'Completed' if self.investigation_completed else 'Started' if self.investigation_started else 'Not Started'}",
+            f"Investigation: {self._investigation_status}",
         ]
+
+        # Timing metrics
+        if self.time_to_first_evidence is not None or self.duration_seconds > 0:
+            lines.append("")
+            lines.append("Timing:")
+            lines.append(f"  Duration: {self.duration_seconds:.1f}s")
+            if self.time_to_first_evidence is not None:
+                lines.append(f"  Time to First Evidence: {self.time_to_first_evidence:.1f}s")
+            if self.time_to_technique_identification is not None:
+                ttid = self.time_to_technique_identification
+                lines.append(f"  Time to Technique ID: {ttid:.1f}s")
+            if self.time_to_ttp_elevation is not None:
+                lines.append(f"  Time to TTP Elevation: {self.time_to_ttp_elevation:.1f}s")
+
+        # Cost metrics
+        if self.total_tokens > 0:
+            lines.append("")
+            lines.append("Cost:")
+            lines.append(
+                f"  Tokens: {self.total_tokens:,} "
+                f"(prompt: {self.prompt_tokens:,}, completion: {self.completion_tokens:,})"
+            )
+            lines.append(f"  Estimated Cost: ${self.estimated_cost_usd:.4f}")
 
         if self.missed_techniques:
             lines.append("")
@@ -281,6 +342,35 @@ class DatasetEvaluationResult:
             return 0.0
         return sum(1 for r in self.results if r.investigation_completed) / len(self.results)
 
+    @property
+    def total_cost_usd(self) -> float:
+        """Total estimated cost across all evaluations."""
+        return sum(r.estimated_cost_usd for r in self.results)
+
+    @property
+    def total_tokens(self) -> int:
+        """Total tokens used across all evaluations."""
+        return sum(r.total_tokens for r in self.results)
+
+    @property
+    def avg_duration_seconds(self) -> float:
+        """Average investigation duration."""
+        if not self.results:
+            return 0.0
+        return sum(r.duration_seconds for r in self.results) / len(self.results)
+
+    @property
+    def avg_time_to_first_evidence(self) -> float | None:
+        """Average time to first evidence (excluding None values)."""
+        times = [
+            r.time_to_first_evidence
+            for r in self.results
+            if r.time_to_first_evidence is not None
+        ]
+        if not times:
+            return None
+        return sum(times) / len(times)
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON export."""
         return {
@@ -294,6 +384,10 @@ class DatasetEvaluationResult:
                 "avg_technique_coverage": self.avg_technique_coverage,
                 "alert_fire_rate": self.alert_fire_rate,
                 "investigation_completion_rate": self.investigation_completion_rate,
+                "total_cost_usd": self.total_cost_usd,
+                "total_tokens": self.total_tokens,
+                "avg_duration_seconds": self.avg_duration_seconds,
+                "avg_time_to_first_evidence": self.avg_time_to_first_evidence,
             },
             "results": [r.to_dict() for r in self.results],
         }
@@ -314,7 +408,15 @@ class DatasetEvaluationResult:
             "Detection Metrics:",
             f"  Alert Fire Rate: {self.alert_fire_rate:.1%}",
             f"  Investigation Completion: {self.investigation_completion_rate:.1%}",
+            "",
+            "Cost & Performance:",
+            f"  Total Cost: ${self.total_cost_usd:.4f}",
+            f"  Total Tokens: {self.total_tokens:,}",
+            f"  Avg Duration: {self.avg_duration_seconds:.1f}s",
         ]
+
+        if self.avg_time_to_first_evidence is not None:
+            lines.append(f"  Avg Time to First Evidence: {self.avg_time_to_first_evidence:.1f}s")
 
         # Grade distribution
         grade_counts: dict[str, int] = {"A": 0, "B": 0, "C": 0, "D": 0, "F": 0}

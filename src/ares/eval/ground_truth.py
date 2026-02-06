@@ -14,6 +14,7 @@ from ares.core.models import (
     PyramidLevel,
     RedTeamState,
     SharedRedTeamState,
+    VulnerabilityInfo,
 )
 
 
@@ -71,10 +72,9 @@ class ExpectedTechnique:
             parent = self.technique_id.split(".")[0]
             if found_technique == parent:
                 return True
-        else:
+        elif found_technique.startswith(f"{self.technique_id}."):
             # This is a parent, check if found is a sub-technique
-            if found_technique.startswith(f"{self.technique_id}."):
-                return True
+            return True
 
         return False
 
@@ -97,6 +97,42 @@ class ExpectedTimelineEvent:
 
 
 @dataclass
+class ExpectedShare:
+    """A network share that should be identified during investigation.
+
+    Attributes:
+        host: Host where share was found.
+        name: Share name.
+        permissions: Access permissions discovered.
+        required: Whether this share is required to be detected.
+    """
+
+    host: str
+    name: str
+    permissions: str = ""
+    required: bool = False
+
+
+@dataclass
+class ExpectedVulnerability:
+    """A vulnerability that should be identified during investigation.
+
+    Attributes:
+        vuln_type: Type of vulnerability (ADCS_ESC1, UNCONSTRAINED_DELEGATION, etc.).
+        target: Target affected by this vulnerability.
+        mitre_techniques: Associated MITRE techniques for this vuln type.
+        exploited: Whether this vulnerability was exploited.
+        required: Whether this vulnerability is required to be detected.
+    """
+
+    vuln_type: str
+    target: str
+    mitre_techniques: list[str] = field(default_factory=list)
+    exploited: bool = False
+    required: bool = True
+
+
+@dataclass
 class EvaluationGroundTruth:
     """Complete ground truth for evaluating a blue team investigation.
 
@@ -106,6 +142,8 @@ class EvaluationGroundTruth:
         expected_iocs: List of IOCs the blue team should find.
         expected_techniques: List of MITRE techniques to identify.
         expected_timeline: List of timeline events to detect.
+        expected_shares: Network shares discovered during attack.
+        expected_vulnerabilities: Vulnerabilities discovered/exploited.
         min_pyramid_level: Minimum acceptable highest pyramid level.
         target_pyramid_level: Target highest pyramid level.
         min_technique_coverage: Minimum acceptable technique coverage (0-1).
@@ -117,6 +155,8 @@ class EvaluationGroundTruth:
     expected_iocs: list[ExpectedIOC] = field(default_factory=list)
     expected_techniques: list[ExpectedTechnique] = field(default_factory=list)
     expected_timeline: list[ExpectedTimelineEvent] = field(default_factory=list)
+    expected_shares: list[ExpectedShare] = field(default_factory=list)
+    expected_vulnerabilities: list[ExpectedVulnerability] = field(default_factory=list)
 
     # Thresholds for pass/fail determination
     min_pyramid_level: int = 4  # Network/Host Artifacts minimum
@@ -172,6 +212,9 @@ def create_ground_truth_from_red_state(
         hashes = state.all_hashes
         timeline = state.operation_timeline
         techniques = state.identified_techniques
+        shares = state.all_shares
+        discovered_vulns = state.discovered_vulnerabilities
+        exploited_vulns = state.exploited_vulnerabilities
     else:
         target_ip = state.target.ip
         hosts = state.hosts
@@ -180,6 +223,9 @@ def create_ground_truth_from_red_state(
         hashes = state.hashes
         timeline = state.timeline
         techniques = state.identified_techniques
+        shares = state.shares
+        discovered_vulns: dict[str, VulnerabilityInfo] = {}
+        exploited_vulns: set[str] = set()
 
     # Extract IOCs from hosts
     for host in hosts:
@@ -287,6 +333,54 @@ def create_ground_truth_from_red_state(
             )
         )
 
+    # Extract expected shares (lateral movement indicators)
+    expected_shares: list[ExpectedShare] = []
+    for share in shares:
+        expected_shares.append(
+            ExpectedShare(
+                host=share.host,
+                name=share.name,
+                permissions=share.permissions,
+                # Writable shares are important for detection
+                required=share.permissions in ("WRITE", "READ/WRITE"),
+            )
+        )
+        # Also add share host as IOC
+        expected_iocs.append(
+            ExpectedIOC(
+                ioc_type="ip",
+                value=share.host,
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=["T1021.002"],  # SMB/Windows Admin Shares
+                required=False,
+                source="share_enumeration",
+            )
+        )
+
+    # Extract expected vulnerabilities
+    expected_vulnerabilities: list[ExpectedVulnerability] = []
+    for vuln_id, vuln in discovered_vulns.items():
+        vuln_techniques = _get_techniques_for_vuln_type(vuln.vuln_type)
+        expected_vulnerabilities.append(
+            ExpectedVulnerability(
+                vuln_type=vuln.vuln_type,
+                target=vuln.target,
+                mitre_techniques=vuln_techniques,
+                exploited=vuln_id in exploited_vulns,
+                required=vuln_id in exploited_vulns,  # Exploited vulns are required
+            )
+        )
+        # Add vulnerability-specific techniques
+        for tech_id in vuln_techniques:
+            if tech_id not in [t.technique_id for t in expected_techniques]:
+                expected_techniques.append(
+                    ExpectedTechnique(
+                        technique_id=tech_id,
+                        required=vuln_id in exploited_vulns,
+                        parent_id=tech_id.split(".")[0] if "." in tech_id else None,
+                    )
+                )
+
     # Deduplicate IOCs by value
     seen_values: set[str] = set()
     unique_iocs: list[ExpectedIOC] = []
@@ -309,6 +403,8 @@ def create_ground_truth_from_red_state(
         expected_iocs=unique_iocs,
         expected_techniques=unique_techniques,
         expected_timeline=expected_timeline,
+        expected_shares=expected_shares,
+        expected_vulnerabilities=expected_vulnerabilities,
     )
 
 
@@ -327,8 +423,45 @@ def _is_technique_required(technique_id: str) -> bool:
         "T1550",  # Use Alternate Authentication Material
     ]
 
-    for prefix in required_prefixes:
-        if technique_id.startswith(prefix):
-            return True
+    return any(technique_id.startswith(prefix) for prefix in required_prefixes)
 
-    return False
+
+# Mapping of vulnerability types to MITRE ATT&CK techniques
+_VULN_TYPE_TECHNIQUES: dict[str, list[str]] = {
+    # Active Directory Certificate Services vulnerabilities
+    "ADCS_ESC1": ["T1649"],  # Steal or Forge Authentication Certificates
+    "ADCS_ESC2": ["T1649"],
+    "ADCS_ESC3": ["T1649"],
+    "ADCS_ESC4": ["T1649"],
+    "ADCS_ESC6": ["T1649"],
+    "ADCS_ESC7": ["T1649"],
+    "ADCS_ESC8": ["T1649"],
+    # Delegation attacks
+    "UNCONSTRAINED_DELEGATION": ["T1558"],  # Steal or Forge Kerberos Tickets
+    "CONSTRAINED_DELEGATION": ["T1558"],
+    "RESOURCE_BASED_CONSTRAINED_DELEGATION": ["T1558"],
+    # ACL-based attacks
+    "ACL_ABUSE": ["T1222", "T1484"],  # File Permissions Modification, Domain Policy Modification
+    "DACL_ABUSE": ["T1222", "T1484"],
+    "WRITEDACL": ["T1222"],
+    "GENERICALL": ["T1222", "T1098"],  # Account Manipulation
+    "GENERICWRITE": ["T1222", "T1098"],
+    "WRITEOWNER": ["T1222"],
+    # Kerberos attacks
+    "KERBEROASTING": ["T1558.003"],  # Kerberoasting
+    "ASREPROASTING": ["T1558.004"],  # AS-REP Roasting
+    # GPO abuse
+    "GPO_ABUSE": ["T1484.001"],  # Group Policy Modification
+    # DCSync
+    "DCSYNC": ["T1003.006"],  # DCSync
+    # Password attacks
+    "PASSWORD_SPRAY": ["T1110.003"],  # Password Spraying
+    "CREDENTIAL_STUFFING": ["T1110.004"],  # Credential Stuffing
+    # Default - generic privilege escalation
+    "DEFAULT": ["T1068"],  # Exploitation for Privilege Escalation
+}
+
+
+def _get_techniques_for_vuln_type(vuln_type: str) -> list[str]:
+    """Get MITRE techniques associated with a vulnerability type."""
+    return _VULN_TYPE_TECHNIQUES.get(vuln_type.upper(), _VULN_TYPE_TECHNIQUES["DEFAULT"])

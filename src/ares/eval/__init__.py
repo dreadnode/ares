@@ -21,8 +21,10 @@ Example:
 from ares.eval.ground_truth import (
     EvaluationGroundTruth,
     ExpectedIOC,
+    ExpectedShare,
     ExpectedTechnique,
     ExpectedTimelineEvent,
+    ExpectedVulnerability,
     create_ground_truth_from_red_state,
 )
 from ares.eval.results import (
@@ -43,6 +45,7 @@ from ares.eval.scorers import (
     score_timeline_accuracy,
 )
 from ares.eval.workflow import (
+    AlertMatchingRules,
     EvaluationDataset,
     EvaluationRunner,
     EvaluationScenario,
@@ -52,11 +55,13 @@ from ares.eval.workflow import (
 
 __all__ = [
     # Ground truth
+    "create_ground_truth_from_red_state",
     "EvaluationGroundTruth",
     "ExpectedIOC",
+    "ExpectedShare",
     "ExpectedTechnique",
     "ExpectedTimelineEvent",
-    "create_ground_truth_from_red_state",
+    "ExpectedVulnerability",
     # Results
     "DatasetEvaluationResult",
     "EvaluationResult",
@@ -73,9 +78,10 @@ __all__ = [
     "score_technique_coverage",
     "score_timeline_accuracy",
     # Workflow
+    "AlertMatchingRules",
+    "build_evaluation_result",
     "EvaluationDataset",
+    "evaluate_investigation",
     "EvaluationRunner",
     "EvaluationScenario",
-    "build_evaluation_result",
-    "evaluate_investigation",
 ]

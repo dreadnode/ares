@@ -196,10 +196,7 @@ def score_technique_coverage(
 
 def _technique_matches(expected: ExpectedTechnique, found_techniques: set[str]) -> bool:
     """Check if an expected technique matches any found technique."""
-    for found in found_techniques:
-        if expected.matches(found):
-            return True
-    return False
+    return any(expected.matches(found) for found in found_techniques)
 
 
 @dn.scorer(name="Pyramid Elevation")
@@ -248,7 +245,7 @@ def score_timeline_accuracy(
     Measures how well the investigation timeline matches expected events.
 
     Scoring based on:
-    - Event matching (description pattern match)
+    - Event matching (regex, substring, and keyword matching)
     - Technique association (correct MITRE techniques linked)
     - Chronological ordering
 
@@ -266,22 +263,17 @@ def score_timeline_accuracy(
         return 0.0  # No timeline generated = zero score
 
     # Build set of timeline descriptions and techniques
-    found_descriptions: set[str] = set()
+    found_descriptions: list[str] = [event.description.lower() for event in state.timeline]
     found_techniques_in_timeline: set[str] = set()
 
     for event in state.timeline:
-        found_descriptions.add(event.description.lower())
         found_techniques_in_timeline.update(event.mitre_techniques)
 
-    # Score event matching
+    # Score event matching with improved matching
     events_matched = 0
     for expected_event in ground_truth.expected_timeline:
-        pattern = expected_event.description_pattern.lower()
-        # Check if any found description contains the pattern
-        for desc in found_descriptions:
-            if pattern in desc or desc in pattern:
-                events_matched += 1
-                break
+        if _timeline_event_matches(expected_event.description_pattern, found_descriptions):
+            events_matched += 1
 
     event_score = events_matched / len(ground_truth.expected_timeline)
 
@@ -300,6 +292,55 @@ def score_timeline_accuracy(
 
     # Combine scores: 60% event matching, 40% technique association
     return (event_score * 0.6) + (technique_score * 0.4)
+
+
+def _timeline_event_matches(pattern: str, descriptions: list[str]) -> bool:
+    """Check if a pattern matches any description using multiple strategies.
+
+    Matching strategies (in order):
+    1. Regex pattern match (if pattern looks like regex)
+    2. Exact substring match
+    3. Keyword overlap (>50% of significant words match)
+    """
+    import re
+
+    pattern_lower = pattern.lower()
+
+    for desc in descriptions:
+        # Strategy 1: Try regex if pattern contains regex metacharacters
+        if any(c in pattern for c in r".*+?[](){}^$|\\"):
+            try:
+                if re.search(pattern_lower, desc, re.IGNORECASE):
+                    return True
+            except re.error:
+                pass  # Invalid regex, fall through to other methods
+
+        # Strategy 2: Substring matching
+        if pattern_lower in desc or desc in pattern_lower:
+            return True
+
+        # Strategy 3: Keyword overlap matching
+        # Extract significant words (>3 chars, not common words)
+        stop_words = {
+            "the", "and", "for", "was", "were", "with", "from", "that",
+            "this", "have", "has", "been", "which", "into", "user",
+        }
+        pattern_words = {
+            w for w in re.findall(r'\w+', pattern_lower)
+            if len(w) > 3 and w not in stop_words
+        }
+        desc_words = {
+            w for w in re.findall(r'\w+', desc)
+            if len(w) > 3 and w not in stop_words
+        }
+
+        if pattern_words and desc_words:
+            overlap = len(pattern_words & desc_words)
+            # Match if >50% of pattern words are found
+            if overlap >= len(pattern_words) * 0.5:
+                return True
+
+    return False
 
 
 @dn.scorer(name="Evidence Quality")
@@ -351,7 +392,7 @@ def score_investigation_overall(
 
     Returns 0.0 if investigation didn't start.
     """
-    state, ground_truth = output
+    state, _ground_truth = output
 
     if state is None:
         return 0.0

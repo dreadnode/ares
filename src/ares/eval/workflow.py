@@ -471,7 +471,10 @@ class EvaluationRunner:
         completion_tokens = 0
 
         # Determine if we should inject synthetic alerts
-        use_synthetic = inject_synthetic if inject_synthetic is not None else self.inject_synthetic_alerts
+        if inject_synthetic is not None:
+            use_synthetic = inject_synthetic
+        else:
+            use_synthetic = self.inject_synthetic_alerts
 
         try:
             # Get or inject alert
@@ -490,19 +493,18 @@ class EvaluationRunner:
                 )
                 if alert is not None:
                     alert_fired = True
-                    logger.info(f"Alert found: {alert.get('labels', {}).get('alertname', 'unknown')}")
+                    alert_name = alert.get("labels", {}).get("alertname", "unknown")
+                    logger.info(f"Alert found: {alert_name}")
 
             if alert is not None:
-                # Run investigation with timing
-                investigation_start = time.time()
+                # Run investigation
                 state, orchestrator = await self._run_investigation(alert)
 
                 # Calculate timing metrics from state timeline
                 if state and state.timeline:
                     for event in state.timeline:
-                        event_offset = (event.timestamp - state.started_at).total_seconds()
-                        if event_offset < 0:
-                            event_offset = 0
+                        delta = (event.timestamp - state.started_at).total_seconds()
+                        event_offset = max(0.0, delta)
 
                         # First evidence
                         if time_to_first_evidence is None and event.evidence_ids:
@@ -624,7 +626,8 @@ class EvaluationRunner:
                     idx: int, scenario: EvaluationScenario
                 ) -> EvaluationResult:
                     async with semaphore:
-                        logger.info(f"[{idx}/{len(dataset)}] Evaluating: {scenario.name or 'unnamed'}")
+                        name = scenario.name or "unnamed"
+                        logger.info(f"[{idx}/{len(dataset)}] Evaluating: {name}")
                         return await self._evaluate_scenario_safe(
                             scenario, poll_timeout_seconds, inject_synthetic
                         )
@@ -722,9 +725,7 @@ class EvaluationRunner:
                 mitre_technique = techniques[0].technique_id
 
         # Get operation timestamp if available
-        if isinstance(red_state, SharedRedTeamState):
-            starts_at = red_state.started_at.isoformat()
-        elif hasattr(red_state, "started_at"):
+        if isinstance(red_state, SharedRedTeamState) or hasattr(red_state, "started_at"):
             starts_at = red_state.started_at.isoformat()
         else:
             starts_at = datetime.now(timezone.utc).isoformat()
@@ -802,9 +803,7 @@ class EvaluationRunner:
                 expected_techniques.add(tech.technique_id.split(".")[0])
 
         # Get operation start time for time window matching
-        if isinstance(red_state, SharedRedTeamState):
-            operation_start = red_state.started_at
-        elif hasattr(red_state, "started_at"):
+        if isinstance(red_state, SharedRedTeamState) or hasattr(red_state, "started_at"):
             operation_start = red_state.started_at
         else:
             operation_start = None
@@ -890,8 +889,11 @@ class EvaluationRunner:
             alert_time_str = alert.get("startsAt", "")
             if alert_time_str:
                 try:
-                    alert_time = datetime.fromisoformat(alert_time_str.replace("Z", "+00:00"))
-                    if abs((alert_time - operation_start).total_seconds()) <= rules.match_by_time_window.total_seconds():
+                    alert_time = datetime.fromisoformat(
+                        alert_time_str.replace("Z", "+00:00")
+                    )
+                    time_delta = abs((alert_time - operation_start).total_seconds())
+                    if time_delta <= rules.match_by_time_window.total_seconds():
                         return True
                 except ValueError:
                     pass
