@@ -19,7 +19,7 @@ TRUNCATION_WARNING = (
 )
 
 
-@rg.prompt  # type: ignore[untyped-decorator]
+@rg.prompt(params=rg.GenerateParams(temperature=0.0))  # type: ignore[untyped-decorator]
 def generate_pr_description(diff: str) -> t.Annotated[str, rg.Ctx("markdown")]:  # type: ignore[empty-body]
     """
     Analyze the provided git diff and create a PR description in markdown format.
