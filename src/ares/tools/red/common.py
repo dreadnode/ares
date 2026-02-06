@@ -561,10 +561,14 @@ def add_credential_to_state(
 
 
 def add_weakness_to_state(state: AnyRedTeamState | None, block: str) -> None:
-    """Add a weakness block to state if not already present."""
+    """Add a weakness block to state if not already present. Uses pub/sub if available."""
     if not state or not block:
         return
-    if block not in state.weaknesses:
+    from ares.core.models import SharedRedTeamState
+
+    if isinstance(state, SharedRedTeamState):
+        state.add_weakness(block)
+    elif block not in state.weaknesses:
         state.weaknesses.append(block)
 
 

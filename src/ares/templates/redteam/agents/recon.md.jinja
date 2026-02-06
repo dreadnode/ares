@@ -63,14 +63,14 @@ When you receive a recon task:
 
 ### Network Scan
 ```
-Task: Scan 10.0.0.0/24 for live hosts and services
+Task: Scan <TARGET_SUBNET> for live hosts and services
 Action: Use nmap_scan with appropriate port range
 Output: List of live hosts with open ports/services
 ```
 
 ### User Enumeration
 ```
-Task: Enumerate users on DC at 10.0.0.1
+Task: Enumerate users on DC at <DC_IP>
 Action: Use enumerate_users or rpcclient
 Output: List of domain users with properties
 ```
@@ -84,7 +84,7 @@ Output: JSON files for analysis, attack paths identified
 
 ### SMB Signing Check
 ```
-Task: Identify relay targets in 10.0.0.0/24
+Task: Identify relay targets in <TARGET_SUBNET>
 Action: Use smb_signing_check to find hosts without SMB signing required
 Output: List of relay-able targets for NTLM relay attacks
 ```

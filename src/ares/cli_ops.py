@@ -235,7 +235,7 @@ async def submit(
             max_steps=max_steps,
             redis_url=resolved_redis_url,
             wait_for_completion=wait,
-            env_vars=env_vars if env_vars else None,
+            env_vars=env_vars or None,
         )
 
         logger.success(f"Operation submitted: {operation_id}")
@@ -344,172 +344,382 @@ async def wait_for(
         sys.exit(1)
 
 
+def _dedup_users(users: list) -> list:
+    """Deduplicate users by normalized domain+username."""
+    seen: set[tuple[str, str]] = set()
+    result = []
+    for user in users:
+        key = (user.domain.strip().lower(), user.username.strip().lower())
+        if key not in seen:
+            seen.add(key)
+            result.append(user)
+    return result
+
+
+def _dedup_credentials(credentials: list) -> list:
+    """Deduplicate credentials by normalized domain+username+password."""
+    seen: set[tuple[str, str, str]] = set()
+    result = []
+    for cred in credentials:
+        key = (cred.domain.strip().lower(), cred.username.strip().lower(), cred.password)
+        if key not in seen:
+            seen.add(key)
+            result.append(cred)
+    return result
+
+
+def _dedup_hashes(hashes: list) -> list:
+    """Deduplicate hashes by normalized domain+username+hash_type+hash_value."""
+    seen: set[tuple[str, str, str, str]] = set()
+    result = []
+    for h in hashes:
+        key = (
+            h.domain.strip().lower(),
+            h.username.strip().lower(),
+            h.hash_type.strip().lower(),
+            h.hash_value.strip().lower(),
+        )
+        if key not in seen:
+            seen.add(key)
+            result.append(h)
+    return result
+
+
+def _loot_snapshot(state) -> dict:
+    """Build a snapshot dict of all loot for diffing."""
+    return {
+        "domains": frozenset(d.strip().lower() for d in getattr(state, "all_domains", []) if d),
+        "host_keys": frozenset((h.hostname, h.ip) for h in state.all_hosts),
+        "user_keys": frozenset(
+            (u.domain.strip().lower(), u.username.strip().lower()) for u in state.all_users
+        ),
+        "cred_keys": frozenset(
+            (c.domain.strip().lower(), c.username.strip().lower(), c.password)
+            for c in state.all_credentials
+        ),
+        "hash_keys": frozenset(
+            (
+                h.domain.strip().lower(),
+                h.username.strip().lower(),
+                h.hash_type.strip().lower(),
+                h.hash_value.strip().lower(),
+            )
+            for h in state.all_hashes
+        ),
+        "share_keys": frozenset((s.host, s.name) for s in state.all_shares),
+        "weaknesses": frozenset(state.all_weaknesses),
+    }
+
+
+def _print_loot(state, *, json_output: bool = False) -> None:
+    """Print loot from state in human-readable or JSON format."""
+    import json as json_module
+
+    unique_users = _dedup_users(state.all_users)
+    unique_creds = _dedup_credentials(state.all_credentials)
+    unique_hashes = _dedup_hashes(state.all_hashes)
+
+    if json_output:
+        output = {
+            "operation_id": state.operation_id,
+            "has_domain_admin": state.has_domain_admin,
+            "domain_admin_path": state.domain_admin_path,
+            "has_golden_ticket": state.has_golden_ticket,
+            "domains": list(getattr(state, "all_domains", [])),
+            "hosts": [
+                {
+                    "ip": h.ip,
+                    "hostname": h.hostname,
+                    "os": h.os,
+                    "is_dc": h.is_dc,
+                    "services": h.services,
+                }
+                for h in state.all_hosts
+            ],
+            "users": [
+                {"username": u.username, "domain": u.domain, "is_admin": u.is_admin}
+                for u in unique_users
+            ],
+            "credentials": [
+                {
+                    "username": c.username,
+                    "password": c.password,
+                    "domain": c.domain,
+                    "is_admin": c.is_admin,
+                }
+                for c in unique_creds
+            ],
+            "hashes": [
+                {
+                    "username": h.username,
+                    "domain": h.domain,
+                    "hash_type": h.hash_type,
+                    "hash_value": h.hash_value,
+                    "source": h.source,
+                }
+                for h in unique_hashes
+            ],
+            "shares": [
+                {"host": s.host, "name": s.name, "permissions": s.permissions}
+                for s in state.all_shares
+            ],
+            "weaknesses": list(state.all_weaknesses),
+        }
+        print(json_module.dumps(output, indent=2, default=str))
+        return
+
+    # Human-readable output
+    print(f"Operation: {state.operation_id}")
+    if state.has_domain_admin:
+        print("*** DOMAIN ADMIN ACHIEVED ***")
+        if state.domain_admin_path:
+            print(f"  Path: {state.domain_admin_path}")
+    if state.has_golden_ticket:
+        print("*** GOLDEN TICKET OBTAINED ***")
+    print()
+
+    # Domains
+    domains = sorted({d.strip().lower() for d in getattr(state, "all_domains", []) if d})
+    print(f"Domains ({len(domains)}):")
+    for domain in domains or ["None"]:
+        print(f"  - {domain}")
+    print()
+
+    # Hosts (with DC indicator, OS, and open ports/services)
+    dcs = [h for h in state.all_hosts if h.is_dc]
+    print(f"Hosts ({len(state.all_hosts)}, {len(dcs)} DCs):")
+    for host in state.all_hosts:
+        parts = [p for p in [host.hostname, host.ip] if p]
+        line = " / ".join(parts) if parts else "(unknown)"
+        if host.os:
+            line = f"{line} [{host.os}]"
+        if host.is_dc:
+            line = f"{line} [DC]"
+        print(f"  - {line}")
+        if host.services:
+            for svc in sorted(host.services):
+                print(f"      {svc}")
+    print()
+
+    # Users
+    print(f"Users ({len(unique_users)}):")
+    for user in unique_users:
+        prefix = f"{user.domain}\\{user.username}" if user.domain else user.username
+        suffix = " (admin)" if user.is_admin else ""
+        print(f"  - {prefix}{suffix}")
+    print()
+
+    # Credentials
+    print(f"Credentials ({len(unique_creds)}):")
+    for cred in unique_creds:
+        prefix = f"{cred.domain}\\{cred.username}" if cred.domain else cred.username
+        suffix = " (admin)" if cred.is_admin else ""
+        print(f"  - {prefix}:{cred.password}{suffix}")
+    print()
+
+    # Hashes
+    print(f"Hashes ({len(unique_hashes)}):")
+    for h in unique_hashes:
+        prefix = f"{h.domain}\\{h.username}" if h.domain else h.username
+        print(f"  - {prefix}:{h.hash_type}:{h.hash_value}")
+    print()
+
+    # Shares
+    print(f"Shares ({len(state.all_shares)}):")
+    for share in state.all_shares:
+        line = f"{share.host}/{share.name}" if share.host else share.name
+        if share.permissions:
+            line = f"{line} [{share.permissions}]"
+        print(f"  - {line}")
+    print()
+
+    # Weaknesses
+    print(f"Weaknesses ({len(state.all_weaknesses)}):")
+    for w in state.all_weaknesses or ["None"]:
+        print(f"  - {w}")
+
+
+def _print_diff(prev_snapshot: dict, curr_snapshot: dict, state) -> None:
+    """Print only new items since the last snapshot."""
+    new_domains = curr_snapshot["domains"] - prev_snapshot["domains"]
+    new_hosts = curr_snapshot["host_keys"] - prev_snapshot["host_keys"]
+    new_users = curr_snapshot["user_keys"] - prev_snapshot["user_keys"]
+    new_creds = curr_snapshot["cred_keys"] - prev_snapshot["cred_keys"]
+    new_hashes = curr_snapshot["hash_keys"] - prev_snapshot["hash_keys"]
+    new_shares = curr_snapshot["share_keys"] - prev_snapshot["share_keys"]
+    new_weaknesses = curr_snapshot["weaknesses"] - prev_snapshot["weaknesses"]
+
+    total_new = (
+        len(new_domains)
+        + len(new_hosts)
+        + len(new_users)
+        + len(new_creds)
+        + len(new_hashes)
+        + len(new_shares)
+        + len(new_weaknesses)
+    )
+
+    if total_new == 0:
+        return
+
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    print(f"\n--- New loot at {ts} ({total_new} items) ---")
+
+    if new_domains:
+        for d in sorted(new_domains):
+            print(f"  [domain] {d}")
+
+    if new_hosts:
+        host_map = {(h.hostname, h.ip): h for h in state.all_hosts}
+        for key in new_hosts:
+            h = host_map.get(key)
+            if h:
+                parts = [p for p in [h.hostname, h.ip] if p]
+                line = " / ".join(parts)
+                if h.is_dc:
+                    line += " [DC]"
+                print(f"  [host] {line}")
+
+    if new_users:
+        for domain, username in sorted(new_users):
+            prefix = f"{domain}\\{username}" if domain else username
+            print(f"  [user] {prefix}")
+
+    if new_creds:
+        for domain, username, password in sorted(new_creds):
+            prefix = f"{domain}\\{username}" if domain else username
+            print(f"  [cred] {prefix}:{password}")
+
+    if new_hashes:
+        for domain, username, hash_type, hash_value in sorted(new_hashes):
+            prefix = f"{domain}\\{username}" if domain else username
+            print(f"  [hash] {prefix}:{hash_type}:{hash_value}")
+
+    if new_shares:
+        for host, name in sorted(new_shares):
+            print(f"  [share] {host}/{name}")
+
+    if new_weaknesses:
+        for w in sorted(new_weaknesses):
+            print(f"  [weakness] {w}")
+
+    sys.stdout.flush()
+
+
 @app.command
 async def loot(
     operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
     *,
     redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
     json_output: Annotated[bool, cyclopts.Parameter(help="Output as JSON")] = False,
+    watch: Annotated[
+        int, cyclopts.Parameter(help="Watch mode: refresh every N seconds (0=off)")
+    ] = 0,
+    diff: Annotated[
+        bool,
+        cyclopts.Parameter(help="Diff mode: only print new items each refresh (implies --watch)"),
+    ] = False,
 ) -> None:
     """Dump users, credentials, hosts, and hashes from operation state.
 
-    Example:
+    Examples:
         ares-ops loot op-20250128-123456
+        ares-ops loot op-20250128-123456 --watch 10
+        ares-ops loot op-20250128-123456 --diff --watch 5
     """
-    import json as json_module
-
-    from ares.core.models import SharedRedTeamState
-    from ares.core.redis_client import create_redis_client
 
     resolved_redis_url = redis_url or get_redis_url()
 
+    # --diff implies --watch with a default interval
+    if diff and watch == 0:
+        watch = 10
+
     try:
-        client = await create_redis_client(resolved_redis_url, decode_responses=False)
-        data = await client.get(f"ares:operation:{operation_id}:state")
-        await client.aclose()
-
-        if not data:
-            logger.error(f"No state found for operation: {operation_id}")
-            sys.exit(1)
-
-        state = SharedRedTeamState.from_bytes(data)
-
-        # Deduplicate users by normalized domain+username
-        seen_user_keys: set[tuple[str, str]] = set()
-        unique_users = []
-        for user in state.all_users:
-            user_key = (user.domain.strip().lower(), user.username.strip().lower())
-            if user_key not in seen_user_keys:
-                seen_user_keys.add(user_key)
-                unique_users.append(user)
-
-        # Deduplicate credentials by normalized domain+username+password
-        seen_cred_keys: set[tuple[str, str, str]] = set()
-        unique_creds = []
-        for cred in state.all_credentials:
-            cred_key = (
-                cred.domain.strip().lower(),
-                cred.username.strip().lower(),
-                cred.password,
-            )
-            if cred_key not in seen_cred_keys:
-                seen_cred_keys.add(cred_key)
-                unique_creds.append(cred)
-
-        # Deduplicate hashes by normalized domain+username+hash_type+hash_value
-        seen_hash_keys: set[tuple[str, str, str, str]] = set()
-        unique_hashes = []
-        for h in state.all_hashes:
-            hash_key = (
-                h.domain.strip().lower(),
-                h.username.strip().lower(),
-                h.hash_type.strip().lower(),
-                h.hash_value.strip().lower(),
-            )
-            if hash_key not in seen_hash_keys:
-                seen_hash_keys.add(hash_key)
-                unique_hashes.append(h)
-
-        if json_output:
-            output = {
-                "operation_id": state.operation_id,
-                "domains": list(getattr(state, "all_domains", [])),
-                "hosts": [
-                    {"ip": h.ip, "hostname": h.hostname, "os": h.os} for h in state.all_hosts
-                ],
-                "users": [
-                    {"username": u.username, "domain": u.domain, "is_admin": u.is_admin}
-                    for u in unique_users
-                ],
-                "credentials": [
-                    {
-                        "username": c.username,
-                        "password": c.password,
-                        "domain": c.domain,
-                        "is_admin": c.is_admin,
-                    }
-                    for c in unique_creds
-                ],
-                "hashes": [
-                    {
-                        "username": h.username,
-                        "domain": h.domain,
-                        "hash_type": h.hash_type,
-                        "hash_value": h.hash_value,
-                        "source": h.source,
-                    }
-                    for h in unique_hashes
-                ],
-                "shares": [
-                    {"host": s.host, "name": s.name, "permissions": s.permissions}
-                    for s in state.all_shares
-                ],
-                "weaknesses": list(state.all_weaknesses),
-            }
-            print(json_module.dumps(output, indent=2, default=str))
-            return
-
-        # Human-readable output
-        print(f"Operation: {state.operation_id}")
-        print()
-
-        # Domains
-        domains = sorted({d.strip().lower() for d in getattr(state, "all_domains", []) if d})
-        print(f"Domains ({len(domains)}):")
-        for domain in domains or ["None"]:
-            print(f"  - {domain}")
-        print()
-
-        # Hosts
-        print(f"Hosts ({len(state.all_hosts)}):")
-        for host in state.all_hosts:
-            parts = [p for p in [host.hostname, host.ip] if p]
-            line = " / ".join(parts) if parts else "(unknown)"
-            if host.os:
-                line = f"{line} [{host.os}]"
-            print(f"  - {line}")
-        print()
-
-        # Users
-        print(f"Users ({len(unique_users)}):")
-        for user in unique_users:
-            prefix = f"{user.domain}\\{user.username}" if user.domain else user.username
-            suffix = " (admin)" if user.is_admin else ""
-            print(f"  - {prefix}{suffix}")
-        print()
-
-        # Credentials
-        print(f"Credentials ({len(unique_creds)}):")
-        for cred in unique_creds:
-            prefix = f"{cred.domain}\\{cred.username}" if cred.domain else cred.username
-            suffix = " (admin)" if cred.is_admin else ""
-            print(f"  - {prefix}:{cred.password}{suffix}")
-        print()
-
-        # Hashes
-        print(f"Hashes ({len(unique_hashes)}):")
-        for h in unique_hashes:
-            prefix = f"{h.domain}\\{h.username}" if h.domain else h.username
-            print(f"  - {prefix}:{h.hash_type}:{h.hash_value}")
-        print()
-
-        # Shares
-        print(f"Shares ({len(state.all_shares)}):")
-        for share in state.all_shares:
-            line = f"{share.host}/{share.name}" if share.host else share.name
-            if share.permissions:
-                line = f"{line} [{share.permissions}]"
-            print(f"  - {line}")
-        print()
-
-        # Weaknesses
-        print(f"Weaknesses ({len(state.all_weaknesses)}):")
-        for w in state.all_weaknesses or ["None"]:
-            print(f"  - {w}")
-
+        if watch > 0:
+            await _loot_watch(operation_id, resolved_redis_url, watch, diff, json_output)
+        else:
+            await _loot_once(operation_id, resolved_redis_url, json_output)
+    except KeyboardInterrupt:
+        print("\nStopped.")
     except Exception as e:
         logger.error(f"Failed to dump loot: {e}")
         sys.exit(1)
+
+
+async def _loot_once(operation_id: str, redis_url: str, json_output: bool) -> None:
+    """Single-shot loot dump."""
+    from ares.core.models import SharedRedTeamState
+    from ares.core.redis_client import create_redis_client
+
+    client = await create_redis_client(redis_url, decode_responses=False)
+    data = await client.get(f"ares:operation:{operation_id}:state")
+    await client.aclose()
+
+    if not data:
+        logger.error(f"No state found for operation: {operation_id}")
+        sys.exit(1)
+
+    state = SharedRedTeamState.from_bytes(data)
+    _print_loot(state, json_output=json_output)
+
+
+async def _loot_watch(
+    operation_id: str,
+    redis_url: str,
+    interval: int,
+    diff_mode: bool,
+    json_output: bool,
+) -> None:
+    """Watch mode: continuously poll Redis and display loot."""
+    from ares.core.models import SharedRedTeamState
+    from ares.core.redis_client import create_redis_client
+
+    prev_snapshot: dict | None = None
+    client = await create_redis_client(redis_url, decode_responses=False)
+
+    try:
+        while True:
+            try:
+                data = await client.get(f"ares:operation:{operation_id}:state")
+            except Exception as e:
+                logger.warning(f"Redis fetch failed, reconnecting in {interval}s: {e}")
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+                await asyncio.sleep(interval)
+                client = await create_redis_client(redis_url, decode_responses=False)
+                continue
+
+            if not data:
+                logger.warning(f"No state found for {operation_id}, retrying in {interval}s...")
+                sys.stdout.flush()
+                await asyncio.sleep(interval)
+                continue
+
+            state = SharedRedTeamState.from_bytes(data)
+            curr_snapshot = _loot_snapshot(state)
+
+            if diff_mode:
+                if prev_snapshot is None:
+                    # First run: print full output then switch to diff
+                    _print_loot(state, json_output=json_output)
+                else:
+                    _print_diff(prev_snapshot, curr_snapshot, state)
+            else:
+                # Full refresh mode: print separator between refreshes
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                if prev_snapshot is not None:
+                    print(f"\n{'=' * 60}")
+                print(f"[watch] Refreshing every {interval}s  |  {ts}")
+                print(f"{'=' * 60}")
+                _print_loot(state, json_output=json_output)
+
+            sys.stdout.flush()
+            prev_snapshot = curr_snapshot
+            await asyncio.sleep(interval)
+    finally:
+        await client.aclose()
 
 
 @app.command
@@ -871,10 +1081,180 @@ async def backfill_domains(
         await client.aclose()
 
         added = [d for d in domains if d not in before]
-        print(f"Backfilled domains ({len(added)}): {', '.join(added) if added else 'None'}")
+        if added:
+            # Notify subscribers so orchestrator/workers pick it up instantly
+            from ares.core.task_queue import RedisTaskQueue
+
+            tq = RedisTaskQueue(resolved_redis_url)
+            await tq.connect()
+            n = await tq.publish_state_update(operation_id)
+            await tq.disconnect()
+            print(
+                f"Backfilled domains ({len(added)}): {', '.join(added)} ({n} subscribers notified)"
+            )
+        else:
+            print("Backfilled domains (0): None")
 
     except Exception as e:
         logger.error(f"Failed to backfill domains: {e}")
+        sys.exit(1)
+
+
+@app.command
+async def inject_credential(
+    operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
+    username: Annotated[str, cyclopts.Parameter(help="Username to inject")],
+    password: Annotated[str, cyclopts.Parameter(help="Password for the credential")],
+    *,
+    domain: Annotated[str, cyclopts.Parameter(help="Domain for the credential")] = "",
+    source: Annotated[str, cyclopts.Parameter(help="Source of the credential")] = "manual-inject",
+    is_admin: Annotated[bool, cyclopts.Parameter(help="Mark credential as admin")] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Inject a credential into an operation's shared state.
+
+    Example:
+        ares-ops inject-credential op-20250128-123456 svc_sql Password123 --domain corp.contoso.local
+    """
+    from ares.core.models import Credential, SharedRedTeamState
+
+    resolved_redis_url = redis_url or get_redis_url()
+
+    try:
+        client = await create_redis_client(resolved_redis_url, decode_responses=False)
+        key = f"ares:operation:{operation_id}:state"
+        data = await client.get(key)
+
+        if not data:
+            logger.error(f"No state found for operation: {operation_id}")
+            sys.exit(1)
+
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Create and add the credential
+        cred = Credential(
+            username=username,
+            password=password,
+            domain=domain,
+            source=source,
+            is_admin=is_admin,
+        )
+
+        added = state.add_credential(cred, source_agent=source)
+
+        if added:
+            # Save updated state
+            await client.set(key, state.to_bytes())
+            await client.aclose()
+
+            # Notify subscribers so orchestrator/workers pick it up instantly
+            from ares.core.task_queue import RedisTaskQueue
+
+            tq = RedisTaskQueue(resolved_redis_url)
+            await tq.connect()
+            n = await tq.publish_state_update(operation_id)
+            await tq.disconnect()
+            logger.success(
+                f"Injected credential: {domain}\\{username}:{password} ({n} subscribers notified)"
+            )
+        else:
+            await client.aclose()
+            logger.warning(f"Credential already exists: {domain}\\{username}")
+
+    except Exception as e:
+        logger.error(f"Failed to inject credential: {e}")
+        sys.exit(1)
+
+
+@app.command
+async def inject_vulnerability(
+    operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
+    vuln_type: Annotated[
+        str, cyclopts.Parameter(help="Vulnerability type (e.g., constrained_delegation)")
+    ],
+    target_ip: Annotated[str, cyclopts.Parameter(help="Target IP address")],
+    *,
+    target_hostname: Annotated[str, cyclopts.Parameter(help="Target hostname")] = "",
+    target_spn: Annotated[str, cyclopts.Parameter(help="Target SPN for delegation attacks")] = "",
+    account_name: Annotated[str, cyclopts.Parameter(help="Account name (for delegation)")] = "",
+    domain: Annotated[str, cyclopts.Parameter(help="Domain")] = "",
+    details: Annotated[str, cyclopts.Parameter(help="Additional details (JSON string)")] = "{}",
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Inject a vulnerability into an operation's shared state.
+
+    Example:
+        ares-ops inject-vulnerability op-xxx constrained_delegation 10.1.2.240 \\
+            --target-hostname srv01.corp.contoso.local \\
+            --target-spn "cifs/srv01.corp.contoso.local" \\
+            --account-name svc_sql \\
+            --domain corp.contoso.local
+    """
+    import json as json_module
+
+    from ares.core.models import SharedRedTeamState, VulnerabilityInfo
+
+    resolved_redis_url = redis_url or get_redis_url()
+
+    try:
+        client = await create_redis_client(resolved_redis_url, decode_responses=False)
+        key = f"ares:operation:{operation_id}:state"
+        data = await client.get(key)
+
+        if not data:
+            logger.error(f"No state found for operation: {operation_id}")
+            sys.exit(1)
+
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Parse additional details
+        try:
+            extra_details = json_module.loads(details) if details else {}
+        except json_module.JSONDecodeError:
+            extra_details = {}
+
+        # Build vulnerability details
+        vuln_details = {
+            "target_ip": target_ip,
+            "target_hostname": target_hostname,
+            "domain": domain,
+            **extra_details,
+        }
+
+        if target_spn:
+            vuln_details["target_spn"] = target_spn
+        if account_name:
+            vuln_details["account_name"] = account_name
+
+        vuln = VulnerabilityInfo(
+            vuln_id=f"{vuln_type}_{target_ip}_{account_name or 'manual'}",
+            vuln_type=vuln_type,
+            target=target_ip,
+            discovered_by="manual-inject",
+            details=vuln_details,
+        )
+
+        state.discovered_vulnerabilities[vuln.vuln_id] = vuln
+
+        # Save updated state
+        await client.set(key, state.to_bytes())
+        await client.aclose()
+
+        # Notify subscribers so orchestrator/workers pick it up instantly
+        from ares.core.task_queue import RedisTaskQueue
+
+        tq = RedisTaskQueue(resolved_redis_url)
+        await tq.connect()
+        n = await tq.publish_state_update(operation_id)
+        await tq.disconnect()
+
+        logger.success(
+            f"Injected vulnerability: {vuln_type} on {target_ip} ({n} subscribers notified)"
+        )
+        logger.info(f"Details: {vuln_details}")
+
+    except Exception as e:
+        logger.error(f"Failed to inject vulnerability: {e}")
         sys.exit(1)
 
 

@@ -21,9 +21,9 @@ Your role is to **delegate tasks to specialized worker agents** and coordinate t
 ## Your Responsibilities
 
 1. **Dispatch Initial Reconnaissance** (to RECON worker)
-   - `dispatch_recon(task_type="network_scan", targets="10.0.0.0/24")`
-   - `dispatch_recon(task_type="user_enumeration", targets="DC_IP", domain="corp.local")`
-   - `dispatch_recon(task_type="smb_signing_check", targets="10.0.0.0/24")` - Find relay targets!
+   - `dispatch_recon(task_type="network_scan", targets="<TARGET_SUBNET>")` - Use actual target IPs from state!
+   - `dispatch_recon(task_type="user_enumeration", targets="<DC_IP>", domain="<DOMAIN>")`
+   - `dispatch_recon(task_type="smb_signing_check", targets="<TARGET_SUBNET>")` - Find relay targets!
    - `dispatch_recon(task_type="bloodhound", targets="DC_IP", domain="corp.local", username="user", password="pass")`  <!-- pragma: allowlist secret -->
 
 2. **Dispatch Low-Hanging Fruit** (to CREDENTIAL_ACCESS worker)
@@ -196,9 +196,14 @@ SMB signing check shows unsigned hosts -> start_coercion workflow:
 
 ## Example Workflow
 
+**IMPORTANT: Replace placeholders with ACTUAL values from operation state!**
+- `<TARGET_SUBNET>` = the target IPs/subnet from state.target (e.g., "10.1.2.0/24" or individual IPs)
+- `<DC_IP>` = the domain controller IP discovered during recon
+- `<DOMAIN>` = the target domain (e.g., "corp.local")
+
 ```
-1. dispatch_recon(task_type="network_scan", targets="10.0.0.0/24")
-2. dispatch_recon(task_type="smb_signing_check", targets="10.0.0.0/24") - RELAY TARGETS!
+1. dispatch_recon(task_type="network_scan", targets="<TARGET_SUBNET>")
+2. dispatch_recon(task_type="smb_signing_check", targets="<TARGET_SUBNET>") - RELAY TARGETS!
 3. dispatch_recon(task_type="user_enumeration", targets="DC_IP", domain="corp.local")
 4. dispatch_credential_access(task_type="low_hanging_fruit", targets="DC_IP", domain="corp.local")
 5. [Wait for results with get_pending_tasks()]

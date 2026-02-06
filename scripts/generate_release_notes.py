@@ -75,7 +75,7 @@ def categorize_commits(commits: list[str]) -> dict[str, list[dict[str, str]]]:
         match = re.match(r"^(\w+)(\(.+\))?!?: (.+)$", message)
         if match:
             commit_type = match.group(1).lower()
-            commit_scope = match.group(2) if match.group(2) else ""
+            commit_scope = match.group(2) or ""
             commit_message = match.group(3)
 
             category = categories.get(commit_type, "Other Changes")
@@ -154,10 +154,10 @@ def main() -> None:
     args = parser.parse_args()
 
     # Determine current tag
-    current_tag = args.tag if args.tag else get_latest_tag()
+    current_tag = args.tag or get_latest_tag()
 
     # Determine previous tag
-    previous_tag = args.previous_tag if args.previous_tag else get_previous_tag(current_tag)
+    previous_tag = args.previous_tag or get_previous_tag(current_tag)
 
     # Get and categorize commits
     commits = get_commits_between_tags(previous_tag, current_tag)

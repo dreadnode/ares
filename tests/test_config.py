@@ -332,7 +332,7 @@ class TestAgentConfig:
         """Test AgentConfig uses proper defaults."""
         agent = AgentConfig(model="test-model")
         assert agent.model == "test-model"
-        assert agent.max_steps == 100
+        assert agent.max_steps == 200
         assert agent.pod_selector == ""
         assert agent.capabilities == []
 

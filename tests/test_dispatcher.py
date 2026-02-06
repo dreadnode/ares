@@ -86,7 +86,7 @@ class TestMssqlScanning:
         dispatcher = RedTeamDispatcher()
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-mssql-2")
         dispatcher._shared_state.all_hosts.append(
-            Host(ip="192.168.56.10", hostname="web01", services=["http/80", "https/443"])
+            Host(ip="192.168.58.10", hostname="web01", services=["http/80", "https/443"])
         )
 
         queued = await dispatcher.scan_hosts_for_mssql()
@@ -95,11 +95,11 @@ class TestMssqlScanning:
 
     @pytest.mark.asyncio
     async def test_scan_hosts_for_mssql_detects_mssql_port(self):
-        """Test scanning detects MSSQL by port 1433."""
+        """Test scanning detects MSSQL by port 1433 and queues both vulnerabilities."""
         dispatcher = RedTeamDispatcher()
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-mssql-3")
         dispatcher._shared_state.all_hosts.append(
-            Host(ip="192.168.56.20", hostname="sql01", services=["tcp/1433"])
+            Host(ip="192.168.58.20", hostname="sql01", services=["tcp/1433"])
         )
         # Add SQL credentials (required for queueing MSSQL vulnerabilities)
         dispatcher._shared_state.all_credentials.append(
@@ -113,19 +113,27 @@ class TestMssqlScanning:
 
         queued = await dispatcher.scan_hosts_for_mssql()
 
-        assert queued == 1
-        dispatcher.queue_vulnerability.assert_awaited_once()
-        call_kwargs = dispatcher.queue_vulnerability.call_args.kwargs
-        assert call_kwargs["vuln_type"] == "mssql_linked_server"
-        assert call_kwargs["target"] == "192.168.56.20"
+        # Should queue 2 vulnerabilities: linked_server + impersonation
+        assert queued == 2
+        assert dispatcher.queue_vulnerability.await_count == 2
+
+        # Verify both vulnerability types were queued
+        call_args_list = [call.kwargs for call in dispatcher.queue_vulnerability.call_args_list]
+        vuln_types = [call["vuln_type"] for call in call_args_list]
+        assert "mssql_linked_server" in vuln_types
+        assert "mssql_impersonation" in vuln_types
+
+        # Verify both target the same host
+        for call in call_args_list:
+            assert call["target"] == "192.168.58.20"
 
     @pytest.mark.asyncio
     async def test_scan_hosts_for_mssql_detects_mssql_service_name(self):
-        """Test scanning detects MSSQL by service name."""
+        """Test scanning detects MSSQL by service name and queues both vulnerabilities."""
         dispatcher = RedTeamDispatcher()
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-mssql-4")
         dispatcher._shared_state.all_hosts.append(
-            Host(ip="192.168.56.30", hostname="db01", services=["ms-sql-s"])
+            Host(ip="192.168.58.30", hostname="db01", services=["ms-sql-s"])
         )
         # Add SQL credentials (required for queueing MSSQL vulnerabilities)
         dispatcher._shared_state.all_credentials.append(
@@ -139,7 +147,8 @@ class TestMssqlScanning:
 
         queued = await dispatcher.scan_hosts_for_mssql()
 
-        assert queued == 1
+        # Should queue 2 vulnerabilities: linked_server + impersonation
+        assert queued == 2
 
     @pytest.mark.asyncio
     async def test_scan_hosts_for_mssql_skips_already_queued(self):
@@ -147,14 +156,14 @@ class TestMssqlScanning:
         dispatcher = RedTeamDispatcher()
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-mssql-5")
         dispatcher._shared_state.all_hosts.append(
-            Host(ip="192.168.56.40", hostname="sql02", services=["mssql/1433"])
+            Host(ip="192.168.58.40", hostname="sql02", services=["mssql/1433"])
         )
         # Add existing vulnerability for this host
-        dispatcher._shared_state.discovered_vulnerabilities["mssql_linked_server_192.168.56.40"] = (
+        dispatcher._shared_state.discovered_vulnerabilities["mssql_linked_server_192.168.58.40"] = (
             VulnerabilityInfo(
-                vuln_id="mssql_linked_server_192.168.56.40",
+                vuln_id="mssql_linked_server_192.168.58.40",
                 vuln_type="mssql_linked_server",
-                target="192.168.56.40",
+                target="192.168.58.40",
                 details={},
                 discovered_by="recon",
             )
@@ -173,10 +182,10 @@ class TestMssqlScanning:
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-mssql-6")
         dispatcher._shared_state.all_hosts.extend(
             [
-                Host(ip="192.168.56.50", hostname="web01", services=["http/80"]),
-                Host(ip="192.168.56.51", hostname="sql01", services=["mssql/1433"]),
-                Host(ip="192.168.56.52", hostname="sql02", services=["sqlserver/1433"]),
-                Host(ip="192.168.56.53", hostname="dc01", services=["ldap/389"]),
+                Host(ip="192.168.58.50", hostname="web01", services=["http/80"]),
+                Host(ip="192.168.58.51", hostname="sql01", services=["mssql/1433"]),
+                Host(ip="192.168.58.52", hostname="sql02", services=["sqlserver/1433"]),
+                Host(ip="192.168.58.53", hostname="dc01", services=["ldap/389"]),
             ]
         )
         # Add SQL credentials (required for queueing MSSQL vulnerabilities)
@@ -191,8 +200,9 @@ class TestMssqlScanning:
 
         queued = await dispatcher.scan_hosts_for_mssql()
 
-        assert queued == 2
-        assert dispatcher.queue_vulnerability.await_count == 2
+        # 2 MSSQL hosts x 2 vuln types each = 4 vulnerabilities
+        assert queued == 4
+        assert dispatcher.queue_vulnerability.await_count == 4
 
     @pytest.mark.asyncio
     async def test_scan_hosts_includes_sql_credentials(self):
@@ -200,7 +210,7 @@ class TestMssqlScanning:
         dispatcher = RedTeamDispatcher()
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-mssql-7")
         dispatcher._shared_state.all_hosts.append(
-            Host(ip="192.168.56.60", hostname="sql03", services=["mssql/1433"])
+            Host(ip="192.168.58.60", hostname="sql03", services=["mssql/1433"])
         )
         # Add SQL service account credential
         dispatcher._shared_state.all_credentials.append(
@@ -215,11 +225,16 @@ class TestMssqlScanning:
 
         queued = await dispatcher.scan_hosts_for_mssql()
 
-        assert queued == 1
-        call_kwargs = dispatcher.queue_vulnerability.call_args.kwargs
-        assert "available_credentials" in call_kwargs["details"]
-        creds = call_kwargs["details"]["available_credentials"]
-        assert any(c["username"] == "sql_svc" for c in creds)
+        # Should queue 2 vulnerabilities (linked_server + impersonation)
+        assert queued == 2
+        assert dispatcher.queue_vulnerability.await_count == 2
+
+        # Both should include credentials
+        for call in dispatcher.queue_vulnerability.call_args_list:
+            call_kwargs = call.kwargs
+            assert "available_credentials" in call_kwargs["details"]
+            creds = call_kwargs["details"]["available_credentials"]
+            assert any(c["username"] == "sql_svc" for c in creds)
 
     def test_find_sql_credentials_prioritizes_sql_accounts(self):
         """Test that SQL accounts are prioritized in credential list."""
@@ -335,7 +350,7 @@ class TestFindDomainControllerIp:
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-2")
         dispatcher._shared_state.all_hosts.append(
             Host(
-                ip="10.0.0.1",
+                ip="192.168.58.1",
                 hostname="dc01.contoso.local",
                 services=["389/tcp ldap", "88/tcp kerberos"],
             )
@@ -343,7 +358,7 @@ class TestFindDomainControllerIp:
 
         dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
 
-        assert dc_ip == "10.0.0.1"
+        assert dc_ip == "192.168.58.1"
 
     def test_matches_kerberos_service_name(self):
         """Service containing 'kerberos' should match."""
@@ -351,7 +366,7 @@ class TestFindDomainControllerIp:
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-3")
         dispatcher._shared_state.all_hosts.append(
             Host(
-                ip="10.0.0.2",
+                ip="192.168.58.2",
                 hostname="dc02.contoso.local",
                 services=["88/tcp kerberos-sec"],
             )
@@ -359,7 +374,7 @@ class TestFindDomainControllerIp:
 
         dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
 
-        assert dc_ip == "10.0.0.2"
+        assert dc_ip == "192.168.58.2"
 
     def test_matches_ldap_service_name(self):
         """Service containing 'ldap' should match."""
@@ -367,7 +382,7 @@ class TestFindDomainControllerIp:
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-4")
         dispatcher._shared_state.all_hosts.append(
             Host(
-                ip="10.0.0.3",
+                ip="192.168.58.3",
                 hostname="dc03.contoso.local",
                 services=["389/tcp ldap"],
             )
@@ -375,7 +390,7 @@ class TestFindDomainControllerIp:
 
         dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
 
-        assert dc_ip == "10.0.0.3"
+        assert dc_ip == "192.168.58.3"
 
     def test_host_without_dc_services_not_selected(self):
         """Host with only RDP/SMB should not be selected as DC."""
@@ -383,7 +398,7 @@ class TestFindDomainControllerIp:
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-5")
         dispatcher._shared_state.all_hosts.append(
             Host(
-                ip="10.0.0.4",
+                ip="192.168.58.4",
                 hostname="workstation.contoso.local",
                 services=["3389/tcp ms-wbt-server", "445/tcp smb", "135/tcp msrpc"],
             )
@@ -400,14 +415,14 @@ class TestFindDomainControllerIp:
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-6")
         dispatcher._shared_state.all_hosts.append(
             Host(
-                ip="10.0.0.5",
+                ip="192.168.58.5",
                 hostname="app-srv01.contoso.local",
                 services=["88/tcp kerberos", "389/tcp ldap"],
             )
         )
         dispatcher._shared_state.all_hosts.append(
             Host(
-                ip="10.0.0.6",
+                ip="192.168.58.6",
                 hostname="dc01.contoso.local",
                 services=["445/tcp smb"],  # Even without DC services
             )
@@ -416,7 +431,7 @@ class TestFindDomainControllerIp:
         dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
 
         # Should prefer dc01 due to hostname
-        assert dc_ip == "10.0.0.6"
+        assert dc_ip == "192.168.58.6"
 
     def test_multi_domain_scenario(self):
         """Multi-domain scenario - ensure correct DC detection.
@@ -478,3 +493,199 @@ class TestFindDomainControllerIp:
             f"Expected dc01.corp.contoso.local (10.1.2.240), got {corp_dc}"
         )
         assert corp_dc != "10.1.2.146", "BUG: sql01 selected - 3389 matched as 389!"
+
+
+class TestS4UAutoChaining:
+    """Tests for automatic lateral movement chaining after S4U attacks."""
+
+    def test_extract_ticket_path_from_output(self):
+        """Test extraction of .ccache path from S4U output."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-1")
+
+        # Standard impacket output format
+        output = """
+[*] Getting TGT for user@contoso.local
+[*] Impersonating Administrator@contoso.local
+[*] Using S4U2self to obtain a ST as Administrator
+[*] Using S4U2proxy to obtain a ST for cifs/DC01.contoso.local
+[*] Saving ticket in Administrator@cifs_DC01.contoso.local@CONTOSO.LOCAL.ccache
+        """
+
+        path = dispatcher._extract_ticket_path_from_output(output)
+
+        assert path == "Administrator@cifs_DC01.contoso.local@CONTOSO.LOCAL.ccache"
+
+    def test_extract_ticket_path_fallback(self):
+        """Test fallback when standard pattern not found."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-2")
+
+        # Output with just ccache filename mentioned
+        output = "Generated ticket saved as admin.ccache"
+
+        path = dispatcher._extract_ticket_path_from_output(output)
+
+        assert path == "admin.ccache"
+
+    def test_extract_ticket_path_default(self):
+        """Test default when no ccache found."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-3")
+
+        output = "Some output without a ticket"
+
+        path = dispatcher._extract_ticket_path_from_output(output)
+
+        assert path == "Administrator.ccache"
+
+    def test_extract_host_from_spn_cifs(self):
+        """Test extraction of host from CIFS SPN."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-4")
+
+        host = dispatcher._extract_host_from_spn("cifs/DC01.contoso.local")
+
+        assert host == "DC01.contoso.local"
+
+    def test_extract_host_from_spn_http(self):
+        """Test extraction of host from HTTP SPN."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-5")
+
+        host = dispatcher._extract_host_from_spn("http/web01.contoso.local")
+
+        assert host == "web01.contoso.local"
+
+    def test_extract_host_from_spn_invalid(self):
+        """Test extraction returns None for invalid SPN."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-6")
+
+        assert dispatcher._extract_host_from_spn("") is None
+        assert dispatcher._extract_host_from_spn("invalidspn") is None
+
+    @pytest.mark.asyncio
+    async def test_auto_chain_s4u_non_exploit_task_ignored(self):
+        """Test that non-exploit tasks are ignored."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-7")
+
+        from ares.core.models import TaskInfo
+
+        task_info = TaskInfo(
+            task_id="task-1",
+            task_type="recon",
+            assigned_agent="enum",
+            params={},
+        )
+
+        chained = await dispatcher._auto_chain_s4u_lateral_movement(
+            task_id="task-1",
+            task_info=task_info,
+            result={"output": "some output"},
+            source_agent="enum",
+        )
+
+        assert chained == 0
+
+    @pytest.mark.asyncio
+    async def test_auto_chain_s4u_non_constrained_delegation_ignored(self):
+        """Test that non-constrained-delegation exploits are ignored."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-8")
+
+        from ares.core.models import TaskInfo
+
+        task_info = TaskInfo(
+            task_id="task-1",
+            task_type="exploit",
+            assigned_agent="privesc",
+            params={"vuln_type": "adcs_esc1"},
+        )
+
+        chained = await dispatcher._auto_chain_s4u_lateral_movement(
+            task_id="task-1",
+            task_info=task_info,
+            result={"output": "Saving ticket in admin.ccache"},
+            source_agent="privesc",
+        )
+
+        assert chained == 0
+
+    @pytest.mark.asyncio
+    async def test_auto_chain_s4u_no_ccache_in_output_ignored(self):
+        """Test that S4U output without .ccache is ignored."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-9")
+
+        from ares.core.models import TaskInfo
+
+        task_info = TaskInfo(
+            task_id="task-1",
+            task_type="exploit",
+            assigned_agent="privesc",
+            params={"vuln_type": "constrained_delegation"},
+        )
+
+        chained = await dispatcher._auto_chain_s4u_lateral_movement(
+            task_id="task-1",
+            task_info=task_info,
+            result={"output": "Attack failed - no ticket generated"},
+            source_agent="privesc",
+        )
+
+        assert chained == 0
+
+    @pytest.mark.asyncio
+    async def test_auto_chain_s4u_dispatches_secretsdump(self):
+        """Test that successful S4U attack dispatches secretsdump."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-s4u-10")
+        dispatcher._shared_state.all_hosts.append(
+            Host(
+                ip="192.168.58.10",
+                hostname="dc01.contoso.local",
+                services=["88/tcp kerberos", "389/tcp ldap"],
+            )
+        )
+
+        # Mock the credential access request
+        dispatcher.request_credential_access = AsyncMock(return_value="task-cred-1")
+
+        from ares.core.models import TaskInfo
+
+        task_info = TaskInfo(
+            task_id="task-1",
+            task_type="exploit",
+            assigned_agent="privesc",
+            params={
+                "vuln_type": "constrained_delegation",
+                "target_spn": "cifs/DC01.contoso.local",
+                "domain": "contoso.local",
+            },
+        )
+
+        s4u_output = """
+[*] Getting TGT for svc_backup@contoso.local
+[*] Impersonating Administrator@contoso.local
+[*] Saving ticket in Administrator.ccache
+        """
+
+        chained = await dispatcher._auto_chain_s4u_lateral_movement(
+            task_id="task-1",
+            task_info=task_info,
+            result={"output": s4u_output},
+            source_agent="privesc",
+        )
+
+        assert chained == 1
+        dispatcher.request_credential_access.assert_called_once()
+
+        # Verify the call arguments
+        call_kwargs = dispatcher.request_credential_access.call_args.kwargs
+        assert call_kwargs["domain"] == "contoso.local"
+        assert call_kwargs["username"] == "Administrator"
+        assert call_kwargs["techniques"] == ["secretsdump"]
+        assert call_kwargs["extra_params"]["ticket_path"] == "Administrator.ccache"
+        assert call_kwargs["extra_params"]["no_pass"] is True

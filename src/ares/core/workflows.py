@@ -207,7 +207,7 @@ async def credential_expansion_loop(  # noqa: PLR0912
                         target_host=host.ip,
                         username=cred.username,
                         source_agent="orchestrator",
-                        password=cred.password if cred.password else None,
+                        password=cred.password or None,
                         hash_value=hash_value,
                         domain=domain_override,
                     )
@@ -232,16 +232,17 @@ async def credential_expansion_loop(  # noqa: PLR0912
             break
 
         # Wait for dispatched tasks to complete (with timeout)
+        # Use shorter timeout (45s) to fail fast and try more combinations
         logger.info(f"Waiting for {len(tasks_dispatched)} lateral movement tasks...")
 
         for task_id in tasks_dispatched:
             try:
-                result = await dispatcher.wait_for_task(task_id, timeout=60.0)
+                result = await dispatcher.wait_for_task(task_id, timeout=45.0)
                 if result.get("success"):
                     # Find the credential/host pair and mark as successful
                     logger.success(f"Task {task_id} succeeded")
             except asyncio.TimeoutError:  # noqa: PERF203
-                logger.warning(f"Task {task_id} timed out")
+                logger.warning(f"Task {task_id} timed out (45s) - continuing with next")
 
         iterations += 1
         logger.info(f"Iteration {iterations} complete. Stats: {tracker.get_stats()}")
@@ -285,6 +286,10 @@ async def exploitation_workflow(
     exploited_count = 0
     credentials_gained = 0
 
+    # Track failures by vuln_type to skip stuck exploits
+    failure_counts: dict[str, int] = {}
+    max_failures_per_type = 3
+
     logger.info("Starting exploitation workflow")
 
     while True:
@@ -317,14 +322,31 @@ async def exploitation_workflow(
             await asyncio.sleep(check_interval)
             continue
 
-        logger.info(f"Processing vulnerability: {vuln['type']} on {vuln['target']}")
+        vuln_type = vuln["type"]
+
+        # Skip vulnerability types that have failed too many times
+        if failure_counts.get(vuln_type, 0) >= max_failures_per_type:
+            logger.warning(
+                f"Skipping {vuln_type} - failed {max_failures_per_type} times, moving to next"
+            )
+            # Mark as exploited (even though failed) to prevent infinite loop
+            # This ensures get_next_vulnerability() won't return it again
+            dispatcher.shared_state.mark_exploited(vuln["id"])
+            await dispatcher.mark_vulnerability_exploited(
+                vuln["id"],
+                success=False,
+                result={"error": f"Skipped: {vuln_type} failed {max_failures_per_type} times"},
+            )
+            continue
+
+        logger.info(f"Processing vulnerability: {vuln_type} on {vuln['target']}")
 
         # Route to appropriate agent
         exploit_started = asyncio.get_event_loop().time()
         result = await _exploit_vulnerability(dispatcher, vuln)
         exploit_elapsed = asyncio.get_event_loop().time() - exploit_started
         logger.info(
-            f"Exploit result for {vuln['id']} ({vuln['type']}): "
+            f"Exploit result for {vuln['id']} ({vuln_type}): "
             f"success={result.get('success')} error={result.get('error')} "
             f"elapsed={exploit_elapsed:.1f}s"
         )
@@ -337,6 +359,15 @@ async def exploitation_workflow(
         )
 
         exploited_count += 1
+
+        # Track failures by type
+        if not result.get("success"):
+            failure_counts[vuln_type] = failure_counts.get(vuln_type, 0) + 1
+            if failure_counts[vuln_type] >= max_failures_per_type:
+                logger.warning(
+                    f"{vuln_type} has failed {max_failures_per_type} times - "
+                    "will skip remaining {vuln_type} vulns"
+                )
 
         # If exploitation yielded credentials, trigger expansion
         result_payload: dict[str, Any] | None = None
