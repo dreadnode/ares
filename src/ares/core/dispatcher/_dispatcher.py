@@ -123,23 +123,36 @@ class RedTeamDispatcher(
         # Priority-based vulnerability queue
         self._vulnerability_queue: PriorityQueue[tuple[int, str, dict[str, Any]]] = PriorityQueue()
         self._vulnerability_priorities: dict[str, int] = {
+            # Tier 1: Instant DA paths (priority 1-5)
             "ADCS_ESC1": 1,
             "ADCS_ESC4": 2,
             "ADCS_ESC8": 3,
             "krbtgt_hash": 4,
             "domain_admin_hash": 5,
-            "acl_abuse": 6,
-            "unconstrained_delegation": 7,
-            "constrained_delegation": 8,
-            "rbcd": 9,
-            "mssql_impersonation": 10,
-            "mssql_linked": 11,
-            "mssql_linked_server": 11,  # Alias for mssql_linked
-            "mssql_xp_cmdshell": 12,
-            "gpo_abuse": 13,
-            "laps_abuse": 14,
-            "dcsync": 15,
-            "shadow_credentials": 16,
+            # Tier 2: Direct DA via ACL (priority 6-7) - NEW HIGH PRIORITY
+            "genericall_domain_admins": 6,  # GenericAll on Domain Admins = instant DA
+            "gpo_write": 7,  # GPO write on DC-linked GPO = SYSTEM on DC
+            # Tier 3: ACL and delegation attacks (priority 8-11)
+            "acl_abuse": 8,
+            "unconstrained_delegation": 9,
+            "constrained_delegation": 10,
+            "rbcd": 11,
+            # Tier 4: MSSQL attacks (priority 12-15)
+            "mssql_impersonation": 12,
+            "mssql_linked_xpcmdshell": 13,  # xp_cmdshell on linked server
+            "mssql_linked": 14,
+            "mssql_linked_server": 14,  # Alias for mssql_linked
+            "mssql_xp_cmdshell": 15,
+            # Tier 5: Other privilege escalation (priority 16-20)
+            "gpo_abuse": 16,  # Generic GPO abuse (lower priority than gpo_write)
+            "gmsa_readable": 17,  # gMSA password retrieval
+            "laps_abuse": 18,
+            "dcsync": 19,
+            "shadow_credentials": 20,
+            # Tier 6: Relay and persistence (priority 21+)
+            "smb_relay_target": 21,
+            "adminsd_holder_writable": 22,
+            "adminsd_holder_acl": 22,  # Alias for detection from BloodHound
         }
 
         # Task completion futures for wait_for_task

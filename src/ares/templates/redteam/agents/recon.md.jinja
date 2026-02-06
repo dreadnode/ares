@@ -30,7 +30,13 @@ Your role is to execute network scanning, enumeration, and discovery tasks dispa
    - Enumerate domain trusts
    - Gather domain policy information
 
-6. **BloodHound Collection**
+6. **gMSA Account Detection**
+   - Enumerate Group Managed Service Accounts (gMSA)
+   - Identify accounts with readable msDS-ManagedPassword
+   - Look for gMSA accounts in LDAP output (objectClass=msDS-GroupManagedServiceAccount)
+   - Report gMSA accounts for password retrieval
+
+7. **BloodHound Collection**
    - Run BloodHound collection when credentials are available
    - Analyze attack paths to Domain Admins
    - Identify ACL abuse opportunities

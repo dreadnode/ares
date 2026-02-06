@@ -767,6 +767,13 @@ class SharedRedTeamState:
     # Key: lowercase NetBIOS name (e.g., "corp"), Value: FQDN (e.g., "corp.contoso.local")
     # Populated by querying CN=Partitions,CN=Configuration via LDAP
     netbios_to_fqdn: dict[str, str] = field(default_factory=dict)
+
+    # Multi-domain tracking for cross-domain/cross-forest attacks
+    trusted_domains: list[str] = field(
+        default_factory=list
+    )  # Trusted domains (from nltest/AD trusts)
+    domain_admin_domains: list[str] = field(default_factory=list)  # Domains where we have DA
+
     all_credentials: list[Credential] = field(default_factory=list)
     all_hashes: list[Hash] = field(default_factory=list)
     all_hosts: list[Host] = field(default_factory=list)

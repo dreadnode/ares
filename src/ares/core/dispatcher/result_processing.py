@@ -8,6 +8,7 @@ from task output.
 from __future__ import annotations
 
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +23,7 @@ from ares.core.models import (
     TaskResult,
     TaskStatus,
     User,
+    VulnerabilityInfo,
 )
 
 if TYPE_CHECKING:
@@ -418,6 +420,16 @@ class ResultProcessingMixin:
                     f"for exploitation from {source_agent}"
                 )
 
+        # Extract and auto-queue gMSA accounts for password retrieval
+        gmsa_accounts = self._extract_gmsa_from_output(output)
+        if gmsa_accounts:
+            queued = await self._auto_queue_gmsa_vulnerabilities(gmsa_accounts, source_agent)
+            if queued > 0:
+                logger.warning(
+                    f"🔑 Auto-gMSA: queued {queued} gMSA account(s) "
+                    f"for password retrieval from {source_agent}"
+                )
+
     def _add_user(self: RedTeamDispatcher, username: str, domain: str) -> bool:
         """Add a user to the shared state."""
         if not username:
@@ -724,6 +736,148 @@ class ResultProcessingMixin:
                     )
 
         return hashes
+
+    def _extract_gmsa_from_output(self: RedTeamDispatcher, output: str) -> list[dict[str, str]]:
+        """
+        Extract gMSA (Group Managed Service Account) from LDAP/BloodHound output.
+
+        Detects gMSA accounts from:
+        - ldapsearch output (objectClass=msDS-GroupManagedServiceAccount)
+        - BloodHound output (gMSA service accounts)
+        - netexec ldap output with gMSA discovery
+
+        Returns:
+            List of dicts with 'account' and optionally 'principals_allowed' keys
+        """
+        if not output:
+            return []
+
+        gmsa_accounts: list[dict[str, str]] = []
+        seen: set[str] = set()
+        output_lower = output.lower()
+
+        # Check if gMSA-related content is present
+        if not any(
+            kw in output_lower
+            for kw in [
+                "gmsa",
+                "msds-groupmanagedserviceaccount",
+                "managedserviceaccount",
+                "msds-managedpassword",
+            ]
+        ):
+            return []
+
+        # Pattern 1: LDAP objectClass=msDS-GroupManagedServiceAccount with sAMAccountName
+        # dn: CN=svc_gmsa,CN=Managed Service Accounts,DC=contoso,DC=local
+        # sAMAccountName: svc_gmsa$
+        ldap_pattern = re.compile(
+            r"(?:samaccountname|cn)[:\s]+([a-zA-Z0-9_\-]+\$?)",
+            re.IGNORECASE,
+        )
+
+        # Pattern 2: netexec/bloodhound gMSA output
+        # gMSA: svc_gmsa$ - PrincipalsAllowedToRetrieveManagedPassword: SERVER01$
+        gmsa_explicit_pattern = re.compile(
+            r"gmsa[:\s]+([a-zA-Z0-9_\-]+\$?)(?:.*principals.*?allowed.*?:?\s*([^\n]+))?",
+            re.IGNORECASE,
+        )
+
+        # Pattern 3: msDS-GroupManagedServiceAccount in objectClass
+        objclass_pattern = re.compile(
+            r"objectclass.*?msds-groupmanagedserviceaccount.*?(?:samaccountname|cn)[:\s]+([a-zA-Z0-9_\-]+\$?)",
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        for pattern in [gmsa_explicit_pattern, objclass_pattern]:
+            for match in pattern.finditer(output):
+                account = match.group(1).strip()
+                if not account or account.lower() in seen:
+                    continue
+                seen.add(account.lower())
+
+                gmsa_info: dict[str, str] = {"account": account}
+
+                # Try to extract principals allowed to read password
+                if match.lastindex and match.lastindex >= 2 and match.group(2):
+                    gmsa_info["principals_allowed"] = match.group(2).strip()
+
+                gmsa_accounts.append(gmsa_info)
+                logger.info(f"[*] Detected gMSA account: {account}")
+
+        # Also check for standalone mentions in msDS-GroupManagedServiceAccount context
+        if "msds-groupmanagedserviceaccount" in output_lower:
+            for match in ldap_pattern.finditer(output):
+                account = match.group(1).strip()
+                # gMSA accounts typically end with $
+                if account.endswith("$") and account.lower() not in seen:
+                    seen.add(account.lower())
+                    gmsa_accounts.append({"account": account})
+                    logger.info(f"[*] Detected gMSA account from LDAP: {account}")
+
+        return gmsa_accounts
+
+    async def _auto_queue_gmsa_vulnerabilities(
+        self: RedTeamDispatcher,
+        gmsa_accounts: list[dict[str, str]],
+        source_agent: str,
+    ) -> int:
+        """
+        Auto-queue gMSA accounts for password retrieval.
+
+        Args:
+            gmsa_accounts: List of gMSA findings from _extract_gmsa_from_output
+            source_agent: Agent that discovered the gMSA accounts
+
+        Returns:
+            Number of gMSA retrieval tasks queued
+        """
+        queued = 0
+        domain = ""
+        if self.shared_state.target and self.shared_state.target.domain:
+            domain = self.shared_state.target.domain
+
+        for gmsa in gmsa_accounts:
+            account = gmsa.get("account", "")
+            if not account:
+                continue
+
+            # Check if already queued
+            vuln_key = f"gmsa_readable:{account.lower()}"
+            if vuln_key in [
+                v.vuln_type + ":" + v.target.lower()
+                for v in self.shared_state.discovered_vulnerabilities.values()
+            ]:
+                continue
+
+            # Queue for gMSA password retrieval
+            dc_ip = ""
+            if self.shared_state.target:
+                dc_ip = self.shared_state.target.ip
+
+            vuln = VulnerabilityInfo(
+                vuln_type="gmsa_readable",
+                target=account,
+                details={
+                    "account": account,
+                    "principals_allowed": gmsa.get("principals_allowed", "unknown"),
+                    "domain": domain,
+                    "dc_ip": dc_ip,
+                    "action": f"Use gmsa_dump_passwords or gmsa_read_password_bloodyad to retrieve {account} NTLM hash",
+                    "description": f"🔑 gMSA account {account} detected - may be readable for password retrieval",
+                },
+            )
+
+            vuln_id = f"vuln-gmsa-{uuid.uuid4().hex[:8]}"
+            self.shared_state.discovered_vulnerabilities[vuln_id] = vuln
+            await self.queue_vulnerability(
+                vuln.vuln_type, vuln.target, vuln.details, "gmsa_extractor"
+            )
+            queued += 1
+
+            logger.warning(f"🔑 Auto-queued gMSA password retrieval for {account}")
+
+        return queued
 
     def _extract_delegation_from_output(  # noqa: PLR0912
         self: RedTeamDispatcher, output: str
@@ -1069,6 +1223,145 @@ class ResultProcessingMixin:
                             "description": f"{principal} has dangerous ACL permissions on {target}",
                         },
                     }
+                )
+
+        # HIGH PRIORITY: Detect GenericAll/WriteMember on Domain Admins (instant DA path)
+        # This is the FASTEST path to DA - just add yourself to Domain Admins!
+        da_acl_patterns = [
+            # Pattern: "user has GenericAll on Domain Admins"
+            r"(\S+)\s+(?:has\s+)?(?:genericall|writemember|writedacl|genericwrite)\s+(?:on|to)\s+(?:group\s+)?['\"]?(?:domain\s*admins|cn=domain\s*admins)['\"]?",
+            # Pattern: "GenericAll: Domain Admins -> user"
+            r"(?:genericall|writemember|writedacl|genericwrite)\s*[:\-=]\s*(?:domain\s*admins|cn=domain\s*admins)\s*(?:->|→|to)\s*(\S+)",
+            # Pattern: "Domain Admins: GenericAll from user"
+            r"(?:domain\s*admins|cn=domain\s*admins)\s*[:\-]\s*(?:genericall|writemember|writedacl)\s+(?:from|by)\s+(\S+)",
+            # Pattern from bloodhound-python output
+            r"(\S+).*(?:MemberOf|AddMember|GenericAll|WriteDacl).*(?:Domain\s*Admins|DOMAIN\s*ADMINS)",
+        ]
+
+        for pattern in da_acl_patterns:
+            for match in re.finditer(pattern, output, re.IGNORECASE):
+                principal = match.group(1).strip() if match.groups() else ""
+
+                if not principal or len(principal) < 2:
+                    continue
+
+                # Skip if it's a built-in account or the target itself
+                principal_lower = principal.lower()
+                if principal_lower in (
+                    "domain admins",
+                    "enterprise admins",
+                    "administrators",
+                    "system",
+                ):
+                    continue
+
+                key = f"genericall_domain_admins:{principal_lower}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                vulns.append(
+                    {
+                        "vuln_type": "genericall_domain_admins",
+                        "target": "Domain Admins",
+                        "principal": principal,
+                        "details": {
+                            "instant_da": True,
+                            "action": "Use bloodyad_add_group_member to add yourself to Domain Admins!",
+                            "description": f"🚨 INSTANT DA PATH: {principal} has write access to Domain Admins group!",
+                        },
+                    }
+                )
+                logger.warning(
+                    f"🚨 HIGH-VALUE: {principal} has GenericAll/WriteMember on Domain Admins - INSTANT DA PATH!"
+                )
+
+        # HIGH PRIORITY: Detect GPO write on DC-linked GPOs (gpo_write vuln)
+        # Look for GPO permissions that include DC linking info
+        gpo_dc_patterns = [
+            # Pattern: GPO linked to Domain Controllers
+            r"(?:gpo|group\s*policy)\s+['\"]?([^'\"]+)['\"]?\s+(?:linked\s+to|applies\s+to)\s+(?:domain\s*controllers|dc)",
+            # Pattern: WriteProperty/WriteDacl on GPO with DC mention
+            r"(?:writeproperty|writedacl|genericall|genericwrite)\s+(?:on|to)\s+(?:gpo\s+)?['\"]?([^'\"]+)['\"]?.*(?:domain\s*controllers|dc\s*ou)",
+            # Pattern from BloodHound: GPO -> OU (Domain Controllers)
+            r"['\"]?([^'\"]+)['\"]?\s*->\s*(?:domain\s*controllers\s*ou|ou=domain\s*controllers)",
+        ]
+
+        for pattern in gpo_dc_patterns:
+            for match in re.finditer(pattern, output_lower, re.IGNORECASE):
+                gpo_name = match.group(1).strip()
+
+                if not gpo_name or len(gpo_name) < 3:
+                    continue
+
+                key = f"gpo_write:{gpo_name.lower()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                vulns.append(
+                    {
+                        "vuln_type": "gpo_write",
+                        "target": gpo_name,
+                        "principal": "",
+                        "details": {
+                            "gpo_name": gpo_name,
+                            "dc_linked": True,
+                            "action": "Use pygpoabuse_immediate_task to create scheduled task as SYSTEM on DC!",
+                            "description": f"🚨 DA PATH: GPO '{gpo_name}' is linked to Domain Controllers and writable!",
+                        },
+                    }
+                )
+                logger.warning(
+                    f"🚨 HIGH-VALUE: GPO '{gpo_name}' linked to DC with write permissions - DA PATH!"
+                )
+
+        # PERSISTENCE: Detect GenericAll on AdminSDHolder (persistence backdoor)
+        # AdminSDHolder ACE propagates to all protected groups via SDProp
+        adminsd_patterns = [
+            # Pattern: GenericAll/WriteDacl on AdminSDHolder
+            r"(\S+).*(?:genericall|writedacl|genericwrite).*(?:adminsdholder|cn=adminsdholder)",
+            # Pattern: AdminSDHolder: GenericAll from user
+            r"(?:adminsdholder|cn=adminsdholder).*(?:genericall|writedacl).*(?:from|by|->|→)\s*(\S+)",
+            # BloodHound edge format
+            r"(\S+)\s*-(?:GenericAll|WriteDacl)->.*AdminSDHolder",
+        ]
+
+        for pattern in adminsd_patterns:
+            for match in re.finditer(pattern, output, re.IGNORECASE):
+                principal = match.group(1).strip() if match.groups() else ""
+
+                if not principal or len(principal) < 2:
+                    continue
+
+                principal_lower = principal.lower()
+                if principal_lower in (
+                    "domain admins",
+                    "enterprise admins",
+                    "administrators",
+                    "system",
+                ):
+                    continue
+
+                key = f"adminsd_holder_acl:{principal_lower}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                vulns.append(
+                    {
+                        "vuln_type": "adminsd_holder_acl",
+                        "target": "AdminSDHolder",
+                        "principal": principal,
+                        "details": {
+                            "persistence": True,
+                            "action": "Use adminsd_holder_add_ace to plant persistent backdoor on all protected groups!",
+                            "description": f"🔒 PERSISTENCE PATH: {principal} can modify AdminSDHolder - permanent DA backdoor!",
+                        },
+                    }
+                )
+                logger.warning(
+                    f"🔒 PERSISTENCE: {principal} has GenericAll on AdminSDHolder - can plant permanent backdoor!"
                 )
 
         return vulns
