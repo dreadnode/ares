@@ -7,11 +7,14 @@ function for running evaluations against real Grafana alerts.
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +99,15 @@ def build_evaluation_result(
     model: str = "",
     duration_seconds: float = 0.0,
     error: str | None = None,
+    # New timing metrics
+    time_to_first_evidence: float | None = None,
+    time_to_technique_identification: float | None = None,
+    time_to_ttp_elevation: float | None = None,
+    # Cost metrics
+    total_tokens: int = 0,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    estimated_cost_usd: float = 0.0,
 ) -> EvaluationResult:
     """Build a complete EvaluationResult from investigation state and ground truth.
 
@@ -107,6 +119,13 @@ def build_evaluation_result(
         model: LLM model used for investigation.
         duration_seconds: Investigation duration.
         error: Error message if evaluation failed.
+        time_to_first_evidence: Seconds until first evidence was found.
+        time_to_technique_identification: Seconds until first technique identified.
+        time_to_ttp_elevation: Seconds until TTP-level evidence found.
+        total_tokens: Total tokens used.
+        prompt_tokens: Prompt tokens used.
+        completion_tokens: Completion tokens used.
+        estimated_cost_usd: Estimated cost in USD.
 
     Returns:
         Complete EvaluationResult with all scores and gaps.
@@ -184,7 +203,37 @@ def build_evaluation_result(
         model=model,
         duration_seconds=duration_seconds,
         error=error,
+        # Timing metrics
+        time_to_first_evidence=time_to_first_evidence,
+        time_to_technique_identification=time_to_technique_identification,
+        time_to_ttp_elevation=time_to_ttp_elevation,
+        # Cost metrics
+        total_tokens=total_tokens,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        estimated_cost_usd=estimated_cost_usd,
     )
+
+
+@dataclass
+class AlertMatchingRules:
+    """Configurable rules for matching alerts to red team operations.
+
+    Attributes:
+        match_by_exact_ip: Match if instance label equals target IP.
+        match_by_subnet: Match if instance IP is in same /24 subnet.
+        match_by_hostname_pattern: Regex patterns for hostname matching.
+        match_by_time_window: Match alerts within this window of operation start.
+        match_by_mitre_technique: Match if alert has matching MITRE technique.
+        match_by_operation_id: Match if operation ID appears in alert.
+    """
+
+    match_by_exact_ip: bool = True
+    match_by_subnet: bool = True
+    match_by_hostname_pattern: list[str] = field(default_factory=list)
+    match_by_time_window: timedelta | None = None
+    match_by_mitre_technique: bool = True
+    match_by_operation_id: bool = True
 
 
 @dataclass
@@ -196,12 +245,14 @@ class EvaluationScenario:
         ground_truth: Pre-computed ground truth (optional, generated if not provided).
         name: Human-readable scenario name.
         tags: Tags for filtering/grouping scenarios.
+        alert_matching_rules: Custom alert matching rules for this scenario.
     """
 
     red_state: RedTeamState | SharedRedTeamState | Path | str
     ground_truth: EvaluationGroundTruth | None = None
     name: str = ""
     tags: list[str] = field(default_factory=list)
+    alert_matching_rules: AlertMatchingRules | None = None
 
     def get_ground_truth(self) -> EvaluationGroundTruth:
         """Get or generate ground truth for this scenario."""
@@ -314,6 +365,21 @@ class EvaluationDataset:
         )
 
 
+# Cost estimates per 1M tokens (as of 2024)
+MODEL_COSTS: dict[str, dict[str, float]] = {
+    "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
+    "claude-opus-4-20250514": {"input": 15.0, "output": 75.0},
+    "gpt-4o": {"input": 2.5, "output": 10.0},
+    "gpt-4-turbo": {"input": 10.0, "output": 30.0},
+}
+
+
+def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """Estimate cost in USD for token usage."""
+    costs = MODEL_COSTS.get(model, {"input": 5.0, "output": 15.0})
+    return (prompt_tokens * costs["input"] + completion_tokens * costs["output"]) / 1_000_000
+
+
 class EvaluationRunner:
     """Runner for blue team evaluations.
 
@@ -326,6 +392,8 @@ class EvaluationRunner:
         grafana_api_key: Grafana API key.
         max_steps: Maximum agent steps per investigation.
         output_dir: Directory for evaluation results.
+        inject_synthetic_alerts: If True, create synthetic alerts instead of polling.
+        default_matching_rules: Default alert matching rules.
     """
 
     def __init__(
@@ -335,6 +403,8 @@ class EvaluationRunner:
         grafana_api_key: str,
         max_steps: int = 150,
         output_dir: Path | str = "./eval_results",
+        inject_synthetic_alerts: bool = False,
+        default_matching_rules: AlertMatchingRules | None = None,
     ):
         self.model = model
         self.grafana_url = grafana_url
@@ -342,23 +412,41 @@ class EvaluationRunner:
         self.max_steps = max_steps
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.inject_synthetic_alerts = inject_synthetic_alerts
+        self.default_matching_rules = default_matching_rules or AlertMatchingRules()
+
+        # Cached MITRE client
+        self._mitre_client = None
+
+    async def _get_mitre_client(self):
+        """Get or create cached MITRE client."""
+        if self._mitre_client is None:
+            from ares.integrations.mitre import MITREAttackClient
+
+            self._mitre_client = MITREAttackClient()
+            await self._mitre_client.load()
+            logger.info("MITRE ATT&CK client loaded and cached")
+        return self._mitre_client
 
     async def evaluate_scenario(
         self,
         scenario: EvaluationScenario,
         poll_timeout_seconds: int = 60,
+        inject_synthetic: bool | None = None,
     ) -> EvaluationResult:
         """Evaluate a single scenario.
 
         Args:
             scenario: Evaluation scenario with red team state.
             poll_timeout_seconds: How long to wait for an alert to fire.
+            inject_synthetic: Override for synthetic alert injection.
 
         Returns:
             EvaluationResult with scores and gaps.
         """
         evaluation_id = f"eval-{uuid.uuid4().hex[:8]}"
         ground_truth = scenario.get_ground_truth()
+        red_state = scenario.get_red_state()
 
         logger.info(f"Starting evaluation {evaluation_id}")
         logger.info(f"  Operation: {ground_truth.operation_id}")
@@ -370,21 +458,76 @@ class EvaluationRunner:
         state: InvestigationState | None = None
         alert_fired = False
         error: str | None = None
+        orchestrator = None
+
+        # Timing metrics
+        time_to_first_evidence: float | None = None
+        time_to_technique_identification: float | None = None
+        time_to_ttp_elevation: float | None = None
+
+        # Cost metrics
+        total_tokens = 0
+        prompt_tokens = 0
+        completion_tokens = 0
+
+        # Determine if we should inject synthetic alerts
+        use_synthetic = inject_synthetic if inject_synthetic is not None else self.inject_synthetic_alerts
 
         try:
-            # Poll for alert related to this operation
-            alert = await self._poll_for_alert(
-                ground_truth.target_ip,
-                ground_truth.operation_id,
-                timeout_seconds=poll_timeout_seconds,
-            )
+            # Get or inject alert
+            if use_synthetic:
+                alert = self._create_synthetic_alert(ground_truth, red_state)
+                alert_fired = True
+                logger.info("Using synthetic alert for evaluation")
+            else:
+                # Poll for alert related to this operation
+                matching_rules = scenario.alert_matching_rules or self.default_matching_rules
+                alert = await self._poll_for_alert(
+                    ground_truth=ground_truth,
+                    red_state=red_state,
+                    timeout_seconds=poll_timeout_seconds,
+                    matching_rules=matching_rules,
+                )
+                if alert is not None:
+                    alert_fired = True
+                    logger.info(f"Alert found: {alert.get('labels', {}).get('alertname', 'unknown')}")
 
             if alert is not None:
-                alert_fired = True
-                logger.info(f"Alert found: {alert.get('labels', {}).get('alertname', 'unknown')}")
+                # Run investigation with timing
+                investigation_start = time.time()
+                state, orchestrator = await self._run_investigation(alert)
 
-                # Run investigation
-                state = await self._run_investigation(alert)
+                # Calculate timing metrics from state timeline
+                if state and state.timeline:
+                    for event in state.timeline:
+                        event_offset = (event.timestamp - state.started_at).total_seconds()
+                        if event_offset < 0:
+                            event_offset = 0
+
+                        # First evidence
+                        if time_to_first_evidence is None and event.evidence_ids:
+                            time_to_first_evidence = event_offset
+
+                        # First technique identification
+                        if time_to_technique_identification is None and event.mitre_techniques:
+                            time_to_technique_identification = event_offset
+
+                        # TTP elevation (check evidence pyramid level)
+                        if time_to_ttp_elevation is None:
+                            for eid in event.evidence_ids:
+                                evidence = state.get_evidence_by_id(eid)
+                                if evidence and evidence.pyramid_level.value >= 5:
+                                    time_to_ttp_elevation = event_offset
+                                    break
+
+                # TODO: Extract token counts from Dreadnode metrics if available
+                # For now, estimate based on steps
+                estimated_tokens_per_step = 2000
+                if state:
+                    total_tokens = len(state.executed_queries) * estimated_tokens_per_step
+                    prompt_tokens = int(total_tokens * 0.7)
+                    completion_tokens = int(total_tokens * 0.3)
+
             else:
                 logger.warning("No alert fired - this is a detection gap")
 
@@ -395,7 +538,16 @@ class EvaluationRunner:
             logger.error(f"Evaluation error: {e}")
             error = str(e)
 
+        finally:
+            # Graceful cleanup
+            if orchestrator is not None:
+                try:
+                    await orchestrator._shutdown_mcp()
+                except Exception as cleanup_error:
+                    logger.warning(f"Cleanup error: {cleanup_error}")
+
         duration = time.time() - start_time
+        estimated_cost = estimate_cost(self.model, prompt_tokens, completion_tokens)
 
         # Build result
         result = build_evaluation_result(
@@ -406,6 +558,13 @@ class EvaluationRunner:
             model=self.model,
             duration_seconds=duration,
             error=error,
+            time_to_first_evidence=time_to_first_evidence,
+            time_to_technique_identification=time_to_technique_identification,
+            time_to_ttp_elevation=time_to_ttp_elevation,
+            total_tokens=total_tokens,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            estimated_cost_usd=estimated_cost,
         )
 
         # Log summary
@@ -413,24 +572,32 @@ class EvaluationRunner:
         if not alert_fired:
             logger.warning("  Alert did not fire - detection gap identified")
 
+        # Save individual result
+        self._save_evaluation_result(result)
+
         return result
 
     async def evaluate_dataset(
         self,
         dataset: EvaluationDataset,
         poll_timeout_seconds: int = 60,
+        max_concurrent: int = 1,
+        inject_synthetic: bool | None = None,
     ) -> DatasetEvaluationResult:
         """Evaluate an entire dataset of scenarios.
 
         Args:
             dataset: Dataset of evaluation scenarios.
             poll_timeout_seconds: How long to wait for alerts per scenario.
+            max_concurrent: Maximum concurrent evaluations (1 = sequential).
+            inject_synthetic: Override for synthetic alert injection.
 
         Returns:
             DatasetEvaluationResult with aggregated metrics.
         """
         logger.info(f"Starting dataset evaluation: {dataset.name}")
         logger.info(f"  Scenarios: {len(dataset)}")
+        logger.info(f"  Concurrency: {max_concurrent}")
 
         results: list[EvaluationResult] = []
 
@@ -438,40 +605,44 @@ class EvaluationRunner:
             dn.log_param("dataset_name", dataset.name)
             dn.log_param("scenario_count", len(dataset))
             dn.log_param("model", self.model)
+            dn.log_param("max_concurrent", max_concurrent)
 
-            for i, scenario in enumerate(dataset, 1):
-                logger.info(f"\n[{i}/{len(dataset)}] Evaluating: {scenario.name or 'unnamed'}")
-
-                try:
-                    result = await self.evaluate_scenario(
-                        scenario,
-                        poll_timeout_seconds=poll_timeout_seconds,
+            if max_concurrent == 1:
+                # Sequential evaluation
+                for i, scenario in enumerate(dataset, 1):
+                    logger.info(f"\n[{i}/{len(dataset)}] Evaluating: {scenario.name or 'unnamed'}")
+                    result = await self._evaluate_scenario_safe(
+                        scenario, poll_timeout_seconds, inject_synthetic
                     )
                     results.append(result)
-
-                    # Log progress metrics
                     dn.log_metric(f"scenario_{i}_overall", result.overall_score)
-                    dn.log_metric(f"scenario_{i}_detection", result.detection_score)
+            else:
+                # Parallel evaluation with semaphore
+                semaphore = asyncio.Semaphore(max_concurrent)
 
-                except Exception as e:
-                    logger.error(f"Scenario failed: {e}")
-                    # Create failed result
-                    ground_truth = scenario.get_ground_truth()
-                    results.append(
-                        build_evaluation_result(
-                            evaluation_id=f"eval-failed-{uuid.uuid4().hex[:8]}",
-                            state=None,
-                            ground_truth=ground_truth,
-                            alert_fired=False,
-                            model=self.model,
-                            error=str(e),
+                async def eval_with_semaphore(
+                    idx: int, scenario: EvaluationScenario
+                ) -> EvaluationResult:
+                    async with semaphore:
+                        logger.info(f"[{idx}/{len(dataset)}] Evaluating: {scenario.name or 'unnamed'}")
+                        return await self._evaluate_scenario_safe(
+                            scenario, poll_timeout_seconds, inject_synthetic
                         )
-                    )
+
+                tasks = [
+                    eval_with_semaphore(i, scenario)
+                    for i, scenario in enumerate(dataset, 1)
+                ]
+                results = await asyncio.gather(*tasks)
+
+                # Log metrics after parallel completion
+                for i, result in enumerate(results, 1):
+                    dn.log_metric(f"scenario_{i}_overall", result.overall_score)
 
             # Build dataset result
             dataset_result = DatasetEvaluationResult(
                 dataset_name=dataset.name,
-                results=results,
+                results=list(results),
             )
 
             # Log aggregate metrics
@@ -489,28 +660,154 @@ class EvaluationRunner:
 
         return dataset_result
 
+    async def _evaluate_scenario_safe(
+        self,
+        scenario: EvaluationScenario,
+        poll_timeout_seconds: int,
+        inject_synthetic: bool | None,
+    ) -> EvaluationResult:
+        """Evaluate scenario with error handling."""
+        try:
+            return await self.evaluate_scenario(
+                scenario,
+                poll_timeout_seconds=poll_timeout_seconds,
+                inject_synthetic=inject_synthetic,
+            )
+        except Exception as e:
+            logger.error(f"Scenario failed: {e}")
+            ground_truth = scenario.get_ground_truth()
+            return build_evaluation_result(
+                evaluation_id=f"eval-failed-{uuid.uuid4().hex[:8]}",
+                state=None,
+                ground_truth=ground_truth,
+                alert_fired=False,
+                model=self.model,
+                error=str(e),
+            )
+
+    def _create_synthetic_alert(
+        self,
+        ground_truth: EvaluationGroundTruth,
+        red_state: RedTeamState | SharedRedTeamState,
+    ) -> dict[str, Any]:
+        """Create a synthetic alert from ground truth for testing.
+
+        Generates a realistic-looking alert based on red team activities.
+        """
+        # Determine alert type based on techniques
+        alert_name = "SuspiciousActivity"
+        severity = "warning"
+        mitre_technique = None
+
+        techniques = list(ground_truth.expected_techniques)
+        if techniques:
+            # Pick the most significant technique for the alert
+            for tech in techniques:
+                if tech.technique_id.startswith("T1003"):
+                    alert_name = "CredentialDumpingDetected"
+                    severity = "critical"
+                    mitre_technique = tech.technique_id
+                    break
+                elif tech.technique_id.startswith("T1558"):
+                    alert_name = "KerberosAttackDetected"
+                    severity = "critical"
+                    mitre_technique = tech.technique_id
+                    break
+                elif tech.technique_id.startswith("T1021"):
+                    alert_name = "LateralMovementDetected"
+                    severity = "high"
+                    mitre_technique = tech.technique_id
+                    break
+            if mitre_technique is None and techniques:
+                mitre_technique = techniques[0].technique_id
+
+        # Get operation timestamp if available
+        if isinstance(red_state, SharedRedTeamState):
+            starts_at = red_state.started_at.isoformat()
+        elif hasattr(red_state, "started_at"):
+            starts_at = red_state.started_at.isoformat()
+        else:
+            starts_at = datetime.now(timezone.utc).isoformat()
+
+        labels: dict[str, str] = {
+            "alertname": alert_name,
+            "instance": ground_truth.target_ip,
+            "severity": severity,
+            "job": "eventlog",
+            "source": "synthetic-evaluation",
+        }
+        if mitre_technique:
+            labels["mitre_technique"] = mitre_technique
+
+        # Build description from ground truth
+        ioc_summary = f"{len(ground_truth.expected_iocs)} IOCs"
+        technique_summary = f"{len(ground_truth.expected_techniques)} techniques"
+
+        return {
+            "labels": labels,
+            "annotations": {
+                "summary": f"Synthetic alert for evaluation: {alert_name}",
+                "description": (
+                    f"Red team operation {ground_truth.operation_id} targeting "
+                    f"{ground_truth.target_ip}. Expected: {ioc_summary}, {technique_summary}."
+                ),
+            },
+            "startsAt": starts_at,
+            "fingerprint": f"synthetic-{ground_truth.operation_id}",
+        }
+
     async def _poll_for_alert(
         self,
-        target_ip: str,
-        operation_id: str,
+        ground_truth: EvaluationGroundTruth,
+        red_state: RedTeamState | SharedRedTeamState,
         timeout_seconds: int = 60,
+        matching_rules: AlertMatchingRules | None = None,
     ) -> dict[str, Any] | None:
         """Poll Grafana for an alert related to the red team operation.
 
+        Uses configurable matching rules for flexible alert correlation.
+
         Args:
-            target_ip: Target IP to look for in alerts.
-            operation_id: Operation ID to match.
+            ground_truth: Ground truth with target info.
+            red_state: Red team state for context.
             timeout_seconds: How long to wait.
+            matching_rules: Rules for matching alerts.
 
         Returns:
             Alert dict if found, None otherwise.
         """
         from ares.tools.blue import GrafanaTools
 
+        rules = matching_rules or self.default_matching_rules
+
         grafana = GrafanaTools(
             base_url=self.grafana_url,
             api_key=self.grafana_api_key,
         )
+
+        target_ip = ground_truth.target_ip
+        operation_id = ground_truth.operation_id
+
+        # Parse target IP for subnet matching
+        try:
+            target_network = ipaddress.ip_network(f"{target_ip}/24", strict=False)
+        except ValueError:
+            target_network = None
+
+        # Get expected techniques for matching
+        expected_techniques = {t.technique_id for t in ground_truth.expected_techniques}
+        # Also include parent techniques
+        for tech in ground_truth.expected_techniques:
+            if "." in tech.technique_id:
+                expected_techniques.add(tech.technique_id.split(".")[0])
+
+        # Get operation start time for time window matching
+        if isinstance(red_state, SharedRedTeamState):
+            operation_start = red_state.started_at
+        elif hasattr(red_state, "started_at"):
+            operation_start = red_state.started_at
+        else:
+            operation_start = None
 
         start_time = time.time()
         poll_interval = 5  # seconds
@@ -520,42 +817,102 @@ class EvaluationRunner:
                 alerts = await grafana.get_firing_alerts()
 
                 for alert in alerts:
-                    # Check if alert matches our target
-                    labels = alert.get("labels", {})
-                    annotations = alert.get("annotations", {})
-
-                    # Match by target IP
-                    if labels.get("instance") == target_ip:
-                        return alert
-                    if target_ip in str(annotations):
-                        return alert
-
-                    # Match by operation ID (if included in alert)
-                    if operation_id in str(labels) or operation_id in str(annotations):
+                    if self._alert_matches(
+                        alert=alert,
+                        target_ip=target_ip,
+                        target_network=target_network,
+                        operation_id=operation_id,
+                        expected_techniques=expected_techniques,
+                        operation_start=operation_start,
+                        rules=rules,
+                    ):
                         return alert
 
             except Exception as e:
                 logger.warning(f"Alert poll error: {e}")
 
-            await _async_sleep(poll_interval)
+            await asyncio.sleep(poll_interval)
 
         return None
 
-    async def _run_investigation(self, alert: dict[str, Any]) -> InvestigationState:
+    def _alert_matches(
+        self,
+        alert: dict[str, Any],
+        target_ip: str,
+        target_network: ipaddress.IPv4Network | None,
+        operation_id: str,
+        expected_techniques: set[str],
+        operation_start: datetime | None,
+        rules: AlertMatchingRules,
+    ) -> bool:
+        """Check if an alert matches the evaluation criteria."""
+        labels = alert.get("labels", {})
+        annotations = alert.get("annotations", {})
+        instance = labels.get("instance", "")
+
+        # Match by exact IP
+        if rules.match_by_exact_ip:
+            if instance == target_ip:
+                return True
+            if target_ip in str(annotations):
+                return True
+
+        # Match by subnet
+        if rules.match_by_subnet and target_network:
+            try:
+                # Extract IP from instance (may include port)
+                instance_ip = instance.split(":")[0] if ":" in instance else instance
+                if ipaddress.ip_address(instance_ip) in target_network:
+                    return True
+            except ValueError:
+                pass
+
+        # Match by hostname patterns
+        if rules.match_by_hostname_pattern:
+            for pattern in rules.match_by_hostname_pattern:
+                if re.search(pattern, instance, re.IGNORECASE):
+                    return True
+
+        # Match by MITRE technique
+        if rules.match_by_mitre_technique:
+            alert_technique = labels.get("mitre_technique") or annotations.get("mitre_technique")
+            if alert_technique and alert_technique in expected_techniques:
+                return True
+
+        # Match by operation ID
+        if rules.match_by_operation_id:
+            alert_str = str(labels) + str(annotations)
+            if operation_id in alert_str:
+                return True
+
+        # Match by time window
+        if rules.match_by_time_window and operation_start:
+            alert_time_str = alert.get("startsAt", "")
+            if alert_time_str:
+                try:
+                    alert_time = datetime.fromisoformat(alert_time_str.replace("Z", "+00:00"))
+                    if abs((alert_time - operation_start).total_seconds()) <= rules.match_by_time_window.total_seconds():
+                        return True
+                except ValueError:
+                    pass
+
+        return False
+
+    async def _run_investigation(
+        self, alert: dict[str, Any]
+    ) -> tuple[InvestigationState, Any]:
         """Run a blue team investigation for an alert.
 
         Args:
             alert: Grafana alert dictionary.
 
         Returns:
-            InvestigationState after investigation completes.
+            Tuple of (InvestigationState, orchestrator) for cleanup.
         """
         from ares.agents.blue import InvestigationOrchestrator
-        from ares.integrations.mitre import MITREAttackClient
 
-        # Load MITRE data
-        mitre_client = MITREAttackClient()
-        await mitre_client.load()
+        # Use cached MITRE client
+        mitre_client = await self._get_mitre_client()
 
         # Create orchestrator
         orchestrator = InvestigationOrchestrator(
@@ -578,7 +935,17 @@ class EvaluationRunner:
                 "ensure InvestigationOrchestrator.investigate() returns state"
             )
 
-        return state
+        return state, orchestrator
+
+    def _save_evaluation_result(self, result: EvaluationResult) -> Path:
+        """Save individual evaluation result to JSON file."""
+        filename = f"eval_{result.evaluation_id}_{result.operation_id}.json"
+        filepath = self.output_dir / filename
+
+        filepath.write_text(json.dumps(result.to_dict(), indent=2, default=str))
+        logger.debug(f"Result saved: {filepath}")
+
+        return filepath
 
     def _save_dataset_results(self, result: DatasetEvaluationResult) -> Path:
         """Save dataset evaluation results to JSON file."""
@@ -626,10 +993,3 @@ def _deserialize_red_state(data: dict[str, Any]) -> RedTeamState | SharedRedTeam
         has_golden_ticket=data.get("has_golden_ticket", False),
         identified_techniques=set(data.get("identified_techniques", [])),
     )
-
-
-async def _async_sleep(seconds: float) -> None:
-    """Async sleep helper."""
-    import asyncio
-
-    await asyncio.sleep(seconds)
