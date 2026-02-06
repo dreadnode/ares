@@ -8,7 +8,10 @@ This package provides toolsets for credential attacks including:
 - Share pilfering
 
 Package Structure:
-    - _credential_discovery.py: Main toolset implementations
+    - discovery.py: Low-hanging fruit (LDAP descriptions, password spray)
+    - harvesting.py: Kerberoasting, AS-REP roasting, secretsdump
+    - cracking.py: Hash cracking with hashcat and John
+    - pilfering.py: SMB share pilfering, GPP passwords, SYSVOL search
 
 Usage:
     from ares.tools.red.credential_discovery import (
@@ -21,13 +24,11 @@ Usage:
 
 from __future__ import annotations
 
-# Re-export all tool classes
-from ares.tools.red.credential_discovery._credential_discovery import (
-    CrackingTools,
-    CredentialDiscoveryTools,
-    CredentialHarvestingTools,
-    SharePilferingTools,
-)
+# Re-export all tool classes from split modules
+from ares.tools.red.credential_discovery.cracking import CrackingTools
+from ares.tools.red.credential_discovery.discovery import CredentialDiscoveryTools
+from ares.tools.red.credential_discovery.harvesting import CredentialHarvestingTools
+from ares.tools.red.credential_discovery.pilfering import SharePilferingTools
 
 __all__ = [
     "CrackingTools",

@@ -70,9 +70,7 @@ class TestSysvolScriptSearch:
         tools = SharePilferingTools()
         tools.set_state(red_team_state)
 
-        with patch(
-            "ares.tools.red.credential_discovery._credential_discovery.run_tool"
-        ) as mock_run:
+        with patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run:
             # Mock no scripts found
             mock_run.return_value = ("", "", 0)
 
@@ -92,9 +90,7 @@ class TestSysvolScriptSearch:
 
         script_content = "password=SecretPass123"
 
-        with patch(
-            "ares.tools.red.credential_discovery._credential_discovery.run_tool"
-        ) as mock_run:
+        with patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run:
 
             def side_effect(cmd, timeout_seconds=300):
                 cmd_str = " ".join(cmd)
@@ -128,9 +124,7 @@ class TestSysvolScriptSearch:
 
         script_content = r"net use * \\server\share /user:CONTOSO\svc-backup P@ssw0rd123"
 
-        with patch(
-            "ares.tools.red.credential_discovery._credential_discovery.run_tool"
-        ) as mock_run:
+        with patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run:
 
             def side_effect(cmd, timeout_seconds=300):
                 cmd_str = " ".join(cmd)
@@ -166,9 +160,7 @@ class TestSysvolScriptSearch:
         tools = SharePilferingTools()
         tools.set_state(red_team_state)
 
-        with patch(
-            "ares.tools.red.credential_discovery._credential_discovery.run_tool"
-        ) as mock_run:
+        with patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run:
             mock_run.side_effect = Exception("Connection failed")
 
             result = tools.sysvol_script_search(
@@ -187,9 +179,7 @@ class TestSysvolScriptSearch:
 
         searched_extensions = []
 
-        with patch(
-            "ares.tools.red.credential_discovery._credential_discovery.run_tool"
-        ) as mock_run:
+        with patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run:
 
             def side_effect(cmd, timeout_seconds=300):
                 cmd_str = " ".join(cmd)
@@ -223,9 +213,7 @@ class TestSysvolScriptSearchPatterns:
 
         # The pattern matching happens in grep command
         # Just verify the tool can be called without error
-        with patch(
-            "ares.tools.red.credential_discovery._credential_discovery.run_tool"
-        ) as mock_run:
+        with patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run:
             mock_run.return_value = ("password=MySecret", "", 0)
 
             result = tools.sysvol_script_search(
@@ -243,9 +231,7 @@ class TestSysvolScriptSearchPatterns:
         tools = SharePilferingTools()
         tools.set_state(red_team_state)
 
-        with patch(
-            "ares.tools.red.credential_discovery._credential_discovery.run_tool"
-        ) as mock_run:
+        with patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run:
             mock_run.return_value = ("pwd:MySecret", "", 0)
 
             result = tools.sysvol_script_search(
@@ -262,9 +248,7 @@ class TestSysvolScriptSearchPatterns:
         tools = SharePilferingTools()
         tools.set_state(red_team_state)
 
-        with patch(
-            "ares.tools.red.credential_discovery._credential_discovery.run_tool"
-        ) as mock_run:
+        with patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run:
             mock_run.return_value = ("cred=MySecret", "", 0)
 
             result = tools.sysvol_script_search(
@@ -287,9 +271,9 @@ class TestSysvolScriptSearchPatterns:
         )
 
         with (
-            patch("ares.tools.red.credential_discovery._credential_discovery.run_tool") as mock_run,
+            patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run,
             patch(
-                "ares.tools.red.credential_discovery._credential_discovery.store_remote_artifact"
+                "ares.tools.red.credential_discovery.pilfering.store_remote_artifact"
             ) as mock_store,
         ):
             mock_store.return_value = True
@@ -329,9 +313,9 @@ class TestSysvolScriptSearchPatterns:
         tools.set_state(shared_state)
 
         with (
-            patch("ares.tools.red.credential_discovery._credential_discovery.run_tool") as mock_run,
+            patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run,
             patch(
-                "ares.tools.red.credential_discovery._credential_discovery.store_remote_artifact"
+                "ares.tools.red.credential_discovery.pilfering.store_remote_artifact"
             ) as mock_store,
         ):
             mock_store.return_value = True
@@ -380,9 +364,9 @@ class TestSysvolScriptSearchPatterns:
         )
 
         with (
-            patch("ares.tools.red.credential_discovery._credential_discovery.run_tool") as mock_run,
+            patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run,
             patch(
-                "ares.tools.red.credential_discovery._credential_discovery.store_remote_artifact"
+                "ares.tools.red.credential_discovery.pilfering.store_remote_artifact"
             ) as mock_store,
         ):
             mock_store.return_value = True
@@ -424,9 +408,9 @@ class TestSysvolScriptSearchPatterns:
         script_content = "user = danj\npassword = P@ssword2024!"
 
         with (
-            patch("ares.tools.red.credential_discovery._credential_discovery.run_tool") as mock_run,
+            patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run,
             patch(
-                "ares.tools.red.credential_discovery._credential_discovery.store_remote_artifact"
+                "ares.tools.red.credential_discovery.pilfering.store_remote_artifact"
             ) as mock_store,
         ):
             mock_store.return_value = True
