@@ -12,8 +12,9 @@ orchestrator. Workers can run in two modes:
 
 Package Structure:
     - _worker.py: Main worker classes and entry point
-    - (future) helpers.py: DC resolution, rate limiting helpers
-    - (future) prompts.py: Task prompt generation
+    - dc_resolution.py: Domain controller IP resolution helpers
+    - operations.py: Operation discovery and model configuration
+    - prompts.py: Task prompt generation and state formatting
 
 Usage:
     from ares.core.worker import run_worker
@@ -38,25 +39,36 @@ Functions:
 
 from __future__ import annotations
 
-# Re-export main classes and functions
+# Re-export main classes and functions from _worker.py
 from ares.core.worker._worker import (
     RATE_LIMIT_BACKOFF_DELAYS,
     RATE_LIMIT_MAX_RETRIES,
     RedisWorkerAgent,
     WorkerAgent,
+    logger,
+    run_worker,
+)
+
+# Re-export from split modules
+from ares.core.worker.dc_resolution import (
+    resolve_dc_ip_for_domain,
+)
+from ares.core.worker.operations import (
     discover_active_operation,
-    format_state_context,
-    generate_prompt_from_task,
     get_active_operation_pointer,
     get_operation_model,
     get_operation_model_overrides,
-    logger,
-    run_worker,
+)
+from ares.core.worker.prompts import (
+    TASK_PROMPTS,
+    format_state_context,
+    generate_prompt_from_task,
 )
 
 __all__ = [
     "RATE_LIMIT_BACKOFF_DELAYS",
     "RATE_LIMIT_MAX_RETRIES",
+    "TASK_PROMPTS",
     "RedisWorkerAgent",
     "WorkerAgent",
     "discover_active_operation",
@@ -66,5 +78,6 @@ __all__ = [
     "get_operation_model",
     "get_operation_model_overrides",
     "logger",
+    "resolve_dc_ip_for_domain",
     "run_worker",
 ]
