@@ -213,10 +213,17 @@ class CoercionRequest(AgentMessage):
 
     type: MessageType = MessageType.COERCION_REQUEST
     task_id: str = Field(default_factory=generate_task_id)
-    interface: str = "eth0"
+    interface: str = Field(default="")  # Auto-detected at runtime if empty
     techniques: list[str] = Field(default_factory=lambda: ["LLMNR", "NBT-NS", "mDNS"])
     duration: int = 300  # seconds
     callback_agent: str = ""
+
+    def model_post_init(self, __context: Any, /) -> None:
+        """Auto-detect network interface if not explicitly set."""
+        if not self.interface:
+            from ares.core.config import get_default_network_interface
+
+            object.__setattr__(self, "interface", get_default_network_interface())
 
 
 # Task Response Messages

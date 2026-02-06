@@ -169,7 +169,7 @@ class CoercionNetworkTools(Toolset):
     @dn.tool_method
     def start_responder(
         self,
-        interface: str = "eth0",
+        interface: str = "",
         analyze_mode: bool = False,
     ) -> str:
         """
@@ -179,16 +179,21 @@ class CoercionNetworkTools(Toolset):
         from machines looking for network resources.
 
         Args:
-            interface: Network interface to listen on
+            interface: Network interface to listen on (auto-detected if empty)
             analyze_mode: If True, only analyze without poisoning (safer)
 
         Returns:
             Responder status
 
         Example:
-            >>> start_responder("eth0")
-            >>> start_responder("eth0", analyze_mode=True)
+            >>> start_responder("ens5")
+            >>> start_responder("ens5", analyze_mode=True)
         """
+        from ares.core.config import get_default_network_interface
+
+        if not interface:
+            interface = get_default_network_interface()
+
         cmd = ["responder", "-I", interface]
 
         if analyze_mode:
@@ -213,7 +218,7 @@ class CoercionNetworkTools(Toolset):
     def start_mitm6(
         self,
         domain: str,
-        interface: str = "eth0",
+        interface: str = "",
     ) -> str:
         """
         Start mitm6 for IPv6 DNS takeover attacks.
@@ -225,14 +230,19 @@ class CoercionNetworkTools(Toolset):
 
         Args:
             domain: Target domain for DNS takeover
-            interface: Network interface to listen on
+            interface: Network interface to listen on (auto-detected if empty)
 
         Returns:
             mitm6 status
 
         Example:
-            >>> start_mitm6("domain.local", "eth0")
+            >>> start_mitm6("domain.local", "ens5")
         """
+        from ares.core.config import get_default_network_interface
+
+        if not interface:
+            interface = get_default_network_interface()
+
         cmd = ["mitm6", "-d", domain, "-i", interface]
 
         try:

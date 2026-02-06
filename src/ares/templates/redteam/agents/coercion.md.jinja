@@ -29,7 +29,7 @@ Your role is to capture authentication traffic and coerce systems to authenticat
 Primary tool for capturing hashes:
 ```
 responder(
-    interface="eth0",
+    interface=""  # Auto-detected (e.g., ens5 on AWS),
     analyze=False  # Set True for passive mode
 )
 ```
@@ -43,7 +43,7 @@ Captures:
 IPv6-based attacks:
 ```
 mitm6(
-    interface="eth0",
+    interface=""  # Auto-detected (e.g., ens5 on AWS),
     domain="corp.local"
 )
 ```
@@ -126,7 +126,7 @@ Capture and reuse SMB sessions for multiple tools:
 ### DHCPv6 + LDAP Relay (Create Computer for RBCD)
 Combine mitm6 with ntlmrelayx to create computer account:
 ```
-1. mitm6(interface="eth0", domain="domain.com")
+1. mitm6(interface=""  # Auto-detected (e.g., ens5 on AWS), domain="domain.com")
    → Poison DHCPv6 responses
 2. ntlmrelayx_ldap(
        target="ldaps://dc.domain.com",
