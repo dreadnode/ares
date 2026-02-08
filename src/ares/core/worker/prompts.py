@@ -57,118 +57,43 @@ def format_state_context(  # noqa: PLR0912
     if not state:
         return ""
 
-    lines = ["\n\n## SHARED STATE CONTEXT (use this intelligence!)"]
+    lines = ["\n\n## STATE"]
 
-    # Domains
+    # Domains - compact
     if state.all_domains:
-        lines.append(f"\n### Discovered Domains ({len(state.all_domains)})")
-        for domain in state.all_domains[:10]:
-            lines.append(f"  - {domain}")
+        lines.append(f"\nDomains: {', '.join(state.all_domains[:5])}")
 
-    # Credentials - CRITICAL for lateral/privesc
+    # Credentials - compact, only show count + first few
     if state.all_credentials:
-        lines.append(f"\n### Available Credentials ({len(state.all_credentials)})")
-        lines.append("**TRY THESE for authentication/lateral movement:**")
-        for cred in state.all_credentials[:15]:
+        lines.append(f"\n### Credentials ({len(state.all_credentials)})")
+        for cred in state.all_credentials[:8]:
             admin_marker = " [ADMIN]" if cred.is_admin else ""
-            lines.append(f"  - {cred.domain}\\{cred.username}:{cred.password}{admin_marker}")
+            lines.append(f"  {cred.domain}\\{cred.username}:{cred.password}{admin_marker}")
 
-    # Hashes - show cracked vs uncracked
+    # Hashes - only cracked ones are useful for context
     if state.all_hashes:
         cracked = [h for h in state.all_hashes if h.cracked_password]
-        uncracked = [h for h in state.all_hashes if not h.cracked_password]
-
         if cracked:
-            lines.append(f"\n### Cracked Hashes ({len(cracked)}) - USE THESE!")
-            for h in cracked[:10]:
-                lines.append(
-                    f"  - {h.domain}\\{h.username}:{h.cracked_password} (from {h.hash_type})"
-                )
+            lines.append(f"\n### Cracked ({len(cracked)})")
+            for h in cracked[:5]:
+                lines.append(f"  {h.domain}\\{h.username}:{h.cracked_password}")
 
-        if uncracked:
-            lines.append(f"\n### Uncracked Hashes ({len(uncracked)}) - awaiting crack")
-            for h in uncracked[:8]:
-                hash_preview = h.hash_value[:40] + "..." if len(h.hash_value) > 40 else h.hash_value
-                lines.append(f"  - {h.domain}\\{h.username} ({h.hash_type}): {hash_preview}")
-
-    # Hosts with role-specific prioritization
+    # Hosts - compact, prioritized
     if state.all_hosts:
-        lines.append(f"\n### Discovered Hosts ({len(state.all_hosts)})")
-
-        # Categorize hosts by role
-        dcs = []
-        mssql_hosts = []
-        adcs_hosts = []
-        other_hosts = []
-
-        for host in state.all_hosts:
-            hostname_lower = (host.hostname or "").lower()
-            services_lower = " ".join(host.services).lower() if host.services else ""
-            roles_lower = " ".join(host.roles).lower() if host.roles else ""
-
-            # Use persisted is_dc field from Host model
-            is_mssql = (
-                "mssql" in services_lower or "1433" in services_lower or "sql" in hostname_lower
-            )
-            is_adcs = (
-                "certsrv" in services_lower
-                or "adcs" in roles_lower
-                or "certenroll" in services_lower
-            )
-
-            if host.is_dc:
-                dcs.append(host)
-            elif is_mssql:
-                mssql_hosts.append(host)
-            elif is_adcs:
-                adcs_hosts.append(host)
-            else:
-                other_hosts.append(host)
-
+        dcs = [h for h in state.all_hosts if h.is_dc]
         if dcs:
-            lines.append("\n**Domain Controllers (HIGH VALUE - DCSync/NTDS.dit):**")
-            for h in dcs:
-                marker = " ← CURRENT TARGET" if h.ip == current_target else ""
-                lines.append(f"  - {h.ip} ({h.hostname or 'unknown'}){marker}")
+            lines.append(f"\n### DCs ({len(dcs)})")
+            for h in dcs[:3]:
+                lines.append(f"  {h.ip} ({h.hostname or '?'})")
 
-        if mssql_hosts:
-            lines.append("\n**MSSQL Servers (linked server pivot opportunity):**")
-            for h in mssql_hosts:
-                marker = " ← CURRENT TARGET" if h.ip == current_target else ""
-                lines.append(f"  - {h.ip} ({h.hostname or 'unknown'}){marker}")
+        # Only show other hosts if few
+        others = [h for h in state.all_hosts if not h.is_dc]
+        if others and len(others) <= 5:
+            lines.append(f"\n### Other hosts ({len(others)})")
+            for h in others:
+                lines.append(f"  {h.ip} ({h.hostname or '?'})")
 
-        if adcs_hosts:
-            lines.append("\n**ADCS Servers (certificate attacks ESC1-ESC8):**")
-            for h in adcs_hosts:
-                marker = " ← CURRENT TARGET" if h.ip == current_target else ""
-                lines.append(f"  - {h.ip} ({h.hostname or 'unknown'}){marker}")
-
-        if other_hosts and len(other_hosts) <= 10:
-            lines.append("\n**Other Hosts:**")
-            for h in other_hosts:
-                marker = " ← CURRENT TARGET" if h.ip == current_target else ""
-                lines.append(f"  - {h.ip} ({h.hostname or 'unknown'}){marker}")
-
-    # Shares - highlight writable and interesting ones
-    if state.all_shares:
-        interesting_shares = []
-        for share in state.all_shares:
-            name_lower = share.name.lower()
-            perms_lower = (share.permissions or "").lower()
-            is_interesting = (
-                "write" in perms_lower
-                or name_lower in ("sysvol", "netlogon", "certenroll")
-                or "admin" in name_lower
-            )
-            if is_interesting:
-                interesting_shares.append(share)
-
-        if interesting_shares:
-            lines.append(f"\n### Interesting Shares ({len(interesting_shares)})")
-            for share in interesting_shares[:10]:
-                lines.append(f"  - {share.host}/{share.name} [{share.permissions}]")
-
-    # Vulnerabilities discovered but not exploited
+    # Pending vulns - compact
     if hasattr(state, "discovered_vulnerabilities") and state.discovered_vulnerabilities:
         unexploited = [
             v
@@ -176,38 +101,9 @@ def format_state_context(  # noqa: PLR0912
             if v.vuln_id not in state.exploited_vulnerabilities
         ]
         if unexploited:
-            lines.append(f"\n### Pending Vulnerabilities ({len(unexploited)})")
-            for vuln in unexploited[:5]:
-                lines.append(f"  - {vuln.vuln_type} on {vuln.target} (ID: {vuln.vuln_id})")
-
-    # Task-specific guidance
-    if task_type == "lateral":
-        lines.append("\n### LATERAL MOVEMENT PRIORITIES")
-        lines.append("1. Try ALL available credentials above against the target")
-        lines.append("2. If DC: run secretsdump for NTDS.dit → krbtgt hash → golden ticket")
-        lines.append("3. If MSSQL: check for linked servers and xp_cmdshell")
-        lines.append("4. After access: harvest creds with secretsdump/lsassy")
-
-    elif task_type == "credential_access":
-        lines.append("\n### CREDENTIAL ACCESS PRIORITIES")
-        lines.append("1. gpp_password_finder + sysvol_script_search on DCs (low-hanging fruit)")
-        lines.append("2. Kerberoast service accounts (sql_svc, etc.)")
-        lines.append("3. AS-REP roast users without pre-auth")
-        lines.append("4. secretsdump on hosts where we have admin")
-        lines.append("5. LAPS dump if we have read access")
-
-    elif task_type == "exploit":
-        lines.append("\n### EXPLOITATION PRIORITIES")
-        lines.append("1. Try ALL available credentials against the target")
-        lines.append("2. For MSSQL: enumerate linked servers for cross-domain pivot")
-        lines.append("3. For ADCS: certipy find → ESC1/ESC4/ESC8 attacks")
-        lines.append("4. Check for delegation (constrained/unconstrained)")
-
-    elif task_type == "coercion":
-        lines.append("\n### COERCION PRIORITIES")
-        lines.append("1. Target DCs with PetitPotam for ESC8 relay")
-        lines.append("2. Use LLMNR/NBT-NS for hash capture")
-        lines.append("3. Coordinate relay targets with hosts lacking SMB signing")
+            lines.append(f"\n### Pending vulns ({len(unexploited)})")
+            for vuln in unexploited[:3]:
+                lines.append(f"  {vuln.vuln_type} on {vuln.target}")
 
     return "\n".join(lines)
 

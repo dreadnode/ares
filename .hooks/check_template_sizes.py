@@ -16,19 +16,19 @@ import sys
 from pathlib import Path
 
 TEMPLATE_SIZE_LIMITS: dict[str, int] = {
-    "privesc.md.jinja": 12000,
-    "acl.md.jinja": 8000,
-    "lateral.md.jinja": 10000,
+    "privesc.md.jinja": 4000,
+    "acl.md.jinja": 3000,
+    "lateral.md.jinja": 8000,
     "recon.md.jinja": 5000,
-    "coercion.md.jinja": 8000,
-    "orchestrator.md.jinja": 12000,
-    "credential_access.md.jinja": 7000,
+    "coercion.md.jinja": 7000,
+    "orchestrator.md.jinja": 10000,
+    "credential_access.md.jinja": 6000,
     "cracker.md.jinja": 5000,
-    "system_instructions.md.jinja": 16000,
+    "system_instructions.md.jinja": 4000,
 }
 
-DEFAULT_LIMIT = 8000
-TOTAL_LIMIT = 85000  # ~21,000 tokens
+DEFAULT_LIMIT = 5000
+TOTAL_LIMIT = 55000  # ~14,000 tokens
 
 
 def check_template_sizes() -> int:

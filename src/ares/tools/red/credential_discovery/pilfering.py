@@ -119,7 +119,7 @@ class SharePilferingTools(Toolset):
             "spider_plus",
             "-o",
             "DOWNLOAD_FLAG=True",  # Enable file downloads
-            "MAX_FILE_SIZE=100KB",  # Download files up to 100KB
+            "MAX_FILE_SIZE=102400",  # Download files up to 100KB (in bytes)
         ]
 
         try:

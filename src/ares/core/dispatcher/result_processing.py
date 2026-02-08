@@ -428,12 +428,18 @@ class ResultProcessingMixin:
             # Resolve the correct domain using multiple strategies
             resolved_domain = self._resolve_credential_domain(username, extracted_domain)
             if not resolved_domain:
-                # Skip credentials where domain cannot be determined
-                # This prevents false positives like assigning wrong domain
-                logger.debug(
-                    f"Skipping credential {username}:{password[:3]}*** - domain not determinable"
-                )
-                continue
+                # Fall back to target domain if we have one - better to add credential
+                # with potentially wrong domain than to drop it entirely
+                if domain:
+                    resolved_domain = domain
+                    logger.debug(
+                        f"Domain resolution failed for {username}, falling back to target domain: {domain}"
+                    )
+                else:
+                    logger.debug(
+                        f"Skipping credential {username}:{password[:3]}*** - no domain available"
+                    )
+                    continue
             self.shared_state.pending_credential_findings.add(
                 f"{resolved_domain}:{username}".lower()
             )

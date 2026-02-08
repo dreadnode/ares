@@ -6,11 +6,37 @@ and dispatch tasks to specialized worker agents.
 
 from __future__ import annotations
 
+import ipaddress
 from typing import TYPE_CHECKING, Any
 
 import dreadnode as dn
 from dreadnode.agent.tools import Toolset
 from loguru import logger
+
+
+def _ip_in_targets(ip: str, targets: list[str]) -> bool:
+    """Check if IP falls within any target range (individual IP or CIDR)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+
+    # Pre-parse targets into networks and individual IPs
+    networks = []
+    ips = set()
+    for t in targets:
+        if "/" in t:
+            try:
+                networks.append(ipaddress.ip_network(t, strict=False))
+            except ValueError:
+                pass
+        else:
+            ips.add(t)
+
+    if ip in ips:
+        return True
+    return any(addr in net for net in networks)
+
 
 if TYPE_CHECKING:
     from ares.core.dispatcher import RedTeamDispatcher
@@ -165,19 +191,27 @@ class OrchestratorTools(Toolset):
 
         techniques = technique_map.get(task_type, [task_type])
 
-        # Deduplicate network scans: skip targets already scanned with nmap
+        # Deduplicate network scans: skip if hosts already discovered in target range
         if task_type == "network_scan" and target_ips:
+            # Primary check: hosts with services IN THE REQUESTED RANGE
+            hosts_in_range = [
+                h
+                for h in self.shared_state.all_hosts
+                if h.services and _ip_in_targets(h.ip, target_ips)
+            ]
+            if hosts_in_range:
+                return (
+                    f"✓ Network scan already complete for this range. "
+                    f"{len(hosts_in_range)} hosts with services found. "
+                    f"No new nmap scan needed."
+                )
+
+            # Secondary check: scanned_targets tracking (for individual IPs)
             already_scanned = set(self.shared_state.scanned_targets)
-            # Fallback: also treat IPs as scanned if they already have services in shared state
-            # (handles case where orchestrator restarted before _complete_task could mark them)
-            hosts_with_services = {h.ip for h in self.shared_state.all_hosts if h.services}
-            already_scanned |= hosts_with_services
             unscanned = [ip for ip in target_ips if ip not in already_scanned]
             if not unscanned:
-                scanned_hosts = len(self.shared_state.all_hosts)
                 return (
-                    f"✓ All targets already scanned ({len(target_ips)} targets). "
-                    f"{scanned_hosts} hosts in shared state. "
+                    f"✓ All targets in scanned_targets ({len(target_ips)} targets). "
                     f"No new nmap scan needed."
                 )
             if len(unscanned) < len(target_ips):
@@ -203,7 +237,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to dispatch recon - no recon agent available"
+            return "✗ Recon task dropped (throttled or low priority in current phase)"
 
         logger.info(f"Dispatched recon ({task_type}): {task_id}")
 
@@ -332,7 +366,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to dispatch credential access - no credential_access agent available"
+            return "✗ Credential access task dropped (throttled or low priority in current phase)"
 
         logger.info(f"Dispatched credential access ({task_type}): {task_id}")
 
@@ -477,7 +511,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to dispatch crack request - no cracker agent available"
+            return "✗ Crack task dropped (throttled or low priority in current phase)"
 
         logger.info(f"Dispatched crack request: {task_id}")
 
@@ -534,7 +568,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to dispatch ACL analysis - no ACL agent available"
+            return "✗ ACL analysis task dropped (throttled or low priority in current phase)"
 
         logger.info(f"Dispatched ACL analysis: {task_id}")
 
@@ -617,7 +651,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to dispatch lateral movement - no lateral agent available"
+            return "✗ Lateral movement task dropped (throttled or low priority in current phase)"
 
         logger.info(f"Dispatched lateral movement: {task_id}")
         auth_method = "password" if password else "hash" if hash_value else "unknown"
@@ -691,7 +725,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to dispatch exploitation - no privesc agent available"
+            return "✗ Exploitation task dropped (throttled or low priority in current phase)"
 
         logger.info(f"Dispatched exploitation: {task_id}")
 
@@ -749,7 +783,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to start coercion - no coercion agent available"
+            return "✗ Coercion task dropped (throttled or low priority in current phase)"
 
         logger.info(f"Dispatched coercion: {task_id}")
 
@@ -836,7 +870,9 @@ class OrchestratorTools(Toolset):
             results.append(f"✓ Relay listener task dispatched to PRIVESC: {privesc_task_id}")
             logger.info(f"ESC8 relay task {privesc_task_id} dispatched to privesc")
         else:
-            results.append("✗ Failed to dispatch relay listener - no privesc agent available")
+            results.append(
+                "✗ Relay listener task dropped (throttled or low priority in current phase)"
+            )
 
         # Step 2: Dispatch petitpotam to COERCION
         # Use request_coercion with petitpotam-specific parameters
@@ -862,7 +898,7 @@ class OrchestratorTools(Toolset):
             results.append(f"✓ PetitPotam coercion task dispatched to COERCION: {coercion_task_id}")
             logger.info(f"ESC8 coercion task {coercion_task_id} dispatched to coercion")
         else:
-            results.append("✗ Failed to dispatch coercion - no coercion agent available")
+            results.append("✗ Coercion task dropped (throttled or low priority in current phase)")
 
         # Provide next steps
         results.append("")

