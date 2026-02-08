@@ -866,3 +866,603 @@ class TestCredentialDomainResolution:
         assert username == "sql_svc"
         assert password == "SqlP@ss123"  # pragma: allowlist secret
         assert domain == ""  # No domain in output
+
+
+class TestCredentialDomainCrossReference:
+    """Tests for credential domain cross-reference in SharedRedTeamState.add_credential().
+
+    These tests verify that credentials are assigned the correct domain by
+    cross-referencing with discovered users, particularly in multi-domain forests
+    where a credential might have a parent domain but the user exists in a child domain.
+    """
+
+    def test_add_credential_corrects_parent_to_child_domain(self):
+        """Credential with parent domain should be corrected to child domain."""
+        from ares.core.models import Target, User
+
+        state = SharedRedTeamState(operation_id="op-test-parent-child")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # User discovered in child domain (from LDAP enumeration)
+        state.all_users.append(User(username="testuser", domain="child.contoso.local"))
+
+        # Credential comes in with parent domain (worker error)
+        cred = Credential(
+            username="testuser",
+            password="TestP@ss!",  # pragma: allowlist secret
+            domain="contoso.local",  # Wrong - should be child.contoso.local
+            source="ldap_description",
+        )
+
+        added = state.add_credential(cred, "enum")
+
+        assert added is True
+        # Check the stored credential has the correct domain
+        assert len(state.all_credentials) == 1
+        stored_cred = state.all_credentials[0]
+        assert stored_cred.domain == "child.contoso.local"
+
+    def test_add_credential_preserves_correct_domain(self):
+        """Credential with correct domain should be preserved."""
+        from ares.core.models import Target, User
+
+        state = SharedRedTeamState(operation_id="op-test-correct-domain")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # User in same domain as credential
+        state.all_users.append(User(username="admin", domain="contoso.local"))
+
+        cred = Credential(
+            username="admin",
+            password="P@ssw0rd!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="spray",
+        )
+
+        added = state.add_credential(cred, "lateral")
+
+        assert added is True
+        assert len(state.all_credentials) == 1
+        assert state.all_credentials[0].domain == "contoso.local"
+
+    def test_add_credential_new_user_accepts_domain(self):
+        """Credential for new user should accept provided domain."""
+        from ares.core.models import Target
+
+        state = SharedRedTeamState(operation_id="op-test-new-user")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # No users in state yet
+        cred = Credential(
+            username="newuser",
+            password="NewP@ss!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="kerberoast",
+        )
+
+        added = state.add_credential(cred, "cracker")
+
+        assert added is True
+        assert len(state.all_credentials) == 1
+        assert state.all_credentials[0].domain == "contoso.local"
+
+    def test_add_credential_prefers_more_specific_domain(self):
+        """When user exists in multiple domains, prefer most specific (longest)."""
+        from ares.core.models import Target, User
+
+        state = SharedRedTeamState(operation_id="op-test-specific-domain")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # User exists in both parent and child (edge case)
+        state.all_users.append(User(username="admin", domain="contoso.local"))
+        state.all_users.append(User(username="admin", domain="child.contoso.local"))
+
+        # Credential with parent domain should prefer child when ambiguous
+        cred = Credential(
+            username="admin",
+            password="AdminP@ss!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="spray",
+        )
+
+        added = state.add_credential(cred, "lateral")
+
+        assert added is True
+        assert len(state.all_credentials) == 1
+        # Should use child domain since it's more specific
+        assert state.all_credentials[0].domain == "child.contoso.local"
+
+    def test_add_credential_resolves_netbios_then_user_lookup(self):
+        """NetBIOS domain should be resolved first, then user lookup applied."""
+        from ares.core.models import Target, User
+
+        state = SharedRedTeamState(operation_id="op-test-netbios-user")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        state.all_domains.append("fabrikam.local")
+
+        # User discovered in fabrikam.local
+        state.all_users.append(User(username="sql_svc", domain="fabrikam.local"))
+
+        # Credential with NetBIOS domain
+        cred = Credential(
+            username="sql_svc",
+            password="SqlP@ss!",  # pragma: allowlist secret
+            domain="FABRIKAM",  # NetBIOS format
+            source="spray",
+        )
+
+        added = state.add_credential(cred, "lateral")
+
+        assert added is True
+        assert len(state.all_credentials) == 1
+        # Should resolve to FQDN
+        assert state.all_credentials[0].domain == "fabrikam.local"
+
+
+class TestDomainCleanup:
+    """Tests for domain cleanup and normalization."""
+
+    def test_cleanup_removes_netbios_when_fqdn_exists(self):
+        """NetBIOS domains should be removed when corresponding FQDN exists."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-cleanup-netbios",
+            "all_domains": ["child", "contoso.local", "child.contoso.local"],
+            "all_users": [],
+            "all_credentials": [],
+            "all_hashes": [],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # "child" should be removed since "child.contoso.local" exists
+        assert "child" not in state.all_domains
+        assert "contoso.local" in state.all_domains
+        assert "child.contoso.local" in state.all_domains
+        assert len(state.all_domains) == 2
+
+    def test_cleanup_dedupes_users_with_parent_child_domains(self):
+        """Users with both parent and child domain entries should be deduplicated."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-cleanup-users",
+            "all_domains": ["contoso.local", "child.contoso.local"],
+            "all_users": [
+                {"username": "sql_svc", "domain": "contoso.local"},
+                {"username": "sql_svc", "domain": "child.contoso.local"},
+                {"username": "domain_admin", "domain": "contoso.local"},
+            ],
+            "all_credentials": [],
+            "all_hashes": [],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # sql_svc should only exist in child domain
+        assert len(state.all_users) == 2
+        user_domains = {(u.username, u.domain) for u in state.all_users}
+        assert ("sql_svc", "child.contoso.local") in user_domains
+        assert ("sql_svc", "contoso.local") not in user_domains
+        # domain_admin stays in parent domain (only exists there)
+        assert ("domain_admin", "contoso.local") in user_domains
+
+    def test_cleanup_fixes_credentials_with_parent_domain(self):
+        """Credentials with parent domain should be fixed when user only in child."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-cleanup-creds",
+            "all_domains": ["contoso.local", "child.contoso.local"],
+            "all_users": [
+                {"username": "sql_svc", "domain": "contoso.local"},
+                {"username": "sql_svc", "domain": "child.contoso.local"},
+            ],
+            "all_credentials": [
+                {
+                    "username": "sql_svc",
+                    "password": "SqlP@ss123!",  # pragma: allowlist secret
+                    "domain": "contoso.local",
+                    "source": "test",
+                },
+            ],
+            "all_hashes": [],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Credential should be fixed to child domain
+        assert len(state.all_credentials) == 1
+        assert state.all_credentials[0].domain == "child.contoso.local"
+
+    def test_cleanup_fixes_hashes_with_parent_domain(self):
+        """Hashes with parent domain should be fixed when user only in child."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-cleanup-hashes",
+            "all_domains": ["contoso.local", "child.contoso.local"],
+            "all_users": [
+                {"username": "sql_svc", "domain": "contoso.local"},
+                {"username": "sql_svc", "domain": "child.contoso.local"},
+            ],
+            "all_credentials": [],
+            "all_hashes": [
+                {
+                    "username": "sql_svc",
+                    "hash_value": "aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                    "hash_type": "NTLM",
+                    "domain": "contoso.local",
+                },
+            ],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Hash should be fixed to child domain
+        assert len(state.all_hashes) == 1
+        assert state.all_hashes[0].domain == "child.contoso.local"
+
+    def test_cleanup_preserves_legitimate_parent_domain_users(self):
+        """Users that only exist in parent domain should not be modified."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-cleanup-preserve",
+            "all_domains": ["contoso.local", "child.contoso.local"],
+            "all_users": [
+                {"username": "domain_admin", "domain": "contoso.local"},
+            ],
+            "all_credentials": [
+                {
+                    "username": "domain_admin",
+                    "password": "AdminP@ss1!",  # pragma: allowlist secret
+                    "domain": "contoso.local",
+                    "source": "test",
+                },
+            ],
+            "all_hashes": [],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # domain_admin stays in parent domain
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "contoso.local"
+        assert len(state.all_credentials) == 1
+        assert state.all_credentials[0].domain == "contoso.local"
+
+
+class TestAddUserDomainUpgrade:
+    """Tests for add_user parent-to-child domain upgrade."""
+
+    def test_add_user_upgrades_parent_to_child_domain(self):
+        """Adding user to child domain should upgrade existing parent domain entry."""
+        state = SharedRedTeamState(operation_id="op-test-upgrade")
+        state.add_domain("contoso.local")
+
+        # Add credential first (which adds user with parent domain)
+        cred = Credential(
+            username="sql_svc",
+            password="SqlP@ss123!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="test",
+        )
+        state.add_credential(cred, "test")
+
+        assert state.all_credentials[0].domain == "contoso.local"
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "contoso.local"
+
+        # Now add user with child domain (simulates LDAP discovery)
+        result = state.add_user("sql_svc", "child.contoso.local")
+
+        # Should upgrade existing entry, not add new one
+        assert result is True
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "child.contoso.local"
+        # Credential should also be updated
+        assert state.all_credentials[0].domain == "child.contoso.local"
+
+    def test_add_user_rejects_parent_when_child_exists(self):
+        """Adding user to parent domain should be rejected if already in child."""
+        state = SharedRedTeamState(operation_id="op-test-reject-parent")
+
+        # Add user in child domain first
+        state.add_user("sql_svc", "child.contoso.local")
+        assert len(state.all_users) == 1
+
+        # Try to add same user in parent domain
+        result = state.add_user("sql_svc", "contoso.local")
+
+        # Should reject - child domain is more specific
+        assert result is False
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "child.contoso.local"
+
+    def test_add_user_updates_credentials_and_hashes(self):
+        """Domain upgrade should update both credentials and hashes."""
+        from ares.core.models import Hash
+
+        state = SharedRedTeamState(operation_id="op-test-update-all")
+        state.add_domain("contoso.local")
+
+        # Add credential and hash with parent domain
+        cred = Credential(
+            username="sql_svc",
+            password="SqlP@ss!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="test",
+        )
+        state.add_credential(cred, "test")
+
+        hash_obj = Hash(
+            username="sql_svc",
+            hash_value="aad3b435b51404ee:abcdef1234567890",
+            hash_type="NTLM",
+            domain="contoso.local",
+        )
+        state.add_hash(hash_obj, "test")
+
+        # Upgrade user to child domain
+        state.add_user("sql_svc", "child.contoso.local")
+
+        # Both should be updated
+        assert state.all_credentials[0].domain == "child.contoso.local"
+        assert state.all_hashes[0].domain == "child.contoso.local"
+
+
+class TestRetroactiveDomainNormalize:
+    """Tests for retroactive domain normalization."""
+
+    def test_retroactive_normalize_removes_netbios_from_domains(self):
+        """Adding FQDN should remove corresponding NetBIOS from all_domains."""
+        state = SharedRedTeamState(operation_id="op-test-retro-netbios")
+
+        # Add NetBIOS domain first
+        state.add_domain("child")
+        assert "child" in state.all_domains
+
+        # Add FQDN - should trigger retroactive normalization
+        state.add_domain("child.contoso.local")
+
+        # NetBIOS should be removed
+        assert "child" not in state.all_domains
+        assert "child.contoso.local" in state.all_domains
+
+    def test_retroactive_normalize_updates_credentials(self):
+        """Adding FQDN should update credentials with NetBIOS domain."""
+        state = SharedRedTeamState(operation_id="op-test-retro-creds")
+
+        # Add credential with NetBIOS domain
+        cred = Credential(
+            username="sql_svc",
+            password="SqlP@ss!",  # pragma: allowlist secret
+            domain="child",
+            source="test",
+        )
+        state.all_credentials.append(cred)
+        state.add_domain("child")
+
+        # Add FQDN
+        state.add_domain("child.contoso.local")
+
+        # Credential should be updated
+        assert state.all_credentials[0].domain == "child.contoso.local"
+
+    def test_retroactive_normalize_triggers_parent_child_normalization(self):
+        """Adding child FQDN should trigger parent-to-child credential normalization.
+
+        Note: _normalize_parent_domain_credentials only fixes credentials for users
+        that ONLY exist in the child domain. If user exists in both domains, use
+        _cleanup_domain_data (via from_bytes) to fix.
+        """
+        from ares.core.models import User
+
+        state = SharedRedTeamState(operation_id="op-test-retro-parent-child")
+        state.add_domain("contoso.local")
+
+        # Add user ONLY in child domain (not in parent)
+        state.all_users.append(User(username="sql_svc", domain="child.contoso.local"))
+
+        # Add credential with parent domain (this simulates tool reporting wrong domain)
+        cred = Credential(
+            username="sql_svc",
+            password="SqlP@ss123!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="test",
+        )
+        state.all_credentials.append(cred)
+
+        # Trigger normalization by adding child domain
+        state.add_domain("child.contoso.local")
+
+        # Credential should be updated to child domain
+        assert state.all_credentials[0].domain == "child.contoso.local"
+
+
+class TestHashDeduplication:
+    """Tests for hash deduplication."""
+
+    def test_kerberoast_deduped_by_spn_and_etype(self):
+        """Kerberoast hashes with same user+SPN+etype should be deduplicated."""
+        import json
+
+        # Two Kerberoast hashes for same user, same SPN, same etype (23=RC4)
+        # but different hash values (different request timestamps)
+        state_dict = {
+            "operation_id": "op-test-kerberoast-dedupe",
+            "all_domains": ["contoso.local"],
+            "all_users": [],
+            "all_credentials": [],
+            "all_hashes": [
+                {
+                    "username": "sql_svc",
+                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$aaa$111",
+                    "hash_type": "Kerberoast",
+                    "domain": "contoso.local",
+                },
+                {
+                    "username": "sql_svc",
+                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$bbb$222",
+                    "hash_type": "Kerberoast",
+                    "domain": "contoso.local",
+                },
+            ],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Should dedupe to 1 hash
+        assert len(state.all_hashes) == 1
+
+    def test_kerberoast_different_spn_kept(self):
+        """Kerberoast hashes with different SPNs should be kept."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-kerberoast-diff-spn",
+            "all_domains": ["contoso.local"],
+            "all_users": [],
+            "all_credentials": [],
+            "all_hashes": [
+                {
+                    "username": "sql_svc",
+                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$aaa$111",
+                    "hash_type": "Kerberoast",
+                    "domain": "contoso.local",
+                },
+                {
+                    "username": "sql_svc",
+                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql02.contoso.local*$bbb$222",
+                    "hash_type": "Kerberoast",
+                    "domain": "contoso.local",
+                },
+            ],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Should keep both (different SPNs)
+        assert len(state.all_hashes) == 2
+
+    def test_kerberoast_different_etype_kept(self):
+        """Kerberoast hashes with different encryption types should be kept."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-kerberoast-diff-etype",
+            "all_domains": ["contoso.local"],
+            "all_users": [],
+            "all_credentials": [],
+            "all_hashes": [
+                {
+                    "username": "sql_svc",
+                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$aaa$111",
+                    "hash_type": "Kerberoast",
+                    "domain": "contoso.local",
+                },
+                {
+                    "username": "sql_svc",
+                    "hash_value": "$krb5tgs$18$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$bbb$222",
+                    "hash_type": "Kerberoast",
+                    "domain": "contoso.local",
+                },
+            ],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Should keep both (RC4 vs AES256)
+        assert len(state.all_hashes) == 2
+
+    def test_asrep_deduped_by_user(self):
+        """AS-REP hashes with same user should be deduplicated."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-asrep-dedupe",
+            "all_domains": ["contoso.local"],
+            "all_users": [],
+            "all_credentials": [],
+            "all_hashes": [
+                {
+                    "username": "nopreauth",
+                    "hash_value": "$krb5asrep$23$nopreauth@CONTOSO.LOCAL:aaa$111",
+                    "hash_type": "AS-REP",
+                    "domain": "contoso.local",
+                },
+                {
+                    "username": "nopreauth",
+                    "hash_value": "$krb5asrep$23$nopreauth@CONTOSO.LOCAL:bbb$222",
+                    "hash_type": "AS-REP",
+                    "domain": "contoso.local",
+                },
+            ],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Should dedupe to 1 hash
+        assert len(state.all_hashes) == 1
+
+    def test_ntlm_deduped_by_value(self):
+        """NTLM hashes should be deduplicated by exact hash value."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-ntlm-dedupe",
+            "all_domains": ["contoso.local"],
+            "all_users": [],
+            "all_credentials": [],
+            "all_hashes": [
+                {
+                    "username": "admin",
+                    "hash_value": "aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                    "hash_type": "NTLM",
+                    "domain": "contoso.local",
+                },
+                {
+                    "username": "admin",
+                    "hash_value": "aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                    "hash_type": "NTLM",
+                    "domain": "contoso.local",
+                },
+            ],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Should dedupe to 1 hash
+        assert len(state.all_hashes) == 1

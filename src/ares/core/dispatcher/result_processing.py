@@ -110,10 +110,16 @@ class ResultProcessingMixin:
             else:
                 target_label = target_ip
 
+        # Extract parent credential tracking from task params for attack chain
+        parent_credential_id = task_params.get("parent_credential_id")
+        parent_attack_step = task_params.get("parent_attack_step", 0)
+
         # Process discoveries from result dict (even if task failed)
         # Workers serialize discoveries and send them regardless of success/failure
         if isinstance(result, dict):
-            await self._process_discovered_data(result, source_agent, target_label)
+            await self._process_discovered_data(
+                result, source_agent, target_label, parent_credential_id, parent_attack_step
+            )
 
         # Process additional result fields only on success
         if success and isinstance(result, dict):
@@ -123,7 +129,9 @@ class ResultProcessingMixin:
             output = result.strip()
 
         if output:
-            await self._process_output_text(output, source_agent)
+            await self._process_output_text(
+                output, source_agent, parent_credential_id, parent_attack_step
+            )
 
         # Auto-chain lateral movement after successful S4U attack
         if success and task_info.task_type == "exploit":
@@ -134,7 +142,7 @@ class ResultProcessingMixin:
                 source_agent=source_agent,
             )
             if chained > 0:
-                logger.warning(f"🎫 Auto-S4U-chain: dispatched {chained} lateral movement task(s)")
+                logger.info("🎫 Auto-S4U-chain: dispatched %d lateral movement task(s)", chained)
 
         # Broadcast completion
         if success:
@@ -165,8 +173,18 @@ class ResultProcessingMixin:
         result: dict[str, Any],
         source_agent: str,
         target_label: str,
+        parent_credential_id: str | None = None,
+        parent_attack_step: int = 0,
     ) -> None:
-        """Process discovered_* fields from worker result."""
+        """Process discovered_* fields from worker result.
+
+        Args:
+            result: Task result dictionary.
+            source_agent: Agent that produced the result.
+            target_label: Label for logging.
+            parent_credential_id: ID of credential used to discover these items (for attack chain).
+            parent_attack_step: Attack step of parent credential.
+        """
         discovered_hosts = result.get("discovered_hosts")
         if isinstance(discovered_hosts, list) and discovered_hosts:
             logger.info(f"Processing {len(discovered_hosts)} discovered hosts from {target_label}")
@@ -196,6 +214,8 @@ class ResultProcessingMixin:
                     domain=c.get("domain", ""),
                     source=c.get("source", f"worker:{source_agent}"),
                     is_admin=c.get("is_admin", False),
+                    parent_id=parent_credential_id,  # Track attack chain
+                    attack_step=parent_attack_step + 1 if parent_credential_id else 0,
                 )
                 await self.publish_credential(credential, source_agent)
 
@@ -214,6 +234,8 @@ class ResultProcessingMixin:
                     domain=h.get("domain", ""),
                     cracked_password=h.get("cracked_password", ""),
                     source=h.get("source", ""),
+                    parent_id=parent_credential_id,  # Track attack chain
+                    attack_step=parent_attack_step + 1 if parent_credential_id else 0,
                 )
                 await self.publish_hash(hash_obj, source_agent)
                 if hash_obj.cracked_password:
@@ -223,6 +245,8 @@ class ResultProcessingMixin:
                         domain=hash_obj.domain,
                         source=f"cracked:{source_agent}",
                         is_admin=False,
+                        parent_id=hash_obj.id,  # Cracked cred links to its hash
+                        attack_step=hash_obj.attack_step + 1,
                     )
                     await self.publish_credential(cracked_cred, source_agent)
 
@@ -370,9 +394,20 @@ class ResultProcessingMixin:
         return "\n".join(output_parts).strip()
 
     async def _process_output_text(  # noqa: PLR0912
-        self: RedTeamDispatcher, output: str, source_agent: str
+        self: RedTeamDispatcher,
+        output: str,
+        source_agent: str,
+        parent_credential_id: str | None = None,
+        parent_attack_step: int = 0,
     ) -> None:
-        """Process raw output text to extract discoveries."""
+        """Process raw output text to extract discoveries.
+
+        Args:
+            output: Raw text output from tool.
+            source_agent: Agent that produced the output.
+            parent_credential_id: ID of credential used to run the command (for attack chain).
+            parent_attack_step: Attack step of parent credential.
+        """
         domain = ""
         if self.shared_state.target and self.shared_state.target.domain:
             domain = self.shared_state.target.domain
@@ -409,6 +444,8 @@ class ResultProcessingMixin:
                 domain=resolved_domain,
                 source="user_description",
                 is_admin=False,
+                parent_id=parent_credential_id,  # Track attack chain
+                attack_step=parent_attack_step + 1 if parent_credential_id else 0,
             )
             await self.publish_credential(credential, source_agent)
 
@@ -418,6 +455,10 @@ class ResultProcessingMixin:
 
         # Extract hashes (Kerberoast, AS-REP, NTLM) from tool output
         for hash_obj in self._extract_hashes_from_output(output):
+            # Track attack chain
+            if parent_credential_id:
+                hash_obj.parent_id = parent_credential_id
+                hash_obj.attack_step = parent_attack_step + 1
             await self.publish_hash(hash_obj, source_agent)
 
         # Extract and auto-queue delegation vulnerabilities from findDelegation output
@@ -471,9 +512,11 @@ class ResultProcessingMixin:
         if not any(indicator in output.lower() for indicator in path_indicators):
             return
 
-        # Initialize tracker if not present
+        # Initialize tracker if not present (with state for persistence!)
         if not hasattr(self, "_acl_chain_tracker"):
-            self._acl_chain_tracker = ACLChainTracker()
+            self._acl_chain_tracker = ACLChainTracker(state=self.shared_state)
+        elif self._acl_chain_tracker._state is None:
+            self._acl_chain_tracker.set_state(self.shared_state)
 
         tracker: ACLChainTracker = self._acl_chain_tracker
         domain = ""
@@ -1009,13 +1052,31 @@ class ResultProcessingMixin:
         if self.shared_state.target and self.shared_state.target.domain:
             domain = self.shared_state.target.domain
 
+        # Get existing gMSA accounts from state to avoid duplicates
+        existing_gmsa = {g.get("account", "").lower() for g in self.shared_state.gmsa_accounts}
+
         for gmsa in gmsa_accounts:
             account = gmsa.get("account", "")
             if not account:
                 continue
 
-            # Check if already queued
-            vuln_key = f"gmsa_readable:{account.lower()}"
+            account_lower = account.lower()
+
+            # Store in state.gmsa_accounts for persistence (if not already there)
+            if account_lower not in existing_gmsa:
+                gmsa_entry = {
+                    "account": account,
+                    "domain": domain,
+                    "principals_allowed": gmsa.get("principals_allowed", "unknown"),
+                    "discovered_by": source_agent,
+                    "discovered_at": datetime.now(timezone.utc).isoformat(),
+                }
+                self.shared_state.gmsa_accounts.append(gmsa_entry)
+                existing_gmsa.add(account_lower)
+                logger.info("🔑 gMSA account stored in state: %s", account)
+
+            # Check if already queued as vulnerability
+            vuln_key = f"gmsa_readable:{account_lower}"
             if vuln_key in [
                 v.vuln_type + ":" + v.target.lower()
                 for v in self.shared_state.discovered_vulnerabilities.values()
@@ -1047,7 +1108,7 @@ class ResultProcessingMixin:
             )
             queued += 1
 
-            logger.warning(f"🔑 Auto-queued gMSA password retrieval for {account}")
+            logger.info("🔑 Auto-queued gMSA password retrieval for %s", account)
 
         return queued
 

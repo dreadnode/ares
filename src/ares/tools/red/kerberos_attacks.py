@@ -1337,17 +1337,17 @@ class TrustAttackTools(Toolset):
         4. Use ticket to access target forest
 
         Args:
-            domain: Source domain where you have DA (e.g., 'sevenkingdoms.local')
+            domain: Source domain where you have DA (e.g., 'contoso.local')
             username: Domain Admin username
             password: DA password
             dc_ip: Source domain controller IP
-            trusted_domain: Target trusted domain (e.g., 'essos.local' or 'ESSOS')
+            trusted_domain: Target trusted domain (e.g., 'fabrikam.local' or 'FABRIKAM')
 
         Returns:
             Trust key (NTLM hash of trust account)
 
         Example:
-            >>> extract_trust_key("sevenkingdoms.local", "Administrator", "pass", "192.168.58.10", "essos.local")
+            >>> extract_trust_key("contoso.local", "Administrator", "pass", "192.168.58.10", "fabrikam.local")
         """
         # Normalize trusted domain name to get trust account
         # Trust accounts are NETBIOS$, e.g., ESSOS$
@@ -1428,10 +1428,10 @@ class TrustAttackTools(Toolset):
         that grants Enterprise Admin access in the target forest.
 
         Args:
-            source_domain: Domain where we have DA (e.g., 'sevenkingdoms.local')
+            source_domain: Domain where we have DA (e.g., 'contoso.local')
             source_sid: SID of source domain (from get_sid)
             trust_key: NTLM hash of trust account (from extract_trust_key)
-            target_domain: Target trusted domain (e.g., 'essos.local')
+            target_domain: Target trusted domain (e.g., 'fabrikam.local')
             target_sid: SID of target domain (from get_sid on target)
             username: User to impersonate (default: Administrator)
             duration: Ticket validity in days (default: 3650 = 10 years)
@@ -1441,10 +1441,10 @@ class TrustAttackTools(Toolset):
 
         Example:
             >>> create_inter_realm_ticket(
-            ...     "sevenkingdoms.local",
+            ...     "contoso.local",
             ...     "S-1-5-21-123...",
             ...     "aad3b435...",
-            ...     "essos.local",
+            ...     "fabrikam.local",
             ...     "S-1-5-21-456...",
             ... )
         """

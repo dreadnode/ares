@@ -853,6 +853,19 @@ class SharedRedTeamState:
         default_factory=set
     )  # secretsdump done "host:user:domain"
     dispatched_acl_steps: set[str] = field(default_factory=set)  # ACL steps dispatched "chain:step"
+    # Coercion and delegation tracking (prevents duplicate dispatch after restart)
+    processed_esc8_servers: set[str] = field(default_factory=set)  # ADCS IPs with ESC8 attempted
+    processed_coerced_dcs: set[str] = field(default_factory=set)  # DC IPs that have been coerced
+    processed_writable_shares: set[str] = field(default_factory=set)  # "host:share" combos notified
+    processed_delegation_creds: set[str] = field(
+        default_factory=set
+    )  # "domain:username" delegation done
+    # Additional automation tracking
+    processed_adcs_servers: set[str] = field(default_factory=set)  # ADCS servers enumerated
+    processed_bloodhound_domains: set[str] = field(default_factory=set)  # BloodHound run
+    processed_spidered_shares: set[str] = field(
+        default_factory=set
+    )  # "host:share:user:domain" spidered
 
     # Agent registry
     registered_agents: dict[str, AgentInfo] = field(default_factory=dict)

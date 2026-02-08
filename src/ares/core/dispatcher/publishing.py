@@ -412,9 +412,12 @@ class PublishingMixin:
             )
 
             queued += 2  # Queued both linked_server and impersonation
-            logger.warning(
-                f"Periodic scan: queued MSSQL vulnerabilities (linked_server + impersonation) for "
-                f"{host.ip} ({host.hostname}) with {len(sql_creds)} SQL credentials"
+            logger.info(
+                "Periodic scan: queued MSSQL vulnerabilities (linked_server + impersonation) for "
+                "%s (%s) with %d SQL credentials",
+                host.ip,
+                host.hostname,
+                len(sql_creds),
             )
 
         return queued
@@ -477,6 +480,10 @@ class PublishingMixin:
         )
 
         dc_ip = self._find_domain_controller_ip(domain)
+
+        # Track attack chain
+        parent_id, parent_step = self._find_credential_id(username, domain, password)
+
         payload = {
             "vuln_type": "adcs_enumerate",
             "vuln_id": f"adcs_enumerate_{target_ip}_{hash(f'{domain}{username}') % 10000:04d}",
@@ -486,6 +493,8 @@ class PublishingMixin:
             "username": username,
             "password": password,
             "note": "Auto-detected ADCS server (CertEnroll share). Run certipy_find to enumerate ESC1-ESC15 vulnerabilities.",
+            "parent_credential_id": parent_id,
+            "parent_attack_step": parent_step,
         }
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)

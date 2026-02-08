@@ -35,6 +35,42 @@ if TYPE_CHECKING:
 class RoutingMixin:
     """Task routing methods for dispatching work to specialized agents."""
 
+    def _find_credential_id(
+        self: RedTeamDispatcher,
+        username: str,
+        domain: str,
+        password: str | None = None,
+    ) -> tuple[str | None, int]:
+        """Find credential ID and attack_step by username/domain/password.
+
+        Returns:
+            Tuple of (credential_id, attack_step) or (None, 0) if not found.
+        """
+        username_lower = username.lower().strip()
+        domain_lower = domain.lower().strip() if domain else ""
+
+        for cred in self.shared_state.all_credentials:
+            if cred.username.lower().strip() != username_lower:
+                continue
+            cred_domain = cred.domain.lower().strip() if cred.domain else ""
+            if cred_domain != domain_lower and domain_lower not in cred_domain:
+                continue
+            # If password specified, must match
+            if password and cred.password != password:
+                continue
+            return cred.id, cred.attack_step
+
+        # Also check hashes (for pass-the-hash scenarios)
+        for hash_obj in self.shared_state.all_hashes:
+            if hash_obj.username.lower().strip() != username_lower:
+                continue
+            hash_domain = hash_obj.domain.lower().strip() if hash_obj.domain else ""
+            if hash_domain != domain_lower and domain_lower not in hash_domain:
+                continue
+            return hash_obj.id, hash_obj.attack_step
+
+        return None, 0
+
     def _find_domain_credential(self: RedTeamDispatcher, domain: str) -> Credential | None:
         """Find a credential for the specified domain."""
         domain_lower = domain.lower() if domain else ""
@@ -236,7 +272,7 @@ class RoutingMixin:
 
         dc_ip = self._find_domain_controller_ip(domain)
 
-        logger.warning(f"🎫 S4U SUCCESS! Auto-chaining secretsdump: {ticket_path} -> {target_host}")
+        logger.info("🎫 S4U SUCCESS! Auto-chaining secretsdump: %s -> %s", ticket_path, target_host)
 
         await self.request_credential_access(
             domain=domain,
@@ -466,6 +502,11 @@ class RoutingMixin:
             source="lateral_movement",
         )
 
+        # Track attack chain - find credential ID
+        parent_id, parent_step = self._find_credential_id(
+            username, resolved_domain or domain, resolved_password
+        )
+
         payload = {
             "target_host": target_host,
             "username": username,
@@ -473,6 +514,8 @@ class RoutingMixin:
             "hash_value": resolved_hash,
             "domain": resolved_domain,
             "method": method,
+            "parent_credential_id": parent_id,
+            "parent_attack_step": parent_step,
         }
 
         if not resolved_password and not resolved_hash:
@@ -568,6 +611,10 @@ class RoutingMixin:
         if credential:
             payload["username"] = credential.username
             payload["password"] = credential.password or ""
+            payload["parent_credential_id"] = credential.id  # Track attack chain
+            payload["parent_attack_step"] = (
+                str(credential.attack_step) if credential.attack_step else ""
+            )
             if not credential.password:
                 for h in self.shared_state.all_hashes:
                     if h.username == credential.username:
@@ -663,6 +710,10 @@ class RoutingMixin:
         )
 
         dc_ip = self._find_domain_controller_ip(domain)
+
+        # Track attack chain
+        parent_id, parent_step = self._find_credential_id(username, domain, password)
+
         payload = {
             "domain": domain,
             "target_ips": target_ips or [],
@@ -672,6 +723,8 @@ class RoutingMixin:
             "hash_value": hash_value,
             "reason": reason,
             "techniques": techniques or [],
+            "parent_credential_id": parent_id,
+            "parent_attack_step": parent_step,
         }
 
         if self._task_queue:
@@ -779,6 +832,10 @@ class RoutingMixin:
         )
 
         dc_ip = self._find_domain_controller_ip(domain)
+
+        # Track attack chain
+        parent_id, parent_step = self._find_credential_id(username, domain, password)
+
         payload: dict[str, Any] = {
             "domain": domain,
             "target_ips": target_ips or [],
@@ -790,6 +847,8 @@ class RoutingMixin:
             "credential_source": credential_source,
             "reason": reason,
             "techniques": techniques or [],
+            "parent_credential_id": parent_id,
+            "parent_attack_step": parent_step,
         }
 
         if extra_params:
@@ -889,6 +948,15 @@ class RoutingMixin:
             "target": target,
             **(params or {}),
         }
+
+        # Track attack chain - look up credential from params
+        username = payload.get("username") or payload.get("account_name", "")
+        domain = payload.get("domain", "")
+        password = payload.get("password", "")
+        if username:
+            parent_id, parent_step = self._find_credential_id(username, domain, password)
+            payload["parent_credential_id"] = parent_id
+            payload["parent_attack_step"] = parent_step
 
         # Ensure dc_ip is resolved for exploit tasks that need it
         if not payload.get("dc_ip") and payload.get("domain"):
@@ -991,12 +1059,18 @@ class RoutingMixin:
         if not dc_ip and self.shared_state.target and self.shared_state.target.ip:
             dc_ip = self.shared_state.target.ip
             logger.warning(f"DC IP fallback: using primary target IP {dc_ip} for {domain}")
+
+        # Track attack chain
+        parent_id, parent_step = self._find_credential_id(username, domain, password)
+
         payload = {
             "domain": domain,
             "dc_ip": dc_ip,
             "username": username,
             "password": password,
             "techniques": techniques or [],
+            "parent_credential_id": parent_id,
+            "parent_attack_step": parent_step,
         }
 
         if self._task_queue:

@@ -529,11 +529,43 @@ def _print_loot(state, *, json_output: bool = False) -> None:
         print("*** GOLDEN TICKET OBTAINED ***")
     print()
 
-    # Domains
+    # Domains (with hierarchy indicator)
     domains = sorted({d.strip().lower() for d in getattr(state, "all_domains", []) if d})
+    # Classify domains as forest roots vs child domains
+    forest_roots: list[str] = []
+    child_domains: dict[str, str] = {}  # child -> parent
+    for domain in domains:
+        parts = domain.split(".")
+        if len(parts) >= 3:
+            # Check if parent domain exists in our list
+            parent = ".".join(parts[1:])
+            if parent in domains:
+                child_domains[domain] = parent
+            else:
+                forest_roots.append(domain)
+        else:
+            # Two-part domains (e.g., contoso.local) are forest roots
+            forest_roots.append(domain)
+
     print(f"Domains ({len(domains)}):")
-    for domain in domains or ["None"]:
-        print(f"  - {domain}")
+    if not domains:
+        print("  - None")
+    else:
+        # Display forest roots first, then their children indented
+        displayed: set[str] = set()
+        for root in sorted(forest_roots):
+            print(f"  - {root} (forest root)")
+            displayed.add(root)
+            # Find and display child domains of this root
+            for child, parent in sorted(child_domains.items()):
+                if parent == root:
+                    print(f"    └─ {child} (child)")
+                    displayed.add(child)
+        # Display any remaining child domains (whose parent isn't a direct forest root)
+        for child in sorted(child_domains.keys()):
+            if child not in displayed:
+                parent = child_domains[child]
+                print(f"  - {child} (child of {parent})")
     print()
 
     # Hosts (with DC indicator, OS, and open ports/services)

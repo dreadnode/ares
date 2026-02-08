@@ -193,6 +193,15 @@ def _merge_background_task_tracking(
     target.processed_password_spray |= existing.processed_password_spray
     target.processed_secretsdump |= existing.processed_secretsdump
     target.dispatched_acl_steps |= existing.dispatched_acl_steps
+    # Coercion and delegation tracking
+    target.processed_esc8_servers |= existing.processed_esc8_servers
+    target.processed_coerced_dcs |= existing.processed_coerced_dcs
+    target.processed_writable_shares |= existing.processed_writable_shares
+    target.processed_delegation_creds |= existing.processed_delegation_creds
+    # Additional automation tracking
+    target.processed_adcs_servers |= existing.processed_adcs_servers
+    target.processed_bloodhound_domains |= existing.processed_bloodhound_domains
+    target.processed_spidered_shares |= existing.processed_spidered_shares
 
 
 class OperationRecoveryManager:

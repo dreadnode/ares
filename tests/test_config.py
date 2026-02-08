@@ -188,7 +188,9 @@ class TestModelResolution:
             }
         }
 
-        with patch.dict(os.environ, {}, clear=False):
+        # Remove any ARES_* env vars that could pollute the test
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("ARES_")}
+        with patch.dict(os.environ, clean_env, clear=True):
             from ares.core.config import _build_config
 
             config = _build_config(config_data)

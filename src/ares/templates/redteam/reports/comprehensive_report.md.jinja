@@ -19,8 +19,8 @@
 #### Credential Chain to Domain Admin
 
 {% for step in domain_admin_chain %}
-{{ loop.index }}. **{{ step.credential }}** ({{ step.source }})
-   - {{ step.description }}
+{{ loop.index }}. **{{ step.domain }}\{{ step.username }}** {% if step.type == "hash" %}({{ step.hash_type }} hash){% else %}(password){% endif %}
+   - Discovered via: {{ step.source }}
 {% endfor %}
 {% endif %}
 {% else %}

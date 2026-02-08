@@ -878,6 +878,14 @@ class ACLExploitTools(Toolset):
 
             if "success" in result.lower() or returncode == 0:
                 logger.info(f"[+] AdminSDHolder backdoor planted for {principal}!")
+
+                # Store backdoor in state for persistence tracking
+                if self.state and hasattr(self.state, "adminsd_holder_backdoors"):
+                    backdoor_key = f"{domain.lower()}:{principal.lower()}"
+                    if backdoor_key not in self.state.adminsd_holder_backdoors:
+                        self.state.adminsd_holder_backdoors.append(backdoor_key)
+                        logger.info(f"[+] AdminSDHolder backdoor tracked in state: {backdoor_key}")
+
                 return (
                     f"✅ AdminSDHolder backdoor planted!\n"
                     f"→ {principal} will have {right} on ALL protected groups\n"

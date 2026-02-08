@@ -28,52 +28,45 @@ def get_default_network_interface() -> str:
     Returns:
         Network interface name (e.g., 'ens5', 'eth0', 'eno1').
     """
-    import subprocess
+    import socket
 
     # Environment variable override
     if env_iface := os.environ.get("ARES_NETWORK_INTERFACE"):
         return env_iface
 
-    # Detect default route interface via 'ip route'
+    # Parse /proc/net/route for default gateway interface
     try:
-        result = subprocess.run(  # nosec B607
-            ["ip", "route", "get", "8.8.8.8"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        if result.returncode == 0:
-            # Parse: "8.8.8.8 via 10.0.0.1 dev ens5 src 10.0.0.5 ..."
-            parts = result.stdout.split()
-            if "dev" in parts:
-                idx = parts.index("dev")
-                if idx + 1 < len(parts):
-                    iface = parts[idx + 1]
+        with open("/proc/net/route") as f:
+            for line in f:
+                fields = line.strip().split()
+                # Skip header and non-default routes
+                # Default route has Destination=00000000 and Flags with RTF_GATEWAY (0x0002)
+                if len(fields) >= 4 and fields[1] == "00000000":
+                    iface = fields[0]
                     if iface and not iface.startswith("lo"):
-                        logger.debug(f"Auto-detected network interface: {iface}")
+                        logger.debug(f"Auto-detected network interface from route table: {iface}")
                         return iface
-    except (subprocess.SubprocessError, OSError, ValueError):
+    except (OSError, IndexError):
         pass
 
-    # Fallback: first non-loopback interface with an IP
+    # Fallback: prefer physical interface prefixes (eth, ens, eno, en)
     try:
-        result = subprocess.run(  # nosec B607
-            ["ip", "-o", "addr", "show"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        if result.returncode == 0:
-            for line in result.stdout.strip().split("\n"):
-                parts = line.split()
-                if len(parts) >= 4 and "inet " in line and "127.0.0.1" not in line:
-                    iface = parts[1].rstrip(":")
-                    if iface and not iface.startswith("lo"):
-                        logger.debug(f"Auto-detected network interface: {iface}")
-                        return iface
-    except (subprocess.SubprocessError, OSError):
+        interfaces = socket.if_nameindex()
+        interface_names = [name for _idx, name in interfaces if name and not name.startswith("lo")]
+
+        # Prefer physical interfaces by common naming patterns
+        preferred_prefixes = ("eth", "ens", "eno", "enp", "en")
+        for prefix in preferred_prefixes:
+            for name in interface_names:
+                if name.startswith(prefix):
+                    logger.debug(f"Auto-detected network interface from socket: {name}")
+                    return name
+
+        # Fall back to any non-loopback interface
+        if interface_names:
+            logger.debug(f"Auto-detected network interface from socket: {interface_names[0]}")
+            return interface_names[0]
+    except OSError:
         pass
 
     logger.warning("Could not auto-detect network interface, falling back to eth0")

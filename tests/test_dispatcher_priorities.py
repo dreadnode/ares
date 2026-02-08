@@ -25,31 +25,40 @@ class TestVulnerabilityPriorities:
         assert priorities["krbtgt_hash"] == 4
         assert priorities["domain_admin_hash"] == 5
 
-    def test_acl_abuse_priority(self):
-        """ACL abuse should have priority 6."""
+    def test_direct_da_acl_priority(self):
+        """Direct DA via ACL should have priority 6-7."""
         dispatcher = RedTeamDispatcher()
         priorities = dispatcher._vulnerability_priorities
 
-        assert priorities["acl_abuse"] == 6
+        assert priorities["genericall_domain_admins"] == 6
+        assert priorities["gpo_write"] == 7
+
+    def test_acl_abuse_priority(self):
+        """ACL abuse should have priority 8."""
+        dispatcher = RedTeamDispatcher()
+        priorities = dispatcher._vulnerability_priorities
+
+        assert priorities["acl_abuse"] == 8
 
     def test_delegation_vulnerabilities_priority(self):
-        """Delegation vulnerabilities should have priority 7-9."""
+        """Delegation vulnerabilities should have priority 9-11."""
         dispatcher = RedTeamDispatcher()
         priorities = dispatcher._vulnerability_priorities
 
-        assert priorities["unconstrained_delegation"] == 7
-        assert priorities["constrained_delegation"] == 8
-        assert priorities["rbcd"] == 9
+        assert priorities["unconstrained_delegation"] == 9
+        assert priorities["constrained_delegation"] == 10
+        assert priorities["rbcd"] == 11
 
     def test_mssql_vulnerabilities_priority(self):
-        """MSSQL vulnerabilities should have priority 10-12."""
+        """MSSQL vulnerabilities should have priority 12-15."""
         dispatcher = RedTeamDispatcher()
         priorities = dispatcher._vulnerability_priorities
 
-        assert priorities["mssql_impersonation"] == 10
-        assert priorities["mssql_linked"] == 11
-        assert priorities["mssql_linked_server"] == 11  # Alias
-        assert priorities["mssql_xp_cmdshell"] == 12
+        assert priorities["mssql_impersonation"] == 12
+        assert priorities["mssql_linked_xpcmdshell"] == 13
+        assert priorities["mssql_linked"] == 14
+        assert priorities["mssql_linked_server"] == 14  # Alias
+        assert priorities["mssql_xp_cmdshell"] == 15
 
     def test_mssql_linked_server_alias(self):
         """mssql_linked_server should be an alias for mssql_linked."""
@@ -58,29 +67,42 @@ class TestVulnerabilityPriorities:
 
         assert priorities["mssql_linked"] == priorities["mssql_linked_server"]
 
-    def test_gpo_and_laps_abuse_priority(self):
-        """GPO and LAPS abuse should have priority 13-14."""
+    def test_gpo_gmsa_laps_abuse_priority(self):
+        """GPO, gMSA, and LAPS abuse should have priority 16-18."""
         dispatcher = RedTeamDispatcher()
         priorities = dispatcher._vulnerability_priorities
 
-        assert priorities["gpo_abuse"] == 13
-        assert priorities["laps_abuse"] == 14
+        assert priorities["gpo_abuse"] == 16
+        assert priorities["gmsa_readable"] == 17
+        assert priorities["laps_abuse"] == 18
 
     def test_dcsync_and_shadow_credentials_priority(self):
-        """DCSync and shadow credentials should have priority 15-16."""
+        """DCSync and shadow credentials should have priority 19-20."""
         dispatcher = RedTeamDispatcher()
         priorities = dispatcher._vulnerability_priorities
 
-        assert priorities["dcsync"] == 15
-        assert priorities["shadow_credentials"] == 16
+        assert priorities["dcsync"] == 19
+        assert priorities["shadow_credentials"] == 20
+
+    def test_relay_and_persistence_priority(self):
+        """Relay and persistence should have priority 21-22."""
+        dispatcher = RedTeamDispatcher()
+        priorities = dispatcher._vulnerability_priorities
+
+        assert priorities["smb_relay_target"] == 21
+        assert priorities["adminsd_holder_writable"] == 22
+        assert priorities["adminsd_holder_acl"] == 22  # Alias
 
     def test_all_priorities_are_unique_except_aliases(self):
         """All priorities should be unique except for known aliases."""
         dispatcher = RedTeamDispatcher()
         priorities = dispatcher._vulnerability_priorities
 
-        # Known aliases
-        aliases = {("mssql_linked", "mssql_linked_server")}
+        # Known aliases (pairs sharing the same priority)
+        aliases = {
+            ("mssql_linked", "mssql_linked_server"),
+            ("adminsd_holder_writable", "adminsd_holder_acl"),
+        }
 
         # Get non-alias items
         non_alias_items = []
@@ -119,23 +141,37 @@ class TestVulnerabilityPriorities:
         priorities = dispatcher._vulnerability_priorities
 
         expected_types = [
+            # Tier 1: ADCS
             "ADCS_ESC1",
             "ADCS_ESC4",
             "ADCS_ESC8",
+            # Tier 1: High-value hashes
             "krbtgt_hash",
             "domain_admin_hash",
+            # Tier 2: Direct DA via ACL
+            "genericall_domain_admins",
+            "gpo_write",
+            # Tier 3: ACL and delegation
             "acl_abuse",
             "unconstrained_delegation",
             "constrained_delegation",
             "rbcd",
+            # Tier 4: MSSQL
             "mssql_impersonation",
+            "mssql_linked_xpcmdshell",
             "mssql_linked",
             "mssql_linked_server",
             "mssql_xp_cmdshell",
+            # Tier 5: Other privilege escalation
             "gpo_abuse",
+            "gmsa_readable",
             "laps_abuse",
             "dcsync",
             "shadow_credentials",
+            # Tier 6: Relay and persistence
+            "smb_relay_target",
+            "adminsd_holder_writable",
+            "adminsd_holder_acl",
         ]
 
         for vuln_type in expected_types:
@@ -153,7 +189,7 @@ class TestDispatcherMSSQLIntegration:
         linked_priority = dispatcher._vulnerability_priorities["mssql_linked"]
         linked_server_priority = dispatcher._vulnerability_priorities["mssql_linked_server"]
 
-        assert linked_priority == linked_server_priority == 11
+        assert linked_priority == linked_server_priority == 14
 
     def test_mssql_priority_chain(self):
         """MSSQL attack chain should follow logical priority order."""

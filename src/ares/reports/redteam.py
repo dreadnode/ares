@@ -254,7 +254,7 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
         has_domain_admin=state.has_domain_admin,
         has_golden_ticket=state.has_golden_ticket,
         domain_admin_path=state.domain_admin_path,
-        domain_admin_chain=None,  # TODO(l): Build chain from credential sources
+        domain_admin_chain=state.build_attack_chain() if state.has_domain_admin else None,
         domains=sorted({d.lower() for d in state.all_domains if d}),
         hosts=state.all_hosts,
         dc_count=dc_count,

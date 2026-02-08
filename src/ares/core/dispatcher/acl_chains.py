@@ -144,18 +144,95 @@ class ACLChain:
 
 
 class ACLChainTracker:
-    """Track and orchestrate multi-hop ACL abuse chains."""
+    """Track and orchestrate multi-hop ACL abuse chains.
 
-    def __init__(self) -> None:
+    Chains are persisted to SharedRedTeamState.acl_chains for pub/sub visibility
+    and recovery after orchestrator restart.
+    """
+
+    def __init__(self, state: Any | None = None) -> None:
         self.chains: dict[str, ACLChain] = {}
         self._active_chain_id: str | None = None
+        self._state = state
+        # Load existing chains from state if available
+        if state is not None:
+            self.sync_from_state()
+
+    def set_state(self, state: Any) -> None:
+        """Set state reference and sync from it."""
+        self._state = state
+        self.sync_from_state()
+
+    def sync_from_state(self) -> None:
+        """Load chains from persisted state (for recovery after restart)."""
+        if not self._state or not hasattr(self._state, "acl_chains"):
+            return
+
+        for chain_data in self._state.acl_chains:
+            chain_id = chain_data.get("chain_id")
+            if not chain_id or chain_id in self.chains:
+                continue  # Already loaded or invalid
+
+            # Reconstruct ACLChain from dict
+            steps: list[ACLChainStep] = []
+            for step_data in chain_data.get("steps", []):
+                action_str = step_data.get("action", "shadow_credentials")
+                try:
+                    action = ACLAction(action_str)
+                except ValueError:
+                    action = ACLAction.SHADOW_CREDENTIALS
+
+                step = ACLChainStep(
+                    step_id=step_data.get("step_id", f"step-{len(steps) + 1}"),
+                    source=step_data.get("source", ""),
+                    target=step_data.get("target", ""),
+                    right=step_data.get("right", ""),
+                    action=action,
+                    target_type=step_data.get("target_type", "user"),
+                    completed=step_data.get("completed", False),
+                    result=step_data.get("result", ""),
+                    new_credential=step_data.get("new_credential"),
+                )
+                if step_data.get("completed_at"):
+                    try:
+                        step.completed_at = datetime.fromisoformat(step_data["completed_at"])
+                    except (ValueError, TypeError):
+                        pass
+                steps.append(step)
+
+            chain = ACLChain(
+                chain_id=chain_id,
+                steps=steps,
+                goal=chain_data.get("goal", ""),
+                domain=chain_data.get("domain", ""),
+                discovered_by=chain_data.get("discovered_by", ""),
+            )
+            if chain_data.get("created_at"):
+                try:
+                    chain.created_at = datetime.fromisoformat(chain_data["created_at"])
+                except (ValueError, TypeError):
+                    pass
+
+            self.chains[chain_id] = chain
+            logger.debug(f"🔗 Restored ACL chain from state: {chain_id}")
+
+    def sync_to_state(self) -> None:
+        """Persist all chains to state for pub/sub visibility."""
+        if not self._state or not hasattr(self._state, "acl_chains"):
+            return
+
+        # Build list of chain dicts
+        chain_list = [chain.to_dict() for chain in self.chains.values()]
+        self._state.acl_chains = chain_list
 
     def add_chain(self, chain: ACLChain) -> str:
-        """Register a new ACL chain."""
+        """Register a new ACL chain and persist to state."""
         self.chains[chain.chain_id] = chain
         logger.info(
             f"🔗 ACL chain registered: {chain.chain_id} with {len(chain.steps)} steps -> {chain.goal}"
         )
+        # Persist to state
+        self.sync_to_state()
         return chain.chain_id
 
     def create_chain_from_bloodhound_path(
@@ -318,7 +395,7 @@ class ACLChainTracker:
         result: str = "",
         new_credential: dict[str, str] | None = None,
     ) -> bool:
-        """Mark a step as completed."""
+        """Mark a step as completed and persist to state."""
         chain = self.chains.get(chain_id)
         if not chain:
             return False
@@ -333,6 +410,8 @@ class ACLChainTracker:
                     f"✅ ACL chain {chain_id} step {step_id} completed: "
                     f"{step.source} -> {step.target} ({step.action.value})"
                 )
+                # Persist updated state
+                self.sync_to_state()
                 return True
         return False
 
@@ -447,8 +526,11 @@ def extract_acl_chains_from_bloodhound(
 
     Called from result_processing when BloodHound analysis completes.
     """
+    # Initialize tracker with state for persistence
     if not hasattr(self, "_acl_chain_tracker"):
-        self._acl_chain_tracker = ACLChainTracker()
+        self._acl_chain_tracker = ACLChainTracker(state=self.shared_state)
+    elif self._acl_chain_tracker._state is None:
+        self._acl_chain_tracker.set_state(self.shared_state)
 
     chains: list[ACLChain] = []
     domain = ""
