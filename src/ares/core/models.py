@@ -1194,6 +1194,11 @@ class SharedRedTeamState:
         # This handles cases where credential has parent domain but user is in child domain
         domain = self._resolve_credential_domain_from_users(username, domain)
         password = credential.password.strip()
+        # Strip truncation artifacts from LLM extraction (e.g., "Heartsbane..." -> "Heartsbane")
+        while password.endswith("..."):
+            password = password[:-3].strip()
+        while password.endswith("…"):  # Unicode ellipsis
+            password = password[:-1].strip()
         if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
             logger.debug(f"Credential rejected: invalid username '{username}' from {source_agent}")
             return False

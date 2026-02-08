@@ -355,11 +355,53 @@ class OrchestratorTools(Toolset):
             return f"✓ Credential access complete: {result.result}"
         return f"✗ Credential access failed: {result.error}"
 
+    def _lookup_hash_from_state(self, username: str, domain: str, hash_type: str) -> str | None:
+        """Look up actual hash value from state by username/domain/type."""
+        hash_type_lower = hash_type.lower().replace("-", "").replace("_", "")
+        for h in self.shared_state.all_hashes:
+            h_type = (h.hash_type or "").lower().replace("-", "").replace("_", "")
+            h_domain = (h.domain or "").lower()
+            h_user = (h.username or "").lower()
+            if (
+                h_user == username.lower()
+                and h_domain == domain.lower()
+                and (
+                    h_type == hash_type_lower
+                    or hash_type_lower in h_type
+                    or h_type in hash_type_lower
+                )
+            ):
+                return h.hash_value
+        return None
+
+    def _is_valid_hash_value(self, hash_value: str) -> bool:
+        """Check if hash_value looks like an actual hash (not a label/identifier)."""
+        if not hash_value:
+            return False
+        v = hash_value.strip()
+
+        # Kerberos hashes start with $
+        if v.startswith("$"):
+            return True
+
+        # NTLM hashes are LM:NT format (32 hex chars each)
+        # e.g., "aad3b435b51404eeaad3b435b51404ee:abcdef1234567890..."
+        if ":" in v:
+            parts = v.split(":")
+            if len(parts) >= 2:
+                # Check if first part looks like hex (LM hash is 32 chars)
+                first_part = parts[0]
+                if len(first_part) == 32 and all(c in "0123456789abcdefABCDEF" for c in first_part):
+                    return True
+
+        # Invalid: labels like "AS-REP:domain\user", "NTLM:username"
+        return False
+
     @dn.tool_method
     async def dispatch_crack_hash(
         self,
-        hash_value: str,
-        hash_type: str,
+        hash_value: str = "",
+        hash_type: str = "",
         priority: int = 5,
         username: str = "",
         domain: str = "",
@@ -370,15 +412,20 @@ class OrchestratorTools(Toolset):
         """
         Send hash to CrackerAgent for cracking.
 
-        The cracker agent will use hashcat or john to attempt to crack
-        the hash and report results back.
+        NOTE: Background automation handles hash cracking automatically.
+        Only use this tool if you need to manually trigger cracking with
+        specific priority or wordlist settings.
+
+        The hash_value will be auto-looked up from state if username/domain
+        are provided and hash_value is missing or invalid.
 
         Args:
-            hash_value: The hash to crack
-            hash_type: Type - NTLM, NetNTLMv2, Kerberos, AS-REP
+            hash_value: The actual hash (e.g., "$krb5tgs$..." or "aad3b435:...").
+                       If not provided, will lookup from state using username/domain.
+            hash_type: Type - NTLM, NetNTLMv2, Kerberoast, AS-REP
             priority: 1=urgent (krbtgt), 2=admin, 5=normal, 10=low
-            username: Associated username (helps prioritization)
-            domain: Associated domain
+            username: Username to crack (used for lookup if hash_value missing)
+            domain: Domain (used for lookup if hash_value missing)
             wordlist: Wordlist to use (default: rockyou.txt)
             wait_for_result: If True, wait for cracking to complete
             timeout: Max time to wait if wait_for_result=True (seconds)
@@ -387,16 +434,40 @@ class OrchestratorTools(Toolset):
             Task ID for tracking, or cracked result if wait_for_result=True
 
         Example:
-            # Crack admin hash with high priority
+            # Crack by username/domain (hash auto-looked up from state)
             >>> dispatch_crack_hash(
-            ...     hash_value="aad3b435b51404eeaad3b435b51404ee:...",
-            ...     hash_type="NTLM",
-            ...     priority=2,
-            ...     username="Administrator"
+            ...     username="sansa.stark",
+            ...     domain="north.sevenkingdoms.local",
+            ...     hash_type="Kerberoast",
+            ...     priority=2
             ... )
         """
+        resolved_hash = hash_value
+
+        # Auto-lookup hash from state if hash_value is missing or invalid
+        if not self._is_valid_hash_value(hash_value):
+            if username and domain and hash_type:
+                looked_up = self._lookup_hash_from_state(username, domain, hash_type)
+                if looked_up:
+                    resolved_hash = looked_up
+                    logger.info(
+                        "Auto-resolved hash for {}\\{} from state",
+                        domain,
+                        username,
+                    )
+                else:
+                    return (
+                        f"✗ Could not find hash for {domain}\\{username} ({hash_type}) in state. "
+                        "Use get_all_hashes to see available hashes."
+                    )
+            else:
+                return (
+                    "✗ Invalid hash_value provided and missing username/domain/hash_type for lookup. "
+                    "Provide either a valid hash (starting with $ or containing :) or username+domain+hash_type."
+                )
+
         task_id = await self.dispatcher.request_crack(
-            hash_value=hash_value,
+            hash_value=resolved_hash,
             hash_type=hash_type,
             source_agent=self._agent_name,
             username=username,
@@ -970,9 +1041,10 @@ class OrchestratorTools(Toolset):
         Get all hashes discovered by any agent.
 
         Useful for tracking which hashes need cracking.
+        Note: Background automation handles hash cracking automatically.
 
         Returns:
-            Formatted list of discovered hashes
+            Formatted list of discovered hashes with full hash values
         """
         hashes = self.shared_state.all_hashes
 
@@ -985,13 +1057,64 @@ class OrchestratorTools(Toolset):
 
         for h in hashes:
             status = "✓ CRACKED" if h.cracked_password else "⏳ pending"
-            lines.append(f"  • {h.domain}\\{h.username}: {h.hash_type} [{status}]")
+            lines.append(f"  • {h.domain}\\{h.username} ({h.hash_type}) [{status}]")
+            lines.append(f"    hash_value: {h.hash_value}")
             if h.cracked_password:
+                lines.append(f"    cracked: {h.cracked_password}")
                 cracked += 1
             else:
                 uncracked += 1
 
         lines.append(f"\nSummary: {cracked} cracked, {uncracked} pending")
+        lines.append("\nNote: Background automation handles cracking automatically.")
+        return "\n".join(lines)
+
+    @dn.tool_method
+    def get_hash_value(self, username: str, domain: str, hash_type: str = "") -> str:
+        """
+        Get the full hash value for a specific user from state.
+
+        Useful when you need the actual hash string for manual operations.
+
+        Args:
+            username: The username to look up
+            domain: The domain to look up
+            hash_type: Optional hash type filter (NTLM, Kerberoast, AS-REP)
+
+        Returns:
+            The full hash value or error message
+        """
+        matches = []
+        for h in self.shared_state.all_hashes:
+            h_domain = (h.domain or "").lower()
+            h_user = (h.username or "").lower()
+            if h_user == username.lower() and h_domain == domain.lower():
+                if hash_type:
+                    h_type = (h.hash_type or "").lower().replace("-", "").replace("_", "")
+                    filter_type = hash_type.lower().replace("-", "").replace("_", "")
+                    if filter_type not in h_type and h_type not in filter_type:
+                        continue
+                matches.append(h)
+
+        if not matches:
+            return f"✗ No hash found for {domain}\\{username}" + (
+                f" with type {hash_type}" if hash_type else ""
+            )
+
+        if len(matches) == 1:
+            h = matches[0]
+            result = f"Hash for {h.domain}\\{h.username} ({h.hash_type}):\n{h.hash_value}"
+            if h.cracked_password:
+                result += f"\n\nCracked password: {h.cracked_password}"
+            return result
+
+        # Multiple matches - return all
+        lines = [f"Found {len(matches)} hashes for {domain}\\{username}:"]
+        for h in matches:
+            lines.append(f"\n{h.hash_type}:")
+            lines.append(h.hash_value)
+            if h.cracked_password:
+                lines.append(f"  Cracked: {h.cracked_password}")
         return "\n".join(lines)
 
     @dn.tool_method
