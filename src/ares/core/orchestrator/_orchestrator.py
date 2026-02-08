@@ -422,6 +422,7 @@ async def run_multi_agent_operation(  # noqa: PLR0912
             _auto_credential_expansion(dispatcher), name="auto_credential_expansion"
         ),
         asyncio.create_task(_auto_credential_access(dispatcher), name="auto_credential_access"),
+        asyncio.create_task(_auto_crack_dispatch(dispatcher), name="auto_crack_dispatch"),
         asyncio.create_task(_auto_mssql_detection(dispatcher), name="auto_mssql_detection"),
         asyncio.create_task(_auto_adcs_enumeration(dispatcher), name="auto_adcs_enumeration"),
         asyncio.create_task(_auto_share_spider(dispatcher), name="auto_share_spider"),
@@ -936,9 +937,7 @@ async def _auto_credential_expansion(
             # Skip if not enough hosts discovered yet
             if len(state.all_hosts) < min_hosts:
                 logger.debug(
-                    "Waiting for hosts (%d/%d) before credential expansion",
-                    len(state.all_hosts),
-                    min_hosts,
+                    f"Waiting for hosts ({len(state.all_hosts)}/{min_hosts}) before credential expansion"
                 )
                 continue
 
@@ -952,10 +951,8 @@ async def _auto_credential_expansion(
 
             if new_creds and not expansion_running:
                 logger.info(
-                    "Auto-expansion: %d new credential(s) detected, "
-                    "triggering lateral movement tests against %d hosts",
-                    len(new_creds),
-                    len(state.all_hosts),
+                    f"Auto-expansion: {len(new_creds)} new credential(s) detected, "
+                    f"triggering lateral movement tests against {len(state.all_hosts)} hosts"
                 )
 
                 expansion_running = True
@@ -1013,8 +1010,7 @@ async def _auto_mssql_detection(
 
             if queued > 0:
                 logger.info(
-                    "🗄️ Auto-detected MSSQL: queued %d vulnerability(ies) for exploitation",
-                    queued,
+                    f"🗄️ Auto-detected MSSQL: queued {queued} vulnerability(ies) for exploitation"
                 )
 
         except asyncio.CancelledError:
@@ -1393,10 +1389,7 @@ async def _auto_bloodhound(  # noqa: PLR0912
                         attempt_count = 0
 
                     logger.info(
-                        "🩸 Auto-BloodHound: Dispatching collection for %s with %s\\%s",
-                        domain,
-                        cred.domain,
-                        cred.username,
+                        f"🩸 Auto-BloodHound: Dispatching collection for {domain} with {cred.domain}\\{cred.username}"
                     )
 
                     task_id = await dispatcher.request_recon(
@@ -1749,18 +1742,12 @@ async def _auto_credential_access(  # noqa: PLR0912
                 if "$krb5tgs$" in hash_value_lower or "KERBEROAST" in hash_type_upper:
                     crack_priority = 2  # High priority - service accounts often weak
                     logger.info(
-                        "Kerberoast hash detected for %s\\%s, boosting crack priority to %d",
-                        hash_obj.domain,
-                        hash_obj.username,
-                        crack_priority,
+                        f"Kerberoast hash detected for {hash_obj.domain}\\{hash_obj.username}, boosting crack priority to {crack_priority}"
                     )
                 elif "$krb5asrep$" in hash_value_lower or "ASREP" in hash_type_upper:
                     crack_priority = 3  # Medium-high priority
                     logger.info(
-                        "AS-REP hash detected for %s\\%s, boosting crack priority to %d",
-                        hash_obj.domain,
-                        hash_obj.username,
-                        crack_priority,
+                        f"AS-REP hash detected for {hash_obj.domain}\\{hash_obj.username}, boosting crack priority to {crack_priority}"
                     )
 
                 crack_task_id = await dispatcher.request_crack(
@@ -1781,6 +1768,89 @@ async def _auto_credential_access(  # noqa: PLR0912
             break
         except Exception as e:
             logger.error(f"Auto credential access error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_crack_dispatch(
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 30.0,
+) -> None:
+    """
+    Dedicated background task for dispatching hash crack requests.
+
+    This runs independently of _auto_credential_access to ensure crack tasks
+    are always dispatched promptly when new hashes are discovered.
+
+    Processes: AS-REP, Kerberoast, and other crackable hash types.
+    """
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            if state.completed or state.has_domain_admin:
+                logger.debug("Operation complete, stopping auto crack dispatch")
+                break
+
+            if not state.all_hashes:
+                continue
+
+            for hash_obj in state.all_hashes:
+                # Skip already cracked
+                if hash_obj.cracked_password:
+                    continue
+
+                # Build crack key for deduplication
+                crack_key = _make_crack_key(
+                    hash_obj.username,
+                    hash_obj.domain or "",
+                    hash_obj.hash_value,
+                    hash_obj.hash_type or "",
+                )
+
+                if crack_key in state.processed_crack_requests:
+                    continue
+
+                # Determine priority based on hash type
+                crack_priority = 5  # Default
+                hash_value_lower = hash_obj.hash_value.lower()
+                hash_type_upper = (hash_obj.hash_type or "").upper()
+
+                if "$krb5tgs$" in hash_value_lower or "KERBEROAST" in hash_type_upper:
+                    crack_priority = 2  # High priority - service accounts
+                    logger.info(
+                        f"Auto-crack: Kerberoast hash for {hash_obj.domain}\\{hash_obj.username}, priority={crack_priority}"
+                    )
+                elif "$krb5asrep$" in hash_value_lower or "ASREP" in hash_type_upper:
+                    crack_priority = 3  # Medium-high priority
+                    logger.info(
+                        f"Auto-crack: AS-REP hash for {hash_obj.domain}\\{hash_obj.username}, priority={crack_priority}"
+                    )
+                else:
+                    logger.info(
+                        f"Auto-crack: {hash_obj.hash_type} hash for {hash_obj.domain}\\{hash_obj.username}, priority={crack_priority}"
+                    )
+
+                crack_task_id = await dispatcher.request_crack(
+                    hash_value=hash_obj.hash_value,
+                    hash_type=hash_obj.hash_type or "unknown",
+                    source_agent="orchestrator",
+                    username=hash_obj.username,
+                    domain=hash_obj.domain or "",
+                    priority=crack_priority,
+                )
+
+                if crack_task_id:
+                    state.processed_crack_requests.add(crack_key)
+                    logger.info(
+                        f"Auto-crack dispatched: {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type}) -> {crack_task_id}"
+                    )
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto crack dispatch error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
 
 
@@ -1893,10 +1963,7 @@ async def _auto_coercion(  # noqa: PLR0912
                 if task_id:
                     state.processed_esc8_servers.add(server_ip)
                     logger.info(
-                        "🎯 Auto ESC8 coercion dispatched: relay to ADCS %s, coerce DC %s (task %s)",
-                        server_hostname or server_ip,
-                        target_dc.hostname or target_dc.ip,
-                        task_id,
+                        f"🎯 Auto ESC8 coercion dispatched: relay to ADCS {server_hostname or server_ip}, coerce DC {target_dc.hostname or target_dc.ip} (task {task_id})"
                     )
 
             # === DC COERCION FOR LDAPS RELAY ===
@@ -1954,10 +2021,7 @@ async def _auto_coercion(  # noqa: PLR0912
 
                 state.processed_writable_shares.add(share_key)
                 logger.info(
-                    "Writable share detected: %s/%s (%s) - potential for file-based coercion",
-                    share.host,
-                    share.name,
-                    perms,
+                    f"Writable share detected: {share.host}/{share.name} ({perms}) - potential for file-based coercion"
                 )
 
         except asyncio.CancelledError:
@@ -2018,25 +2082,16 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
                     if task_result.success:
                         # Task succeeded - persist to state (won't retry after restart)
                         state.processed_delegation_creds.add(cred_key)
-                        logger.info(
-                            "Auto-delegation task %s succeeded for %s",
-                            task_id,
-                            cred_key,
-                        )
+                        logger.info(f"Auto-delegation task {task_id} succeeded for {cred_key}")
                     else:
                         # Task failed - DON'T add to state so it can be retried
                         logger.warning(
-                            "Auto-delegation task %s failed for %s: %s. Will retry.",
-                            task_id,
-                            cred_key,
-                            task_result.error,
+                            f"Auto-delegation task {task_id} failed for {cred_key}: {task_result.error}. Will retry."
                         )
                 else:
                     # Task not in pending or completed - probably lost, allow retry
                     logger.warning(
-                        "Auto-delegation task %s missing for %s, allowing retry",
-                        task_id,
-                        cred_key,
+                        f"Auto-delegation task {task_id} missing for {cred_key}, allowing retry"
                     )
                     del dispatched_tasks[task_id]
 
@@ -2067,9 +2122,7 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
 
                 # Dispatch delegation enumeration to PRIVESC agent (has DelegationTools)
                 logger.info(
-                    "Auto-delegation: Running find_delegation for {}\\{}",
-                    cred.domain,
-                    cred.username,
+                    f"Auto-delegation: Running find_delegation for {cred.domain}\\{cred.username}"
                 )
 
                 task_id = await dispatcher.request_privesc_enumeration(
@@ -2084,10 +2137,7 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
                     # Track as dispatched - will be marked processed only on success
                     dispatched_tasks[task_id] = cred_key
                     logger.info(
-                        "Auto-delegation task {} dispatched for {}\\{}",
-                        task_id,
-                        cred.domain,
-                        cred.username,
+                        f"Auto-delegation task {task_id} dispatched for {cred.domain}\\{cred.username}"
                     )
 
         except asyncio.CancelledError:
@@ -2144,21 +2194,12 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
                         # Persist successful host to state for restart recovery
                         state.processed_secretsdump.add(host_ip)
                         logger.info(
-                            "Auto-secretsdump succeeded on %s with %s\\%s",
-                            host_ip,
-                            domain,
-                            username,
+                            f"Auto-secretsdump succeeded on {host_ip} with {domain}\\{username}"
                         )
                     elif task_result and not task_result.success:
                         failed_attempts[key] = failed_attempts.get(key, 0) + 1
                         logger.warning(
-                            "Auto-secretsdump failed on %s with %s\\%s: %s (attempt %d/%d)",
-                            host_ip,
-                            domain,
-                            username,
-                            task_result.error,
-                            failed_attempts[key],
-                            max_retries,
+                            f"Auto-secretsdump failed on {host_ip} with {domain}\\{username}: {task_result.error} (attempt {failed_attempts[key]}/{max_retries})"
                         )
                     del secretsdump_attempts[key]
 
