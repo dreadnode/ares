@@ -866,6 +866,9 @@ class SharedRedTeamState:
     processed_spidered_shares: set[str] = field(
         default_factory=set
     )  # "host:share:user:domain" spidered
+    processed_expansion_creds: set[str] = field(
+        default_factory=set
+    )  # "domain:user:pwdhash" - expansion loop triggered
 
     # Agent registry
     registered_agents: dict[str, AgentInfo] = field(default_factory=dict)

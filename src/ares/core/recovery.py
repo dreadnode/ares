@@ -202,6 +202,7 @@ def _merge_background_task_tracking(
     target.processed_adcs_servers |= existing.processed_adcs_servers
     target.processed_bloodhound_domains |= existing.processed_bloodhound_domains
     target.processed_spidered_shares |= existing.processed_spidered_shares
+    target.processed_expansion_creds |= existing.processed_expansion_creds
 
 
 class OperationRecoveryManager:

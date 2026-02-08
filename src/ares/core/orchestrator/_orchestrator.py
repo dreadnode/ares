@@ -916,8 +916,11 @@ async def _auto_credential_expansion(
     """
     from ares.core.workflows import credential_expansion_loop
 
-    processed_creds: set[tuple[str, str, int]] = set()  # (username, domain, password_hash)
+    # NOTE: processed credentials persisted in state.processed_expansion_creds for restart recovery
     expansion_running = False
+
+    def _make_expansion_key(username: str, domain: str, password: str) -> str:
+        return f"{domain.lower()}:{username.lower()}:{hash(password or '')}"
 
     while True:
         try:
@@ -933,22 +936,26 @@ async def _auto_credential_expansion(
             # Skip if not enough hosts discovered yet
             if len(state.all_hosts) < min_hosts:
                 logger.debug(
-                    f"Waiting for hosts ({len(state.all_hosts)}/{min_hosts}) "
-                    "before credential expansion"
+                    "Waiting for hosts (%d/%d) before credential expansion",
+                    len(state.all_hosts),
+                    min_hosts,
                 )
                 continue
 
-            # Check for new credentials
-            current_creds = {
-                (c.username, c.domain or "", hash(c.password or "")) for c in state.all_credentials
-            }
-            new_creds = current_creds - processed_creds
+            # Check for new credentials (not yet in persisted state)
+            new_creds = [
+                c
+                for c in state.all_credentials
+                if _make_expansion_key(c.username, c.domain or "", c.password or "")
+                not in state.processed_expansion_creds
+            ]
 
             if new_creds and not expansion_running:
-                new_count = len(new_creds)
                 logger.info(
-                    f"🔑 Auto-expansion: {new_count} new credential(s) detected, "
-                    f"triggering lateral movement tests against {len(state.all_hosts)} hosts"
+                    "Auto-expansion: %d new credential(s) detected, "
+                    "triggering lateral movement tests against %d hosts",
+                    len(new_creds),
+                    len(state.all_hosts),
                 )
 
                 expansion_running = True
@@ -958,8 +965,10 @@ async def _auto_credential_expansion(
                     logger.warning(f"Credential expansion failed: {e}")
                 finally:
                     expansion_running = False
-                    # Mark all current creds as processed
-                    processed_creds.update(current_creds)
+                    # Mark all current creds as processed (persist to state)
+                    for c in state.all_credentials:
+                        key = _make_expansion_key(c.username, c.domain or "", c.password or "")
+                        state.processed_expansion_creds.add(key)
 
         except asyncio.CancelledError:
             break
@@ -1063,13 +1072,13 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                 logger.debug("ADCS scanner: no ADCS servers detected yet")
                 continue
 
-            # Get domains we know about
-            domains: set[str] = set()
+            # Build current domain set (computed from state each iteration)
+            _iter_domains: set[str] = set()
             if state.target and state.target.domain:
-                domains.add(state.target.domain)
+                _iter_domains.add(state.target.domain)
             for cred in state.all_credentials:
                 if cred.domain:
-                    domains.add(cred.domain)
+                    _iter_domains.add(cred.domain)
 
             current_time = asyncio.get_event_loop().time()
 
@@ -1108,7 +1117,7 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                         task_info = state.pending_tasks.get(task_id)
                         if task_info and task_info.status == TaskStatus.COMPLETED:
                             state.processed_adcs_servers.add(server_ip)
-                            logger.info("ADCS enumeration succeeded for %s", server_ip)
+                            logger.info(f"ADCS enumeration succeeded for {server_ip}")
                             break
 
                         # Skip if max retries reached
@@ -1145,8 +1154,8 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                     target_domain = cred.domain
                     if not target_domain:
                         target_domain = state.target.domain if state.target else ""
-                    if not target_domain and domains:
-                        target_domain = next(iter(domains))
+                    if not target_domain and _iter_domains:
+                        target_domain = next(iter(_iter_domains))
 
                     if not target_domain:
                         continue
@@ -1304,17 +1313,17 @@ async def _auto_bloodhound(  # noqa: PLR0912
                 logger.debug("BloodHound scanner: waiting for credentials")
                 continue
 
-            # Get all known domains including trusted domains
-            domains: set[str] = set()
+            # Build current domain set (computed from state each iteration)
+            _iter_domains: set[str] = set()
             if state.target and state.target.domain:
-                domains.add(state.target.domain.lower())
+                _iter_domains.add(state.target.domain.lower())
             for cred in state.all_credentials:
                 if cred.domain:
-                    domains.add(cred.domain.lower())
+                    _iter_domains.add(cred.domain.lower())
             # Include trusted domains discovered via BloodHound/nltest
             for trusted in state.trusted_domains:
                 if trusted:
-                    domains.add(trusted.lower())
+                    _iter_domains.add(trusted.lower())
             # Also include domains from discovered hosts (parent/sibling domains)
             for host in state.all_hosts:
                 if host.hostname and "." in host.hostname:
@@ -1323,15 +1332,15 @@ async def _auto_bloodhound(  # noqa: PLR0912
                     if len(parts) > 1:
                         host_domain = parts[1]
                         if host_domain and not host_domain.endswith(".internal"):
-                            domains.add(host_domain)
+                            _iter_domains.add(host_domain)
 
-            if not domains:
+            if not _iter_domains:
                 continue
 
             current_time = asyncio.get_event_loop().time()
 
             # Try to run BloodHound for each domain
-            for domain in domains:
+            for domain in _iter_domains:
                 # Skip domains we've already successfully enumerated (persisted in state)
                 if domain.lower() in state.processed_bloodhound_domains:
                     continue
@@ -1360,7 +1369,7 @@ async def _auto_bloodhound(  # noqa: PLR0912
                         task_info = state.pending_tasks.get(task_id)
                         if task_info and task_info.status == TaskStatus.COMPLETED:
                             state.processed_bloodhound_domains.add(domain.lower())
-                            logger.info("BloodHound collection succeeded for %s", domain)
+                            logger.info(f"BloodHound collection succeeded for {domain}")
                             break
 
                         # Skip if max retries reached
@@ -1465,28 +1474,31 @@ async def _auto_credential_access(  # noqa: PLR0912
             if not host_ips and state.target and state.target.ip:
                 host_ips = [state.target.ip]
 
-            hosts_by_domain: dict[str, list[str]] = {}
+            _iter_hosts_by_domain: dict[str, list[str]] = {}
             for host in state.all_hosts:
                 if not host.ip:
                     continue
                 hostname = (host.hostname or "").lower()
                 if "." in hostname:
                     host_domain = hostname.split(".", 1)[1]
-                    hosts_by_domain.setdefault(host_domain, []).append(host.ip)
+                    _iter_hosts_by_domain.setdefault(host_domain, []).append(host.ip)
             if state.target and state.target.domain and state.target.ip:
-                hosts_by_domain.setdefault(state.target.domain.lower(), []).append(state.target.ip)
+                _iter_hosts_by_domain.setdefault(state.target.domain.lower(), []).append(
+                    state.target.ip
+                )
 
-            domains: set[str] = set()
+            # Build current domain set (computed from state each iteration)
+            _iter_domains: set[str] = set()
             if state.target and state.target.domain:
-                domains.add(state.target.domain)
+                _iter_domains.add(state.target.domain)
             for cred in state.all_credentials:
                 if cred.domain:
-                    domains.add(cred.domain)
+                    _iter_domains.add(cred.domain)
             for user in state.all_users:
                 if user.domain:
-                    domains.add(user.domain)
+                    _iter_domains.add(user.domain)
 
-            if not domains:
+            if not _iter_domains:
                 await dispatcher.wait_for_credential_access_signal(check_interval)
                 continue
 
@@ -1514,14 +1526,13 @@ async def _auto_credential_access(  # noqa: PLR0912
             has_new_domains = (
                 not state.all_credentials
                 and not state.all_hashes
-                and any(domain.lower() not in state.processed_asrep_domains for domain in domains)
+                and any(d.lower() not in state.processed_asrep_domains for d in _iter_domains)
             )
             # Check if any domain has users but hasn't had password spray run yet
             has_unsprayed_users = any(
-                domain.lower() not in state.processed_password_spray
-                and sum(1 for u in state.all_users if (u.domain or "").lower() == domain.lower())
-                >= 3
-                for domain in domains
+                d.lower() not in state.processed_password_spray
+                and sum(1 for u in state.all_users if (u.domain or "").lower() == d.lower()) >= 3
+                for d in _iter_domains
             )
 
             if not (
@@ -1535,10 +1546,10 @@ async def _auto_credential_access(  # noqa: PLR0912
                 continue
 
             if not state.all_credentials and not state.all_hashes:
-                for domain in sorted(domains):
+                for domain in sorted(_iter_domains):
                     if domain.lower() in state.processed_asrep_domains:
                         continue
-                    domain_hosts = hosts_by_domain.get(domain.lower(), []) or host_ips
+                    domain_hosts = _iter_hosts_by_domain.get(domain.lower(), []) or host_ips
                     # Include low-hanging fruit techniques that work without credentials
                     task_id = await dispatcher.request_credential_access(
                         source_agent="orchestrator",
@@ -1559,7 +1570,7 @@ async def _auto_credential_access(  # noqa: PLR0912
 
             # Check for new users without credentials - run username_as_password on them
             # This catches cases like hodor:hodor where username equals password
-            for domain in sorted(domains):
+            for domain in sorted(_iter_domains):
                 # Find users in this domain that don't have credentials
                 domain_users = [
                     u.username
@@ -1580,7 +1591,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                         enum_cred = c
                         break
 
-                domain_hosts = hosts_by_domain.get(domain.lower(), []) or host_ips
+                domain_hosts = _iter_hosts_by_domain.get(domain.lower(), []) or host_ips
 
                 # Run username_as_password if we have enough users and haven't done it yet
                 should_run_username_spray = domain.lower() not in state.processed_username_spray
@@ -1635,7 +1646,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                 if key in state.processed_cred_expansion:
                     continue
                 domain_name = cred.domain or (state.target.domain if state.target else "")
-                domain_hosts = hosts_by_domain.get(domain_name.lower(), []) or host_ips
+                domain_hosts = _iter_hosts_by_domain.get(domain_name.lower(), []) or host_ips
                 task_id = await dispatcher.request_credential_access(
                     source_agent="orchestrator",
                     domain=domain_name,
@@ -1696,7 +1707,9 @@ async def _auto_credential_access(  # noqa: PLR0912
                         domain_name = hash_obj.domain or (
                             state.target.domain if state.target else ""
                         )
-                        domain_hosts = hosts_by_domain.get(domain_name.lower(), []) or host_ips
+                        domain_hosts = (
+                            _iter_hosts_by_domain.get(domain_name.lower(), []) or host_ips
+                        )
                         task_id = await dispatcher.request_credential_access(
                             source_agent="orchestrator",
                             domain=domain_name,
@@ -2054,7 +2067,7 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
 
                 # Dispatch delegation enumeration to PRIVESC agent (has DelegationTools)
                 logger.info(
-                    "Auto-delegation: Running find_delegation for %s\\%s",
+                    "Auto-delegation: Running find_delegation for {}\\{}",
                     cred.domain,
                     cred.username,
                 )
@@ -2071,7 +2084,7 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
                     # Track as dispatched - will be marked processed only on success
                     dispatched_tasks[task_id] = cred_key
                     logger.info(
-                        "Auto-delegation task %s dispatched for %s\\%s",
+                        "Auto-delegation task {} dispatched for {}\\{}",
                         task_id,
                         cred.domain,
                         cred.username,
@@ -2623,7 +2636,7 @@ async def _auto_acl_chain_follow(  # noqa: PLR0912
                         },
                     )
                     state.dispatched_acl_steps.add(step_key)
-                    logger.info("Dispatched ACL chain step: %s", task_id)
+                    logger.info(f"Dispatched ACL chain step: {task_id}")
                 except Exception as e:
                     logger.warning(f"🔗 Failed to dispatch ACL chain step: {e}")
 

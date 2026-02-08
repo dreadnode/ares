@@ -272,7 +272,7 @@ class RoutingMixin:
 
         dc_ip = self._find_domain_controller_ip(domain)
 
-        logger.info("🎫 S4U SUCCESS! Auto-chaining secretsdump: %s -> %s", ticket_path, target_host)
+        logger.info(f"🎫 S4U SUCCESS! Auto-chaining secretsdump: {ticket_path} -> {target_host}")
 
         await self.request_credential_access(
             domain=domain,

@@ -142,7 +142,7 @@ class ResultProcessingMixin:
                 source_agent=source_agent,
             )
             if chained > 0:
-                logger.info("🎫 Auto-S4U-chain: dispatched %d lateral movement task(s)", chained)
+                logger.info(f"🎫 Auto-S4U-chain: dispatched {chained} lateral movement task(s)")
 
         # Broadcast completion
         if success:
@@ -1073,7 +1073,7 @@ class ResultProcessingMixin:
                 }
                 self.shared_state.gmsa_accounts.append(gmsa_entry)
                 existing_gmsa.add(account_lower)
-                logger.info("🔑 gMSA account stored in state: %s", account)
+                logger.info(f"🔑 gMSA account stored in state: {account}")
 
             # Check if already queued as vulnerability
             vuln_key = f"gmsa_readable:{account_lower}"
@@ -1108,7 +1108,7 @@ class ResultProcessingMixin:
             )
             queued += 1
 
-            logger.info("🔑 Auto-queued gMSA password retrieval for %s", account)
+            logger.info(f"🔑 Auto-queued gMSA password retrieval for {account}")
 
         return queued
 
