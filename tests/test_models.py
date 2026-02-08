@@ -1282,3 +1282,120 @@ class TestRetroactiveDomainNormalization:
 
         # Credential domain should remain unchanged
         assert state.all_credentials[0].domain == "contoso"
+
+
+class TestDomainAdminAutoDetection:
+    """Tests for automatic domain admin detection via hash analysis.
+
+    CRITICAL: Only krbtgt NTLM hash should trigger DA auto-detection.
+    Administrator hash does NOT trigger DA because it could be a local admin.
+    """
+
+    def test_krbtgt_hash_triggers_domain_admin(self) -> None:
+        """Test that krbtgt NTLM hash correctly triggers domain admin flag."""
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        assert state.has_domain_admin is False
+
+        hash_obj = Hash(
+            username="krbtgt",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            hash_type="NTLM",
+            domain="contoso.local",
+        )
+        state.add_hash(hash_obj, "secretsdump")
+
+        assert state.has_domain_admin is True
+        assert state.domain_admin_path is not None
+        assert len(state.weaknesses) > 0
+
+    def test_administrator_hash_does_not_trigger_domain_admin(self) -> None:
+        """Test that Administrator NTLM hash does NOT trigger domain admin.
+
+        This is critical: "Administrator" could be a LOCAL admin on a workstation,
+        not the domain Administrator. Getting 7 hashes instead of thousands from
+        ntds.dit = NOT domain admin.
+        """
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        assert state.has_domain_admin is False
+
+        hash_obj = Hash(
+            username="Administrator",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889",
+            hash_type="NTLM",
+            domain="contoso.local",
+        )
+        state.add_hash(hash_obj, "secretsdump")
+
+        # Administrator hash should NOT set domain admin
+        assert state.has_domain_admin is False
+        assert state.domain_admin_path is None
+
+    def test_administrator_lowercase_does_not_trigger_domain_admin(self) -> None:
+        """Test that administrator (lowercase) also doesn't trigger DA."""
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        hash_obj = Hash(
+            username="administrator",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889",
+            hash_type="NTLM",
+            domain="contoso.local",
+        )
+        state.add_hash(hash_obj, "lsass_dump")
+
+        assert state.has_domain_admin is False
+
+    def test_local_admin_does_not_trigger_domain_admin(self) -> None:
+        """Test that local Administrator from workstation doesn't trigger DA."""
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # This is what happens when you dump LSASS on a workstation
+        hash_obj = Hash(
+            username="Administrator",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889",
+            hash_type="NTLM",
+            domain="WS01",  # Workstation name, not domain
+        )
+        state.add_hash(hash_obj, "mimikatz")
+
+        assert state.has_domain_admin is False
+
+    def test_non_ntlm_krbtgt_does_not_trigger_domain_admin(self) -> None:
+        """Test that non-NTLM krbtgt hash doesn't trigger DA."""
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Kerberos TGT is not the same as NTLM hash
+        hash_obj = Hash(
+            username="krbtgt",
+            hash_value="$krb5tgs$23$*krbtgt$CONTOSO.LOCAL$...",
+            hash_type="kerberos",
+            domain="contoso.local",
+        )
+        state.add_hash(hash_obj, "kerberoast")
+
+        assert state.has_domain_admin is False
+
+    def test_regular_user_hash_does_not_trigger_domain_admin(self) -> None:
+        """Test that regular user NTLM hash doesn't trigger DA."""
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        hash_obj = Hash(
+            username="jsmith",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            hash_type="NTLM",
+            domain="contoso.local",
+        )
+        state.add_hash(hash_obj, "secretsdump")
+
+        assert state.has_domain_admin is False

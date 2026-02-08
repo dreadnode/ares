@@ -826,6 +826,34 @@ class SharedRedTeamState:
     has_golden_ticket: bool = False
     domain_admin_path: str | None = None
 
+    # Persistence tracking (CRITICAL: must be in state for pub/sub visibility)
+    # Golden tickets: {domain, ticket_path, created_at, krbtgt_hash}
+    golden_tickets: list[dict] = field(default_factory=list)
+    # Domains where AdminSDHolder backdoor was planted
+    adminsd_holder_backdoors: list[str] = field(default_factory=list)
+
+    # ACL chain tracking for multi-hop attacks
+    # Serialized chain data: {chain_id, steps, goal, domain, is_complete, progress}
+    acl_chains: list[dict] = field(default_factory=list)
+
+    # gMSA account tracking for password retrieval
+    # {account, domain, principals_allowed, discovered_by}
+    gmsa_accounts: list[dict] = field(default_factory=list)
+
+    # Background task deduplication tracking (CRITICAL for restart recovery)
+    # These prevent re-running expensive operations after orchestrator restart
+    # Format: "domain:username:password_hash" for creds, "domain:username:hash" for hashes
+    processed_cred_expansion: set[str] = field(default_factory=set)  # kerberoast/secretsdump done
+    processed_hash_lateral: set[str] = field(default_factory=set)  # lateral movement dispatched
+    processed_crack_requests: set[str] = field(default_factory=set)  # hash crack submitted
+    processed_asrep_domains: set[str] = field(default_factory=set)  # AS-REP roast done
+    processed_username_spray: set[str] = field(default_factory=set)  # username_as_password done
+    processed_password_spray: set[str] = field(default_factory=set)  # password_spray done
+    processed_secretsdump: set[str] = field(
+        default_factory=set
+    )  # secretsdump done "host:user:domain"
+    dispatched_acl_steps: set[str] = field(default_factory=set)  # ACL steps dispatched "chain:step"
+
     # Agent registry
     registered_agents: dict[str, AgentInfo] = field(default_factory=dict)
 
@@ -1026,6 +1054,118 @@ class SharedRedTeamState:
         # No FQDN found, return original
         return netbios_lower
 
+    @staticmethod
+    def _extract_kerberoast_spn_key(hash_value: str) -> str:
+        """Extract a deduplication key from a Kerberoast hash.
+
+        Kerberoast hash format: $krb5tgs$ETYPE$*user$realm$spn*$checksum$encrypted
+
+        We extract ETYPE (encryption type) and SPN to create a unique key.
+        Same user can have multiple SPNs, and same SPN can have different encryption
+        types (RC4=23, AES128=17, AES256=18), so we keep one per SPN+ETYPE combo.
+
+        Args:
+            hash_value: The Kerberoast hash string
+
+        Returns:
+            A key like "23:http/web01.contoso.local" or empty string if parse fails
+        """
+        if not hash_value or not hash_value.startswith("$krb5tgs$"):
+            return ""
+
+        # Format: $krb5tgs$23$*user$realm$spn*$...
+        parts = hash_value.split("$")
+        if len(parts) < 4:
+            return ""
+
+        etype = parts[2]  # Encryption type (23=RC4, 17=AES128, 18=AES256)
+
+        # Extract SPN from the *user$realm$spn* section
+        # Find content between first * and second *
+        try:
+            first_star = hash_value.index("*")
+            second_star = hash_value.index("*", first_star + 1)
+            inner = hash_value[first_star + 1 : second_star]
+            # inner = "user$realm$spn" - SPN is the last part
+            inner_parts = inner.split("$")
+            if len(inner_parts) >= 3:
+                spn = inner_parts[-1]  # Last part is SPN
+                return f"{etype}:{spn.lower()}"
+        except (ValueError, IndexError):
+            pass
+
+        return ""
+
+    def _resolve_credential_domain_from_users(self, username: str, provided_domain: str) -> str:
+        """Resolve credential domain by cross-referencing with discovered users.
+
+        In multi-domain AD forests, a credential might come in with a parent domain
+        (e.g., 'contoso.local') when the user actually belongs to a child domain
+        (e.g., 'child.contoso.local'). This method cross-references with
+        discovered users to return the correct domain.
+
+        Resolution logic:
+        1. If user exists in exactly one domain, use that domain
+        2. If user exists in a child domain of the provided domain, prefer the child
+        3. If user exists in the provided domain, use the provided domain
+        4. If user not found, return the provided domain unchanged
+
+        Args:
+            username: The username to look up
+            provided_domain: The domain from the credential
+
+        Returns:
+            The resolved domain (may be the same as provided_domain)
+        """
+        if not username:
+            return provided_domain
+
+        username_lower = username.lower()
+        provided_lower = provided_domain.lower()
+
+        # Find all domains where this user exists
+        user_domains: list[str] = []
+        for user in self.all_users:
+            if user.username.lower() == username_lower and user.domain:
+                user_domains.append(user.domain.lower())
+
+        if not user_domains:
+            # User not in discovered users - accept provided domain
+            return provided_domain
+
+        unique_domains = list(set(user_domains))
+
+        # If user exists in exactly one domain, use it
+        if len(unique_domains) == 1:
+            resolved = unique_domains[0]
+            if resolved != provided_lower:
+                logger.debug(f"Domain corrected for {username}: {provided_domain} -> {resolved}")
+            return resolved
+
+        # User exists in multiple domains - try to find the best match
+        # Prefer a child domain of the provided domain (more specific)
+        if provided_lower:
+            for domain in unique_domains:
+                # Check if domain is a child of provided domain
+                # e.g., 'child.contoso.local' is child of 'contoso.local'
+                if domain.endswith("." + provided_lower):
+                    logger.debug(
+                        f"Domain corrected for {username}: {provided_domain} -> {domain} (child domain)"
+                    )
+                    return domain
+
+            # If provided domain is one of the user's domains, use it
+            if provided_lower in unique_domains:
+                return provided_lower
+
+        # Multiple domains, can't determine - return the most specific (longest)
+        resolved = max(unique_domains, key=len)
+        if resolved != provided_lower:
+            logger.debug(
+                f"Domain resolved for {username}: {provided_domain} -> {resolved} (most specific)"
+            )
+        return resolved
+
     def add_credential(self, credential: Credential, source_agent: str) -> bool:
         """Add credential if not duplicate. Returns True if added."""
         username = credential.username.strip()
@@ -1034,6 +1174,9 @@ class SharedRedTeamState:
         # Resolve NetBIOS domain names (e.g., "CONTOSO") to FQDN (e.g., "contoso.local")
         if domain and "." not in domain:
             domain = self._resolve_netbios_to_fqdn(domain)
+        # Cross-reference with discovered users to get correct domain
+        # This handles cases where credential has parent domain but user is in child domain
+        domain = self._resolve_credential_domain_from_users(username, domain)
         password = credential.password.strip()
         if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
             logger.debug(f"Credential rejected: invalid username '{username}' from {source_agent}")
@@ -1077,7 +1220,12 @@ class SharedRedTeamState:
         return True
 
     def add_user(self, username: str, domain: str) -> bool:
-        """Add user if not duplicate. Returns True if added."""
+        """Add user if not duplicate. Returns True if added.
+
+        If the user already exists in a parent domain and is now being added to
+        a child domain, updates the existing entry to use the child domain
+        (child domains are more specific/accurate).
+        """
         if not username:
             logger.debug(f"User rejected: empty username for domain {domain}")
             return False
@@ -1097,15 +1245,62 @@ class SharedRedTeamState:
                 f"User rejected: path artifact '{normalized}' for domain {normalized_domain}"
             )
             return False
+
+        # Check for existing user entries
         for existing in self.all_users:
             existing_domain = (existing.domain or "").lower()
-            if existing.username == normalized and existing_domain == normalized_domain:
-                logger.debug(f"User rejected: duplicate {normalized_domain}\\{normalized}")
-                return False
+            if existing.username == normalized:
+                if existing_domain == normalized_domain:
+                    # Exact duplicate
+                    logger.debug(f"User rejected: duplicate {normalized_domain}\\{normalized}")
+                    return False
+                # Check if this is a child->parent or parent->child relationship
+                if normalized_domain.endswith("." + existing_domain):
+                    # New domain is a child of existing - update to more specific
+                    old_domain = existing_domain
+                    existing.domain = normalized_domain
+                    logger.info(
+                        f"User domain upgraded: {normalized} from {old_domain} to {normalized_domain}"
+                    )
+                    # Also update credentials with the old parent domain
+                    self._update_credentials_domain(normalized, old_domain, normalized_domain)
+                    self.add_domain(normalized_domain)
+                    return True
+                if existing_domain.endswith("." + normalized_domain):
+                    # Existing domain is more specific (child) - keep it
+                    logger.debug(
+                        f"User rejected: {normalized} already in more specific domain {existing_domain}"
+                    )
+                    return False
+
         self.all_users.append(User(username=normalized, domain=normalized_domain))
         self.add_domain(normalized_domain)
         logger.debug(f"User added: {normalized_domain}\\{normalized}")
         return True
+
+    def _update_credentials_domain(self, username: str, old_domain: str, new_domain: str) -> None:
+        """Update credentials for a user when their domain is corrected."""
+        updated = 0
+        for cred in self.all_credentials:
+            if (
+                cred.username.lower() == username.lower()
+                and cred.domain.lower() == old_domain.lower()
+            ):
+                cred.domain = new_domain
+                updated += 1
+        for hash_obj in self.all_hashes:
+            if (
+                hash_obj.username.lower() == username.lower()
+                and hash_obj.domain.lower() == old_domain.lower()
+            ):
+                hash_obj.domain = new_domain
+                updated += 1
+        if updated:
+            logger.info(
+                f"Updated {updated} credential(s)/hash(es) for {username}: "
+                f"{old_domain} -> {new_domain}"
+            )
+            self.all_credentials = self._dedupe_credentials(self.all_credentials)
 
     def add_domain(self, domain: str) -> bool:
         """Add domain if not duplicate. Returns True if added.
@@ -1209,8 +1404,104 @@ class SharedRedTeamState:
                 f"{updated_creds} creds, {updated_users} users, {updated_hashes} hashes"
             )
 
+        # Remove the NetBIOS name from all_domains since it's now represented by the FQDN
+        # e.g., remove "child" after normalizing to "child.contoso.local"
+        self.all_domains = [d for d in self.all_domains if d.lower() != netbios]
+
         # Now deduplicate credentials that may now be duplicates after normalization
         self.all_credentials = self._dedupe_credentials(self.all_credentials)
+
+        # Check if this is a child domain and normalize parent domain credentials
+        # e.g., when adding "child.contoso.local", check for credentials with
+        # "contoso.local" that should be reassigned to this child domain
+        self._normalize_parent_domain_credentials(fqdn)
+
+    def _normalize_parent_domain_credentials(self, child_fqdn: str) -> None:  # noqa: PLR0912
+        """Normalize credentials with parent domain when a child domain is discovered.
+
+        In AD forests, tools sometimes report credentials with the parent/root domain
+        even when the user only exists in a child domain. For example:
+        - contoso.local\\sql_svc when user is actually in child.contoso.local
+
+        This method:
+        1. Identifies if child_fqdn is a child domain of any existing domain
+        2. Finds credentials/users/hashes with the parent domain
+        3. Cross-references with all_users to see if the user ONLY exists in the child domain
+        4. If so, reassigns the credential to the child domain
+
+        Args:
+            child_fqdn: The child domain FQDN (e.g., "child.contoso.local")
+        """
+        # Find potential parent domains (e.g., "contoso.local" is parent of "child.contoso.local")
+        parts = child_fqdn.split(".")
+        if len(parts) < 3:
+            # Not a child domain (e.g., "contoso.local" has no parent)
+            return
+
+        # Extract parent domain (remove first label)
+        # e.g., "child.contoso.local" -> "contoso.local"
+        parent_domain = ".".join(parts[1:])
+
+        # Check if parent domain is in our known domains
+        if parent_domain not in [d.lower() for d in self.all_domains]:
+            return
+
+        updated_creds = 0
+        updated_users = 0
+        updated_hashes = 0
+
+        # Build a set of usernames that ONLY exist in the child domain
+        # These are users that should NOT have credentials with the parent domain
+        users_in_child: set[str] = set()
+        users_in_parent: set[str] = set()
+
+        for user in self.all_users:
+            user_domain = (user.domain or "").lower()
+            username_lower = user.username.lower()
+            if user_domain == child_fqdn:
+                users_in_child.add(username_lower)
+            elif user_domain == parent_domain:
+                users_in_parent.add(username_lower)
+
+        # Users that are ONLY in child domain (not in parent)
+        child_only_users = users_in_child - users_in_parent
+
+        if not child_only_users:
+            return
+
+        # Update credentials for users that only exist in the child domain
+        for cred in self.all_credentials:
+            cred_domain = (cred.domain or "").lower()
+            username_lower = cred.username.lower()
+            if cred_domain == parent_domain and username_lower in child_only_users:
+                cred.domain = child_fqdn
+                updated_creds += 1
+
+        # Update users (shouldn't happen often since we checked all_users above)
+        for user in self.all_users:
+            user_domain = (user.domain or "").lower()
+            username_lower = user.username.lower()
+            if user_domain == parent_domain and username_lower in child_only_users:
+                user.domain = child_fqdn
+                updated_users += 1
+
+        # Update hashes
+        for hash_obj in self.all_hashes:
+            hash_domain = (hash_obj.domain or "").lower()
+            username_lower = hash_obj.username.lower()
+            if hash_domain == parent_domain and username_lower in child_only_users:
+                hash_obj.domain = child_fqdn
+                updated_hashes += 1
+
+        if updated_creds or updated_users or updated_hashes:
+            logger.info(
+                f"Parent->child domain normalize '{parent_domain}' -> '{child_fqdn}': "
+                f"{updated_creds} creds, {updated_users} users, {updated_hashes} hashes "
+                f"(for {len(child_only_users)} child-only users)"
+            )
+
+            # Deduplicate after normalization
+            self.all_credentials = self._dedupe_credentials(self.all_credentials)
 
     def add_hash(self, hash_obj: Hash, source_agent: str) -> bool:  # noqa: PLR0912
         """Add hash if not duplicate. Returns True if added."""
@@ -1249,12 +1540,14 @@ class SharedRedTeamState:
                         f"Hash updated with cracked password: {domain}\\{username} ({hash_type}) "
                         f"from {source_agent}"
                     )
-                    # Create a credential from the cracked password
+                    # Create a credential from the cracked password, linking to parent hash
                     cracked_cred = Credential(
                         username=username,
                         password=hash_obj.cracked_password,
                         domain=domain,
                         source=f"cracked:{hash_type}",
+                        parent_id=existing.id,  # Link to the hash that was cracked
+                        attack_step=existing.attack_step + 1,
                     )
                     self.add_credential(cracked_cred, source_agent)
                     # Signal credential access if dispatcher available
@@ -1267,8 +1560,6 @@ class SharedRedTeamState:
                 )
                 return False
             # For AS-REP, dedupe by user since each request generates different hash but same password
-            # NOTE: Don't dedupe Kerberoast by user - same user can have multiple SPNs with different
-            # encryption types (RC4 vs AES), and we want to keep all of them for cracking flexibility
             existing_value = existing.hash_value or ""
             existing_is_asrep = (existing.hash_type or "").strip().lower() in {
                 "as-rep",
@@ -1284,6 +1575,31 @@ class SharedRedTeamState:
                         f"Hash rejected: duplicate AS-REP user {domain}\\{username} from {source_agent}"
                     )
                     return False
+
+            # For Kerberoast, dedupe by user+SPN+encryption_type
+            # Same user can have multiple SPNs, and same SPN can have RC4 vs AES
+            # But we don't need multiple copies of the same SPN with same encryption
+            # Hash format: $krb5tgs$ETYPE$*user$realm$spn*$checksum$encrypted
+            existing_is_kerberoast = (existing.hash_type or "").strip().lower() in {
+                "kerberoast",
+                "krb5tgs",
+                "tgs-rep",
+                "tgs",
+            } or existing_value.startswith("$krb5tgs$")
+
+            if is_kerberoast and existing_is_kerberoast:
+                existing_user = (existing.username or "").strip().lower()
+                existing_domain = (existing.domain or "").strip().lower()
+                if existing_user == username and existing_domain == domain:
+                    # Extract SPN and encryption type from both hashes
+                    new_spn_key = self._extract_kerberoast_spn_key(hash_value)
+                    existing_spn_key = self._extract_kerberoast_spn_key(existing_value)
+                    if new_spn_key and existing_spn_key and new_spn_key == existing_spn_key:
+                        logger.debug(
+                            f"Hash rejected: duplicate Kerberoast {domain}\\{username} "
+                            f"(SPN: {new_spn_key}) from {source_agent}"
+                        )
+                        return False
         # Update hash_obj with normalized values (including resolved domain)
         hash_obj.domain = domain
         hash_obj.username = username
@@ -1297,25 +1613,29 @@ class SharedRedTeamState:
         self.all_hashes.append(hash_obj)
         logger.info(f"Hash added: {domain}\\{username} ({hash_type}) (source: {source_agent})")
 
-        # Auto-detect Domain Admin: krbtgt or Administrator NTLM hash = DA achieved
-        if (
-            hash_type == "ntlm"
-            and username in ("krbtgt", "administrator")
-            and not self.has_domain_admin
-        ):
+        # Auto-detect Domain Admin: krbtgt NTLM hash = DA achieved
+        # NOTE: We ONLY check krbtgt, NOT Administrator, because:
+        # - krbtgt only exists on DCs, so its hash proves DC-level access
+        # - "Administrator" could be a LOCAL admin on a workstation (not DA!)
+        # - Having 7 hashes instead of all ntds.dit hashes = NOT domain admin
+        if hash_type == "ntlm" and username == "krbtgt" and not self.has_domain_admin:
             self.has_domain_admin = True
-            self.domain_admin_path = f"secretsdump → {username} NTLM hash extracted from DC"
+            # Build attack path from credential chain instead of hardcoding
+            attack_chain = self.format_attack_chain(hash_obj)
+            self.domain_admin_path = attack_chain
             logger.warning(
                 f"🏆 DOMAIN ADMIN AUTO-DETECTED: {domain}\\{username} NTLM hash "
                 f"found in state (source: {source_agent})"
             )
+            logger.info(f"Attack chain: {attack_chain}")
             self.add_weakness(
-                f"### Domain Admin Achieved — {username} NTLM hash extracted\n"
-                f"**Vulnerability:** Full NTDS.DIT dump obtained via secretsdump, "
-                f"including the {username} NTLM hash which grants Domain Admin access.\n"
+                f"### Domain Admin Achieved — krbtgt NTLM hash extracted\n"
+                f"**Attack Path:** {attack_chain}\n"
+                f"**Vulnerability:** krbtgt hash extracted via DCSync or ntds.dit dump, "
+                f"enabling Golden Ticket attacks.\n"
                 f"- **Affected Resource:** {domain} domain\n"
-                f"- **Discovery Method:** secretsdump (source: {source_agent})\n"
-                f"- **Impact:** Complete domain compromise. All domain user credentials exposed."
+                f"- **Discovery Method:** {source_agent}\n"
+                f"- **Impact:** Complete domain compromise. Golden Tickets grant indefinite DA access."
             )
 
         # Real-time checkpoint to Redis (don't call publish_hash - that would re-add)
@@ -1324,6 +1644,105 @@ class SharedRedTeamState:
             self._publish_async(self._dispatcher._checkpoint())
 
         return True
+
+    def find_by_id(self, item_id: str) -> Credential | Hash | None:
+        """Find a credential or hash by its ID.
+
+        Args:
+            item_id: The unique ID to search for.
+
+        Returns:
+            The Credential or Hash if found, None otherwise.
+        """
+        for cred in self.all_credentials:
+            if cred.id == item_id:
+                return cred
+        for hash_obj in self.all_hashes:
+            if hash_obj.id == item_id:
+                return hash_obj
+        return None
+
+    def build_attack_chain(self, item: Credential | Hash | None = None) -> list[dict[str, str]]:
+        """Build the attack chain by walking parent_id backwards.
+
+        Args:
+            item: The credential or hash to start from. If None, uses the most
+                  recent DA credential (krbtgt or Administrator hash).
+
+        Returns:
+            List of chain steps from initial access to final compromise, each with:
+            - type: "credential" or "hash"
+            - username: The username
+            - domain: The domain
+            - source: How it was discovered
+            - attack_step: Position in chain
+        """
+        # If no item provided, find the DA credential
+        if item is None:
+            for hash_obj in reversed(self.all_hashes):
+                if hash_obj.hash_type.lower() == "ntlm" and hash_obj.username.lower() in (
+                    "krbtgt",
+                    "administrator",
+                ):
+                    item = hash_obj
+                    break
+
+        if item is None:
+            return []
+
+        # Walk backwards through parent_id chain
+        chain: list[dict[str, str]] = []
+        visited: set[str] = set()
+        current: Credential | Hash | None = item
+
+        while current is not None:
+            if current.id in visited:
+                logger.warning(f"Cycle detected in attack chain at {current.id}")
+                break
+            visited.add(current.id)
+
+            step = {
+                "type": "hash" if isinstance(current, Hash) else "credential",
+                "username": current.username,
+                "domain": current.domain,
+                "source": current.source,
+                "attack_step": str(current.attack_step),
+            }
+            if isinstance(current, Hash):
+                step["hash_type"] = current.hash_type
+            chain.append(step)
+
+            # Move to parent
+            current = self.find_by_id(current.parent_id) if current.parent_id else None
+
+        # Reverse so chain goes from initial access to final compromise
+        chain.reverse()
+        return chain
+
+    def format_attack_chain(self, item: Credential | Hash | None = None) -> str:
+        """Format the attack chain as a human-readable string.
+
+        Args:
+            item: The credential or hash to start from. If None, uses DA credential.
+
+        Returns:
+            Formatted string like "password_spray → user1 → kerberoast → svc_sql → ..."
+        """
+        chain = self.build_attack_chain(item)
+        if not chain:
+            return "Unknown path"
+
+        parts = []
+        for step in chain:
+            source = step["source"].split(":")[0] if step["source"] else "unknown"
+            username = step["username"]
+            domain = step["domain"]
+            if step["type"] == "hash":
+                hash_type = step.get("hash_type", "NTLM")
+                parts.append(f"{source} → {domain}\\{username} ({hash_type})")
+            else:
+                parts.append(f"{source} → {domain}\\{username}")
+        return " → ".join(parts) if parts else "Unknown path"
 
     def add_host(self, host: Host) -> bool:  # noqa: PLR0912
         """Add host if not duplicate. Returns True if added."""
@@ -1540,6 +1959,13 @@ class SharedRedTeamState:
             "pending_credential_findings": len(self.pending_credential_findings),
             "has_domain_admin": self.has_domain_admin,
             "has_golden_ticket": self.has_golden_ticket,
+            "golden_ticket_count": len(self.golden_tickets),
+            "acl_chain_count": len(self.acl_chains),
+            "gmsa_account_count": len(self.gmsa_accounts),
+            "adminsd_backdoor_count": len(self.adminsd_holder_backdoors),
+            "processed_cred_expansion": len(self.processed_cred_expansion),
+            "processed_hash_lateral": len(self.processed_hash_lateral),
+            "processed_crack_requests": len(self.processed_crack_requests),
             "registered_agents": list(self.registered_agents.keys()),
         }
 
@@ -1567,7 +1993,167 @@ class SharedRedTeamState:
         state.all_credentials = cls._dedupe_credentials(state.all_credentials)
         if not state.all_domains:
             state.all_domains = cls._extract_domains(state)
+
+        # Clean up domain data to fix historical issues
+        state._cleanup_domain_data()
         return state
+
+    def _cleanup_domain_data(self) -> None:  # noqa: PLR0912
+        """Clean up domain data to fix historical issues.
+
+        This method fixes:
+        1. NetBIOS domains that should be FQDNs (e.g., "north" -> remove if "north.x.y" exists)
+        2. Users with parent domain when they only exist in child domain
+        3. Credentials with parent domain when user only exists in child domain
+        """
+        # 1. Remove NetBIOS entries when FQDN exists
+        fqdns = [d for d in self.all_domains if "." in d]
+        netbios_to_remove: set[str] = set()
+
+        for netbios in [d for d in self.all_domains if "." not in d]:
+            # Check if any FQDN starts with this NetBIOS name
+            for fqdn in fqdns:
+                if fqdn.startswith(netbios + "."):
+                    netbios_to_remove.add(netbios)
+                    break
+
+        if netbios_to_remove:
+            self.all_domains = [d for d in self.all_domains if d not in netbios_to_remove]
+            logger.info(
+                f"Cleaned up {len(netbios_to_remove)} NetBIOS domain(s): {netbios_to_remove}"
+            )
+
+        # 2. Build mapping of username -> domains (to find users in multiple domains)
+        user_domains: dict[str, set[str]] = {}
+        for user in self.all_users:
+            username_lower = user.username.lower()
+            domain_lower = (user.domain or "").lower()
+            if username_lower not in user_domains:
+                user_domains[username_lower] = set()
+            user_domains[username_lower].add(domain_lower)
+
+        # 3. For users in both parent and child domains, keep only the child domain
+        users_to_update: dict[str, str] = {}  # username -> correct child domain
+        for username, domains in user_domains.items():
+            if len(domains) <= 1:
+                continue
+            # Find parent-child relationships
+            for d1 in domains:
+                for d2 in domains:
+                    if d1 != d2 and d1.endswith("." + d2):
+                        # d1 is child of d2 - user should be in d1
+                        users_to_update[username] = d1
+
+        # 4. Update users and credentials
+        if users_to_update:
+            # Remove duplicate user entries with parent domain
+            updated_users: list[User] = []
+            seen_users: set[tuple[str, str]] = set()
+            for user in self.all_users:
+                username_lower = user.username.lower()
+                domain_lower = (user.domain or "").lower()
+                correct_domain = users_to_update.get(username_lower)
+
+                if correct_domain:
+                    # This user should be in the child domain
+                    if domain_lower != correct_domain:
+                        # Skip this entry (it's the parent domain duplicate)
+                        continue
+                    domain_lower = correct_domain
+                    user.domain = correct_domain
+
+                key = (username_lower, domain_lower)
+                if key not in seen_users:
+                    seen_users.add(key)
+                    updated_users.append(user)
+
+            if len(updated_users) < len(self.all_users):
+                logger.info(
+                    f"Cleaned up {len(self.all_users) - len(updated_users)} duplicate user(s) "
+                    f"with parent domain"
+                )
+                self.all_users = updated_users
+
+            # Update credentials with parent domain
+            creds_updated = 0
+            for cred in self.all_credentials:
+                username_lower = cred.username.lower()
+                correct_domain = users_to_update.get(username_lower)
+                if correct_domain and cred.domain.lower() != correct_domain:
+                    cred.domain = correct_domain
+                    creds_updated += 1
+
+            if creds_updated:
+                logger.info(f"Fixed {creds_updated} credential(s) with parent domain")
+                self.all_credentials = self._dedupe_credentials(self.all_credentials)
+
+            # Update hashes with parent domain
+            hashes_updated = 0
+            for hash_obj in self.all_hashes:
+                username_lower = hash_obj.username.lower()
+                correct_domain = users_to_update.get(username_lower)
+                if correct_domain and hash_obj.domain.lower() != correct_domain:
+                    hash_obj.domain = correct_domain
+                    hashes_updated += 1
+
+            if hashes_updated:
+                logger.info(f"Fixed {hashes_updated} hash(es) with parent domain")
+
+        # 5. Deduplicate Kerberoast/AS-REP hashes by user+SPN+etype
+        self.all_hashes = self._dedupe_hashes(self.all_hashes)
+
+    def _dedupe_hashes(self, hashes: list[Hash]) -> list[Hash]:
+        """Deduplicate hashes.
+
+        - NTLM hashes: dedupe by hash_value
+        - AS-REP hashes: dedupe by username+domain (same password)
+        - Kerberoast hashes: dedupe by username+domain+SPN+etype
+        """
+        deduped: list[Hash] = []
+        seen_values: set[str] = set()  # For NTLM
+        seen_asrep: set[str] = set()  # For AS-REP: domain:username
+        seen_kerberoast: set[str] = set()  # For Kerberoast: domain:username:spn_key
+
+        for hash_obj in hashes:
+            hash_value = hash_obj.hash_value or ""
+            hash_type = (hash_obj.hash_type or "").lower()
+            username = (hash_obj.username or "").lower()
+            domain = (hash_obj.domain or "").lower()
+
+            is_asrep = hash_type in {"as-rep", "asrep", "krb5asrep"} or hash_value.startswith(
+                "$krb5asrep$"
+            )
+            is_kerberoast = hash_type in {
+                "kerberoast",
+                "krb5tgs",
+                "tgs-rep",
+                "tgs",
+            } or hash_value.startswith("$krb5tgs$")
+
+            if is_asrep:
+                key = f"{domain}:{username}"
+                if key in seen_asrep:
+                    continue
+                seen_asrep.add(key)
+            elif is_kerberoast:
+                spn_key = self._extract_kerberoast_spn_key(hash_value)
+                key = f"{domain}:{username}:{spn_key}"
+                if key in seen_kerberoast:
+                    continue
+                seen_kerberoast.add(key)
+            else:
+                # NTLM and other hashes - dedupe by exact value
+                if hash_value in seen_values:
+                    continue
+                seen_values.add(hash_value)
+
+            deduped.append(hash_obj)
+
+        removed = len(hashes) - len(deduped)
+        if removed > 0:
+            logger.info(f"Deduplicated {removed} hash(es)")
+
+        return deduped
 
     @staticmethod
     def _dedupe_credentials(credentials: list[Credential]) -> list[Credential]:

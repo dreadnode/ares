@@ -616,5 +616,83 @@ class TestRecoveryError:
         assert issubclass(RecoveryError, Exception)
 
 
+# ============================================================================
+# _merge_state Domain Admin Detection Tests
+# ============================================================================
+
+
+class TestMergeStateDomainAdminDetection:
+    """Tests for _merge_state domain admin detection during state merge.
+
+    CRITICAL: Only krbtgt NTLM hash should trigger DA in merge safety net.
+    Administrator hash does NOT trigger DA (could be local admin).
+    """
+
+    def test_merge_detects_krbtgt_hash(self):
+        """Test that _merge_state detects krbtgt NTLM hash and sets DA flag."""
+        from ares.core.models import Hash, SharedRedTeamState
+        from ares.core.recovery import _merge_state
+
+        target = SharedRedTeamState(operation_id="test-op")
+        existing = SharedRedTeamState(operation_id="test-op")
+
+        # Add krbtgt hash to existing state
+        existing.all_hashes.append(
+            Hash(
+                username="krbtgt",
+                hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                hash_type="NTLM",
+                domain="contoso.local",
+            )
+        )
+
+        _merge_state(target, existing)
+
+        assert target.has_domain_admin is True
+        assert "krbtgt" in target.domain_admin_path
+
+    def test_merge_does_not_detect_administrator_hash(self):
+        """Test that _merge_state does NOT set DA for Administrator hash.
+
+        This is critical: Administrator could be a LOCAL admin on a workstation.
+        """
+        from ares.core.models import Hash, SharedRedTeamState
+        from ares.core.recovery import _merge_state
+
+        target = SharedRedTeamState(operation_id="test-op")
+        existing = SharedRedTeamState(operation_id="test-op")
+
+        # Add Administrator hash to existing state
+        existing.all_hashes.append(
+            Hash(
+                username="Administrator",
+                hash_value="aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889",
+                hash_type="NTLM",
+                domain="contoso.local",
+            )
+        )
+
+        _merge_state(target, existing)
+
+        # Administrator hash should NOT set domain admin
+        assert target.has_domain_admin is False
+        assert target.domain_admin_path is None
+
+    def test_merge_preserves_existing_da_flag(self):
+        """Test that _merge_state preserves DA flag from existing state."""
+        from ares.core.models import SharedRedTeamState
+        from ares.core.recovery import _merge_state
+
+        target = SharedRedTeamState(operation_id="test-op")
+        existing = SharedRedTeamState(operation_id="test-op")
+        existing.has_domain_admin = True
+        existing.domain_admin_path = "S4U → secretsdump → krbtgt"
+
+        _merge_state(target, existing)
+
+        assert target.has_domain_admin is True
+        assert target.domain_admin_path == "S4U → secretsdump → krbtgt"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

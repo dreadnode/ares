@@ -57,15 +57,25 @@ def _merge_state(target: SharedRedTeamState, existing: SharedRedTeamState) -> No
     if existing.has_golden_ticket and not target.has_golden_ticket:
         target.has_golden_ticket = True
 
+    # Merge persistence tracking (CRITICAL for orchestrator visibility)
+    _merge_golden_tickets(target, existing)
+    _merge_acl_chains(target, existing)
+    _merge_gmsa_accounts(target, existing)
+    _merge_adminsd_backdoors(target, existing)
+
+    # Merge background task deduplication tracking (CRITICAL for preventing duplicate work)
+    _merge_background_task_tracking(target, existing)
+
     # Safety net: scan merged hashes for DA indicators if flag not yet set
+    # NOTE: Only krbtgt counts as DA proof - Administrator could be LOCAL admin on workstation
     if not target.has_domain_admin:
         for h in target.all_hashes:
             ht = (h.hash_type or "").strip().lower()
             un = (h.username or "").strip().lower()
-            if ht == "ntlm" and un in ("krbtgt", "administrator"):
+            if ht == "ntlm" and un == "krbtgt":
                 target.has_domain_admin = True
                 target.domain_admin_path = (
-                    f"secretsdump → {un} NTLM hash found in state (detected during merge)"
+                    "secretsdump → krbtgt NTLM hash found in state (detected during merge)"
                 )
                 break
 
@@ -125,6 +135,64 @@ def _merge_timeline(target: SharedRedTeamState, existing: SharedRedTeamState) ->
         if event.id not in seen:
             seen.add(event.id)
             target.operation_timeline.append(event)
+
+
+def _merge_golden_tickets(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+    """Merge golden tickets from existing state into target."""
+    seen = {t.get("domain", "").lower() for t in target.golden_tickets}
+    for ticket in existing.golden_tickets:
+        domain = ticket.get("domain", "").lower()
+        if domain and domain not in seen:
+            seen.add(domain)
+            target.golden_tickets.append(ticket)
+
+
+def _merge_acl_chains(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+    """Merge ACL chains from existing state into target."""
+    seen = {c.get("chain_id", "") for c in target.acl_chains}
+    for chain in existing.acl_chains:
+        chain_id = chain.get("chain_id", "")
+        if chain_id and chain_id not in seen:
+            seen.add(chain_id)
+            target.acl_chains.append(chain)
+
+
+def _merge_gmsa_accounts(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+    """Merge gMSA accounts from existing state into target."""
+    seen = {g.get("account", "").lower() for g in target.gmsa_accounts}
+    for gmsa in existing.gmsa_accounts:
+        account = gmsa.get("account", "").lower()
+        if account and account not in seen:
+            seen.add(account)
+            target.gmsa_accounts.append(gmsa)
+
+
+def _merge_adminsd_backdoors(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+    """Merge AdminSDHolder backdoors from existing state into target."""
+    seen = set(target.adminsd_holder_backdoors)
+    for backdoor in existing.adminsd_holder_backdoors:
+        if backdoor and backdoor not in seen:
+            seen.add(backdoor)
+            target.adminsd_holder_backdoors.append(backdoor)
+
+
+def _merge_background_task_tracking(
+    target: SharedRedTeamState, existing: SharedRedTeamState
+) -> None:
+    """Merge background task deduplication sets from existing state into target.
+
+    These sets track which operations have already been performed to prevent
+    duplicate work after orchestrator restart.
+    """
+    # Merge all the tracking sets (union operation)
+    target.processed_cred_expansion |= existing.processed_cred_expansion
+    target.processed_hash_lateral |= existing.processed_hash_lateral
+    target.processed_crack_requests |= existing.processed_crack_requests
+    target.processed_asrep_domains |= existing.processed_asrep_domains
+    target.processed_username_spray |= existing.processed_username_spray
+    target.processed_password_spray |= existing.processed_password_spray
+    target.processed_secretsdump |= existing.processed_secretsdump
+    target.dispatched_acl_steps |= existing.dispatched_acl_steps
 
 
 class OperationRecoveryManager:
