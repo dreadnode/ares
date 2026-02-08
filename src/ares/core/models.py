@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import types
+import uuid
 from dataclasses import dataclass, field, is_dataclass
 from dataclasses import fields as dc_fields
 from datetime import datetime, timezone
@@ -468,18 +469,46 @@ class User(Model):
 
 
 class Credential(Model):
-    """Discovered credential."""
+    """Discovered credential.
 
+    Attributes:
+        id: Unique identifier for chain tracking.
+        username: The username.
+        password: The password.
+        domain: The domain.
+        source: Tool/method that discovered this credential.
+        is_admin: Whether this is an admin credential.
+        parent_id: ID of the credential/hash that enabled this discovery (for attack chain).
+        attack_step: Position in the attack chain (0 = initial access).
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     username: str
     password: str
     domain: str = ""
     source: str = ""  # where it was found
     is_admin: bool = False
+    parent_id: str | None = None  # ID of credential/hash that enabled this discovery
+    attack_step: int = 0  # Position in attack chain
 
 
 class Hash(Model):
-    """Discovered password hash."""
+    """Discovered password hash.
 
+    Attributes:
+        id: Unique identifier for chain tracking.
+        username: The username.
+        hash_value: The hash value.
+        hash_type: Type of hash (NTLM, etc.).
+        domain: The domain.
+        cracked_password: Password if cracked.
+        source: Tool/method that discovered this hash.
+        discovered_at: When the hash was discovered.
+        parent_id: ID of the credential/hash that enabled this discovery (for attack chain).
+        attack_step: Position in the attack chain (0 = initial access).
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     username: str
     hash_value: str
     hash_type: str = "NTLM"
@@ -487,6 +516,8 @@ class Hash(Model):
     cracked_password: str = ""
     source: str = ""
     discovered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    parent_id: str | None = None  # ID of credential/hash that enabled this discovery
+    attack_step: int = 0  # Position in attack chain
 
 
 class Share(Model):
@@ -1181,7 +1212,7 @@ class SharedRedTeamState:
         # Now deduplicate credentials that may now be duplicates after normalization
         self.all_credentials = self._dedupe_credentials(self.all_credentials)
 
-    def add_hash(self, hash_obj: Hash, source_agent: str) -> bool:
+    def add_hash(self, hash_obj: Hash, source_agent: str) -> bool:  # noqa: PLR0912
         """Add hash if not duplicate. Returns True if added."""
         hash_type = (hash_obj.hash_type or "").strip().lower()
         username = (hash_obj.username or "").strip().lower()
@@ -1211,6 +1242,26 @@ class SharedRedTeamState:
 
         for existing in self.all_hashes:
             if existing.hash_value == hash_value:
+                # If incoming hash has cracked_password and existing doesn't, merge it
+                if hash_obj.cracked_password and not existing.cracked_password:
+                    existing.cracked_password = hash_obj.cracked_password
+                    logger.info(
+                        f"Hash updated with cracked password: {domain}\\{username} ({hash_type}) "
+                        f"from {source_agent}"
+                    )
+                    # Create a credential from the cracked password
+                    cracked_cred = Credential(
+                        username=username,
+                        password=hash_obj.cracked_password,
+                        domain=domain,
+                        source=f"cracked:{hash_type}",
+                    )
+                    self.add_credential(cracked_cred, source_agent)
+                    # Signal credential access if dispatcher available
+                    if self._dispatcher:
+                        self._dispatcher.signal_credential_access()
+                        self._publish_async(self._dispatcher._checkpoint())
+                    return True  # Return True since we updated it
                 logger.debug(
                     f"Hash rejected: duplicate hash for {domain}\\{username} ({hash_type}) from {source_agent}"
                 )

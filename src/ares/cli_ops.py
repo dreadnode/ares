@@ -26,12 +26,60 @@ app = cyclopts.App(
 )
 
 
+async def _generate_local_report(
+    operation_id: str,
+    redis_url: str,
+    report_dir: Path | None = None,
+) -> Path | None:
+    """Generate a comprehensive report locally from Redis state.
+
+    This pulls the operation state from Redis and generates a detailed
+    report with full attack path, credentials, and hashes.
+
+    Args:
+        operation_id: The operation to generate a report for.
+        redis_url: Redis connection URL.
+        report_dir: Directory to save the report (default: ./reports).
+
+    Returns:
+        Path to the generated report, or None if state not found.
+    """
+    from ares.core.models import SharedRedTeamState
+    from ares.reports import generate_comprehensive_report
+
+    client = await create_redis_client(redis_url, decode_responses=False)
+    try:
+        data = await client.get(f"ares:operation:{operation_id}:state")
+        if not data:
+            logger.warning(f"No state found for operation {operation_id}")
+            return None
+
+        state = SharedRedTeamState.from_bytes(data)
+        report_content = generate_comprehensive_report(state)
+
+        resolved_dir = Path(report_dir or "./reports").resolve()
+        resolved_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = f"{operation_id}_report.md"
+        output_path = resolved_dir / filename
+        output_path.write_text(report_content)
+        logger.success(f"Report saved: {output_path}")
+        return output_path
+    finally:
+        await client.aclose()
+
+
 def _persist_report(
     status: dict[str, object],
     *,
     operation_id: str,
     report_dir: Path | None = None,
 ) -> Path | None:
+    """Legacy report persistence from orchestrator result.
+
+    This is a fallback that uses the report_markdown from the orchestrator.
+    Prefer using _generate_local_report for comprehensive reports.
+    """
     result_payload = status.get("result") if isinstance(status.get("result"), dict) else None
     report_markdown = None
     report_path = None
@@ -243,7 +291,8 @@ async def submit(
 
         if wait and result["status"] == "completed":
             logger.success("Operation completed successfully!")
-            _persist_report(result, operation_id=operation_id)
+            # Generate comprehensive report from Redis state
+            await _generate_local_report(operation_id, resolved_redis_url)
         elif wait and result["status"] == "failed":
             logger.error(f"Operation failed: {result.get('error', 'Unknown error')}")
 
@@ -294,7 +343,8 @@ async def status(
 
             if result["status"] == "completed":
                 logger.success("Operation completed successfully")
-                _persist_report(result, operation_id=operation_id)
+                # Generate comprehensive report from Redis state
+                await _generate_local_report(operation_id, resolved_redis_url)
             elif result["status"] == "failed":
                 logger.error(f"Operation failed: {result.get('error', 'Unknown')}")
         else:
@@ -332,7 +382,8 @@ async def wait_for(
 
         if result["status"] == "completed":
             logger.success("Operation completed successfully!")
-            _persist_report(result, operation_id=operation_id)
+            # Generate comprehensive report from Redis state
+            await _generate_local_report(operation_id, resolved_redis_url)
         elif result["status"] == "failed":
             logger.error(f"Operation failed: {result.get('error', 'Unknown error')}")
 
@@ -788,6 +839,57 @@ async def _loot_watch(
             await asyncio.sleep(interval)
     finally:
         await client.aclose()
+
+
+@app.command
+async def report(
+    operation_id: Annotated[str | None, cyclopts.Parameter(help="Operation ID")] = None,
+    *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Use the latest operation (prefer running)")
+    ] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+    output_dir: Annotated[
+        str, cyclopts.Parameter(help="Output directory for report (default: ./reports)")
+    ] = "./reports",
+) -> None:
+    """Generate a comprehensive markdown report for an operation.
+
+    The report includes full attack path, all credentials with passwords,
+    NTLM hashes, discovered vulnerabilities, and timeline events.
+
+    Examples:
+        ares-ops report op-20250128-123456
+        ares-ops report --latest
+        ares-ops report --latest --output-dir ./my-reports
+    """
+    resolved_redis_url = redis_url or get_redis_url()
+
+    # Resolve operation ID
+    if latest and not operation_id:
+        operation_id = await _resolve_latest_operation(resolved_redis_url)
+        if not operation_id:
+            logger.error("No operations found")
+            sys.exit(1)
+        logger.info(f"Using latest operation: {operation_id}")
+    elif not operation_id:
+        logger.error("Either operation_id or --latest is required")
+        sys.exit(1)
+
+    try:
+        report_path = await _generate_local_report(
+            operation_id,
+            resolved_redis_url,
+            report_dir=Path(output_dir),
+        )
+        if report_path:
+            logger.success(f"Report generated: {report_path}")
+        else:
+            logger.error(f"Failed to generate report for {operation_id}")
+            sys.exit(1)
+    except Exception as e:
+        logger.error(f"Failed to generate report: {e}")
+        sys.exit(1)
 
 
 @app.command

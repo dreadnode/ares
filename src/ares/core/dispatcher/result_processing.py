@@ -246,6 +246,18 @@ class ResultProcessingMixin:
                     continue
                 self._add_user(u.get("username", ""), u.get("domain", ""))
 
+        # Process trusted domains (from BloodHound, nltest, etc.)
+        trusted_domains = result.get("trusted_domains")
+        if isinstance(trusted_domains, list):
+            for td in trusted_domains:
+                if isinstance(td, str) and td.strip():
+                    domain_lower = td.strip().lower()
+                    if domain_lower not in self.shared_state.trusted_domains:
+                        self.shared_state.trusted_domains.append(domain_lower)
+                        logger.info(
+                            f"Trusted domain discovered: {domain_lower} from {target_label}"
+                        )
+
     async def _process_success_result_data(  # noqa: PLR0912
         self: RedTeamDispatcher,
         result: dict[str, Any],
@@ -377,14 +389,24 @@ class ResultProcessingMixin:
         creds = self._extract_plaintext_passwords_from_output(output)
         if "password :" in output.lower() and not creds and domain:
             self.shared_state.pending_credential_findings.add(f"{domain}:unknown")
-        for username, password in creds:
-            if domain:
-                self.shared_state.pending_credential_findings.add(f"{domain}:{username}".lower())
-            self._add_user(username, domain)
+        for username, password, extracted_domain in creds:
+            # Resolve the correct domain using multiple strategies
+            resolved_domain = self._resolve_credential_domain(username, extracted_domain)
+            if not resolved_domain:
+                # Skip credentials where domain cannot be determined
+                # This prevents false positives like assigning wrong domain
+                logger.debug(
+                    f"Skipping credential {username}:{password[:3]}*** - domain not determinable"
+                )
+                continue
+            self.shared_state.pending_credential_findings.add(
+                f"{resolved_domain}:{username}".lower()
+            )
+            self._add_user(username, resolved_domain)
             credential = Credential(
                 username=username,
                 password=password,
-                domain=domain,
+                domain=resolved_domain,
                 source="user_description",
                 is_admin=False,
             )
@@ -429,6 +451,65 @@ class ResultProcessingMixin:
                     f"🔑 Auto-gMSA: queued {queued} gMSA account(s) "
                     f"for password retrieval from {source_agent}"
                 )
+
+        # Extract ACL chains from BloodHound shortest path output
+        self._extract_acl_chains_from_output(output, source_agent)
+
+    def _extract_acl_chains_from_output(
+        self: RedTeamDispatcher, output: str, source_agent: str
+    ) -> None:
+        """
+        Extract ACL chains from BloodHound output and register for tracking.
+
+        Parses BloodHound shortest path output to identify multi-hop
+        ACL abuse chains to Domain Admin.
+        """
+        from ares.core.dispatcher.acl_chains import ACLChainTracker
+
+        # Only process if output looks like BloodHound path data
+        path_indicators = ["shortest path", "attack path", "->", "-["]
+        if not any(indicator in output.lower() for indicator in path_indicators):
+            return
+
+        # Initialize tracker if not present
+        if not hasattr(self, "_acl_chain_tracker"):
+            self._acl_chain_tracker = ACLChainTracker()
+
+        tracker: ACLChainTracker = self._acl_chain_tracker
+        domain = ""
+        if self.shared_state.target and self.shared_state.target.domain:
+            domain = self.shared_state.target.domain
+
+        # Split output into potential paths
+        lines = output.split("\n")
+        current_path: list[str] = []
+        chains_found = 0
+
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line:
+                if current_path:
+                    path_text = " ".join(current_path)
+                    chain = tracker.create_chain_from_bloodhound_path(
+                        path_text, domain, source_agent
+                    )
+                    if chain:
+                        chains_found += 1
+                    current_path = []
+            elif "->" in line or "-[" in line:
+                current_path.append(line)
+
+        # Handle last path
+        if current_path:
+            path_text = " ".join(current_path)
+            chain = tracker.create_chain_from_bloodhound_path(path_text, domain, source_agent)
+            if chain:
+                chains_found += 1
+
+        if chains_found > 0:
+            logger.warning(
+                f"🔗 Extracted {chains_found} ACL chain(s) from BloodHound output ({source_agent})"
+            )
 
     def _add_user(self: RedTeamDispatcher, username: str, domain: str) -> bool:
         """Add a user to the shared state."""
@@ -526,17 +607,35 @@ class ResultProcessingMixin:
 
     def _extract_plaintext_passwords_from_output(  # noqa: PLR0912
         self: RedTeamDispatcher, output: str
-    ) -> list[tuple[str, str]]:
-        """Extract username/password pairs from tool output."""
+    ) -> list[tuple[str, str, str]]:
+        """Extract username/password/domain tuples from tool output.
+
+        Returns:
+            List of (username, password, domain) tuples. Domain may be empty
+            if not determinable from output.
+        """
         if not output:
             return []
-        creds: list[tuple[str, str]] = []
+        creds: list[tuple[str, str, str]] = []
         seen: set[tuple[str, str]] = set()
         current_user = ""
+        current_domain = ""
         for line in output.splitlines():
             stripped = line.strip()
             if not stripped:
                 continue
+
+            # Extract domain from DOMAIN\user or user@domain patterns
+            domain_user_match = re.search(r"([A-Za-z0-9_.-]+)\\([A-Za-z0-9_.-]+)", stripped)
+            if domain_user_match:
+                current_domain = domain_user_match.group(1).strip()
+                current_user = domain_user_match.group(2).strip()
+
+            upn_match = re.search(r"([A-Za-z0-9_.-]+)@([A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)", stripped)
+            if upn_match:
+                current_user = upn_match.group(1).strip()
+                current_domain = upn_match.group(2).strip()
+
             user_match = re.search(r"user:\[([^\]]+)\]", stripped, re.IGNORECASE)
             if user_match:
                 current_user = user_match.group(1).strip()
@@ -553,6 +652,7 @@ class ResultProcessingMixin:
                 continue
             password = pass_match.group(1).strip()
             username = ""
+            extracted_domain = current_domain
             smb_match = re.search(
                 r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.-]+)\s+\d{4}-\d{2}-\d{2}.*Password\s*:\s*",
                 stripped,
@@ -571,8 +671,80 @@ class ResultProcessingMixin:
             if key in seen:
                 continue
             seen.add(key)
-            creds.append(key)
+            creds.append((username, password, extracted_domain))
         return creds
+
+    def _resolve_credential_domain(  # noqa: PLR0912
+        self: RedTeamDispatcher, username: str, extracted_domain: str
+    ) -> str:
+        """Resolve the correct domain for a credential.
+
+        Uses multiple strategies to determine the correct domain:
+        1. Use extracted domain if it's an FQDN
+        2. Resolve NetBIOS domain to FQDN via known mappings
+        3. Cross-reference with discovered users to find the correct domain
+        4. Only use target domain if user is confirmed to exist there
+
+        Args:
+            username: The username to resolve domain for
+            extracted_domain: Domain extracted from tool output (may be empty or NetBIOS)
+
+        Returns:
+            The resolved FQDN domain, or empty string if not determinable
+        """
+        username_lower = username.lower()
+
+        # If we have an extracted FQDN domain, use it
+        if extracted_domain and "." in extracted_domain:
+            return extracted_domain.lower()
+
+        # If we have a NetBIOS domain, try to resolve it
+        if extracted_domain:
+            netbios_lower = extracted_domain.lower()
+            # Check authoritative NetBIOS -> FQDN mapping
+            if netbios_lower in self.shared_state.netbios_to_fqdn:
+                return self.shared_state.netbios_to_fqdn[netbios_lower]
+            # Check known domains for matching FQDN pattern
+            for domain in self.shared_state.all_domains:
+                domain_lower = domain.lower()
+                if domain_lower.startswith(netbios_lower + "."):
+                    return domain_lower
+
+        # Cross-reference with discovered users to find correct domain
+        matching_domains: list[str] = []
+        for user in self.shared_state.all_users:
+            if user.username.lower() == username_lower and user.domain:
+                matching_domains.append(user.domain.lower())
+
+        # If user exists in exactly one domain, use it
+        unique_domains = list(set(matching_domains))
+        if len(unique_domains) == 1:
+            return unique_domains[0]
+
+        # If user exists in multiple domains, prefer the one matching extracted NetBIOS
+        if len(unique_domains) > 1 and extracted_domain:
+            netbios_lower = extracted_domain.lower()
+            for domain in unique_domains:
+                if domain.startswith(netbios_lower + "."):
+                    return domain
+
+        # If user exists in multiple domains with no NetBIOS hint, don't guess
+        if len(unique_domains) > 1:
+            logger.debug(f"Credential domain ambiguous for {username}: found in {unique_domains}")
+            return ""
+
+        # No user found - only use target domain if we have NetBIOS match
+        if extracted_domain:
+            target_domain = ""
+            if self.shared_state.target and self.shared_state.target.domain:
+                target_domain = self.shared_state.target.domain.lower()
+            netbios_lower = extracted_domain.lower()
+            if target_domain and target_domain.startswith(netbios_lower + "."):
+                return target_domain
+
+        # Cannot determine domain - return empty to avoid false positives
+        logger.debug(f"Cannot determine domain for credential: {username}")
+        return ""
 
     def _extract_shares_from_output(  # noqa: PLR0912
         self: RedTeamDispatcher, output: str, default_host: str = ""

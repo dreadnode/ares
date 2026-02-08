@@ -57,19 +57,29 @@ class OperationRequest:
             cred_data = data["initial_credential"]
             initial_cred = cred_data  # Keep as dict for now
 
+        # Resolve model - check request env_vars first (they haven't been applied to os.environ yet)
+        env_vars = data.get("env_vars") or {}
+        model = (
+            data.get("model")
+            or env_vars.get("ARES_ORCHESTRATOR_MODEL")
+            or env_vars.get("ARES_MODEL")
+            or os.environ.get("ARES_ORCHESTRATOR_MODEL")
+            or os.environ.get("ARES_MODEL")
+        )
+
         return cls(
             operation_id=data["operation_id"],
             target_domain=data["target_domain"],
             target_ips=data["target_ips"],
             initial_credential=initial_cred,
             resume_from_checkpoint=data.get("resume_from_checkpoint", False),
-            model=data.get("model")
-            or os.environ.get("ARES_ORCHESTRATOR_MODEL")
-            or os.environ.get("ARES_MODEL"),
+            model=model,
             max_steps=data.get("max_steps", 200),
             checkpoint_interval=data.get("checkpoint_interval", 60),
-            report_dir=data.get("report_dir") or os.environ.get("ARES_REPORT_DIR"),
-            env_vars=data.get("env_vars"),
+            report_dir=data.get("report_dir")
+            or env_vars.get("ARES_REPORT_DIR")
+            or os.environ.get("ARES_REPORT_DIR"),
+            env_vars=env_vars or None,
         )
 
 

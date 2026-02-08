@@ -325,7 +325,7 @@ class TestFindDomainControllerIp:
         # sql01 has RDP (3389) but NOT LDAP (389)
         dispatcher._shared_state.all_hosts.append(
             Host(
-                ip="10.1.2.146",
+                ip="192.168.58.146",
                 hostname="sql01.contoso.local",
                 services=["1433/tcp ms-sql-s", "3389/tcp ms-wbt-server", "445/tcp smb"],
             )
@@ -333,7 +333,7 @@ class TestFindDomainControllerIp:
         # dc01 is the actual DC with Kerberos services
         dispatcher._shared_state.all_hosts.append(
             Host(
-                ip="10.1.2.240",
+                ip="192.168.58.240",
                 hostname="dc01.contoso.local",
                 services=["88/tcp kerberos-sec", "389/tcp ldap", "53/tcp domain"],
             )
@@ -342,7 +342,7 @@ class TestFindDomainControllerIp:
         dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
 
         # Should return dc01 (the actual DC), NOT sql01
-        assert dc_ip == "10.1.2.240"
+        assert dc_ip == "192.168.58.240"
 
     def test_matches_exact_port_389(self):
         """Port 389 should be detected as LDAP."""
@@ -445,8 +445,8 @@ class TestFindDomainControllerIp:
         dispatcher._shared_state.all_hosts.extend(
             [
                 Host(
-                    ip="10.1.2.146",
-                    hostname="sql01.corp.contoso.local",
+                    ip="192.168.58.146",
+                    hostname="sql01.fabrikam.local",
                     services=[
                         "1433/tcp ms-sql-s",
                         "139/tcp netbios-ssn",
@@ -457,8 +457,8 @@ class TestFindDomainControllerIp:
                     ],
                 ),
                 Host(
-                    ip="10.1.2.240",
-                    hostname="dc01.corp.contoso.local",
+                    ip="192.168.58.240",
+                    hostname="dc01.fabrikam.local",
                     services=[
                         "139/tcp netbios-ssn",
                         "88/tcp kerberos-sec",
@@ -470,7 +470,7 @@ class TestFindDomainControllerIp:
                     ],
                 ),
                 Host(
-                    ip="10.1.2.183",
+                    ip="192.168.58.183",
                     hostname="dc01.contoso.local",
                     services=[
                         "139/tcp netbios-ssn",
@@ -486,13 +486,13 @@ class TestFindDomainControllerIp:
             ]
         )
 
-        # Test corp.contoso.local -> must be dc01.corp.contoso.local, NOT sql01
+        # Test fabrikam.local -> must be dc01.fabrikam.local, NOT sql01
         # This is the critical test - sql01 was incorrectly selected before the fix
-        corp_dc = dispatcher._find_domain_controller_ip("corp.contoso.local")
-        assert corp_dc == "10.1.2.240", (
-            f"Expected dc01.corp.contoso.local (10.1.2.240), got {corp_dc}"
+        fabrikam_dc = dispatcher._find_domain_controller_ip("fabrikam.local")
+        assert fabrikam_dc == "192.168.58.240", (
+            f"Expected dc01.fabrikam.local (192.168.58.240), got {fabrikam_dc}"
         )
-        assert corp_dc != "10.1.2.146", "BUG: sql01 selected - 3389 matched as 389!"
+        assert fabrikam_dc != "192.168.58.146", "BUG: sql01 selected - 3389 matched as 389!"
 
 
 class TestS4UAutoChaining:
@@ -689,3 +689,180 @@ class TestS4UAutoChaining:
         assert call_kwargs["techniques"] == ["secretsdump"]
         assert call_kwargs["extra_params"]["ticket_path"] == "Administrator.ccache"
         assert call_kwargs["extra_params"]["no_pass"] is True
+
+
+class TestCredentialDomainResolution:
+    """Tests for credential domain resolution to prevent false positives.
+
+    The critical bug was that credentials extracted from tool output were
+    assigned the target domain, even when the user belonged to a different
+    domain in a multi-domain forest.
+
+    Example: sql_svc:SqlP@ss123 belongs to fabrikam.local,
+    but was incorrectly assigned contoso.local when that was the target.
+    """
+
+    def test_resolve_credential_domain_uses_fqdn_from_output(self):
+        """Extracted FQDN domain should be used as-is."""
+        from ares.core.models import Target
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-1")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # If the output has an FQDN, use it
+        domain = dispatcher._resolve_credential_domain("sql_svc", "fabrikam.local")
+
+        assert domain == "fabrikam.local"
+
+    def test_resolve_credential_domain_resolves_netbios_via_mapping(self):
+        """NetBIOS domain should be resolved via authoritative mapping."""
+        from ares.core.models import Target
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-2")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        # Add authoritative NetBIOS -> FQDN mapping
+        dispatcher._shared_state.netbios_to_fqdn["fabrikam"] = "fabrikam.local"
+
+        domain = dispatcher._resolve_credential_domain("sql_svc", "FABRIKAM")
+
+        assert domain == "fabrikam.local"
+
+    def test_resolve_credential_domain_cross_references_users(self):
+        """Should cross-reference with discovered users to find correct domain."""
+        from ares.core.models import Target, User
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-3")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        # User was previously discovered with correct domain
+        dispatcher._shared_state.all_users.append(User(username="sql_svc", domain="fabrikam.local"))
+
+        # No domain in output, but user exists in state
+        domain = dispatcher._resolve_credential_domain("sql_svc", "")
+
+        assert domain == "fabrikam.local"
+
+    def test_resolve_credential_domain_ambiguous_returns_empty(self):
+        """Should return empty when user exists in multiple domains without hint."""
+        from ares.core.models import Target, User
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-4")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        # Same username in multiple domains (different users)
+        dispatcher._shared_state.all_users.append(
+            User(username="administrator", domain="fabrikam.local")
+        )
+        dispatcher._shared_state.all_users.append(
+            User(username="administrator", domain="contoso.local")
+        )
+
+        # No domain hint, user is ambiguous
+        domain = dispatcher._resolve_credential_domain("administrator", "")
+
+        # Should return empty to avoid false positive
+        assert domain == ""
+
+    def test_resolve_credential_domain_ambiguous_with_netbios_hint(self):
+        """Should prefer domain matching NetBIOS hint when user is in multiple domains."""
+        from ares.core.models import Target, User
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-5")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        dispatcher._shared_state.all_domains.extend(["fabrikam.local", "contoso.local"])
+        # Same username in multiple domains
+        dispatcher._shared_state.all_users.append(
+            User(username="administrator", domain="fabrikam.local")
+        )
+        dispatcher._shared_state.all_users.append(
+            User(username="administrator", domain="contoso.local")
+        )
+
+        # NetBIOS hint "FABRIKAM" should resolve to fabrikam.local
+        domain = dispatcher._resolve_credential_domain("administrator", "FABRIKAM")
+
+        assert domain == "fabrikam.local"
+
+    def test_resolve_credential_domain_unknown_user_no_domain(self):
+        """Should return empty for unknown user without domain info."""
+        from ares.core.models import Target
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-6")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # User not in state, no domain in output
+        domain = dispatcher._resolve_credential_domain("unknownuser", "")
+
+        # Should return empty, NOT the target domain
+        assert domain == ""
+
+    def test_resolve_credential_domain_netbios_matches_target(self):
+        """NetBIOS matching target domain should resolve to target."""
+        from ares.core.models import Target
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-7")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # NetBIOS "CONTOSO" matches target domain "contoso.local"
+        domain = dispatcher._resolve_credential_domain("someuser", "CONTOSO")
+
+        assert domain == "contoso.local"
+
+    def test_extract_plaintext_passwords_extracts_domain_backslash(self):
+        """Should extract domain from DOMAIN\\user format in output."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-8")
+
+        output = """
+        FABRIKAM\\sql_svc
+        Password: SqlP@ss123
+        """
+
+        creds = dispatcher._extract_plaintext_passwords_from_output(output)
+
+        assert len(creds) == 1
+        username, password, domain = creds[0]
+        assert username == "sql_svc"
+        assert password == "SqlP@ss123"  # pragma: allowlist secret
+        assert domain == "FABRIKAM"
+
+    def test_extract_plaintext_passwords_extracts_domain_upn(self):
+        """Should extract domain from user@domain.local format in output."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-9")
+
+        output = """
+        sql_svc@fabrikam.local
+        Password: SqlP@ss123
+        """
+
+        creds = dispatcher._extract_plaintext_passwords_from_output(output)
+
+        assert len(creds) == 1
+        username, password, domain = creds[0]
+        assert username == "sql_svc"
+        assert password == "SqlP@ss123"  # pragma: allowlist secret
+        assert domain == "fabrikam.local"
+
+    def test_extract_plaintext_passwords_no_domain_returns_empty(self):
+        """Should return empty domain when not determinable from output."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-10")
+
+        output = """
+        samaccountname: sql_svc
+        Password: SqlP@ss123
+        """
+
+        creds = dispatcher._extract_plaintext_passwords_from_output(output)
+
+        assert len(creds) == 1
+        username, password, domain = creds[0]
+        assert username == "sql_svc"
+        assert password == "SqlP@ss123"  # pragma: allowlist secret
+        assert domain == ""  # No domain in output

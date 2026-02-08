@@ -126,34 +126,11 @@ Report to orchestrator for PRIVESC dispatch:
 ```
 
 ### AdminSDHolder Persistence (POST-DA BACKDOOR)
-After achieving Domain Admin, plant a persistent backdoor:
+After DA, plant persistent backdoor:
 ```
-adminsd_holder_add_ace(
-    domain="contoso.local",
-    username="Administrator",
-    password="P@ss",  {# pragma: allowlist secret #}
-    dc_ip="192.168.58.10",
-    principal="backdoor_user"
-)
+adminsd_holder_add_ace(domain="...", username="Administrator", password="...", dc_ip="...", principal="backdoor_user")  {# pragma: allowlist secret #}
 ```
-
-**Why AdminSDHolder is powerful:**
-1. SDProp runs every 60 minutes automatically
-2. Propagates ACEs to ALL protected groups:
-   - Domain Admins, Enterprise Admins, Schema Admins
-   - Account Operators, Backup Operators, Administrators
-   - Domain Controllers group, krbtgt account
-3. Survives:
-   - DA password resets
-   - Group membership revocation
-   - Standard incident response cleanup
-4. Detection requires checking AdminSDHolder ACL specifically
-
-**When to use:**
-- ✅ After achieving Domain Admin
-- ✅ When you need persistent access
-- ✅ Before expected IR/blue team response
-- ❌ Not for initial escalation (requires DA)
+SDProp propagates ACEs to all protected groups every 60 min. Survives DA password resets, group revocation, standard IR.
 
 ## Workflow
 
@@ -173,6 +150,22 @@ adminsd_holder_add_ace(
 4. **Report Back**
    - Use task_complete with discovered credentials
    - Or request_assistance if stuck
+
+## ACL Chain Following (Multi-Hop Attacks)
+
+Execute multi-hop paths IN ORDER, re-authenticating after each step.
+
+| ACL Right | Best Action |
+|-----------|-------------|
+| ForceChangePassword | `bloodyad_set_password` |
+| GenericAll (user) | `pywhisker` → hash |
+| GenericAll (group) | `bloodyad_add_group_member` |
+| GenericAll (computer) | `rbcd_write` + S4U |
+| WriteDacl | `dacl_edit` → GenericAll action |
+| WriteOwner | `owneredit` → `dacl_edit` → action |
+| AddMember | `bloodyad_add_group_member` |
+
+Report new credentials immediately after each step.
 
 ## Priority Order for Exploitation
 

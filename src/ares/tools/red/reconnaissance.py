@@ -1579,6 +1579,7 @@ class BloodHoundTools(Toolset):
             "collection_successful": False,
             "json_files_created": [],
             "discovered_hosts": [],  # Computer hostnames from collection
+            "trusted_domains": [],  # Domain trusts discovered
             "computers_found": 0,
             "raw_output": raw_output,
         }
@@ -1673,6 +1674,34 @@ class BloodHoundTools(Toolset):
                     hostname_part = fqdn.split(".")[0]
                     if hostname_part.isupper() or len(hostname_part) <= 15:
                         result["discovered_hosts"].append(fqdn)
+
+        # Extract trusted domains from BloodHound output
+        # BloodHound discovers trusts and outputs domain references
+        trust_patterns = [
+            r"trust[^\n]*?([a-zA-Z0-9\-]+\.[a-zA-Z0-9\-]+\.(?:local|com|net|org))",
+            r"domain:\s*([a-zA-Z0-9\-]+\.[a-zA-Z0-9\-]+\.(?:local|com|net|org))",
+            r"forest[^\n]*?([a-zA-Z0-9\-]+\.[a-zA-Z0-9\-]+\.(?:local|com|net|org))",
+        ]
+        for pattern in trust_patterns:
+            trust_matches = re.findall(pattern, raw_output, re.IGNORECASE)
+            for trust_domain in trust_matches:
+                trust_domain_lower = trust_domain.lower()
+                if trust_domain_lower not in result["trusted_domains"]:
+                    result["trusted_domains"].append(trust_domain_lower)
+
+        # Also extract domains from discovered host FQDNs (parent/sibling domains)
+        for host in result["discovered_hosts"]:
+            if "." in host:
+                parts = host.lower().split(".", 1)
+                if len(parts) > 1:
+                    host_domain = parts[1]
+                    # Skip common non-domain suffixes and duplicates
+                    is_valid = host_domain and host_domain not in result["trusted_domains"]
+                    is_not_infra = not any(
+                        host_domain.endswith(x) for x in [".internal", ".compute", ".amazonaws.com"]
+                    )
+                    if is_valid and is_not_infra:
+                        result["trusted_domains"].append(host_domain)
 
         # Standard recommendations for BloodHound output
         if result["collection_successful"]:

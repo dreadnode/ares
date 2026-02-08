@@ -1286,7 +1286,7 @@ async def _auto_bloodhound(  # noqa: PLR0912
         max_retries: Maximum retry attempts per domain
     """
     # Track (domain, username) -> (task_id, attempt_count, last_attempt_time)
-    bloodhound_attempts: dict[tuple[str, str], tuple[str, int, float]] = {}
+    bloodhound_attempts: dict[tuple[str, str, str], tuple[str, int, float]] = {}
     successful_domains: set[str] = set()  # Domains with successful BloodHound
     retry_cooldown = 120.0  # Wait 2 minutes before retrying failed tasks
 
@@ -1306,13 +1306,26 @@ async def _auto_bloodhound(  # noqa: PLR0912
                 logger.debug("BloodHound scanner: waiting for credentials")
                 continue
 
-            # Get all known domains
+            # Get all known domains including trusted domains
             domains: set[str] = set()
             if state.target and state.target.domain:
                 domains.add(state.target.domain.lower())
             for cred in state.all_credentials:
                 if cred.domain:
                     domains.add(cred.domain.lower())
+            # Include trusted domains discovered via BloodHound/nltest
+            for trusted in state.trusted_domains:
+                if trusted:
+                    domains.add(trusted.lower())
+            # Also include domains from discovered hosts (parent/sibling domains)
+            for host in state.all_hosts:
+                if host.hostname and "." in host.hostname:
+                    # Extract domain from FQDN (e.g., dc.parent.local -> parent.local)
+                    parts = host.hostname.lower().split(".", 1)
+                    if len(parts) > 1:
+                        host_domain = parts[1]
+                        if host_domain and not host_domain.endswith(".internal"):
+                            domains.add(host_domain)
 
             if not domains:
                 continue
@@ -1326,16 +1339,20 @@ async def _auto_bloodhound(  # noqa: PLR0912
                     continue
 
                 # Find a credential for this domain
-                for cred in state.all_credentials:
-                    if not cred.password:
-                        continue
-
+                # First try same-domain creds, then cross-domain creds (trusts allow this)
+                sorted_creds = sorted(
+                    [c for c in state.all_credentials if c.password],
+                    key=lambda c: (
+                        0 if (c.domain or "").lower() == domain.lower() else 1,
+                        0 if c.is_admin else 1,
+                    ),
+                )
+                for cred in sorted_creds:
                     cred_domain = (cred.domain or "").lower()
-                    # Use credentials from same domain, or if no domain try anyway
-                    if cred_domain and cred_domain != domain.lower():
-                        continue
+                    # Allow cross-domain enumeration via trusts
+                    # (same-domain creds are sorted first above)
 
-                    cred_key = (domain.lower(), cred.username.lower())
+                    cred_key = (domain.lower(), cred.username.lower(), cred_domain)
 
                     # Check if we've already attempted with this credential
                     if cred_key in bloodhound_attempts:
@@ -2404,6 +2421,127 @@ async def _auto_golden_ticket(  # noqa: PLR0912
             break
         except Exception as e:
             logger.error(f"Auto golden ticket error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_acl_chain_follow(  # noqa: PLR0912
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 30.0,
+) -> None:
+    """
+    Automatically follow ACL chains discovered by BloodHound.
+
+    When BloodHound discovers multi-hop ACL paths to Domain Admin,
+    this automation:
+    1. Tracks chain progress
+    2. Dispatches tasks for each step
+    3. Re-authenticates with new credentials
+    4. Continues until DA is achieved
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between chain progress checks
+    """
+    from ares.core.dispatcher.acl_chains import ACLChainTracker
+
+    state = dispatcher.shared_state
+
+    # Initialize tracker if not present
+    if not hasattr(dispatcher, "_acl_chain_tracker"):
+        dispatcher._acl_chain_tracker = ACLChainTracker()
+
+    tracker: ACLChainTracker = dispatcher._acl_chain_tracker
+    dispatched_steps: set[str] = set()  # Track dispatched step IDs
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            # Skip if DA already achieved
+            if state.has_domain_admin:
+                continue
+
+            # Check for chains that need progress
+            for chain in list(tracker.chains.values()):
+                if chain.is_complete:
+                    continue
+
+                current_step = chain.current_step
+                if not current_step:
+                    continue
+
+                step_key = f"{chain.chain_id}:{current_step.step_id}"
+                if step_key in dispatched_steps:
+                    continue
+
+                # Check if we have credentials for the source user
+                source_cred = None
+                for cred in state.all_credentials:
+                    if cred.username.lower() == current_step.source.lower() and cred.password:
+                        source_cred = cred
+                        break
+
+                if not source_cred:
+                    # Check if previous step provided a credential
+                    if chain.current_step_index > 0:
+                        prev_step = chain.steps[chain.current_step_index - 1]
+                        if prev_step.new_credential:
+                            # Create credential from previous step
+                            from ares.core.models import Credential
+
+                            source_cred = Credential(
+                                username=prev_step.new_credential.get("username", ""),
+                                password=prev_step.new_credential.get("password", ""),
+                                domain=chain.domain,
+                                source="acl_chain",
+                            )
+                    else:
+                        logger.debug(
+                            f"🔗 ACL chain {chain.chain_id}: No credentials for source {current_step.source}"
+                        )
+                        continue
+
+                # Generate prompt for this step
+                prompt = tracker.generate_step_prompt(chain, current_step, chain.domain)
+
+                logger.warning(
+                    f"🔗 ACL chain {chain.chain_id} step {current_step.step_id}: "
+                    f"{current_step.source} -> {current_step.target} ({current_step.action.value})"
+                )
+
+                # Dispatch to ACL agent
+                if source_cred is None:  # Should never happen due to continue above
+                    continue
+                try:
+                    task_id = await dispatcher.dispatch_task(
+                        agent_role="acl",
+                        task_type="acl_chain_step",
+                        description=f"ACL chain step: {current_step.source} -> {current_step.target}",
+                        payload={
+                            "chain_id": chain.chain_id,
+                            "step_id": current_step.step_id,
+                            "source": current_step.source,
+                            "target": current_step.target,
+                            "right": current_step.right,
+                            "action": current_step.action.value,
+                            "domain": chain.domain,
+                            "username": source_cred.username,
+                            "password": source_cred.password,
+                            "prompt": prompt,
+                        },
+                    )
+                    dispatched_steps.add(step_key)
+                    logger.info(f"🔗 Dispatched ACL chain step: {task_id}")
+                except Exception as e:
+                    logger.warning(f"🔗 Failed to dispatch ACL chain step: {e}")
+
+            # Check for newly discovered chains from BloodHound output
+            # (This is handled in result_processing via extract_acl_chains_from_bloodhound)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto ACL chain error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
 
 

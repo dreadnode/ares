@@ -247,6 +247,100 @@ tasks:
         fi
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops loot $OP_ID_ARG $LATEST_FLAG {{if ne .WATCH "0"}}--watch {{.WATCH}}{{end}} {{if eq .DIFF "true"}}--diff{{end}}
 
+  multi:report:
+    desc: "Generate comprehensive markdown report for an operation (usage: task red:multi:report [OPERATION_ID=op-xxx] [LATEST=true])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required. Usage: task red:multi:report OPERATION_ID=op-xxx  OR  task red:multi:report LATEST=true"
+    cmds:
+      - |
+        # Ensure output directory exists
+        mkdir -p "{{.OUTPUT_DIR}}"
+
+        # Build args for the report command
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        OP_ID_ARG=""
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ID_ARG="{{.OPERATION_ID}}"
+        fi
+
+        # Generate report in pod and capture it
+        # The report command outputs the path and logs, so we use a temp approach
+        REPORT_CONTENT=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
+          python -c "
+        import asyncio
+        from ares.core.config import get_redis_url
+        from ares.core.redis_client import create_redis_client
+        from ares.core.models import SharedRedTeamState
+        from ares.reports import generate_comprehensive_report
+
+        async def main():
+            redis_url = get_redis_url()
+            client = await create_redis_client(redis_url, decode_responses=False)
+            try:
+                # Get operation ID
+                op_id = '$OP_ID_ARG'
+                if not op_id:
+                    # Find latest
+                    from ares.core.task_queue import RedisTaskQueue
+                    lock_keys = await client.keys(f'{RedisTaskQueue.LOCK_PREFIX}:*')
+                    running = set()
+                    for k in lock_keys:
+                        parts = k.split(':', 2)
+                        if len(parts) >= 3:
+                            running.add(parts[2])
+                    state_keys = await client.keys('ares:operation:*:state')
+                    ops = []
+                    for k in state_keys:
+                        parts = k.split(':')
+                        if len(parts) >= 3:
+                            oid = parts[2]
+                            checkpoint = await client.get(f'ares:operation:{oid}:checkpoint_time')
+                            ops.append((checkpoint, oid, oid in running))
+                    # Prefer running, then latest by checkpoint
+                    running_ops = [(t, o) for t, o, r in ops if r]
+                    if running_ops:
+                        running_ops.sort(key=lambda x: x[0] or '', reverse=True)
+                        op_id = running_ops[0][1]
+                    else:
+                        ops.sort(key=lambda x: x[0] or '', reverse=True)
+                        op_id = ops[0][1] if ops else None
+
+                if not op_id:
+                    raise ValueError('No operations found')
+
+                data = await client.get(f'ares:operation:{op_id}:state')
+                if not data:
+                    raise ValueError(f'No state for {op_id}')
+
+                state = SharedRedTeamState.from_bytes(data)
+                report = generate_comprehensive_report(state)
+                # Output operation ID as first line for filename
+                print(f'OPERATION_ID:{op_id}')
+                print(report)
+            finally:
+                await client.aclose()
+
+        asyncio.run(main())
+        " 2>/dev/null)
+
+        # Extract operation ID and report content
+        REPORT_OP_ID=$(echo "$REPORT_CONTENT" | head -1 | sed 's/OPERATION_ID://')
+        REPORT_BODY=$(echo "$REPORT_CONTENT" | tail -n +2)
+
+        # Save report locally
+        REPORT_FILE="{{.OUTPUT_DIR}}/${REPORT_OP_ID}_report.md"
+        echo "$REPORT_BODY" > "$REPORT_FILE"
+        echo "Report saved: $REPORT_FILE"
+
   multi:status:
     desc: "Check multi-agent operation status (usage: task red:multi:status OPERATION_ID=op-xxx)"
     silent: true
@@ -420,27 +514,6 @@ tasks:
   # ===========================================================================
   # Shell-based tasks (cannot be moved to Python)
   # ===========================================================================
-
-  multi:report:
-    desc: "Fetch a multi-agent red team report from the orchestrator pod (usage: task red:multi:report OPERATION_ID=op-xxx)"
-    silent: true
-    vars:
-      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
-    preconditions:
-      - sh: test -n "{{.OPERATION_ID}}"
-        msg: "OPERATION_ID variable is required. Usage: task red:multi:report OPERATION_ID=op-xxx"
-    cmds:
-      - |
-        POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-        if [ -z "$POD" ]; then
-          echo "No orchestrator pod found in namespace {{.K8S_NAMESPACE}}"
-          exit 1
-        fi
-        REMOTE_PATH="{{.REMOTE_REPORT_DIR}}/{{.OPERATION_ID}}_report.md"
-        mkdir -p {{.REPORT_DIR}}
-        kubectl exec -n {{.K8S_NAMESPACE}} "$POD" -- test -f "$REMOTE_PATH"
-        kubectl cp -n {{.K8S_NAMESPACE}} "$POD:$REMOTE_PATH" "{{.REPORT_DIR}}/{{.OPERATION_ID}}_report.md"
-        echo "Report copied to: {{.REPORT_DIR}}/{{.OPERATION_ID}}_report.md"
 
   multi:local:
     desc: "Run multi-agent red team operation using .env file (usage: task red:multi:local TARGET=dreadgoad [DOMAIN=sevenkingdoms.local])"
