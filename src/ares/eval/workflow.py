@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import dreadnode as dn
 from loguru import logger
@@ -45,8 +45,11 @@ from ares.eval.scorers import (
     score_timeline_accuracy,
 )
 
+if TYPE_CHECKING:
+    from ares.integrations.mitre import MITREAttackClient
 
-@dn.task(
+
+@dn.task(  # type: ignore[arg-type]  # dreadnode SDK generic typing limitation
     scorers=[
         score_stage_progress,
         score_ioc_detection,
@@ -132,14 +135,27 @@ def build_evaluation_result(
     """
     output = (state, ground_truth)
 
-    # Calculate all scores
-    stage_score = score_stage_progress(output)
-    ioc_score = score_ioc_detection(output)
-    technique_score = score_technique_coverage(output)
-    pyramid_score = score_pyramid_elevation(output)
-    timeline_score = score_timeline_accuracy(output)
-    evidence_score = score_evidence_quality(output)
-    overall_score = score_investigation_overall(output)
+    # Calculate all scores using .func to call the raw scoring functions
+    # directly, bypassing the async @dn.scorer wrapper (which returns Metric).
+    # The @dn.task scorers list handles platform logging separately.
+    stage_score = score_stage_progress.func(output)
+    ioc_score = score_ioc_detection.func(output)
+    technique_score = score_technique_coverage.func(output)
+    pyramid_score = score_pyramid_elevation.func(output)
+    timeline_score = score_timeline_accuracy.func(output)
+    evidence_score = score_evidence_quality.func(output)
+
+    # Compute overall as weighted average matching score_investigation_overall weights:
+    # Detection 35% (17.5% each), Quality 30% (15% each), Completeness 35% (17.5% each).
+    total_weight = 3.5 + 3.5 + 3.0 + 3.0 + 3.5 + 3.5  # 20.0
+    overall_score = (
+        ioc_score * 3.5
+        + technique_score * 3.5
+        + pyramid_score * 3.0
+        + evidence_score * 3.0
+        + stage_score * 3.5
+        + timeline_score * 3.5
+    ) / total_weight
 
     # Calculate category scores
     detection_score = (ioc_score + technique_score) / 2
@@ -416,7 +432,7 @@ class EvaluationRunner:
         self.default_matching_rules = default_matching_rules or AlertMatchingRules()
 
         # Cached MITRE client
-        self._mitre_client = None
+        self._mitre_client: MITREAttackClient | None = None
 
     async def _get_mitre_client(self):
         """Get or create cached MITRE client."""
@@ -478,6 +494,7 @@ class EvaluationRunner:
 
         try:
             # Get or inject alert
+            alert: dict[str, Any] | None = None
             if use_synthetic:
                 alert = self._create_synthetic_alert(ground_truth, red_state)
                 alert_fired = True
@@ -522,7 +539,7 @@ class EvaluationRunner:
                                     time_to_ttp_elevation = event_offset
                                     break
 
-                # TODO: Extract token counts from Dreadnode metrics if available
+                # TODO(martin): Extract token counts from Dreadnode metrics if available
                 # For now, estimate based on steps
                 estimated_tokens_per_step = 2000
                 if state:
@@ -632,10 +649,7 @@ class EvaluationRunner:
                             scenario, poll_timeout_seconds, inject_synthetic
                         )
 
-                tasks = [
-                    eval_with_semaphore(i, scenario)
-                    for i, scenario in enumerate(dataset, 1)
-                ]
+                tasks = [eval_with_semaphore(i, scenario) for i, scenario in enumerate(dataset, 1)]
                 results = await asyncio.gather(*tasks)
 
                 # Log metrics after parallel completion
@@ -711,12 +725,12 @@ class EvaluationRunner:
                     severity = "critical"
                     mitre_technique = tech.technique_id
                     break
-                elif tech.technique_id.startswith("T1558"):
+                if tech.technique_id.startswith("T1558"):
                     alert_name = "KerberosAttackDetected"
                     severity = "critical"
                     mitre_technique = tech.technique_id
                     break
-                elif tech.technique_id.startswith("T1021"):
+                if tech.technique_id.startswith("T1021"):
                     alert_name = "LateralMovementDetected"
                     severity = "high"
                     mitre_technique = tech.technique_id
@@ -838,7 +852,7 @@ class EvaluationRunner:
         self,
         alert: dict[str, Any],
         target_ip: str,
-        target_network: ipaddress.IPv4Network | None,
+        target_network: ipaddress.IPv4Network | ipaddress.IPv6Network | None,
         operation_id: str,
         expected_techniques: set[str],
         operation_start: datetime | None,
@@ -889,9 +903,7 @@ class EvaluationRunner:
             alert_time_str = alert.get("startsAt", "")
             if alert_time_str:
                 try:
-                    alert_time = datetime.fromisoformat(
-                        alert_time_str.replace("Z", "+00:00")
-                    )
+                    alert_time = datetime.fromisoformat(alert_time_str.replace("Z", "+00:00"))
                     time_delta = abs((alert_time - operation_start).total_seconds())
                     if time_delta <= rules.match_by_time_window.total_seconds():
                         return True
@@ -900,9 +912,7 @@ class EvaluationRunner:
 
         return False
 
-    async def _run_investigation(
-        self, alert: dict[str, Any]
-    ) -> tuple[InvestigationState, Any]:
+    async def _run_investigation(self, alert: dict[str, Any]) -> tuple[InvestigationState, Any]:
         """Run a blue team investigation for an alert.
 
         Args:

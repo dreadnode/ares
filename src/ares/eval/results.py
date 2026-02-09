@@ -8,10 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ares.core.models import InvestigationStage
-from ares.eval.ground_truth import ExpectedIOC, ExpectedTechnique
+if TYPE_CHECKING:
+    from ares.core.models import InvestigationStage
+    from ares.eval.ground_truth import ExpectedIOC, ExpectedTechnique
 
 
 @dataclass
@@ -363,9 +364,7 @@ class DatasetEvaluationResult:
     def avg_time_to_first_evidence(self) -> float | None:
         """Average time to first evidence (excluding None values)."""
         times = [
-            r.time_to_first_evidence
-            for r in self.results
-            if r.time_to_first_evidence is not None
+            r.time_to_first_evidence for r in self.results if r.time_to_first_evidence is not None
         ]
         if not times:
             return None

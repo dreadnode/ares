@@ -8,10 +8,15 @@ a float score between 0.0 and 1.0.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import dreadnode as dn
+from dreadnode.scorers import weighted_avg
 
 from ares.core.models import InvestigationStage, InvestigationState, PyramidLevel
-from ares.eval.ground_truth import EvaluationGroundTruth, ExpectedIOC, ExpectedTechnique
+
+if TYPE_CHECKING:
+    from ares.eval.ground_truth import EvaluationGroundTruth, ExpectedIOC, ExpectedTechnique
 
 
 @dn.scorer(name="Stage Progress")
@@ -227,9 +232,7 @@ def score_pyramid_elevation(
 
     # Calculate high-level ratio (30% weight)
     high_level_evidence = sum(
-        1
-        for e in state.evidence
-        if e.pyramid_level in (PyramidLevel.TOOLS, PyramidLevel.TTPS)
+        1 for e in state.evidence if e.pyramid_level in (PyramidLevel.TOOLS, PyramidLevel.TTPS)
     )
     high_level_ratio = high_level_evidence / len(state.evidence) if state.evidence else 0.0
 
@@ -279,13 +282,11 @@ def score_timeline_accuracy(
 
     # Score technique coverage in timeline
     expected_timeline_techniques: set[str] = set()
-    for event in ground_truth.expected_timeline:
-        expected_timeline_techniques.update(event.mitre_techniques)
+    for expected_event in ground_truth.expected_timeline:
+        expected_timeline_techniques.update(expected_event.mitre_techniques)
 
     if expected_timeline_techniques:
-        technique_matches = len(
-            expected_timeline_techniques & found_techniques_in_timeline
-        )
+        technique_matches = len(expected_timeline_techniques & found_techniques_in_timeline)
         technique_score = technique_matches / len(expected_timeline_techniques)
     else:
         technique_score = 1.0
@@ -322,17 +323,26 @@ def _timeline_event_matches(pattern: str, descriptions: list[str]) -> bool:
         # Strategy 3: Keyword overlap matching
         # Extract significant words (>3 chars, not common words)
         stop_words = {
-            "the", "and", "for", "was", "were", "with", "from", "that",
-            "this", "have", "has", "been", "which", "into", "user",
+            "the",
+            "and",
+            "for",
+            "was",
+            "were",
+            "with",
+            "from",
+            "that",
+            "this",
+            "have",
+            "has",
+            "been",
+            "which",
+            "into",
+            "user",
         }
         pattern_words = {
-            w for w in re.findall(r'\w+', pattern_lower)
-            if len(w) > 3 and w not in stop_words
+            w for w in re.findall(r"\w+", pattern_lower) if len(w) > 3 and w not in stop_words
         }
-        desc_words = {
-            w for w in re.findall(r'\w+', desc)
-            if len(w) > 3 and w not in stop_words
-        }
+        desc_words = {w for w in re.findall(r"\w+", desc) if len(w) > 3 and w not in stop_words}
 
         if pattern_words and desc_words:
             overlap = len(pattern_words & desc_words)
@@ -378,43 +388,19 @@ def score_evidence_quality(
     return (avg_confidence * 0.4) + (validation_rate * 0.3) + (ttp_ratio * 0.3)
 
 
-@dn.scorer(name="Investigation Quality")
-def score_investigation_overall(
-    output: tuple[InvestigationState | None, EvaluationGroundTruth],
-) -> float:
-    """Composite scorer for overall investigation quality.
-
-    Combines all component scores with weights:
-    - Detection (IOC + Technique): 35%
-    - Quality (Pyramid + Evidence): 30%
-    - Completeness (Stage + Timeline): 35%
-
-    Returns 0.0 if investigation didn't start.
-    """
-    state, _ground_truth = output
-
-    if state is None:
-        return 0.0
-
-    # Get component scores
-    ioc_score = score_ioc_detection(output)
-    technique_score = score_technique_coverage(output)
-    pyramid_score = score_pyramid_elevation(output)
-    evidence_score = score_evidence_quality(output)
-    stage_score = score_stage_progress(output)
-    timeline_score = score_timeline_accuracy(output)
-
-    # Calculate category scores
-    detection_score = (ioc_score + technique_score) / 2
-    quality_score = (pyramid_score + evidence_score) / 2
-    completeness_score = (stage_score + timeline_score) / 2
-
-    # Weighted composite
-    return (
-        (detection_score * 0.35)
-        + (quality_score * 0.30)
-        + (completeness_score * 0.35)
+# Composite scorer using dreadnode's weighted_avg.
+# Weights: Detection 35% (17.5% each), Quality 30% (15% each), Completeness 35% (17.5% each).
+score_investigation_overall = (
+    weighted_avg(
+        (score_ioc_detection, 3.5),
+        (score_technique_coverage, 3.5),
+        (score_pyramid_elevation, 3.0),
+        (score_evidence_quality, 3.0),
+        (score_stage_progress, 3.5),
+        (score_timeline_accuracy, 3.5),
     )
+    >> "investigation_quality"
+)
 
 
 # Helper functions for external use

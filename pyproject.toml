@@ -271,3 +271,9 @@ skip-magic-trailing-comma = false
     "T201",    # printing is fine for CLI commands
     "PLR0912", # too many branches is acceptable for CLI command functions
 ]
+"src/ares/main.py" = [
+    "T201",    # printing is intentional for CI JSON output
+]
+"src/ares/eval/*.py" = [
+    "PLR0912", # complex evaluation functions have many branches by nature
+]

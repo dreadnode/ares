@@ -8,9 +8,11 @@ actionable recommendations for improving blue team detection capabilities.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-from ares.eval.ground_truth import ExpectedIOC, ExpectedTechnique
-from ares.eval.results import EvaluationResult
+if TYPE_CHECKING:
+    from ares.eval.ground_truth import ExpectedIOC, ExpectedTechnique
+    from ares.eval.results import EvaluationResult
 
 
 @dataclass
@@ -77,18 +79,18 @@ class GapAnalysisReport:
         else:
             lines.append("No significant detection gaps identified.")
 
-        lines.extend([
-            "",
-            "## Recommendations",
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "## Recommendations",
+                "",
+            ]
+        )
 
         if self.recommendations:
             # Group by priority
             for priority in ["critical", "high", "medium", "low"]:
-                priority_recs = [
-                    r for r in self.recommendations if r.priority == priority
-                ]
+                priority_recs = [r for r in self.recommendations if r.priority == priority]
                 if priority_recs:
                     lines.append(f"### {priority.title()} Priority")
                     lines.append("")
@@ -190,8 +192,7 @@ def analyze_detection_gaps(result: EvaluationResult) -> GapAnalysisReport:
                     "Enable additional log sources to identify tools and TTPs."
                 ),
                 implementation_hint=(
-                    "Enable Sysmon, PowerShell script block logging, "
-                    "and command-line auditing."
+                    "Enable Sysmon, PowerShell script block logging, and command-line auditing."
                 ),
             )
         )
@@ -271,8 +272,7 @@ def _recommend_for_ioc(ioc: ExpectedIOC) -> DetectionRecommendation | None:
             ),
             techniques=ioc.mitre_techniques,
             implementation_hint=(
-                "Verify log forwarding from this host. "
-                "Add to asset inventory if missing."
+                "Verify log forwarding from this host. Add to asset inventory if missing."
             ),
         )
 
@@ -357,8 +357,7 @@ def _recommend_for_technique(tech: ExpectedTechnique) -> DetectionRecommendation
         "T1649": {
             "title": "Detect certificate-based attacks",
             "description": (
-                "Certificate abuse (T1649) was not detected. ADCS attacks are "
-                "increasingly common."
+                "Certificate abuse (T1649) was not detected. ADCS attacks are increasingly common."
             ),
             "hint": (
                 "Monitor certificate requests (Event ID 4886/4887), detect "
@@ -403,9 +402,7 @@ def _generate_summary(result: EvaluationResult, gaps: list[str]) -> str:
 
     # Overall assessment
     if result.grade in ("A", "B"):
-        parts.append(
-            f"The investigation performed well with a grade of {result.grade}."
-        )
+        parts.append(f"The investigation performed well with a grade of {result.grade}.")
     elif result.grade == "C":
         parts.append(
             f"The investigation achieved a passing grade of {result.grade} but "
@@ -421,9 +418,7 @@ def _generate_summary(result: EvaluationResult, gaps: list[str]) -> str:
     if result.alert_fired:
         parts.append("An alert was successfully triggered for this attack.")
     else:
-        parts.append(
-            "No alert was triggered, indicating a critical gap in detection rules."
-        )
+        parts.append("No alert was triggered, indicating a critical gap in detection rules.")
 
     # Detection rates
     parts.append(

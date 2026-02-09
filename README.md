@@ -431,16 +431,16 @@ uv run ares evaluate-dataset ./scenarios.json \
 
 #### Evaluation Arguments (`--eval-args.*`)
 
-| Option                        | Default          | Description                                     |
-| ----------------------------- | ---------------- | ----------------------------------------------- |
-| `--eval-args.output-dir`      | `./eval_results` | Directory for evaluation result JSON files       |
-| `--eval-args.poll-timeout`    | `60`             | Seconds to wait for Grafana alerts per scenario  |
-| `--eval-args.ci`              | `false`          | CI mode — JSON to stdout, exit code 0/1          |
-| `--eval-args.synthetic`       | `false`          | Use synthetic alerts instead of polling Grafana   |
-| `--eval-args.min-score`       | `0.5`            | Minimum overall score to pass (CI mode)          |
-| `--eval-args.min-ioc-rate`    | `0.5`            | Minimum IOC detection rate to pass (CI mode)     |
-| `--eval-args.min-technique-rate` | `0.5`         | Minimum technique coverage to pass (CI mode)     |
-| `--eval-args.parallel`        | `1`              | Concurrent scenarios for dataset evaluation      |
+| Option                           | Default          | Description                                     |
+| -------------------------------- | ---------------- | ----------------------------------------------- |
+| `--eval-args.output-dir`         | `./eval_results` | Directory for evaluation result JSON files      |
+| `--eval-args.poll-timeout`       | `60`             | Seconds to wait for Grafana alerts per scenario |
+| `--eval-args.ci`                 | `false`          | CI mode — JSON to stdout, exit code 0/1         |
+| `--eval-args.synthetic`          | `false`          | Use synthetic alerts instead of polling Grafana |
+| `--eval-args.min-score`          | `0.5`            | Minimum overall score to pass (CI mode)         |
+| `--eval-args.min-ioc-rate`       | `0.5`            | Minimum IOC detection rate to pass (CI mode)    |
+| `--eval-args.min-technique-rate` | `0.5`            | Minimum technique coverage to pass (CI mode)    |
+| `--eval-args.parallel`           | `1`              | Concurrent scenarios for dataset evaluation     |
 
 ### Scoring
 
@@ -487,8 +487,8 @@ The `--eval-args.synthetic` flag bypasses Grafana polling and generates a
 synthetic alert from the red team ground truth. The alert type and severity
 are chosen based on the most significant expected techniques:
 
-| Technique Pattern | Alert Name                 | Severity |
-| ----------------- | -------------------------- | -------- |
+| Technique Pattern | Alert Name                  | Severity |
+| ----------------- | --------------------------- | -------- |
 | T1003 (cred dump) | `CredentialDumpingDetected` | Critical |
 | T1558 (Kerberos)  | `KerberosAttackDetected`    | Critical |
 | T1021 (lateral)   | `LateralMovementDetected`   | High     |

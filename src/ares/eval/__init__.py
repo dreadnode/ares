@@ -18,6 +18,11 @@ Example:
     >>> print(results.to_summary())
 """
 
+from ares.eval.gap_analysis import (
+    DetectionRecommendation,
+    GapAnalysisReport,
+    analyze_detection_gaps,
+)
 from ares.eval.ground_truth import (
     EvaluationGroundTruth,
     ExpectedIOC,
@@ -26,11 +31,6 @@ from ares.eval.ground_truth import (
     ExpectedTimelineEvent,
     ExpectedVulnerability,
     create_ground_truth_from_red_state,
-)
-from ares.eval.gap_analysis import (
-    DetectionRecommendation,
-    GapAnalysisReport,
-    analyze_detection_gaps,
 )
 from ares.eval.results import (
     DatasetEvaluationResult,
@@ -59,21 +59,28 @@ from ares.eval.workflow import (
 )
 
 __all__ = [
-    # Ground truth
-    "create_ground_truth_from_red_state",
+    # Workflow
+    "AlertMatchingRules",
+    # Results
+    "DatasetEvaluationResult",
+    "DetectionRecommendation",
+    "EvaluationDataset",
     "EvaluationGroundTruth",
+    "EvaluationResult",
+    "EvaluationRunner",
+    "EvaluationScenario",
     "ExpectedIOC",
     "ExpectedShare",
     "ExpectedTechnique",
     "ExpectedTimelineEvent",
     "ExpectedVulnerability",
+    "GapAnalysisReport",
     # Gap analysis
     "analyze_detection_gaps",
-    "DetectionRecommendation",
-    "GapAnalysisReport",
-    # Results
-    "DatasetEvaluationResult",
-    "EvaluationResult",
+    "build_evaluation_result",
+    # Ground truth
+    "create_ground_truth_from_red_state",
+    "evaluate_investigation",
     # Scorers
     "get_found_iocs",
     "get_found_techniques",
@@ -86,11 +93,4 @@ __all__ = [
     "score_stage_progress",
     "score_technique_coverage",
     "score_timeline_accuracy",
-    # Workflow
-    "AlertMatchingRules",
-    "build_evaluation_result",
-    "EvaluationDataset",
-    "evaluate_investigation",
-    "EvaluationRunner",
-    "EvaluationScenario",
 ]

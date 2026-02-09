@@ -8,7 +8,7 @@ blue team investigation should detect.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from typing import TYPE_CHECKING
 
 from ares.core.models import (
     PyramidLevel,
@@ -16,6 +16,9 @@ from ares.core.models import (
     SharedRedTeamState,
     VulnerabilityInfo,
 )
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 @dataclass
@@ -224,8 +227,8 @@ def create_ground_truth_from_red_state(
         timeline = state.timeline
         techniques = state.identified_techniques
         shares = state.shares
-        discovered_vulns: dict[str, VulnerabilityInfo] = {}
-        exploited_vulns: set[str] = set()
+        discovered_vulns = dict[str, VulnerabilityInfo]()
+        exploited_vulns = set[str]()
 
     # Extract IOCs from hosts
     for host in hosts:
