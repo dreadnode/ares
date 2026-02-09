@@ -216,7 +216,7 @@ def create_ground_truth_from_red_state(
         discovered_vulns = state.discovered_vulnerabilities
         exploited_vulns = state.exploited_vulnerabilities
     else:
-        target_ip = state.target.ip
+        target_ip = state.target.ip if state.target else ""
         hosts = state.hosts
         users = state.users
         credentials = state.credentials
