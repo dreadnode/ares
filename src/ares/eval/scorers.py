@@ -387,8 +387,7 @@ def score_investigation_overall(
     Combines all component scores with weights:
     - Detection (IOC + Technique): 35%
     - Quality (Pyramid + Evidence): 30%
-    - Completeness (Stage + Timeline): 20%
-    - Efficiency (stage progress alone): 15%
+    - Completeness (Stage + Timeline): 35%
 
     Returns 0.0 if investigation didn't start.
     """
@@ -414,8 +413,7 @@ def score_investigation_overall(
     return (
         (detection_score * 0.35)
         + (quality_score * 0.30)
-        + (completeness_score * 0.20)
-        + (stage_score * 0.15)
+        + (completeness_score * 0.35)
     )
 
 
