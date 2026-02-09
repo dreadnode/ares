@@ -1628,11 +1628,26 @@ class CrackerCallbackTools(Toolset):
         """
         from ares.core.models import Credential
 
+        # Find the parent hash to link for attack chain
+        parent_hash_id = None
+        parent_attack_step = 0
+        normalized_domain = domain.lower().strip()
+        normalized_user = username.lower().strip()
+        for h in self.state.all_hashes:
+            if h.hash_value == original_hash or (
+                h.username.lower() == normalized_user and h.domain.lower() == normalized_domain
+            ):
+                parent_hash_id = h.id
+                parent_attack_step = h.attack_step
+                break
+
         cred = Credential(
             username=username,
             password=password,
             domain=domain,
             source=f"cracked:{method}",
+            parent_id=parent_hash_id,
+            attack_step=parent_attack_step + 1 if parent_hash_id else 0,
         )
 
         await self.dispatcher.publish_credential(cred, self._agent_name)

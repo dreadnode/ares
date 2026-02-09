@@ -218,14 +218,14 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
             {
                 "vuln_id": vuln_id,
                 "vuln_type": vuln.vuln_type,
-                "target_ip": vuln.target_ip,
-                "target_host": vuln.target_host or vuln.target_ip,
+                "target_ip": vuln.target,
+                "target_host": vuln.target,
                 "priority": vuln.priority,
                 "exploited": vuln_id in state.exploited_vulnerabilities,
                 "details": vuln.details or "",
             }
         )
-    discovered_vulns.sort(key=lambda v: v["priority"])
+    discovered_vulns.sort(key=lambda v: v.get("priority", 999))  # type: ignore[arg-type,return-value]
 
     # Format timeline events
     timeline = []

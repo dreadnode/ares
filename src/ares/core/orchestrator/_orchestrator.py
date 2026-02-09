@@ -40,7 +40,6 @@ from ares.core.recovery import OperationRecoveryManager, RecoveryError
 from ares.core.task_queue import RedisTaskQueue
 from ares.core.workflows import exploitation_workflow
 from ares.reports.redteam import RedTeamReportGenerator
-from ares.tools.red import RedTeamReportingTools
 from ares.tools.red.orchestrator import OrchestratorTools
 
 # Default max runtime in seconds (60 minutes), configurable via ARES_MAX_RUNTIME env var
@@ -149,8 +148,15 @@ async def _load_or_initialize_state(
 ) -> None:
     if resume_from_checkpoint:
         try:
-            state, _task_ids = await recovery.recover_operation(operation_id)
+            state, requeued_task_ids = await recovery.recover_operation(operation_id)
             dispatcher._shared_state = state
+            # Add requeued task IDs to dispatcher so result consumer can track them
+            for task_id in requeued_task_ids:
+                dispatcher._redis_task_ids.add(task_id)
+            if requeued_task_ids:
+                logger.info(
+                    f"Added {len(requeued_task_ids)} requeued task IDs to result consumer tracking"
+                )
             if state.all_credentials or state.all_hashes:
                 dispatcher.signal_credential_access()
             logger.info(f"Resumed operation {operation_id} from checkpoint")
@@ -372,10 +378,11 @@ async def run_multi_agent_operation(  # noqa: PLR0912
     await dispatcher.start(operation_id)
 
     # Acquire exclusive operation lock
+    # Force acquire when resuming from checkpoint (stale lock from crashed orchestrator)
     task_queue = RedisTaskQueue(redis_url)
     await task_queue.connect()
 
-    if not await task_queue.acquire_operation_lock(operation_id):
+    if not await task_queue.acquire_operation_lock(operation_id, force=resume_from_checkpoint):
         await task_queue.disconnect()
         raise RuntimeError(
             f"Operation {operation_id} is already running by another orchestrator. "
@@ -485,8 +492,28 @@ async def run_multi_agent_operation(  # noqa: PLR0912
                     logger.info(f"🤖 Connecting to {model}...")
                     result = await orchestrator_agent.run(initial_prompt)
                     _log_orchestrator_result(result, model)
+
+                    # Check if result indicates a fatal error (e.g., auth failure)
+                    if result.stop_reason == "error":
+                        error_msg = str(result.error) if result.error else "Unknown error"
+                        # Auth errors are fatal - no point retrying with bad credentials
+                        if "AuthenticationError" in error_msg or "invalid" in error_msg.lower():
+                            raise RuntimeError(f"Fatal authentication error: {error_msg}")
+                        # Other errors - treat as crash and let retry logic handle
+                        raise RuntimeError(f"Orchestrator returned error: {error_msg}")
+
                     break  # Success - exit the retry loop
                 except Exception as e:
+                    error_str = str(e)
+
+                    # Auth errors are fatal - never retry with bad credentials
+                    if (
+                        "Fatal authentication error" in error_str
+                        or "AuthenticationError" in error_str
+                    ):
+                        logger.error(f"Authentication failed - cannot continue: {e}")
+                        raise
+
                     orchestrator_crash_count += 1
                     state = dispatcher.shared_state
                     has_progress = len(state.all_credentials) > 0 or len(state.all_hashes) > 0
@@ -665,24 +692,16 @@ async def _create_orchestrator_agent(
     if not shared_state._dispatcher:
         shared_state.set_dispatcher(dispatcher)
 
-    # Create completion tools that can modify shared state (for stop conditions)
-    complete_operation, announce_domain_admin = _create_completion_tools(shared_state, dispatcher)
-
     # Create orchestrator tools with dispatcher wired in
+    # OrchestratorTools includes all orchestrator functionality:
+    # - Stop conditions: complete_operation, announce_domain_admin
+    # - Status: get_operation_summary, get_all_credentials, get_all_hashes, etc.
+    # - Dispatch: dispatch_recon, dispatch_credential_access, etc.
     orchestrator_tools = OrchestratorTools()
     orchestrator_tools.set_dispatcher(dispatcher)
     orchestrator_tools.set_shared_state(shared_state)
 
-    # Reporting tools for status tracking
-    reporting_tools = RedTeamReportingTools()
-    reporting_tools.set_state(shared_state)
-
-    tools = [
-        complete_operation,  # Stop condition tool for marking operation complete
-        announce_domain_admin,  # Stop condition tool for announcing DA achievement
-        orchestrator_tools,  # Coordination tools (dispatch_*, get_*, broadcast_*)
-        reporting_tools,  # record_finding, generate_report
-    ]
+    tools = [orchestrator_tools]
 
     # Load orchestrator-specific instructions
     instructions = load_agent_instructions(AgentRole.ORCHESTRATOR)
@@ -1790,7 +1809,9 @@ async def _auto_crack_dispatch(
 
             state = dispatcher.shared_state
 
-            if state.completed or state.has_domain_admin:
+            # NOTE: Don't exit on has_domain_admin - we still want to crack hashes
+            # after DA for reporting/persistence. Crack tasks don't use LLM tokens.
+            if state.completed:
                 logger.debug("Operation complete, stopping auto crack dispatch")
                 break
 
@@ -2749,6 +2770,88 @@ async def _wait_for_crack_tasks(
         await asyncio.sleep(check_interval)
 
 
+async def _wait_for_golden_ticket(
+    dispatcher: RedTeamDispatcher,
+    timeout: float = 120.0,
+    check_interval: float = 5.0,
+) -> None:
+    """
+    Wait for golden ticket generation if krbtgt hash is available.
+
+    When DA is achieved, we may have a krbtgt hash that the _auto_golden_ticket
+    background task hasn't processed yet. This function waits for golden ticket
+    generation to complete (or timeout) before exiting.
+
+    Args:
+        dispatcher: The dispatcher instance
+        timeout: Maximum seconds to wait for golden ticket
+        check_interval: Seconds between checks
+    """
+    state = dispatcher.shared_state
+
+    # Find krbtgt hashes that don't have corresponding golden tickets yet
+    processed_domains = {
+        t.get("domain", "").lower()
+        for t in state.golden_tickets
+        if t.get("domain")
+        and t.get("status") in ("success", "failed_no_dc", "failed_no_sid", "failed_ticketer")
+    }
+
+    pending_krbtgt_domains = set()
+    for hash_obj in state.all_hashes:
+        if hash_obj.username.lower() == "krbtgt" and hash_obj.hash_type.lower() == "ntlm":
+            domain = (hash_obj.domain or "").lower()
+            if domain and domain not in processed_domains:
+                pending_krbtgt_domains.add(domain)
+
+    if not pending_krbtgt_domains:
+        if state.has_golden_ticket:
+            logger.info("🎫 Golden ticket already generated")
+        return
+
+    logger.info(
+        f"🎫 Waiting for golden ticket generation for {len(pending_krbtgt_domains)} domain(s): "
+        f"{pending_krbtgt_domains} (timeout: {timeout}s)"
+    )
+
+    start_time = asyncio.get_event_loop().time()
+
+    while True:
+        elapsed = asyncio.get_event_loop().time() - start_time
+
+        if elapsed > timeout:
+            logger.warning(
+                f"🎫 Golden ticket generation timed out after {timeout}s. "
+                f"Pending domains: {pending_krbtgt_domains}"
+            )
+            break
+
+        # Check if golden ticket was generated
+        if state.has_golden_ticket:
+            logger.success("🎫 Golden ticket generated successfully!")
+            break
+
+        # Check if all pending domains have been processed (success or failure)
+        processed_domains = {
+            t.get("domain", "").lower()
+            for t in state.golden_tickets
+            if t.get("domain")
+            and t.get("status") in ("success", "failed_no_dc", "failed_no_sid", "failed_ticketer")
+        }
+        remaining = pending_krbtgt_domains - processed_domains
+        if not remaining:
+            if state.has_golden_ticket:
+                logger.success("🎫 Golden ticket generated successfully!")
+            else:
+                logger.warning("🎫 All golden ticket attempts completed (some may have failed)")
+            break
+
+        logger.debug(
+            f"🎫 Waiting for golden ticket ({elapsed:.0f}s/{timeout:.0f}s) - pending: {remaining}"
+        )
+        await asyncio.sleep(check_interval)
+
+
 async def _wait_for_completion(
     dispatcher: RedTeamDispatcher,
     background_tasks: list[asyncio.Task],
@@ -2772,6 +2875,8 @@ async def _wait_for_completion(
         # Check runtime limit
         if elapsed > max_runtime:
             logger.warning(f"Operation reached max runtime ({max_runtime}s)")
+            # Still try for golden ticket if we have krbtgt (quick operation)
+            await _wait_for_golden_ticket(dispatcher, timeout=60.0)
             # Wait for running crack tasks before fully exiting
             await _wait_for_crack_tasks(dispatcher)
             break
@@ -2779,11 +2884,15 @@ async def _wait_for_completion(
         # Check for domain admin or explicit completion
         if dispatcher.shared_state.has_domain_admin:
             logger.success("Domain Admin achieved! Operation complete.")
+            # Wait for golden ticket generation (if krbtgt hash is available)
+            await _wait_for_golden_ticket(dispatcher)
             # Wait for running crack tasks before fully exiting
             await _wait_for_crack_tasks(dispatcher)
             break
         if dispatcher.shared_state.completed:
             logger.success("Operation marked complete.")
+            # Wait for golden ticket generation (if krbtgt hash is available)
+            await _wait_for_golden_ticket(dispatcher)
             # Wait for running crack tasks before fully exiting
             await _wait_for_crack_tasks(dispatcher)
             break

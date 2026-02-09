@@ -358,12 +358,29 @@ class RoutingMixin:
         Returns:
             Task ID for tracking.
         """
+        # Find the hash object to get its ID for attack chain tracking
+        parent_hash_id = None
+        parent_attack_step = 0
+        normalized_domain = domain.lower().strip()
+        normalized_user = username.lower().strip()
+        for h in self.shared_state.all_hashes:
+            if h.hash_value == hash_value or (
+                h.username.lower() == normalized_user
+                and h.domain.lower() == normalized_domain
+                and h.hash_type.upper() == hash_type.upper()
+            ):
+                parent_hash_id = h.id
+                parent_attack_step = h.attack_step
+                break
+
         payload = {
             "hash_value": hash_value,
             "hash_type": hash_type,
             "username": username,
             "domain": domain,
             "wordlist": wordlist,
+            "parent_credential_id": parent_hash_id,  # Hash ID for attack chain
+            "parent_attack_step": parent_attack_step,
         }
 
         if self._task_queue:

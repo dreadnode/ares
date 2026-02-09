@@ -25,6 +25,7 @@ from ares.core.models import (
     Host,
     Share,
     TaskInfo,
+    TimelineEvent,
     VulnerabilityInfo,
 )
 
@@ -68,6 +69,19 @@ class PublishingMixin:
                 ),
                 exclude=source_agent,
             )
+            # Add timeline event for credential discovery
+            import uuid
+            from datetime import datetime, timezone
+
+            self.shared_state.operation_timeline.append(
+                TimelineEvent(
+                    id=f"evt-cred-{uuid.uuid4().hex[:8]}",
+                    timestamp=datetime.now(timezone.utc),
+                    source=source_agent,
+                    description=f"Credential discovered: {credential.domain}\\{credential.username} via {credential.source}",
+                    mitre_techniques=["T1078"] if is_admin else ["T1552"],
+                )
+            )
             await self._checkpoint()
             logger.info(f"Credential published: {credential.domain}\\{credential.username}")
         else:
@@ -108,6 +122,25 @@ class PublishingMixin:
                     priority=priority,
                 ),
                 exclude=source_agent,
+            )
+            # Add timeline event for hash discovery
+            import uuid
+            from datetime import datetime, timezone
+
+            is_critical = hash_obj.username.lower() in ("krbtgt", "administrator")
+            event_desc = (
+                f"Hash discovered: {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type})"
+            )
+            if is_critical:
+                event_desc = f"CRITICAL: {event_desc}"
+            self.shared_state.operation_timeline.append(
+                TimelineEvent(
+                    id=f"evt-hash-{uuid.uuid4().hex[:8]}",
+                    timestamp=datetime.now(timezone.utc),
+                    source=source_agent,
+                    description=event_desc,
+                    mitre_techniques=["T1003"],  # OS Credential Dumping
+                )
             )
             await self._checkpoint()
             logger.info(

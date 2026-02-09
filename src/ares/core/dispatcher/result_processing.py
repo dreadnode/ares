@@ -123,7 +123,9 @@ class ResultProcessingMixin:
 
         # Process additional result fields only on success
         if success and isinstance(result, dict):
-            await self._process_success_result_data(result, task_id, source_agent)
+            await self._process_success_result_data(
+                result, task_id, source_agent, parent_credential_id, parent_attack_step
+            )
             output = self._extract_output_from_result(result)
         elif success and isinstance(result, str):
             output = result.strip()
@@ -287,8 +289,13 @@ class ResultProcessingMixin:
         result: dict[str, Any],
         task_id: str,
         source_agent: str,
+        parent_credential_id: str | None = None,
+        parent_attack_step: int = 0,
     ) -> None:
         """Process credential/hash/share fields from successful result."""
+        # Calculate attack_step for discoveries (parent + 1)
+        discovery_step = parent_attack_step + 1 if parent_credential_id else 0
+
         cred_data = result.get("credential")
         if isinstance(cred_data, dict):
             self._add_user(cred_data.get("username", ""), cred_data.get("domain", ""))
@@ -298,6 +305,8 @@ class ResultProcessingMixin:
                 domain=cred_data.get("domain", ""),
                 source=cred_data.get("source", f"task:{task_id}"),
                 is_admin=cred_data.get("is_admin", False),
+                parent_id=parent_credential_id,
+                attack_step=discovery_step,
             )
             await self.publish_credential(credential, source_agent)
 
@@ -313,6 +322,8 @@ class ResultProcessingMixin:
                     domain=cred.get("domain", ""),
                     source=cred.get("source", f"task:{task_id}"),
                     is_admin=cred.get("is_admin", False),
+                    parent_id=parent_credential_id,
+                    attack_step=discovery_step,
                 )
                 await self.publish_credential(credential, source_agent)
 
@@ -324,6 +335,8 @@ class ResultProcessingMixin:
                 hash_type=hash_data.get("hash_type", "NTLM"),
                 domain=hash_data.get("domain", ""),
                 cracked_password=hash_data.get("cracked_password", ""),
+                parent_id=parent_credential_id,
+                attack_step=discovery_step,
             )
             await self.publish_hash(hash_obj, source_agent)
             if hash_obj.cracked_password:
@@ -333,6 +346,8 @@ class ResultProcessingMixin:
                     domain=hash_obj.domain,
                     source=f"hash:{task_id}",
                     is_admin=False,
+                    parent_id=hash_obj.id,
+                    attack_step=hash_obj.attack_step + 1,
                 )
                 await self.publish_credential(cracked_cred, source_agent)
 
@@ -347,6 +362,8 @@ class ResultProcessingMixin:
                     hash_type=h.get("hash_type", "NTLM"),
                     domain=h.get("domain", ""),
                     cracked_password=h.get("cracked_password", ""),
+                    parent_id=parent_credential_id,
+                    attack_step=discovery_step,
                 )
                 await self.publish_hash(hash_obj, source_agent)
                 if hash_obj.cracked_password:
@@ -356,6 +373,8 @@ class ResultProcessingMixin:
                         domain=hash_obj.domain,
                         source=f"hash:{task_id}",
                         is_admin=False,
+                        parent_id=hash_obj.id,
+                        attack_step=hash_obj.attack_step + 1,
                     )
                     await self.publish_credential(cracked_cred, source_agent)
 
