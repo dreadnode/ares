@@ -27,6 +27,11 @@ from ares.eval.ground_truth import (
     ExpectedVulnerability,
     create_ground_truth_from_red_state,
 )
+from ares.eval.gap_analysis import (
+    DetectionRecommendation,
+    GapAnalysisReport,
+    analyze_detection_gaps,
+)
 from ares.eval.results import (
     DatasetEvaluationResult,
     EvaluationResult,
@@ -62,6 +67,10 @@ __all__ = [
     "ExpectedTechnique",
     "ExpectedTimelineEvent",
     "ExpectedVulnerability",
+    # Gap analysis
+    "analyze_detection_gaps",
+    "DetectionRecommendation",
+    "GapAnalysisReport",
     # Results
     "DatasetEvaluationResult",
     "EvaluationResult",

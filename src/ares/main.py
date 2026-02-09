@@ -821,10 +821,22 @@ class EvalArgs:
     Attributes:
         output_dir: Directory for evaluation results.
         poll_timeout: Seconds to wait for alerts per scenario.
+        ci: CI mode - output JSON to stdout and use exit codes.
+        synthetic: Use synthetic alerts (don't wait for real Grafana alerts).
+        min_score: Minimum overall score to pass (0.0-1.0, CI mode only).
+        min_ioc_rate: Minimum IOC detection rate to pass (0.0-1.0, CI mode only).
+        min_technique_rate: Minimum technique coverage to pass (0.0-1.0, CI mode only).
+        parallel: Number of scenarios to run in parallel (dataset only).
     """
 
     output_dir: str = "./eval_results"
     poll_timeout: int = 60
+    ci: bool = False
+    synthetic: bool = False
+    min_score: float = 0.5
+    min_ioc_rate: float = 0.5
+    min_technique_rate: float = 0.5
+    parallel: int = 1
 
 
 # Cyclopts decorator typing not yet fully supported by type checkers
@@ -917,7 +929,34 @@ async def evaluate(
         result = await runner.evaluate_scenario(
             scenario,
             poll_timeout_seconds=eval_args.poll_timeout,
+            inject_synthetic=eval_args.synthetic,
         )
+
+    # CI mode: JSON output and exit codes
+    if eval_args.ci:
+        import json
+        import sys
+
+        # Check pass/fail against thresholds
+        passed = (
+            result.overall_score >= eval_args.min_score
+            and result.ioc_detection_rate >= eval_args.min_ioc_rate
+            and result.technique_coverage >= eval_args.min_technique_rate
+        )
+
+        output = {
+            "passed": passed,
+            "result": result.to_dict(),
+            "thresholds": {
+                "min_score": eval_args.min_score,
+                "min_ioc_rate": eval_args.min_ioc_rate,
+                "min_technique_rate": eval_args.min_technique_rate,
+            },
+        }
+        print(json.dumps(output, indent=2, default=str))
+
+        # Exit with appropriate code
+        sys.exit(0 if passed else 1)
 
     logger.success("")
     logger.success("=" * 60)
@@ -1016,12 +1055,47 @@ async def evaluate_dataset(
         grafana_api_key=grafana_api_key,
         max_steps=args.max_steps,
         output_dir=eval_args.output_dir,
+        inject_synthetic_alerts=eval_args.synthetic,
     )
 
     result = await runner.evaluate_dataset(
         dataset,
         poll_timeout_seconds=eval_args.poll_timeout,
+        max_concurrent=eval_args.parallel,
     )
+
+    # CI mode: JSON output and exit codes
+    if eval_args.ci:
+        import json
+        import sys
+
+        # Check pass/fail against thresholds
+        passed = (
+            result.avg_overall_score >= eval_args.min_score
+            and result.avg_ioc_detection_rate >= eval_args.min_ioc_rate
+            and result.avg_technique_coverage >= eval_args.min_technique_rate
+        )
+
+        output = {
+            "passed": passed,
+            "summary": {
+                "count": result.count,
+                "pass_rate": result.pass_rate,
+                "avg_overall_score": result.avg_overall_score,
+                "avg_ioc_detection_rate": result.avg_ioc_detection_rate,
+                "avg_technique_coverage": result.avg_technique_coverage,
+            },
+            "thresholds": {
+                "min_score": eval_args.min_score,
+                "min_ioc_rate": eval_args.min_ioc_rate,
+                "min_technique_rate": eval_args.min_technique_rate,
+            },
+            "results": result.to_dict(),
+        }
+        print(json.dumps(output, indent=2, default=str))
+
+        # Exit with appropriate code
+        sys.exit(0 if passed else 1)
 
     logger.success("")
     logger.success("=" * 60)
