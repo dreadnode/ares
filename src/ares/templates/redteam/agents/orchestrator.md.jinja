@@ -134,8 +134,17 @@ Port 1433 open -> queue_vulnerability_for_exploitation(vuln_type="mssql_linked_s
 ```
 **IMPORTANT:** Call `scan_for_mssql_hosts()` periodically to auto-detect MSSQL services discovered by workers!
 
-### PRIORITY 7: NTLM Relay
-SMB signing disabled → `start_coercion(responder)` + `start_coercion(ntlmrelayx_smb/ldap)`
+### PRIORITY 7: NTLM Relay Attacks
+```
+SMB signing check shows unsigned hosts -> start_coercion workflow:
+  1. start_coercion(coercion_type="responder", interface="eth0")
+     → Capture NetNTLMv2 hashes from LLMNR/NBT-NS
+  2. start_coercion(coercion_type="ntlmrelayx_smb", targets="unsigned_hosts.txt")
+     → Relay captured auth to unsigned SMB targets
+  3. start_coercion(coercion_type="ntlmrelayx_ldap", target="ldaps://DC_IP")
+     → Relay to LDAP for computer creation (RBCD setup)
+```
+**IMPORTANT:** Run SMB signing check early via dispatch_recon to identify relay targets!
 
 ## Coordination Rules
 
@@ -185,12 +194,30 @@ SMB signing disabled → `start_coercion(responder)` + `start_coercion(ntlmrelay
 
 **IMPORTANT:** If you have ANY credentials but haven't dispatched secretsdump/kerberoast/asrep_roast yet, DO NOT call complete_operation() - you haven't exhausted all paths!
 
-## Workflow Summary
+## Example Workflow
 
-1. `dispatch_recon` → network_scan, smb_signing_check, user_enumeration
-2. `dispatch_credential_access` → low_hanging_fruit
-3. **On any credential:** → ADCS enumerate, secretsdump ALL DCs, kerberoast, asrep_roast
-4. `dispatch_recon` → bloodhound for ACL paths
-5. `queue_vulnerability_for_exploitation` for discovered vulns
-6. `announce_domain_admin` when krbtgt/Administrator hash found
-7. `complete_operation` when all paths exhausted
+**IMPORTANT: Replace placeholders with ACTUAL values from operation state!**
+- `<TARGET_SUBNET>` = the target IPs/subnet from state.target (e.g., "10.1.2.0/24" or individual IPs)
+- `<DC_IP>` = the domain controller IP discovered during recon
+- `<DOMAIN>` = the target domain (e.g., "corp.local")
+
+```
+1. dispatch_recon(task_type="network_scan", targets="<TARGET_SUBNET>")
+2. dispatch_recon(task_type="smb_signing_check", targets="<TARGET_SUBNET>") - RELAY TARGETS!
+3. dispatch_recon(task_type="user_enumeration", targets="DC_IP", domain="corp.local")
+4. dispatch_credential_access(task_type="low_hanging_fruit", targets="DC_IP", domain="corp.local")
+5. [Wait for results with get_pending_tasks()]
+6. AS SOON AS ANY CREDENTIAL IS FOUND:
+   a. dispatch_privesc_exploit(task_type="adcs_enumerate", ...) - FIND ADCS VULNS!
+   b. dispatch_credential_access(task_type="secretsdump", targets="ALL_DCs", ...)
+   c. dispatch_credential_access(task_type="kerberoast", ...)
+   d. dispatch_credential_access(task_type="asrep_roast", ...)
+   e. Check results for krbtgt or Administrator hash
+   f. If found -> announce_domain_admin()
+7. dispatch_recon(task_type="bloodhound", ...) for ACL paths
+8. If relay targets found: start_coercion(coercion_type="responder/ntlmrelayx", ...)
+9. queue_vulnerability_for_exploitation() for any discovered vulns (ADCS, delegation, etc.)
+10. Monitor with get_vulnerability_queue_status() and get_pending_tasks()
+11. announce_domain_admin() when achieved
+12. complete_operation() with summary
+```

@@ -18,8 +18,8 @@ operation:
 # Agent configurations
 agents:
   orchestrator:
-    model: "gpt-5.2"
-    # model: "claude-sonnet-4-20250514"
+    # model: "gpt-5.2"
+    model: "claude-sonnet-4-5-20250929"
     max_steps: 200
     pod_selector: "app.kubernetes.io/name=ares-orchestrator"
     tools:
@@ -42,8 +42,8 @@ agents:
       - announce_domain_admin
 
   recon:
-    model: "gpt-5.2"
-    # model: "claude-sonnet-4-20250514"
+    # model: "gpt-5.2"
+    model: "claude-sonnet-4-5-20250929"
     max_steps: 100
     pod_selector: "ares.dreadnode.io/role=recon"
     capabilities:
@@ -74,8 +74,8 @@ agents:
       - whois
 
   credential_access:
-    model: "gpt-5.2"
-    # model: "claude-sonnet-4-20250514"
+    # model: "gpt-5.2"
+    model: "claude-sonnet-4-5-20250929"
     max_steps: 100
     pod_selector: "ares.dreadnode.io/role=credential_access"
     capabilities:
@@ -90,8 +90,8 @@ agents:
       - smbclient
 
   cracker:
-    model: "gpt-5.2"
-    # model: "claude-sonnet-4-20250514"
+    # model: "gpt-5.2"
+    model: "claude-sonnet-4-5-20250929"
     max_steps: 150
     pod_selector: "ares.dreadnode.io/role=cracker"
     capabilities:
@@ -101,8 +101,8 @@ agents:
       - seclists
 
   acl:
-    model: "gpt-5.2"
-    # model: "claude-sonnet-4-20250514"
+    # model: "gpt-5.2"
+    model: "claude-sonnet-4-5-20250929"
     max_steps: 150  # ACL analysis requires complex path finding
     pod_selector: "ares.dreadnode.io/role=acl"
     capabilities:
@@ -113,8 +113,8 @@ agents:
       - rpcclient
 
   privesc:
-    model: "gpt-5.2"
-    # model: "claude-sonnet-4-20250514"
+    # model: "gpt-5.2"
+    model: "claude-sonnet-4-5-20250929"
     max_steps: 100
     pod_selector: "ares.dreadnode.io/role=privesc"
     capabilities:
@@ -141,8 +141,8 @@ agents:
       - scmuacbypass
 
   lateral:
-    model: "gpt-5.2"
-    # model: "claude-sonnet-4-20250514"
+    # model: "gpt-5.2"
+    model: "claude-sonnet-4-5-20250929"
     max_steps: 300
     pod_selector: "ares.dreadnode.io/role=lateral"
     capabilities:
@@ -156,8 +156,8 @@ agents:
       - sshpass
 
   coercion:
-    model: "gpt-5.2"
-    # model: "claude-sonnet-4-20250514"
+    # model: "gpt-5.2"
+    model: "claude-sonnet-4-5-20250929"
     max_steps: 30
     pod_selector: "ares.dreadnode.io/role=coercion"
     capabilities:

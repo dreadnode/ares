@@ -11,18 +11,58 @@ includes:
   remote:
     taskfile: .taskfiles/remote/Taskfile.yaml
     optional: true
+    vars:
+      K8S_NAMESPACE: '{{.K8S_NAMESPACE}}'
   red:
     taskfile: .taskfiles/red/Taskfile.yaml
     optional: true
+    vars:
+      MODEL_ALL: '{{.MODEL_ALL}}'
+      MODEL: '{{.MODEL}}'
+      MODEL_ORCHESTRATOR: '{{.MODEL_ORCHESTRATOR}}'
+      MODEL_WORKER: '{{.MODEL_WORKER}}'
+      MODEL_RECON: '{{.MODEL_RECON}}'
+      MODEL_CREDENTIAL_ACCESS: '{{.MODEL_CREDENTIAL_ACCESS}}'
+      MODEL_CRACKER: '{{.MODEL_CRACKER}}'
+      MODEL_ACL: '{{.MODEL_ACL}}'
+      MODEL_PRIVESC: '{{.MODEL_PRIVESC}}'
+      MODEL_LATERAL: '{{.MODEL_LATERAL}}'
+      MODEL_COERCION: '{{.MODEL_COERCION}}'
+      MAX_STEPS_RED: '{{.MAX_STEPS_RED}}'
+      LOG_DIR: '{{.LOG_DIR}}'
+      REPORT_DIR: '{{.REPORT_DIR}}'
+      GRAFANA_URL: '{{.GRAFANA_URL}}'
+      DREADNODE_SERVER_URL: '{{.DREADNODE_SERVER_URL}}'
+      DREADNODE_ORGANIZATION: '{{.DREADNODE_ORGANIZATION}}'
+      DREADNODE_WORKSPACE: '{{.DREADNODE_WORKSPACE}}'
+      DREADNODE_PROJECT: '{{.DREADNODE_PROJECT}}'
+      K8S_NAMESPACE: '{{.K8S_NAMESPACE}}'
+      TARGET_PROFILE: '{{.TARGET_PROFILE}}'
+      TARGET_REGION: '{{.TARGET_REGION}}'
+      REDTEAM_PROJECT: '{{.REDTEAM_PROJECT}}'
+      TARGET: '{{.TARGET}}'
+      DOMAIN: '{{.DOMAIN}}'
   blue:
     taskfile: .taskfiles/blue/Taskfile.yaml
     optional: true
+    vars:
+      MODEL_ALL: '{{.MODEL_ALL}}'
+      MODEL: '{{.MODEL}}'
+      MAX_STEPS_BLUE: '{{.MAX_STEPS_BLUE}}'
+      MAX_STEPS_BLUE_ONCE: '{{.MAX_STEPS_BLUE_ONCE}}'
+      POLL_INTERVAL: '{{.POLL_INTERVAL}}'
+      LOG_DIR: '{{.LOG_DIR}}'
+      REPORT_DIR: '{{.REPORT_DIR}}'
+      GRAFANA_URL: '{{.GRAFANA_URL}}'
+      DREADNODE_SERVER_URL: '{{.DREADNODE_SERVER_URL}}'
+      DREADNODE_ORGANIZATION: '{{.DREADNODE_ORGANIZATION}}'
+      DREADNODE_WORKSPACE: '{{.DREADNODE_WORKSPACE}}'
+      DREADNODE_PROJECT: '{{.DREADNODE_PROJECT}}'
 
 vars:
   API_DIR: "."
   # Ares configuration
-  # MODEL: '{{.MODEL | default "claude-sonnet-4-20250514"}}'
-  MODEL: '{{.MODEL | default "gpt-5.2"}}'
+  MODEL: '{{.MODEL | default "claude-sonnet-4-5-20250929"}}'
   GRAFANA_URL: '{{.GRAFANA_URL | default "https://grafana.dev.plundr.ai"}}'
   POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
   MAX_STEPS_BLUE: '{{.MAX_STEPS_BLUE | default "50"}}'
@@ -36,7 +76,7 @@ vars:
   DREADNODE_PROJECT: '{{.DREADNODE_PROJECT | default "ares-soc"}}'
   MODEL_ORCHESTRATOR: '{{.MODEL_ORCHESTRATOR | default ""}}'
   MODEL_WORKER: '{{.MODEL_WORKER | default ""}}'
-  MODEL_ALL: '{{.MODEL_ALL | default ""}}'
+  MODEL_ALL: '{{.MODEL_ALL | default "claude-sonnet-4-5-20250929"}}'
   MODEL_RECON: '{{.MODEL_RECON | default ""}}'
   MODEL_CREDENTIAL_ACCESS: '{{.MODEL_CREDENTIAL_ACCESS | default ""}}'
   MODEL_CRACKER: '{{.MODEL_CRACKER | default ""}}'
@@ -44,6 +84,14 @@ vars:
   MODEL_PRIVESC: '{{.MODEL_PRIVESC | default ""}}'
   MODEL_LATERAL: '{{.MODEL_LATERAL | default ""}}'
   MODEL_COERCION: '{{.MODEL_COERCION | default ""}}'
+  # Infrastructure
+  K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
+  TARGET_PROFILE: '{{.TARGET_PROFILE | default "lab"}}'
+  TARGET_REGION: '{{.TARGET_REGION | default "us-west-1"}}'
+  # Red team defaults
+  REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
+  TARGET: '{{.TARGET | default "dreadgoad"}}'
+  DOMAIN: '{{.DOMAIN | default "sevenkingdoms.local"}}'
 
 tasks:
   default:
@@ -202,10 +250,10 @@ tasks:
           REGION: '{{.REGION | default "us-west-2"}}'
     cmds:
       - |
-        export ANTHROPIC_API_KEY=$(op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo "")
+        export ANTHROPIC_API_KEY=$(op item get "Dreadnode Claude" --fields api-key --reveal 2>/dev/null || echo "")
         export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
         export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
-        export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null)
+        export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-personal-api-key --reveal 2>/dev/null)
         MODEL_ARG="{{.MODEL}}"
         if [ -n "{{.MODEL_ALL}}" ]; then
           MODEL_ARG="{{.MODEL_ALL}}"
@@ -278,11 +326,11 @@ tasks:
         fi
 
         # Check Anthropic API key
-        if op item get "claude.ai" --fields dreadnode-api-key --reveal >/dev/null 2>&1; then
+        if op item get "Dreadnode Claude" --fields api-key --reveal >/dev/null 2>&1; then
           echo "  ✅ Anthropic API key accessible"
         else
           echo "  ⚠️  Anthropic API key not found in 1Password"
-          echo "     Item: 'claude.ai'"
+          echo "     Item: 'Dreadnode Claude'"
           echo "     Field: 'dreadnode-api-key'"
         fi
 

@@ -214,7 +214,9 @@ class OrchestratorService:
             await recovery_manager.start()
 
             try:
-                state = await recovery_manager.recover_operation(operation_id, auto_requeue=True)
+                state, _requeued_task_ids = await recovery_manager.recover_operation(
+                    operation_id, auto_requeue=True
+                )
             finally:
                 await recovery_manager.stop()
 

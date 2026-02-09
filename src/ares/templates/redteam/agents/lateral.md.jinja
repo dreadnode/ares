@@ -252,12 +252,3 @@ When choosing which hosts to target:
 4. **Admin Workstations** - Cached creds
 5. **Web Servers** - Application creds
 6. **Other Servers** - General expansion
-
-## Cross-Domain/Forest Attacks (Post-DA)
-
-After DA in one domain, pivot to trusted domains/forests:
-
-1. `extract_trust_key(trusted_domain=...)` → get trust account hash
-2. `get_sid` for both domains
-3. `create_inter_realm_ticket(source_domain, trust_key, target_domain, ...)` → EA ticket
-4. `secretsdump_kerberos` on target forest DC → full forest compromise

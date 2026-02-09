@@ -222,7 +222,7 @@ class OperationRecoveryManager:
         await manager.checkpoint(state)
 
         # Recover after pod restart
-        state = await manager.recover_operation(operation_id)
+        state, requeued_task_ids = await manager.recover_operation(operation_id)
     """
 
     def __init__(
@@ -323,7 +323,7 @@ class OperationRecoveryManager:
         self,
         operation_id: str,
         auto_requeue: bool = True,
-    ) -> SharedRedTeamState:
+    ) -> tuple[SharedRedTeamState, list[str]]:
         """
         Recover state from last checkpoint.
 
@@ -335,7 +335,9 @@ class OperationRecoveryManager:
             auto_requeue: If True, automatically requeue interrupted tasks.
 
         Returns:
-            Recovered SharedRedTeamState.
+            Tuple of (recovered state, list of requeued task IDs).
+            The caller should add requeued task IDs to dispatcher._redis_task_ids
+            so the result consumer can track them.
 
         Raises:
             RecoveryError: If no checkpoint found or recovery fails.
@@ -356,6 +358,7 @@ class OperationRecoveryManager:
             interrupted_count = 0
             requeued_count = 0
             failed_count = 0
+            requeued_task_ids: list[str] = []
 
             # Create task queue for requeuing
             task_queue = RedisTaskQueue(self._redis_url) if auto_requeue else None
@@ -395,6 +398,7 @@ class OperationRecoveryManager:
                                     retry_count=task.retry_count,
                                 )
                                 requeued_count += 1
+                                requeued_task_ids.append(task_id)
                                 logger.info(
                                     f"Task {task_id} requeued for retry "
                                     f"({task.retry_count}/{max_retries})"
@@ -431,7 +435,7 @@ class OperationRecoveryManager:
                 )
                 logger.info(f"Recovered state from checkpoint at {checkpoint_str}")
 
-            return state
+            return state, requeued_task_ids
 
         except RecoveryError:
             raise

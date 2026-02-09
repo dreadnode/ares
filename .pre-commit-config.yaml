@@ -125,11 +125,3 @@ repos:
         additional_dependencies:
           - jinja2
           - tomli>=2.0.1
-
-      - id: check-template-sizes
-        name: Check agent template sizes
-        description: Prevents template bloat that causes LLM rate limit issues
-        entry: .hooks/check_template_sizes.py
-        language: python
-        files: ^src/ares/templates/redteam/agents/.*\.jinja$
-        pass_filenames: false

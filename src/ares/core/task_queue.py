@@ -593,6 +593,7 @@ class RedisTaskQueue:
         self,
         operation_id: str,
         ttl_seconds: int = 7200,
+        force: bool = False,
     ) -> bool:
         """
         Acquire exclusive lock for an operation using SETNX.
@@ -600,6 +601,7 @@ class RedisTaskQueue:
         Args:
             operation_id: The operation to lock
             ttl_seconds: Lock expiry time (default: 2 hours)
+            force: If True, forcefully acquire lock (for resume scenarios)
 
         Returns:
             True if lock acquired, False if already held by another process
@@ -608,6 +610,14 @@ class RedisTaskQueue:
             await self.connect()
 
         key = f"{self.LOCK_PREFIX}:{operation_id}"
+
+        if force:
+            # Force acquire: delete existing lock and set new one
+            await self._client.delete(key)
+            await self._client.set(key, "locked", ex=ttl_seconds)
+            logger.info(f"Force-acquired operation lock for {operation_id}")
+            return True
+
         # SETNX-style: only set if not exists
         result = await self._client.set(key, "locked", nx=True, ex=ttl_seconds)
 

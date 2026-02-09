@@ -91,7 +91,7 @@ def derive_redis_url(namespace: str, host: str = "redis", port: int = 6379) -> s
 class AgentConfig:
     """Configuration for a specific agent role."""
 
-    model: str = "gpt-5.2"
+    model: str = ""
     max_steps: int = 200
     pod_selector: str = ""
     capabilities: list[str] = field(default_factory=list)

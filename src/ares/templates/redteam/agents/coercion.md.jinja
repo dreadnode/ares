@@ -110,11 +110,6 @@ Coordinate with PrivEsc agent:
 3. Relay performs LDAP actions
 ```
 
-### For SMB Relay (SMB Signing Disabled Required)
-1. `ntlmrelayx_to_smb(target_ip=..., socks=True)` or `ntlmrelayx_multirelay(target_ips=...)`
-2. `petitpotam` or `coercer` to trigger auth
-3. Use SOCKS proxy: `proxychains secretsdump.py -no-pass DOMAIN/USER@TARGET`
-
 ### SOCKS Relay (Interactive Sessions)
 Capture and reuse SMB sessions for multiple tools:
 ```
@@ -190,8 +185,6 @@ Combine mitm6 with ntlmrelayx to create computer account:
 | ntlmrelayx | Multi-target relay |
 | ntlmrelayx_socks | Relay with SOCKS proxy for session reuse |
 | ntlmrelayx_ldap | Relay to LDAP/LDAPS (add computer, delegate) |
-| ntlmrelayx_to_smb | Relay to SMB (requires signing disabled) |
-| ntlmrelayx_multirelay | Relay to multiple SMB targets at once |
 | krbrelayx | Kerberos relay |
 
 ## Hash Types Captured

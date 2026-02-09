@@ -57,7 +57,7 @@ This will:
 1. Retrieve API keys from 1Password:
    - `Dreadnode Dev Platform` → `api-key` field
    - `Ares Grafana MCP` → `grafana-token` field (blue team only)
-   - `claude.ai` → `dreadnode-api-key` field
+   - `Dreadnode Claude` → `dreadnode-api-key` field
 2. Start the agent with the configured platform (https://platform.dev.plundr.ai/)
 
 ## Available Tasks
@@ -483,7 +483,7 @@ Ares expects the following items in 1Password:
    - Field: `grafana-token`
    - Used for: Alert polling and Loki/Prometheus queries
 
-3. **claude.ai** (Required)
+3. **Dreadnode Claude** (Required)
    - Field: `dreadnode-api-key`
    - Used for: Claude model inference
 
@@ -507,7 +507,7 @@ op item create \
 # Create Anthropic item
 op item create \
   --category="API Credential" \
-  --title="claude.ai" \
+  --title="Dreadnode Claude" \
   dreadnode-api-key="your-anthropic-api-key"
 ```
 
@@ -523,7 +523,7 @@ op item get "Dreadnode Dev Platform" --fields api-key --reveal
 op item get "Ares Grafana MCP" --fields grafana-token --reveal
 
 # Test Anthropic key
-op item get "claude.ai" --fields dreadnode-api-key --reveal
+op item get "Dreadnode Claude" --fields api-key --reveal
 ```
 
 ## Common Workflows

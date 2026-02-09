@@ -36,7 +36,7 @@ from ares.core.models import (
     Target,
     TaskStatus,
 )
-from ares.core.recovery import OperationRecoveryManager
+from ares.core.recovery import OperationRecoveryManager, RecoveryError
 from ares.core.task_queue import RedisTaskQueue
 from ares.core.workflows import exploitation_workflow
 from ares.reports.redteam import RedTeamReportGenerator
@@ -148,14 +148,15 @@ async def _load_or_initialize_state(
     initial_credential: Credential | None,
 ) -> None:
     if resume_from_checkpoint:
-        state = await recovery.recover_operation(operation_id)
-        if state:
+        try:
+            state, _task_ids = await recovery.recover_operation(operation_id)
             dispatcher._shared_state = state
             if state.all_credentials or state.all_hashes:
                 dispatcher.signal_credential_access()
             logger.info(f"Resumed operation {operation_id} from checkpoint")
             return
-        logger.warning(f"No checkpoint found for {operation_id}, starting fresh")
+        except RecoveryError:
+            logger.warning(f"No checkpoint found for {operation_id}, starting fresh")
 
     state = dispatcher.shared_state
     # Enable real-time publishing of discoveries to Redis
