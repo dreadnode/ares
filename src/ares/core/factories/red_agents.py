@@ -42,9 +42,9 @@ from ares.tools.red import (
 )
 
 if TYPE_CHECKING:
-    from dreadnode.agent.reactions import Reaction
-
     from ares.core.k8s_executor import KubernetesPodExecutor
+
+from dreadnode.agent.reactions import Finish, Reaction
 
 
 def fix_tool_output_encoding(content: str) -> str:
@@ -287,6 +287,24 @@ def create_role_hooks(
             return None
 
         hooks.append(check_domain_admin)
+
+        # Stop orchestrator when DA is achieved externally (by worker agents)
+        # This handles the case where a worker discovers krbtgt hash via secretsdump
+        # and sets has_domain_admin=True, but the orchestrator LLM doesn't know to stop
+        async def stop_on_external_domain_admin(event: StepStart) -> Finish | None:
+            """Stop orchestrator when Domain Admin is achieved by worker agents."""
+            if not isinstance(event, StepStart):
+                return None
+
+            if shared_state.has_domain_admin:
+                logger.success(
+                    "🎯 Domain Admin detected (achieved externally) - stopping orchestrator agent"
+                )
+                return Finish(reason="Domain Admin achieved by worker agent")
+
+            return None
+
+        hooks.append(stop_on_external_domain_admin)
 
     elif role == AgentRole.CRACKER:
         # Cracker broadcasts cracked credentials
