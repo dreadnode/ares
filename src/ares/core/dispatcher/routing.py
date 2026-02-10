@@ -413,11 +413,7 @@ class RoutingMixin:
             Task ID for tracking.
         """
         if not target_host or not target_host.strip():
-            logger.warning(
-                "Skipping lateral movement for %s\\%s: empty target_host",
-                domain,
-                username,
-            )
+            logger.warning(f"Skipping lateral movement for {domain}\\{username}: empty target_host")
             return ""
 
         resolved_password = password
@@ -441,9 +437,7 @@ class RoutingMixin:
                 if not resolved_domain:
                     resolved_domain = cred.domain
                 logger.debug(
-                    "Filled lateral auth from credential store for %s\\%s",
-                    resolved_domain or domain,
-                    username,
+                    f"Filled lateral auth from credential store for {resolved_domain or domain}\\{username}"
                 )
 
             if not resolved_password:
@@ -461,9 +455,7 @@ class RoutingMixin:
                     if not resolved_domain:
                         resolved_domain = h.domain
                     logger.debug(
-                        "Filled lateral auth from hash store for %s\\%s",
-                        resolved_domain or domain,
-                        username,
+                        f"Filled lateral auth from hash store for {resolved_domain or domain}\\{username}"
                     )
 
         self._ensure_credential_in_state(
@@ -485,10 +477,7 @@ class RoutingMixin:
 
         if not resolved_password and not resolved_hash:
             logger.warning(
-                "Skipping lateral movement for %s\\%s -> %s: missing credentials",
-                resolved_domain or domain,
-                username,
-                target_host,
+                f"Skipping lateral movement for {resolved_domain or domain}\\{username} -> {target_host}: missing credentials"
             )
             return ""
 

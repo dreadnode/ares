@@ -1529,8 +1529,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                     if task_id:
                         processed_no_cred_domains.add(domain)
                         logger.info(
-                            "Auto credential access (low-hanging fruit, no-creds) dispatched for domain %s",
-                            domain,
+                            f"Auto credential access (low-hanging fruit, no-creds) dispatched for domain {domain}"
                         )
 
             # Check for new users without credentials - run username_as_password on them
@@ -1603,9 +1602,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                     if task_id:
                         processed_password_spray_domains.add(domain)
                         logger.info(
-                            "Auto password_spray dispatched for %d users in %s",
-                            len(domain_users),
-                            domain,
+                            f"Auto password_spray dispatched for {len(domain_users)} users in {domain}"
                         )
 
             for cred in state.all_credentials:
