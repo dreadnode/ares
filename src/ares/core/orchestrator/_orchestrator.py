@@ -532,15 +532,13 @@ async def run_multi_agent_operation(  # noqa: PLR0912
             )
             if pending_plaintext:
                 logger.warning(
-                    "Orchestrator stopped ({}) but pending plaintext credentials exist; "
-                    "keeping operation open",
-                    stop_reason,
+                    f"Orchestrator stopped ({stop_reason}) but pending plaintext credentials exist; "
+                    "keeping operation open"
                 )
             else:
                 dispatcher.shared_state.completed = True
                 logger.warning(
-                    "Orchestrator stopped ({}) with no pending tasks; marking operation complete",
-                    stop_reason,
+                    f"Orchestrator stopped ({stop_reason}) with no pending tasks; marking operation complete"
                 )
 
         exploitation_status = await dispatcher.get_exploitation_status()
@@ -1725,11 +1723,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                 if crack_task_id:
                     processed_crack_hashes.add(crack_key)
                     logger.info(
-                        "Auto crack dispatched for {}\\{} ({}, priority={})",
-                        hash_obj.domain or "(unknown)",
-                        hash_obj.username,
-                        hash_obj.hash_type or "unknown",
-                        crack_priority,
+                        f"Auto crack dispatched for {hash_obj.domain or '(unknown)'}\\{hash_obj.username} ({hash_obj.hash_type or 'unknown'}, priority={crack_priority})"
                     )
 
         except asyncio.CancelledError:

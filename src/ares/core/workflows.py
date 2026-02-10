@@ -181,8 +181,7 @@ async def credential_expansion_loop(  # noqa: PLR0912
             for host in hosts:
                 if not host.ip:
                     logger.debug(
-                        "Skipping lateral movement for %s: missing host IP",
-                        host.hostname or "unknown-host",
+                        f"Skipping lateral movement for {host.hostname or 'unknown-host'}: missing host IP"
                     )
                     continue
                 for domain_override in domain_variants:
@@ -216,10 +215,7 @@ async def credential_expansion_loop(  # noqa: PLR0912
                         tasks_dispatched.append(task_id)
                         new_tests += 1
                         logger.debug(
-                            "Dispatched lateral test: %s\\%s -> %s",
-                            domain_override,
-                            cred.username,
-                            host.ip,
+                            f"Dispatched lateral test: {domain_override}\\{cred.username} -> {host.ip}"
                         )
 
                     tracker.mark_tested(test_cred, host)
@@ -449,8 +445,7 @@ async def _dispatch_krbtgt(
                 return task_id
         else:
             logger.warning(
-                "krbtgt hash found for %s but no credential available for raise_child",
-                krbtgt_domain,
+                f"krbtgt hash found for {krbtgt_domain} but no credential available for raise_child"
             )
 
     return await dispatcher.request_lateral_movement(

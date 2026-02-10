@@ -480,9 +480,7 @@ class OrchestratorService:
                     "ARES_ORCHESTRATOR_MODEL/ARES_MODEL in the orchestrator environment."
                 )
             logger.info(
-                "Runtime env presence: OPENAI_API_KEY={} DREADNODE_API_KEY={}",
-                "set" if os.environ.get("OPENAI_API_KEY") else "missing",
-                "set" if os.environ.get("DREADNODE_API_KEY") else "missing",
+                f"Runtime env presence: OPENAI_API_KEY={'set' if os.environ.get('OPENAI_API_KEY') else 'missing'} DREADNODE_API_KEY={'set' if os.environ.get('DREADNODE_API_KEY') else 'missing'}"
             )
             if request.model.startswith("gpt-") and not os.environ.get("OPENAI_API_KEY"):
                 raise ValueError(

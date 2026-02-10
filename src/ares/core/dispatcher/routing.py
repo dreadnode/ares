@@ -700,10 +700,7 @@ class RoutingMixin:
                 cred_label = f"{cred_label} (password)"
             reason_label = f" reason={reason}" if reason else ""
             logger.info(
-                "Recon task {} submitted to Redis queue for {}{}",
-                task_id,
-                cred_label,
-                reason_label,
+                f"Recon task {task_id} submitted to Redis queue for {cred_label}{reason_label}"
             )
             return task_id
 
@@ -826,12 +823,7 @@ class RoutingMixin:
             source_label = f" source={credential_source}" if credential_source else ""
             hash_label = f" hash_type={hash_type}" if hash_type else ""
             logger.info(
-                "Credential access task {} submitted to Redis queue for {}{}{}{}",
-                task_id,
-                cred_label,
-                reason_label,
-                source_label,
-                hash_label,
+                f"Credential access task {task_id} submitted to Redis queue for {cred_label}{reason_label}{source_label}{hash_label}"
             )
             return task_id
 

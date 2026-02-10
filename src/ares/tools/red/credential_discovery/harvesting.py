@@ -412,8 +412,7 @@ class CredentialHarvestingTools(Toolset):
                 check_result = run_remote(check_cmd, timeout_seconds=30)
                 if check_result.return_code != 0:
                     logger.warning(
-                        "[!] Users file %s not found on remote. Falling back to default list.",
-                        users_file,
+                        f"[!] Users file {users_file} not found on remote. Falling back to default list."
                     )
                     users_file = ""
 
@@ -488,11 +487,7 @@ class CredentialHarvestingTools(Toolset):
                             description="validated via Kerberos (no-auth)",
                         )
                     )
-                    logger.info(
-                        "[+] Recorded user from Kerberos no-auth: %s@%s",
-                        username,
-                        domain,
-                    )
+                    logger.info(f"[+] Recorded user from Kerberos no-auth: {username}@{domain}")
 
             if validated:
                 summary = ", ".join(sorted(validated))
