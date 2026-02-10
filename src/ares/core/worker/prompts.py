@@ -262,14 +262,32 @@ def generate_prompt_from_task(
 
         techniques = payload.get("techniques", ["LLMNR", "NBT-NS"])
         interface = payload.get("interface") or get_default_network_interface()
+        attack_type = payload.get("attack_type", "passive")
+        coerce_target = payload.get("coerce_target", "")
+        coerce_hostname = payload.get("coerce_hostname", "")
+
+        # Build attack-specific info
+        target_info = ""
+        if attack_type == "esc8":
+            adcs_server = payload.get("adcs_server", "")
+            target_info = f"**ESC8 RELAY** - ADCS: {adcs_server}, Coerce DC: {coerce_hostname or coerce_target}\n\n"
+        elif attack_type == "ldaps_relay":
+            target_info = f"**LDAPS RELAY** - Coerce DC: {coerce_hostname or coerce_target}\n\n"
+
         base_prompt = (
             f"Start network coercion:\n"
             f"Interface: {interface}\n"
             f"Techniques: {', '.join(techniques)}\n"
             f"Duration: {payload.get('duration', 300)}s\n"
             f"Task ID: {task.task_id}\n\n"
-            "Start responder/mitm6 and capture hashes. "
-            "For ESC8 relay attacks, coordinate PetitPotam against DCs."
+            f"{target_info}"
+            "**STEP BUDGET: ~30 steps max. Work efficiently!**\n\n"
+            "**HARD LIMITS:**\n"
+            "- Each coercion technique: max 2 attempts per target\n"
+            "- 'connection refused'/'timed out'/'RPC unavailable' → SKIP target\n"
+            "- Track attempts - never repeat same target+technique\n\n"
+            "**CALL task_complete WHEN:**\n"
+            "- All targets attempted | Relay succeeded | Duration exceeded\n\n"
         )
         state_context = format_state_context(state, "coercion")
         return base_prompt + state_context

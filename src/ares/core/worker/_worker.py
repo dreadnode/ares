@@ -40,6 +40,7 @@ from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue, TaskMessage
 
 # Import from split modules
+from ares.core.worker.cleanup import close_litellm_clients
 from ares.core.worker.operations import (
     discover_active_operation,
     get_active_operation_pointer,
@@ -2073,6 +2074,7 @@ async def run_worker(  # noqa: PLR0912
             if task_queue:
                 await task_queue.disconnect()
             await dispatcher.stop()
+            await close_litellm_clients()
             logger.info(f"Worker {agent_info.name} shutdown complete")
 
         if pointer_switched and discover_operation:

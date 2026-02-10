@@ -141,6 +141,8 @@ Combine mitm6 with ntlmrelayx to create computer account:
 
 ## Workflow
 
+**TRACK YOUR ATTEMPTS** - Keep a mental list of targets attempted and techniques that failed.
+
 1. **Receive Coercion Request**
    - Get interface and techniques
    - Get duration
@@ -203,6 +205,38 @@ Combine mitm6 with ntlmrelayx to create computer account:
 - **Long runs** (2+ hours): Comprehensive capture
 
 Note: Longer runs increase detection risk.
+
+## Hard Limits (Avoid Step Loops)
+
+**You have a LIMITED step budget (~30 steps). Work efficiently.**
+
+### Attempt Limits Per Target
+- Coercion techniques (petitpotam/coercer): **max 2 attempts per target**
+- Responder/mitm6: Start **once** per task, do not restart
+- ntlmrelayx setup: **once** per relay target
+
+### When to Give Up on a Target
+Skip target immediately if you see:
+- "Connection refused" or "port filtered"
+- "timed out" or "no response"
+- "RPC_S_SERVER_UNAVAILABLE"
+- "Access denied"
+
+### When to Complete the Task
+Call `task_complete` when:
+- All assigned targets attempted (success or failure)
+- Relay captured authentication
+- Duration exceeded
+- No more targets to try
+
+### When to Request Assistance
+Call `request_assistance` if:
+- Cannot start listener (port in use)
+- Network completely unreachable
+
+**DO NOT:**
+- Retry same technique on same target after failure
+- Loop indefinitely waiting for captures
 
 ## Reporting
 

@@ -351,6 +351,53 @@ def create_role_hooks(
 
         hooks.append(track_exploitation)
 
+    elif role == AgentRole.COERCION:
+        # Coercion monitors for futility - too many failures indicate target unreachable
+        _coercion_failures: dict[str, Any] = {"count": 0, "targets": set()}
+
+        async def track_coercion_futility(event: ToolEnd):
+            if not isinstance(event, ToolEnd) or not event.message:
+                return None
+
+            result = fix_tool_output_encoding(str(event.message.content)).lower()
+            tool_name = (
+                event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
+            )
+
+            coercion_tools = {"petitpotam", "coercer", "printerbug", "dfscoerce"}
+            if tool_name in coercion_tools:
+                # Track target
+                if hasattr(event, "tool_call") and event.tool_call and event.tool_call.arguments:
+                    try:
+                        import json
+
+                        args = json.loads(event.tool_call.arguments)
+                        _coercion_failures["targets"].add(args.get("target", "unknown"))
+                    except Exception:
+                        pass
+
+                # Check for failures
+                failure_indicators = [
+                    "connection refused",
+                    "timed out",
+                    "no response",
+                    "access denied",
+                    "failed",
+                    "rpc_s_server_unavailable",
+                ]
+                if any(ind in result for ind in failure_indicators):
+                    _coercion_failures["count"] += 1
+
+                    if _coercion_failures["count"] >= 3:
+                        targets = ", ".join(_coercion_failures["targets"])
+                        return (
+                            f"COERCION FUTILITY: {_coercion_failures['count']} failures on targets: {targets}\n"
+                            "→ If all targets exhausted, call task_complete now."
+                        )
+            return None
+
+        hooks.append(track_coercion_futility)
+
     # Unstall hook for all roles - provides context-specific guidance when agent stalls
     role_feedback = {
         AgentRole.ORCHESTRATOR: (
@@ -411,10 +458,12 @@ def create_role_hooks(
             "7. Use task_complete when access achieved or all methods exhausted"
         ),
         AgentRole.COERCION: (
-            "You seem stuck. As coercion agent, focus on:\n"
-            "1. Start responder/mitm6 if not running\n"
-            "2. Use coercion techniques (petitpotam, coercer)\n"
-            "3. Report captured hashes"
+            "You seem stuck. CHECK YOUR PROGRESS:\n"
+            "1. All targets attempted? → Call task_complete with summary\n"
+            "2. petitpotam/coercer failed? → Skip to next target\n"
+            "3. Saw 'connection refused'/'timed out'? → Target blocked, skip it\n"
+            "4. responder/ntlmrelayx running? → Wait for captures, don't restart\n\n"
+            "**DO NOT** retry failed techniques on same target."
         ),
     }
 
