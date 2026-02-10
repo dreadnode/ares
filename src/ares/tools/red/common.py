@@ -492,9 +492,7 @@ def resolve_password(
             continue
         if cred.password:
             logger.info(
-                "Replaced placeholder password for %s\\%s from shared state",
-                cred.domain or domain,
-                cred.username,
+                f"Replaced placeholder password for {cred.domain or domain}\\{cred.username} from shared state"
             )
             return cred.password
     return password

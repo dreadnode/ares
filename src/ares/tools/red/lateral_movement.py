@@ -994,10 +994,7 @@ WHERE a.permission_name = 'IMPERSONATE';
 
         try:
             logger.info(
-                "[*] Executing query as %s on %s (db=%s)",
-                impersonate_user,
-                target,
-                database or "default",
+                f"[*] Executing query as {impersonate_user} on {target} (db={database or 'default'})"
             )
             stdout, stderr, _ = run_tool(["bash", "-c", cmd_string], timeout_seconds=120)
             return stdout + "\n" + (stderr or "")

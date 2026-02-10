@@ -1015,14 +1015,10 @@ class RedisWorkerAgent:
 
             with gzip.open(gz_path, "rb") as src, open(tmp_wordlist, "wb") as dst:
                 shutil.copyfileobj(src, dst)
-            logger.info(
-                "[%s] Decompressed wordlist %s to %s", self.agent_name, gz_path, tmp_wordlist
-            )
+            logger.info(f"[{self.agent_name}] Decompressed wordlist {gz_path} to {tmp_wordlist}")
             return tmp_wordlist
         except Exception as exc:
-            logger.warning(
-                "[%s] Failed to decompress wordlist %s: %s", self.agent_name, gz_path, exc
-            )
+            logger.warning(f"[{self.agent_name}] Failed to decompress wordlist {gz_path}: {exc}")
             return wordlist_path
 
     @staticmethod

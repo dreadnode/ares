@@ -598,8 +598,7 @@ class CredentialDiscoveryTools(Toolset):
                     {f"{cred_domain}\\{username}" for cred_domain, username, _, _ in matching}
                 )
                 logger.warning(
-                    "[!] FOUND USER WITH USERNAME=PASSWORD! Accounts: %s",
-                    ", ".join(accounts),
+                    f"[!] FOUND USER WITH USERNAME=PASSWORD! Accounts: {', '.join(accounts)}"
                 )
                 result = (
                     "🚨 USERNAME=PASSWORD FOUND!\n"

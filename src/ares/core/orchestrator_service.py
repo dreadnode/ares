@@ -349,7 +349,7 @@ class OrchestratorService:
         elif isinstance(raw_env_vars, dict):
             raw_keys = sorted(k for k, v in raw_env_vars.items() if v)
             if raw_keys:
-                logger.info("Request env_vars keys (raw): {}", ", ".join(raw_keys))
+                logger.info(f"Request env_vars keys (raw): {', '.join(raw_keys)}")
             else:
                 logger.warning("Request env_vars present but empty")
         else:
@@ -361,7 +361,7 @@ class OrchestratorService:
         if request_env_vars:
             present_keys = sorted(k for k, v in request_env_vars.items() if v)
             if present_keys:
-                logger.info("Request env keys present: {}", ", ".join(present_keys))
+                logger.info(f"Request env keys present: {', '.join(present_keys)}")
         if not openai_api_key:
             openai_api_key = os.environ.get("OPENAI_API_KEY")
             if openai_api_key:
@@ -480,9 +480,7 @@ class OrchestratorService:
                     "ARES_ORCHESTRATOR_MODEL/ARES_MODEL in the orchestrator environment."
                 )
             logger.info(
-                "Runtime env presence: OPENAI_API_KEY={} DREADNODE_API_KEY={}",
-                "set" if os.environ.get("OPENAI_API_KEY") else "missing",
-                "set" if os.environ.get("DREADNODE_API_KEY") else "missing",
+                f"Runtime env presence: OPENAI_API_KEY={'set' if os.environ.get('OPENAI_API_KEY') else 'missing'} DREADNODE_API_KEY={'set' if os.environ.get('DREADNODE_API_KEY') else 'missing'}"
             )
             if request.model.startswith("gpt-") and not os.environ.get("OPENAI_API_KEY"):
                 raise ValueError(

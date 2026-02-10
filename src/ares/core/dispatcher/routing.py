@@ -413,11 +413,7 @@ class RoutingMixin:
             Task ID for tracking.
         """
         if not target_host or not target_host.strip():
-            logger.warning(
-                "Skipping lateral movement for %s\\%s: empty target_host",
-                domain,
-                username,
-            )
+            logger.warning(f"Skipping lateral movement for {domain}\\{username}: empty target_host")
             return ""
 
         resolved_password = password
@@ -441,9 +437,7 @@ class RoutingMixin:
                 if not resolved_domain:
                     resolved_domain = cred.domain
                 logger.debug(
-                    "Filled lateral auth from credential store for %s\\%s",
-                    resolved_domain or domain,
-                    username,
+                    f"Filled lateral auth from credential store for {resolved_domain or domain}\\{username}"
                 )
 
             if not resolved_password:
@@ -461,9 +455,7 @@ class RoutingMixin:
                     if not resolved_domain:
                         resolved_domain = h.domain
                     logger.debug(
-                        "Filled lateral auth from hash store for %s\\%s",
-                        resolved_domain or domain,
-                        username,
+                        f"Filled lateral auth from hash store for {resolved_domain or domain}\\{username}"
                     )
 
         self._ensure_credential_in_state(
@@ -485,10 +477,7 @@ class RoutingMixin:
 
         if not resolved_password and not resolved_hash:
             logger.warning(
-                "Skipping lateral movement for %s\\%s -> %s: missing credentials",
-                resolved_domain or domain,
-                username,
-                target_host,
+                f"Skipping lateral movement for {resolved_domain or domain}\\{username} -> {target_host}: missing credentials"
             )
             return ""
 
@@ -711,10 +700,7 @@ class RoutingMixin:
                 cred_label = f"{cred_label} (password)"
             reason_label = f" reason={reason}" if reason else ""
             logger.info(
-                "Recon task {} submitted to Redis queue for {}{}",
-                task_id,
-                cred_label,
-                reason_label,
+                f"Recon task {task_id} submitted to Redis queue for {cred_label}{reason_label}"
             )
             return task_id
 
@@ -837,12 +823,7 @@ class RoutingMixin:
             source_label = f" source={credential_source}" if credential_source else ""
             hash_label = f" hash_type={hash_type}" if hash_type else ""
             logger.info(
-                "Credential access task {} submitted to Redis queue for {}{}{}{}",
-                task_id,
-                cred_label,
-                reason_label,
-                source_label,
-                hash_label,
+                f"Credential access task {task_id} submitted to Redis queue for {cred_label}{reason_label}{source_label}{hash_label}"
             )
             return task_id
 
