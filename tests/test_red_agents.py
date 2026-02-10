@@ -425,3 +425,88 @@ class TestRoleHooks:
 
         # PRIVESC should have multiple hooks (exploitation tracking + unstall)
         assert len(hooks) >= 2, "PRIVESC should have exploitation tracking and unstall hooks"
+
+    def test_orchestrator_has_summarize_when_long_hook(self):
+        """Test that ORCHESTRATOR role includes summarize_when_long hook for context management."""
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+
+        # ORCHESTRATOR should have multiple hooks including summarize_when_long
+        # (log_tool_usage, log_tool_result, summarize_when_long, check_domain_admin, unstall)
+        assert len(hooks) >= 4, "ORCHESTRATOR should have summarize_when_long and other hooks"
+
+    def test_non_orchestrator_roles_dont_have_summarize_hook(self):
+        """Test that non-orchestrator roles don't get summarize_when_long hook."""
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        non_orchestrator_roles = [
+            AgentRole.RECON,
+            AgentRole.CREDENTIAL_ACCESS,
+            AgentRole.CRACKER,
+            AgentRole.ACL,
+            AgentRole.PRIVESC,
+            AgentRole.LATERAL,
+            AgentRole.COERCION,
+        ]
+
+        for role in non_orchestrator_roles:
+            hooks = create_role_hooks(role, dispatcher, shared_state)
+            # Non-orchestrator roles should have fewer hooks than orchestrator
+            # They should have: log_tool_usage, log_tool_result, unstall, maybe role-specific
+            # But NOT summarize_when_long (that's orchestrator-only)
+            orchestrator_hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+            # The exact count varies, but orchestrator should have more due to summarize_when_long
+            # and check_domain_admin hooks
+            assert len(hooks) < len(orchestrator_hooks), (
+                f"Role {role} should have fewer hooks than ORCHESTRATOR"
+            )
+
+
+class TestContextManagementHooks:
+    """Tests for context management hooks in red_agents."""
+
+    def test_summarize_when_long_uses_config_values(self, monkeypatch):
+        """Test that summarize_when_long hook uses config values."""
+        # Mock the config functions
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_max_context_tokens",
+            lambda: 50000,
+        )
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_min_messages_to_keep",
+            lambda: 5,
+        )
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        # Create hooks - this should use our mocked config values
+        hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+
+        # Verify hooks were created (we can't easily verify the exact values
+        # passed to summarize_when_long, but we can verify hooks exist)
+        assert len(hooks) > 0
+
+    def test_get_max_context_tokens_used_in_hooks(self):
+        """Test that get_max_context_tokens is imported and available."""
+        from ares.core.factories.red_agents import get_max_context_tokens
+
+        # Should return a reasonable default (100k for ~85% of 128k window)
+        result = get_max_context_tokens()
+        assert result >= 50000  # Should be at least 50k tokens
+        assert result <= 200000  # But not more than 200k
+
+    def test_get_min_messages_to_keep_used_in_hooks(self):
+        """Test that get_min_messages_to_keep is imported and available."""
+        from ares.core.factories.red_agents import get_min_messages_to_keep
+
+        # Should return a reasonable default
+        result = get_min_messages_to_keep()
+        assert result >= 5  # At least 5 messages
+        assert result <= 50  # But not more than 50

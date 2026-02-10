@@ -18,8 +18,7 @@ operation:
 # Agent configurations
 agents:
   orchestrator:
-    # model: "gpt-5.2"
-    model: "claude-sonnet-4-5-20250929"
+    model: "gpt-5.2"
     max_steps: 200
     pod_selector: "app.kubernetes.io/name=ares-orchestrator"
     tools:
@@ -42,8 +41,7 @@ agents:
       - announce_domain_admin
 
   recon:
-    # model: "gpt-5.2"
-    model: "claude-sonnet-4-5-20250929"
+    model: "gpt-5.2"
     max_steps: 100
     pod_selector: "ares.dreadnode.io/role=recon"
     capabilities:
@@ -74,8 +72,7 @@ agents:
       - whois
 
   credential_access:
-    # model: "gpt-5.2"
-    model: "claude-sonnet-4-5-20250929"
+    model: "gpt-5.2"
     max_steps: 100
     pod_selector: "ares.dreadnode.io/role=credential_access"
     capabilities:
@@ -90,8 +87,7 @@ agents:
       - smbclient
 
   cracker:
-    # model: "gpt-5.2"
-    model: "claude-sonnet-4-5-20250929"
+    model: "gpt-5.2"
     max_steps: 150
     pod_selector: "ares.dreadnode.io/role=cracker"
     capabilities:
@@ -101,8 +97,7 @@ agents:
       - seclists
 
   acl:
-    # model: "gpt-5.2"
-    model: "claude-sonnet-4-5-20250929"
+    model: "gpt-5.2"
     max_steps: 150  # ACL analysis requires complex path finding
     pod_selector: "ares.dreadnode.io/role=acl"
     capabilities:
@@ -113,8 +108,7 @@ agents:
       - rpcclient
 
   privesc:
-    # model: "gpt-5.2"
-    model: "claude-sonnet-4-5-20250929"
+    model: "gpt-5.2"
     max_steps: 100
     pod_selector: "ares.dreadnode.io/role=privesc"
     capabilities:
@@ -141,8 +135,7 @@ agents:
       - scmuacbypass
 
   lateral:
-    # model: "gpt-5.2"
-    model: "claude-sonnet-4-5-20250929"
+    model: "gpt-5.2"
     max_steps: 300
     pod_selector: "ares.dreadnode.io/role=lateral"
     capabilities:
@@ -156,8 +149,7 @@ agents:
       - sshpass
 
   coercion:
-    # model: "gpt-5.2"
-    model: "claude-sonnet-4-5-20250929"
+    model: "gpt-5.2"
     max_steps: 30
     pod_selector: "ares.dreadnode.io/role=coercion"
     capabilities:
@@ -197,6 +189,18 @@ phase_detection:
   lateral_movement_owned_hosts: 5  # >= this many owned hosts
   # Minimum slots per worker role (prevents starvation)
   min_slots_per_role: 1
+
+# Context management settings
+# Prevents context window exhaustion in long-running operations
+context_management:
+  # Trigger conversation summarization when orchestrator exceeds this token count
+  # Set to ~85% of model context window to leave room for response
+  max_context_tokens: 100000
+  # Keep this many recent messages after summarization
+  min_messages_to_keep: 10
+  # Truncate task outputs to this size in broadcasts to orchestrator
+  # Structured discoveries are preserved; only raw output is truncated
+  max_output_chars: 2000
 
 # Vulnerability priorities (lower = higher priority)
 vulnerability_priorities:

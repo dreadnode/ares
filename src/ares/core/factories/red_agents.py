@@ -12,11 +12,11 @@ from typing import TYPE_CHECKING, Any
 import dreadnode as dn
 from dreadnode.agent import Agent, Thread
 from dreadnode.agent.events import AgentStalled, ToolEnd, ToolStart
-from dreadnode.agent.hooks import retry_with_feedback
+from dreadnode.agent.hooks import retry_with_feedback, summarize_when_long
 from dreadnode.agent.stop import tool_use
 from loguru import logger
 
-from ares.core.config import get_agent_config
+from ares.core.config import get_agent_config, get_max_context_tokens, get_min_messages_to_keep
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.models import AgentInfo, AgentRole, SharedRedTeamState
 from ares.core.templates import get_template_loader
@@ -224,6 +224,16 @@ def create_role_hooks(
 
     # Role-specific hooks
     if role == AgentRole.ORCHESTRATOR:
+        # Context management: summarize conversation when approaching token limits
+        # This prevents rate limit exhaustion from accumulated context
+        # Default threshold is ~100k tokens (~85% of 128k window for Sonnet)
+        # Configurable via ARES_MAX_CONTEXT_TOKENS and ARES_MIN_MESSAGES_TO_KEEP
+        summarize_hook = summarize_when_long(
+            max_tokens=get_max_context_tokens(),
+            min_messages_to_keep=get_min_messages_to_keep(),
+        )
+        hooks.append(summarize_hook)
+
         # Orchestrator monitors for domain admin achievement
         async def check_domain_admin(event: ToolEnd):
             if not isinstance(event, ToolEnd):

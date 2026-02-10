@@ -108,6 +108,15 @@ class OperationConfig:
     redis_url: str = ""  # Derived from namespace if not explicitly set
     checkpoint_interval: int = 60
 
+    # Context management settings
+    # max_context_tokens: Trigger summarization when orchestrator exceeds this
+    # (set to ~85% of model context window to leave room for response)
+    max_context_tokens: int = 100_000
+    # min_messages_to_keep: Keep this many recent messages after summarization
+    min_messages_to_keep: int = 10
+    # max_output_chars: Truncate task outputs to this size in broadcasts
+    max_output_chars: int = 2000
+
     def __post_init__(self) -> None:
         """Derive redis_url from namespace if not explicitly set."""
         if not self.redis_url:
@@ -221,6 +230,7 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
     recovery = data.get("recovery", {})
     grafana = data.get("grafana", {})
     phase_detection = data.get("phase_detection", {})
+    context_management = data.get("context_management", {})
 
     # Build agent configs
     agents: dict[str, AgentConfig] = {}
@@ -266,6 +276,10 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
             "lateral_movement_owned_hosts", 5
         ),
         min_slots_per_role=phase_detection.get("min_slots_per_role", 1),
+        # Context management
+        max_context_tokens=context_management.get("max_context_tokens", 100_000),
+        min_messages_to_keep=context_management.get("min_messages_to_keep", 10),
+        max_output_chars=context_management.get("max_output_chars", 2000),
     )
 
 
@@ -319,6 +333,23 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:  # noqa: P
     if rate_threshold := os.environ.get("ARES_RATE_LIMIT_THRESHOLD"):
         try:
             config.rate_limit_threshold = int(rate_threshold)
+        except ValueError:
+            pass
+
+    # Context management overrides
+    if max_tokens := os.environ.get("ARES_MAX_CONTEXT_TOKENS"):
+        try:
+            config.max_context_tokens = int(max_tokens)
+        except ValueError:
+            pass
+    if min_messages := os.environ.get("ARES_MIN_MESSAGES_TO_KEEP"):
+        try:
+            config.min_messages_to_keep = int(min_messages)
+        except ValueError:
+            pass
+    if max_output := os.environ.get("ARES_MAX_OUTPUT_CHARS"):
+        try:
+            config.max_output_chars = int(max_output)
         except ValueError:
             pass
 
@@ -427,6 +458,21 @@ def get_min_slots_per_role() -> int:
     return load_config().min_slots_per_role
 
 
+def get_max_context_tokens() -> int:
+    """Get max token threshold for triggering conversation summarization."""
+    return load_config().max_context_tokens
+
+
+def get_min_messages_to_keep() -> int:
+    """Get minimum messages to keep after summarization."""
+    return load_config().min_messages_to_keep
+
+
+def get_max_output_chars() -> int:
+    """Get max characters for task output in broadcasts."""
+    return load_config().max_output_chars
+
+
 def clear_config_cache() -> None:
     """Clear the cached configuration (useful for testing)."""
     global _cached_config
@@ -445,6 +491,9 @@ __all__ = [
     "get_lateral_movement_admin_creds_threshold",
     "get_lateral_movement_owned_hosts_threshold",
     "get_max_concurrent_tasks",
+    "get_max_context_tokens",
+    "get_max_output_chars",
+    "get_min_messages_to_keep",
     "get_min_slots_per_role",
     "get_namespace",
     "get_rate_limit_backoff",

@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from ares.core.config import get_max_output_chars
+from ares.core.context_manager import summarize_task_result
 from ares.core.messages import TaskComplete, TaskFailed
 from ares.core.models import (
     Credential,
@@ -146,13 +148,21 @@ class ResultProcessingMixin:
             if chained > 0:
                 logger.info(f"🎫 Auto-S4U-chain: dispatched {chained} lateral movement task(s)")
 
-        # Broadcast completion
+        # Broadcast completion with summarized result to save orchestrator context
+        # Full structured discoveries are already extracted above into shared state
         if success:
+            # Summarize result to prevent context bloat in orchestrator
+            # Keeps structured discoveries, truncates large raw outputs
+            broadcast_result = result
+            if isinstance(result, dict):
+                broadcast_result = summarize_task_result(
+                    result, task_info.task_type, max_output_chars=get_max_output_chars()
+                )
             await self._broadcast(
                 TaskComplete(
                     source_agent=source_agent,
                     task_id=task_id,
-                    result={"task_type": task_info.task_type, "data": result},
+                    result={"task_type": task_info.task_type, "data": broadcast_result},
                 )
             )
         else:

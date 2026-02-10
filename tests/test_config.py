@@ -352,5 +352,124 @@ class TestAgentConfig:
         assert agent.capabilities == ["cap1", "cap2"]
 
 
+class TestContextManagementSettings:
+    """Tests for context management configuration."""
+
+    def test_context_management_defaults(self):
+        """Test default values for context management settings."""
+        from ares.core.config import OperationConfig
+
+        config = OperationConfig()
+
+        assert config.max_context_tokens == 100_000
+        assert config.min_messages_to_keep == 10
+        assert config.max_output_chars == 2000
+
+    def test_context_management_env_overrides(self):
+        """Test environment variable overrides for context management."""
+        config_data = {"agents": {}}
+
+        with patch.dict(
+            os.environ,
+            {
+                "ARES_MAX_CONTEXT_TOKENS": "50000",
+                "ARES_MIN_MESSAGES_TO_KEEP": "5",
+                "ARES_MAX_OUTPUT_CHARS": "1000",
+            },
+            clear=False,
+        ):
+            from ares.core.config import _build_config
+
+            config = _build_config(config_data)
+            config = _apply_env_overrides(config)
+
+            assert config.max_context_tokens == 50000
+            assert config.min_messages_to_keep == 5
+            assert config.max_output_chars == 1000
+
+    def test_context_management_invalid_env_values_ignored(self):
+        """Test that invalid env values are ignored, keeping defaults."""
+        config_data = {"agents": {}}
+
+        with patch.dict(
+            os.environ,
+            {
+                "ARES_MAX_CONTEXT_TOKENS": "not_a_number",
+                "ARES_MIN_MESSAGES_TO_KEEP": "invalid",
+                "ARES_MAX_OUTPUT_CHARS": "",
+            },
+            clear=False,
+        ):
+            from ares.core.config import _build_config
+
+            config = _build_config(config_data)
+            config = _apply_env_overrides(config)
+
+            # Should keep defaults when values are invalid
+            assert config.max_context_tokens == 100_000
+            assert config.min_messages_to_keep == 10
+            assert config.max_output_chars == 2000
+
+    def test_get_max_context_tokens_function(self):
+        """Test get_max_context_tokens helper function."""
+        from ares.core.config import clear_config_cache, get_max_context_tokens
+
+        clear_config_cache()
+
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("ARES_")}
+        with patch.dict(os.environ, clean_env, clear=True):
+            clear_config_cache()
+            result = get_max_context_tokens()
+            assert result == 100_000
+
+    def test_get_min_messages_to_keep_function(self):
+        """Test get_min_messages_to_keep helper function."""
+        from ares.core.config import clear_config_cache, get_min_messages_to_keep
+
+        clear_config_cache()
+
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("ARES_")}
+        with patch.dict(os.environ, clean_env, clear=True):
+            clear_config_cache()
+            result = get_min_messages_to_keep()
+            assert result == 10
+
+    def test_get_max_output_chars_function(self):
+        """Test get_max_output_chars helper function."""
+        from ares.core.config import clear_config_cache, get_max_output_chars
+
+        clear_config_cache()
+
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("ARES_")}
+        with patch.dict(os.environ, clean_env, clear=True):
+            clear_config_cache()
+            result = get_max_output_chars()
+            assert result == 2000
+
+    def test_context_management_env_override_with_existing_config(self):
+        """Test env overrides work even when config has other values set."""
+        config_data = {
+            "agents": {"recon": {"model": "test-model"}},
+            "operation": {"name": "test-op"},
+        }
+
+        with patch.dict(
+            os.environ,
+            {
+                "ARES_MAX_CONTEXT_TOKENS": "75000",
+            },
+            clear=False,
+        ):
+            from ares.core.config import _build_config
+
+            config = _build_config(config_data)
+            config = _apply_env_overrides(config)
+
+            assert config.max_context_tokens == 75000
+            # Other settings should use defaults
+            assert config.min_messages_to_keep == 10
+            assert config.max_output_chars == 2000
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

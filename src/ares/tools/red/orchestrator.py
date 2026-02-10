@@ -1584,6 +1584,38 @@ class OrchestratorTools(Toolset):
             return f"✓ Host registered: {hostname or ip} ({os})"
         return f"[i] Host already known: {hostname or ip}"
 
+    @dn.tool_method
+    async def retrieve_task_output(self, task_id: str) -> str:
+        """
+        Retrieve full output for a task that was offloaded to Redis.
+
+        When tool outputs are very large (>5000 chars), they are automatically
+        offloaded to Redis to save context space. Use this tool to retrieve
+        the full output when you need to examine details.
+
+        Look for messages containing "[Full output stored:" to identify
+        offloaded outputs.
+
+        Args:
+            task_id: The task ID to retrieve output for
+
+        Returns:
+            Full task output or error message
+
+        Example:
+            >>> retrieve_task_output(task_id="recon-abc123")
+        """
+        from ares.core.context_manager import retrieve_offloaded_output
+
+        redis = self.dispatcher._redis
+        operation_id = self.shared_state.operation_id
+
+        output = await retrieve_offloaded_output(redis, operation_id, task_id)
+
+        if output:
+            return f"Full output for task {task_id}:\n\n{output}"
+        return f"✗ No offloaded output found for task {task_id}"
+
 
 class CrackerCallbackTools(Toolset):
     """Callback tools for the cracker agent to report results."""

@@ -62,7 +62,8 @@ includes:
 vars:
   API_DIR: "."
   # Ares configuration
-  MODEL: '{{.MODEL | default "claude-sonnet-4-5-20250929"}}'
+  # MODEL: '{{.MODEL | default "claude-sonnet-4-5-20250929"}}'
+  MODEL: '{{.MODEL | default "gpt-5.2"}}'
   GRAFANA_URL: '{{.GRAFANA_URL | default "https://grafana.dev.plundr.ai"}}'
   POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
   MAX_STEPS_BLUE: '{{.MAX_STEPS_BLUE | default "50"}}'
@@ -76,7 +77,7 @@ vars:
   DREADNODE_PROJECT: '{{.DREADNODE_PROJECT | default "ares-soc"}}'
   MODEL_ORCHESTRATOR: '{{.MODEL_ORCHESTRATOR | default ""}}'
   MODEL_WORKER: '{{.MODEL_WORKER | default ""}}'
-  MODEL_ALL: '{{.MODEL_ALL | default "claude-sonnet-4-5-20250929"}}'
+  MODEL_ALL: '{{.MODEL_ALL | default "gpt-5.2"}}'
   MODEL_RECON: '{{.MODEL_RECON | default ""}}'
   MODEL_CREDENTIAL_ACCESS: '{{.MODEL_CREDENTIAL_ACCESS | default ""}}'
   MODEL_CRACKER: '{{.MODEL_CRACKER | default ""}}'
@@ -331,7 +332,7 @@ tasks:
         else
           echo "  ⚠️  Anthropic API key not found in 1Password"
           echo "     Item: 'Dreadnode Claude'"
-          echo "     Field: 'dreadnode-api-key'"
+          echo "     Field: 'dreadnode-personal-api-key'"
         fi
 
         echo ""
