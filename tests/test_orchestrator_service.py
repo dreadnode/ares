@@ -93,7 +93,7 @@ async def test_recover_orphaned_operation_runs_and_publishes_status():
     recovery_manager = AsyncMock()
     recovery_manager.start = AsyncMock()
     recovery_manager.stop = AsyncMock()
-    recovery_manager.recover_operation = AsyncMock(return_value=state)
+    recovery_manager.recover_operation = AsyncMock(return_value=(state, []))
 
     with (
         patch(

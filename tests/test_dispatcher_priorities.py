@@ -8,45 +8,39 @@ from ares.core.dispatcher import RedTeamDispatcher
 class TestVulnerabilityPriorities:
     """Tests for vulnerability priority mappings in the dispatcher."""
 
-    def test_adcs_vulnerabilities_highest_priority(self):
-        """ADCS vulnerabilities should have highest priority (1-3)."""
+    def test_instant_da_paths_highest_priority(self):
+        """Instant DA paths (krbtgt, DA hash, delegation) should have highest priority (1-4)."""
         dispatcher = RedTeamDispatcher()
         priorities = dispatcher._vulnerability_priorities
 
-        assert priorities["ADCS_ESC1"] == 1
-        assert priorities["ADCS_ESC4"] == 2
-        assert priorities["ADCS_ESC8"] == 3
+        assert priorities["krbtgt_hash"] == 1
+        assert priorities["domain_admin_hash"] == 2
+        assert priorities["constrained_delegation"] == 3
+        assert priorities["unconstrained_delegation"] == 4
 
-    def test_high_value_hashes_high_priority(self):
-        """krbtgt and domain admin hashes should have high priority (4-5)."""
+    def test_adcs_vulnerabilities_tier2_priority(self):
+        """ADCS vulnerabilities should have tier 2 priority (5-7)."""
         dispatcher = RedTeamDispatcher()
         priorities = dispatcher._vulnerability_priorities
 
-        assert priorities["krbtgt_hash"] == 4
-        assert priorities["domain_admin_hash"] == 5
+        assert priorities["ADCS_ESC1"] == 5
+        assert priorities["ADCS_ESC4"] == 6
+        assert priorities["ADCS_ESC8"] == 7
 
     def test_direct_da_acl_priority(self):
-        """Direct DA via ACL should have priority 6-7."""
+        """Direct DA via ACL should have priority 8-9."""
         dispatcher = RedTeamDispatcher()
         priorities = dispatcher._vulnerability_priorities
 
-        assert priorities["genericall_domain_admins"] == 6
-        assert priorities["gpo_write"] == 7
+        assert priorities["genericall_domain_admins"] == 8
+        assert priorities["gpo_write"] == 9
 
-    def test_acl_abuse_priority(self):
-        """ACL abuse should have priority 8."""
+    def test_acl_and_rbcd_priority(self):
+        """ACL abuse and RBCD should have priority 10-11."""
         dispatcher = RedTeamDispatcher()
         priorities = dispatcher._vulnerability_priorities
 
-        assert priorities["acl_abuse"] == 8
-
-    def test_delegation_vulnerabilities_priority(self):
-        """Delegation vulnerabilities should have priority 9-11."""
-        dispatcher = RedTeamDispatcher()
-        priorities = dispatcher._vulnerability_priorities
-
-        assert priorities["unconstrained_delegation"] == 9
-        assert priorities["constrained_delegation"] == 10
+        assert priorities["acl_abuse"] == 10
         assert priorities["rbcd"] == 11
 
     def test_mssql_vulnerabilities_priority(self):
@@ -126,11 +120,12 @@ class TestVulnerabilityPriorities:
         dispatcher = RedTeamDispatcher()
         priorities = dispatcher._vulnerability_priorities
 
-        # ADCS should be higher priority than delegation
-        assert priorities["ADCS_ESC1"] < priorities["unconstrained_delegation"]
+        # Instant DA paths (krbtgt, delegation) should be highest
+        assert priorities["krbtgt_hash"] < priorities["ADCS_ESC1"]
+        assert priorities["constrained_delegation"] < priorities["ADCS_ESC1"]
 
-        # Delegation should be higher priority than MSSQL
-        assert priorities["unconstrained_delegation"] < priorities["mssql_impersonation"]
+        # ADCS should be higher priority than MSSQL
+        assert priorities["ADCS_ESC8"] < priorities["mssql_impersonation"]
 
         # MSSQL should be higher priority than GPO abuse
         assert priorities["mssql_xp_cmdshell"] < priorities["gpo_abuse"]
@@ -141,34 +136,34 @@ class TestVulnerabilityPriorities:
         priorities = dispatcher._vulnerability_priorities
 
         expected_types = [
-            # Tier 1: ADCS
+            # Tier 1: Instant DA paths
+            "krbtgt_hash",
+            "domain_admin_hash",
+            "constrained_delegation",
+            "unconstrained_delegation",
+            # Tier 2: ADCS
             "ADCS_ESC1",
             "ADCS_ESC4",
             "ADCS_ESC8",
-            # Tier 1: High-value hashes
-            "krbtgt_hash",
-            "domain_admin_hash",
-            # Tier 2: Direct DA via ACL
+            # Tier 3: Direct DA via ACL
             "genericall_domain_admins",
             "gpo_write",
-            # Tier 3: ACL and delegation
+            # Tier 4: ACL and RBCD
             "acl_abuse",
-            "unconstrained_delegation",
-            "constrained_delegation",
             "rbcd",
-            # Tier 4: MSSQL
+            # Tier 5: MSSQL
             "mssql_impersonation",
             "mssql_linked_xpcmdshell",
             "mssql_linked",
             "mssql_linked_server",
             "mssql_xp_cmdshell",
-            # Tier 5: Other privilege escalation
+            # Tier 6: Other privilege escalation
             "gpo_abuse",
             "gmsa_readable",
             "laps_abuse",
             "dcsync",
             "shadow_credentials",
-            # Tier 6: Relay and persistence
+            # Tier 7: Relay and persistence
             "smb_relay_target",
             "adminsd_holder_writable",
             "adminsd_holder_acl",

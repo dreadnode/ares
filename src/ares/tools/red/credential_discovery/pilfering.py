@@ -105,6 +105,17 @@ class SharePilferingTools(Toolset):
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
             return "[!] Refusing to use placeholder password; provide a real credential."
 
+        # Deduplication: check if this target/share/credential combo was already spidered
+        if self.state and hasattr(self.state, "processed_spidered_shares"):
+            spider_key = (
+                f"{target.lower()}:{share.lower()}:{username.lower()}:{(domain or '').lower()}"
+            )
+            if spider_key in self.state.processed_spidered_shares:
+                return (
+                    f"[*] Already spidered {share} on {target} with {domain}\\{username} - skipping"
+                )
+            self.state.processed_spidered_shares.add(spider_key)
+
         cmd = [
             "netexec",
             "smb",
@@ -346,6 +357,15 @@ class SharePilferingTools(Toolset):
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
             return "[!] Refusing to use placeholder password; provide a real credential."
+
+        # Deduplication: check if SYSVOL was already searched with this credential
+        if self.state and hasattr(self.state, "processed_spidered_shares"):
+            spider_key = f"{target.lower()}:sysvol:{username.lower()}:{(domain or '').lower()}"
+            if spider_key in self.state.processed_spidered_shares:
+                return (
+                    f"[*] Already searched SYSVOL on {target} with {domain}\\{username} - skipping"
+                )
+            self.state.processed_spidered_shares.add(spider_key)
 
         results: list[str] = []
 

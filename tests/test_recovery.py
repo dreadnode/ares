@@ -343,7 +343,9 @@ class TestOperationRecoveryManagerRecovery:
             mock_queue.disconnect = AsyncMock()
             mock_queue.requeue_task = AsyncMock(return_value="task_001")
 
-            recovered = await manager.recover_operation(state_with_in_progress_tasks.operation_id)
+            recovered, _requeued_ids = await manager.recover_operation(
+                state_with_in_progress_tasks.operation_id
+            )
 
             # Verify tasks were requeued (task_001, task_002, task_003, task_005)
             assert mock_queue.requeue_task.call_count == 4  # IN_PROGRESS, PENDING, RETRYING tasks
@@ -392,7 +394,7 @@ class TestOperationRecoveryManagerRecovery:
             mock_queue.disconnect = AsyncMock()
             mock_queue.requeue_task = AsyncMock()
 
-            recovered = await manager.recover_operation(
+            recovered, _requeued_ids = await manager.recover_operation(
                 state_with_max_retries_exceeded.operation_id
             )
 
@@ -420,7 +422,7 @@ class TestOperationRecoveryManagerRecovery:
             b"2024-01-15T10:00:00+00:00",  # checkpoint time
         ]
 
-        recovered = await manager.recover_operation(
+        recovered, _requeued_ids = await manager.recover_operation(
             state_with_in_progress_tasks.operation_id,
             auto_requeue=False,
         )
