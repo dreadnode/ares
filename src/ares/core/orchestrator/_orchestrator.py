@@ -1255,12 +1255,7 @@ async def _auto_share_spider(
                     if task_id:
                         spidered_shares.add(spider_key)
                         logger.info(
-                            "🕷️ Auto share spider dispatched: {}\\{} -> {}/{} (task {})",
-                            cred.domain or "(local)",
-                            cred.username,
-                            share.host,
-                            share.name,
-                            task_id,
+                            f"🕷️ Auto share spider dispatched: {cred.domain or '(local)'}\\{cred.username} -> {share.host}/{share.name} (task {task_id})"
                         )
                         # Only spider each share once per credential - don't flood
                         break
@@ -1653,10 +1648,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                 if task_id:
                     processed_creds.add(key)
                     logger.info(
-                        "Auto credential access dispatched for {}\\{} (source={})",
-                        cred.domain or "(unknown)",
-                        cred.username,
-                        cred.source or "unknown",
+                        f"Auto credential access dispatched for {cred.domain or '(unknown)'}\\{cred.username} (source={cred.source or 'unknown'})"
                     )
 
             for hash_obj in state.all_hashes:
@@ -1665,10 +1657,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                 if key not in processed_hashes:
                     if not _is_pass_the_hash_compatible(hash_obj.hash_value, hash_obj.hash_type):
                         logger.info(
-                            "Skipping credential access for {}\\{}: non-NTLM hash type {}",
-                            hash_obj.domain or "(unknown)",
-                            hash_obj.username,
-                            hash_obj.hash_type or "unknown",
+                            f"Skipping credential access for {hash_obj.domain or '(unknown)'}\\{hash_obj.username}: non-NTLM hash type {hash_obj.hash_type or 'unknown'}"
                         )
                         processed_hashes.add(key)
                     else:
@@ -1689,10 +1678,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                         if task_id:
                             processed_hashes.add(key)
                             logger.info(
-                                "Auto credential access dispatched for {}\\{} (hash_type={})",
-                                hash_obj.domain or "(unknown)",
-                                hash_obj.username,
-                                hash_obj.hash_type or "unknown",
+                                f"Auto credential access dispatched for {hash_obj.domain or '(unknown)'}\\{hash_obj.username} (hash_type={hash_obj.hash_type or 'unknown'})"
                             )
 
                 # Crack requests for ALL hashes (AS-REP, Kerberoast, NTLM, etc.)
