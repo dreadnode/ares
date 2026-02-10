@@ -124,18 +124,19 @@ class RedTeamDispatcher(
         self._vulnerability_queue: PriorityQueue[tuple[int, str, dict[str, Any]]] = PriorityQueue()
         self._vulnerability_priorities: dict[str, int] = {
             # Tier 1: Instant DA paths (priority 1-5)
-            "ADCS_ESC1": 1,
-            "ADCS_ESC4": 2,
-            "ADCS_ESC8": 3,
-            "krbtgt_hash": 4,
-            "domain_admin_hash": 5,
-            # Tier 2: Direct DA via ACL (priority 6-7) - NEW HIGH PRIORITY
-            "genericall_domain_admins": 6,  # GenericAll on Domain Admins = instant DA
-            "gpo_write": 7,  # GPO write on DC-linked GPO = SYSTEM on DC
-            # Tier 3: ACL and delegation attacks (priority 8-11)
-            "acl_abuse": 8,
-            "unconstrained_delegation": 9,
-            "constrained_delegation": 10,
+            "krbtgt_hash": 1,  # krbtgt = golden ticket = instant DA
+            "domain_admin_hash": 2,  # DA hash = instant DA
+            "constrained_delegation": 3,  # S4U with DA impersonation = instant DA
+            "unconstrained_delegation": 4,  # DC ticket = krbtgt = DA
+            # Tier 2: ADCS attacks (priority 5-7)
+            "ADCS_ESC1": 5,
+            "ADCS_ESC4": 6,
+            "ADCS_ESC8": 7,
+            # Tier 3: Direct DA via ACL (priority 8-9)
+            "genericall_domain_admins": 8,  # GenericAll on Domain Admins = instant DA
+            "gpo_write": 9,  # GPO write on DC-linked GPO = SYSTEM on DC
+            # Tier 4: Other ACL and delegation attacks (priority 10-13)
+            "acl_abuse": 10,
             "rbcd": 11,
             # Tier 4: MSSQL attacks (priority 12-15)
             "mssql_impersonation": 12,
