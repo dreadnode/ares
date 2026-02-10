@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import dreadnode as dn
 from dreadnode.agent import Agent, Thread
-from dreadnode.agent.events import AgentStalled, ToolEnd, ToolStart
+from dreadnode.agent.events import AgentStalled, GenerationEnd, StepStart, ToolEnd, ToolStart
 from dreadnode.agent.hooks import retry_with_feedback, summarize_when_long
 from dreadnode.agent.stop import tool_use
 from loguru import logger
@@ -42,6 +42,8 @@ from ares.tools.red import (
 )
 
 if TYPE_CHECKING:
+    from dreadnode.agent.reactions import Reaction
+
     from ares.core.k8s_executor import KubernetesPodExecutor
 
 
@@ -228,11 +230,39 @@ def create_role_hooks(
         # This prevents rate limit exhaustion from accumulated context
         # Default threshold is ~100k tokens (~85% of 128k window for Sonnet)
         # Configurable via ARES_MAX_CONTEXT_TOKENS and ARES_MIN_MESSAGES_TO_KEEP
-        summarize_hook = summarize_when_long(
-            max_tokens=get_max_context_tokens(),
-            min_messages_to_keep=get_min_messages_to_keep(),
+        max_tokens = get_max_context_tokens()
+        min_messages = get_min_messages_to_keep()
+        _summarize_hook = summarize_when_long(
+            max_tokens=max_tokens,
+            min_messages_to_keep=min_messages,
         )
-        hooks.append(summarize_hook)
+
+        async def context_aware_summarize(event: StepStart | GenerationEnd) -> Reaction | None:
+            """Wrap summarize_when_long with logging for observability."""
+            # Log token count on each step start
+            if isinstance(event, StepStart):
+                last_gen = event.get_latest_event_by_type(GenerationEnd)
+                if last_gen and last_gen.usage:
+                    tokens = last_gen.usage.input_tokens
+                    pct = (tokens / max_tokens) * 100
+                    if pct >= 80:
+                        logger.warning(
+                            f"📊 Context: {tokens:,} / {max_tokens:,} tokens ({pct:.0f}%)"
+                        )
+                    elif pct >= 50:
+                        logger.info(f"📊 Context: {tokens:,} / {max_tokens:,} tokens ({pct:.0f}%)")
+
+            # Call the actual summarization hook
+            result = await _summarize_hook(event)
+
+            if result is not None:
+                logger.success(
+                    f"📝 Conversation summarized! Keeping {min_messages} recent messages"
+                )
+
+            return result
+
+        hooks.append(context_aware_summarize)
 
         # Orchestrator monitors for domain admin achievement
         async def check_domain_admin(event: ToolEnd):

@@ -12,8 +12,6 @@ Based on industry patterns from:
 from __future__ import annotations
 
 import hashlib
-import json
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -87,8 +85,7 @@ async def offload_large_output(
     )
 
     logger.debug(
-        f"Offloaded {len(output):,} chars to Redis: {redis_key} "
-        f"(preview: {len(summary)} chars)"
+        f"Offloaded {len(output):,} chars to Redis: {redis_key} (preview: {len(summary)} chars)"
     )
 
     return summary, True
@@ -127,6 +124,43 @@ async def retrieve_offloaded_output(
         return output.decode() if isinstance(output, bytes) else output
 
     return None
+
+
+def _truncate_output(output: str, max_chars: int) -> str:
+    """Truncate output while preserving head and tail portions.
+
+    Args:
+        output: Full output text
+        max_chars: Maximum characters to keep
+
+    Returns:
+        Truncated output with omission indicator
+    """
+    lines = output.split("\n")
+    total_lines = len(lines)
+
+    # Keep first and last portions
+    head_lines = lines[:15]
+    tail_lines = lines[-5:] if total_lines > 20 else []
+
+    head = "\n".join(head_lines)
+    tail = "\n".join(tail_lines)
+
+    if len(head) > max_chars // 2:
+        head = head[: max_chars // 2]
+
+    # Calculate omitted lines and format result
+    if tail_lines:
+        omitted = total_lines - len(head_lines) - len(tail_lines)
+        if omitted > 0:
+            return f"{head}\n[... {omitted} lines omitted ...]\n{tail}"
+        return f"{head}\n{tail}"
+
+    omitted = total_lines - len(head_lines)
+    if omitted > 0:
+        return f"{head}\n[... {omitted} lines omitted ...]"
+    # Output exceeded char limit but has few lines (long lines)
+    return f"{head}\n[... truncated, {len(output):,} chars total ...]"
 
 
 def summarize_task_result(
@@ -176,25 +210,10 @@ def summarize_task_result(
     # Summarize output fields
     output_fields = ["output", "stdout", "stderr"]
     for field in output_fields:
-        if field in result and result[field]:
+        if result.get(field):
             output = str(result[field])
             if len(output) > max_output_chars:
-                lines = output.split("\n")
-                # Keep first and last portions
-                head_lines = lines[:15]
-                tail_lines = lines[-5:] if len(lines) > 20 else []
-
-                head = "\n".join(head_lines)
-                tail = "\n".join(tail_lines)
-
-                if len(head) > max_output_chars // 2:
-                    head = head[:max_output_chars // 2]
-
-                summarized[field] = (
-                    f"{head}\n"
-                    f"[... {len(lines) - 20} lines omitted ...]\n"
-                    f"{tail}"
-                ) if tail_lines else f"{head}\n[... {len(lines) - 15} lines omitted ...]"
+                summarized[field] = _truncate_output(output, max_output_chars)
             else:
                 summarized[field] = output
 
@@ -291,8 +310,8 @@ class ContextOffloader:
 
 
 __all__ = [
-    "ContextOffloader",
     "DEFAULT_OFFLOAD_THRESHOLD",
+    "ContextOffloader",
     "estimate_tokens",
     "offload_large_output",
     "retrieve_offloaded_output",
