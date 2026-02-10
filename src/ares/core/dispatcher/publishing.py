@@ -446,11 +446,8 @@ class PublishingMixin:
 
             queued += 2  # Queued both linked_server and impersonation
             logger.info(
-                "Periodic scan: queued MSSQL vulnerabilities (linked_server + impersonation) for "
-                "%s (%s) with %d SQL credentials",
-                host.ip,
-                host.hostname,
-                len(sql_creds),
+                f"Periodic scan: queued MSSQL vulnerabilities (linked_server + impersonation) for "
+                f"{host.ip} ({host.hostname}) with {len(sql_creds)} SQL credentials"
             )
 
         return queued

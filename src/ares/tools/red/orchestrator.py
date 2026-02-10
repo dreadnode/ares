@@ -484,11 +484,7 @@ class OrchestratorTools(Toolset):
                 looked_up = self._lookup_hash_from_state(username, domain, hash_type)
                 if looked_up:
                     resolved_hash = looked_up
-                    logger.info(
-                        "Auto-resolved hash for {}\\{} from state",
-                        domain,
-                        username,
-                    )
+                    logger.info(f"Auto-resolved hash for {domain}\\{username} from state")
                 else:
                     return (
                         f"✗ Could not find hash for {domain}\\{username} ({hash_type}) in state. "
