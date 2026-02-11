@@ -1149,9 +1149,9 @@ class NetworkEnumerationTools(Toolset):
                 output = "\n".join(content for _, content in outputs if content).strip()
                 return self._format_enum_failure_message(outputs, output)
 
-            # Save to file on recon pod where netexec commands execute
+            # Save to local file for password spraying
             users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
-            ok, error = write_users_file_remote(sorted(users), users_file, target_role="recon")
+            ok, error = write_users_file_remote(sorted(users), users_file, target_role=None)
             if not ok:
                 return f"[!] Failed to write users file on remote: {error}"
 
@@ -1792,7 +1792,7 @@ class BloodHoundTools(Toolset):
             try:
                 nslookup_cmd = ["nslookup", "-type=srv", srv_query, dc_ip]
                 srv_stdout, srv_stderr, _ = run_tool(
-                    nslookup_cmd, timeout_seconds=30, target_role="recon"
+                    nslookup_cmd, timeout_seconds=30, target_role=None
                 )
                 srv_output = srv_stdout or srv_stderr or ""
 
@@ -1824,7 +1824,7 @@ class BloodHoundTools(Toolset):
                 try:
                     ptr_cmd = ["nslookup", dc_ip, dc_ip]
                     ptr_stdout, ptr_stderr, _ = run_tool(
-                        ptr_cmd, timeout_seconds=15, target_role="recon"
+                        ptr_cmd, timeout_seconds=15, target_role=None
                     )
                     ptr_output = ptr_stdout or ptr_stderr or ""
                     # Extract hostname from PTR record: "name = hostname.domain.local"
@@ -1872,7 +1872,7 @@ class BloodHoundTools(Toolset):
 
         try:
             logger.info(f"[*] Running BloodHound collection for {domain}")
-            stdout, stderr, _ = run_tool(cmd, timeout_seconds=600, target_role="recon")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=600, target_role=None)
 
             raw_output = stdout + "\n" + (stderr or "")
 

@@ -377,14 +377,14 @@ class CredentialDiscoveryTools(Toolset):
                 enumerated_file = self._enumerate_users_to_file(target)
                 if not enumerated_file:
                     canonical_users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
-                    # Check on recon pod since netexec commands route there
-                    exists, _ = remote_file_exists(canonical_users_file, target_role="recon")
+                    # Check if users file exists locally
+                    exists, _ = remote_file_exists(canonical_users_file, target_role=None)
                     if not exists:
                         return (
                             "[!] Failed to enumerate users and no users_file provided. "
                             "Try save_users_to_file first."
                         )
-                    logger.info(f"[*] Using existing users file on remote: {canonical_users_file}")
+                    logger.info(f"[*] Using existing users file: {canonical_users_file}")
                     users_file = canonical_users_file
                 else:
                     users_file = enumerated_file
@@ -400,9 +400,9 @@ class CredentialDiscoveryTools(Toolset):
                         continue
                     exclude_users.add(cred.username.lower())
                 if exclude_users:
-                    # Filter on recon pod since netexec commands route there
+                    # Filter out users who already have credentials
                     filtered_file, error = filter_users_file_remote(
-                        users_file, exclude_users, target_role="recon"
+                        users_file, exclude_users, target_role=None
                     )
                     if error == "all users already have credentials":
                         return "[!] Password spray skipped: all users already have credentials."
@@ -505,8 +505,8 @@ class CredentialDiscoveryTools(Toolset):
                 return None
 
             users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
-            # Write to recon pod since netexec commands route there
-            ok, error = write_users_file_remote(sorted(users), users_file, target_role="recon")
+            # Write users file locally for password spraying
+            ok, error = write_users_file_remote(sorted(users), users_file, target_role=None)
             if not ok:
                 logger.warning(f"[!] Failed to write users file on remote: {error}")
                 return None
@@ -553,14 +553,14 @@ class CredentialDiscoveryTools(Toolset):
                 enumerated_file = self._enumerate_users_to_file(target)
                 if not enumerated_file:
                     canonical_users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
-                    # Check on recon pod since netexec commands route there
-                    exists, _ = remote_file_exists(canonical_users_file, target_role="recon")
+                    # Check if users file exists locally
+                    exists, _ = remote_file_exists(canonical_users_file, target_role=None)
                     if not exists:
                         return (
                             "[!] Failed to enumerate users and no users_file provided. "
                             "Try save_users_to_file first."
                         )
-                    logger.info(f"[*] Using existing users file on remote: {canonical_users_file}")
+                    logger.info(f"[*] Using existing users file: {canonical_users_file}")
                     users_file = canonical_users_file
                 else:
                     users_file = enumerated_file

@@ -117,7 +117,7 @@ class ThrottlingMixin:
         # This is an absolute limit - no exceptions for min_slots or priority
         if llm_count >= max_tasks * 2:
             logger.warning(
-                f"Throttle HARD CAP: {llm_count}/{max_tasks} LLM tasks - "
+                f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}) - "
                 f"DEFERRING {task_type} task (2x over limit, no exceptions)"
             )
             return True
@@ -128,7 +128,7 @@ class ThrottlingMixin:
             # Guarantee each role has at least min_slots_per_role tasks
             if role_pending < get_min_slots_per_role():
                 logger.info(
-                    f"Throttle SOFT CAP: {llm_count}/{max_tasks} but ALLOWING {task_type} for {target_role} "
+                    f"Throttle SOFT CAP: {llm_count} running (limit: {max_tasks}) - ALLOWING {task_type} for {target_role} "
                     f"(role has {role_pending} pending, min={get_min_slots_per_role()})"
                 )
                 return False
@@ -138,14 +138,14 @@ class ThrottlingMixin:
             adjustment = self._get_phase_priority_adjustment(task_type, target_role)
             if adjustment < 0:  # Negative = high priority for current phase
                 logger.info(
-                    f"Throttle SOFT CAP: {llm_count}/{max_tasks} but ALLOWING {task_type} "
+                    f"Throttle SOFT CAP: {llm_count} running (limit: {max_tasks}) - ALLOWING {task_type} "
                     f"(high priority adj={adjustment} in {phase} phase)"
                 )
                 return False
 
             # At capacity and not high priority - defer
             logger.debug(
-                f"Throttle SOFT CAP: {llm_count}/{max_tasks} - DEFERRING {task_type} "
+                f"Throttle SOFT CAP: {llm_count} running (limit: {max_tasks}) - DEFERRING {task_type} "
                 f"({phase} phase, priority adj={adjustment})"
             )
             return True
@@ -389,6 +389,11 @@ class ThrottlingMixin:
         Returns:
             Task ID if submitted, empty string on failure
         """
+        # HALT: If DA achieved, reject all new tasks immediately
+        if self._shared_state and self._shared_state.has_domain_admin:
+            logger.debug(f"Rejecting {task_type} task - Domain Admin achieved, halting new tasks")
+            return ""
+
         if not self._task_queue:
             logger.warning("No task queue available for throttled submit")
             return ""

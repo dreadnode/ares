@@ -172,6 +172,21 @@ class DeferredQueueMixin:
             try:
                 await asyncio.sleep(DEFERRED_QUEUE_CHECK_INTERVAL)
 
+                # HALT: If DA achieved, drain deferred queues and stop processing
+                if self._shared_state and self._shared_state.has_domain_admin:
+                    # Drain all queues - these tasks are no longer needed
+                    total_drained = 0
+                    async with self._get_deferred_lock():
+                        for queue in self._deferred_queues.values():
+                            if queue:
+                                total_drained += len(queue)
+                                queue.clear()
+                    if total_drained > 0:
+                        logger.info(
+                            f"DA achieved - drained {total_drained} tasks from deferred queues"
+                        )
+                    continue  # Keep loop alive but skip processing
+
                 # Check if we have capacity
                 llm_count = await self._get_llm_task_count()
                 max_tasks = get_max_concurrent_tasks()

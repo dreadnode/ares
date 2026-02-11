@@ -137,7 +137,7 @@ class SharePilferingTools(Toolset):
 
             result = stdout + "\n" + (stderr or "")
 
-            # Fetch spider JSON metadata from recon pod (spider_plus runs on recon)
+            # Fetch spider JSON metadata from local filesystem
             import json
 
             spider_dir = "/root/.nxc/modules/nxc_spider_plus"
@@ -145,8 +145,8 @@ class SharePilferingTools(Toolset):
 
             downloaded_content = []
 
-            # Fetch the JSON metadata from recon pod
-            json_bytes = fetch_remote_file(json_file, target_role="recon", timeout_seconds=30)
+            # Fetch the JSON metadata locally
+            json_bytes = fetch_remote_file(json_file, target_role=None, timeout_seconds=30)
             if json_bytes:
                 try:
                     spider_data = json.loads(json_bytes.decode("utf-8", errors="ignore"))
@@ -159,13 +159,13 @@ class SharePilferingTools(Toolset):
                                     isinstance(file_info, dict)
                                     and file_info.get("size", 0) < 102400
                                 ):  # <100KB
-                                    # Fetch downloaded file from recon pod
+                                    # Fetch downloaded file locally
                                     # spider_plus downloads to: spider_dir/IP/SHARE/path
                                     clean_path = file_path.lstrip("/\\").replace("\\", "/")
                                     dl_path = f"{spider_dir}/{target}/{share_name}/{clean_path}"
 
                                     file_bytes = fetch_remote_file(
-                                        dl_path, target_role="recon", timeout_seconds=30
+                                        dl_path, target_role=None, timeout_seconds=30
                                     )
                                     if file_bytes:
                                         try:

@@ -200,21 +200,7 @@ def is_ntlm_hash(value: str) -> bool:
 
 
 def resolve_recon_route(cmd: list[str], target_role: str | None = None) -> str | None:
-    """Route netexec/ldapsearch calls to recon when not running there."""
-    if target_role:
-        return target_role
-    local_role = os.environ.get("ARES_ROLE", "").strip().lower()
-    if local_role == "recon":
-        return target_role
-    if not cmd:
-        return target_role
-    base = cmd[0]
-    if base in {"netexec", "ldapsearch"}:
-        return "recon"
-    if base in {"bash", "sh"} and len(cmd) >= 3 and cmd[1] in {"-c", "-lc"}:
-        script = cmd[2]
-        if re.search(r"\b(netexec|ldapsearch)\b", script):
-            return "recon"
+    """Resolve target role for command execution. Always runs locally."""
     return target_role
 
 

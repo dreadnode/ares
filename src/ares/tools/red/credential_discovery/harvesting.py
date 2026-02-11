@@ -490,10 +490,8 @@ class CredentialHarvestingTools(Toolset):
             if validated:
                 summary = ", ".join(sorted(validated))
                 users_file = f"/tmp/users_kerberos_{uuid.uuid4().hex}.txt"  # nosec B108  # noqa: S108
-                # Write to recon pod where netexec commands execute
-                ok, error = write_users_file_remote(
-                    sorted(validated), users_file, target_role="recon"
-                )
+                # Write users file locally for Kerberos validation
+                ok, error = write_users_file_remote(sorted(validated), users_file, target_role=None)
                 if ok:
                     file_note = f"\nUsers file: {users_file}"
                 else:

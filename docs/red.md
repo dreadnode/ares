@@ -75,13 +75,13 @@ tool assignments. For detailed responsibilities, see sections below.
 
 | Agent | Purpose | Pod Selector | Max Steps | Tool Classes |
 |-------|---------|--------------|-----------|--------------|
-| **ORCHESTRATOR** | Central coordinator (dispatches, never executes) | `app.kubernetes.io/name=ares-orchestrator` | 200 | `OrchestratorTools`, `RedTeamReportingTools` |
-| **RECON** | Network scanning, enumeration, BloodHound | `ares.dreadnode.io/role=recon` | 200 | `NetworkEnumerationTools`, `BloodHoundTools` |
-| **CREDENTIAL_ACCESS** | Password attacks, hash extraction | `ares.dreadnode.io/role=credential_access` | 100 | `CredentialDiscoveryTools`, `CredentialHarvestingTools`, `SharePilferingTools` |
-| **CRACKER** | Offline hash cracking | `ares.dreadnode.io/role=cracker` | 150 | `CrackingTools` |
-| **ACL** | AD ACL abuse attacks | `ares.dreadnode.io/role=acl` | 150 | `ACLExploitTools` |
-| **PRIVESC** | Privilege escalation exploitation | `ares.dreadnode.io/role=privesc` | 100 | `CertipyTools`, `DelegationTools`, `MSSQLTools`, `CVEExploitTools`, `GoldenTicketTools`, `TrustAttackTools` |
-| **LATERAL** | Host compromise, credential harvesting | `ares.dreadnode.io/role=lateral` | 300 | `LateralMovementTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `PostureValidationTools` |
+| **ORCHESTRATOR** | Central coordinator (dispatches, never executes) | `app.kubernetes.io/name=ares-orchestrator` | 150 | `OrchestratorTools`, `RedTeamReportingTools` |
+| **RECON** | Network scanning, enumeration, BloodHound | `ares.dreadnode.io/role=recon` | 75 | `NetworkEnumerationTools`, `BloodHoundTools`, `RedTeamReportingTools` |
+| **CREDENTIAL_ACCESS** | Password attacks, hash extraction | `ares.dreadnode.io/role=credential_access` | 75 | `NetworkEnumerationTools`, `CredentialDiscoveryTools`, `CredentialHarvestingTools`, `SharePilferingTools` |
+| **CRACKER** | Offline hash cracking | `ares.dreadnode.io/role=cracker` | 50 | `CrackingTools`, `CrackerCallbackTools` |
+| **ACL** | AD ACL abuse attacks | `ares.dreadnode.io/role=acl` | 100 | `ACLExploitTools` |
+| **PRIVESC** | Privilege escalation exploitation | `ares.dreadnode.io/role=privesc` | 75 | `CertipyTools`, `DelegationTools`, `MSSQLTools`, `CVEExploitTools`, `GoldenTicketTools`, `TrustAttackTools`, `LateralMovementTools` |
+| **LATERAL** | Host compromise, credential harvesting | `ares.dreadnode.io/role=lateral` | 100 | `LateralMovementTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `PostureValidationTools`, `LateralCallbackTools` |
 | **COERCION** | NTLM coercion and relay attacks | `ares.dreadnode.io/role=coercion` | 30 | `CoercionTools`, `CoercionNetworkTools` |
 
 ### Configuration Sources
@@ -624,12 +624,12 @@ kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- \
 
 | Agent Pod | Tool Classes |
 | --------- | ------------ |
-| `ares-recon-agent-*` | `NetworkEnumerationTools`, `BloodHoundTools` |
-| `ares-credential-access-agent-*` | `CredentialDiscoveryTools`, `CredentialHarvestingTools`, `SharePilferingTools` |
-| `ares-cracker-agent-*` | `CrackingTools` |
+| `ares-recon-agent-*` | `NetworkEnumerationTools`, `BloodHoundTools`, `RedTeamReportingTools` |
+| `ares-credential-access-agent-*` | `NetworkEnumerationTools`, `CredentialDiscoveryTools`, `CredentialHarvestingTools`, `SharePilferingTools` |
+| `ares-cracker-agent-*` | `CrackingTools`, `CrackerCallbackTools` |
 | `ares-acl-agent-*` | `ACLExploitTools` |
-| `ares-privesc-agent-*` | `CertipyTools`, `DelegationTools`, `MSSQLTools`, `CVEExploitTools` |
-| `ares-lateral-movement-agent-*` | `LateralMovementTools`, `CredentialHarvestingTools` |
+| `ares-privesc-agent-*` | `CertipyTools`, `DelegationTools`, `MSSQLTools`, `CVEExploitTools`, `GoldenTicketTools`, `TrustAttackTools`, `LateralMovementTools` |
+| `ares-lateral-movement-agent-*` | `LateralMovementTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `PostureValidationTools`, `LateralCallbackTools` |
 | `ares-coercion-agent-*` | `CoercionTools`, `CoercionNetworkTools` |
 
 #### Importing Tool Classes
@@ -746,15 +746,13 @@ All agents inherit these foundational tools:
 - **LDAP**: ldap-utils (ldapsearch)
 - **SMB enumeration**: enum4linux, enum4linux-ng, samba-common-bin (rpcclient)
 - **DNS**: dnsutils (dig, nslookup), whois, adidnsdump
-- **AD tools**: NetExec (netexec, nxc, nxcdb), bloodhound-python
+- **AD tools**: NetExec (netexec, nxc, nxcdb), bloodhound-python, certipy-ad
 - **Impacket suite**: GetNPUsers, GetUserSPNs
 
 ### CREDENTIAL_ACCESS Agent
 
-- **LDAP**: ldap-utils (ldapsearch)
 - **SMB**: smbclient, samba-common-bin (rpcclient)
-- **AD tools**: NetExec (netexec, nxc, nxcdb), sprayhound,
-  targetedKerberoast, lsassy
+- **AD tools**: sprayhound, targetedKerberoast, lsassy
 - **Impacket suite**: GetNPUsers, secretsdump
 
 ### CRACKER Agent
@@ -772,7 +770,7 @@ All agents inherit these foundational tools:
 ### PRIVESC Agent
 
 - **ADCS**: certipy-ad (certipy)
-- **Kerberos**: noPac
+- **Kerberos**: noPac, krbrelayx (printerbug, addspn, dnstool)
 - **Impacket suite**: getST, getTGT, rbcd, mssqlclient, raiseChild
 - **Windows privesc binaries**: PrintSpoofer, GodPotato, SweetPotato,
   KrbRelayUp, SharpGPOAbuse, Seatbelt, SharpUp, RunasCs
@@ -783,10 +781,13 @@ All agents inherit these foundational tools:
 
 - **Remote access**: evil-winrm, xfreerdp (freerdp2/3), sshpass
 - **SMB**: smbclient
+- **Pivoting**: proxychains4
+- **Pass-the-Hash**: pth-toolkit
 - **Impacket suite**: psexec, wmiexec, smbexec, secretsdump
 
 ### COERCION Agent
 
+- **Poisoning**: Responder, mitm6
 - **Coercion tools**: Coercer, PetitPotam, dfscoerce
 - **Relay tools**: krbrelayx (addspn, dnstool, krbrelayx tools)
 - **Impacket**: ntlmrelayx (impacket-ntlmrelayx)

