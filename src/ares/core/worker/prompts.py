@@ -1012,6 +1012,13 @@ def _generate_privesc_enumeration_prompt(
     password = payload.get("password", "")
     techniques = payload.get("techniques", [])
 
+    # Re-resolve DC IP using current state - the original dispatch may have used
+    # stale data before host discovery completed
+    if domain:
+        dc_ip, dc_warning = resolve_dc_ip_for_domain(state, domain, dc_ip or "")
+    else:
+        dc_warning = None
+
     technique_instructions = []
     for i, technique in enumerate(techniques, 1):
         if technique == "find_delegation":
@@ -1022,10 +1029,13 @@ def _generate_privesc_enumeration_prompt(
         else:
             technique_instructions.append(f"{i}. {technique}(...)")
 
+    dc_warning_line = f"⚠️ {dc_warning}\n" if dc_warning else ""
+
     base_prompt = (
         f"Run privilege escalation enumeration:\n"
         f"Domain: {domain}\n"
         f"DC IP: {dc_ip or 'N/A'}\n"
+        f"{dc_warning_line}"
         f"Username: {username}\n"
         f"Password: {password}\n"
         f"Task ID: {task.task_id}\n\n"
