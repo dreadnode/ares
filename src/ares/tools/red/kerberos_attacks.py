@@ -683,6 +683,19 @@ class CertipyTools(Toolset):
         ca_name = None
         ca_host = None
 
+        def _is_valid_host(value: str) -> bool:
+            """Check if value looks like a valid hostname or IP, not an error message."""
+            if not value:
+                return False
+            # Error messages often contain brackets, "Errno", "refused", "error", etc.
+            error_indicators = ["[", "]", "errno", "refused", "error", "failed", "timeout"]
+            value_lower = value.lower()
+            if any(ind in value_lower for ind in error_indicators):
+                return False
+            # Valid hostnames/IPs should only contain alphanumeric, dots, hyphens
+            # Allow underscores too (sometimes seen in AD)
+            return all(c.isalnum() or c in ".-_" for c in value)
+
         # Look for CA name in output (e.g., "CA Name: corp-DC01-CA")
         ca_match = re.search(r"CA Name\s*:\s*([^\n\r]+)", certipy_output, re.IGNORECASE)
         if ca_match:
@@ -695,7 +708,14 @@ class CertipyTools(Toolset):
             re.IGNORECASE,
         )
         if dns_match:
-            ca_host = dns_match.group(1).strip()
+            extracted = dns_match.group(1).strip()
+            # Only use if it looks like a valid hostname, not an error message
+            if _is_valid_host(extracted):
+                ca_host = extracted
+            else:
+                logger.warning(
+                    f"Ignoring invalid ca_host extracted from certipy output: {extracted}"
+                )
 
         # Create unique vulnerability ID
         vuln_id = f"ADCS_ESC8_{domain}_{uuid.uuid4().hex[:8]}"
