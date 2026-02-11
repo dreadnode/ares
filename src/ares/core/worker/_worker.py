@@ -1988,6 +1988,11 @@ async def run_worker(  # noqa: PLR0912
         discovery_timeout: Max seconds to wait for operation discovery (default: None = wait forever).
         use_redis_queue: If True, poll Redis queue for tasks (Kubernetes mode).
     """
+    # Apply rigging patches for case-insensitive tool parameters
+    from ares.core.rigging_patches import apply as apply_rigging_patches
+
+    apply_rigging_patches()
+
     configure_litellm_env()
 
     # Resolve config defaults

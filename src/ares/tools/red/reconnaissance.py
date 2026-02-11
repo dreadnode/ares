@@ -1764,7 +1764,7 @@ class BloodHoundTools(Toolset):
         if self.state:
             domain_key = domain.lower()
             if domain_key in getattr(self.state, "processed_bloodhound_domains", set()):
-                return f"[i] BloodHound already completed for {domain} - skipping to save time"
+                return f"BloodHound already completed for {domain} - skipping to save time"
 
         cmd = [
             "bloodhound-python",

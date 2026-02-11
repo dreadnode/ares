@@ -364,6 +364,11 @@ async def run_multi_agent_operation(  # noqa: PLR0912
     Returns:
         Operation results summary
     """
+    # Apply rigging patches for case-insensitive tool parameters
+    from ares.core.rigging_patches import apply as apply_rigging_patches
+
+    apply_rigging_patches()
+
     # Resolve max runtime from parameter, env, or default
     resolved_max_runtime = max_runtime if max_runtime is not None else DEFAULT_MAX_RUNTIME
     # Resolve config defaults

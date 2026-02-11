@@ -1363,7 +1363,7 @@ class OrchestratorTools(Toolset):
 
         if added:
             return f"✓ Credential broadcast to all agents: {domain}\\{username}"
-        return f"[i] Credential already known: {domain}\\{username}"
+        return f"Credential already known: {domain}\\{username}"
 
     @dn.tool_method
     async def announce_domain_admin(
@@ -1592,7 +1592,7 @@ class OrchestratorTools(Toolset):
 
         if added:
             return f"✓ Host registered: {hostname or ip} ({os})"
-        return f"[i] Host already known: {hostname or ip}"
+        return f"Host already known: {hostname or ip}"
 
     @dn.tool_method
     async def retrieve_task_output(self, task_id: str) -> str:

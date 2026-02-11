@@ -210,6 +210,12 @@ def create_role_hooks(
                 if not content:
                     logger.info(f"✅ [{log_name}] {event.tool_call.name}: (empty)")
                 else:
+                    # Detect error content returned by rigging's exception catching
+                    # (ValidationError, JSONDecodeError are caught and returned as error XML)
+                    is_error = content.startswith('<error type="') or "ValidationError" in content
+                    icon = "❌" if is_error else "✅"
+                    log_fn = logger.warning if is_error else logger.info
+
                     # Show first 50 lines, max 5000 chars
                     lines = content.split("\n")[:50]
                     result = "\n".join(lines)
@@ -219,9 +225,9 @@ def create_role_hooks(
                         truncated = True
                     suffix = " ..." if truncated else ""
                     if "\n" in result:
-                        logger.info(f"✅ [{log_name}] {event.tool_call.name}:\n{result}{suffix}")
+                        log_fn(f"{icon} [{log_name}] {event.tool_call.name}:\n{result}{suffix}")
                     else:
-                        logger.info(f"✅ [{log_name}] {event.tool_call.name}: {result}{suffix}")
+                        log_fn(f"{icon} [{log_name}] {event.tool_call.name}: {result}{suffix}")
 
     hooks.extend([log_tool_usage, log_tool_result])
 
