@@ -7,12 +7,12 @@ This module provides tools for finding easy credential wins:
 - LAPS password retrieval
 """
 
-import logging
 import re
 from typing import Any, ClassVar
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
+from loguru import logger
 
 from ares.core.models import Credential
 from ares.tools.red.common import (
@@ -27,8 +27,6 @@ from ares.tools.red.common import (
     run_tool,
     write_users_file_remote,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class CredentialDiscoveryTools(Toolset):

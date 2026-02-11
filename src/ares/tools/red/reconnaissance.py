@@ -5,7 +5,6 @@ security posture validation, and BloodHound collection.
 """
 
 import json
-import logging
 import re
 import shlex
 import uuid
@@ -13,6 +12,7 @@ from typing import Any
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
+from loguru import logger
 
 from ares.core.models import Credential, Host, Share, User
 from ares.tools.red.common import (
@@ -24,8 +24,6 @@ from ares.tools.red.common import (
     run_tool,
     write_users_file_remote,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class NetworkEnumerationTools(Toolset):

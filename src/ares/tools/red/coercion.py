@@ -5,17 +5,14 @@ This module provides toolsets for:
 - Responder and mitm6 for capturing/relaying credentials
 """
 
-import logging
-
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
+from loguru import logger
 
 from ares.tools.red.common import (
     AnyRedTeamState,
     run_tool,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class CoercionTools(Toolset):

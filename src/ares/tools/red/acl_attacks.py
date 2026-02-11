@@ -4,19 +4,17 @@ This module provides toolsets for exploiting Active Directory
 ACL misconfigurations (GenericAll, GenericWrite, WriteDacl, etc.)
 """
 
-import logging
 import re
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
+from loguru import logger
 
 from ares.core.models import Hash
 from ares.tools.red.common import (
     AnyRedTeamState,
     run_tool,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class ACLExploitTools(Toolset):

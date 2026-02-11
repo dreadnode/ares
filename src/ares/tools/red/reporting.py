@@ -4,7 +4,6 @@ This module provides toolsets for recording findings during
 red team operations.
 """
 
-import logging
 from datetime import datetime, timezone
 
 import dreadnode as dn
@@ -15,8 +14,6 @@ from ares.tools.red.common import (
     AnyRedTeamState,
     format_weakness_block,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class RedTeamReportingTools(Toolset):

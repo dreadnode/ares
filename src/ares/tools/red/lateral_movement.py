@@ -7,12 +7,12 @@ This module provides toolsets for:
 - MSSQL attacks
 """
 
-import logging
 import re
 from typing import ClassVar
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
+from loguru import logger
 
 from ares.core.models import Hash, SharedRedTeamState
 from ares.tools.red.common import (
@@ -22,8 +22,6 @@ from ares.tools.red.common import (
     resolve_password,
     run_tool,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class LateralMovementTools(Toolset):

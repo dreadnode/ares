@@ -8,7 +8,6 @@ This module provides tools for harvesting credentials via AD attacks:
 """
 
 import asyncio
-import logging
 import re
 import shlex
 import uuid
@@ -16,6 +15,7 @@ from typing import Any, ClassVar
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
+from loguru import logger
 
 from ares.core.models import Hash, User
 from ares.core.remote import run_remote
@@ -27,8 +27,6 @@ from ares.tools.red.common import (
     run_tool,
     write_users_file_remote,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class CredentialHarvestingTools(Toolset):

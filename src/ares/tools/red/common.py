@@ -4,7 +4,6 @@ This module contains shared helper functions, type aliases, and constants
 used across all red team toolset modules.
 """
 
-import logging
 import os
 import re
 import shlex
@@ -13,13 +12,13 @@ import tempfile
 import uuid
 from typing import ClassVar
 
+from loguru import logger
+
 from ares.core.models import Credential, RedTeamState, SharedRedTeamState
 from ares.core.remote import run_remote
 
 # Type alias for state that works with both single-agent and multi-agent modes
 AnyRedTeamState = RedTeamState | SharedRedTeamState
-
-logger = logging.getLogger(__name__)
 
 # Shared placeholder passwords used across multiple toolsets
 PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = {"password", "changeme", "<password>"}

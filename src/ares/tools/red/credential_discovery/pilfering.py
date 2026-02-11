@@ -7,12 +7,12 @@ This module provides tools for:
 - Extracting NTDS.dit database
 """
 
-import logging
 import re
 from typing import Any, ClassVar
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
+from loguru import logger
 
 from ares.core.models import Credential
 from ares.tools.red.common import (
@@ -24,8 +24,6 @@ from ares.tools.red.common import (
     run_tool,
     store_remote_artifact,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class SharePilferingTools(Toolset):
