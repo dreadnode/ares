@@ -1213,5 +1213,175 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
         assert "2. find_trusts" in prompt or "find_trusts(...)" in prompt
 
 
+class TestUpdateEtcHosts:
+    """Tests for _update_etc_hosts function."""
+
+    def test_update_etc_hosts_adds_fqdn_and_short_name(self, tmp_path):
+        """Test that /etc/hosts entries include both FQDN and short hostname."""
+        from ares.core.models import Host
+        from ares.core.worker._worker import _update_etc_hosts
+
+        # Create a temp hosts file
+        hosts_file = tmp_path / "hosts"
+        hosts_file.write_text("127.0.0.1 localhost\n")
+
+        hosts_list = [
+            Host(ip="192.168.58.50", hostname="web01.contoso.local"),
+        ]
+
+        with patch("builtins.open", create=True) as mock_open:
+            mock_file = MagicMock()
+            mock_open.return_value.__enter__.return_value = mock_file
+
+            result = _update_etc_hosts(hosts_list, set(), "test-agent")
+
+        # Should have written the entry
+        assert "192.168.58.50" in result
+        calls = mock_file.write.call_args_list
+        written = "".join(call[0][0] for call in calls)
+        # Non-DC: just FQDN and short name
+        assert "192.168.58.50  web01.contoso.local web01\n" in written
+
+    def test_update_etc_hosts_adds_domain_for_dc(self, tmp_path):
+        """Test that domain controllers get domain alias on the same line."""
+        from ares.core.models import Host
+        from ares.core.worker._worker import _update_etc_hosts
+
+        hosts_list = [
+            Host(
+                ip="192.168.58.10",
+                hostname="dc01.contoso.local",
+                is_dc=True,
+            ),
+        ]
+
+        with patch("builtins.open", create=True) as mock_open:
+            mock_file = MagicMock()
+            mock_open.return_value.__enter__.return_value = mock_file
+
+            result = _update_etc_hosts(hosts_list, set(), "test-agent")
+
+        assert "192.168.58.10" in result
+        calls = mock_file.write.call_args_list
+        written = "".join(call[0][0] for call in calls)
+        # DC: FQDN, short name, and domain all on one line
+        assert "192.168.58.10  dc01.contoso.local dc01 contoso.local\n" in written
+
+    def test_update_etc_hosts_skips_already_written(self):
+        """Test that already-written IPs are skipped."""
+        from ares.core.models import Host
+        from ares.core.worker._worker import _update_etc_hosts
+
+        hosts_list = [
+            Host(ip="192.168.58.10", hostname="dc01.contoso.local"),
+        ]
+
+        # IP already in written set
+        written_ips = {"192.168.58.10"}
+
+        with patch("builtins.open", create=True) as mock_open:
+            result = _update_etc_hosts(hosts_list, written_ips, "test-agent")
+
+        # open should not be called since all hosts are already written
+        mock_open.assert_not_called()
+        assert result == {"192.168.58.10"}
+
+    def test_update_etc_hosts_skips_hosts_without_hostname(self):
+        """Test that hosts without hostnames are skipped."""
+        from ares.core.models import Host
+        from ares.core.worker._worker import _update_etc_hosts
+
+        hosts_list = [
+            Host(ip="192.168.58.10", hostname=""),  # No hostname
+            Host(ip="192.168.58.20", hostname="sql01.contoso.local"),
+        ]
+
+        with patch("builtins.open", create=True) as mock_open:
+            mock_file = MagicMock()
+            mock_open.return_value.__enter__.return_value = mock_file
+
+            result = _update_etc_hosts(hosts_list, set(), "test-agent")
+
+        # Only the host with a hostname should be written
+        assert "192.168.58.10" not in result
+        assert "192.168.58.20" in result
+        calls = mock_file.write.call_args_list
+        written = "".join(call[0][0] for call in calls)
+        assert "192.168.58.10" not in written
+        assert "192.168.58.20  sql01.contoso.local sql01\n" in written
+
+    def test_update_etc_hosts_multiple_dcs_each_get_domain(self):
+        """Test that each DC gets its own domain alias on its line."""
+        from ares.core.models import Host
+        from ares.core.worker._worker import _update_etc_hosts
+
+        hosts_list = [
+            Host(
+                ip="192.168.58.10",
+                hostname="dc01.contoso.local",
+                is_dc=True,
+            ),
+            Host(
+                ip="192.168.58.11",
+                hostname="dc02.contoso.local",
+                is_dc=True,
+            ),
+        ]
+
+        with patch("builtins.open", create=True) as mock_open:
+            mock_file = MagicMock()
+            mock_open.return_value.__enter__.return_value = mock_file
+
+            result = _update_etc_hosts(hosts_list, set(), "test-agent")
+
+        assert "192.168.58.10" in result
+        assert "192.168.58.11" in result
+        calls = mock_file.write.call_args_list
+        written = "".join(call[0][0] for call in calls)
+        # Each DC line has the domain alias
+        assert "192.168.58.10  dc01.contoso.local dc01 contoso.local\n" in written
+        assert "192.168.58.11  dc02.contoso.local dc02 contoso.local\n" in written
+
+    def test_update_etc_hosts_handles_permission_error(self):
+        """Test graceful handling of permission errors."""
+        from ares.core.models import Host
+        from ares.core.worker._worker import _update_etc_hosts
+
+        hosts_list = [
+            Host(ip="192.168.58.30", hostname="web01.contoso.local"),
+        ]
+
+        with patch("builtins.open", side_effect=PermissionError("Access denied")):
+            # Should not raise, just log warning
+            result = _update_etc_hosts(hosts_list, set(), "test-agent")
+
+        # IP should still be marked as "written" to avoid repeated attempts
+        assert "192.168.58.30" in result
+
+    def test_update_etc_hosts_handles_child_domain(self):
+        """Test proper handling of child domains (multi-level FQDNs)."""
+        from ares.core.models import Host
+        from ares.core.worker._worker import _update_etc_hosts
+
+        hosts_list = [
+            Host(
+                ip="192.168.58.100",
+                hostname="dc01.child.contoso.local",
+                is_dc=True,
+            ),
+        ]
+
+        with patch("builtins.open", create=True) as mock_open:
+            mock_file = MagicMock()
+            mock_open.return_value.__enter__.return_value = mock_file
+
+            _update_etc_hosts(hosts_list, set(), "test-agent")
+
+        calls = mock_file.write.call_args_list
+        written = "".join(call[0][0] for call in calls)
+        # DC with child domain: FQDN, short name, child domain all on one line
+        assert "192.168.58.100  dc01.child.contoso.local dc01 child.contoso.local\n" in written
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

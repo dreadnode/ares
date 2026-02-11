@@ -65,6 +65,72 @@ RATE_LIMIT_BACKOFF_DELAYS = [5.0, 10.0, 20.0, 40.0, 60.0, 60.0]  # 6 retries wit
 RATE_LIMIT_MAX_RETRIES = len(RATE_LIMIT_BACKOFF_DELAYS)
 
 
+def _update_etc_hosts(hosts_list: list, written_ips: set[str], agent_name: str) -> set[str]:
+    """Update /etc/hosts with discovered hosts for DNS resolution.
+
+    Adds entries for hosts with both IP and hostname to /etc/hosts, enabling
+    AD hostname resolution without relying on DNS. Entries include both
+    FQDN and short hostname aliases on a single line.
+
+    For domain controllers, also adds the bare domain name as an alias to enable
+    Kerberos realm resolution (e.g., "10.1.2.183  kingslanding.sevenkingdoms.local kingslanding sevenkingdoms.local").
+
+    Args:
+        hosts_list: List of Host objects from shared state
+        written_ips: Set of IPs already written (to avoid duplicates)
+        agent_name: Agent name for logging
+
+    Returns:
+        Updated set of written IPs
+    """
+    new_entries: list[str] = []
+
+    for host in hosts_list:
+        if not host.ip or not host.hostname:
+            continue
+        if host.ip in written_ips:
+            continue
+
+        # Build entry with all aliases on one line:
+        # DC: "10.1.2.183  kingslanding.sevenkingdoms.local kingslanding sevenkingdoms.local"
+        # Non-DC: "10.1.2.146  castelblack.north.sevenkingdoms.local castelblack"
+        hostname = host.hostname.lower()
+        parts = hostname.split(".")
+        short_name = parts[0] if parts else hostname
+
+        # Start with FQDN and short name
+        aliases = [hostname]
+        if short_name != hostname:
+            aliases.append(short_name)
+
+        # For domain controllers, add bare domain as alias for Kerberos realm resolution
+        if host.is_dc and len(parts) >= 2:
+            domain = ".".join(parts[1:])
+            if domain:
+                aliases.append(domain)
+
+        entry = f"{host.ip}  {' '.join(aliases)}"
+        new_entries.append(entry)
+        written_ips.add(host.ip)
+
+    if new_entries:
+        try:
+            # Append new entries to /etc/hosts
+            with open("/etc/hosts", "a") as f:
+                f.write(f"\n# Ares discovered hosts ({agent_name})\n")
+                for entry in new_entries:
+                    f.write(f"{entry}\n")
+            logger.info(f"[{agent_name}] Updated /etc/hosts with {len(new_entries)} entries")
+            for entry in new_entries:
+                logger.debug(f"[{agent_name}] Added hosts entry: {entry}")
+        except PermissionError:
+            logger.warning(f"[{agent_name}] Cannot update /etc/hosts: permission denied")
+        except OSError as e:
+            logger.warning(f"[{agent_name}] Cannot update /etc/hosts: {e}")
+
+    return written_ips
+
+
 def _is_rate_limit_error(exc: Exception) -> bool:
     """Check if an exception is a rate limit error from the LLM provider."""
     exc_str = str(exc).lower()
@@ -176,6 +242,8 @@ class RedisWorkerAgent:
         # Threaded state subscriber for real-time pub/sub updates
         self._state_subscriber_thread: threading.Thread | None = None
         self._state_subscriber_stop_event = threading.Event()
+        # Track hosts written to /etc/hosts to avoid duplicates
+        self._hosts_written_to_etc: set[str] = set()
 
     def _run_agent_sync(self, prompt: str) -> Any:
         """Run the async agent in a dedicated event loop (thread-safe helper)."""
@@ -766,6 +834,10 @@ class RedisWorkerAgent:
                 f"{len(fresh.all_hosts)} hosts"
             )
             self.shared_state = fresh
+            # Update /etc/hosts with any hosts present in initial state
+            self._hosts_written_to_etc = _update_etc_hosts(
+                fresh.all_hosts, self._hosts_written_to_etc, self.agent_name
+            )
             return
 
         # Track counts before merge
@@ -855,6 +927,11 @@ class RedisWorkerAgent:
                 f"hosts {old_hosts}->{new_hosts}, "
                 f"shares {old_shares}->{new_shares}"
             )
+
+        # Update /etc/hosts with newly discovered hosts for DNS resolution
+        self._hosts_written_to_etc = _update_etc_hosts(
+            current.all_hosts, self._hosts_written_to_etc, self.agent_name
+        )
 
     async def _execute_crack_task(self, task: TaskMessage) -> None:
         payload = task.payload or {}
