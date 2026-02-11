@@ -361,7 +361,8 @@ class TestLocalExecutorRunCommand:
         assert result.stdout == "output"
         mock_run.assert_called_once()
         args, kwargs = mock_run.call_args
-        assert args[0] == "echo test"
+        # Command is wrapped in bash -lc to load login profile for PATH
+        assert args[0] == "bash -lc 'echo test'"
         assert kwargs["shell"] is True
         assert kwargs["cwd"] == "/tmp"
 
@@ -379,7 +380,8 @@ class TestLocalExecutorRunCommand:
 
         assert result.success is True
         args, kwargs = mock_run.call_args
-        assert args[0] == "echo test"
+        # Command is wrapped in bash -lc to load login profile for PATH
+        assert args[0] == "bash -lc 'echo test'"
         assert kwargs["cwd"] == "/workdir"
 
 

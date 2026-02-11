@@ -212,7 +212,7 @@ class LateralMovementTools(Toolset):
         if hash:
             cmd.extend(["-hashes", f":{hash}"])
 
-        cmd.extend(["-c", command])
+        cmd.append(command)
 
         try:
             logger.info(f"[*] Executing via PsExec on {target}")
@@ -428,7 +428,7 @@ class LateralMovementTools(Toolset):
             cmd.extend(["-dc-ip", dc_ip])
         if target_ip:
             cmd.extend(["-target-ip", target_ip])
-        cmd.extend(["-c", command])
+        cmd.append(command)
 
         # Prepend KRB5CCNAME environment variable
         cmd = ["env", f"KRB5CCNAME={actual_ticket}"] + cmd
