@@ -823,7 +823,7 @@ class RedisWorkerAgent:
         for hash_obj in local_hashes:
             current.add_hash(hash_obj, self.agent_name)
         for user in local_users:
-            current.add_user(user.username, user.domain)
+            current.add_user(user.username, user.domain, user.source)
         for weakness in local_weaknesses:
             if weakness not in current.all_weaknesses:
                 current.all_weaknesses.append(weakness)

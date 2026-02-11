@@ -460,12 +460,21 @@ class Host(Model):
 
 
 class User(Model):
-    """Discovered user account."""
+    """Discovered user account.
+
+    Attributes:
+        username: The username.
+        domain: The domain.
+        description: User description from LDAP.
+        is_admin: Whether this is an admin user.
+        source: Tool/method that discovered this user.
+    """
 
     username: str
     domain: str = ""
     description: str = ""
     is_admin: bool = False
+    source: str = ""
 
 
 class Credential(Model):
@@ -1212,7 +1221,7 @@ class SharedRedTeamState:
         if "/" in username or "\\" in username or username.endswith(".txt"):
             logger.debug(f"Credential rejected: path artifact '{username}' from {source_agent}")
             return False
-        self.add_user(username, domain)
+        self.add_user(username, domain, source_agent)
         self.add_domain(domain)
         key = f"{domain}:{username}:{password}".lower()
         for existing in self.all_credentials:
@@ -1240,12 +1249,17 @@ class SharedRedTeamState:
 
         return True
 
-    def add_user(self, username: str, domain: str) -> bool:
+    def add_user(self, username: str, domain: str, source: str = "") -> bool:
         """Add user if not duplicate. Returns True if added.
 
         If the user already exists in a parent domain and is now being added to
         a child domain, updates the existing entry to use the child domain
         (child domains are more specific/accurate).
+
+        Args:
+            username: The username.
+            domain: The domain.
+            source: Tool/method that discovered this user.
         """
         if not username:
             logger.debug(f"User rejected: empty username for domain {domain}")
@@ -1294,9 +1308,11 @@ class SharedRedTeamState:
                     )
                     return False
 
-        self.all_users.append(User(username=normalized, domain=normalized_domain))
+        self.all_users.append(User(username=normalized, domain=normalized_domain, source=source))
         self.add_domain(normalized_domain)
-        logger.debug(f"User added: {normalized_domain}\\{normalized}")
+        logger.debug(
+            f"User added: {normalized_domain}\\{normalized} (source: {source or 'unknown'})"
+        )
         return True
 
     def _update_credentials_domain(self, username: str, old_domain: str, new_domain: str) -> None:
@@ -1644,7 +1660,7 @@ class SharedRedTeamState:
             # Build attack path from credential chain instead of hardcoding
             attack_chain = self.format_attack_chain(hash_obj)
             self.domain_admin_path = attack_chain
-            logger.warning(
+            logger.success(
                 f"🏆 DOMAIN ADMIN AUTO-DETECTED: {domain}\\{username} NTLM hash "
                 f"found in state (source: {source_agent})"
             )

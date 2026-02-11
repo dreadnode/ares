@@ -703,6 +703,11 @@ def _generate_exploit_prompt(
             f"DC IP: {dc_ip}\n"
             f"Credentials: {domain}\\{username}\n"
             f"Task ID: {task.task_id}\n\n"
+            "**STEP BUDGET: ~20 steps max. Work efficiently!**\n\n"
+            "**HARD LIMITS:**\n"
+            "- 'connection refused'/'timed out' → CA unreachable, STOP immediately\n"
+            "- 'web enrollment' error → ESC8 not viable, skip it\n"
+            "- Max 2 attempts at certipy_find, then report failure\n\n"
             "**INSTRUCTIONS:**\n"
             "1. Run certipy_find to enumerate ADCS vulnerabilities:\n"
             f"   certipy_find(domain='{domain}', username='{username}', "
@@ -711,8 +716,8 @@ def _generate_exploit_prompt(
             "3. Report any vulnerable templates found\n"
             "4. If ESC1/ESC4 found: can request cert with arbitrary UPN\n"
             "5. If ESC8 found: web enrollment relay attack possible\n\n"
-            "**CRITICAL**: Run certipy_find FIRST before any exploitation!\n"
-            "Report discovered vulnerabilities so they can be queued for exploitation."
+            "**ON FAILURE**: Call task_complete immediately with failure reason.\n"
+            "Do NOT keep retrying if CA/web enrollment is unreachable."
         )
         state_context = format_state_context(state, "exploit", current_target=target)
         return adcs_prompt + state_context
@@ -748,6 +753,45 @@ def _generate_exploit_prompt(
         )
         state_context = format_state_context(state, "exploit", current_target=target)
         return unconstrained_prompt + state_context
+
+    # Special handling for ADCS ESC vulnerabilities
+    vuln_type_lower = vuln_type.lower()
+    if "esc1" in vuln_type_lower or "esc4" in vuln_type_lower or "esc8" in vuln_type_lower:
+        ca_server = payload.get("ca_server", target)
+        template = payload.get("template", "")
+        domain = payload.get("domain", "")
+
+        esc_prompt = (
+            f"**ADCS {vuln_type.upper()} EXPLOITATION**\n\n"
+            f"CA Server: {ca_server}\n"
+            f"Template: {template}\n"
+            f"Domain: {domain}\n"
+            f"Task ID: {task.task_id}\n\n"
+            "**STEP BUDGET: ~25 steps max. Work efficiently!**\n\n"
+            "**HARD LIMITS:**\n"
+            "- 'connection refused'/'timed out' → CA unreachable, STOP immediately\n"
+            "- 'web enrollment' error → HTTP not available, call task_complete(failed)\n"
+            "- Max 2 attempts per tool, then report failure\n\n"
+            "**WORKFLOW:**\n"
+        )
+        if "esc1" in vuln_type_lower or "esc4" in vuln_type_lower:
+            esc_prompt += (
+                "1. certipy_req_esc1 to request certificate with alternate UPN\n"
+                "2. certipy_auth to get NTLM hash from certificate\n"
+                "3. Report hash immediately when obtained\n"
+            )
+        else:  # esc8
+            esc_prompt += (
+                "1. Start ntlmrelayx targeting the CA's web enrollment\n"
+                "2. Coerce DC/target to authenticate to relay\n"
+                "3. Relay captures cert → certipy_auth for hash\n"
+            )
+        esc_prompt += (
+            "\n**ON FAILURE**: Call task_complete immediately with failure reason.\n"
+            "Do NOT keep retrying if CA/web enrollment is unreachable."
+        )
+        state_context = format_state_context(state, "exploit", current_target=target)
+        return esc_prompt + state_context
 
     # Default exploit prompt
     default_prompt = (

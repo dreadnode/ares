@@ -117,16 +117,17 @@ ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
 }
 
 
-# Default max steps per role
+# Default max steps per role - these are HARD CAPS to prevent token burn
+# Lower values = faster failure detection, less wasted tokens on stuck agents
 ROLE_MAX_STEPS: dict[AgentRole, int] = {
-    AgentRole.ORCHESTRATOR: 200,  # Coordinator role with dispatching
-    AgentRole.RECON: 200,
-    AgentRole.CREDENTIAL_ACCESS: 120,
-    AgentRole.CRACKER: 50,
-    AgentRole.ACL: 150,  # ACL analysis requires complex path finding
-    AgentRole.PRIVESC: 100,
-    AgentRole.LATERAL: 200,
-    AgentRole.COERCION: 30,
+    AgentRole.ORCHESTRATOR: 150,  # Coordinator - needs room for dispatching
+    AgentRole.RECON: 75,  # Recon tasks should be quick
+    AgentRole.CREDENTIAL_ACCESS: 75,  # Credential tasks are focused
+    AgentRole.CRACKER: 50,  # Cracker is deterministic (hashcat/john)
+    AgentRole.ACL: 100,  # ACL analysis can be complex
+    AgentRole.PRIVESC: 75,  # Exploit tasks should succeed or fail fast
+    AgentRole.LATERAL: 100,  # Lateral movement needs some room
+    AgentRole.COERCION: 30,  # Coercion is simple relay setup
 }
 
 
@@ -331,7 +332,13 @@ def create_role_hooks(
         hooks.append(broadcast_cracked)
 
     elif role == AgentRole.PRIVESC:
-        # PrivEsc monitors for successful exploitation
+        # PrivEsc monitors for successful exploitation AND futility
+        _privesc_failures: dict[str, Any] = {
+            "adcs_failures": 0,
+            "delegation_failures": 0,
+            "failed_targets": set(),
+        }
+
         async def track_exploitation(event: ToolEnd):
             if not isinstance(event, ToolEnd):
                 return None
@@ -340,6 +347,7 @@ def create_role_hooks(
                 return None
 
             result = fix_tool_output_encoding(str(event.message.content))
+            result_lower = result.lower()
             tool_name = (
                 event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
             )
@@ -356,15 +364,79 @@ def create_role_hooks(
                 "certipy_relay_esc8",
             }
             if tool_name in certipy_exploitation_tools and (
-                "success" in result.lower()
-                or ".pfx" in result.lower()
-                or ("hash" in result.lower() and ":" in result)
+                "success" in result_lower
+                or ".pfx" in result_lower
+                or ("hash" in result_lower and ":" in result)
             ):
                 return (
                     "✅ ADCS EXPLOITATION SUCCESSFUL!\n"
                     "→ Report the obtained credential/certificate\n"
                     "→ Use certipy_auth to get NTLM hash if needed"
                 )
+
+            # Track ADCS failures - detect unreachable CA/web enrollment
+            adcs_failure_indicators = [
+                "connection refused",
+                "errno 111",
+                "timed out",
+                "timeout",
+                "web enrollment",
+                "no ca found",
+                "rpc unavailable",
+                "rpc_s_server_unavailable",
+                "access denied",
+                "could not connect",
+                "name or service not known",
+                "no route to host",
+            ]
+            adcs_tools = {
+                "certipy_find",
+                "certipy_request",
+                "certipy_req",
+                "certipy_req_esc1",
+                "certipy_auth",
+                "certipy_relay",
+                "certipy_relay_esc8",
+            }
+            if tool_name in adcs_tools and any(
+                ind in result_lower for ind in adcs_failure_indicators
+            ):
+                _privesc_failures["adcs_failures"] += 1
+                # Extract target from tool args if possible
+                if hasattr(event, "tool_call") and event.tool_call and event.tool_call.arguments:
+                    try:
+                        import json
+
+                        args = json.loads(event.tool_call.arguments)
+                        target = args.get("ca_server") or args.get("target") or args.get("dc_ip")
+                        if target:
+                            _privesc_failures["failed_targets"].add(target)
+                    except Exception:
+                        pass
+
+                failures = _privesc_failures["adcs_failures"]
+                if failures >= 2:
+                    targets = ", ".join(_privesc_failures["failed_targets"]) or "CA"
+                    return (
+                        f"⚠️ ADCS FUTILITY: {failures} failures on {targets}\n"
+                        "→ CA web enrollment appears unreachable\n"
+                        "→ STOP retrying ADCS attacks - call task_complete with failure\n"
+                        "→ Try OTHER attack paths (delegation, GPO abuse) if available"
+                    )
+
+            # Track delegation failures
+            delegation_tools = {"constrained_delegation_s4u", "getST", "s4u_attack"}
+            if tool_name in delegation_tools and any(
+                ind in result_lower for ind in ["failed", "error", "denied", "refused", "not found"]
+            ):
+                _privesc_failures["delegation_failures"] += 1
+                if _privesc_failures["delegation_failures"] >= 3:
+                    return (
+                        f"⚠️ DELEGATION FUTILITY: {_privesc_failures['delegation_failures']} failures\n"
+                        "→ STOP retrying delegation attacks\n"
+                        "→ Try OTHER attack paths or call task_complete"
+                    )
+
             return None
 
         hooks.append(track_exploitation)
@@ -459,11 +531,12 @@ def create_role_hooks(
             "3. Execute ACL abuse: shadow credentials, targeted kerberoast, password change"
         ),
         AgentRole.PRIVESC: (
-            "You seem stuck. As privesc agent, focus on:\n"
-            "1. Process pending exploit requests\n"
-            "2. ADCS exploitation: certipy_req_esc1, certipy_auth\n"
-            "3. Delegation attacks: constrained_delegation_s4u\n"
-            "4. Report successful exploitations"
+            "You seem stuck. CHECK YOUR PROGRESS:\n"
+            "1. ADCS 'connection refused'/'timed out'? → CA unreachable, STOP trying ADCS\n"
+            "2. Web enrollment failed? → Skip ESC8, try other paths\n"
+            "3. Delegation failed 2+ times? → Move to next attack vector\n"
+            "4. All attack paths exhausted? → Call task_complete with summary\n\n"
+            "**DO NOT** keep retrying unreachable services. Report failure and move on."
         ),
         AgentRole.LATERAL: (
             "You seem stuck. As lateral agent, focus on:\n"
@@ -563,11 +636,10 @@ def create_specialized_agent(
         )
 
     agent_name = f"ares-{role.value.replace('_', '-')}"
-    max_steps = max_steps or ROLE_MAX_STEPS.get(role, 100)
-    if role == AgentRole.LATERAL and max_steps < 300:
-        max_steps = 300
-    if role == AgentRole.CRACKER and max_steps < 150:
-        max_steps = 150
+    # Use role-specific limit as hard cap (prevents global 200 from overriding role limits)
+    # This stops agents from spinning for 200 steps burning millions of tokens
+    role_limit = ROLE_MAX_STEPS.get(role, 75)
+    max_steps = min(max_steps or role_limit, role_limit)
 
     logger.info(f"Creating {agent_name} agent with {len(tools)} toolsets, max_steps={max_steps}")
 
@@ -740,7 +812,7 @@ def request_assistance(issue: str, context: str = "") -> str:
     Returns:
         Confirmation that assistance was requested
     """
-    logger.warning(f"Assistance requested: {issue}")
+    logger.info(f"Assistance requested: {issue}")
     return f"⚠️ Assistance requested for: {issue}"
 
 

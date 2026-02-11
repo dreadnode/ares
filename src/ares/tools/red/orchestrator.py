@@ -707,6 +707,20 @@ class OrchestratorTools(Toolset):
         if not vuln_id:
             vuln_id = f"{vuln_type}_{target}".replace(" ", "_")
 
+        # Check if vulnerability is already exploited (prevents duplicate dispatch)
+        if await self.dispatcher._is_vulnerability_exploited(vuln_id):
+            return (
+                f"⏭️ Vulnerability {vuln_id} already exploited or attempted. "
+                "Use get_exploitation_status() to see results."
+            )
+
+        # Also check shared_state.exploited_vulnerabilities
+        if vuln_id in self.shared_state.exploited_vulnerabilities:
+            return (
+                f"⏭️ Vulnerability {vuln_id} already in exploited list. "
+                "Use get_exploitation_status() to see results."
+            )
+
         if vuln_type == "ADCS_ESC8":
             kwargs = dict(kwargs)
             if not kwargs.get("coerce_target"):

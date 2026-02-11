@@ -280,7 +280,7 @@ class ResultProcessingMixin:
             for u in discovered_users:
                 if not isinstance(u, dict):
                     continue
-                self._add_user(u.get("username", ""), u.get("domain", ""))
+                self._add_user(u.get("username", ""), u.get("domain", ""), source_agent)
 
         # Process trusted domains (from BloodHound, nltest, etc.)
         trusted_domains = result.get("trusted_domains")
@@ -308,7 +308,7 @@ class ResultProcessingMixin:
 
         cred_data = result.get("credential")
         if isinstance(cred_data, dict):
-            self._add_user(cred_data.get("username", ""), cred_data.get("domain", ""))
+            self._add_user(cred_data.get("username", ""), cred_data.get("domain", ""), source_agent)
             credential = Credential(
                 username=cred_data.get("username", ""),
                 password=cred_data.get("password", ""),
@@ -325,7 +325,7 @@ class ResultProcessingMixin:
             for cred in creds_data:
                 if not isinstance(cred, dict):
                     continue
-                self._add_user(cred.get("username", ""), cred.get("domain", ""))
+                self._add_user(cred.get("username", ""), cred.get("domain", ""), source_agent)
                 credential = Credential(
                     username=cred.get("username", ""),
                     password=cred.get("password", ""),
@@ -448,7 +448,7 @@ class ResultProcessingMixin:
                 self.shared_state.all_hosts.append(host)
 
         for username in self._extract_users_from_output(output):
-            self._add_user(username, domain)
+            self._add_user(username, domain, source_agent)
 
         creds = self._extract_plaintext_passwords_from_output(output)
         if "password :" in output.lower() and not creds and domain:
@@ -472,7 +472,7 @@ class ResultProcessingMixin:
             self.shared_state.pending_credential_findings.add(
                 f"{resolved_domain}:{username}".lower()
             )
-            self._add_user(username, resolved_domain)
+            self._add_user(username, resolved_domain, source_agent)
             credential = Credential(
                 username=username,
                 password=password,
@@ -589,8 +589,14 @@ class ResultProcessingMixin:
                 f"🔗 Extracted {chains_found} ACL chain(s) from BloodHound output ({source_agent})"
             )
 
-    def _add_user(self: RedTeamDispatcher, username: str, domain: str) -> bool:
-        """Add a user to the shared state."""
+    def _add_user(self: RedTeamDispatcher, username: str, domain: str, source: str = "") -> bool:
+        """Add a user to the shared state.
+
+        Args:
+            username: The username.
+            domain: The domain.
+            source: Tool/method that discovered this user.
+        """
         if not username:
             return False
         normalized = username.strip()
@@ -601,7 +607,7 @@ class ResultProcessingMixin:
         for existing in self.shared_state.all_users:
             if existing.username == normalized and existing.domain == domain:
                 return False
-        self.shared_state.all_users.append(User(username=normalized, domain=domain))
+        self.shared_state.all_users.append(User(username=normalized, domain=domain, source=source))
         return True
 
     def _extract_hosts_from_output(self: RedTeamDispatcher, output: str) -> list[Host]:

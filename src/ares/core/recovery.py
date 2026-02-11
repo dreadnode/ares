@@ -33,7 +33,7 @@ def _merge_state(target: SharedRedTeamState, existing: SharedRedTeamState) -> No
     for domain in getattr(existing, "all_domains", []):
         target.add_domain(domain)
     for user in existing.all_users:
-        target.add_user(user.username, user.domain)
+        target.add_user(user.username, user.domain, user.source)
 
     # Credentials (preserve original source fields)
     _merge_credentials(target, existing)

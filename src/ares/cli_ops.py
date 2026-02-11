@@ -20,6 +20,46 @@ from ares.core.orchestrator_client import (
 )
 from ares.core.redis_client import create_redis_client
 
+# Vulnerability priority lookup (matches dispatcher._vulnerability_priorities)
+# Lower priority number = higher priority (exploited sooner)
+VULNERABILITY_PRIORITIES: dict[str, int] = {
+    # Tier 1: Instant DA paths (priority 1-5)
+    "krbtgt_hash": 1,
+    "domain_admin_hash": 2,
+    "constrained_delegation": 3,
+    "unconstrained_delegation": 4,
+    # Tier 2: ADCS attacks (priority 5-7)
+    "ADCS_ESC1": 5,
+    "esc1": 5,
+    "ADCS_ESC4": 6,
+    "esc4": 6,
+    "ADCS_ESC8": 7,
+    "esc8": 7,
+    # Tier 3: Direct DA via ACL (priority 8-9)
+    "genericall_domain_admins": 8,
+    "gpo_write": 9,
+    # Tier 4: Other ACL and delegation attacks (priority 10-13)
+    "acl_abuse": 10,
+    "rbcd": 11,
+    # Tier 4: MSSQL attacks (priority 12-15)
+    "mssql_impersonation": 12,
+    "mssql_linked_xpcmdshell": 13,
+    "mssql_linked": 14,
+    "mssql_linked_server": 14,
+    "mssql_xp_cmdshell": 15,
+    # Tier 5: Other privilege escalation (priority 16-20)
+    "gpo_abuse": 16,
+    "gmsa_readable": 17,
+    "laps_abuse": 18,
+    "dcsync": 19,
+    "shadow_credentials": 20,
+    # Tier 6: Relay and persistence (priority 21+)
+    "smb_relay_target": 21,
+    "smb_signing_disabled": 21,
+    "adminsd_holder_writable": 22,
+    "adminsd_holder_acl": 22,  # Alias for BloodHound detection
+}
+
 app = cyclopts.App(
     name="ares-ops",
     help="Submit and manage operations with the Ares orchestrator service",
@@ -488,7 +528,12 @@ def _print_loot(state, *, json_output: bool = False) -> None:
                 for h in state.all_hosts
             ],
             "users": [
-                {"username": u.username, "domain": u.domain, "is_admin": u.is_admin}
+                {
+                    "username": u.username,
+                    "domain": u.domain,
+                    "is_admin": u.is_admin,
+                    "source": u.source if hasattr(u, "source") else "",
+                }
                 for u in unique_users
             ],
             "credentials": [
@@ -584,12 +629,18 @@ def _print_loot(state, *, json_output: bool = False) -> None:
                 print(f"      {svc}")
     print()
 
-    # Users
+    # Users - group by source for readability
     print(f"Users ({len(unique_users)}):")
+    users_by_source: dict[str, list] = {}
     for user in unique_users:
-        prefix = f"{user.domain}\\{user.username}" if user.domain else user.username
-        suffix = " (admin)" if user.is_admin else ""
-        print(f"  - {prefix}{suffix}")
+        src = user.source if hasattr(user, "source") and user.source else "unknown"
+        users_by_source.setdefault(src, []).append(user)
+    for src, users in sorted(users_by_source.items()):
+        print(f"  [{src}] ({len(users)})")
+        for user in users:
+            prefix = f"{user.domain}\\{user.username}" if user.domain else user.username
+            suffix = " (admin)" if user.is_admin else ""
+            print(f"    - {prefix}{suffix}")
     print()
 
     # Credentials
@@ -1431,7 +1482,7 @@ async def inject_credential(
             )
         else:
             await client.aclose()
-            logger.warning(f"Credential already exists: {domain}\\{username}")
+            logger.info(f"Credential already exists: {domain}\\{username}")
 
     except Exception as e:
         logger.error(f"Failed to inject credential: {e}")
@@ -1498,12 +1549,19 @@ async def inject_vulnerability(
         if account_name:
             vuln_details["account_name"] = account_name
 
+        # Look up priority from the priority table (default to 99 if unknown)
+        priority = VULNERABILITY_PRIORITIES.get(vuln_type.lower(), 99)
+        # Also check without lowercase for case-sensitive types like ADCS_ESC1
+        if priority == 99:
+            priority = VULNERABILITY_PRIORITIES.get(vuln_type, 99)
+
         vuln = VulnerabilityInfo(
             vuln_id=f"{vuln_type}_{target_ip}_{account_name or 'manual'}",
             vuln_type=vuln_type,
             target=target_ip,
             discovered_by="manual-inject",
             details=vuln_details,
+            priority=priority,
         )
 
         state.discovered_vulnerabilities[vuln.vuln_id] = vuln
@@ -1521,7 +1579,8 @@ async def inject_vulnerability(
         await tq.disconnect()
 
         logger.success(
-            f"Injected vulnerability: {vuln_type} on {target_ip} ({n} subscribers notified)"
+            f"Injected vulnerability: {vuln_type} on {target_ip} "
+            f"(priority={priority}, {n} subscribers notified)"
         )
         logger.info(f"Details: {vuln_details}")
 

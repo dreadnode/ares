@@ -577,6 +577,6 @@ def extract_acl_chains_from_bloodhound(
             chains.append(chain)
 
     if chains:
-        logger.warning(f"🔗 Extracted {len(chains)} ACL chain(s) from BloodHound output")
+        logger.info(f"🔗 Extracted {len(chains)} ACL chain(s) from BloodHound output")
 
     return chains

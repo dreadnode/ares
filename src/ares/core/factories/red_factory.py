@@ -385,7 +385,7 @@ async def vulnerability_discovery_hook(event: ToolEnd):  # noqa: PLR0912
         )
 
     if redirects:
-        logger.warning("[!] Vulnerability discovery hook triggered - injecting exploit guidance")
+        logger.info("[!] Vulnerability discovery hook triggered - injecting exploit guidance")
         header = "\n\n" + "=" * 50 + "\n⚡ IMMEDIATE ACTION REQUIRED ⚡\n" + "=" * 50 + "\n"
         return header + "\n\n".join(redirects)
 
@@ -577,7 +577,7 @@ async def periodic_priority_check(event: StepStart):
     if not unexploited:
         return None
 
-    logger.warning(f"[!] Periodic check: {len(unexploited)} unexploited vulnerabilities")
+    logger.info(f"[!] Periodic check: {len(unexploited)} unexploited vulnerabilities")
 
     return (
         "\n\n" + "=" * 50 + "\n"

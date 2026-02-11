@@ -1762,6 +1762,12 @@ class BloodHoundTools(Toolset):
         Example:
             >>> run_bloodhound("example.local", "dave.lee", "ExamplePass123!", "192.168.58.10")
         """
+        # DEDUP CHECK: Skip if already ran BloodHound for this domain (prevents duplicate work)
+        if self.state:
+            domain_key = domain.lower()
+            if domain_key in getattr(self.state, "processed_bloodhound_domains", set()):
+                return f"[i] BloodHound already completed for {domain} - skipping to save time"
+
         cmd = [
             "bloodhound-python",
             "-d",

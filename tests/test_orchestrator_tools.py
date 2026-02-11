@@ -405,7 +405,9 @@ class TestRetrieveTaskOutput:
     """Tests for retrieve_task_output method."""
 
     @pytest.mark.asyncio
-    async def test_retrieve_existing_output(self, orchestrator_tools, mock_dispatcher, shared_state):
+    async def test_retrieve_existing_output(
+        self, orchestrator_tools, mock_dispatcher, shared_state
+    ):
         """Test retrieving existing offloaded output."""
         # Set up mock Redis
         mock_redis = AsyncMock()
@@ -421,7 +423,9 @@ class TestRetrieveTaskOutput:
         assert "task-123" in result
 
     @pytest.mark.asyncio
-    async def test_retrieve_nonexistent_output(self, orchestrator_tools, mock_dispatcher, shared_state):
+    async def test_retrieve_nonexistent_output(
+        self, orchestrator_tools, mock_dispatcher, shared_state
+    ):
         """Test retrieving output that doesn't exist."""
         mock_redis = AsyncMock()
         mock_redis.scan_iter = MagicMock(return_value=AsyncIterator([]))
@@ -433,7 +437,9 @@ class TestRetrieveTaskOutput:
         assert "nonexistent-task" in result
 
     @pytest.mark.asyncio
-    async def test_retrieve_handles_string_response(self, orchestrator_tools, mock_dispatcher, shared_state):
+    async def test_retrieve_handles_string_response(
+        self, orchestrator_tools, mock_dispatcher, shared_state
+    ):
         """Test handling string (not bytes) response from Redis."""
         mock_redis = AsyncMock()
         mock_redis.scan_iter = MagicMock(

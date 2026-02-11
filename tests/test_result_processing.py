@@ -4,13 +4,11 @@ Tests that complete_task properly uses summarize_task_result to prevent
 context bloat in the orchestrator.
 """
 
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from ares.core.context_manager import summarize_task_result
-from ares.core.models import SharedRedTeamState, Target, TaskInfo, TaskStatus
 
 
 class TestSummarizeTaskResultIntegration:
@@ -169,10 +167,9 @@ class TestMaxOutputCharsConfig:
 
     def test_get_max_output_chars_function(self):
         """get_max_output_chars returns configured value."""
-        from ares.core.config import clear_config_cache, get_max_output_chars
-
         import os
-        from unittest.mock import patch
+
+        from ares.core.config import clear_config_cache, get_max_output_chars
 
         clean_env = {k: v for k, v in os.environ.items() if not k.startswith("ARES_")}
         with patch.dict(os.environ, clean_env, clear=True):

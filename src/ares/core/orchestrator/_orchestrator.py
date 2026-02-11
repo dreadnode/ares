@@ -1176,7 +1176,7 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                     if not target_domain:
                         continue
 
-                    logger.warning(
+                    logger.info(
                         f"🔐 Auto-ADCS: Found ADCS server {server_ip} ({server_hostname}), "
                         f"dispatching certipy_find with {cred.domain}\\{cred.username}"
                     )
@@ -2018,7 +2018,7 @@ async def _auto_coercion(  # noqa: PLR0912
 
                 if task_id:
                     state.processed_coerced_dcs.add(host.ip)
-                    logger.warning(
+                    logger.info(
                         f"🎯 Auto LDAPS relay coercion dispatched: coerce DC {host.hostname or host.ip} "
                         f"for RBCD (task {task_id})"
                     )
@@ -2273,7 +2273,7 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
                         continue
 
                     # Dispatch secretsdump task
-                    logger.warning(
+                    logger.info(
                         f"🔓 Auto-secretsdump: Admin access detected for {cred_domain}\\{cred.username} "
                         f"on {host.ip} ({host.hostname}), dispatching secretsdump"
                     )
@@ -2339,7 +2339,7 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
                 if key in secretsdump_attempts or failed_attempts.get(key, 0) >= max_retries:
                     continue
 
-                logger.warning(
+                logger.info(
                     f"🔓 Auto-secretsdump: BloodHound {vuln.vuln_type} detected - "
                     f"{admin_domain}\\{admin_user} has admin on {target_ip}, dispatching secretsdump"
                 )
@@ -2419,7 +2419,7 @@ async def _auto_golden_ticket(  # noqa: PLR0912
                     continue
 
                 # Found unprocessed krbtgt hash!
-                logger.warning(
+                logger.info(
                     f"🎫 Auto-golden-ticket: Found krbtgt hash for {domain}, "
                     "attempting to generate golden ticket"
                 )
@@ -2672,7 +2672,7 @@ async def _auto_acl_chain_follow(  # noqa: PLR0912
                 # Generate prompt for this step
                 prompt = tracker.generate_step_prompt(chain, current_step, chain.domain)
 
-                logger.warning(
+                logger.info(
                     f"🔗 ACL chain {chain.chain_id} step {current_step.step_id}: "
                     f"{current_step.source} -> {current_step.target} ({current_step.action.value})"
                 )

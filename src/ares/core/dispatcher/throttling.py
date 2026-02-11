@@ -59,6 +59,17 @@ class ThrottlingMixin:
             if t.assigned_agent == role and t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
         )
 
+    async def _get_queue_length(self: RedTeamDispatcher, role: str) -> int:
+        """Get Redis queue length for a specific role (tasks waiting to be picked up)."""
+        if not self._task_queue or not self._task_queue._client:
+            return 0
+        try:
+            queue_key = f"ares:tasks:{role}"
+            return await self._task_queue._client.llen(queue_key)
+        except Exception as e:
+            logger.debug(f"Failed to get queue length for {role}: {e}")
+            return 0
+
     async def _get_llm_task_count(self: RedTeamDispatcher) -> int:
         """Get count of pending LLM-using tasks (excludes crack, command)."""
         if not self._shared_state:
@@ -69,6 +80,69 @@ class ThrottlingMixin:
             if t.task_type not in self.NON_LLM_TASK_TYPES
             and t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
         )
+
+    async def _check_llm_throttle_drop(
+        self: RedTeamDispatcher, task_type: str, target_role: str, reason: str
+    ) -> bool:
+        """
+        Check if an LLM task should be dropped due to throttling.
+
+        Returns True if the task should be dropped, False if it should proceed.
+        """
+        # Non-LLM tasks (crack, command) don't hit rate limits - always allow
+        if task_type in self.NON_LLM_TASK_TYPES:
+            logger.debug(
+                f"Throttle at {reason} but ALLOWING {task_type} task "
+                f"(non-LLM task, no rate limit impact)"
+            )
+            return False
+
+        # LLM task - apply throttling rules
+        role_pending = await self._get_pending_count_by_role(target_role)
+        llm_count = await self._get_llm_task_count()
+        max_tasks = get_max_concurrent_tasks()
+
+        # HARD CAP: If we're 2x over the limit, DROP regardless of priority
+        if llm_count >= max_tasks * 2:
+            logger.warning(
+                f"Throttle HARD CAP: {llm_count}/{max_tasks} LLM tasks - "
+                f"DROPPING {task_type} task (2x over limit)"
+            )
+            return True
+
+        # Guarantee each role has at least min_slots_per_role tasks
+        if role_pending < get_min_slots_per_role():
+            logger.info(
+                f"Throttle at {reason} but ALLOWING {task_type} task for {target_role} "
+                f"(role has {role_pending} pending, min={get_min_slots_per_role()})"
+            )
+            return False
+
+        # Role already has tasks queued - check phase priority
+        phase = self._get_operation_phase()
+        adjustment = self._get_phase_priority_adjustment(task_type, target_role)
+
+        # In domain_dominance phase, only allow high-priority tasks
+        if phase == "domain_dominance" and adjustment >= 0:
+            logger.debug(
+                f"Throttle at {reason} - DROPPING {task_type} task "
+                f"(domain_dominance phase, low priority adj={adjustment})"
+            )
+            return True
+
+        # In other phases, drop only clearly low-priority tasks (adj > 1)
+        if adjustment > 1:
+            logger.debug(
+                f"Throttle at {reason} - DROPPING {task_type} task "
+                f"({phase} phase, low priority adj={adjustment})"
+            )
+            return True
+
+        logger.info(
+            f"Throttle at {reason} but ALLOWING {task_type} task "
+            f"({phase} phase, priority adj={adjustment})"
+        )
+        return False
 
     def _get_operation_phase(self: RedTeamDispatcher) -> str:
         """
@@ -282,64 +356,38 @@ class ThrottlingMixin:
             start_wait = asyncio.get_event_loop().time()
             total_waited = 0.0
 
-            while total_waited < max_wait:
-                should_wait, wait_time, reason = await self._should_throttle()
+            # FAILSAFE: If target worker is idle (queue empty), skip throttle wait entirely.
+            # No point burning time waiting when the worker has nothing to do.
+            role_queue_len = await self._get_queue_length(target_role)
+            role_pending = await self._get_pending_count_by_role(target_role)
+            if role_queue_len == 0 and role_pending == 0:
+                logger.debug(
+                    f"Bypassing throttle for {task_type} - {target_role} worker is idle "
+                    f"(queue={role_queue_len}, pending={role_pending})"
+                )
+                # Skip directly to submit
+            else:
+                while total_waited < max_wait:
+                    should_wait, wait_time, reason = await self._should_throttle()
 
-                if not should_wait:
-                    break
+                    if not should_wait:
+                        break
 
-                # Cap wait time to remaining max_wait
-                actual_wait = min(wait_time, max_wait - total_waited)
-                if actual_wait <= 0:
-                    break
+                    # Cap wait time to remaining max_wait
+                    actual_wait = min(wait_time, max_wait - total_waited)
+                    if actual_wait <= 0:
+                        break
 
-                logger.debug(f"Throttling task dispatch: {reason}, waiting {actual_wait:.1f}s")
-                await asyncio.sleep(actual_wait)
-                total_waited = asyncio.get_event_loop().time() - start_wait
+                    logger.debug(f"Throttling task dispatch: {reason}, waiting {actual_wait:.1f}s")
+                    await asyncio.sleep(actual_wait)
+                    total_waited = asyncio.get_event_loop().time() - start_wait
 
             # Final check - smart throttling to balance worker utilization
             should_wait, _, reason = await self._should_throttle()
             if should_wait and "max concurrent tasks" in reason:
-                # Check if this role has any pending tasks
-                role_pending = await self._get_pending_count_by_role(target_role)
-
-                # Non-LLM tasks (crack, command) don't hit rate limits - always allow
-                if task_type in self.NON_LLM_TASK_TYPES:
-                    logger.debug(
-                        f"Throttle at {reason} but ALLOWING {task_type} task "
-                        f"(non-LLM task, no rate limit impact)"
-                    )
-                # Guarantee each role has at least min_slots_per_role tasks
-                # This prevents worker starvation - no role is completely idle
-                elif role_pending < get_min_slots_per_role():
-                    logger.info(
-                        f"Throttle at {reason} but ALLOWING {task_type} task for {target_role} "
-                        f"(role has {role_pending} pending, min={get_min_slots_per_role()})"
-                    )
-                else:
-                    # Role already has tasks queued - check phase priority
-                    phase = self._get_operation_phase()
-                    adjustment = self._get_phase_priority_adjustment(task_type, target_role)
-
-                    # In domain_dominance phase, only allow high-priority tasks
-                    # (exploit, lateral, credential_access for final DC dump)
-                    if phase == "domain_dominance" and adjustment >= 0:
-                        logger.debug(
-                            f"Throttle at {reason} - DROPPING {task_type} task "
-                            f"(domain_dominance phase, low priority adj={adjustment})"
-                        )
-                        return ""
-                    # In other phases, drop only clearly low-priority tasks (adj > 1)
-                    if adjustment > 1:
-                        logger.debug(
-                            f"Throttle at {reason} - DROPPING {task_type} task "
-                            f"({phase} phase, low priority adj={adjustment})"
-                        )
-                        return ""
-                    logger.info(
-                        f"Throttle at {reason} but ALLOWING {task_type} task "
-                        f"({phase} phase, priority adj={adjustment})"
-                    )
+                drop_task = await self._check_llm_throttle_drop(task_type, target_role, reason)
+                if drop_task:
+                    return ""
 
             # Apply phase-aware priority adjustment
             adjusted_priority = priority + self._get_phase_priority_adjustment(

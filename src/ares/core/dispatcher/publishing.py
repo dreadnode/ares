@@ -53,7 +53,7 @@ class PublishingMixin:
         Returns:
             True if credential was new and added.
         """
-        self._add_user(credential.username, credential.domain)
+        self._add_user(credential.username, credential.domain, source_agent)
         added = self.shared_state.add_credential(credential, source_agent)
 
         if added:
@@ -275,7 +275,7 @@ class PublishingMixin:
             details=details,
             discovered_by=source_agent,
         )
-        logger.warning(
+        logger.info(
             f"Auto-queued MSSQL vulnerability for {host.ip} ({host.hostname}) - "
             f"found {len(sql_creds)} potential SQL creds"
         )
@@ -612,7 +612,7 @@ class PublishingMixin:
                 exclude=source_agent,
             )
             await self._checkpoint()
-            logger.warning(f"Vulnerability published: {vuln.vuln_type} on {vuln.target}")
+            logger.info(f"Vulnerability published: {vuln.vuln_type} on {vuln.target}")
 
         return added
 

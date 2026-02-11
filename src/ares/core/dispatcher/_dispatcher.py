@@ -21,7 +21,7 @@ The dispatcher functionality is split across mixin classes for maintainability:
 from __future__ import annotations
 
 import asyncio
-from asyncio import PriorityQueue, Queue
+from asyncio import Queue
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -120,8 +120,7 @@ class RedTeamDispatcher(
         # Role-based routing
         self._role_queues: dict[AgentRole, str] = {}  # role -> agent_name
 
-        # Priority-based vulnerability queue
-        self._vulnerability_queue: PriorityQueue[tuple[int, str, dict[str, Any]]] = PriorityQueue()
+        # Vulnerability priorities (queue is now Redis-backed ZSET, see VulnerabilityMixin)
         self._vulnerability_priorities: dict[str, int] = {
             # Tier 1: Instant DA paths (priority 1-5)
             "krbtgt_hash": 1,  # krbtgt = golden ticket = instant DA
