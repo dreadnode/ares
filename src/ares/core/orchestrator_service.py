@@ -235,9 +235,30 @@ class OrchestratorService:
             target_ips = [h.ip for h in state.all_hosts if h.ip]
             if not target_ips and state.target and state.target.ip:
                 target_ips = [state.target.ip]
+
+            # Load stored model from Redis (required for recovery)
+            model: str | None = None
+            model_key = f"ares:operation:{operation_id}:model"
+            if self.task_queue and self.task_queue._client:
+                stored_model = await self.task_queue._client.get(model_key)
+                if stored_model:
+                    model = (
+                        stored_model.decode()
+                        if isinstance(stored_model, bytes)
+                        else str(stored_model)
+                    )
+            if not model:
+                # Fallback to environment variables if model not stored
+                model = os.environ.get("ARES_ORCHESTRATOR_MODEL") or os.environ.get("ARES_MODEL")
+            if not model:
+                raise ValueError(
+                    f"No model stored for operation {operation_id} and no "
+                    "ARES_ORCHESTRATOR_MODEL/ARES_MODEL in environment"
+                )
+
             logger.info(
                 f"Resuming operation {operation_id}: "
-                f"target={target_domain}, "
+                f"target={target_domain}, model={model}, "
                 f"credentials={len(state.all_credentials)}, "
                 f"hosts={len(state.all_hosts)}"
             )
@@ -253,6 +274,7 @@ class OrchestratorService:
                 report_dir=self._report_dir,
                 redis_url=self.redis_url,
                 namespace=self.namespace,
+                model=model,
             )
 
             # Publish completion status

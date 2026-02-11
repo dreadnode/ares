@@ -413,21 +413,14 @@ krb_relay_up(
 
 ## Reporting Results
 
-Success:
-```
-task_complete(
-    task_id="task-xxx",
-    result="Obtained Administrator hash via ADCS ESC1: aad3b435...\n"
-           "```json\n"
-           "{\"hash\": {\"username\": \"Administrator\", \"hash_value\": \"aad3b435...\", \"hash_type\": \"NTLM\", \"domain\": \"domain.com\"}}\n"
-           "```"
-)
-```
+**IMPORTANT: To report results, you must CALL the tool (not write it as text). Use the tool calling interface.**
 
-Failure:
-```
-request_assistance(
-    issue="ESC1 exploitation failed - RPC endpoint unavailable",
-    context="Tried certipy_req_esc1, got ept_s_not_registered error"
-)
-```
+On success, call the `task_complete` tool with:
+- task_id: The task ID you were assigned
+- result: Summary including any credentials/hashes discovered
+
+On failure or if blocked, call the `request_assistance` tool with:
+- issue: Brief description of the problem
+- context: What you tried and what error occurred
+
+**DO NOT write tool calls as code/text. Actually invoke the tool using your function calling capability.**

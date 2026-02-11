@@ -717,13 +717,25 @@ class CertipyTools(Toolset):
                     f"Ignoring invalid ca_host extracted from certipy output: {extracted}"
                 )
 
+        # Validate dc_ip fallback - it might also be an error message
+        validated_dc_ip = dc_ip if _is_valid_host(dc_ip) else None
+
+        # Determine target - prefer ca_host, fall back to validated dc_ip
+        target = ca_host or validated_dc_ip
+        if not target:
+            logger.warning(
+                f"Cannot queue ESC8 vulnerability: no valid target "
+                f"(ca_host={ca_host!r}, dc_ip={dc_ip!r})"
+            )
+            return
+
         # Create unique vulnerability ID
         vuln_id = f"ADCS_ESC8_{domain}_{uuid.uuid4().hex[:8]}"
 
         # Build details for exploitation
         details: dict[str, str | list[str] | None] = {
             "ca_name": ca_name,
-            "ca_host": ca_host or dc_ip,
+            "ca_host": target,
             "domain": domain,
             "dc_ip": dc_ip,
             "username": username,
@@ -743,7 +755,7 @@ class CertipyTools(Toolset):
         vuln = VulnerabilityInfo(
             vuln_id=vuln_id,
             vuln_type="ADCS_ESC8",
-            target=ca_host or dc_ip,
+            target=target,
             discovered_by="certipy_find",
             details=details,
             priority=3,  # High priority - ADCS_ESC8 is priority 3 in dispatcher
@@ -758,7 +770,7 @@ class CertipyTools(Toolset):
         if added:
             logger.warning(
                 f"[!] ESC8 vulnerability queued for exploitation: {vuln_id} "
-                f"(CA: {ca_name or 'unknown'}, host: {ca_host or dc_ip})"
+                f"(CA: {ca_name or 'unknown'}, host: {target})"
             )
         else:
             logger.debug(f"ESC8 vulnerability already queued for {domain}")

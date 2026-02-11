@@ -12,8 +12,14 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from ares.core.models import TaskInfo, TaskStatus
+
 if TYPE_CHECKING:
     from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+
+# Stale task timeout in seconds - tasks pending longer than this are cleaned up
+# This prevents throttle deadlock when tasks get lost in Redis or workers crash
+STALE_TASK_TIMEOUT_SECONDS = 600  # 10 minutes
 
 
 class MonitoringMixin:
@@ -102,11 +108,61 @@ class MonitoringMixin:
 
         logger.info("Result consumer stopped")
 
+    async def _cleanup_stale_tasks(self: RedTeamDispatcher) -> None:
+        """
+        Clean up tasks that have been pending for too long.
+
+        This prevents throttle deadlock when:
+        - Workers crash without sending results
+        - Tasks get lost in Redis
+        - Network partitions cause result delivery failures
+
+        Tasks older than STALE_TASK_TIMEOUT_SECONDS are removed from:
+        - pending_tasks (decreases LLM task count)
+        - _redis_task_ids (stops result polling)
+        """
+        if not self._shared_state:
+            return
+
+        now = datetime.now(timezone.utc)
+        stale_task_ids: list[str] = []
+
+        for task_id, task_info in list(self._shared_state.pending_tasks.items()):
+            # Only clean up tasks still in PENDING or IN_PROGRESS
+            if task_info.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+                continue
+
+            age_seconds = (now - task_info.created_at).total_seconds()
+            if age_seconds > STALE_TASK_TIMEOUT_SECONDS:
+                stale_task_ids.append(task_id)
+
+        if stale_task_ids:
+            for task_id in stale_task_ids:
+                stale_task: TaskInfo | None = self._shared_state.pending_tasks.get(task_id)
+                if stale_task is not None:
+                    del self._shared_state.pending_tasks[task_id]
+                self._redis_task_ids.discard(task_id)
+
+                if stale_task is not None:
+                    logger.warning(
+                        f"Cleaned up stale task {task_id} ({stale_task.task_type} -> "
+                        f"{stale_task.assigned_agent}) - pending for "
+                        f"{(now - stale_task.created_at).total_seconds():.0f}s"
+                    )
+
+            logger.info(
+                f"Stale task cleanup: removed {len(stale_task_ids)} tasks "
+                f"(threshold: {STALE_TASK_TIMEOUT_SECONDS}s)"
+            )
+
     async def _consume_pending_results(self: RedTeamDispatcher) -> None:
         """Check and consume results for all pending Redis tasks."""
         if not self._task_queue:
             logger.warning("Result consumer has no task queue; skipping result checks")
             return
+
+        # Periodically clean up stale tasks to prevent throttle deadlock
+        await self._cleanup_stale_tasks()
 
         task_ids_to_check = list(self._redis_task_ids)
 

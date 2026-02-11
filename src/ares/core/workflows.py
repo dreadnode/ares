@@ -332,7 +332,19 @@ async def exploitation_workflow(
                 f"elapsed={exploit_elapsed:.1f}s"
             )
 
-            # Mark as attempted
+            # Check if this was a dispatch failure (task deferred or dropped)
+            # vs an actual execution failure. Don't mark as exploited if dispatch failed
+            # so the vulnerability stays in queue for retry.
+            dispatch_failed = result.get("error") == "Failed to dispatch task"
+            if dispatch_failed:
+                logger.warning(
+                    f"Dispatch failed for {vuln_id} ({vuln_type}) - "
+                    f"NOT marking as exploited, will retry on next cycle"
+                )
+                in_flight_vulns.discard(vuln_id)
+                return  # Don't mark as exploited, don't count as failure
+
+            # Mark as attempted (only for actual execution attempts)
             await dispatcher.mark_vulnerability_exploited(
                 vuln_id,
                 success=result.get("success", False),

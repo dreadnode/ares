@@ -240,28 +240,22 @@ Call `request_assistance` if:
 
 ## Reporting
 
+**IMPORTANT: To report results, you must CALL the tool (not write it as text). Use the tool calling interface.**
+
 ### Hash Capture
-When you capture a hash:
-```
-Immediately report hash type, username, and hash value
-Request crack dispatch from orchestrator
-```
+When you capture a hash, immediately report the hash type, username, and hash value via the appropriate tool.
 
 ### Coercion Success
-```
-task_complete(
-    task_id="task-xxx",
-    result="Successfully coerced DC authentication to relay"
-)
-```
+Call the `task_complete` tool with:
+- task_id: The task ID you were assigned
+- result: Summary of what was coerced and any captured authentication
 
 ### Coercion Failure
-```
-request_assistance(
-    issue="Coercion failed - port filtered",
-    context="PetitPotam to DC failed, SMB port not accessible"
-)
-```
+Call the `request_assistance` tool with:
+- issue: Brief description (e.g., "Coercion failed - port filtered")
+- context: What you tried and what error occurred
+
+**DO NOT write tool calls as code/text. Actually invoke the tool using your function calling capability.**
 
 ## Safety Considerations
 

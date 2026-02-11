@@ -31,6 +31,7 @@ from ares.core.config import get_agent_heartbeat_timeout
 # Import all mixins
 from ares.core.dispatcher.agents import AgentMixin
 from ares.core.dispatcher.announcements import AnnouncementMixin
+from ares.core.dispatcher.deferred_queue import DeferredQueueMixin
 from ares.core.dispatcher.messaging import MessagingMixin
 from ares.core.dispatcher.monitoring import MonitoringMixin
 from ares.core.dispatcher.persistence import PersistenceMixin
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
 
 class RedTeamDispatcher(
     ThrottlingMixin,
+    DeferredQueueMixin,
     AgentMixin,
     MessagingMixin,
     PublishingMixin,
@@ -166,10 +168,14 @@ class RedTeamDispatcher(
         self._last_dispatch_time: float = 0.0
         self._rate_limit_errors: int = 0
         self._global_backoff_until: float = 0.0
-        self._throttle_lock = asyncio.Lock()
+        # Lock created lazily to avoid event loop binding issues
+        self._throttle_lock: asyncio.Lock | None = None
 
         # Phase tracking for transition logging
         self._last_phase: str = "initial_access"
+
+        # Deferred queue for throttled tasks (queue instead of drop)
+        self._init_deferred_queue()
 
     async def start(self, operation_id: str) -> None:
         """
@@ -206,6 +212,9 @@ class RedTeamDispatcher(
             self._result_consumer_task = asyncio.create_task(self._result_consumer())
             logger.info("Result consumer started for Redis task completion")
 
+            # Start deferred queue processor (handles throttled tasks)
+            await self._start_deferred_processor()
+
         logger.info(f"Dispatcher started for operation {operation_id}")
 
     async def stop(self) -> None:
@@ -225,6 +234,9 @@ class RedTeamDispatcher(
                 await self._result_consumer_task
             except asyncio.CancelledError:
                 pass
+
+        # Stop deferred queue processor
+        await self._stop_deferred_processor()
 
         # Cleanup background publish tasks in shared state
         if self._shared_state:

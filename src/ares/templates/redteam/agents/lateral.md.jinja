@@ -198,24 +198,22 @@ secretsdump with -just-dc flag
 
 ## Reporting Results
 
+**IMPORTANT: To report results, you must CALL the tool (not write it as text). Use the tool calling interface.**
+
 ### Successful Movement
-```
-report_lateral_success(
-    task_id="task-xxx",
-    target_host="192.168.56.10",
-    method="psexec",
-    new_credentials='[{"username": "localadmin", "hash": "..."}]'
-)
-```
+Call the `report_lateral_success` tool with:
+- task_id: The task ID you were assigned
+- target_host: The host you moved to
+- method: The method used (psexec, winrm, etc.)
+- new_credentials: JSON array of any credentials found
 
 ### Failed Movement
-```
-report_lateral_failed(
-    task_id="task-xxx",
-    target_host="192.168.56.10",
-    reason="Access denied - credential not valid for target"
-)
-```
+Call the `report_lateral_failed` tool with:
+- task_id: The task ID you were assigned
+- target_host: The target host
+- reason: Why movement failed
+
+**DO NOT write tool calls as code/text. Actually invoke the tool using your function calling capability.**
 
 ## Post-Exploitation Checklist
 

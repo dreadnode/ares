@@ -1236,7 +1236,14 @@ class SharedRedTeamState:
         credential.username = username
         credential.domain = domain
         credential.password = password
-        credential.source = f"{source_agent}:{credential.source}"
+        # Avoid repeated source prefix concatenation (e.g., during state restores/merges)
+        # Only prepend source_agent if it's not already in the source chain
+        if source_agent and credential.source:
+            # Check if source_agent is already at the start of source
+            if not credential.source.startswith(f"{source_agent}:"):
+                credential.source = f"{source_agent}:{credential.source}"
+        elif source_agent and not credential.source:
+            credential.source = source_agent
         self.all_credentials.append(credential)
         pending_key = f"{domain}:{username}".lower()
         self.pending_credential_findings.discard(pending_key)
@@ -1641,10 +1648,14 @@ class SharedRedTeamState:
         hash_obj.domain = domain
         hash_obj.username = username
         self.add_domain(domain)
-        if not getattr(hash_obj, "source", ""):
+        # Avoid repeated source prefix concatenation (e.g., during state restores/merges)
+        # Only prepend source_agent if it's not already in the source chain
+        existing_source = getattr(hash_obj, "source", "")
+        if source_agent and existing_source:
+            if not existing_source.startswith(f"{source_agent}:"):
+                hash_obj.source = f"{source_agent}:{existing_source}"
+        elif source_agent and not existing_source:
             hash_obj.source = source_agent
-        else:
-            hash_obj.source = f"{source_agent}:{hash_obj.source}"
         if not getattr(hash_obj, "discovered_at", None):
             hash_obj.discovered_at = datetime.now(timezone.utc)
         self.all_hashes.append(hash_obj)

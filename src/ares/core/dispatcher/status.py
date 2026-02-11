@@ -150,5 +150,25 @@ class StatusMixin:
             ],
         }
 
+    def get_throttle_status(self: RedTeamDispatcher) -> dict[str, Any]:
+        """Get throttling and deferred queue status for monitoring.
+
+        Returns dict with:
+            - llm_task_count: Current number of LLM tasks in flight
+            - max_concurrent_tasks: Configured limit
+            - deferred_queue: Status of deferred task queue
+            - phase: Current operation phase
+        """
+        from ares.core.config import get_max_concurrent_tasks
+
+        deferred_status = self.get_deferred_queue_status()
+        phase = self._get_operation_phase()
+
+        return {
+            "max_concurrent_tasks": get_max_concurrent_tasks(),
+            "phase": phase,
+            "deferred_queue": deferred_status,
+        }
+
 
 __all__ = ["StatusMixin"]
