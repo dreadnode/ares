@@ -31,7 +31,7 @@ repos:
     rev: v2.4.1
     hooks:
       - id: codespell
-        entry: codespell -q 3 -f --skip=".git,.github,README.md" --ignore-words-list="astroid,braket,unstall,infinit"
+        entry: codespell -q 3 -f --skip=".git,.github,README.md" --ignore-words-list="astroid"
 
   - repo: https://github.com/RodrigoGonzalez/check-mkdocs
     rev: v1.2.0
@@ -93,7 +93,6 @@ repos:
     rev: v1.19.1
     hooks:
       - id: mypy
-        exclude: ^tests/
         additional_dependencies:
           - "types-PyYAML"
           - "types-requests"
