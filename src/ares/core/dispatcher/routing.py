@@ -1269,11 +1269,14 @@ class RoutingMixin:
         }
 
         if self._task_queue:
+            # Use priority=1 (highest) for delegation enumeration - these are critical
+            # for discovering constrained delegation paths to Domain Admin
             task_id = await self._throttled_submit_task(
                 task_type="privesc_enumeration",
                 target_role="privesc",
                 payload=payload,
                 source_agent=source_agent,
+                priority=1,  # Highest priority - delegation discovery is critical path
             )
             if not task_id:
                 return ""

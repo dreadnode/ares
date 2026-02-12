@@ -361,7 +361,7 @@ class TestContextManagementSettings:
 
         config = OperationConfig()
 
-        assert config.max_context_tokens == 100_000
+        assert config.max_context_tokens == 75_000
         assert config.min_messages_to_keep == 10
         assert config.max_output_chars == 2000
 
@@ -406,7 +406,7 @@ class TestContextManagementSettings:
             config = _apply_env_overrides(config)
 
             # Should keep defaults when values are invalid
-            assert config.max_context_tokens == 100_000
+            assert config.max_context_tokens == 75_000
             assert config.min_messages_to_keep == 10
             assert config.max_output_chars == 2000
 
@@ -465,7 +465,7 @@ class TestContextManagementSettings:
             config = _build_config(config_data)
             config = _apply_env_overrides(config)
 
-            assert config.max_context_tokens == 75000
+            assert config.max_context_tokens == 100000
             # Other settings should use defaults
             assert config.min_messages_to_keep == 10
             assert config.max_output_chars == 2000

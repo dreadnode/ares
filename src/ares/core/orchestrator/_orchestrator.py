@@ -2191,7 +2191,7 @@ async def _auto_coercion(  # noqa: PLR0912
 
 async def _auto_delegation_enumeration(  # noqa: PLR0912
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 60.0,
+    check_interval: float = 15.0,
 ) -> None:
     """
     Background task that automatically runs delegation enumeration for discovered credentials.
@@ -2202,9 +2202,12 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
 
     These are high-value targets for privilege escalation.
 
+    Note: Immediate delegation dispatch also happens in publish_credential() for cracked
+    hashes. This periodic loop serves as a backup for other credential sources.
+
     Args:
         dispatcher: The dispatcher instance
-        check_interval: Seconds between checks for new credentials
+        check_interval: Seconds between checks for new credentials (default: 15s for faster detection)
     """
     # NOTE: Processed credentials are persisted in state.processed_delegation_creds
     # Format: "domain:username" - successful delegation enumerations

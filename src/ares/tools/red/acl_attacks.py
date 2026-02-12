@@ -393,7 +393,7 @@ class ACLExploitTools(Toolset):
             password,
             "--dc-ip",
             dc_ip,
-            "-t",
+            "--request-user",
             target_user,
         ]
 

@@ -192,6 +192,11 @@ def create_role_hooks(
     hooks = []
     log_name = display_name or role.value
 
+    # Circuit breaker state - track consecutive failures per tool
+    # This prevents agents from infinitely retrying the same failing approach
+    consecutive_failures: dict[str, int] = {}
+    circuit_breaker_threshold = 3  # Stop after 3 consecutive failures on same tool
+
     # Common logging hooks
     async def log_tool_usage(event: ToolStart):
         """Log tool calls for observability."""
@@ -199,39 +204,77 @@ def create_role_hooks(
             logger.info(f"🔧 [{log_name}] Tool: {event.tool_call.name}")
             dn.log_metric(f"multiagent_{log_name}_tool_{event.tool_call.name}", 1, mode="count")
 
-    async def log_tool_result(event: ToolEnd):
-        """Log tool results."""
+    async def log_tool_result(event: ToolEnd) -> Reaction | None:  # noqa: PLR0912
+        """Log tool results and apply circuit breaker for repeated failures."""
         if not isinstance(event, ToolEnd):
-            return
+            return None
 
-        if hasattr(event, "tool_call") and event.tool_call:
-            if hasattr(event, "error") and event.error:
-                logger.warning(f"❌ [{log_name}] {event.tool_call.name} failed: {event.error}")
+        if not (hasattr(event, "tool_call") and event.tool_call):
+            return None
+
+        tool_name = event.tool_call.name
+        is_error = False
+
+        if hasattr(event, "error") and event.error:
+            is_error = True
+            logger.warning(f"❌ [{log_name}] {tool_name} failed: {event.error}")
+        else:
+            content = fix_tool_output_encoding(
+                str(event.message.content) if event.message and event.message.content else ""
+            )
+            if not content:
+                logger.info(f"✅ [{log_name}] {tool_name}: (empty)")
             else:
-                content = fix_tool_output_encoding(
-                    str(event.message.content) if event.message and event.message.content else ""
+                # Detect error content returned by rigging's exception catching
+                # (ValidationError, JSONDecodeError are caught and returned as error XML)
+                # Also detect common tool failure patterns
+                is_error = (
+                    content.startswith('<error type="')
+                    or "ValidationError" in content
+                    or "Login failed" in content
+                    or "timed out" in content.lower()
+                    or "[-] ERROR" in content
                 )
-                if not content:
-                    logger.info(f"✅ [{log_name}] {event.tool_call.name}: (empty)")
-                else:
-                    # Detect error content returned by rigging's exception catching
-                    # (ValidationError, JSONDecodeError are caught and returned as error XML)
-                    is_error = content.startswith('<error type="') or "ValidationError" in content
-                    icon = "❌" if is_error else "✅"
-                    log_fn = logger.warning if is_error else logger.info
+                icon = "❌" if is_error else "✅"
+                log_fn = logger.warning if is_error else logger.info
 
-                    # Show first 50 lines, max 5000 chars
-                    lines = content.split("\n")[:50]
-                    result = "\n".join(lines)
-                    truncated = len(lines) < len(content.split("\n")) or len(content) > 5000
-                    if len(result) > 5000:
-                        result = result[:5000]
-                        truncated = True
-                    suffix = " ..." if truncated else ""
-                    if "\n" in result:
-                        log_fn(f"{icon} [{log_name}] {event.tool_call.name}:\n{result}{suffix}")
-                    else:
-                        log_fn(f"{icon} [{log_name}] {event.tool_call.name}: {result}{suffix}")
+                # Show first 50 lines, max 5000 chars
+                lines = content.split("\n")[:50]
+                result = "\n".join(lines)
+                truncated = len(lines) < len(content.split("\n")) or len(content) > 5000
+                if len(result) > 5000:
+                    result = result[:5000]
+                    truncated = True
+                suffix = " ..." if truncated else ""
+                if "\n" in result:
+                    log_fn(f"{icon} [{log_name}] {tool_name}:\n{result}{suffix}")
+                else:
+                    log_fn(f"{icon} [{log_name}] {tool_name}: {result}{suffix}")
+
+        # Circuit breaker logic
+        if is_error:
+            consecutive_failures[tool_name] = consecutive_failures.get(tool_name, 0) + 1
+            fail_count = consecutive_failures[tool_name]
+
+            if fail_count >= circuit_breaker_threshold:
+                logger.error(
+                    f"🔌 [{log_name}] Circuit breaker tripped: {tool_name} failed "
+                    f"{fail_count} times consecutively - stopping agent"
+                )
+                return Finish(
+                    reason=f"Circuit breaker: {tool_name} failed {fail_count} times consecutively. "
+                    "The approach is not working - task will be retried with a different strategy."
+                )
+            if fail_count >= 2:
+                logger.warning(
+                    f"⚠️ [{log_name}] {tool_name} failed {fail_count}x consecutively "
+                    f"(circuit breaker at {circuit_breaker_threshold})"
+                )
+        else:
+            # Reset failure counter on success
+            consecutive_failures[tool_name] = 0
+
+        return None
 
     hooks.extend([log_tool_usage, log_tool_result])
 

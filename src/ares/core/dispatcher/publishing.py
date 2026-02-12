@@ -84,6 +84,37 @@ class PublishingMixin:
             )
             await self._checkpoint()
             logger.info(f"Credential published: {credential.domain}\\{credential.username}")
+
+            # Immediate delegation check for high-value credentials (cracked hashes)
+            # Cracked Kerberoast/AS-REP hashes may have constrained delegation rights
+            is_cracked = credential.source and (
+                "cracker" in credential.source.lower()
+                or "cracked" in credential.source.lower()
+                or "kerberoast" in credential.source.lower()
+                or "asrep" in credential.source.lower()
+            )
+            if is_cracked and credential.password and credential.domain:
+                cred_key = f"{credential.domain.lower()}:{credential.username.lower()}"
+                if cred_key not in self.shared_state.processed_delegation_creds:
+                    logger.info(
+                        f"🚀 Immediate delegation check for cracked credential: "
+                        f"{credential.domain}\\{credential.username}"
+                    )
+                    try:
+                        task_id = await self.request_privesc_enumeration(
+                            source_agent="orchestrator",
+                            domain=credential.domain,
+                            username=credential.username,
+                            password=credential.password,
+                            techniques=["find_delegation"],
+                        )
+                        if task_id:
+                            logger.info(
+                                f"🚀 Immediate delegation task {task_id} dispatched for "
+                                f"{credential.domain}\\{credential.username}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"Failed to dispatch immediate delegation check: {e}")
         else:
             logger.debug(
                 f"Credential not published (duplicate/invalid): {credential.domain}\\{credential.username}"

@@ -64,6 +64,11 @@ if TYPE_CHECKING:
 RATE_LIMIT_BACKOFF_DELAYS = [5.0, 10.0, 20.0, 40.0, 60.0, 60.0]  # 6 retries with short waits
 RATE_LIMIT_MAX_RETRIES = len(RATE_LIMIT_BACKOFF_DELAYS)
 
+# Task-level timeout to prevent agents from running indefinitely on a single task.
+# This prevents infinite retry loops where the LLM keeps trying the same failing approach.
+# 5 minutes is enough for most legitimate tasks while preventing 20+ minute stalls.
+AGENT_TASK_TIMEOUT_SECONDS = 300
+
 
 def _update_etc_hosts(hosts_list: list, written_ips: set[str], agent_name: str) -> set[str]:
     """Update /etc/hosts with discovered hosts for DNS resolution.
@@ -525,59 +530,76 @@ class RedisWorkerAgent:
                 )
                 return
 
-            # Run agent with rate limit retry
+            # Run agent with rate limit retry and task-level timeout
             # Note: Rate limit errors can appear as:
             # 1. Exceptions raised during _run_agent()
             # 2. Errors returned in result.error or result.last_error (dreadnode SDK catches them)
             result = None
             last_rate_limit_error: str | Exception | None = None
-            for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
-                try:
-                    attempt_msg = (
-                        f" (retry {attempt}/{RATE_LIMIT_MAX_RETRIES})" if attempt > 0 else ""
-                    )
-                    logger.info(
-                        f"[{self.agent_name}] Running agent for task {task.task_id}{attempt_msg}"
-                    )
-                    result = await self._run_agent(prompt)
-
-                    # Check if rate limit error was returned in result (SDK catches exceptions)
-                    result_error = getattr(result, "error", None) or getattr(
-                        result, "last_error", None
-                    )
-                    if result_error and _is_rate_limit_error(Exception(str(result_error))):
-                        if attempt < RATE_LIMIT_MAX_RETRIES:
-                            delay = RATE_LIMIT_BACKOFF_DELAYS[attempt]
-                            logger.warning(
-                                f"[{self.agent_name}] ⏳ Rate limit in result for task {task.task_id}, "
-                                f"backing off {delay}s (attempt {attempt + 1}/{RATE_LIMIT_MAX_RETRIES}): "
-                                f"{result_error}"
+            try:
+                async with asyncio.timeout(AGENT_TASK_TIMEOUT_SECONDS):
+                    for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+                        try:
+                            attempt_msg = (
+                                f" (retry {attempt}/{RATE_LIMIT_MAX_RETRIES})"
+                                if attempt > 0
+                                else ""
                             )
-                            last_rate_limit_error = str(result_error)
-                            result = None  # Clear result to retry
-                            await asyncio.sleep(delay)
-                            continue
-                        # Out of retries - will be handled below
-                        last_rate_limit_error = str(result_error)
-                        result = None
-                        break
+                            logger.info(
+                                f"[{self.agent_name}] Running agent for task {task.task_id}{attempt_msg}"
+                            )
+                            result = await self._run_agent(prompt)
 
-                    if attempt > 0:
-                        logger.success(
-                            f"[{self.agent_name}] Task {task.task_id} succeeded after {attempt} retries"
-                        )
-                    break  # Success, exit retry loop
-                except Exception as e:
-                    if _is_rate_limit_error(e) and attempt < RATE_LIMIT_MAX_RETRIES:
-                        delay = RATE_LIMIT_BACKOFF_DELAYS[attempt]
-                        logger.warning(
-                            f"[{self.agent_name}] ⏳ Rate limit exception for task {task.task_id}, "
-                            f"backing off {delay}s (attempt {attempt + 1}/{RATE_LIMIT_MAX_RETRIES}): {e}"
-                        )
-                        last_rate_limit_error = e
-                        await asyncio.sleep(delay)
-                        continue
-                    raise  # Re-raise if not rate limit or out of retries
+                            # Check if rate limit error was returned in result (SDK catches exceptions)
+                            result_error = getattr(result, "error", None) or getattr(
+                                result, "last_error", None
+                            )
+                            if result_error and _is_rate_limit_error(Exception(str(result_error))):
+                                if attempt < RATE_LIMIT_MAX_RETRIES:
+                                    delay = RATE_LIMIT_BACKOFF_DELAYS[attempt]
+                                    logger.warning(
+                                        f"[{self.agent_name}] ⏳ Rate limit in result for task {task.task_id}, "
+                                        f"backing off {delay}s (attempt {attempt + 1}/{RATE_LIMIT_MAX_RETRIES}): "
+                                        f"{result_error}"
+                                    )
+                                    last_rate_limit_error = str(result_error)
+                                    result = None  # Clear result to retry
+                                    await asyncio.sleep(delay)
+                                    continue
+                                # Out of retries - will be handled below
+                                last_rate_limit_error = str(result_error)
+                                result = None
+                                break
+
+                            if attempt > 0:
+                                logger.success(
+                                    f"[{self.agent_name}] Task {task.task_id} succeeded after {attempt} retries"
+                                )
+                            break  # Success, exit retry loop
+                        except Exception as e:
+                            if _is_rate_limit_error(e) and attempt < RATE_LIMIT_MAX_RETRIES:
+                                delay = RATE_LIMIT_BACKOFF_DELAYS[attempt]
+                                logger.warning(
+                                    f"[{self.agent_name}] ⏳ Rate limit exception for task {task.task_id}, "
+                                    f"backing off {delay}s (attempt {attempt + 1}/{RATE_LIMIT_MAX_RETRIES}): {e}"
+                                )
+                                last_rate_limit_error = e
+                                await asyncio.sleep(delay)
+                                continue
+                            raise  # Re-raise if not rate limit or out of retries
+            except TimeoutError:
+                logger.warning(
+                    f"[{self.agent_name}] ⏱️ Task {task.task_id} timed out after "
+                    f"{AGENT_TASK_TIMEOUT_SECONDS}s - agent stuck in retry loop"
+                )
+                await self.task_queue.send_result(
+                    task_id=task.task_id,
+                    success=False,
+                    error=f"Task timeout: agent exceeded {AGENT_TASK_TIMEOUT_SECONDS}s limit",
+                    worker_pod=self.pod_name,
+                    agent_name=self.agent_name,
+                )
+                return
 
             if result is None:
                 # All retries exhausted due to rate limits

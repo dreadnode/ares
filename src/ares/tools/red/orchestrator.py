@@ -13,6 +13,8 @@ import dreadnode as dn
 from dreadnode.agent.tools import Toolset
 from loguru import logger
 
+from ares.core.config import get_default_network_interface
+
 
 def _ip_in_targets(ip: str, targets: list[str]) -> bool:
     """Check if IP falls within any target range (individual IP or CIDR)."""
@@ -755,7 +757,7 @@ class OrchestratorTools(Toolset):
     @dn.tool_method
     async def start_coercion(
         self,
-        interface: str = "eth0",
+        interface: str | None = None,
         techniques: str = "LLMNR,NBT-NS,mDNS",
         duration: int = 300,
         wait_for_result: bool = False,
@@ -767,7 +769,7 @@ class OrchestratorTools(Toolset):
         The coercion agent will run responder/mitm6 to capture hashes.
 
         Args:
-            interface: Network interface to use
+            interface: Network interface to use (auto-detected if not specified)
             techniques: Comma-separated coercion techniques (LLMNR, NBT-NS, mDNS)
             duration: How long to run in seconds (default: 300)
             wait_for_result: If True, wait for coercion to complete
@@ -778,11 +780,15 @@ class OrchestratorTools(Toolset):
 
         Example:
             >>> start_coercion(
-            ...     interface="eth0",
             ...     techniques="LLMNR,NBT-NS",
             ...     duration=600
             ... )
         """
+        # Auto-detect interface if not specified (handles AWS ens5 vs eth0)
+        if interface is None:
+            interface = get_default_network_interface()
+            logger.debug(f"Auto-detected network interface: {interface}")
+
         tech_list = [t.strip() for t in techniques.split(",")]
 
         task_id = await self.dispatcher.request_coercion(
