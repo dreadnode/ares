@@ -57,17 +57,39 @@ async def test_create_multi_agent_ensemble_uses_env_models(monkeypatch):
     assert mock_create.call_args_list[1].kwargs["model"] == "worker-model"
 
 
-def test_create_specialized_agent_uses_set_state_when_shared_state_missing(monkeypatch):
-    created: dict[str, MagicMock] = {}
+def test_create_specialized_agent_uses_set_state(monkeypatch):
+    """Test that create_specialized_agent calls set_state on all toolsets."""
+    created_instances: list[MagicMock] = []
 
     class DummyToolset:
         def __init__(self) -> None:
             self.set_state = MagicMock()
-            created["instance"] = self
+            self.set_dispatcher = MagicMock()
+            created_instances.append(self)
 
+        def get_tools(self, *, variant=None):
+            # Return a mock tool to ensure toolset is included
+            mock_tool = MagicMock()
+            mock_tool.name = "nmap_scan"  # Match a capability
+            return [mock_tool]
+
+    # Mock ALL_TOOLSETS and UNIVERSAL_TOOLSETS to use our dummy
     monkeypatch.setattr(
-        "ares.core.factories.red_agents.ROLE_TOOLSETS",
-        {AgentRole.RECON: [DummyToolset]},
+        "ares.core.factories.red_agents.ALL_TOOLSETS",
+        [DummyToolset],
+    )
+    monkeypatch.setattr(
+        "ares.core.factories.red_agents.UNIVERSAL_TOOLSETS",
+        [],
+    )
+    monkeypatch.setattr(
+        "ares.core.factories.red_agents.ROLE_CALLBACK_TOOLS",
+        {},
+    )
+    # Mock get_enabled_tools to return our tool name
+    monkeypatch.setattr(
+        "ares.core.factories.red_agents.get_enabled_tools",
+        lambda _caps: {"nmap_scan"},
     )
     monkeypatch.setattr(
         "ares.core.factories.red_agents.load_agent_instructions",
@@ -91,7 +113,9 @@ def test_create_specialized_agent_uses_set_state_when_shared_state_missing(monke
         dispatcher=dispatcher,
     )
 
-    created["instance"].set_state.assert_called_once_with(shared_state)
+    # Verify set_state was called on at least one toolset instance
+    assert len(created_instances) > 0, "No toolset instances created"
+    created_instances[0].set_state.assert_called_once_with(shared_state)
 
 
 class TestCapabilitiesFromConfig:
@@ -194,23 +218,28 @@ class TestCapabilitiesFromConfig:
 
         clear_config_cache()  # Ensure fresh load
 
-        # Test that privesc has the new tools we added
+        # Test that privesc has the configured tools
         privesc_config = get_agent_config("privesc")
-        assert "sweetpotato" in privesc_config.capabilities
-        assert "sharpgpoabuse" in privesc_config.capabilities
         assert "certipy" in privesc_config.capabilities
+        assert "impacket-getst" in privesc_config.capabilities  # getST for S4U attacks
 
-        # Test that recon has the impacket tools
+        # Test that recon has enumeration tools
         recon_config = get_agent_config("recon")
-        assert "impacket-getnpusers" in recon_config.capabilities
-        assert "impacket-secretsdump" in recon_config.capabilities
+        assert "nmap" in recon_config.capabilities
+        assert "bloodhound-python" in recon_config.capabilities
+        assert "netexec" in recon_config.capabilities
 
-        # Test that credential_access has rpcclient
+        # Test that credential_access has credential harvesting tools
         cred_config = get_agent_config("credential_access")
         assert "rpcclient" in cred_config.capabilities
-        assert "netexec" in cred_config.capabilities
-        assert "ldapsearch" in cred_config.capabilities
         assert "smbclient" in cred_config.capabilities
+        assert "impacket-secretsdump" in cred_config.capabilities
+
+        # Test that lateral has movement tools
+        lateral_config = get_agent_config("lateral")
+        assert "evil-winrm" in lateral_config.capabilities
+        assert "impacket-psexec" in lateral_config.capabilities
+        assert "impacket-secretsdump" in lateral_config.capabilities
 
     def test_template_renders_capabilities_from_config(self):
         """Integration test: verify templates render capabilities from config."""

@@ -7,6 +7,7 @@ and consuming task results from Redis.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,10 @@ if TYPE_CHECKING:
 
 class MonitoringMixin:
     """Heartbeat and result monitoring for agent health and task completion."""
+
+    # Rate-limit noisy warnings (class-level to persist across calls)
+    _last_hard_cap_warning: float = 0.0
+    _hard_cap_warning_interval: float = 30.0  # Only log every 30 seconds
 
     async def heartbeat(
         self: RedTeamDispatcher,
@@ -244,10 +249,17 @@ class MonitoringMixin:
         effective_timeout = stale_timeout // 2 if is_at_hard_cap else stale_timeout
 
         if is_at_hard_cap:
-            logger.warning(
-                f"Throttle at HARD CAP ({llm_count}/{hard_cap}) - "
-                f"using aggressive stale timeout ({effective_timeout}s)"
-            )
+            # Rate-limit this warning to avoid log spam (runs every 1s in the loop)
+            current_time = time.monotonic()
+            if (
+                current_time - MonitoringMixin._last_hard_cap_warning
+                >= MonitoringMixin._hard_cap_warning_interval
+            ):
+                MonitoringMixin._last_hard_cap_warning = current_time
+                logger.warning(
+                    f"Throttle at HARD CAP ({llm_count}/{hard_cap}) - "
+                    f"using aggressive stale timeout ({effective_timeout}s)"
+                )
 
         for task_id, task_info in list(self._shared_state.pending_tasks.items()):
             # Only clean up tasks still in PENDING or IN_PROGRESS

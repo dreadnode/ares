@@ -1034,6 +1034,30 @@ class SharedRedTeamState:
             return list(self.downloaded_artifacts.keys())
         return [k for k in self.downloaded_artifacts if k.startswith(prefix)]
 
+    def _merge_source(self, source_agent: str, existing_source: str) -> str:
+        """Merge source_agent with existing source, avoiding duplicate prefixes.
+
+        Handles cases like:
+        - source_agent="Task input (x)", existing="x" → "Task input (x)"
+        - source_agent="orchestrator", existing="worker:tool" → "orchestrator:worker:tool"
+        - source_agent="x", existing="x" → "x" (no duplication)
+        """
+        if not source_agent:
+            return existing_source or ""
+        if not existing_source:
+            return source_agent
+
+        # Skip concatenation if equal or already prefixed
+        if source_agent == existing_source or existing_source.startswith(f"{source_agent}:"):
+            return existing_source
+
+        # Skip if one contains the other (task ID pattern overlap)
+        if source_agent in existing_source or existing_source in source_agent:
+            # Keep the more descriptive one
+            return source_agent if len(source_agent) > len(existing_source) else existing_source
+
+        return f"{source_agent}:{existing_source}"
+
     def _resolve_netbios_to_fqdn(self, netbios_name: str) -> str:
         """Resolve a NetBIOS domain name to its FQDN equivalent.
 
@@ -1241,14 +1265,8 @@ class SharedRedTeamState:
         credential.username = username
         credential.domain = domain
         credential.password = password
-        # Avoid repeated source prefix concatenation (e.g., during state restores/merges)
-        # Only prepend source_agent if it's not already in the source chain
-        if source_agent and credential.source:
-            # Check if source_agent is already at the start of source
-            if not credential.source.startswith(f"{source_agent}:"):
-                credential.source = f"{source_agent}:{credential.source}"
-        elif source_agent and not credential.source:
-            credential.source = source_agent
+        # Set credential source, avoiding duplicate prefixes
+        credential.source = self._merge_source(source_agent, credential.source)
         self.all_credentials.append(credential)
         pending_key = f"{domain}:{username}".lower()
         self.pending_credential_findings.discard(pending_key)

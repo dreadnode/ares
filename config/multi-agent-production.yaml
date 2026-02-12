@@ -87,6 +87,7 @@ agents:
       - sprayhound
       - targetedkerberoast
       - lsassy
+      - gMSADumper
       # Impacket
       - impacket-getnpusers
       - impacket-secretsdump
@@ -135,18 +136,24 @@ agents:
       - addspn
       - dnstool
       # Impacket
+      - impacket-findDelegation
       - impacket-getst
       - impacket-gettgt
       - impacket-rbcd
+      - impacket-addcomputer
+      - impacket-lookupsid
       - impacket-mssqlclient
       - impacket-raisechild
       - impacket-ticketer
+      - impacket-secretsdump  # S4U → secretsdump chain must complete on same pod
+      - impacket-psexec       # S4U → psexec chain must complete on same pod
       # Windows privesc binaries
       - printspoofer
       - godpotato
       - sweetpotato
       - krbrelayup
       - sharpgpoabuse
+      - pygpoabuse
       - seatbelt
       - sharpup
       - runascs
@@ -157,6 +164,7 @@ agents:
       - linpeas
       # CVE exploits
       - printnightmare
+      - zerologon
       - scmuacbypass
 
   lateral:

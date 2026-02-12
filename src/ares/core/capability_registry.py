@@ -30,6 +30,9 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
         "enumerate_users",
         "enumerate_shares",
         "password_spray",
+        "username_as_password",
+        "password_policy",
+        "laps_dump",  # netexec ldap -M laps
         "check_credman_entries",
         "check_autologon_registry",
         "check_lm_compatibility_level",
@@ -38,6 +41,7 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
         "smbclient_spider",
         "gpp_password_finder",
         "sysvol_script_search",
+        "domain_admin_checker",  # netexec smb -x whoami
     ],
     "rpcclient": ["enumerate_users", "force_change_password"],
     "ldapsearch": [
@@ -193,14 +197,6 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
         "check_winrm_reachability",
         "save_users_to_file",
     ],
-    # ===================
-    # Special: Domain Admin Checker
-    # ===================
-    "domain_admin_checker": ["domain_admin_checker"],
-    # ===================
-    # LAPS
-    # ===================
-    "laps": ["laps_dump"],
 }
 
 

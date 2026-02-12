@@ -565,6 +565,7 @@ class PublishingMixin:
                 target_role="privesc",
                 payload=payload,
                 source_agent=source_agent,
+                priority=1,  # Exploit tasks get highest priority
             )
             if not task_id:
                 return ""

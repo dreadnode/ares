@@ -754,7 +754,7 @@ All agents inherit these foundational tools:
 ### CREDENTIAL_ACCESS Agent
 
 - **SMB**: smbclient, samba-common-bin (rpcclient)
-- **AD tools**: sprayhound, targetedKerberoast, lsassy
+- **AD tools**: sprayhound, targetedKerberoast, lsassy, gMSADumper
 - **Impacket suite**: GetNPUsers, secretsdump
 
 ### CRACKER Agent
@@ -774,11 +774,11 @@ All agents inherit these foundational tools:
 - **ADCS**: certipy-ad (certipy)
 - **Kerberos**: noPac, krbrelayx (printerbug, addspn, dnstool)
 - **Credential extraction**: lsassy (LSASS dumping for TGT extraction)
-- **Impacket suite**: getST, getTGT, rbcd, mssqlclient, raiseChild
+- **Impacket suite**: findDelegation, getST, getTGT, rbcd, addcomputer, lookupsid, mssqlclient, raiseChild, ticketer
 - **Windows privesc binaries**: PrintSpoofer, GodPotato, SweetPotato,
-  KrbRelayUp, SharpGPOAbuse, Seatbelt, SharpUp, RunasCs
+  KrbRelayUp, SharpGPOAbuse, pyGPOAbuse, Seatbelt, SharpUp, RunasCs
 - **Privesc scripts**: PowerUp, PowerUpSQL, WinPEAS, LinPEAS
-- **Exploits**: PrintNightmare, SCMUACBypass (optional)
+- **Exploits**: PrintNightmare, Zerologon, SCMUACBypass (optional)
 
 ### LATERAL Agent
 

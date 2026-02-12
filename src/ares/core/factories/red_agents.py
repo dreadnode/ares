@@ -198,6 +198,9 @@ def create_role_hooks(
     # This prevents agents from infinitely retrying the same failing approach
     consecutive_failures: dict[str, int] = {}
     circuit_breaker_threshold = 3  # Stop after 3 consecutive failures on same tool
+    circuit_breaker_tripped = (
+        False  # Flag to prevent redundant Finish reactions from parallel calls
+    )
 
     # Common logging hooks
     async def log_tool_usage(event: ToolStart):
@@ -254,11 +257,20 @@ def create_role_hooks(
                     log_fn(f"{icon} [{log_name}] {tool_name}: {result}{suffix}")
 
         # Circuit breaker logic
+        # Use nonlocal to modify the tripped flag
+        nonlocal circuit_breaker_tripped
+
+        # If already tripped, return Finish immediately to stop parallel calls
+        if circuit_breaker_tripped:
+            return Finish(reason="Circuit breaker already tripped - stopping agent")
+
         if is_error:
             consecutive_failures[tool_name] = consecutive_failures.get(tool_name, 0) + 1
             fail_count = consecutive_failures[tool_name]
 
             if fail_count >= circuit_breaker_threshold:
+                # Set flag BEFORE returning to prevent race with parallel calls
+                circuit_breaker_tripped = True
                 logger.error(
                     f"🔌 [{log_name}] Circuit breaker tripped: {tool_name} failed "
                     f"{fail_count} times consecutively - stopping agent"

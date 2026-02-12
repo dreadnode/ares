@@ -2137,7 +2137,8 @@ async def run_worker(  # noqa: PLR0912
             logger.info("Worker connected to Redis task queue")
 
         # Create dispatcher for state management and fallback messaging
-        dispatcher = RedTeamDispatcher(redis_url=redis_url)
+        # Workers don't need result consumer (they send results, not consume them)
+        dispatcher = RedTeamDispatcher(redis_url=redis_url, is_orchestrator=False)
         await dispatcher.start(operation_id)
 
         # Try to recover existing state

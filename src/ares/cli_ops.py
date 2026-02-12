@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import shutil
 import sys
 import uuid
@@ -476,6 +477,129 @@ def _dedup_hashes(hashes: list) -> list:
     return result
 
 
+def _normalize_source_label(source: str) -> str:
+    """Convert internal source identifiers to human-readable labels.
+
+    Maps task types, tool names, and internal identifiers to clean labels
+    for display in loot output.
+    """
+    if not source:
+        return "Unknown"
+
+    # Remove duplicate source patterns (e.g., "Task input (x):Task input (x)")
+    if ":" in source:
+        parts = source.split(":")
+        if len(parts) >= 2 and parts[0] == parts[1]:
+            source = parts[0]
+
+    # Strip "Task input (...)" wrapper - extract task type from task ID
+    lower = source.lower()
+    if "task input" in lower:
+        # Extract task type from "Task input (exploit_xxx)" -> "exploit"
+        match = re.search(r"\((\w+)_[a-f0-9]+\)", source)
+        if match:
+            source = match.group(1)
+            lower = source.lower()  # Update lower for label lookup
+
+    # Map internal names to human-readable labels
+    label_map = {
+        # Task types
+        "exploit": "Exploitation",
+        "recon": "Reconnaissance",
+        "lateral": "Lateral Movement",
+        "privesc": "Privilege Escalation",
+        "privesc_enumeration": "Privesc Enumeration",
+        "credential_access": "Credential Access",
+        "acl_analysis": "ACL Analysis",
+        "crack": "Password Cracking",
+        # Tool-based sources
+        "netexec_user_enum": "NetExec User Enum",
+        "netexec_smb": "NetExec SMB",
+        "bloodhound": "BloodHound",
+        "kerberoast": "Kerberoasting",
+        "asreproast": "AS-REP Roasting",
+        "secretsdump": "Secretsdump",  # pragma: allowlist secret
+        "lsassy": "LSASSY",
+        "share_spider": "Share Spider",
+        "gpp_password": "GPP Passwords",  # nosec B105 # pragma: allowlist secret
+        "ldap_search": "LDAP Search",
+        "kerberos_noauth": "Kerberos Enum",
+        "user_description": "LDAP Description",
+        "manual-inject": "Manual Injection",
+        # Generic fallbacks
+        "worker": "Agent Discovery",
+        "task": "Task Output",
+        "unknown": "Unknown",
+    }
+
+    # Check for exact match first
+    if lower in label_map:
+        return label_map[lower]
+
+    # Check for prefix matches (e.g., "recon_task" -> "Reconnaissance")
+    for key, label in label_map.items():
+        if lower.startswith(key):
+            return label
+
+    # Check for task ID patterns (e.g., "exploit_abc123" -> "Exploitation")
+    task_match = re.match(r"^(\w+)_[a-f0-9]{8,}$", lower)
+    if task_match:
+        task_type = task_match.group(1)
+        if task_type in label_map:
+            return label_map[task_type]
+
+    # Return original with title case if no mapping found
+    return source.replace("_", " ").title()
+
+
+def _parse_weakness_block(block: str) -> dict[str, str]:
+    """Parse a markdown weakness block into structured fields.
+
+    Weakness blocks have this format:
+        ### Title Here
+        **Vulnerability:** Description
+        - **Affected Resource:** resource
+        - **Discovery Method:** method
+        - **Impact:** impact text
+
+    Returns:
+        Dictionary with keys: title, vulnerability, affected_resource,
+        discovery_method, impact, attack_path
+    """
+    result: dict[str, str] = {}
+
+    if not block:
+        return result
+
+    lines = block.strip().split("\n")
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+
+        # Parse title (### Title or **Title**)
+        if stripped.startswith("### "):
+            result["title"] = stripped[4:].strip()
+        elif stripped.startswith("**") and ":**" not in stripped and stripped.endswith("**"):
+            # Bold title without colon (e.g., **Domain Admin Achieved**)
+            result["title"] = stripped.strip("*").strip()
+
+        # Parse **Key:** Value patterns (e.g., "**Vulnerability:** text" or "- **Impact:** text")
+        # Note: The colon is inside the bold markers: **Key:**
+        elif ":**" in stripped:
+            # Handle both "**Key:** Value" and "- **Key:** Value"
+            clean = stripped.lstrip("-").strip()
+            # Match **Key:** patterns where colon is inside the bold
+            match = re.match(r"\*\*([^*:]+):\*\*\s*(.*)$", clean)
+            if match:
+                key = match.group(1).strip().lower().replace(" ", "_")
+                value = match.group(2).strip()
+                result[key] = value
+
+    return result
+
+
 def _loot_snapshot(state) -> dict:
     """Build a snapshot dict of all loot for diffing."""
     return {
@@ -634,6 +758,7 @@ def _print_loot(state, *, json_output: bool = False) -> None:
     users_by_source: dict[str, list] = {}
     for user in unique_users:
         src = user.source if hasattr(user, "source") and user.source else "unknown"
+        src = _normalize_source_label(src)
         users_by_source.setdefault(src, []).append(user)
     for src, users in sorted(users_by_source.items()):
         print(f"  [{src}] ({len(users)})")
@@ -667,10 +792,29 @@ def _print_loot(state, *, json_output: bool = False) -> None:
         print(f"  - {line}")
     print()
 
-    # Weaknesses
+    # Weaknesses - parse markdown blocks and display cleanly
     print(f"Weaknesses ({len(state.all_weaknesses)}):")
-    for w in state.all_weaknesses or ["None"]:
-        print(f"  - {w}")
+    if not state.all_weaknesses:
+        print("  None")
+    else:
+        for i, w in enumerate(state.all_weaknesses, 1):
+            parsed = _parse_weakness_block(w)
+            title = parsed.get("title", "Untitled Weakness")
+            vuln = parsed.get("vulnerability", "")
+            impact = parsed.get("impact", "")
+            resource = parsed.get("affected_resource", "")
+
+            # Print compact summary
+            print(f"  {i}. {title}")
+            if vuln:
+                # Truncate long vulnerability descriptions
+                vuln_display = vuln[:80] + "..." if len(vuln) > 80 else vuln
+                print(f"     └─ {vuln_display}")
+            if resource:
+                print(f"     Resource: {resource}")
+            if impact:
+                impact_display = impact[:60] + "..." if len(impact) > 60 else impact
+                print(f"     Impact: {impact_display}")
 
 
 def _print_diff(prev_snapshot: dict, curr_snapshot: dict, state) -> None:

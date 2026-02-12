@@ -760,6 +760,34 @@ class RoutingMixin:
         # Normalize domain to FQDN format
         domain = self._normalize_domain(domain)
 
+        # PREREQUISITE CHECK: ACL analysis requires BloodHound data
+        # The ACL agent only has exploitation tools, not collection capability.
+        # If BloodHound hasn't run for this domain, dispatch it first and defer ACL analysis.
+        domain_lower = domain.lower()
+        if domain_lower not in self.shared_state.processed_bloodhound_domains:
+            logger.info(
+                f"ACL analysis for {target_user}@{domain} deferred - BloodHound not yet run. "
+                f"Dispatching BloodHound collection first."
+            )
+            # Find credential for BloodHound collection
+            credential = self._find_domain_credential(domain)
+            if credential and credential.password:
+                await self.request_recon(
+                    source_agent=source_agent,
+                    domain=domain,
+                    username=credential.username,
+                    password=credential.password,
+                    reason="bloodhound",
+                    techniques=["run_bloodhound"],
+                )
+            else:
+                logger.warning(
+                    f"Cannot dispatch BloodHound for {domain} - no password credential available. "
+                    f"ACL analysis will remain blocked until BloodHound data is collected."
+                )
+            # Return empty - ACL analysis will be retried by orchestrator after BloodHound completes
+            return ""
+
         credential = self._find_domain_credential(domain)
         dc_ip = self._find_domain_controller_ip(domain)
 
@@ -1157,11 +1185,16 @@ class RoutingMixin:
                 logger.info(f"Resolved dc_ip={dc_ip} for exploit {vuln_type}")
 
         if self._task_queue:
+            # Use priority=1 (highest) - exploit tasks are the actual DA path.
+            # Combined with phase adjustment (-2 in privilege_escalation),
+            # exploits will have effective priority -1 → clamped to 1,
+            # beating discovery tasks (priority=2 after +1 adjustment).
             task_id = await self._throttled_submit_task(
                 task_type="exploit",
                 target_role="privesc",
                 payload=payload,
                 source_agent=source_agent,
+                priority=1,
             )
             if not task_id:
                 return ""

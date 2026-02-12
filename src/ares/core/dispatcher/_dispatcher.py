@@ -93,14 +93,18 @@ class RedTeamDispatcher(
         task_id = await dispatcher.request_crack(hash_data, "orchestrator")
     """
 
-    def __init__(self, redis_url: str | None = None):
+    def __init__(self, redis_url: str | None = None, *, is_orchestrator: bool = True):
         """
         Initialize the dispatcher.
 
         Args:
             redis_url: Optional Redis URL for state persistence and task queuing.
                        If not provided, uses in-memory state only.
+            is_orchestrator: Whether this dispatcher is for the orchestrator (True) or
+                            a worker (False). Workers don't run result consumer or
+                            stale task cleanup since they only send results, not consume them.
         """
+        self._is_orchestrator = is_orchestrator
         self._agents: dict[str, AgentInfo] = {}
         self._message_queues: dict[str, Queue[AgentMessage]] = {}
         self._shared_state: SharedRedTeamState | None = None
@@ -207,8 +211,11 @@ class RedTeamDispatcher(
         # Start background tasks
         self._heartbeat_task = asyncio.create_task(self._heartbeat_monitor())
 
-        # Start result consumer for Redis-based task completion
-        if self._task_queue:
+        # Start result consumer for Redis-based task completion (orchestrator only)
+        # Workers send results via task_queue.send_result(), they don't consume them.
+        # Running result consumer on workers causes spurious warnings because workers
+        # recover pending_tasks from Redis but never update them when tasks complete.
+        if self._task_queue and self._is_orchestrator:
             self._result_consumer_task = asyncio.create_task(self._result_consumer())
             logger.info("Result consumer started for Redis task completion")
 
