@@ -77,11 +77,14 @@ class TestRunToolFunction:
             mock_run.return_value = MockRunResult(stdout="ok", stderr="", return_code=0)
             run_tool(["whoami"], target_role="lateral")
 
-        mock_run.assert_called_once_with(
-            ["whoami"],
-            timeout_seconds=300,
-            target_role="lateral",
-        )
+        # The tool path may be resolved to a full path (e.g., /usr/bin/whoami)
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args
+        assert call_args.kwargs.get("target_role") == "lateral"
+        assert call_args.kwargs.get("timeout_seconds") == 300
+        # The command should end with "whoami" (may have full path prefix)
+        called_cmd = call_args.args[0] if call_args.args else call_args.kwargs.get("cmd", [])
+        assert called_cmd[0].endswith("whoami")
 
 
 class TestNetworkEnumerationTools:

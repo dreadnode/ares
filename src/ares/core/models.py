@@ -800,6 +800,7 @@ class SharedRedTeamState:
     operation_id: str
     target: Target | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime | None = None  # Set when operation completes
 
     # Global discoveries (aggregated from all agents)
     all_domains: list[str] = field(default_factory=list)
@@ -807,6 +808,10 @@ class SharedRedTeamState:
     # Key: lowercase NetBIOS name (e.g., "corp"), Value: FQDN (e.g., "corp.contoso.local")
     # Populated by querying CN=Partitions,CN=Configuration via LDAP
     netbios_to_fqdn: dict[str, str] = field(default_factory=dict)
+
+    # Domain controller IP cache - populated when DC hosts are discovered
+    # Key: lowercase FQDN (e.g., "contoso.local"), Value: DC IP address
+    domain_controllers: dict[str, str] = field(default_factory=dict)
 
     # Multi-domain tracking for cross-domain/cross-forest attacks
     trusted_domains: list[str] = field(
@@ -1668,6 +1673,7 @@ class SharedRedTeamState:
         # - Having 7 hashes instead of all ntds.dit hashes = NOT domain admin
         if hash_type == "ntlm" and username == "krbtgt" and not self.has_domain_admin:
             self.has_domain_admin = True
+            self.completed_at = datetime.now(timezone.utc)  # Record completion time
             # Build attack path from credential chain instead of hardcoding
             attack_chain = self.format_attack_chain(hash_obj)
             self.domain_admin_path = attack_chain
@@ -1841,6 +1847,14 @@ class SharedRedTeamState:
                     existing.services = list({*existing.services, *host.services})
                 # Update DC status after merge (new services/hostname may reveal it's a DC)
                 existing.update_dc_status()
+                # Register DC IP if merge reveals it's a domain controller
+                if existing.is_dc and existing.hostname and "." in existing.hostname:
+                    parts = existing.hostname.lower().split(".")
+                    if len(parts) > 1:
+                        domain = ".".join(parts[1:])
+                        if domain not in self.domain_controllers:
+                            self.domain_controllers[domain] = existing.ip
+                            logger.info(f"DC registered (merge): {domain} -> {existing.ip}")
                 logger.debug(
                     f"Host merged: {host.ip} (existing, updated details, is_dc={existing.is_dc})"
                 )
@@ -1859,6 +1873,11 @@ class SharedRedTeamState:
             if len(parts) > 1:
                 domain = ".".join(parts[1:])
                 self.add_domain(domain)
+
+                # Register DC IP if host is a domain controller
+                if host.is_dc and domain not in self.domain_controllers:
+                    self.domain_controllers[domain] = host.ip
+                    logger.info(f"DC registered: {domain} -> {host.ip} ({host.hostname})")
 
         # Real-time checkpoint to Redis (don't call publish_host - that would re-add)
         if self._dispatcher:

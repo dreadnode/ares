@@ -43,8 +43,13 @@ class AnnouncementMixin:
             credential_type: Type of credential (password, hash, ticket).
             source_agent: Agent that achieved it.
         """
+        from datetime import datetime, timezone
+
         self.shared_state.has_domain_admin = True
         self.shared_state.domain_admin_path = attack_path
+        # Record completion time for accurate report duration
+        if not self.shared_state.completed_at:
+            self.shared_state.completed_at = datetime.now(timezone.utc)
 
         await self._broadcast(
             DomainAdminAchieved(

@@ -251,7 +251,7 @@ async def credential_expansion_loop(  # noqa: PLR0912
     return tracker
 
 
-async def exploitation_workflow(
+async def exploitation_workflow(  # noqa: PLR0912
     dispatcher: RedTeamDispatcher,
     check_interval: float = 10.0,
     max_runtime: float = 7200.0,  # 2 hours default
@@ -392,6 +392,18 @@ async def exploitation_workflow(
         state = dispatcher.shared_state
         if state.has_domain_admin:
             logger.success("Domain Admin achieved! Halting exploitation workflow.")
+
+            # Cancel all active exploitation tasks immediately
+            if active_tasks:
+                logger.info(f"Cancelling {len(active_tasks)} active exploit tasks...")
+                for task in list(active_tasks):
+                    if not task.done():
+                        task.cancel()
+                # Wait briefly for cancellations to propagate
+                await asyncio.gather(*active_tasks, return_exceptions=True)
+                active_tasks.clear()
+
+            # Broadcast DA achieved
             await dispatcher._broadcast(
                 DomainAdminAchieved(
                     source_agent="exploitation_workflow",
@@ -399,6 +411,19 @@ async def exploitation_workflow(
                     domain=state.target.domain if state.target else "",
                     attack_path=state.domain_admin_path or "Unknown path",
                     credential_type="credential",
+                )
+            )
+
+            # Broadcast operation complete to signal workers to stop
+            from ares.core.messages import OperationComplete
+
+            await dispatcher._broadcast(
+                OperationComplete(
+                    source_agent="exploitation_workflow",
+                    operation_id=state.operation_id,
+                    success=True,
+                    summary=f"Domain Admin achieved via {state.domain_admin_path or 'unknown'}",
+                    domain_admin_achieved=True,
                 )
             )
             break
@@ -544,6 +569,46 @@ async def _dispatch_krbtgt(
     )
 
 
+async def _wait_with_da_check(
+    dispatcher: RedTeamDispatcher,
+    task_id: str,
+    timeout: float = 1200.0,
+    check_interval: float = 10.0,
+) -> dict[str, Any]:
+    """Wait for task completion with periodic DA checks.
+
+    Instead of waiting for the full timeout, this function checks every
+    `check_interval` seconds if DA has been achieved. If so, it abandons
+    the wait early to allow the workflow to halt quickly.
+
+    Args:
+        dispatcher: The RedTeamDispatcher instance
+        task_id: Task to wait for
+        timeout: Total timeout in seconds (default 20 minutes)
+        check_interval: How often to check for DA (default 10 seconds)
+
+    Returns:
+        Task result dict, or abandoned result if DA achieved during wait
+    """
+    start = asyncio.get_event_loop().time()
+    while (asyncio.get_event_loop().time() - start) < timeout:
+        # Check if DA achieved during wait
+        if dispatcher.shared_state.has_domain_admin:
+            logger.info(f"DA achieved - abandoning wait for task {task_id}")
+            return {"success": False, "error": "Cancelled: DA achieved", "abandoned": True}
+
+        # Try to get result with short timeout
+        try:
+            return await dispatcher.wait_for_task(task_id, timeout=check_interval)
+        except asyncio.TimeoutError:
+            # Task still running, continue loop to check DA
+            continue
+
+    # Total timeout exceeded
+    logger.warning(f"Exploitation task {task_id} timed out after {timeout}s")
+    return {"success": False, "error": "Task timed out"}
+
+
 async def _exploit_vulnerability(
     dispatcher: RedTeamDispatcher,
     vuln: dict[str, Any],
@@ -592,14 +657,9 @@ async def _exploit_vulnerability(
         logger.warning(f"Failed to dispatch exploitation for {vuln_type}")
         return {"success": False, "error": "Failed to dispatch task"}
 
-    # Wait for task completion (with timeout)
-    # Increased to 20 minutes to account for single privesc worker queue backup
-    # Critical path tasks (S4U, ESC1-8) may wait behind other tasks in queue
-    try:
-        return await dispatcher.wait_for_task(task_id, timeout=1200)
-    except asyncio.TimeoutError:
-        logger.warning(f"Exploitation task {task_id} timed out after 20 minutes")
-        return {"success": False, "error": "Task timed out"}
+    # Wait for task completion with periodic DA checks
+    # Uses chunked waits to detect DA achievement and abandon stale tasks early
+    return await _wait_with_da_check(dispatcher, task_id, timeout=1200.0, check_interval=10.0)
 
 
 __all__ = [

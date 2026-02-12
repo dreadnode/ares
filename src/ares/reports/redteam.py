@@ -35,7 +35,9 @@ class RedTeamReportGenerator:
         Returns:
             Complete markdown report as a string.
         """
-        duration = datetime.now(timezone.utc) - state.started_at
+        # Use persisted completed_at if available (for SharedRedTeamState)
+        completed_at = getattr(state, "completed_at", None) or datetime.now(timezone.utc)
+        duration = completed_at - state.started_at
         duration_str = str(duration).split(".")[0]
 
         executive_summary = self._generate_executive_summary(state)
@@ -52,7 +54,7 @@ class RedTeamReportGenerator:
             operation_id=state.operation_id,
             target_ip=state.target.ip,
             started_at=state.started_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
-            completed_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            completed_at=completed_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
             duration=duration_str,
             stage=state.stage.value,
             executive_summary=executive_summary,
@@ -176,8 +178,9 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
         Complete markdown report as a string.
     """
     loader = get_template_loader()
-    now = datetime.now(timezone.utc)
-    duration = now - state.started_at
+    # Use persisted completed_at if available, fallback to now
+    completed_at = state.completed_at or datetime.now(timezone.utc)
+    duration = completed_at - state.started_at
     duration_str = str(duration).split(".")[0]
 
     # Deduplicate credentials and hashes
@@ -249,7 +252,7 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
         target_ip=target_ip,
         target_domain=target_domain,
         started_at=state.started_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
-        completed_at=now.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        completed_at=completed_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
         duration=duration_str,
         has_domain_admin=state.has_domain_admin,
         has_golden_ticket=state.has_golden_ticket,
@@ -267,5 +270,5 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
         discovered_vulns=discovered_vulns,
         vulnerabilities_found=len(state.discovered_vulnerabilities),
         vulnerabilities_exploited=len(state.exploited_vulnerabilities),
-        generated_at=now.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
     )

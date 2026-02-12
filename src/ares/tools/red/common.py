@@ -7,6 +7,7 @@ used across all red team toolset modules.
 import os
 import re
 import shlex
+import shutil
 import socket
 import tempfile
 import uuid
@@ -27,6 +28,59 @@ PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = {"password", "changeme", "<password>
 # These appear when bash outputs the Kali "minimal installation" message
 MOTD_GARBAGE_CHARS: frozenset[str] = frozenset("┏┃┗┓┛━─│┌┐└┘├┤┬┴┼╔╗╚╝║═")
 
+# Known tool paths for common red team tools (checked in order)
+# These are fallback paths when tools aren't in the default PATH
+TOOL_PATHS: dict[str, list[str]] = {
+    "nmap": ["/usr/bin/nmap", "/usr/local/bin/nmap", "/opt/nmap/bin/nmap"],
+    "coercer": [
+        "/usr/local/bin/coercer",
+        "/opt/coercer/coercer",
+        "/root/.local/bin/coercer",
+    ],
+    "impacket-findDelegation": [
+        "/usr/local/bin/impacket-findDelegation",
+        "/usr/bin/impacket-findDelegation",
+        "/opt/impacket/examples/findDelegation.py",
+    ],
+    "impacket-getST": [
+        "/usr/local/bin/impacket-getST",
+        "/usr/bin/impacket-getST",
+        "/opt/impacket/examples/getST.py",
+    ],
+    "impacket-secretsdump": [
+        "/usr/local/bin/impacket-secretsdump",
+        "/usr/bin/impacket-secretsdump",
+        "/opt/impacket/examples/secretsdump.py",
+    ],
+    "impacket-psexec": [
+        "/usr/local/bin/impacket-psexec",
+        "/usr/bin/impacket-psexec",
+        "/opt/impacket/examples/psexec.py",
+    ],
+    "certipy": [
+        "/usr/local/bin/certipy",
+        "/usr/bin/certipy",
+        "/root/.local/bin/certipy",
+    ],
+    "netexec": [
+        "/usr/local/bin/netexec",
+        "/usr/bin/netexec",
+        "/root/.local/bin/netexec",
+    ],
+    "hashcat": ["/usr/bin/hashcat", "/usr/local/bin/hashcat", "/opt/hashcat/hashcat"],
+    "john": ["/usr/bin/john", "/usr/local/bin/john", "/opt/john/run/john"],
+    "responder": [
+        "/usr/bin/responder",
+        "/usr/local/bin/responder",
+        "/opt/Responder/Responder.py",
+    ],
+    "bloodhound-python": [
+        "/usr/local/bin/bloodhound-python",
+        "/usr/bin/bloodhound-python",
+        "/root/.local/bin/bloodhound-python",
+    ],
+}
+
 # Patterns that indicate MOTD or system messages, not valid usernames
 TEMP_USERS_PATTERN = f"{tempfile.gettempdir().rstrip(os.sep)}{os.sep}users".lower()
 
@@ -40,6 +94,35 @@ MOTD_GARBAGE_PATTERNS: tuple[str, ...] = (
     TEMP_USERS_PATTERN,  # File path leaking as username
     ".txt",  # File extension leaking
 )
+
+
+def resolve_tool_path(tool_name: str) -> str:
+    """Resolve tool name to full path, checking known locations and PATH.
+
+    This helps handle cases where tools aren't in the default PATH,
+    which can happen in container environments or minimal installations.
+
+    Args:
+        tool_name: The tool name (e.g., "nmap", "coercer")
+
+    Returns:
+        Full path to the tool if found, otherwise the original tool name
+    """
+    # Check known paths first (for tools with custom install locations)
+    if tool_name in TOOL_PATHS:
+        for path in TOOL_PATHS[tool_name]:
+            if os.path.exists(path) and os.access(path, os.X_OK):
+                logger.debug(f"Resolved {tool_name} to {path}")
+                return path
+
+    # Fall back to shutil.which (searches PATH)
+    found = shutil.which(tool_name)
+    if found:
+        return found
+
+    # Return bare name as last resort (will fail with command not found)
+    logger.debug(f"Could not resolve path for tool: {tool_name}")
+    return tool_name
 
 
 def is_motd_line(line: str) -> bool:
@@ -222,6 +305,13 @@ def run_tool(
     from ares.core.logging_utils import truncate_output
 
     resolved_role = resolve_recon_route(cmd, target_role)
+
+    # Resolve tool path before execution (handles tools not in PATH)
+    if cmd:
+        resolved_tool = resolve_tool_path(cmd[0])
+        if resolved_tool != cmd[0]:
+            cmd = [resolved_tool] + cmd[1:]
+
     cmd_str = shlex.join(cmd) if isinstance(cmd, list) else cmd
     tool_name = cmd[0] if cmd else "unknown"
 

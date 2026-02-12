@@ -35,6 +35,27 @@ if TYPE_CHECKING:
 class RoutingMixin:
     """Task routing methods for dispatching work to specialized agents."""
 
+    def _normalize_domain(self: RedTeamDispatcher, domain: str) -> str:
+        """Normalize domain to FQDN format.
+
+        Resolves NetBIOS domain names (e.g., "CONTOSO") to their FQDN
+        (e.g., "contoso.local") using the shared state's mapping.
+
+        Args:
+            domain: Domain name (may be NetBIOS or FQDN)
+
+        Returns:
+            Normalized FQDN, or lowercase original if not resolvable
+        """
+        if not domain:
+            return ""
+        domain_lower = domain.strip().lower()
+        # If already FQDN (contains dot), return as-is
+        if "." in domain_lower:
+            return domain_lower
+        # Try to resolve NetBIOS to FQDN
+        return self.shared_state._resolve_netbios_to_fqdn(domain_lower)
+
     def _find_credential_id(
         self: RedTeamDispatcher,
         username: str,
@@ -88,12 +109,20 @@ class RoutingMixin:
         """Find DC IP for the specified domain.
 
         Detection priority:
+        0. Cached domain_controllers dict (fastest, populated by add_host)
         1. Hosts with explicit DC roles (AD DC, DC, Domain Controller) matching domain
         2. Hosts with "dc" in hostname matching domain (strong indicator)
         3. Hosts with DC-like services (Kerberos 88, LDAP 389) matching domain
         4. Fallback: any host with DC role/services (cross-domain, logged as warning)
+        5. DNS SRV lookup (last resort, requires network access)
         """
         domain_lower = domain.lower() if domain else ""
+
+        # Priority 0: Check cached domain_controllers (populated by add_host when DC discovered)
+        if domain_lower and domain_lower in self.shared_state.domain_controllers:
+            cached_ip = self.shared_state.domain_controllers[domain_lower]
+            logger.debug(f"DC IP found in cache: {cached_ip} for {domain}")
+            return cached_ip
         # Port tokens must match at start of service string to avoid
         # substring issues (e.g., "389/tcp" matching "3389/tcp")
         dc_port_prefixes = ("88/tcp", "389/tcp")
@@ -184,7 +213,93 @@ class RoutingMixin:
                 )
                 return host.ip
 
+        # Priority 6: DNS SRV lookup (last resort, requires network access)
+        if domain_lower:
+            dc_ip = self._dns_lookup_dc(domain_lower)
+            if dc_ip:
+                # Cache for future lookups
+                self.shared_state.domain_controllers[domain_lower] = dc_ip
+                logger.info(f"DC IP found via DNS SRV: {dc_ip} for {domain}")
+                return dc_ip
+
         logger.warning(f"No DC IP found for domain {domain}")
+        return ""
+
+    def _dns_lookup_dc(self: RedTeamDispatcher, domain: str) -> str:
+        """Try DNS SRV record lookup to find DC IP.
+
+        Queries _ldap._tcp.dc._msdcs.{domain} SRV record, then resolves
+        the target hostname to an IP address.
+
+        Args:
+            domain: The domain to look up (e.g., "contoso.local")
+
+        Returns:
+            DC IP address if found, empty string otherwise
+        """
+        import socket
+        import subprocess
+
+        try:
+            # Try SRV lookup using nslookup (more reliable in container environments)
+            srv_query = f"_ldap._tcp.dc._msdcs.{domain}"
+            result = subprocess.run(  # nosec B607
+                ["nslookup", "-type=srv", srv_query],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            output = result.stdout + result.stderr
+
+            # Extract hostname from SRV response
+            hostname = None
+            for raw_line in output.splitlines():
+                stripped = raw_line.strip()
+                # Match "svr hostname = dc01.contoso.local"
+                if "svr hostname" in stripped.lower():
+                    match = re.search(r"svr hostname\s*=\s*(\S+)", stripped, re.IGNORECASE)
+                    if match:
+                        hostname = match.group(1).rstrip(".")
+                        break
+                # Match "service = 0 100 389 dc01.contoso.local"
+                if "service" in stripped.lower() and "389" in stripped:
+                    match = re.search(
+                        r"service\s*=\s*\d+\s+\d+\s+\d+\s+(\S+)", stripped, re.IGNORECASE
+                    )
+                    if match:
+                        hostname = match.group(1).rstrip(".")
+                        break
+
+            if not hostname:
+                logger.debug(f"No SRV hostname found for {domain}")
+                return ""
+
+            # Resolve hostname to IP
+            try:
+                ip = socket.gethostbyname(hostname)
+                logger.debug(f"Resolved DC hostname {hostname} to {ip}")
+                return ip
+            except socket.gaierror:
+                # Try nslookup as fallback
+                result = subprocess.run(  # nosec B607
+                    ["nslookup", hostname],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                for ns_line in (result.stdout + result.stderr).splitlines():
+                    match = re.search(r"Address:\s*(\d+\.\d+\.\d+\.\d+)", ns_line)
+                    if match:
+                        ip = match.group(1)
+                        # Skip DNS server address (usually first)
+                        if ip != "127.0.0.1" and not ip.startswith("127."):
+                            logger.debug(f"Resolved DC hostname {hostname} to {ip} via nslookup")
+                            return ip
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+            logger.debug(f"DNS SRV lookup failed for {domain}: {e}")
+
         return ""
 
     def _extract_ticket_path_from_output(self: RedTeamDispatcher, output: str) -> str:
@@ -365,6 +480,12 @@ class RoutingMixin:
         Returns:
             Task ID for tracking.
         """
+        # Skip new crack tasks if DA already achieved (allow in-progress to complete)
+        if self.shared_state.has_domain_admin:
+            logger.debug(f"Skipping crack request for {username} - DA already achieved")
+            return ""
+        # Normalize domain to FQDN format
+        domain = self._normalize_domain(domain)
         # Find the hash object to get its ID for attack chain tracking
         parent_hash_id = None
         parent_attack_step = 0
@@ -445,7 +566,7 @@ class RoutingMixin:
         logger.info(f"Crack request {task_id} sent to {cracker_agent}")
         return task_id
 
-    async def request_lateral_movement(
+    async def request_lateral_movement(  # noqa: PLR0912
         self: RedTeamDispatcher,
         target_host: str,
         username: str,
@@ -472,9 +593,17 @@ class RoutingMixin:
         Returns:
             Task ID for tracking.
         """
+        # Skip lateral movement if DA already achieved
+        if self.shared_state.has_domain_admin:
+            logger.debug(f"Skipping lateral movement to {target_host} - DA already achieved")
+            return ""
+
         if not target_host or not target_host.strip():
             logger.warning(f"Skipping lateral movement for {domain}\\{username}: empty target_host")
             return ""
+
+        # Normalize domain to FQDN format
+        domain = self._normalize_domain(domain)
 
         resolved_password = password
         resolved_hash = hash_value
@@ -623,6 +752,14 @@ class RoutingMixin:
         Returns:
             Task ID for tracking.
         """
+        # Skip ACL analysis if DA already achieved
+        if self.shared_state.has_domain_admin:
+            logger.debug(f"Skipping ACL analysis for {target_user} - DA already achieved")
+            return ""
+
+        # Normalize domain to FQDN format
+        domain = self._normalize_domain(domain)
+
         credential = self._find_domain_credential(domain)
         dc_ip = self._find_domain_controller_ip(domain)
 
@@ -725,6 +862,14 @@ class RoutingMixin:
         Returns:
             Task ID for tracking.
         """
+        # Skip new recon tasks if DA already achieved
+        if self.shared_state.has_domain_admin:
+            logger.debug(f"Skipping recon request ({reason}) - DA already achieved")
+            return ""
+
+        # Normalize domain to FQDN format
+        domain = self._normalize_domain(domain)
+
         self._ensure_credential_in_state(
             username=username,
             domain=domain,
@@ -847,6 +992,14 @@ class RoutingMixin:
         Returns:
             Task ID for tracking.
         """
+        # Skip new credential access tasks if DA already achieved
+        if self.shared_state.has_domain_admin:
+            logger.debug(f"Skipping credential access request ({reason}) - DA already achieved")
+            return ""
+
+        # Normalize domain to FQDN format
+        domain = self._normalize_domain(domain)
+
         self._ensure_credential_in_state(
             username=username,
             domain=domain,
@@ -966,11 +1119,21 @@ class RoutingMixin:
         Returns:
             Task ID for tracking.
         """
+        # Skip new exploit tasks if DA already achieved
+        if self.shared_state.has_domain_admin:
+            logger.debug(f"Skipping exploit {vuln_type} on {target} - DA already achieved")
+            return ""
+
+        # Normalize domain to FQDN format in params
+        params = params or {}
+        if "domain" in params:
+            params["domain"] = self._normalize_domain(params["domain"])
+
         payload = {
             "vuln_type": vuln_type,
             "vuln_id": vuln_id,
             "target": target,
-            **(params or {}),
+            **params,
         }
 
         # Track attack chain - look up credential from params
@@ -1072,6 +1235,14 @@ class RoutingMixin:
         Returns:
             Task ID for tracking.
         """
+        # Skip new privesc enumeration tasks if DA already achieved
+        if self.shared_state.has_domain_admin:
+            logger.debug(f"Skipping privesc enumeration ({techniques}) - DA already achieved")
+            return ""
+
+        # Normalize domain to FQDN format
+        domain = self._normalize_domain(domain)
+
         self._ensure_credential_in_state(
             username=username,
             domain=domain,
@@ -1181,6 +1352,11 @@ class RoutingMixin:
         Returns:
             Task ID for tracking.
         """
+        # Skip new coercion tasks if DA already achieved
+        if self.shared_state.has_domain_admin:
+            logger.debug(f"Skipping coercion request ({techniques}) - DA already achieved")
+            return ""
+
         from ares.core.config import get_default_network_interface
 
         techniques = techniques or ["LLMNR", "NBT-NS", "mDNS"]

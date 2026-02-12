@@ -25,7 +25,7 @@ class RecoveryError(Exception):
     """Raised when recovery fails."""
 
 
-def _merge_state(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+def _merge_state(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:  # noqa: PLR0912
     """Merge existing checkpoint data into current state to prevent regressions."""
     # Hosts, domains, users (using built-in dedup methods)
     for host in existing.all_hosts:
@@ -57,6 +57,20 @@ def _merge_state(target: SharedRedTeamState, existing: SharedRedTeamState) -> No
     if existing.has_golden_ticket and not target.has_golden_ticket:
         target.has_golden_ticket = True
 
+    # Preserve earliest completed_at timestamp (prefer existing if set)
+    if existing.completed_at and not target.completed_at:
+        target.completed_at = existing.completed_at
+
+    # Merge domain controller cache (prefer existing mappings)
+    for domain, ip in existing.domain_controllers.items():
+        if domain not in target.domain_controllers:
+            target.domain_controllers[domain] = ip
+
+    # Merge NetBIOS to FQDN mappings (prefer existing mappings)
+    for netbios, fqdn in existing.netbios_to_fqdn.items():
+        if netbios not in target.netbios_to_fqdn:
+            target.netbios_to_fqdn[netbios] = fqdn
+
     # Merge persistence tracking (CRITICAL for orchestrator visibility)
     _merge_golden_tickets(target, existing)
     _merge_acl_chains(target, existing)
@@ -69,6 +83,8 @@ def _merge_state(target: SharedRedTeamState, existing: SharedRedTeamState) -> No
     # Safety net: scan merged hashes for DA indicators if flag not yet set
     # NOTE: Only krbtgt counts as DA proof - Administrator could be LOCAL admin on workstation
     if not target.has_domain_admin:
+        from datetime import datetime, timezone
+
         for h in target.all_hashes:
             ht = (h.hash_type or "").strip().lower()
             un = (h.username or "").strip().lower()
@@ -77,6 +93,8 @@ def _merge_state(target: SharedRedTeamState, existing: SharedRedTeamState) -> No
                 target.domain_admin_path = (
                     "secretsdump → krbtgt NTLM hash found in state (detected during merge)"
                 )
+                if not target.completed_at:
+                    target.completed_at = datetime.now(timezone.utc)
                 break
 
     # Merge dynamic tracking attributes (set via object.__setattr__)
