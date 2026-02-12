@@ -23,7 +23,12 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from loguru import logger
 
-from ares.core.config import get_agent_task_timeout, get_redis_url
+from ares.core.config import (
+    get_agent_task_timeout,
+    get_rate_limit_backoff_delays,
+    get_rate_limit_max_retries,
+    get_redis_url,
+)
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.exceptions import AuthenticationError, ConfigurationError, CriticalWorkerError
 from ares.core.factories.red_agents import create_agent_info, create_specialized_agent
@@ -57,13 +62,6 @@ from ares.tools.red import CrackerCallbackTools, CrackingTools, LateralCallbackT
 
 if TYPE_CHECKING:
     from dreadnode.agent import Agent
-
-
-# Rate limit retry configuration
-# Short delays because TPM window resets every 60s; with max_concurrent_tasks=1
-# we only need to wait for the window to roll over
-RATE_LIMIT_BACKOFF_DELAYS = [5.0, 10.0, 20.0, 40.0, 60.0, 60.0]  # 6 retries with short waits
-RATE_LIMIT_MAX_RETRIES = len(RATE_LIMIT_BACKOFF_DELAYS)
 
 
 def _update_etc_hosts(hosts_list: list, written_ips: set[str], agent_name: str) -> set[str]:
@@ -533,12 +531,14 @@ class RedisWorkerAgent:
             result = None
             last_rate_limit_error: str | Exception | None = None
             agent_timeout = get_agent_task_timeout()
+            rate_limit_delays = get_rate_limit_backoff_delays()
+            rate_limit_max_retries = get_rate_limit_max_retries()
             try:
                 async with asyncio.timeout(agent_timeout):
-                    for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+                    for attempt in range(rate_limit_max_retries + 1):
                         try:
                             attempt_msg = (
-                                f" (retry {attempt}/{RATE_LIMIT_MAX_RETRIES})"
+                                f" (retry {attempt}/{rate_limit_max_retries})"
                                 if attempt > 0
                                 else ""
                             )
@@ -552,11 +552,11 @@ class RedisWorkerAgent:
                                 result, "last_error", None
                             )
                             if result_error and _is_rate_limit_error(Exception(str(result_error))):
-                                if attempt < RATE_LIMIT_MAX_RETRIES:
-                                    delay = RATE_LIMIT_BACKOFF_DELAYS[attempt]
+                                if attempt < rate_limit_max_retries:
+                                    delay = rate_limit_delays[attempt]
                                     logger.warning(
                                         f"[{self.agent_name}] ⏳ Rate limit in result for task {task.task_id}, "
-                                        f"backing off {delay}s (attempt {attempt + 1}/{RATE_LIMIT_MAX_RETRIES}): "
+                                        f"backing off {delay}s (attempt {attempt + 1}/{rate_limit_max_retries}): "
                                         f"{result_error}"
                                     )
                                     last_rate_limit_error = str(result_error)
@@ -574,11 +574,11 @@ class RedisWorkerAgent:
                                 )
                             break  # Success, exit retry loop
                         except Exception as e:
-                            if _is_rate_limit_error(e) and attempt < RATE_LIMIT_MAX_RETRIES:
-                                delay = RATE_LIMIT_BACKOFF_DELAYS[attempt]
+                            if _is_rate_limit_error(e) and attempt < rate_limit_max_retries:
+                                delay = rate_limit_delays[attempt]
                                 logger.warning(
                                     f"[{self.agent_name}] ⏳ Rate limit exception for task {task.task_id}, "
-                                    f"backing off {delay}s (attempt {attempt + 1}/{RATE_LIMIT_MAX_RETRIES}): {e}"
+                                    f"backing off {delay}s (attempt {attempt + 1}/{rate_limit_max_retries}): {e}"
                                 )
                                 last_rate_limit_error = e
                                 await asyncio.sleep(delay)

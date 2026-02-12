@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from ares.core.models import DEFAULT_MAX_RETRIES, SharedRedTeamState, TaskStatus
+from ares.core.config import get_default_max_retries
+from ares.core.models import SharedRedTeamState, TaskStatus
 from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue
 
@@ -399,7 +400,7 @@ class OperationRecoveryManager:
                         if task.status == TaskStatus.IN_PROGRESS:
                             task.retry_count += 1
 
-                        max_retries = getattr(task, "max_retries", DEFAULT_MAX_RETRIES)
+                        max_retries = getattr(task, "max_retries", get_default_max_retries())
                         if auto_requeue and task.retry_count <= max_retries:
                             task.status = TaskStatus.RETRYING
                             if task.retry_count > 0:
@@ -765,7 +766,7 @@ class OperationResumeHelper:
                         "params": task.params,
                         "assigned_agent": task.assigned_agent,
                         "retry_count": getattr(task, "retry_count", 0),
-                        "max_retries": getattr(task, "max_retries", DEFAULT_MAX_RETRIES),
+                        "max_retries": getattr(task, "max_retries", get_default_max_retries()),
                     }
                 )
 

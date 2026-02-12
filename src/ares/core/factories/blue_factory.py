@@ -11,6 +11,15 @@ from dreadnode.agent.hooks import retry_with_feedback
 from dreadnode.agent.stop import StopCondition, tool_use
 from loguru import logger
 
+from ares.core.config import (
+    get_bonus_queries_for_evidence,
+    get_bonus_queries_for_pyramid_l4,
+    get_max_duplicate_queries,
+    get_max_queries_critical,
+    get_max_queries_per_investigation,
+    get_max_total_queries,
+    get_query_limits_by_stage,
+)
 from ares.core.evidence_validation import (
     auto_extract_evidence_from_query,
     reset_evidence_validation,
@@ -42,11 +51,6 @@ _executed_queries: list[dict] = []
 _seen_queries: dict[str, int] = {}  # Track query -> count to detect loops
 _current_state: "InvestigationState | None" = None
 _bonus_queries_granted = 0  # Track bonus queries granted
-
-# Base query limits - increased for deeper investigations
-MAX_QUERIES_PER_INVESTIGATION = 8  # Was 5
-MAX_QUERIES_CRITICAL = 12  # Was 8 - higher limit for critical alerts
-MAX_DUPLICATE_QUERIES = 2  # Max times same query can run before blocking
 
 # LogQL optimization patterns - broad selectors that cause timeouts
 _BROAD_SELECTOR_PATTERNS = [
@@ -96,20 +100,6 @@ def _optimize_logql_query(query: str) -> tuple[str, bool]:
     return optimized, was_modified
 
 
-# Adaptive query limit settings - more generous for productive investigations
-BONUS_QUERIES_FOR_EVIDENCE = 3  # Was 2 - grant +3 queries when evidence is found
-BONUS_QUERIES_FOR_PYRAMID_L4 = 2  # Grant +2 queries when reaching pyramid level 4+
-MAX_TOTAL_QUERIES = 25  # Was 15 - hard cap to prevent runaway investigations
-
-# Staged limits by investigation phase (cumulative budget per phase)
-QUERY_LIMITS_BY_STAGE = {
-    "triage": 8,  # Was 5 - initial queries for triage
-    "causation": 14,  # Was 8 - root cause analysis
-    "lateral": 20,  # Was 11 - lateral movement scope
-    "synthesis": 20,  # Was 11 - no additional queries in synthesis phase
-}
-
-
 def reset_query_tracking():
     """Reset query tracking for a new investigation."""
     from ares.core.query_resilience import reset_resilient_executor
@@ -157,19 +147,21 @@ def _calculate_bonus_queries() -> int:
         return 0
 
     new_bonus = 0
+    bonus_for_evidence = get_bonus_queries_for_evidence()
+    bonus_for_pyramid = get_bonus_queries_for_pyramid_l4()
 
-    if _current_state.evidence_count > 0 and _bonus_queries_granted < BONUS_QUERIES_FOR_EVIDENCE:
-        new_bonus += BONUS_QUERIES_FOR_EVIDENCE
-        logger.info(f"🎁 Granting +{BONUS_QUERIES_FOR_EVIDENCE} bonus queries for finding evidence")
+    if _current_state.evidence_count > 0 and _bonus_queries_granted < bonus_for_evidence:
+        new_bonus += bonus_for_evidence
+        logger.info(f"🎁 Granting +{bonus_for_evidence} bonus queries for finding evidence")
 
     if (
         _current_state.highest_pyramid_level >= 4
-        and _bonus_queries_granted < BONUS_QUERIES_FOR_EVIDENCE + BONUS_QUERIES_FOR_PYRAMID_L4
+        and _bonus_queries_granted < bonus_for_evidence + bonus_for_pyramid
     ):
         # Only grant pyramid bonus if not already at max bonus
         pyramid_bonus = min(
-            BONUS_QUERIES_FOR_PYRAMID_L4,
-            BONUS_QUERIES_FOR_EVIDENCE + BONUS_QUERIES_FOR_PYRAMID_L4 - _bonus_queries_granted,
+            bonus_for_pyramid,
+            bonus_for_evidence + bonus_for_pyramid - _bonus_queries_granted,
         )
         if pyramid_bonus > 0:
             new_bonus += pyramid_bonus
@@ -185,32 +177,34 @@ def _get_query_limit() -> int:
     """Get the adaptive query limit based on investigation state.
 
     The limit is determined by:
-    1. Base limit from alert severity (5 normal, 8 critical)
-    2. Stage-based limits (triage: 5, causation: 8, lateral: 11)
+    1. Base limit from alert severity (normal vs critical)
+    2. Stage-based limits (triage, causation, lateral, synthesis)
     3. Bonus queries for productive investigations
-    4. Hard cap at MAX_TOTAL_QUERIES (15)
+    4. Hard cap at max_total_queries
 
     Returns:
         Current query limit
     """
     # Start with stage-based limit
-    base_limit = MAX_QUERIES_PER_INVESTIGATION
+    base_limit = get_max_queries_per_investigation()
 
     if _current_state:
         # Use stage-based limit
         stage_name = _current_state.stage.value
-        base_limit = QUERY_LIMITS_BY_STAGE.get(stage_name, MAX_QUERIES_PER_INVESTIGATION)
+        base_limit = get_query_limits_by_stage().get(
+            stage_name, get_max_queries_per_investigation()
+        )
 
         # Override with critical severity limit if higher
         severity = _current_state.alert.get("labels", {}).get("severity", "").lower()
         if severity == "critical":
-            base_limit = max(base_limit, MAX_QUERIES_CRITICAL)
+            base_limit = max(base_limit, get_max_queries_critical())
 
     bonus = _calculate_bonus_queries()
     total_limit = base_limit + bonus
 
     # Cap at maximum to prevent runaway
-    return min(total_limit, MAX_TOTAL_QUERIES)
+    return min(total_limit, get_max_total_queries())
 
 
 def _check_query_limit() -> str | None:
@@ -241,7 +235,7 @@ def _check_duplicate_query(query: str) -> str | None:
     normalized = query.strip().lower()
 
     count = _seen_queries.get(normalized, 0)
-    if count >= MAX_DUPLICATE_QUERIES:
+    if count >= get_max_duplicate_queries():
         logger.warning(f"🔁 Duplicate query blocked (run {count + 1} times): {query[:100]}...")
         return (
             f"🔁 DUPLICATE QUERY BLOCKED. You've already run this query {count} times.\n\n"

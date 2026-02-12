@@ -184,6 +184,46 @@ class OperationConfig:
     # Confidence penalty for unvalidated evidence
     unvalidated_confidence_penalty: float = 0.15
 
+    # Blue team investigation query limits
+    # Base query limit per investigation
+    max_queries_per_investigation: int = 8
+    # Higher limit for critical alerts
+    max_queries_critical: int = 12
+    # Max times same query can run before blocking
+    max_duplicate_queries: int = 2
+    # Bonus queries granted when evidence is found
+    bonus_queries_for_evidence: int = 3
+    # Bonus queries for reaching pyramid level 4+
+    bonus_queries_for_pyramid_l4: int = 2
+    # Hard cap to prevent runaway investigations
+    max_total_queries: int = 25
+
+    # Task retry settings
+    # Default max retries for tasks interrupted by pod restarts
+    default_max_retries: int = 3
+
+    # Orchestrator runtime settings
+    # Maximum operation runtime in seconds (default 60 minutes)
+    max_runtime: float = 3600.0
+    # Grace period for crack tasks when operation is completing (seconds)
+    crack_task_grace_period: float = 300.0
+
+    # Rate limit retry settings (for worker agents)
+    # Delays between retries when rate limited (list of seconds)
+    rate_limit_backoff_delays: list[float] = field(
+        default_factory=lambda: [5.0, 10.0, 20.0, 40.0, 60.0, 60.0]
+    )
+
+    # Blue team investigation stage-based query limits
+    query_limits_by_stage: dict[str, int] = field(
+        default_factory=lambda: {
+            "triage": 8,
+            "causation": 14,
+            "lateral": 20,
+            "synthesis": 20,
+        }
+    )
+
     # Phase detection thresholds (see PRIORITY.md)
     lateral_movement_admin_creds_threshold: int = 3
     lateral_movement_owned_hosts_threshold: int = 5
@@ -337,6 +377,27 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         # Evidence validation (blue team)
         max_stored_results=operation.get("max_stored_results", 10),
         unvalidated_confidence_penalty=operation.get("unvalidated_confidence_penalty", 0.15),
+        # Blue team investigation query limits
+        max_queries_per_investigation=operation.get("max_queries_per_investigation", 8),
+        max_queries_critical=operation.get("max_queries_critical", 12),
+        max_duplicate_queries=operation.get("max_duplicate_queries", 2),
+        bonus_queries_for_evidence=operation.get("bonus_queries_for_evidence", 3),
+        bonus_queries_for_pyramid_l4=operation.get("bonus_queries_for_pyramid_l4", 2),
+        max_total_queries=operation.get("max_total_queries", 25),
+        # Task retry settings
+        default_max_retries=operation.get("default_max_retries", 3),
+        # Orchestrator runtime settings
+        max_runtime=operation.get("max_runtime", 3600.0),
+        crack_task_grace_period=operation.get("crack_task_grace_period", 300.0),
+        # Rate limit retry settings
+        rate_limit_backoff_delays=operation.get(
+            "rate_limit_backoff_delays", [5.0, 10.0, 20.0, 40.0, 60.0, 60.0]
+        ),
+        # Blue team stage-based query limits
+        query_limits_by_stage=operation.get(
+            "query_limits_by_stage",
+            {"triage": 8, "causation": 14, "lateral": 20, "synthesis": 20},
+        ),
     )
 
 
@@ -485,6 +546,57 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:  # noqa: P
     if confidence_penalty := os.environ.get("ARES_UNVALIDATED_CONFIDENCE_PENALTY"):
         try:
             config.unvalidated_confidence_penalty = float(confidence_penalty)
+        except ValueError:
+            pass
+
+    # Blue team investigation query limit overrides
+    if max_queries := os.environ.get("ARES_MAX_QUERIES_PER_INVESTIGATION"):
+        try:
+            config.max_queries_per_investigation = int(max_queries)
+        except ValueError:
+            pass
+    if max_queries_crit := os.environ.get("ARES_MAX_QUERIES_CRITICAL"):
+        try:
+            config.max_queries_critical = int(max_queries_crit)
+        except ValueError:
+            pass
+    if max_dup := os.environ.get("ARES_MAX_DUPLICATE_QUERIES"):
+        try:
+            config.max_duplicate_queries = int(max_dup)
+        except ValueError:
+            pass
+    if bonus_evidence := os.environ.get("ARES_BONUS_QUERIES_FOR_EVIDENCE"):
+        try:
+            config.bonus_queries_for_evidence = int(bonus_evidence)
+        except ValueError:
+            pass
+    if bonus_pyramid := os.environ.get("ARES_BONUS_QUERIES_FOR_PYRAMID_L4"):
+        try:
+            config.bonus_queries_for_pyramid_l4 = int(bonus_pyramid)
+        except ValueError:
+            pass
+    if max_total := os.environ.get("ARES_MAX_TOTAL_QUERIES"):
+        try:
+            config.max_total_queries = int(max_total)
+        except ValueError:
+            pass
+
+    # Task retry overrides
+    if default_retries := os.environ.get("ARES_DEFAULT_MAX_RETRIES"):
+        try:
+            config.default_max_retries = int(default_retries)
+        except ValueError:
+            pass
+
+    # Orchestrator runtime overrides
+    if max_runtime := os.environ.get("ARES_MAX_RUNTIME"):
+        try:
+            config.max_runtime = float(max_runtime)
+        except ValueError:
+            pass
+    if crack_grace := os.environ.get("ARES_CRACK_GRACE_PERIOD"):
+        try:
+            config.crack_task_grace_period = float(crack_grace)
         except ValueError:
             pass
 
@@ -678,6 +790,66 @@ def get_unvalidated_confidence_penalty() -> float:
     return load_config().unvalidated_confidence_penalty
 
 
+def get_max_queries_per_investigation() -> int:
+    """Get base query limit per investigation."""
+    return load_config().max_queries_per_investigation
+
+
+def get_max_queries_critical() -> int:
+    """Get query limit for critical alerts."""
+    return load_config().max_queries_critical
+
+
+def get_max_duplicate_queries() -> int:
+    """Get max times same query can run before blocking."""
+    return load_config().max_duplicate_queries
+
+
+def get_bonus_queries_for_evidence() -> int:
+    """Get bonus queries granted when evidence is found."""
+    return load_config().bonus_queries_for_evidence
+
+
+def get_bonus_queries_for_pyramid_l4() -> int:
+    """Get bonus queries for reaching pyramid level 4+."""
+    return load_config().bonus_queries_for_pyramid_l4
+
+
+def get_max_total_queries() -> int:
+    """Get hard cap for total queries per investigation."""
+    return load_config().max_total_queries
+
+
+def get_default_max_retries() -> int:
+    """Get default max retries for tasks interrupted by pod restarts."""
+    return load_config().default_max_retries
+
+
+def get_max_runtime() -> float:
+    """Get maximum operation runtime in seconds."""
+    return load_config().max_runtime
+
+
+def get_crack_task_grace_period() -> float:
+    """Get grace period for crack tasks when operation is completing (seconds)."""
+    return load_config().crack_task_grace_period
+
+
+def get_rate_limit_backoff_delays() -> list[float]:
+    """Get list of delays (seconds) between rate limit retries."""
+    return load_config().rate_limit_backoff_delays
+
+
+def get_rate_limit_max_retries() -> int:
+    """Get maximum number of rate limit retries (derived from backoff delays length)."""
+    return len(load_config().rate_limit_backoff_delays)
+
+
+def get_query_limits_by_stage() -> dict[str, int]:
+    """Get stage-based query limits for blue team investigations."""
+    return load_config().query_limits_by_stage
+
+
 def clear_config_cache() -> None:
     """Clear the cached configuration (useful for testing)."""
     global _cached_config
@@ -693,7 +865,11 @@ __all__ = [
     "get_agent_config",
     "get_agent_heartbeat_timeout",
     "get_agent_task_timeout",
+    "get_bonus_queries_for_evidence",
+    "get_bonus_queries_for_pyramid_l4",
+    "get_crack_task_grace_period",
     "get_critical_priority_threshold",
+    "get_default_max_retries",
     "get_default_network_interface",
     "get_deferred_queue_check_interval",
     "get_deferred_task_max_age",
@@ -703,15 +879,23 @@ __all__ = [
     "get_max_context_tokens",
     "get_max_deferred_per_type",
     "get_max_deferred_total",
+    "get_max_duplicate_queries",
     "get_max_output_chars",
+    "get_max_queries_critical",
+    "get_max_queries_per_investigation",
     "get_max_redis_consecutive_failures",
+    "get_max_runtime",
     "get_max_stored_results",
+    "get_max_total_queries",
     "get_min_messages_to_keep",
     "get_min_slots_per_role",
     "get_namespace",
     "get_offload_threshold",
     "get_offload_ttl",
+    "get_query_limits_by_stage",
     "get_rate_limit_backoff",
+    "get_rate_limit_backoff_delays",
+    "get_rate_limit_max_retries",
     "get_rate_limit_threshold",
     "get_redis_retry_base_delay",
     "get_redis_retry_max_delay",

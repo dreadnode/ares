@@ -38,8 +38,9 @@ from rigging.parsing import (
     try_parse_set,
 )
 
+from ares.core.config import get_default_max_retries
+
 __all__ = [
-    "DEFAULT_MAX_RETRIES",
     # Multi-Agent Models
     "AgentInfo",
     "AgentLocalState",
@@ -615,10 +616,6 @@ class TaskStatus(Enum):
     RETRYING = "retrying"  # Marked for retry after pod restart
 
 
-# Default max retries for tasks interrupted by pod restarts
-DEFAULT_MAX_RETRIES = 3
-
-
 @dataclass
 class TaskInfo:
     """Information about a dispatched task."""
@@ -634,7 +631,7 @@ class TaskInfo:
     result: Any = None
     error: str | None = None
     retry_count: int = 0
-    max_retries: int = DEFAULT_MAX_RETRIES
+    max_retries: int = field(default_factory=get_default_max_retries)
 
 
 @dataclass

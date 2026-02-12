@@ -19,7 +19,13 @@ from dreadnode.agent import Agent, Thread
 from dreadnode.agent.stop import tool_use
 from loguru import logger
 
-from ares.core.config import get_agent_config, get_namespace, get_redis_url
+from ares.core.config import (
+    get_agent_config,
+    get_crack_task_grace_period,
+    get_max_runtime,
+    get_namespace,
+    get_redis_url,
+)
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.factories.red_agents import (
     create_role_hooks,
@@ -41,12 +47,6 @@ from ares.core.task_queue import RedisTaskQueue
 from ares.core.workflows import exploitation_workflow
 from ares.reports.redteam import RedTeamReportGenerator
 from ares.tools.red.orchestrator import OrchestratorTools
-
-# Default max runtime in seconds (60 minutes), configurable via ARES_MAX_RUNTIME env var
-DEFAULT_MAX_RUNTIME = float(os.environ.get("ARES_MAX_RUNTIME", "3600"))
-
-# Grace period for running crack tasks when operation is completing (5 minutes)
-CRACK_TASK_GRACE_PERIOD = float(os.environ.get("ARES_CRACK_GRACE_PERIOD", "300"))
 
 
 def _resolve_model_generator(model: str, openai_api_key: str | None) -> str | rg.Generator:
@@ -370,7 +370,7 @@ async def run_multi_agent_operation(  # noqa: PLR0912
     apply_rigging_patches()
 
     # Resolve max runtime from parameter, env, or default
-    resolved_max_runtime = max_runtime if max_runtime is not None else DEFAULT_MAX_RUNTIME
+    resolved_max_runtime = max_runtime if max_runtime is not None else get_max_runtime()
     # Resolve config defaults
     redis_url = redis_url or get_redis_url()
     namespace = namespace or get_namespace()
@@ -2863,7 +2863,7 @@ def _get_running_crack_tasks(dispatcher: RedTeamDispatcher) -> list[str]:
 
 async def _wait_for_crack_tasks(
     dispatcher: RedTeamDispatcher,
-    timeout: float = CRACK_TASK_GRACE_PERIOD,
+    timeout: float | None = None,
     check_interval: float = 5.0,
 ) -> None:
     """
@@ -2871,9 +2871,11 @@ async def _wait_for_crack_tasks(
 
     Args:
         dispatcher: The dispatcher instance
-        timeout: Maximum seconds to wait for crack tasks
+        timeout: Maximum seconds to wait for crack tasks (default from config)
         check_interval: Seconds between checks
     """
+    if timeout is None:
+        timeout = get_crack_task_grace_period()
     start_time = asyncio.get_event_loop().time()
     crack_tasks = _get_running_crack_tasks(dispatcher)
 
