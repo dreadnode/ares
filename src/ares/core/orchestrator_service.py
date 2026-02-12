@@ -449,6 +449,7 @@ class OrchestratorService:
         Args:
             request_data: Operation request data from Redis
         """
+        started_at = datetime.now(timezone.utc)
         try:
             # Fetch env_vars from separate key if not in request (security: secrets stored separately)
             if not request_data.get("env_vars") and request_data.get("operation_id"):
@@ -548,7 +549,22 @@ class OrchestratorService:
                 },
             )
 
-            logger.success(f"Operation {request.operation_id} completed successfully")
+            completed_at = datetime.now(timezone.utc)
+            elapsed = (completed_at - started_at).total_seconds()
+            hours, remainder = divmod(int(elapsed), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            if hours > 0:
+                duration_str = f"{hours}h {minutes}m {seconds}s"
+            elif minutes > 0:
+                duration_str = f"{minutes}m {seconds}s"
+            else:
+                duration_str = f"{seconds}s"
+            start_str = started_at.strftime("%H:%M:%S")
+            end_str = completed_at.strftime("%H:%M:%S")
+            logger.success(
+                f"Operation {request.operation_id} completed successfully "
+                f"(started {start_str}, ended {end_str}, duration {duration_str})"
+            )
 
         except Exception as e:
             logger.error(f"Error processing operation: {e}")
