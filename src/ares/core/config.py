@@ -241,6 +241,8 @@ class OperationConfig:
 CONFIG_PATHS = [
     Path("config/multi-agent-production.yaml"),
     Path("config/multi-agent.yaml"),
+    Path("/ares/config/multi-agent-production.yaml"),  # K8s pod PVC path
+    Path("/ares/config/multi-agent.yaml"),
     Path.home() / ".config/ares/multi-agent.yaml",
     Path("/etc/ares/multi-agent.yaml"),
 ]
