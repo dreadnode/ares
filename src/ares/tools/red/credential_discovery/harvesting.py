@@ -670,7 +670,8 @@ class CredentialHarvestingTools(Toolset):
 
             cmd.extend(["-x", "whoami"])
 
-            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120, target_role="recon")
 
             output = stdout
             if stderr:

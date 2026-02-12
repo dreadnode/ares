@@ -19,6 +19,7 @@ from ares.tools.red.common import (
     PLACEHOLDER_PASSWORDS,
     AnyRedTeamState,
     check_port,
+    get_credential_context,
     resolve_password,
     run_tool,
 )
@@ -671,9 +672,25 @@ class LateralMovementTools(Toolset):
 
         This triggers real-time Redis checkpoint so the orchestrator sees hashes
         without waiting for task completion.
+
+        Uses the current credential context (set via set_credential_context) to
+        establish parent_id linkage for attack chain tracking.
         """
         if not output:
             return
+
+        # Get credential context for attack chain tracking
+        ctx = get_credential_context()
+        parent_id = ctx.parent_id
+        attack_step = ctx.attack_step + 1 if ctx.parent_id else 0
+
+        # Build source string that captures the attack path
+        if ctx.impersonated_user and ctx.impersonation_method:
+            source = f"secretsdump:via_{ctx.impersonation_method}:{ctx.impersonated_user}"
+        elif ctx.source_username:
+            source = f"secretsdump:{ctx.source_domain}\\{ctx.source_username}"
+        else:
+            source = "secretsdump"
 
         extracted = 0
         guest_null_hash = "31d6cfe0d16ae931b73c59d7e0c089c0"  # pragma: allowlist secret
@@ -714,7 +731,9 @@ class LateralMovementTools(Toolset):
                 hash_value=f"{lm_hash}:{nt_hash}",
                 hash_type="NTLM",
                 domain=h_domain,
-                source="secretsdump",
+                source=source,
+                parent_id=parent_id,
+                attack_step=attack_step,
             )
 
             if isinstance(self.state, SharedRedTeamState):
@@ -725,17 +744,32 @@ class LateralMovementTools(Toolset):
                 extracted += 1
 
         if extracted:
-            logger.warning(
-                f"[+] Auto-extracted {extracted} NTLM hashes from secretsdump into state"
-            )
+            # Log with context about the attack path
+            if ctx.impersonated_user:
+                logger.warning(
+                    f"[+] Auto-extracted {extracted} NTLM hashes from secretsdump "
+                    f"(via {ctx.impersonation_method} as {ctx.impersonated_user})"
+                )
+            else:
+                logger.warning(
+                    f"[+] Auto-extracted {extracted} NTLM hashes from secretsdump into state"
+                )
             # Record NTDS dump as a weakness
             if isinstance(self.state, SharedRedTeamState):
+                discovery_method = "secretsdump"
+                if ctx.impersonated_user:
+                    discovery_method = f"secretsdump (via {ctx.impersonation_method} impersonating {ctx.impersonated_user})"
+                elif ctx.source_username:
+                    discovery_method = (
+                        f"secretsdump (using {ctx.source_domain}\\{ctx.source_username})"
+                    )
+
                 self.state.add_weakness(
                     f"### Full NTDS.DIT dump — {extracted} NTLM hashes extracted\n"
                     f"**Vulnerability:** Secretsdump successfully dumped {extracted} "
                     f"NTLM hashes from a domain controller, exposing all domain credentials.\n"
                     f"- **Affected Resource:** {domain} domain controller\n"
-                    f"- **Discovery Method:** secretsdump (Kerberos auth via S4U/pass-the-ticket)\n"
+                    f"- **Discovery Method:** {discovery_method}\n"
                     f"- **Impact:** All domain user password hashes compromised. "
                     f"Enables pass-the-hash, golden ticket, and complete domain takeover."
                 )

@@ -627,6 +627,9 @@ class TaskInfo:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    # Last activity time - updated when task shows progress (heartbeat, status change)
+    # Used for stale task detection - defaults to created_at if never updated
+    last_activity_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     params: dict[str, Any] = field(default_factory=dict)
     result: Any = None
     error: str | None = None

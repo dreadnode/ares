@@ -210,11 +210,15 @@ class DeferredQueueMixin:
 
             # Track task for result consumption
             if task_id and self._shared_state:
+                from datetime import datetime, timezone
+
+                now = datetime.now(timezone.utc)
                 task_info = TaskInfo(
                     task_id=task_id,
                     task_type=task.task_type,
                     assigned_agent=task.target_role,
                     params=task.payload,
+                    last_activity_at=now,  # Fresh activity time for stale detection
                 )
                 self._shared_state.pending_tasks[task_id] = task_info
                 self._redis_task_ids.add(task_id)

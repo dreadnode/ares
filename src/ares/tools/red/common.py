@@ -11,12 +11,90 @@ import shutil
 import socket
 import tempfile
 import uuid
+from dataclasses import dataclass
 from typing import ClassVar
 
 from loguru import logger
 
 from ares.core.models import Credential, RedTeamState, SharedRedTeamState
 from ares.core.remote import run_remote
+
+
+@dataclass
+class CredentialContext:
+    """Tracks the current credential lineage for attack chain building.
+
+    When tools run within an agent's autonomous loop, they may use credentials
+    obtained from previous steps. This context tracks that lineage so discoveries
+    (hashes, new credentials) can be linked to their parent credential.
+    """
+
+    parent_id: str | None = None
+    """ID of the credential/hash that enabled the current action."""
+
+    attack_step: int = 0
+    """Position in the attack chain (increments with each credential transition)."""
+
+    source_username: str = ""
+    """Username of the credential being used."""
+
+    source_domain: str = ""
+    """Domain of the credential being used."""
+
+    impersonated_user: str = ""
+    """If impersonating via S4U/delegation, the impersonated user."""
+
+    impersonation_method: str = ""
+    """Method used for impersonation (e.g., 's4u_attack', 'pass_the_ticket')."""
+
+
+# Thread-local credential context for the current operation
+# Tools can read this to determine parent_id for discoveries
+_credential_context: CredentialContext = CredentialContext()
+
+
+def get_credential_context() -> CredentialContext:
+    """Get the current credential context for attack chain tracking."""
+    return _credential_context
+
+
+def set_credential_context(
+    parent_id: str | None = None,
+    attack_step: int = 0,
+    source_username: str = "",
+    source_domain: str = "",
+    impersonated_user: str = "",
+    impersonation_method: str = "",
+) -> None:
+    """Set the current credential context for attack chain tracking.
+
+    Call this before running tools that may discover new credentials/hashes.
+    The context will be used to set parent_id on discoveries.
+
+    Args:
+        parent_id: ID of the credential/hash enabling the current action.
+        attack_step: Current position in attack chain.
+        source_username: Username of credential being used.
+        source_domain: Domain of credential being used.
+        impersonated_user: If impersonating, the target user.
+        impersonation_method: Method of impersonation (s4u_attack, etc).
+    """
+    global _credential_context
+    _credential_context = CredentialContext(
+        parent_id=parent_id,
+        attack_step=attack_step,
+        source_username=source_username,
+        source_domain=source_domain,
+        impersonated_user=impersonated_user,
+        impersonation_method=impersonation_method,
+    )
+
+
+def clear_credential_context() -> None:
+    """Clear the credential context (call after task completes)."""
+    global _credential_context
+    _credential_context = CredentialContext()
+
 
 # Type alias for state that works with both single-agent and multi-agent modes
 AnyRedTeamState = RedTeamState | SharedRedTeamState

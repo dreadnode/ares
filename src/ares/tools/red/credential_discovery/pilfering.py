@@ -133,7 +133,8 @@ class SharePilferingTools(Toolset):
 
         try:
             logger.info(f"[*] Spidering share {share} on {target} with downloads enabled")
-            stdout, stderr, _ = run_tool(cmd, timeout_seconds=300)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=300, target_role="recon")
 
             result = stdout + "\n" + (stderr or "")
 
@@ -307,7 +308,8 @@ class SharePilferingTools(Toolset):
 
         try:
             logger.info(f"[*] Searching for GPP passwords in {domain}")
-            stdout, stderr, _ = run_tool(cmd, timeout_seconds=180)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=180, target_role="recon")
 
             result = stdout + "\n" + (stderr or "")
 
@@ -465,7 +467,8 @@ class SharePilferingTools(Toolset):
                         results.append(f"\n📄 {script_file}:\n{grep_output}")
 
             # Also use netexec's spider to find any files with passwords
-            stdout, stderr, _ = run_tool(spider_cmd, timeout_seconds=300)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _ = run_tool(spider_cmd, timeout_seconds=300, target_role="recon")
             spider_output = stdout + "\n" + (stderr or "")
 
             # Combine results

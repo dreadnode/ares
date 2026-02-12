@@ -16,6 +16,7 @@ from dreadnode.agent.hooks import retry_with_feedback, summarize_when_long
 from dreadnode.agent.stop import tool_use
 from loguru import logger
 
+from ares.core.capability_registry import FilteredToolset, get_enabled_tools
 from ares.core.config import get_agent_config, get_max_context_tokens, get_min_messages_to_keep
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.models import AgentInfo, AgentRole, SharedRedTeamState
@@ -32,6 +33,7 @@ from ares.tools.red import (
     CredentialHarvestingTools,
     CVEExploitTools,
     DelegationTools,
+    GMSATools,
     GoldenTicketTools,
     LateralCallbackTools,
     LateralMovementTools,
@@ -63,49 +65,49 @@ def fix_tool_output_encoding(content: str) -> str:
     return content.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
 
 
-# Tool assignments per agent role
+# All available toolset classes for filtering by capabilities
+# Each role gets ALL toolsets, but FilteredToolset restricts to capability-enabled tools
 # Note: ORCHESTRATOR is not included here - it uses OrchestratorTools which are
 # wired up separately in the orchestrator.py module
-ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
-    AgentRole.RECON: [
-        NetworkEnumerationTools,
-        BloodHoundTools,
-        RedTeamReportingTools,
-    ],
-    AgentRole.CREDENTIAL_ACCESS: [
-        NetworkEnumerationTools,
-        CredentialDiscoveryTools,
-        CredentialHarvestingTools,
-        SharePilferingTools,
-    ],
-    AgentRole.CRACKER: [
-        CrackingTools,
-        CrackerCallbackTools,
-    ],
-    AgentRole.ACL: [
-        ACLExploitTools,
-    ],
-    AgentRole.PRIVESC: [
-        CertipyTools,
-        DelegationTools,
-        MSSQLTools,
-        CVEExploitTools,
-        GoldenTicketTools,
-        TrustAttackTools,
-        LateralMovementTools,
-    ],
-    AgentRole.LATERAL: [
-        LateralMovementTools,
-        CredentialHarvestingTools,
-        SharePilferingTools,
-        PostureValidationTools,
-        LateralCallbackTools,
-    ],
-    AgentRole.COERCION: [
-        CoercionTools,
-        CoercionNetworkTools,
-    ],
+ALL_TOOLSETS: list[type] = [
+    # Reconnaissance
+    NetworkEnumerationTools,
+    BloodHoundTools,
+    PostureValidationTools,
+    # Credential discovery
+    CredentialDiscoveryTools,
+    CredentialHarvestingTools,
+    SharePilferingTools,
+    # Cracking
+    CrackingTools,
+    # ACL exploitation
+    ACLExploitTools,
+    # Privilege escalation
+    CertipyTools,
+    DelegationTools,
+    MSSQLTools,
+    CVEExploitTools,
+    GoldenTicketTools,
+    TrustAttackTools,
+    GMSATools,
+    # Lateral movement
+    LateralMovementTools,
+    # Coercion/relay
+    CoercionTools,
+    CoercionNetworkTools,
+]
+
+# Role-specific callback tools (not capability-filtered)
+# These are added automatically based on role
+ROLE_CALLBACK_TOOLS: dict[AgentRole, list[type]] = {
+    AgentRole.CRACKER: [CrackerCallbackTools],
+    AgentRole.LATERAL: [LateralCallbackTools],
 }
+
+# Always-included toolsets (reporting is needed by all roles)
+UNIVERSAL_TOOLSETS: list[type] = [
+    RedTeamReportingTools,
+]
 
 
 # System instruction templates per role
@@ -623,7 +625,7 @@ def create_role_hooks(
     return hooks
 
 
-def create_specialized_agent(
+def create_specialized_agent(  # noqa: PLR0912
     role: AgentRole,
     model: str,
     shared_state: SharedRedTeamState,
@@ -635,6 +637,11 @@ def create_specialized_agent(
 ) -> Agent:
     """
     Create a specialized agent for a specific role.
+
+    Tools are determined by the capabilities list in the YAML configuration.
+    The capability registry maps capability strings (e.g., "nmap", "impacket-secretsdump")
+    to specific tool method names, and FilteredToolset ensures only those methods
+    are exposed to the agent.
 
     Args:
         role: Agent specialization.
@@ -649,11 +656,19 @@ def create_specialized_agent(
     Returns:
         Configured Dreadnode Agent.
     """
-    # Get toolsets for this role
-    toolset_classes = ROLE_TOOLSETS.get(role, [])
+    # Get capabilities from config - this is now the source of truth for tool access
+    agent_config = get_agent_config(role.value)
+    enabled_tools = get_enabled_tools(set(agent_config.capabilities))
+
+    if not enabled_tools:
+        logger.warning(
+            f"No capabilities configured for role {role.value} - agent will have limited tools"
+        )
+
     tools: list[Any] = []
 
-    for cls in toolset_classes:
+    # Instantiate all toolsets and filter by capabilities
+    for cls in ALL_TOOLSETS:
         try:
             toolset = cls()
             # Set shared state on toolset (all toolsets accept AnyRedTeamState)
@@ -663,9 +678,44 @@ def create_specialized_agent(
                 toolset.set_dispatcher(dispatcher)
             if hasattr(toolset, "set_executor") and pod_executor:
                 toolset.set_executor(pod_executor)
-            tools.append(toolset)
+
+            # Wrap with capability filter
+            filtered = FilteredToolset(toolset, enabled_tools)
+
+            # Only add if this toolset has at least one enabled tool
+            if filtered.get_tools():
+                tools.append(filtered)
+                logger.debug(
+                    f"[{role.value}] Added {cls.__name__} with "
+                    f"{len(filtered.get_tools())} enabled tools"
+                )
         except Exception as e:  # noqa: PERF203
             logger.warning(f"Failed to initialize toolset {cls.__name__}: {e}")
+
+    # Add universal toolsets (not capability-filtered)
+    for cls in UNIVERSAL_TOOLSETS:
+        try:
+            toolset = cls()
+            if hasattr(toolset, "set_state"):
+                toolset.set_state(shared_state)
+            if hasattr(toolset, "set_dispatcher"):
+                toolset.set_dispatcher(dispatcher)
+            tools.append(toolset)
+        except Exception as e:  # noqa: PERF203
+            logger.warning(f"Failed to initialize universal toolset {cls.__name__}: {e}")
+
+    # Add role-specific callback tools (not capability-filtered)
+    callback_toolsets = ROLE_CALLBACK_TOOLS.get(role, [])
+    for cls in callback_toolsets:
+        try:
+            toolset = cls()
+            if hasattr(toolset, "set_state"):
+                toolset.set_state(shared_state)
+            if hasattr(toolset, "set_dispatcher"):
+                toolset.set_dispatcher(dispatcher)
+            tools.append(toolset)
+        except Exception as e:  # noqa: PERF203
+            logger.warning(f"Failed to initialize callback toolset {cls.__name__}: {e}")
 
     # Add additional tools
     if additional_tools:
@@ -872,9 +922,11 @@ def request_assistance(issue: str, context: str = "") -> str:
 
 
 __all__ = [
+    "ALL_TOOLSETS",
+    "ROLE_CALLBACK_TOOLS",
     "ROLE_INSTRUCTIONS",
     "ROLE_MAX_STEPS",
-    "ROLE_TOOLSETS",
+    "UNIVERSAL_TOOLSETS",
     "create_agent_info",
     "create_multi_agent_ensemble",
     "create_role_hooks",

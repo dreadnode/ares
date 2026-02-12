@@ -340,10 +340,10 @@ class TestStaleTaskCleanup:
             assigned_agent="privesc",
             status=TaskStatus.PENDING,
         )
-        # Manually set created_at to be older than threshold
-        stale_task.created_at = datetime.now(timezone.utc) - timedelta(
-            seconds=get_stale_task_timeout() + 60
-        )
+        # Manually set created_at and last_activity_at to be older than threshold
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=get_stale_task_timeout() + 60)
+        stale_task.created_at = old_time
+        stale_task.last_activity_at = old_time
 
         # Add a fresh task
         fresh_task = TaskInfo(
@@ -388,9 +388,9 @@ class TestStaleTaskCleanup:
             assigned_agent="privesc",
             status=TaskStatus.COMPLETED,
         )
-        completed_task.created_at = datetime.now(timezone.utc) - timedelta(
-            seconds=get_stale_task_timeout() + 60
-        )
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=get_stale_task_timeout() + 60)
+        completed_task.created_at = old_time
+        completed_task.last_activity_at = old_time
 
         dispatcher._shared_state.pending_tasks["completed-task-1"] = completed_task
 

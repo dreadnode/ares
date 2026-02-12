@@ -22,8 +22,10 @@ from ares.tools.red.common import (
     PLACEHOLDER_PASSWORDS,
     AnyRedTeamState,
     format_weakness_block,
+    get_credential_context,
     resolve_password,
     run_tool,
+    set_credential_context,
 )
 
 
@@ -334,7 +336,7 @@ class DelegationTools(Toolset):
             return f"RBCD write failed: {e}"
 
     @dn.tool_method
-    def s4u_attack(
+    def s4u_attack(  # noqa: PLR0912
         self,
         target_spn: str,
         impersonate: str,
@@ -408,6 +410,48 @@ class DelegationTools(Toolset):
                     "🎫 S4U ATTACK SUCCESSFUL!\n"
                     "\u2192 Service ticket obtained for impersonated user\n"
                     "\u2192 Set KRB5CCNAME=<ticket.ccache> and use with psexec\n\n" + result
+                )
+
+                # Update credential context for attack chain tracking
+                # Find the source credential's ID to establish parent linkage
+                source_cred_id = None
+                current_ctx = get_credential_context()
+                current_step = current_ctx.attack_step
+
+                if self.state:
+                    # Look up the credential used for S4U
+                    for cred in self.state.credentials:
+                        if (
+                            cred.username.lower() == username.lower()
+                            and cred.domain.lower() == domain.lower()
+                        ):
+                            source_cred_id = cred.id
+                            current_step = cred.attack_step
+                            break
+
+                    # If not found in credentials, check hashes (may have used hash)
+                    if not source_cred_id and hash:
+                        for h in getattr(self.state, "all_hashes", self.state.hashes):
+                            if (
+                                h.username.lower() == username.lower()
+                                and h.domain.lower() == domain.lower()
+                            ):
+                                source_cred_id = h.id
+                                current_step = h.attack_step
+                                break
+
+                # Update context so subsequent tools (secretsdump) know the lineage
+                set_credential_context(
+                    parent_id=source_cred_id,
+                    attack_step=current_step + 1,
+                    source_username=username,
+                    source_domain=domain,
+                    impersonated_user=impersonate,
+                    impersonation_method="s4u_attack",
+                )
+                logger.debug(
+                    f"Credential context updated: S4U as {impersonate} "
+                    f"via {domain}\\{username} (parent_id={source_cred_id})"
                 )
 
             return result

@@ -611,8 +611,8 @@ Run the underlying tool binaries directly:
 kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- \
     smbclient '//10.1.2.240/SYSVOL' -U 'DOMAIN/user%password' -c 'ls'
 
-# Run netexec directly
-kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- \
+# Run netexec directly (on recon agent - netexec is only installed there)
+kubectl -n attack-simulation exec -it ares-recon-agent-0 -- \
     netexec smb 10.1.2.240 -u 'user' -p 'password' -d 'DOMAIN' --shares
 
 # Run secretsdump directly
@@ -729,7 +729,9 @@ availability can vary by distro and role flags.
 All agents inherit these foundational tools:
 
 - **Runtime**: python3, pip3, uv, rust/cargo (via rustup), pipx
-- **Utilities**: git, curl, wget, netcat-traditional
+- **Utilities**: git, curl, wget, netcat-traditional, vim, jq, tmux, htop
+- **Network diagnostics**: dnsutils (dig, nslookup), net-tools, iproute2, tcpdump, telnet
+- **Debugging**: procps (ps, top), strace, lsof
 - **Build**: build-essential, libffi-dev, libssl-dev
 - **Python packages**: python-dotenv, dreadnode, rigging, pydantic, asyncio
 
@@ -771,6 +773,7 @@ All agents inherit these foundational tools:
 
 - **ADCS**: certipy-ad (certipy)
 - **Kerberos**: noPac, krbrelayx (printerbug, addspn, dnstool)
+- **Credential extraction**: lsassy (LSASS dumping for TGT extraction)
 - **Impacket suite**: getST, getTGT, rbcd, mssqlclient, raiseChild
 - **Windows privesc binaries**: PrintSpoofer, GodPotato, SweetPotato,
   KrbRelayUp, SharpGPOAbuse, Seatbelt, SharpUp, RunasCs
@@ -782,12 +785,12 @@ All agents inherit these foundational tools:
 - **Remote access**: evil-winrm, xfreerdp (freerdp2/3), sshpass
 - **SMB**: smbclient
 - **Pivoting**: proxychains4
-- **Pass-the-Hash**: pth-toolkit
+- **Pass-the-Hash**: pth-toolkit (Kali only)
 - **Impacket suite**: psexec, wmiexec, smbexec, secretsdump
 
 ### COERCION Agent
 
 - **Poisoning**: Responder, mitm6
 - **Coercion tools**: Coercer, PetitPotam, dfscoerce
-- **Relay tools**: krbrelayx (addspn, dnstool, krbrelayx tools)
+- **Relay tools**: krbrelayx (printerbug, addspn, dnstool, krbrelayx)
 - **Impacket**: ntlmrelayx (impacket-ntlmrelayx)

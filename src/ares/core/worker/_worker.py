@@ -59,6 +59,7 @@ from ares.core.worker.prompts import (
     generate_prompt_from_task,
 )
 from ares.tools.red import CrackerCallbackTools, CrackingTools, LateralCallbackTools
+from ares.tools.red.common import clear_credential_context, set_credential_context
 
 if TYPE_CHECKING:
     from dreadnode.agent import Agent
@@ -499,6 +500,25 @@ class RedisWorkerAgent:
             f"(type={task.task_type}, payload={payload_snapshot})"
         )
 
+        # Set credential context from task payload for attack chain tracking
+        # This allows tools (e.g., secretsdump) to set parent_id on discoveries
+        if payload_snapshot:
+            parent_cred_id = payload_snapshot.get("parent_credential_id")
+            parent_step = payload_snapshot.get("parent_attack_step", 0)
+            source_user = payload_snapshot.get("username", "")
+            source_domain = payload_snapshot.get("domain", "")
+            if parent_cred_id or source_user:
+                set_credential_context(
+                    parent_id=parent_cred_id,
+                    attack_step=parent_step,
+                    source_username=source_user,
+                    source_domain=source_domain,
+                )
+                logger.debug(
+                    f"Credential context set: parent_id={parent_cred_id}, "
+                    f"step={parent_step}, user={source_domain}\\{source_user}"
+                )
+
         try:
             await self._refresh_shared_state()
             # Handle "command" tasks directly via subprocess (no agent needed)
@@ -827,6 +847,8 @@ class RedisWorkerAgent:
                 logger.warning(f"[{self.agent_name}] Failed to record task status: {status_error}")
         finally:
             self._current_task = None
+            # Clear credential context to prevent leakage between tasks
+            clear_credential_context()
 
     async def _refresh_shared_state(self) -> None:
         if not self.redis_url or not self.operation_id:

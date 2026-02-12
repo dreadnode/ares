@@ -428,7 +428,8 @@ class CredentialDiscoveryTools(Toolset):
                 cmd.extend(["--jitter", str(delay_seconds)])
 
             logger.info(f"[*] Password spraying {domain} with password: {password}")
-            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=300)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=300, target_role="recon")
 
             result = stdout + "\n" + (stderr or "")
             creds = self._parse_netexec_credentials(result)
@@ -580,7 +581,8 @@ class CredentialDiscoveryTools(Toolset):
             ]
 
             logger.info(f"[*] Testing username=password combinations in {domain}")
-            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=300)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=300, target_role="recon")
 
             result = stdout + "\n" + (stderr or "")
 
@@ -681,7 +683,8 @@ class CredentialDiscoveryTools(Toolset):
 
         try:
             logger.info(f"[*] Querying password policy for {domain}")
-            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=120)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=120, target_role="recon")
             result = stdout + "\n" + (stderr or "")
 
             min_length = None
@@ -790,7 +793,8 @@ class CredentialDiscoveryTools(Toolset):
 
         try:
             logger.info(f"[*] Dumping LAPS passwords from {domain}")
-            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=120)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=120, target_role="recon")
 
             result = stdout + "\n" + (stderr or "")
 

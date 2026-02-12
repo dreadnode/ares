@@ -21,7 +21,10 @@ agents:
     model: "gpt-5.2"
     max_steps: 200
     pod_selector: "app.kubernetes.io/name=ares-orchestrator"
+    # Tools: OrchestratorTools, RedTeamReportingTools
+    # NOTE: Orchestrator NEVER executes tools directly - it dispatches to workers
     tools:
+      # Dispatch to worker agents
       - dispatch_recon
       - dispatch_credential_access
       - dispatch_crack_hash
@@ -29,70 +32,75 @@ agents:
       - dispatch_lateral_movement
       - dispatch_privesc_exploit
       - start_coercion
+      # Workflow triggers
       - trigger_credential_expansion
       - queue_vulnerability_for_exploitation
+      # State queries
       - get_pending_tasks
       - get_all_credentials
       - get_all_hashes
       - get_exploitation_status
       - get_agent_status
       - get_operation_summary
+      # Reporting
       - broadcast_credential
       - announce_domain_admin
+      - complete_operation
 
   recon:
     model: "gpt-5.2"
     max_steps: 100
     pod_selector: "ares.dreadnode.io/role=recon"
+    # Tools: NetworkEnumerationTools, BloodHoundTools, RedTeamReportingTools
     capabilities:
+      # Network scanning
       - nmap
-      - netexec
-      - rpcclient
+      # LDAP enumeration
       - ldapsearch
+      # SMB enumeration
       - enum4linux
       - enum4linux-ng
-      - bloodhound
-      - certipy
-      - adidnsdump
-      - impacket-getnpusers
-      - impacket-getuserspns
-      - impacket-regsecrets
-      - impacket-secretsdump
-      - impacket-psexec
-      - impacket-wmiexec
-      - impacket-smbexec
-      - impacket-rbcd
-      - impacket-getst
-      - impacket-gettgt
-      - mssqlclient
-      - raisechild
-      - impacket-ticketer
+      - rpcclient
+      # DNS utilities
       - dig
       - nslookup
       - whois
+      - adidnsdump
+      # AD tools
+      - netexec
+      - bloodhound-python
+      - certipy
+      # Impacket (limited to enumeration)
+      - impacket-getnpusers
+      - impacket-getuserspns
 
   credential_access:
     model: "gpt-5.2"
     max_steps: 100
     pod_selector: "ares.dreadnode.io/role=credential_access"
+    # Tools: NetworkEnumerationTools, CredentialDiscoveryTools, CredentialHarvestingTools, SharePilferingTools
     capabilities:
-      - netexec
-      - ldapsearch
+      # SMB access
+      - smbclient
+      - rpcclient
+      # AD credential attacks
+      - sprayhound
+      - targetedkerberoast
+      - lsassy
+      # Impacket
       - impacket-getnpusers
       - impacket-secretsdump
-      - targeted_kerberoast
-      - lsassy
-      - sprayhound
-      - rpcclient
-      - smbclient
 
   cracker:
     model: "gpt-5.2"
     max_steps: 150
     pod_selector: "ares.dreadnode.io/role=cracker"
+    # Tools: CrackingTools, CrackerCallbackTools
     capabilities:
+      # Cracking tools
       - hashcat
       - john
+      # Wordlists
       - rockyou
       - seclists
 
@@ -100,69 +108,99 @@ agents:
     model: "gpt-5.2"
     max_steps: 150  # ACL analysis requires complex path finding
     pod_selector: "ares.dreadnode.io/role=acl"
+    # Tools: ACLExploitTools
     capabilities:
+      # ACL abuse tools
       - bloodyad
       - pywhisker
-      - dacledit
-      - targeted_kerberoast
+      - targetedkerberoast
       - rpcclient
+      # Impacket
+      - impacket-dacledit
 
   privesc:
     model: "gpt-5.2"
     max_steps: 100
     pod_selector: "ares.dreadnode.io/role=privesc"
+    # Tools: CertipyTools, DelegationTools, MSSQLTools, CVEExploitTools, GoldenTicketTools, TrustAttackTools, LateralMovementTools
     capabilities:
+      # ADCS exploitation
       - certipy
+      # Credential extraction
+      - lsassy
+      # Kerberos attacks
+      - nopac
+      - krbrelayx
+      - printerbug
+      - addspn
+      - dnstool
+      # Impacket
       - impacket-getst
       - impacket-gettgt
       - impacket-rbcd
-      - mssqlclient
-      - nopac
-      - printnightmare
-      - raisechild
-      - krbrelayup
+      - impacket-mssqlclient
+      - impacket-raisechild
+      - impacket-ticketer
+      # Windows privesc binaries
       - printspoofer
       - godpotato
       - sweetpotato
+      - krbrelayup
+      - sharpgpoabuse
+      - seatbelt
+      - sharpup
+      - runascs
+      # Privesc scripts
+      - powerup
+      - powerupsql
       - winpeas
       - linpeas
-      - powerupsql
-      - powerup
-      - sharpup
-      - seatbelt
-      - sharpgpoabuse
-      - runascs
+      # CVE exploits
+      - printnightmare
       - scmuacbypass
 
   lateral:
     model: "gpt-5.2"
     max_steps: 300
     pod_selector: "ares.dreadnode.io/role=lateral"
+    # Tools: LateralMovementTools, CredentialHarvestingTools, SharePilferingTools, PostureValidationTools, LateralCallbackTools
     capabilities:
+      # Remote access
       - evil-winrm
+      - xfreerdp
+      - sshpass
+      # SMB
+      - smbclient
+      # Pivoting
+      - proxychains4
+      # Pass-the-Hash
+      - pth-toolkit
+      # Impacket
       - impacket-psexec
       - impacket-wmiexec
       - impacket-smbexec
       - impacket-secretsdump
-      - smbclient
-      - xfreerdp
-      - sshpass
 
   coercion:
     model: "gpt-5.2"
     max_steps: 30
     pod_selector: "ares.dreadnode.io/role=coercion"
+    # Tools: CoercionTools, CoercionNetworkTools
     capabilities:
+      # Poisoning
       - responder
       - mitm6
+      # Coercion tools
       - coercer
       - petitpotam
-      - ntlmrelayx
+      - dfscoerce
+      # Relay tools
       - krbrelayx
+      - printerbug
       - addspn
       - dnstool
-      - printerbug
-      - dfscoerce
+      # Impacket
+      - impacket-ntlmrelayx
 
 # Timeout configurations
 timeouts:

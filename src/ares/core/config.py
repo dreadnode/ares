@@ -148,7 +148,7 @@ class OperationConfig:
 
     # Task monitoring / resilience
     # Tasks pending longer than this are cleaned up (prevents throttle deadlock)
-    stale_task_timeout: int = 600  # 10 minutes
+    stale_task_timeout: int = 180  # 3 minutes (reduced from 10 to prevent deadlock)
     # After this many consecutive Redis failures, crash for K8s restart
     max_redis_consecutive_failures: int = 30
     # Base delay between Redis retries (exponential backoff)
