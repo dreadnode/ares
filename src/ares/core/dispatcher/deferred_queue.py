@@ -25,6 +25,7 @@ MAX_DEFERRED_TOTAL = 25  # Total max queued tasks across all types
 MAX_DEFERRED_PER_TYPE = 10  # Max queued tasks per task_type (secondary limit)
 DEFERRED_TASK_MAX_AGE_SECONDS = 300  # 5 minutes - evict older tasks
 DEFERRED_QUEUE_CHECK_INTERVAL = 5.0  # Check every 5 seconds (faster drain)
+CRITICAL_PRIORITY_THRESHOLD = 3  # Priority 1-3 tasks are critical, force-drain even at capacity
 
 
 @dataclass(order=True)
@@ -188,6 +189,55 @@ class DeferredQueueMixin:
             )
             return True
 
+    async def _submit_deferred_task(
+        self: RedTeamDispatcher, task: DeferredTask, *, is_critical: bool = False
+    ) -> bool:
+        """Submit a single deferred task to the queue. Returns True on success."""
+        if not self._task_queue:
+            return False
+
+        try:
+            task_id = await self._task_queue.submit_task(
+                task_type=task.task_type,
+                target_role=task.target_role,
+                payload=task.payload,
+                source_agent=task.source_agent,
+                priority=task.priority,
+            )
+
+            # Track task for result consumption
+            if task_id and self._shared_state:
+                task_info = TaskInfo(
+                    task_id=task_id,
+                    task_type=task.task_type,
+                    assigned_agent=task.target_role,
+                    params=task.payload,
+                )
+                self._shared_state.pending_tasks[task_id] = task_info
+                self._redis_task_ids.add(task_id)
+
+            self._deferred_queue_stats["processed"] += 1
+            age = time.time() - task.enqueue_time
+            prefix = "Force-drained critical" if is_critical else "Processed deferred"
+            logger.info(
+                f"{prefix} {task.task_type} task -> {task.target_role} "
+                f"(task_id={task_id}, priority={task.priority}, waited {age:.1f}s)"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to submit deferred task: {e}")
+            return False
+
+    async def _drain_queues_on_da(self: RedTeamDispatcher) -> None:
+        """Drain all deferred queues when DA is achieved."""
+        total_drained = 0
+        async with self._get_deferred_lock():
+            for queue in self._deferred_queues.values():
+                total_drained += len(queue)
+                queue.clear()
+        if total_drained > 0:
+            logger.info(f"DA achieved - drained {total_drained} tasks from deferred queues")
+
     async def _deferred_queue_processor(self: RedTeamDispatcher) -> None:
         """Background task that processes deferred queue when slots open."""
         logger.info("Deferred queue processor running")
@@ -198,81 +248,62 @@ class DeferredQueueMixin:
 
                 # HALT: If DA achieved, drain deferred queues and stop processing
                 if self._shared_state and self._shared_state.has_domain_admin:
-                    # Drain all queues - these tasks are no longer needed
-                    total_drained = 0
-                    async with self._get_deferred_lock():
-                        for queue in self._deferred_queues.values():
-                            if queue:
-                                total_drained += len(queue)
-                                queue.clear()
-                    if total_drained > 0:
-                        logger.info(
-                            f"DA achieved - drained {total_drained} tasks from deferred queues"
-                        )
-                    continue  # Keep loop alive but skip processing
-
-                # Check if we have capacity
-                llm_count = await self._get_llm_task_count()
-                max_tasks = get_max_concurrent_tasks()
-
-                if llm_count >= max_tasks:
-                    # Still at capacity, skip this cycle
+                    await self._drain_queues_on_da()
                     continue
 
-                # Calculate available slots
-                available_slots = max_tasks - llm_count
+                llm_count = await self._get_llm_task_count()
+                max_tasks = get_max_concurrent_tasks()
+                available_slots = max(0, max_tasks - llm_count)
 
-                # Process tasks from deferred queue
-                tasks_to_submit = await self._get_highest_priority_deferred(available_slots)
+                # Force-drain critical priority tasks (1-3) even at capacity
+                critical_tasks = await self._get_critical_priority_deferred()
+                if critical_tasks:
+                    logger.info(
+                        f"Force-draining {len(critical_tasks)} critical priority tasks "
+                        f"(at {llm_count}/{max_tasks} capacity)"
+                    )
+                    for task in critical_tasks:
+                        await self._submit_deferred_task(task, is_critical=True)
 
-                for task in tasks_to_submit:
-                    # Submit directly to task queue (bypassing throttle check)
-                    if self._task_queue:
-                        try:
-                            task_id = await self._task_queue.submit_task(
-                                task_type=task.task_type,
-                                target_role=task.target_role,
-                                payload=task.payload,
-                                source_agent=task.source_agent,
-                                priority=task.priority,
-                            )
+                if llm_count >= max_tasks:
+                    continue
 
-                            # CRITICAL: Track task for result consumption
-                            # Without this, results from deferred tasks are never consumed
-                            if task_id and self._shared_state:
-                                task_info = TaskInfo(
-                                    task_id=task_id,
-                                    task_type=task.task_type,
-                                    assigned_agent=task.target_role,
-                                    params=task.payload,
-                                )
-                                self._shared_state.pending_tasks[task_id] = task_info
-                                self._redis_task_ids.add(task_id)
-
-                            self._deferred_queue_stats["processed"] += 1
-                            age = time.time() - task.enqueue_time
-                            logger.info(
-                                f"Processed deferred {task.task_type} task -> {task.target_role} "
-                                f"(task_id={task_id}, waited {age:.1f}s)"
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to submit deferred task: {e}")
-                            # Re-queue the task if submission failed
-                            await self._enqueue_deferred_task(
-                                task.task_type,
-                                task.target_role,
-                                task.payload,
-                                task.source_agent,
-                                task.priority,
-                            )
+                # Process remaining tasks from deferred queue
+                for task in await self._get_highest_priority_deferred(available_slots):
+                    success = await self._submit_deferred_task(task)
+                    if not success:
+                        # Re-queue on failure
+                        await self._enqueue_deferred_task(
+                            task.task_type,
+                            task.target_role,
+                            task.payload,
+                            task.source_agent,
+                            task.priority,
+                        )
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Deferred queue processor error: {e}")
-                await asyncio.sleep(5.0)  # Back off on error
+                await asyncio.sleep(5.0)
 
         logger.info("Deferred queue processor stopped")
+
+    async def _get_critical_priority_deferred(self: RedTeamDispatcher) -> list[DeferredTask]:
+        """Get all critical priority tasks (priority <= CRITICAL_PRIORITY_THRESHOLD) for force-drain."""
+        async with self._get_deferred_lock():
+            critical_tasks: list[DeferredTask] = []
+
+            for queue in self._deferred_queues.values():
+                # Find tasks with priority <= threshold (lower = higher priority)
+                for task in list(queue):  # Copy to allow modification
+                    if task.priority <= CRITICAL_PRIORITY_THRESHOLD:
+                        critical_tasks.append(task)
+                        queue.remove(task)
+
+            # Sort by priority (lowest first = highest priority)
+            critical_tasks.sort()
+            return critical_tasks
 
     async def _get_highest_priority_deferred(
         self: RedTeamDispatcher, max_count: int

@@ -37,6 +37,12 @@ class ThrottlingMixin:
     # - command: direct shell execution for remote ops
     NON_LLM_TASK_TYPES = frozenset({"crack", "command"})
 
+    # Task types that bypass hard cap throttling (critical path to DA)
+    # These still use LLM and count against limits, but won't be deferred at hard cap
+    # - exploit: S4U, ESC1-8, MSSQL impersonation - direct DA path
+    # - privesc_enumeration: discovers exploitable vulns (delegation, ADCS)
+    CRITICAL_PATH_TASK_TYPES = frozenset({"exploit", "privesc_enumeration"})
+
     def _get_throttle_lock(self: RedTeamDispatcher) -> asyncio.Lock:
         """Get or create the throttle lock (lazy init for event loop safety)."""
         lock = self._throttle_lock
@@ -113,14 +119,22 @@ class ThrottlingMixin:
         llm_count = await self._get_llm_task_count()
         max_tasks = get_max_concurrent_tasks()
 
-        # HARD CAP: If we're 1.5x over the limit, DEFER unconditionally
-        # This is an absolute limit - no exceptions for min_slots or priority
-        # Lower multiplier (1.5x vs 2x) prevents excessive task pileup before deferring
+        # HARD CAP: If we're 1.5x over the limit, DEFER most tasks
+        # Exception: CRITICAL_PATH_TASK_TYPES (exploit, privesc_enumeration) bypass hard cap
+        # These are the tasks that actually achieve DA - can't starve them
         hard_cap = int(max_tasks * 1.5)
         if llm_count >= hard_cap:
+            # Critical path tasks bypass hard cap - they're the DA path
+            if task_type in self.CRITICAL_PATH_TASK_TYPES:
+                logger.info(
+                    f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
+                    f"ALLOWING {task_type} (critical path to DA, bypasses hard cap)"
+                )
+                return False
+
             logger.warning(
                 f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
-                f"DEFERRING {task_type} task (1.5x over limit, no exceptions)"
+                f"DEFERRING {task_type} task (1.5x over limit)"
             )
             return True
 

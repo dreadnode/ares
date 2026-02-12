@@ -593,12 +593,12 @@ async def _exploit_vulnerability(
         return {"success": False, "error": "Failed to dispatch task"}
 
     # Wait for task completion (with timeout)
-    # Reduced from 15min to 10min - stuck tasks should fail faster to free up resources
-    # ADCS stuck detection is 8min, so 10min gives buffer while not wasting tokens
+    # Increased to 20 minutes to account for single privesc worker queue backup
+    # Critical path tasks (S4U, ESC1-8) may wait behind other tasks in queue
     try:
-        return await dispatcher.wait_for_task(task_id, timeout=600)
+        return await dispatcher.wait_for_task(task_id, timeout=1200)
     except asyncio.TimeoutError:
-        logger.warning(f"Exploitation task {task_id} timed out after 10 minutes")
+        logger.warning(f"Exploitation task {task_id} timed out after 20 minutes")
         return {"success": False, "error": "Task timed out"}
 
 

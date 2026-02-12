@@ -438,13 +438,14 @@ class TestRoleHooks:
         # (log_tool_usage, log_tool_result, summarize_when_long, check_domain_admin, unstall)
         assert len(hooks) >= 4, "ORCHESTRATOR should have summarize_when_long and other hooks"
 
-    def test_non_orchestrator_roles_dont_have_summarize_hook(self):
-        """Test that non-orchestrator roles don't get summarize_when_long hook."""
+    def test_all_roles_get_summarize_hook(self):
+        """Test that ALL roles get summarize_when_long hook for context management."""
         shared_state = SharedRedTeamState(operation_id="test-op")
         dispatcher = MagicMock(spec=RedTeamDispatcher)
         dispatcher.shared_state = shared_state
 
-        non_orchestrator_roles = [
+        all_roles = [
+            AgentRole.ORCHESTRATOR,
             AgentRole.RECON,
             AgentRole.CREDENTIAL_ACCESS,
             AgentRole.CRACKER,
@@ -454,17 +455,20 @@ class TestRoleHooks:
             AgentRole.COERCION,
         ]
 
-        for role in non_orchestrator_roles:
+        for role in all_roles:
             hooks = create_role_hooks(role, dispatcher, shared_state)
-            # Non-orchestrator roles should have fewer hooks than orchestrator
-            # They should have: log_tool_usage, log_tool_result, unstall, maybe role-specific
-            # But NOT summarize_when_long (that's orchestrator-only)
-            orchestrator_hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
-            # The exact count varies, but orchestrator should have more due to summarize_when_long
-            # and check_domain_admin hooks
-            assert len(hooks) < len(orchestrator_hooks), (
-                f"Role {role} should have fewer hooks than ORCHESTRATOR"
+            # All roles should have at least 3 hooks:
+            # log_tool_usage, log_tool_result, context_aware_summarize
+            assert len(hooks) >= 3, (
+                f"Role {role} should have at least 3 hooks (including summarize_when_long)"
             )
+
+        # Orchestrator should have MORE hooks than workers due to domain admin checking
+        orchestrator_hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+        worker_hooks = create_role_hooks(AgentRole.RECON, dispatcher, shared_state)
+        assert len(orchestrator_hooks) > len(worker_hooks), (
+            "ORCHESTRATOR should have additional domain admin hooks"
+        )
 
 
 class TestContextManagementHooks:

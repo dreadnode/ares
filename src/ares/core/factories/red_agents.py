@@ -235,46 +235,48 @@ def create_role_hooks(
 
     hooks.extend([log_tool_usage, log_tool_result])
 
+    # Context management for ALL roles: summarize conversation when approaching token limits
+    # This prevents context window exhaustion from accumulated tool outputs
+    # Default threshold is ~100k tokens (~85% of 128k window for Sonnet)
+    # Configurable via ARES_MAX_CONTEXT_TOKENS and ARES_MIN_MESSAGES_TO_KEEP
+    max_tokens = get_max_context_tokens()
+    min_messages = get_min_messages_to_keep()
+    _summarize_hook = summarize_when_long(
+        max_tokens=max_tokens,
+        min_messages_to_keep=min_messages,
+    )
+
+    async def context_aware_summarize(event: StepStart | GenerationEnd) -> Reaction | None:
+        """Wrap summarize_when_long with logging for observability."""
+        # Log token count on each step start
+        if isinstance(event, StepStart):
+            last_gen = event.get_latest_event_by_type(GenerationEnd)
+            if last_gen and last_gen.usage:
+                tokens = last_gen.usage.input_tokens
+                pct = (tokens / max_tokens) * 100
+                if pct >= 80:
+                    logger.warning(
+                        f"📊 [{log_name}] Context: {tokens:,} / {max_tokens:,} tokens ({pct:.0f}%)"
+                    )
+                elif pct >= 50:
+                    logger.info(
+                        f"📊 [{log_name}] Context: {tokens:,} / {max_tokens:,} tokens ({pct:.0f}%)"
+                    )
+
+        # Call the actual summarization hook
+        result = await _summarize_hook(event)
+
+        if result is not None:
+            logger.success(
+                f"📝 [{log_name}] Conversation summarized! Keeping {min_messages} recent messages"
+            )
+
+        return result
+
+    hooks.append(context_aware_summarize)
+
     # Role-specific hooks
     if role == AgentRole.ORCHESTRATOR:
-        # Context management: summarize conversation when approaching token limits
-        # This prevents rate limit exhaustion from accumulated context
-        # Default threshold is ~100k tokens (~85% of 128k window for Sonnet)
-        # Configurable via ARES_MAX_CONTEXT_TOKENS and ARES_MIN_MESSAGES_TO_KEEP
-        max_tokens = get_max_context_tokens()
-        min_messages = get_min_messages_to_keep()
-        _summarize_hook = summarize_when_long(
-            max_tokens=max_tokens,
-            min_messages_to_keep=min_messages,
-        )
-
-        async def context_aware_summarize(event: StepStart | GenerationEnd) -> Reaction | None:
-            """Wrap summarize_when_long with logging for observability."""
-            # Log token count on each step start
-            if isinstance(event, StepStart):
-                last_gen = event.get_latest_event_by_type(GenerationEnd)
-                if last_gen and last_gen.usage:
-                    tokens = last_gen.usage.input_tokens
-                    pct = (tokens / max_tokens) * 100
-                    if pct >= 80:
-                        logger.warning(
-                            f"📊 Context: {tokens:,} / {max_tokens:,} tokens ({pct:.0f}%)"
-                        )
-                    elif pct >= 50:
-                        logger.info(f"📊 Context: {tokens:,} / {max_tokens:,} tokens ({pct:.0f}%)")
-
-            # Call the actual summarization hook
-            result = await _summarize_hook(event)
-
-            if result is not None:
-                logger.success(
-                    f"📝 Conversation summarized! Keeping {min_messages} recent messages"
-                )
-
-            return result
-
-        hooks.append(context_aware_summarize)
-
         # Orchestrator monitors for domain admin achievement
         async def check_domain_admin(event: ToolEnd):
             if not isinstance(event, ToolEnd):
