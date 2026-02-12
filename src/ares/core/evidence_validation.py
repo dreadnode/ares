@@ -14,11 +14,7 @@ from typing import Any
 
 from loguru import logger
 
-# Maximum number of query results to store for validation
-MAX_STORED_RESULTS = 10
-
-# Confidence penalty for unvalidated evidence (reduced from 0.3 to allow higher baseline confidence)
-UNVALIDATED_CONFIDENCE_PENALTY = 0.15
+from ares.core.config import get_max_stored_results, get_unvalidated_confidence_penalty
 
 
 @dataclass
@@ -35,14 +31,14 @@ class StoredQueryResult:
 
 
 # Global storage for recent query results
-_recent_results: deque[StoredQueryResult] = deque(maxlen=MAX_STORED_RESULTS)
+_recent_results: deque[StoredQueryResult] = deque(maxlen=get_max_stored_results())
 _query_counter = 0
 
 
 def reset_evidence_validation():
     """Reset evidence validation state for a new investigation."""
     global _recent_results, _query_counter
-    _recent_results = deque(maxlen=MAX_STORED_RESULTS)
+    _recent_results = deque(maxlen=get_max_stored_results())
     _query_counter = 0
 
 
@@ -326,7 +322,7 @@ def adjust_confidence_for_validation(
     if validated:
         return confidence
     # Apply penalty for unvalidated evidence
-    return max(0.1, confidence - UNVALIDATED_CONFIDENCE_PENALTY)
+    return max(0.1, confidence - get_unvalidated_confidence_penalty())
 
 
 def get_recent_query_ids() -> list[str]:

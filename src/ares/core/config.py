@@ -146,6 +146,44 @@ class OperationConfig:
     # Number of rate limit errors before triggering global backoff
     rate_limit_threshold: int = 3
 
+    # Task monitoring / resilience
+    # Tasks pending longer than this are cleaned up (prevents throttle deadlock)
+    stale_task_timeout: int = 600  # 10 minutes
+    # After this many consecutive Redis failures, crash for K8s restart
+    max_redis_consecutive_failures: int = 30
+    # Base delay between Redis retries (exponential backoff)
+    redis_retry_base_delay: float = 1.0
+    # Maximum delay between Redis retries
+    redis_retry_max_delay: float = 10.0
+
+    # Deferred queue settings (tasks queued when at capacity)
+    # Total max queued tasks across all types
+    max_deferred_total: int = 25
+    # Max queued tasks per task_type (secondary limit)
+    max_deferred_per_type: int = 10
+    # Evict deferred tasks older than this (seconds)
+    deferred_task_max_age: int = 300  # 5 minutes
+    # How often to check deferred queue (seconds)
+    deferred_queue_check_interval: float = 5.0
+    # Priority 1-N tasks are critical, force-drain even at capacity
+    critical_priority_threshold: int = 3
+
+    # Worker agent settings
+    # Timeout for agent tasks (prevents infinite retry loops)
+    agent_task_timeout: int = 300  # 5 minutes
+
+    # Context offloading settings
+    # Tool outputs larger than this (chars) are offloaded to Redis
+    offload_threshold: int = 5000
+    # TTL for offloaded outputs (seconds)
+    offload_ttl: int = 14400  # 4 hours
+
+    # Evidence validation settings (blue team)
+    # Maximum number of query results to store for validation
+    max_stored_results: int = 10
+    # Confidence penalty for unvalidated evidence
+    unvalidated_confidence_penalty: float = 0.15
+
     # Phase detection thresholds (see PRIORITY.md)
     lateral_movement_admin_creds_threshold: int = 3
     lateral_movement_owned_hosts_threshold: int = 5
@@ -269,6 +307,19 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         task_dispatch_delay=operation.get("task_dispatch_delay", 1.5),
         rate_limit_backoff=operation.get("rate_limit_backoff", 30.0),
         rate_limit_threshold=operation.get("rate_limit_threshold", 3),
+        # Task monitoring / resilience from operation section
+        stale_task_timeout=operation.get("stale_task_timeout", 600),
+        max_redis_consecutive_failures=operation.get("max_redis_consecutive_failures", 30),
+        redis_retry_base_delay=operation.get("redis_retry_base_delay", 1.0),
+        redis_retry_max_delay=operation.get("redis_retry_max_delay", 10.0),
+        # Deferred queue settings from operation section
+        max_deferred_total=operation.get("max_deferred_total", 25),
+        max_deferred_per_type=operation.get("max_deferred_per_type", 10),
+        deferred_task_max_age=operation.get("deferred_task_max_age", 300),
+        deferred_queue_check_interval=operation.get("deferred_queue_check_interval", 5.0),
+        critical_priority_threshold=operation.get("critical_priority_threshold", 3),
+        # Worker settings from operation section
+        agent_task_timeout=operation.get("agent_task_timeout", 300),
         # Phase detection thresholds
         lateral_movement_admin_creds_threshold=phase_detection.get(
             "lateral_movement_admin_creds", 3
@@ -281,6 +332,11 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         max_context_tokens=context_management.get("max_context_tokens", 100_000),
         min_messages_to_keep=context_management.get("min_messages_to_keep", 10),
         max_output_chars=context_management.get("max_output_chars", 2000),
+        offload_threshold=context_management.get("offload_threshold", 5000),
+        offload_ttl=context_management.get("offload_ttl", 14400),
+        # Evidence validation (blue team)
+        max_stored_results=operation.get("max_stored_results", 10),
+        unvalidated_confidence_penalty=operation.get("unvalidated_confidence_penalty", 0.15),
     )
 
 
@@ -337,6 +393,62 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:  # noqa: P
         except ValueError:
             pass
 
+    # Task monitoring / resilience overrides
+    if stale_timeout := os.environ.get("ARES_STALE_TASK_TIMEOUT"):
+        try:
+            config.stale_task_timeout = int(stale_timeout)
+        except ValueError:
+            pass
+    if redis_failures := os.environ.get("ARES_MAX_REDIS_CONSECUTIVE_FAILURES"):
+        try:
+            config.max_redis_consecutive_failures = int(redis_failures)
+        except ValueError:
+            pass
+    if redis_base_delay := os.environ.get("ARES_REDIS_RETRY_BASE_DELAY"):
+        try:
+            config.redis_retry_base_delay = float(redis_base_delay)
+        except ValueError:
+            pass
+    if redis_max_delay := os.environ.get("ARES_REDIS_RETRY_MAX_DELAY"):
+        try:
+            config.redis_retry_max_delay = float(redis_max_delay)
+        except ValueError:
+            pass
+
+    # Deferred queue overrides
+    if max_deferred := os.environ.get("ARES_MAX_DEFERRED_TOTAL"):
+        try:
+            config.max_deferred_total = int(max_deferred)
+        except ValueError:
+            pass
+    if max_deferred_type := os.environ.get("ARES_MAX_DEFERRED_PER_TYPE"):
+        try:
+            config.max_deferred_per_type = int(max_deferred_type)
+        except ValueError:
+            pass
+    if deferred_max_age := os.environ.get("ARES_DEFERRED_TASK_MAX_AGE"):
+        try:
+            config.deferred_task_max_age = int(deferred_max_age)
+        except ValueError:
+            pass
+    if deferred_interval := os.environ.get("ARES_DEFERRED_QUEUE_CHECK_INTERVAL"):
+        try:
+            config.deferred_queue_check_interval = float(deferred_interval)
+        except ValueError:
+            pass
+    if critical_priority := os.environ.get("ARES_CRITICAL_PRIORITY_THRESHOLD"):
+        try:
+            config.critical_priority_threshold = int(critical_priority)
+        except ValueError:
+            pass
+
+    # Worker overrides
+    if agent_timeout := os.environ.get("ARES_AGENT_TASK_TIMEOUT"):
+        try:
+            config.agent_task_timeout = int(agent_timeout)
+        except ValueError:
+            pass
+
     # Context management overrides
     if max_tokens := os.environ.get("ARES_MAX_CONTEXT_TOKENS"):
         try:
@@ -351,6 +463,28 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:  # noqa: P
     if max_output := os.environ.get("ARES_MAX_OUTPUT_CHARS"):
         try:
             config.max_output_chars = int(max_output)
+        except ValueError:
+            pass
+    if offload_thresh := os.environ.get("ARES_OFFLOAD_THRESHOLD"):
+        try:
+            config.offload_threshold = int(offload_thresh)
+        except ValueError:
+            pass
+    if offload_ttl_env := os.environ.get("ARES_OFFLOAD_TTL"):
+        try:
+            config.offload_ttl = int(offload_ttl_env)
+        except ValueError:
+            pass
+
+    # Evidence validation overrides (blue team)
+    if max_results := os.environ.get("ARES_MAX_STORED_RESULTS"):
+        try:
+            config.max_stored_results = int(max_results)
+        except ValueError:
+            pass
+    if confidence_penalty := os.environ.get("ARES_UNVALIDATED_CONFIDENCE_PENALTY"):
+        try:
+            config.unvalidated_confidence_penalty = float(confidence_penalty)
         except ValueError:
             pass
 
@@ -474,6 +608,76 @@ def get_max_output_chars() -> int:
     return load_config().max_output_chars
 
 
+def get_stale_task_timeout() -> int:
+    """Get timeout (seconds) after which pending tasks are cleaned up."""
+    return load_config().stale_task_timeout
+
+
+def get_max_redis_consecutive_failures() -> int:
+    """Get max consecutive Redis failures before crashing for K8s restart."""
+    return load_config().max_redis_consecutive_failures
+
+
+def get_redis_retry_base_delay() -> float:
+    """Get base delay (seconds) between Redis retries."""
+    return load_config().redis_retry_base_delay
+
+
+def get_redis_retry_max_delay() -> float:
+    """Get maximum delay (seconds) between Redis retries."""
+    return load_config().redis_retry_max_delay
+
+
+def get_max_deferred_total() -> int:
+    """Get max total deferred tasks across all types."""
+    return load_config().max_deferred_total
+
+
+def get_max_deferred_per_type() -> int:
+    """Get max deferred tasks per task type."""
+    return load_config().max_deferred_per_type
+
+
+def get_deferred_task_max_age() -> int:
+    """Get max age (seconds) for deferred tasks before eviction."""
+    return load_config().deferred_task_max_age
+
+
+def get_deferred_queue_check_interval() -> float:
+    """Get interval (seconds) for checking deferred queue."""
+    return load_config().deferred_queue_check_interval
+
+
+def get_critical_priority_threshold() -> int:
+    """Get priority threshold for critical tasks (1-N are critical)."""
+    return load_config().critical_priority_threshold
+
+
+def get_agent_task_timeout() -> int:
+    """Get timeout (seconds) for agent tasks."""
+    return load_config().agent_task_timeout
+
+
+def get_offload_threshold() -> int:
+    """Get character threshold for offloading tool outputs to Redis."""
+    return load_config().offload_threshold
+
+
+def get_offload_ttl() -> int:
+    """Get TTL (seconds) for offloaded outputs in Redis."""
+    return load_config().offload_ttl
+
+
+def get_max_stored_results() -> int:
+    """Get max query results to store for evidence validation."""
+    return load_config().max_stored_results
+
+
+def get_unvalidated_confidence_penalty() -> float:
+    """Get confidence penalty for unvalidated evidence."""
+    return load_config().unvalidated_confidence_penalty
+
+
 def clear_config_cache() -> None:
     """Clear the cached configuration (useful for testing)."""
     global _cached_config
@@ -488,18 +692,32 @@ __all__ = [
     "derive_redis_url",
     "get_agent_config",
     "get_agent_heartbeat_timeout",
+    "get_agent_task_timeout",
+    "get_critical_priority_threshold",
     "get_default_network_interface",
+    "get_deferred_queue_check_interval",
+    "get_deferred_task_max_age",
     "get_lateral_movement_admin_creds_threshold",
     "get_lateral_movement_owned_hosts_threshold",
     "get_max_concurrent_tasks",
     "get_max_context_tokens",
+    "get_max_deferred_per_type",
+    "get_max_deferred_total",
     "get_max_output_chars",
+    "get_max_redis_consecutive_failures",
+    "get_max_stored_results",
     "get_min_messages_to_keep",
     "get_min_slots_per_role",
     "get_namespace",
+    "get_offload_threshold",
+    "get_offload_ttl",
     "get_rate_limit_backoff",
     "get_rate_limit_threshold",
+    "get_redis_retry_base_delay",
+    "get_redis_retry_max_delay",
     "get_redis_url",
+    "get_stale_task_timeout",
     "get_task_dispatch_delay",
+    "get_unvalidated_confidence_penalty",
     "load_config",
 ]

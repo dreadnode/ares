@@ -16,15 +16,10 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from ares.core.config import get_offload_threshold, get_offload_ttl
+
 if TYPE_CHECKING:
     from redis.asyncio import Redis
-
-# Threshold for offloading tool outputs (characters)
-# Outputs larger than this are stored in Redis with a reference
-DEFAULT_OFFLOAD_THRESHOLD = 5000
-
-# TTL for offloaded outputs (seconds) - 4 hours
-OFFLOAD_TTL = 14400
 
 
 def _hash_content(content: str) -> str:
@@ -46,7 +41,7 @@ async def offload_large_output(
     operation_id: str,
     task_id: str,
     output: str,
-    threshold: int = DEFAULT_OFFLOAD_THRESHOLD,
+    threshold: int | None = None,
 ) -> tuple[str, bool]:
     """Offload large output to Redis, return summary + reference.
 
@@ -55,11 +50,14 @@ async def offload_large_output(
         operation_id: Current operation ID
         task_id: Task that produced the output
         output: Full output text
-        threshold: Character threshold for offloading
+        threshold: Character threshold for offloading (uses config default if None)
 
     Returns:
         Tuple of (output_or_summary, was_offloaded)
     """
+    if threshold is None:
+        threshold = get_offload_threshold()
+
     if len(output) <= threshold:
         return output, False
 
@@ -68,7 +66,7 @@ async def offload_large_output(
     redis_key = f"ares:operation:{operation_id}:output:{task_id}:{content_hash}"
 
     # Store full output in Redis
-    await redis.set(redis_key, output, ex=OFFLOAD_TTL)
+    await redis.set(redis_key, output, ex=get_offload_ttl())
 
     # Generate summary with reference
     lines = output.split("\n")
@@ -235,11 +233,13 @@ class ContextOffloader:
         self,
         redis: Redis,
         operation_id: str,
-        offload_threshold: int = DEFAULT_OFFLOAD_THRESHOLD,
+        offload_threshold: int | None = None,
     ):
         self.redis = redis
         self.operation_id = operation_id
-        self.offload_threshold = offload_threshold
+        self.offload_threshold = (
+            offload_threshold if offload_threshold is not None else get_offload_threshold()
+        )
         self._offloaded_tasks: set[str] = set()
 
     async def process_task_result(
@@ -310,7 +310,6 @@ class ContextOffloader:
 
 
 __all__ = [
-    "DEFAULT_OFFLOAD_THRESHOLD",
     "ContextOffloader",
     "estimate_tokens",
     "offload_large_output",

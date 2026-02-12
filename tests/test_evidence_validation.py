@@ -1,8 +1,7 @@
 """Tests for evidence validation and IOC extraction."""
 
+from ares.core.config import get_max_stored_results, get_unvalidated_confidence_penalty
 from ares.core.evidence_validation import (
-    MAX_STORED_RESULTS,
-    UNVALIDATED_CONFIDENCE_PENALTY,
     StoredQueryResult,
     _classify_ioc,
     _extract_patterns_from_string,
@@ -96,15 +95,16 @@ class TestStoreQueryResult:
         assert any("192.168.58.100" in v for v in values)
 
     def test_store_respects_max_limit(self):
-        """Test store respects MAX_STORED_RESULTS."""
+        """Test store respects max_stored_results config."""
         reset_evidence_validation()
+        max_stored = get_max_stored_results()
 
         # Store more than max
-        for i in range(MAX_STORED_RESULTS + 5):
+        for i in range(max_stored + 5):
             store_query_result("test", f"query{i}", {f"val{i}": f"data{i}"}, 1)
 
-        # Should only have MAX_STORED_RESULTS
-        assert len(get_recent_query_ids()) == MAX_STORED_RESULTS
+        # Should only have max_stored_results
+        assert len(get_recent_query_ids()) == max_stored
 
 
 class TestExtractSearchableValues:
@@ -368,7 +368,7 @@ class TestAdjustConfidenceForValidation:
     def test_unvalidated_penalty(self):
         """Test unvalidated evidence gets penalty."""
         result = adjust_confidence_for_validation(0.8, validated=False)
-        expected = 0.8 - UNVALIDATED_CONFIDENCE_PENALTY
+        expected = 0.8 - get_unvalidated_confidence_penalty()
         assert result == expected
 
     def test_unvalidated_minimum(self):

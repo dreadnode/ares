@@ -12,14 +12,16 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from ares.core.config import (
+    get_max_redis_consecutive_failures,
+    get_redis_retry_base_delay,
+    get_redis_retry_max_delay,
+    get_stale_task_timeout,
+)
 from ares.core.models import TaskInfo, TaskStatus
 
 if TYPE_CHECKING:
     from ares.core.dispatcher._dispatcher import RedTeamDispatcher
-
-# Stale task timeout in seconds - tasks pending longer than this are cleaned up
-# This prevents throttle deadlock when tasks get lost in Redis or workers crash
-STALE_TASK_TIMEOUT_SECONDS = 600  # 10 minutes
 
 
 class MonitoringMixin:
@@ -45,46 +47,65 @@ class MonitoringMixin:
             self._agents[agent_name].last_heartbeat = datetime.now(timezone.utc)
 
     async def _heartbeat_monitor(self: RedTeamDispatcher) -> None:
-        """Background task to monitor agent heartbeats."""
+        """Background task to monitor agent heartbeats.
+
+        Resilience: Continues running even if individual heartbeat checks fail.
+        Connection errors are logged but don't stop the monitor.
+        """
+        consecutive_failures = 0
+
         while self._running:
-            now = datetime.now(timezone.utc)
+            try:
+                now = datetime.now(timezone.utc)
 
-            # For cross-pod workers, read heartbeats from Redis
-            if self._task_queue:
-                for agent_name in list(self._agents.keys()):
-                    try:
-                        heartbeat_data = await self._task_queue.get_heartbeat(agent_name)
-                        if heartbeat_data:
-                            # Update in-memory state from Redis heartbeat
-                            timestamp_str = heartbeat_data.get("timestamp")
-                            if timestamp_str:
-                                timestamp = datetime.fromisoformat(timestamp_str)
-                                self._agents[agent_name].last_heartbeat = timestamp
-                                self._agents[agent_name].status = heartbeat_data.get(
-                                    "status", "idle"
-                                )
-                                self._agents[agent_name].current_task = heartbeat_data.get(
-                                    "current_task"
-                                )
-                    except Exception as e:  # noqa: PERF203
-                        # Heartbeat failures could indicate auth issues - log at ERROR level
-                        logger.error(
-                            f"Failed to get heartbeat for {agent_name}: {e}. "
-                            "This may indicate authentication failure or misconfiguration.",
-                            exc_info=True,
+                # For cross-pod workers, read heartbeats from Redis
+                if self._task_queue:
+                    for agent_name in list(self._agents.keys()):
+                        try:
+                            heartbeat_data = await self._task_queue.get_heartbeat(agent_name)
+                            if heartbeat_data:
+                                # Update in-memory state from Redis heartbeat
+                                timestamp_str = heartbeat_data.get("timestamp")
+                                if timestamp_str:
+                                    timestamp = datetime.fromisoformat(timestamp_str)
+                                    self._agents[agent_name].last_heartbeat = timestamp
+                                    self._agents[agent_name].status = heartbeat_data.get(
+                                        "status", "idle"
+                                    )
+                                    self._agents[agent_name].current_task = heartbeat_data.get(
+                                        "current_task"
+                                    )
+                        except Exception as e:  # noqa: PERF203
+                            # Heartbeat failures could indicate auth issues - log at ERROR level
+                            logger.error(
+                                f"Failed to get heartbeat for {agent_name}: {e}. "
+                                "This may indicate authentication failure or misconfiguration.",
+                            )
+
+                # Check for stale heartbeats
+                for agent_name, agent_info in list(self._agents.items()):
+                    elapsed = (now - agent_info.last_heartbeat).total_seconds()
+                    stale_threshold = max(60, self._agent_heartbeat_timeout)
+                    if elapsed > stale_threshold and agent_info.status != "offline":
+                        logger.warning(
+                            f"Agent {agent_name} heartbeat stale ({elapsed:.0f}s) - marking offline"
                         )
+                        agent_info.status = "offline"
 
-            # Check for stale heartbeats
-            for agent_name, agent_info in list(self._agents.items()):
-                elapsed = (now - agent_info.last_heartbeat).total_seconds()
-                stale_threshold = max(60, self._agent_heartbeat_timeout)
-                if elapsed > stale_threshold and agent_info.status != "offline":
-                    logger.warning(
-                        f"Agent {agent_name} heartbeat stale ({elapsed:.0f}s) - marking offline"
-                    )
-                    agent_info.status = "offline"
+                # Reset failure counter on success
+                consecutive_failures = 0
+                await asyncio.sleep(15)
 
-            await asyncio.sleep(15)
+            except asyncio.CancelledError:  # noqa: PERF203
+                logger.info("Heartbeat monitor cancelled")
+                break
+
+            except Exception as e:
+                consecutive_failures += 1
+                logger.warning(f"Heartbeat monitor error (attempt {consecutive_failures}): {e}")
+                # Don't crash - heartbeat failures are less critical than result consumer
+                # Just wait and retry
+                await asyncio.sleep(min(15, consecutive_failures * 5))
 
     async def _result_consumer(self: RedTeamDispatcher) -> None:
         """
@@ -94,17 +115,72 @@ class MonitoringMixin:
         task_queue.send_result()) and the dispatcher's in-memory pending_tasks
         tracking. Without this, tasks complete on workers but the orchestrator
         never knows about it.
+
+        Resilience: If Redis becomes unavailable, this consumer will retry with
+        exponential backoff. After MAX_REDIS_CONSECUTIVE_FAILURES, it raises
+        an exception to crash the orchestrator so Kubernetes can restart it.
         """
         logger.info("Result consumer started")
+        consecutive_failures = 0
 
-        try:
-            while self._running:
+        while self._running:
+            try:
                 await self._consume_pending_results()
+                # Success - reset failure counter and delay
+                if consecutive_failures > 0:
+                    logger.info(f"Result consumer recovered after {consecutive_failures} failures")
+                consecutive_failures = 0
                 await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            logger.info("Result consumer cancelled")
-        except Exception as e:
-            logger.error(f"Result consumer fatal error: {e}", exc_info=True)
+
+            except asyncio.CancelledError:  # noqa: PERF203
+                logger.info("Result consumer cancelled")
+                break
+
+            except Exception as e:
+                consecutive_failures += 1
+                # Check if this is a connection-related error
+                error_str = str(e).lower()
+                is_connection_error = any(
+                    keyword in error_str
+                    for keyword in [
+                        "connection",
+                        "connect",
+                        "closed",
+                        "timeout",
+                        "broken pipe",
+                        "reset",
+                        "refused",
+                        "sentinel",
+                    ]
+                )
+
+                if is_connection_error:
+                    # Exponential backoff with cap
+                    max_failures = get_max_redis_consecutive_failures()
+                    delay = min(
+                        get_redis_retry_base_delay() * (2 ** min(consecutive_failures - 1, 4)),
+                        get_redis_retry_max_delay(),
+                    )
+                    logger.warning(
+                        f"Result consumer Redis error (attempt {consecutive_failures}/"
+                        f"{max_failures}): {e}. Retrying in {delay:.1f}s"
+                    )
+
+                    # Fail fast after too many consecutive failures
+                    if consecutive_failures >= max_failures:
+                        logger.critical(
+                            f"Result consumer failed {consecutive_failures} times consecutively. "
+                            "Redis appears unavailable. Crashing orchestrator for restart."
+                        )
+                        raise RuntimeError(
+                            f"Redis unavailable after {consecutive_failures} consecutive failures"
+                        ) from e
+
+                    await asyncio.sleep(delay)
+                else:
+                    # Non-connection error - log and continue with normal delay
+                    logger.error(f"Result consumer error: {e}", exc_info=True)
+                    await asyncio.sleep(1)
 
         logger.info("Result consumer stopped")
 
@@ -117,13 +193,14 @@ class MonitoringMixin:
         - Tasks get lost in Redis
         - Network partitions cause result delivery failures
 
-        Tasks older than STALE_TASK_TIMEOUT_SECONDS are removed from:
+        Tasks older than stale_task_timeout (from config) are removed from:
         - pending_tasks (decreases LLM task count)
         - _redis_task_ids (stops result polling)
         """
         if not self._shared_state:
             return
 
+        stale_timeout = get_stale_task_timeout()
         now = datetime.now(timezone.utc)
         stale_task_ids: list[str] = []
 
@@ -133,7 +210,7 @@ class MonitoringMixin:
                 continue
 
             age_seconds = (now - task_info.created_at).total_seconds()
-            if age_seconds > STALE_TASK_TIMEOUT_SECONDS:
+            if age_seconds > stale_timeout:
                 stale_task_ids.append(task_id)
 
         if stale_task_ids:
@@ -152,7 +229,7 @@ class MonitoringMixin:
 
             logger.info(
                 f"Stale task cleanup: removed {len(stale_task_ids)} tasks "
-                f"(threshold: {STALE_TASK_TIMEOUT_SECONDS}s)"
+                f"(threshold: {stale_timeout}s)"
             )
 
     async def _consume_pending_results(self: RedTeamDispatcher) -> None:

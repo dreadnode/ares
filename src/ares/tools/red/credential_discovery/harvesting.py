@@ -17,11 +17,12 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
-from ares.core.models import Hash, User
+from ares.core.models import Hash
 from ares.core.remote import run_remote
 from ares.tools.red.common import (
     PLACEHOLDER_PASSWORDS,
     AnyRedTeamState,
+    add_user_to_state,
     is_ntlm_hash,
     resolve_password,
     run_tool,
@@ -474,18 +475,9 @@ class CredentialHarvestingTools(Toolset):
                         validated.add(match.group(1))
 
             if validated and self.state:
-                existing = {user.username.lower() for user in self.state.users}
                 for username in sorted(validated):
-                    if username.lower() in existing:
-                        continue
-                    self.state.users.append(
-                        User(
-                            username=username,
-                            domain=domain,
-                            description="validated via Kerberos (no-auth)",
-                        )
-                    )
-                    logger.info(f"[+] Recorded user from Kerberos no-auth: {username}@{domain}")
+                    if add_user_to_state(self.state, username, domain, source="kerberos_noauth"):
+                        logger.info(f"[+] Recorded user from Kerberos no-auth: {username}@{domain}")
 
             if validated:
                 summary = ", ".join(sorted(validated))

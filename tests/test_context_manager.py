@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ares.core.config import get_offload_threshold
 from ares.core.context_manager import (
-    DEFAULT_OFFLOAD_THRESHOLD,
     ContextOffloader,
     _hash_content,
     estimate_tokens,
@@ -137,7 +137,7 @@ class TestOffloadLargeOutput:
     @pytest.mark.asyncio
     async def test_offload_uses_correct_ttl(self):
         """Offloaded content uses 4 hour TTL."""
-        from ares.core.context_manager import OFFLOAD_TTL
+        from ares.core.config import get_offload_ttl
 
         redis = AsyncMock()
         output = "x" * 200
@@ -152,7 +152,7 @@ class TestOffloadLargeOutput:
 
         # Check TTL is set
         call_kwargs = redis.set.call_args[1]
-        assert call_kwargs["ex"] == OFFLOAD_TTL
+        assert call_kwargs["ex"] == get_offload_ttl()
 
 
 class TestRetrieveOffloadedOutput:
@@ -431,7 +431,7 @@ class TestDefaultOffloadThreshold:
 
     def test_default_threshold_is_reasonable(self):
         """Default threshold should be 5000 characters."""
-        assert DEFAULT_OFFLOAD_THRESHOLD == 5000
+        assert get_offload_threshold() == 5000
 
 
 # Helper for async iteration

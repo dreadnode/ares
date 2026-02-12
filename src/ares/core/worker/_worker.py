@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from loguru import logger
 
-from ares.core.config import get_redis_url
+from ares.core.config import get_agent_task_timeout, get_redis_url
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.exceptions import AuthenticationError, ConfigurationError, CriticalWorkerError
 from ares.core.factories.red_agents import create_agent_info, create_specialized_agent
@@ -46,6 +46,7 @@ from ares.core.worker.operations import (
     get_active_operation_pointer,
     get_operation_model,
     get_operation_model_overrides,
+    is_operation_completed,
 )
 from ares.core.worker.prompts import (
     TASK_PROMPTS,
@@ -63,11 +64,6 @@ if TYPE_CHECKING:
 # we only need to wait for the window to roll over
 RATE_LIMIT_BACKOFF_DELAYS = [5.0, 10.0, 20.0, 40.0, 60.0, 60.0]  # 6 retries with short waits
 RATE_LIMIT_MAX_RETRIES = len(RATE_LIMIT_BACKOFF_DELAYS)
-
-# Task-level timeout to prevent agents from running indefinitely on a single task.
-# This prevents infinite retry loops where the LLM keeps trying the same failing approach.
-# 5 minutes is enough for most legitimate tasks while preventing 20+ minute stalls.
-AGENT_TASK_TIMEOUT_SECONDS = 300
 
 
 def _update_etc_hosts(hosts_list: list, written_ips: set[str], agent_name: str) -> set[str]:
@@ -536,8 +532,9 @@ class RedisWorkerAgent:
             # 2. Errors returned in result.error or result.last_error (dreadnode SDK catches them)
             result = None
             last_rate_limit_error: str | Exception | None = None
+            agent_timeout = get_agent_task_timeout()
             try:
-                async with asyncio.timeout(AGENT_TASK_TIMEOUT_SECONDS):
+                async with asyncio.timeout(agent_timeout):
                     for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
                         try:
                             attempt_msg = (
@@ -590,12 +587,12 @@ class RedisWorkerAgent:
             except TimeoutError:
                 logger.warning(
                     f"[{self.agent_name}] ⏱️ Task {task.task_id} timed out after "
-                    f"{AGENT_TASK_TIMEOUT_SECONDS}s - agent stuck in retry loop"
+                    f"{agent_timeout}s - agent stuck in retry loop"
                 )
                 await self.task_queue.send_result(
                     task_id=task.task_id,
                     success=False,
-                    error=f"Task timeout: agent exceeded {AGENT_TASK_TIMEOUT_SECONDS}s limit",
+                    error=f"Task timeout: agent exceeded {agent_timeout}s limit",
                     worker_pod=self.pod_name,
                     agent_name=self.agent_name,
                 )
@@ -1134,6 +1131,14 @@ class RedisWorkerAgent:
         """Return True if a switch is requested and the worker should exit."""
         if not self.redis_url or not self.operation_id:
             return False
+
+        # Check if operation has completed
+        if await is_operation_completed(self.redis_url, self.operation_id):
+            logger.info(f"Operation {self.operation_id} has completed; shutting down worker")
+            self._running = False
+            return True
+
+        # Check if active pointer switched to different operation
         active_op = await get_active_operation_pointer(
             self.redis_url, max_operation_age=self.max_operation_age
         )
@@ -1781,6 +1786,14 @@ class WorkerAgent:
         """Return True if a switch is requested and the worker should exit."""
         if not self.redis_url or not self.operation_id:
             return False
+
+        # Check if operation has completed
+        if await is_operation_completed(self.redis_url, self.operation_id):
+            logger.info(f"Operation {self.operation_id} has completed; shutting down worker")
+            self._running = False
+            return True
+
+        # Check if active pointer switched to different operation
         active_op = await get_active_operation_pointer(
             self.redis_url, max_operation_age=self.max_operation_age
         )

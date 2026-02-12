@@ -14,10 +14,11 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
-from ares.core.models import Credential, Host, Share, User
+from ares.core.models import Credential, Host, Share
 from ares.tools.red.common import (
     AnyRedTeamState,
     add_credential_to_state,
+    add_user_to_state,
     format_weakness_block,
     is_motd_garbage,
     is_motd_line,
@@ -803,18 +804,8 @@ class NetworkEnumerationTools(Toolset):
                     users = self._extract_users_from_outputs(outputs)
                     found_users = bool(users)
                     for found_user in sorted(users):
-                        if any(
-                            u.username == found_user and u.domain == effective_domain
-                            for u in self.state.users
-                        ):
-                            continue
-                        self.state.users.append(
-                            User(
-                                username=found_user,
-                                domain=effective_domain,
-                                description="",
-                                is_admin=False,
-                            )
+                        add_user_to_state(
+                            self.state, found_user, effective_domain, source="netexec_user_enum"
                         )
 
                     extracted = self._extract_passwords_from_user_enum_output(output)

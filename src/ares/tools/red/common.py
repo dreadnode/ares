@@ -679,6 +679,48 @@ def add_hash_to_state(
         dispatcher.signal_credential_access()
 
 
+def add_user_to_state(
+    state: AnyRedTeamState | None,
+    username: str,
+    domain: str,
+    source: str = "",
+) -> bool:
+    """Add a user to state if not duplicate.
+
+    Uses SharedRedTeamState.add_user() which handles domain normalization,
+    deduplication, and real-time Redis checkpoint.
+
+    Args:
+        state: The operation state (RedTeamState or SharedRedTeamState).
+        username: The username to add.
+        domain: The domain for the user.
+        source: Tool/method that discovered this user (e.g., "netexec_user_enum").
+
+    Returns:
+        True if user was added, False if duplicate or invalid.
+    """
+    if not state or not username:
+        return False
+
+    # SharedRedTeamState.add_user() handles validation, normalization, and Redis checkpoint
+    if hasattr(state, "add_user"):
+        return state.add_user(username, domain, source)
+
+    # Legacy single-agent state fallback
+    from ares.core.models import User
+
+    normalized = username.strip()
+    normalized_domain = (domain or "").strip().lower()
+    if not normalized:
+        return False
+    # Check for duplicate
+    for existing in state.users:
+        if existing.username == normalized and (existing.domain or "").lower() == normalized_domain:
+            return False
+    state.users.append(User(username=normalized, domain=normalized_domain, source=source))
+    return True
+
+
 def check_tool_result(
     stdout: str,
     stderr: str,
