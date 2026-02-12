@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from ares.core.config import get_agent_heartbeat_timeout
+from ares.core.config import get_agent_heartbeat_timeout, get_vulnerability_priorities
 
 # Import all mixins
 from ares.core.dispatcher.agents import AgentMixin
@@ -126,40 +126,9 @@ class RedTeamDispatcher(
         # Role-based routing
         self._role_queues: dict[AgentRole, str] = {}  # role -> agent_name
 
-        # Vulnerability priorities (queue is now Redis-backed ZSET, see VulnerabilityMixin)
-        self._vulnerability_priorities: dict[str, int] = {
-            # Tier 1: Instant DA paths (priority 1-5)
-            "krbtgt_hash": 1,  # krbtgt = golden ticket = instant DA
-            "domain_admin_hash": 2,  # DA hash = instant DA
-            "constrained_delegation": 3,  # S4U with DA impersonation = instant DA
-            "unconstrained_delegation": 4,  # DC ticket = krbtgt = DA
-            # Tier 2: ADCS attacks (priority 5-7)
-            "ADCS_ESC1": 5,
-            "ADCS_ESC4": 6,
-            "ADCS_ESC8": 7,
-            # Tier 3: Direct DA via ACL (priority 8-9)
-            "genericall_domain_admins": 8,  # GenericAll on Domain Admins = instant DA
-            "gpo_write": 9,  # GPO write on DC-linked GPO = SYSTEM on DC
-            # Tier 4: Other ACL and delegation attacks (priority 10-13)
-            "acl_abuse": 10,
-            "rbcd": 11,
-            # Tier 4: MSSQL attacks (priority 12-15)
-            "mssql_impersonation": 12,
-            "mssql_linked_xpcmdshell": 13,  # xp_cmdshell on linked server
-            "mssql_linked": 14,
-            "mssql_linked_server": 14,  # Alias for mssql_linked
-            "mssql_xp_cmdshell": 15,
-            # Tier 5: Other privilege escalation (priority 16-20)
-            "gpo_abuse": 16,  # Generic GPO abuse (lower priority than gpo_write)
-            "gmsa_readable": 17,  # gMSA password retrieval
-            "laps_abuse": 18,
-            "dcsync": 19,
-            "shadow_credentials": 20,
-            # Tier 6: Relay and persistence (priority 21+)
-            "smb_relay_target": 21,
-            "adminsd_holder_writable": 22,
-            "adminsd_holder_acl": 22,  # Alias for detection from BloodHound
-        }
+        # Vulnerability priorities from config (single source of truth)
+        # Lower number = higher priority (exploited first)
+        self._vulnerability_priorities: dict[str, int] = get_vulnerability_priorities()
 
         # Task completion futures for wait_for_task
         self._task_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}

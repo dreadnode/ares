@@ -744,13 +744,8 @@ async def worker(
     # workers to start without ARES_MODEL in the ConfigMap.
     if not model and not operation_id:
         logger.info("No model specified - will fetch from operation config after discovery")
+    # max_steps from CLI takes precedence, otherwise use YAML config (single source of truth)
     max_steps = worker_args.max_steps if worker_args.max_steps > 0 else agent_config.max_steps
-    if role == "lateral" and max_steps < 300:
-        max_steps = 300
-    if role == "cracker" and max_steps < 150:
-        max_steps = 150
-    if role == "acl" and max_steps < 150:
-        max_steps = 150  # ACL analysis requires complex path finding
 
     # Configure Dreadnode (optional - don't fail if platform unavailable)
     dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")

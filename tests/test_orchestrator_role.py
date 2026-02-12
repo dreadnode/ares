@@ -13,7 +13,6 @@ from ares.core.config import get_agent_config
 from ares.core.factories.red_agents import (
     ALL_TOOLSETS,
     ROLE_INSTRUCTIONS,
-    ROLE_MAX_STEPS,
     create_role_hooks,
     load_agent_instructions,
 )
@@ -77,17 +76,17 @@ class TestOrchestratorTemplate:
 
 
 class TestOrchestratorMaxSteps:
-    """Tests for orchestrator max steps configuration."""
+    """Tests for orchestrator max steps configuration (from YAML config)."""
 
     def test_orchestrator_has_max_steps(self):
-        """ORCHESTRATOR should have max_steps configured."""
-        assert AgentRole.ORCHESTRATOR in ROLE_MAX_STEPS
-        assert ROLE_MAX_STEPS[AgentRole.ORCHESTRATOR] > 0
+        """ORCHESTRATOR should have max_steps configured in YAML."""
+        config = get_agent_config("orchestrator")
+        assert config.max_steps > 0
 
     def test_recon_has_max_steps(self):
-        """RECON should have its own max_steps configured."""
-        assert AgentRole.RECON in ROLE_MAX_STEPS
-        assert ROLE_MAX_STEPS[AgentRole.RECON] > 0
+        """RECON should have its own max_steps configured in YAML."""
+        config = get_agent_config("recon")
+        assert config.max_steps > 0
 
 
 class TestCapabilityBasedToolsets:

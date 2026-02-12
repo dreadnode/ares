@@ -13,7 +13,7 @@ from typing import Annotated
 import cyclopts
 from loguru import logger
 
-from ares.core.config import get_redis_url
+from ares.core.config import get_redis_url, get_vulnerability_priorities
 from ares.core.orchestrator_client import (
     get_operation_status,
     submit_operation,
@@ -21,45 +21,19 @@ from ares.core.orchestrator_client import (
 )
 from ares.core.redis_client import create_redis_client
 
-# Vulnerability priority lookup (matches dispatcher._vulnerability_priorities)
-# Lower priority number = higher priority (exploited sooner)
-VULNERABILITY_PRIORITIES: dict[str, int] = {
-    # Tier 1: Instant DA paths (priority 1-5)
-    "krbtgt_hash": 1,
-    "domain_admin_hash": 2,
-    "constrained_delegation": 3,
-    "unconstrained_delegation": 4,
-    # Tier 2: ADCS attacks (priority 5-7)
-    "ADCS_ESC1": 5,
-    "esc1": 5,
-    "ADCS_ESC4": 6,
-    "esc4": 6,
-    "ADCS_ESC8": 7,
-    "esc8": 7,
-    # Tier 3: Direct DA via ACL (priority 8-9)
-    "genericall_domain_admins": 8,
-    "gpo_write": 9,
-    # Tier 4: Other ACL and delegation attacks (priority 10-13)
-    "acl_abuse": 10,
-    "rbcd": 11,
-    # Tier 4: MSSQL attacks (priority 12-15)
-    "mssql_impersonation": 12,
-    "mssql_linked_xpcmdshell": 13,
-    "mssql_linked": 14,
-    "mssql_linked_server": 14,
-    "mssql_xp_cmdshell": 15,
-    # Tier 5: Other privilege escalation (priority 16-20)
-    "gpo_abuse": 16,
-    "gmsa_readable": 17,
-    "laps_abuse": 18,
-    "dcsync": 19,
-    "shadow_credentials": 20,
-    # Tier 6: Relay and persistence (priority 21+)
-    "smb_relay_target": 21,
-    "smb_signing_disabled": 21,
-    "adminsd_holder_writable": 22,
-    "adminsd_holder_acl": 22,  # Alias for BloodHound detection
-}
+
+def _get_vuln_priorities() -> dict[str, int]:
+    """Get vulnerability priorities with lowercase aliases for CLI convenience."""
+    priorities = get_vulnerability_priorities()
+    # Add lowercase aliases for CLI convenience (e.g., "esc1" -> "ADCS_ESC1")
+    aliases = {
+        "esc1": priorities.get("ADCS_ESC1", 1),
+        "esc4": priorities.get("ADCS_ESC4", 2),
+        "esc8": priorities.get("ADCS_ESC8", 3),
+        "smb_signing_disabled": priorities.get("smb_relay_target", 22),
+    }
+    return {**priorities, **aliases}
+
 
 app = cyclopts.App(
     name="ares-ops",
@@ -1693,11 +1667,12 @@ async def inject_vulnerability(
         if account_name:
             vuln_details["account_name"] = account_name
 
-        # Look up priority from the priority table (default to 99 if unknown)
-        priority = VULNERABILITY_PRIORITIES.get(vuln_type.lower(), 99)
+        # Look up priority from config (default to 99 if unknown)
+        vuln_priorities = _get_vuln_priorities()
+        priority = vuln_priorities.get(vuln_type.lower(), 99)
         # Also check without lowercase for case-sensitive types like ADCS_ESC1
         if priority == 99:
-            priority = VULNERABILITY_PRIORITIES.get(vuln_type, 99)
+            priority = vuln_priorities.get(vuln_type, 99)
 
         vuln = VulnerabilityInfo(
             vuln_id=f"{vuln_type}_{target_ip}_{account_name or 'manual'}",

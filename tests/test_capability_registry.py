@@ -230,3 +230,119 @@ class TestCapabilityIntegration:
         assert "certipy_request" in enabled
         assert "s4u_attack" in enabled
         assert "nopac" in enabled
+
+
+class TestAgentToolRequirements:
+    """Tests that verify agents have access to their required tools.
+
+    These tests use the actual config to catch capability regressions.
+    If a required tool is removed from an agent's capabilities, CI will fail.
+    """
+
+    @staticmethod
+    def _get_agent_tools(agent_name: str) -> set[str]:
+        """Get tools available to an agent from actual config."""
+        from ares.core.config import get_agent_config
+
+        config = get_agent_config(agent_name)
+        capabilities = getattr(config, "capabilities", []) or []
+        return get_enabled_tools(set(capabilities))
+
+    def test_credential_access_has_required_tools(self):
+        """credential_access must have credential harvesting tools."""
+        tools = self._get_agent_tools("credential_access")
+
+        # Core credential harvesting
+        assert "secretsdump" in tools, "credential_access needs secretsdump"
+        assert "asrep_roast" in tools, "credential_access needs asrep_roast"
+        assert "gmsa_dump_passwords" in tools, "credential_access needs gmsa_dump_passwords"
+        assert "targeted_kerberoast" in tools, "credential_access needs targeted_kerberoast"
+
+    def test_lateral_has_required_tools(self):
+        """lateral must have movement and validation tools."""
+        tools = self._get_agent_tools("lateral")
+
+        # Movement tools
+        assert "psexec" in tools, "lateral needs psexec"
+        assert "wmiexec" in tools, "lateral needs wmiexec"
+        assert "evil_winrm" in tools, "lateral needs evil_winrm"
+
+        # Kerberos variants
+        assert "psexec_kerberos" in tools, "lateral needs psexec_kerberos"
+        assert "wmiexec_kerberos" in tools, "lateral needs wmiexec_kerberos"
+
+        # Pre-connection validation (requires posture_validation)
+        assert "check_rdp_reachability" in tools, (
+            "lateral needs check_rdp_reachability (add posture_validation)"
+        )
+        assert "check_winrm_reachability" in tools, (
+            "lateral needs check_winrm_reachability (add posture_validation)"
+        )
+
+    def test_recon_has_required_tools(self):
+        """recon must have discovery and enumeration tools."""
+        tools = self._get_agent_tools("recon")
+
+        assert "nmap_scan" in tools, "recon needs nmap_scan"
+        assert "run_bloodhound" in tools, "recon needs run_bloodhound"
+        assert "smb_sweep" in tools, "recon needs smb_sweep"
+        assert "enumerate_domain_netbios_mappings" in tools, (
+            "recon needs enumerate_domain_netbios_mappings"
+        )
+
+    def test_privesc_has_required_tools(self):
+        """privesc must have escalation and exploitation tools."""
+        tools = self._get_agent_tools("privesc")
+
+        # Delegation attacks
+        assert "find_delegation" in tools, "privesc needs find_delegation"
+        assert "s4u_attack" in tools, "privesc needs s4u_attack"
+
+        # ADCS
+        assert "certipy_find" in tools, "privesc needs certipy_find"
+        assert "certipy_request" in tools, "privesc needs certipy_request"
+
+        # Post-exploitation
+        assert "secretsdump" in tools, "privesc needs secretsdump"
+        assert "psexec" in tools, "privesc needs psexec"
+
+    def test_coercion_has_required_tools(self):
+        """coercion must have relay and coercion tools."""
+        tools = self._get_agent_tools("coercion")
+
+        assert "start_responder" in tools, "coercion needs start_responder"
+        assert "petitpotam" in tools, "coercion needs petitpotam"
+        assert "coercer" in tools, "coercion needs coercer"
+        assert "unconstrained_coerce_and_capture" in tools, (
+            "coercion needs unconstrained_coerce_and_capture"
+        )
+
+    def test_acl_has_required_tools(self):
+        """acl must have ACL exploitation tools."""
+        tools = self._get_agent_tools("acl")
+
+        assert "bloodyad_add_group_member" in tools, "acl needs bloodyad_add_group_member"
+        assert "pywhisker" in tools, "acl needs pywhisker"
+        assert "targeted_kerberoast" in tools, "acl needs targeted_kerberoast"
+        assert "dacl_edit" in tools, "acl needs dacl_edit"
+
+    def test_all_registry_tools_are_accessible(self):
+        """Verify all tools in registry are accessible to at least one agent."""
+        all_registry_tools: set[str] = set()
+        for tools in CAPABILITY_REGISTRY.values():
+            all_registry_tools.update(tools)
+
+        all_agent_tools: set[str] = set()
+        for agent in [
+            "recon",
+            "credential_access",
+            "lateral",
+            "privesc",
+            "acl",
+            "coercion",
+            "cracker",
+        ]:
+            all_agent_tools.update(self._get_agent_tools(agent))
+
+        unmapped = all_registry_tools - all_agent_tools
+        assert not unmapped, f"Tools in registry but not accessible to any agent: {unmapped}"

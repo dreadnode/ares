@@ -123,18 +123,8 @@ ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
 }
 
 
-# Default max steps per role - these are HARD CAPS to prevent token burn
-# Lower values = faster failure detection, less wasted tokens on stuck agents
-ROLE_MAX_STEPS: dict[AgentRole, int] = {
-    AgentRole.ORCHESTRATOR: 150,  # Coordinator - needs room for dispatching
-    AgentRole.RECON: 75,  # Recon tasks should be quick
-    AgentRole.CREDENTIAL_ACCESS: 75,  # Credential tasks are focused
-    AgentRole.CRACKER: 50,  # Cracker is deterministic (hashcat/john)
-    AgentRole.ACL: 100,  # ACL analysis can be complex
-    AgentRole.PRIVESC: 75,  # Exploit tasks should succeed or fail fast
-    AgentRole.LATERAL: 40,  # Lateral: access + secretsdump + report = done
-    AgentRole.COERCION: 30,  # Coercion is simple relay setup
-}
+# Default max steps fallback when role not in YAML config
+DEFAULT_MAX_STEPS = 75
 
 
 def load_agent_instructions(role: AgentRole) -> str:
@@ -753,9 +743,9 @@ def create_specialized_agent(  # noqa: PLR0912
         )
 
     agent_name = f"ares-{role.value.replace('_', '-')}"
-    # Use role-specific limit as hard cap (prevents global 200 from overriding role limits)
+    # Use role-specific limit from YAML config as hard cap (single source of truth)
     # This stops agents from spinning for 200 steps burning millions of tokens
-    role_limit = ROLE_MAX_STEPS.get(role, 75)
+    role_limit = agent_config.max_steps or DEFAULT_MAX_STEPS
     max_steps = min(max_steps or role_limit, role_limit)
 
     logger.info(f"Creating {agent_name} agent with {len(tools)} toolsets, max_steps={max_steps}")
@@ -935,9 +925,9 @@ def request_assistance(issue: str, context: str = "") -> str:
 
 __all__ = [
     "ALL_TOOLSETS",
+    "DEFAULT_MAX_STEPS",
     "ROLE_CALLBACK_TOOLS",
     "ROLE_INSTRUCTIONS",
-    "ROLE_MAX_STEPS",
     "UNIVERSAL_TOOLSETS",
     "create_agent_info",
     "create_multi_agent_ensemble",

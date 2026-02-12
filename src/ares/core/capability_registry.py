@@ -84,7 +84,7 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
         "ntlmrelayx_multirelay",
     ],
     "impacket-addcomputer": ["add_computer"],
-    "impacket-findDelegation": ["find_delegation"],
+    "impacket-finddelegation": ["find_delegation"],
     "impacket-lookupsid": ["get_sid"],
     "impacket-raisechild": ["raise_child"],
     "impacket-mssqlclient": [
@@ -145,10 +145,15 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
     # Lateral Movement
     # ===================
     "evil-winrm": ["evil_winrm"],
-    "xfreerdp": [],  # Not directly mapped
-    "sshpass": [],  # Not directly mapped
-    "pth-toolkit": [],  # Not directly mapped
+    "xfreerdp": [],  # RDP pass-the-hash - not directly mapped
+    "sshpass": [],  # SSH with password - not directly mapped
     "proxychains4": [],  # Infrastructure tool, not a method
+    # Pass-the-Hash toolkit (apt: passing-the-hash)
+    "pth-winexe": [],  # PTH remote execution - not directly mapped
+    "pth-smbclient": [],  # PTH SMB client - not directly mapped
+    "pth-rpcclient": [],  # PTH RPC client - not directly mapped
+    "pth-net": [],  # PTH net commands - not directly mapped
+    "pth-wmic": [],  # PTH WMI client - not directly mapped
     # ===================
     # SMB Tools
     # ===================
@@ -162,7 +167,7 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
     # ===================
     "lsassy": ["unconstrained_tgt_dump"],
     "sprayhound": ["password_spray"],
-    "gMSADumper": ["gmsa_dump_passwords"],
+    "gmsadumper": ["gmsa_dump_passwords"],
     # ===================
     # Cracking Tools
     # ===================
@@ -177,18 +182,20 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
     "zerologon": ["zerologon"],
     "scmuacbypass": [],  # Not directly mapped
     # ===================
-    # Windows Privesc Binaries (run via other methods)
+    # Windows Privesc Binaries (run via other methods, e.g., psexec upload+execute)
+    # Config uses PascalCase to match binary names, registry normalizes to lowercase
+    # NOTE: krbrelayup, sharpgpoabuse, scmuacbypass are defined earlier - do not duplicate!
     # ===================
-    "printspoofer": [],
-    "godpotato": [],
-    "sweetpotato": [],
-    "seatbelt": [],
-    "sharpup": [],
-    "runascs": [],
-    "powerup": [],
-    "powerupsql": [],
-    "winpeas": [],
-    "linpeas": [],
+    "printspoofer": [],  # SeImpersonatePrivilege exploit
+    "godpotato": [],  # SeImpersonatePrivilege exploit
+    "sweetpotato": [],  # SeImpersonatePrivilege exploit
+    "seatbelt": [],  # Windows enumeration
+    "sharpup": [],  # Privesc checks
+    "runascs": [],  # Run commands as another user
+    "powerup": [],  # PowerShell privesc enumeration
+    "powerupsql": [],  # MSSQL enumeration/exploitation
+    "winpeas": [],  # Windows privesc enumeration
+    "linpeas": [],  # Linux privesc enumeration
     # ===================
     # Posture Validation (always available for status checks)
     # ===================

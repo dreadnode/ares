@@ -767,6 +767,60 @@ def get_critical_priority_threshold() -> int:
     return load_config().critical_priority_threshold
 
 
+# Default vulnerability priorities - used when YAML doesn't specify a priority
+# Lower number = higher priority (exploited first)
+# This is the single source of truth for default priorities
+DEFAULT_VULNERABILITY_PRIORITIES: dict[str, int] = {
+    # Tier 1: ADCS attacks (priority 1-3) - often easiest path to DA
+    "ADCS_ESC1": 1,
+    "ADCS_ESC4": 2,
+    "ADCS_ESC8": 3,
+    # Tier 2: Kerberos keys (priority 4-5) - instant DA if obtained
+    "krbtgt_hash": 4,
+    "domain_admin_hash": 5,
+    # Tier 3: ACL abuse (priority 6)
+    "acl_abuse": 6,
+    # Tier 4: Delegation attacks (priority 7-9)
+    "unconstrained_delegation": 7,
+    "constrained_delegation": 8,
+    "rbcd": 9,
+    # Tier 5: MSSQL attacks (priority 10-11)
+    "mssql_impersonation": 10,
+    "mssql_linked": 11,
+    "mssql_linked_server": 11,  # Alias
+    "mssql_linked_xpcmdshell": 11,  # Alias
+    "mssql_xp_cmdshell": 11,  # Alias
+    # Tier 6: Other privilege escalation (priority 12-15)
+    "gpo_abuse": 12,
+    "gpo_write": 12,  # Alias
+    "laps_abuse": 13,
+    "dcsync": 14,
+    "shadow_credentials": 15,
+    # Tier 7: Targeted credential attacks (priority 16-21)
+    "gmsa_readable": 16,
+    "genericall_domain_admins": 17,
+    "kerberoast": 20,
+    "asreproast": 21,
+    # Tier 8: Relay and other (priority 22+)
+    "smb_relay_target": 22,
+    "adminsd_holder_writable": 23,
+    "adminsd_holder_acl": 23,  # Alias
+    "password_spray": 50,  # nosec B105 - not a password, it's a priority value
+}
+
+
+def get_vulnerability_priorities() -> dict[str, int]:
+    """Get vulnerability priorities (lower = higher priority).
+
+    Merges YAML config with defaults. YAML values take precedence.
+    """
+    config = load_config()
+    # Start with defaults, then overlay YAML config
+    priorities = DEFAULT_VULNERABILITY_PRIORITIES.copy()
+    priorities.update(config.vulnerability_priorities)
+    return priorities
+
+
 def get_agent_task_timeout() -> int:
     """Get timeout (seconds) for agent tasks."""
     return load_config().agent_task_timeout
@@ -860,6 +914,7 @@ def clear_config_cache() -> None:
 
 __all__ = [
     "DEFAULT_NAMESPACE",
+    "DEFAULT_VULNERABILITY_PRIORITIES",
     "AgentConfig",
     "OperationConfig",
     "clear_config_cache",
@@ -905,5 +960,6 @@ __all__ = [
     "get_stale_task_timeout",
     "get_task_dispatch_delay",
     "get_unvalidated_confidence_penalty",
+    "get_vulnerability_priorities",
     "load_config",
 ]
