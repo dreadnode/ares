@@ -848,11 +848,60 @@ tasks:
       - cmd: echo "=== SYNCING CODE ==="
       - task: :remote:sync:full
         vars: { NAMESPACE: "{{.K8S_NAMESPACE}}" }
+      - cmd: echo "=== SYNCING CONFIG ==="
+      - task: multi:sync:config
       - cmd: echo "=== CLEARING REDIS CACHE ==="
       - task: multi:redis:clear
       - cmd: echo "=== ROLLING OUT ==="
       - task: :remote:rollout
         vars: { NAMESPACE: "{{.K8S_NAMESPACE}}" }
+
+  multi:sync:config:
+    desc: "Sync config/multi-agent-production.yaml to all pods"
+    silent: true
+    cmds:
+      - |
+        echo -e "{{.INFO}} Syncing config to pods in {{.K8S_NAMESPACE}}"
+
+        # Get orchestrator pod
+        ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+          -l app.kubernetes.io/name=ares-orchestrator \
+          --field-selector=status.phase=Running \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+        # Get worker pods
+        PODS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+          -l ares.dreadnode.io/component=red-team \
+          --field-selector=status.phase=Running \
+          -o json | jq -r --arg orch "$ORCH_POD" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
+
+        CONFIG_FILE="config/multi-agent-production.yaml"
+        if [ ! -f "$CONFIG_FILE" ]; then
+          echo -e "{{.WARN}} Config file not found: $CONFIG_FILE"
+          exit 0
+        fi
+
+        # Sync to workers
+        for pod in $PODS; do
+          kubectl exec -n {{.K8S_NAMESPACE}} "$pod" -- mkdir -p /ares/config 2>/dev/null || true
+          if kubectl cp "$CONFIG_FILE" "{{.K8S_NAMESPACE}}/$pod:/ares/config/multi-agent-production.yaml" 2>/dev/null; then
+            echo -e "{{.SUCCESS}} Config synced to $pod"
+          else
+            echo -e "{{.WARN}} Failed to sync config to $pod"
+          fi
+        done
+
+        # Sync to orchestrator
+        if [ -n "$ORCH_POD" ]; then
+          kubectl exec -n {{.K8S_NAMESPACE}} "$ORCH_POD" -c {{.ORCH_CONTAINER}} -- mkdir -p /ares/config 2>/dev/null || true
+          if kubectl cp "$CONFIG_FILE" "{{.K8S_NAMESPACE}}/$ORCH_POD:/ares/config/multi-agent-production.yaml" -c {{.ORCH_CONTAINER}} 2>/dev/null; then
+            echo -e "{{.SUCCESS}} Config synced to orchestrator"
+          else
+            echo -e "{{.WARN}} Failed to sync config to orchestrator"
+          fi
+        fi
+
+        echo -e "{{.SUCCESS}} Config sync complete"
 
   # ===========================================================================
   # K8s Infrastructure Tasks

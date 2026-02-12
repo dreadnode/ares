@@ -1360,12 +1360,12 @@ class RoutingMixin:
             logger.debug(f"Skipping coercion request ({techniques}) - DA already achieved")
             return ""
 
-        from ares.core.config import get_default_network_interface
-
         techniques = techniques or ["LLMNR", "NBT-NS", "mDNS"]
 
-        if not interface:
-            interface = get_default_network_interface()
+        # NOTE: Do NOT detect interface here on the orchestrator side.
+        # Pass empty string and let the coercion worker detect the interface locally,
+        # since the worker pod has the correct ARES_NETWORK_INTERFACE env var set.
+        # The orchestrator and worker pods may have different network interfaces.
 
         payload: dict[str, Any] = {
             "interface": interface,

@@ -227,20 +227,28 @@ class RedTeamReportingTools(Toolset):
         if not self.state:
             return "[!] No operation state available"
 
-        if not hasattr(self.state, "timeline"):
+        # Support both RedTeamState (timeline) and SharedRedTeamState (operation_timeline)
+        timeline_attr = None
+        if hasattr(self.state, "timeline"):
+            timeline_attr = "timeline"
+        elif hasattr(self.state, "operation_timeline"):
+            timeline_attr = "operation_timeline"
+
+        if not timeline_attr:
             return "[!] Timeline not available in operation state"
 
+        timeline = getattr(self.state, timeline_attr)
         techniques = [t.strip() for t in mitre_techniques.split(",") if t.strip()]
 
         event = TimelineEvent(
-            id=f"evt-{len(self.state.timeline):04d}",  # type: ignore[union-attr]
+            id=f"evt-{len(timeline):04d}",
             timestamp=datetime.now(timezone.utc),
             description=description,
             mitre_techniques=techniques,
             confidence=confidence,
             source="manual_recording",
         )
-        self.state.timeline.append(event)  # type: ignore[union-attr]
+        timeline.append(event)
 
         return f"[+] Recorded timeline event: {description}"
 
