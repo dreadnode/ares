@@ -131,6 +131,13 @@ class RoutingMixin:
         if self.shared_state.target and self.shared_state.target.ip:
             target_ip = self.shared_state.target.ip
             target_hostname = (self.shared_state.target.hostname or "").lower()
+            target_domain = (self.shared_state.target.domain or "").lower()
+
+            # If target.domain was explicitly set and matches, use target.ip
+            # This is set when user starts operation with --domain, meaning target IS the DC
+            if target_domain and target_domain == domain_lower:
+                return target_ip
+
             if target_hostname and _hostname_matches_domain(target_hostname, domain_lower):
                 return target_ip
             for host in self.shared_state.all_hosts:

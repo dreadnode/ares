@@ -11,6 +11,7 @@ from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.dispatcher.deferred_queue import (
     DEFERRED_TASK_MAX_AGE_SECONDS,
     MAX_DEFERRED_PER_TYPE,
+    MAX_DEFERRED_TOTAL,
     DeferredTask,
 )
 from ares.core.models import SharedRedTeamState
@@ -448,3 +449,201 @@ class TestStaleTaskCleanup:
         # Verify task is tracked
         assert "task-from-deferred" in dispatcher._shared_state.pending_tasks
         assert "task-from-deferred" in dispatcher._redis_task_ids
+
+
+class TestGlobalQueueLimits:
+    """Tests for global deferred queue limits (MAX_DEFERRED_TOTAL)."""
+
+    @pytest.fixture
+    def dispatcher(self):
+        """Create a dispatcher with deferred queue initialized."""
+        d = RedTeamDispatcher()
+        d._shared_state = SharedRedTeamState(operation_id="op-test-global")
+        d._running = True
+        return d
+
+    @pytest.mark.asyncio
+    async def test_total_queue_limit_across_types(self, dispatcher):
+        """Should enforce MAX_DEFERRED_TOTAL across all task types."""
+        # Fill queue to total capacity using multiple task types
+        # Since MAX_DEFERRED_PER_TYPE=10 and MAX_DEFERRED_TOTAL=25,
+        # we need at least 3 types to hit total limit
+        task_types = ["exploit", "lateral", "recon", "credential_access"]
+
+        added = 0
+        type_idx = 0
+        while added < MAX_DEFERRED_TOTAL:
+            task_type = task_types[type_idx % len(task_types)]
+            result = await dispatcher._enqueue_deferred_task(
+                task_type=task_type,
+                target_role=task_type if task_type != "exploit" else "privesc",
+                payload={"i": added},
+                source_agent="orchestrator",
+                priority=5,
+            )
+            if result:
+                added += 1
+            type_idx += 1
+
+        # Verify total is at capacity
+        total = sum(len(q) for q in dispatcher._deferred_queues.values())
+        assert total == MAX_DEFERRED_TOTAL
+
+        # Adding another with same priority should fail (total limit)
+        result = await dispatcher._enqueue_deferred_task(
+            task_type="crack",  # New type - would have room per-type but not total
+            target_role="cracker",
+            payload={"new": "task"},
+            source_agent="orchestrator",
+            priority=5,  # Same priority - should be rejected
+        )
+
+        assert result is False
+        new_total = sum(len(q) for q in dispatcher._deferred_queues.values())
+        assert new_total == MAX_DEFERRED_TOTAL
+
+    @pytest.mark.asyncio
+    async def test_cross_type_eviction_when_total_full(self, dispatcher):
+        """Higher priority task should evict lowest priority across ALL types."""
+        # Fill with mixed priorities across multiple types
+        # Need to spread across enough types to hit MAX_DEFERRED_TOTAL
+        # Each type can hold MAX_DEFERRED_PER_TYPE, so use multiple types
+
+        # Add low priority tasks to exploit queue (will be evicted)
+        for i in range(5):
+            await dispatcher._enqueue_deferred_task(
+                task_type="exploit",
+                target_role="privesc",
+                payload={"i": i},
+                source_agent="orchestrator",
+                priority=9,  # Very low priority - candidates for eviction
+            )
+
+        # Add medium priority to lateral
+        for i in range(5):
+            await dispatcher._enqueue_deferred_task(
+                task_type="lateral",
+                target_role="lateral",
+                payload={"i": i},
+                source_agent="orchestrator",
+                priority=5,
+            )
+
+        # Add to recon (up to per-type limit)
+        for i in range(MAX_DEFERRED_PER_TYPE):
+            await dispatcher._enqueue_deferred_task(
+                task_type="recon",
+                target_role="recon",
+                payload={"i": i},
+                source_agent="orchestrator",
+                priority=3,
+            )
+
+        # Fill remaining with credential_access to hit total
+        current = sum(len(q) for q in dispatcher._deferred_queues.values())
+        remaining = MAX_DEFERRED_TOTAL - current
+        for i in range(remaining):
+            await dispatcher._enqueue_deferred_task(
+                task_type="credential_access",
+                target_role="credential_access",
+                payload={"i": i},
+                source_agent="orchestrator",
+                priority=4,
+            )
+
+        # Verify at capacity
+        total = sum(len(q) for q in dispatcher._deferred_queues.values())
+        assert total == MAX_DEFERRED_TOTAL
+
+        initial_exploit_count = len(dispatcher._deferred_queues["exploit"])
+
+        # Add very high priority task to a NEW type
+        result = await dispatcher._enqueue_deferred_task(
+            task_type="crack",
+            target_role="cracker",
+            payload={"urgent": True},
+            source_agent="orchestrator",
+            priority=1,  # Highest priority - should evict lowest (priority 9 from exploit)
+        )
+
+        assert result is True
+        # Should still be at total capacity
+        new_total = sum(len(q) for q in dispatcher._deferred_queues.values())
+        assert new_total == MAX_DEFERRED_TOTAL
+
+        # Exploit queue should have lost one task (lowest priority evicted)
+        assert len(dispatcher._deferred_queues["exploit"]) == initial_exploit_count - 1
+
+        # New crack queue should have the high priority task
+        assert "crack" in dispatcher._deferred_queues
+        assert len(dispatcher._deferred_queues["crack"]) == 1
+        assert dispatcher._deferred_queues["crack"][0].priority == 1
+
+    @pytest.mark.asyncio
+    async def test_status_includes_total_capacity(self, dispatcher):
+        """Status should include max_total and capacity_pct."""
+        # Add some tasks
+        await dispatcher._enqueue_deferred_task(
+            task_type="lateral",
+            target_role="lateral",
+            payload={},
+            source_agent="orchestrator",
+            priority=5,
+        )
+        await dispatcher._enqueue_deferred_task(
+            task_type="exploit",
+            target_role="privesc",
+            payload={},
+            source_agent="orchestrator",
+            priority=2,
+        )
+
+        status = dispatcher.get_deferred_queue_status()
+
+        assert "max_total" in status
+        assert status["max_total"] == MAX_DEFERRED_TOTAL
+        assert "capacity_pct" in status
+        expected_pct = round(100 * 2 / MAX_DEFERRED_TOTAL, 1)
+        assert status["capacity_pct"] == expected_pct
+
+    @pytest.mark.asyncio
+    async def test_stale_eviction_across_all_queues(self, dispatcher):
+        """Stale task eviction should clean ALL queues, not just current type."""
+        # Add stale tasks to multiple queues
+        stale_time = time.time() - DEFERRED_TASK_MAX_AGE_SECONDS - 10
+
+        stale_exploit = DeferredTask(
+            priority=5,
+            enqueue_time=stale_time,
+            task_type="exploit",
+            target_role="privesc",
+            payload={"stale": "exploit"},
+            source_agent="orchestrator",
+        )
+        stale_lateral = DeferredTask(
+            priority=5,
+            enqueue_time=stale_time,
+            task_type="lateral",
+            target_role="lateral",
+            payload={"stale": "lateral"},
+            source_agent="orchestrator",
+        )
+        dispatcher._deferred_queues["exploit"] = [stale_exploit]
+        dispatcher._deferred_queues["lateral"] = [stale_lateral]
+
+        # Enqueue to a different type - should trigger cleanup of ALL stale
+        await dispatcher._enqueue_deferred_task(
+            task_type="recon",
+            target_role="recon",
+            payload={"new": "task"},
+            source_agent="orchestrator",
+            priority=5,
+        )
+
+        # Both stale queues should be empty
+        assert len(dispatcher._deferred_queues["exploit"]) == 0
+        assert len(dispatcher._deferred_queues["lateral"]) == 0
+        # New task should be there
+        assert len(dispatcher._deferred_queues["recon"]) == 1
+        # Should have evicted 2 stale tasks
+        assert dispatcher._deferred_queue_stats["evicted_age"] == 2

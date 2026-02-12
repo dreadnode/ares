@@ -1624,15 +1624,18 @@ async def _auto_credential_access(  # noqa: PLR0912
                     if domain.lower() in state.processed_asrep_domains:
                         continue
                     domain_hosts = _iter_hosts_by_domain.get(domain.lower(), []) or host_ips
-                    # Include low-hanging fruit techniques that work without credentials
+                    # These techniques work without credentials:
+                    # - asrep_roast: queries DC for accounts without pre-auth
+                    # - username_as_password: auto-enumerates users via null session, then tests user=pass
+                    # - password_spray: auto-enumerates users, sprays common passwords
                     fruit_task_id = await dispatcher.request_credential_access(
                         source_agent="orchestrator",
                         domain=domain,
                         target_ips=domain_hosts,
                         reason="low_hanging_fruit_no_creds",
                         techniques=[
-                            "username_as_password",  # Test user:user combos (e.g., hodor:hodor)
-                            "password_spray",  # Common passwords
+                            "username_as_password",  # Auto-enumerates users, tests user:user
+                            "password_spray",  # Auto-enumerates users, sprays common passwords
                             "asrep_roast",  # Users without pre-auth
                         ],
                     )
@@ -1719,6 +1722,9 @@ async def _auto_credential_access(  # noqa: PLR0912
             dc_ips = _get_dc_ips(state)
 
             for cred in state.all_credentials:
+                # Skip credentials without valid username - can't use for authenticated techniques
+                if not cred.username or not cred.username.strip():
+                    continue
                 key = _make_cred_key(cred.username, cred.domain or "", cred.password or "")
                 if key in state.processed_cred_expansion:
                     continue
@@ -1775,22 +1781,24 @@ async def _auto_credential_access(  # noqa: PLR0912
                 # These are high-value low-hanging fruit that take ~2-5 seconds each
                 # Running them separately ensures they complete quickly without getting
                 # blocked by slow recon (smb_sweep) or credential dumping (secretsdump)
-                dc_targets = dc_hosts_in_domain or domain_hosts[:1]
-                await dispatcher.request_credential_access(
-                    source_agent="orchestrator",
-                    domain=domain_name,
-                    target_ips=dc_targets,
-                    username=cred.username,
-                    password=cred.password,
-                    credential_source=cred.source,
-                    reason="fast_credential_discovery",
-                    techniques=[
-                        "sysvol_script_search",  # ~2 sec, hardcoded passwords in SYSVOL
-                        "gpp_password_finder",  # ~2 sec, GPP/cpassword credentials
-                        "ldap_search_descriptions",  # ~3 sec, passwords in user descriptions
-                        "laps_dump",  # ~2 sec, LAPS local admin passwords
-                    ],
-                )
+                # NOTE: These techniques require password auth (not hash), skip if no password
+                if cred.password:
+                    dc_targets = dc_hosts_in_domain or domain_hosts[:1]
+                    await dispatcher.request_credential_access(
+                        source_agent="orchestrator",
+                        domain=domain_name,
+                        target_ips=dc_targets,
+                        username=cred.username,
+                        password=cred.password,
+                        credential_source=cred.source,
+                        reason="fast_credential_discovery",
+                        techniques=[
+                            "sysvol_script_search",  # ~2 sec, hardcoded passwords in SYSVOL
+                            "gpp_password_finder",  # ~2 sec, GPP/cpassword credentials
+                            "ldap_search_descriptions",  # ~3 sec, passwords in user descriptions
+                            "laps_dump",  # ~2 sec, LAPS local admin passwords
+                        ],
+                    )
                 if cred_task_id:
                     state.processed_cred_expansion.add(key)
                     logger.info(

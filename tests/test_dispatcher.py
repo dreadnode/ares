@@ -12,6 +12,7 @@ from ares.core.models import (
     Credential,
     Host,
     SharedRedTeamState,
+    Target,
     VulnerabilityInfo,
 )
 
@@ -493,6 +494,45 @@ class TestFindDomainControllerIp:
             f"Expected dc01.fabrikam.local (192.168.58.240), got {fabrikam_dc}"
         )
         assert fabrikam_dc != "192.168.58.146", "BUG: sql01 selected - 3389 matched as 389!"
+
+    def test_uses_target_when_domain_matches(self):
+        """When target.domain matches requested domain, use target.ip.
+
+        This handles the case where the operation was started with --domain flag,
+        meaning the user explicitly told us the target IP is the DC for that domain.
+        """
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-target")
+
+        # Set target with domain (simulates K8s orchestrator startup with --domain)
+        dispatcher._shared_state.target = Target(
+            ip="192.168.58.10",
+            domain="contoso.local",
+        )
+        # No hosts in all_hosts yet (recon hasn't run)
+
+        dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
+
+        # Should return target.ip since target.domain matches
+        assert dc_ip == "192.168.58.10"
+
+    def test_ignores_target_when_domain_mismatch(self):
+        """When target.domain doesn't match, don't use target.ip blindly."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-mismatch")
+
+        # Target is for contoso.local
+        dispatcher._shared_state.target = Target(
+            ip="192.168.58.10",
+            domain="contoso.local",
+        )
+        # No hosts in all_hosts yet
+
+        # Ask for different domain
+        dc_ip = dispatcher._find_domain_controller_ip("fabrikam.local")
+
+        # Should NOT return target.ip - different domain
+        assert dc_ip == ""
 
 
 class TestS4UAutoChaining:

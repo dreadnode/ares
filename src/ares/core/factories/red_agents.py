@@ -130,7 +130,7 @@ ROLE_MAX_STEPS: dict[AgentRole, int] = {
     AgentRole.CRACKER: 50,  # Cracker is deterministic (hashcat/john)
     AgentRole.ACL: 100,  # ACL analysis can be complex
     AgentRole.PRIVESC: 75,  # Exploit tasks should succeed or fail fast
-    AgentRole.LATERAL: 100,  # Lateral movement needs some room
+    AgentRole.LATERAL: 40,  # Lateral: access + secretsdump + report = done
     AgentRole.COERCION: 30,  # Coercion is simple relay setup
 }
 

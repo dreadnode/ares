@@ -113,16 +113,18 @@ class ThrottlingMixin:
         llm_count = await self._get_llm_task_count()
         max_tasks = get_max_concurrent_tasks()
 
-        # HARD CAP: If we're 2x over the limit, DEFER unconditionally
+        # HARD CAP: If we're 1.5x over the limit, DEFER unconditionally
         # This is an absolute limit - no exceptions for min_slots or priority
-        if llm_count >= max_tasks * 2:
+        # Lower multiplier (1.5x vs 2x) prevents excessive task pileup before deferring
+        hard_cap = int(max_tasks * 1.5)
+        if llm_count >= hard_cap:
             logger.warning(
-                f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}) - "
-                f"DEFERRING {task_type} task (2x over limit, no exceptions)"
+                f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
+                f"DEFERRING {task_type} task (1.5x over limit, no exceptions)"
             )
             return True
 
-        # SOFT CAP: If we're over the limit but under 2x, apply selective throttling
+        # SOFT CAP: If we're over the limit but under hard cap, apply selective throttling
         # Allow through if role needs minimum slots OR task has high priority
         if llm_count >= max_tasks:
             # Guarantee each role has at least min_slots_per_role tasks

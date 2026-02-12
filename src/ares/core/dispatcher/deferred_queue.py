@@ -21,9 +21,10 @@ if TYPE_CHECKING:
     from ares.core.dispatcher._dispatcher import RedTeamDispatcher
 
 # Configuration constants
-MAX_DEFERRED_PER_TYPE = 5  # Max queued tasks per task_type
+MAX_DEFERRED_TOTAL = 25  # Total max queued tasks across all types
+MAX_DEFERRED_PER_TYPE = 10  # Max queued tasks per task_type (secondary limit)
 DEFERRED_TASK_MAX_AGE_SECONDS = 300  # 5 minutes - evict older tasks
-DEFERRED_QUEUE_CHECK_INTERVAL = 10.0  # Check every 10 seconds
+DEFERRED_QUEUE_CHECK_INTERVAL = 5.0  # Check every 5 seconds (faster drain)
 
 
 @dataclass(order=True)
@@ -115,21 +116,45 @@ class DeferredQueueMixin:
             queue = self._deferred_queues[task_type]
             now = time.time()
 
-            # First, evict stale tasks (>5 min old)
-            original_len = len(queue)
-            queue[:] = [t for t in queue if now - t.enqueue_time < DEFERRED_TASK_MAX_AGE_SECONDS]
-            evicted = original_len - len(queue)
-            if evicted > 0:
-                self._deferred_queue_stats["evicted_age"] += evicted
-                logger.debug(f"Evicted {evicted} stale {task_type} tasks from deferred queue")
+            # First, evict stale tasks (>5 min old) across ALL queues
+            total_evicted = 0
+            for q in self._deferred_queues.values():
+                original_len = len(q)
+                q[:] = [t for t in q if now - t.enqueue_time < DEFERRED_TASK_MAX_AGE_SECONDS]
+                total_evicted += original_len - len(q)
+            if total_evicted > 0:
+                self._deferred_queue_stats["evicted_age"] += total_evicted
+                logger.debug(f"Evicted {total_evicted} stale tasks from deferred queues")
 
-            # Check if queue is at capacity
+            # Calculate total queue size across all types
+            total_queued = sum(len(q) for q in self._deferred_queues.values())
+
+            # Check TOTAL queue capacity first (hard limit across all types)
+            if total_queued >= MAX_DEFERRED_TOTAL:
+                # Find lowest priority task across ALL queues
+                all_tasks = [(t, tt) for tt, q in self._deferred_queues.items() for t in q]
+                if all_tasks:
+                    worst_task, worst_type = max(all_tasks, key=lambda x: x[0].priority)
+                    if priority < worst_task.priority:
+                        self._deferred_queues[worst_type].remove(worst_task)
+                        self._deferred_queue_stats["evicted_capacity"] += 1
+                        logger.info(
+                            f"Evicted lower-priority {worst_type} task (priority {worst_task.priority}) "
+                            f"to make room for {task_type} priority {priority} task"
+                        )
+                    else:
+                        logger.warning(
+                            f"Deferred queue TOTAL full ({total_queued}/{MAX_DEFERRED_TOTAL}), "
+                            f"DROPPING {task_type} priority {priority} task"
+                        )
+                        return False
+
+            # Check per-type capacity (secondary limit)
             if len(queue) >= MAX_DEFERRED_PER_TYPE:
-                # Find lowest priority task (highest priority number)
+                # Find lowest priority task in THIS type's queue
                 worst_idx = max(range(len(queue)), key=lambda i: queue[i].priority)
                 worst_task = queue[worst_idx]
 
-                # Only evict if new task has higher priority (lower number)
                 if priority < worst_task.priority:
                     queue.pop(worst_idx)
                     self._deferred_queue_stats["evicted_capacity"] += 1
@@ -138,10 +163,9 @@ class DeferredQueueMixin:
                         f"to make room for priority {priority} task"
                     )
                 else:
-                    # Queue full with equal or higher priority tasks - reject
                     logger.warning(
-                        f"Deferred queue full for {task_type} ({len(queue)} tasks), "
-                        f"DROPPING priority {priority} task (queue has equal/higher priority tasks)"
+                        f"Deferred queue full for {task_type} ({len(queue)}/{MAX_DEFERRED_PER_TYPE}), "
+                        f"DROPPING priority {priority} task"
                     )
                     return False
 
@@ -280,9 +304,12 @@ class DeferredQueueMixin:
         queue_sizes = {
             task_type: len(queue) for task_type, queue in self._deferred_queues.items() if queue
         }
+        total = sum(queue_sizes.values())
         return {
             "queue_sizes": queue_sizes,
-            "total_queued": sum(queue_sizes.values()),
+            "total_queued": total,
+            "max_total": MAX_DEFERRED_TOTAL,
+            "capacity_pct": round(100 * total / MAX_DEFERRED_TOTAL, 1) if MAX_DEFERRED_TOTAL else 0,
             "stats": self._deferred_queue_stats.copy(),
         }
 

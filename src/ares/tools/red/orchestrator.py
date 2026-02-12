@@ -1617,9 +1617,11 @@ class OrchestratorTools(Toolset):
         """
         from ares.core.context_manager import retrieve_offloaded_output
 
-        redis = self.dispatcher._redis
-        operation_id = self.shared_state.operation_id
+        redis = self.dispatcher._redis_client
+        if redis is None:
+            return "✗ Redis not available - output retrieval requires Redis connection"
 
+        operation_id = self.shared_state.operation_id
         output = await retrieve_offloaded_output(redis, operation_id, task_id)
 
         if output:

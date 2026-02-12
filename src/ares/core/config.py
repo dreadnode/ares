@@ -46,16 +46,17 @@ def get_default_network_interface() -> str:
                     if iface and not iface.startswith("lo"):
                         logger.debug(f"Auto-detected network interface from route table: {iface}")
                         return iface
-    except (OSError, IndexError):
-        pass
+    except (OSError, IndexError) as e:
+        logger.debug(f"Could not parse /proc/net/route: {e}")
 
     # Fallback: prefer physical interface prefixes (eth, ens, eno, en)
     try:
         interfaces = socket.if_nameindex()
         interface_names = [name for _idx, name in interfaces if name and not name.startswith("lo")]
+        logger.debug(f"Available network interfaces: {interface_names}")
 
         # Prefer physical interfaces by common naming patterns
-        preferred_prefixes = ("eth", "ens", "eno", "enp", "en")
+        preferred_prefixes = ("ens", "eno", "enp", "eth", "en")
         for prefix in preferred_prefixes:
             for name in interface_names:
                 if name.startswith(prefix):
@@ -66,8 +67,8 @@ def get_default_network_interface() -> str:
         if interface_names:
             logger.debug(f"Auto-detected network interface from socket: {interface_names[0]}")
             return interface_names[0]
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug(f"Could not enumerate interfaces via socket: {e}")
 
     logger.warning("Could not auto-detect network interface, falling back to eth0")
     return "eth0"

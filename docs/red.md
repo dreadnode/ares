@@ -81,7 +81,7 @@ tool assignments. For detailed responsibilities, see sections below.
 | **CRACKER** | Offline hash cracking | `ares.dreadnode.io/role=cracker` | 50 | `CrackingTools`, `CrackerCallbackTools` |
 | **ACL** | AD ACL abuse attacks | `ares.dreadnode.io/role=acl` | 100 | `ACLExploitTools` |
 | **PRIVESC** | Privilege escalation exploitation | `ares.dreadnode.io/role=privesc` | 75 | `CertipyTools`, `DelegationTools`, `MSSQLTools`, `CVEExploitTools`, `GoldenTicketTools`, `TrustAttackTools`, `LateralMovementTools` |
-| **LATERAL** | Host compromise, credential harvesting | `ares.dreadnode.io/role=lateral` | 100 | `LateralMovementTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `PostureValidationTools`, `LateralCallbackTools` |
+| **LATERAL** | Host compromise, credential harvesting | `ares.dreadnode.io/role=lateral` | 40 | `LateralMovementTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `PostureValidationTools`, `LateralCallbackTools` |
 | **COERCION** | NTLM coercion and relay attacks | `ares.dreadnode.io/role=coercion` | 30 | `CoercionTools`, `CoercionNetworkTools` |
 
 ### Configuration Sources

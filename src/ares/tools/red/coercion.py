@@ -25,18 +25,25 @@ def _kill_existing_relay_processes() -> str:
     """
     killed = []
 
-    # Kill ntlmrelayx processes
+    # Kill ntlmrelayx processes (|| true to suppress exit code 1 when no match)
+    # Use [n]tlmrelayx pattern so pkill doesn't match its own bash -c command line
     try:
-        _stdout, _, code = run_tool(["pkill", "-9", "-f", "ntlmrelayx"], timeout_seconds=5)
-        if code == 0:
+        _stdout, _, _code = run_tool(
+            ["bash", "-c", "pkill -9 -f '[n]tlmrelayx' && echo killed || true"],
+            timeout_seconds=5,
+        )
+        if "killed" in _stdout:
             killed.append("ntlmrelayx")
     except Exception:
         pass
 
-    # Kill responder processes
+    # Kill responder processes (|| true to suppress exit code 1 when no match)
     try:
-        _stdout, _, code = run_tool(["pkill", "-9", "-f", "Responder.py"], timeout_seconds=5)
-        if code == 0:
+        _stdout, _, _code = run_tool(
+            ["bash", "-c", "pkill -9 -f 'R[e]sponder.py' && echo killed || true"],
+            timeout_seconds=5,
+        )
+        if "killed" in _stdout:
             killed.append("responder")
     except Exception:
         pass

@@ -69,7 +69,8 @@ class LateralMovementTools(Toolset):
             cmd.extend(["-d", domain])
         cmd.extend(["-x", "whoami"])
         try:
-            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120, target_role="recon")
         except Exception:
             return None
         output = (stdout or "") + ("\n" + stderr if stderr else "")
