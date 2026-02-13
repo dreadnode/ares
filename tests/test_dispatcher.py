@@ -1772,6 +1772,20 @@ class TestCredentialAttachmentForDelegation:
         mock_task_queue.submit_task.side_effect = capture_submit
         dispatcher._task_queue = mock_task_queue
 
+        # Register a mock worker for the privesc role (needed for role health check)
+        from datetime import datetime, timezone
+
+        from ares.core.models import AgentInfo, AgentRole
+
+        privesc_agent = AgentInfo(
+            name="privesc_worker",
+            role=AgentRole.PRIVESC,
+            status="idle",
+            last_heartbeat=datetime.now(timezone.utc),
+            pod_name="test-privesc-pod",
+        )
+        dispatcher._agents["privesc_worker"] = privesc_agent
+
         # Call request_exploit with delegation vuln that has has_credentials=True but no password
         await dispatcher.request_exploit(
             vuln_type="constrained_delegation",

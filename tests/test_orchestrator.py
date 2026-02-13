@@ -62,6 +62,7 @@ async def test_run_multi_agent_operation_skips_wait_when_completed(monkeypatch):
     recovery = SimpleNamespace()
     recovery.start = AsyncMock()
     recovery.start_periodic_checkpoint = AsyncMock()
+    recovery.checkpoint = AsyncMock(return_value=True)
 
     class DummyAgent:
         async def run(self, _prompt):

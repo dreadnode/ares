@@ -6,8 +6,9 @@ and exploitation progress.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from loguru import logger
 
@@ -20,9 +21,133 @@ if TYPE_CHECKING:
 class StatusMixin:
     """Status query methods for dispatcher state."""
 
+    # Role-level circuit breaker tracking (class-level to persist across calls)
+    # Tracks consecutive task failures per role to detect systemic issues
+    _role_failure_counts: ClassVar[dict[str, int]] = {}
+    _role_circuit_breaker_threshold: ClassVar[int] = 5  # Trips after 5 consecutive failures
+    _role_circuit_breaker_tripped: ClassVar[set[str]] = set()
+    _role_circuit_breaker_reset_time: ClassVar[dict[str, float]] = {}  # When CB can be reset
+    _role_circuit_breaker_cooldown: ClassVar[float] = 300.0  # 5 minute cooldown after trip
+
     def get_pending_tasks(self: RedTeamDispatcher) -> list[TaskInfo]:
         """Get all pending tasks."""
         return list(self.shared_state.pending_tasks.values())
+
+    def is_role_online(self: RedTeamDispatcher, role: str) -> bool:
+        """Check if any workers are online for a given role.
+
+        Args:
+            role: Worker role name (e.g., "privesc", "recon", "lateral")
+
+        Returns:
+            True if at least one worker for this role is online/idle/busy
+        """
+        now = datetime.now(timezone.utc)
+        stale_threshold = max(60, self._agent_heartbeat_timeout)
+
+        for agent_info in self._agents.values():
+            if agent_info.role.value.lower() == role.lower():
+                # Check if heartbeat is fresh
+                elapsed = (now - agent_info.last_heartbeat).total_seconds()
+                if elapsed <= stale_threshold and agent_info.status != "offline":
+                    return True
+        return False
+
+    def get_role_health(self: RedTeamDispatcher, role: str) -> dict[str, Any]:
+        """Get comprehensive health status for a worker role.
+
+        Args:
+            role: Worker role name
+
+        Returns:
+            Dict with online status, circuit breaker state, and failure count
+        """
+        role_lower = role.lower()
+        is_online = self.is_role_online(role)
+        is_tripped = role_lower in StatusMixin._role_circuit_breaker_tripped
+        failure_count = StatusMixin._role_failure_counts.get(role_lower, 0)
+
+        # Check if cooldown has expired
+        reset_time = StatusMixin._role_circuit_breaker_reset_time.get(role_lower, 0)
+        cooldown_remaining = max(0, reset_time - time.monotonic())
+
+        return {
+            "role": role,
+            "is_online": is_online,
+            "circuit_breaker_tripped": is_tripped,
+            "consecutive_failures": failure_count,
+            "cooldown_remaining_seconds": cooldown_remaining,
+            "can_dispatch": is_online and not is_tripped,
+        }
+
+    def record_role_task_success(self: RedTeamDispatcher, role: str) -> None:
+        """Record a successful task completion for a role, resetting circuit breaker."""
+        role_lower = role.lower()
+        StatusMixin._role_failure_counts[role_lower] = 0
+
+        # Reset circuit breaker if it was tripped and cooldown has passed
+        if role_lower in StatusMixin._role_circuit_breaker_tripped:
+            reset_time = StatusMixin._role_circuit_breaker_reset_time.get(role_lower, 0)
+            if time.monotonic() >= reset_time:
+                StatusMixin._role_circuit_breaker_tripped.discard(role_lower)
+                logger.info(f"🔌 Role {role} circuit breaker reset after successful task")
+
+    def record_role_task_failure(
+        self: RedTeamDispatcher, role: str, is_circuit_breaker: bool = False
+    ) -> None:
+        """Record a task failure for a role, potentially tripping circuit breaker.
+
+        Args:
+            role: Worker role name
+            is_circuit_breaker: True if this failure was due to worker circuit breaker
+        """
+        role_lower = role.lower()
+        count = StatusMixin._role_failure_counts.get(role_lower, 0) + 1
+        StatusMixin._role_failure_counts[role_lower] = count
+
+        # Circuit breaker failures count more heavily
+        if is_circuit_breaker:
+            count += 2  # Triple count for circuit breaker failures
+
+        if (
+            count >= StatusMixin._role_circuit_breaker_threshold
+            and role_lower not in StatusMixin._role_circuit_breaker_tripped
+        ):
+            StatusMixin._role_circuit_breaker_tripped.add(role_lower)
+            StatusMixin._role_circuit_breaker_reset_time[role_lower] = (
+                time.monotonic() + StatusMixin._role_circuit_breaker_cooldown
+            )
+            logger.warning(
+                f"🔌 CIRCUIT BREAKER TRIPPED for role {role}! "
+                f"{count} consecutive failures. "
+                f"Suspending dispatches for {StatusMixin._role_circuit_breaker_cooldown}s"
+            )
+
+    def can_dispatch_to_role(self: RedTeamDispatcher, role: str) -> tuple[bool, str]:
+        """Check if tasks can be dispatched to a role.
+
+        Args:
+            role: Worker role name
+
+        Returns:
+            Tuple of (can_dispatch, reason)
+        """
+        role_lower = role.lower()
+
+        # Check if any workers are online
+        if not self.is_role_online(role):
+            return False, f"No workers online for role {role}"
+
+        # Check circuit breaker
+        if role_lower in StatusMixin._role_circuit_breaker_tripped:
+            reset_time = StatusMixin._role_circuit_breaker_reset_time.get(role_lower, 0)
+            remaining = max(0, reset_time - time.monotonic())
+            if remaining > 0:
+                return False, f"Circuit breaker tripped for {role}, {remaining:.0f}s remaining"
+            # Cooldown expired - reset circuit breaker on next success
+            # But still allow dispatch to test if role has recovered
+
+        return True, "OK"
 
     def get_agent_status(self: RedTeamDispatcher) -> dict[str, dict]:
         """Get status of all registered agents."""

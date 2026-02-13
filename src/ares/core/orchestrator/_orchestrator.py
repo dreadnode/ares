@@ -494,6 +494,8 @@ async def run_multi_agent_operation(  # noqa: PLR0912
             # Run the orchestrator agent with crash recovery
             while orchestrator_crash_count < max_orchestrator_crashes:
                 try:
+                    # Checkpoint before blocking operation to prevent state loss
+                    await recovery.checkpoint(dispatcher.shared_state)
                     logger.info(f"🤖 Connecting to {model}...")
                     result = await orchestrator_agent.run(initial_prompt)
                     _log_orchestrator_result(result, model)
@@ -533,6 +535,8 @@ async def run_multi_agent_operation(  # noqa: PLR0912
                             f"Orchestrator crashed but has progress ({len(state.all_credentials)} creds, "
                             f"{len(state.all_hashes)} hashes). Continuing background tasks and retrying..."
                         )
+                        # Checkpoint state before retry to preserve progress
+                        await recovery.checkpoint(dispatcher.shared_state)
                         # Give background tasks time to work before retrying
                         await asyncio.sleep(30)
                     elif not has_progress:

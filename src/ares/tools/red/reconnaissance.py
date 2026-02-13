@@ -14,6 +14,7 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
+from ares.core.dispatcher.extraction import extract_shares_from_output
 from ares.core.models import Credential, Host, Share
 from ares.tools.red.common import (
     AnyRedTeamState,
@@ -902,44 +903,6 @@ class NetworkEnumerationTools(Toolset):
                 )
             return hosts
 
-        def _parse_netexec_shares(output: str) -> list[Share]:
-            shares: list[Share] = []
-            in_table = False
-            for line in output.splitlines():
-                if not line.startswith("SMB"):
-                    continue
-                body = re.sub(r"^SMB\s+\S+\s+\d+\s+\S+\s+", "", line).strip()
-                if not body:
-                    continue
-                lower = body.lower()
-                if lower.startswith("share") and "permission" in lower:
-                    in_table = True
-                    continue
-                if in_table and set(body) <= {"-", " "}:
-                    continue
-                if in_table and (body.startswith("[") or lower.startswith("smb")):
-                    in_table = False
-                    continue
-                if not in_table:
-                    continue
-                parts = body.split(None, 2)
-                if not parts:
-                    continue
-                name = parts[0].strip()
-                if not name or name.lower() == "share":
-                    continue
-                permissions = parts[1].strip() if len(parts) > 1 else ""
-                comment = parts[2].strip() if len(parts) > 2 else ""
-                shares.append(
-                    Share(
-                        host=target,
-                        name=name,
-                        permissions=permissions,
-                        comment=comment,
-                    )
-                )
-            return shares
-
         def _run_share_enum(
             auth_user: str, auth_pass: str, auth_domain: str, auth_desc: str
         ) -> tuple[str, list[Share], bool]:
@@ -969,7 +932,7 @@ class NetworkEnumerationTools(Toolset):
                 logger.warning(f"[enumerate_shares] {auth_desc} failed on {target}: access denied")
                 return output, [], False
 
-            shares = _parse_netexec_shares(output)
+            shares = extract_shares_from_output(output, default_host=target)
             if shares:
                 logger.info(
                     f"[enumerate_shares] {auth_desc} found {len(shares)} shares on {target}: "

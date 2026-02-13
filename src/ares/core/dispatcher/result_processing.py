@@ -71,6 +71,22 @@ class ResultProcessingMixin:
                 f"success={success}"
             )
 
+        # Track role health for circuit breaker detection
+        role = task_info.assigned_agent
+        is_circuit_breaker_failure = bool(
+            not success
+            and error
+            and any(
+                ind in error.lower()
+                for ind in ["circuit breaker", "tool failures", "consecutive failures"]
+            )
+        )
+
+        if success:
+            self.record_role_task_success(role)
+        else:
+            self.record_role_task_failure(role, is_circuit_breaker=is_circuit_breaker_failure)
+
         task_result = TaskResult(
             task_id=task_id,
             success=success,

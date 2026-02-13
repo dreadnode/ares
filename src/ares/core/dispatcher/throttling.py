@@ -453,6 +453,29 @@ class ThrottlingMixin:
             logger.warning("No task queue available for throttled submit")
             return ""
 
+        # Check role health before dispatching - detect dead workers or tripped circuit breakers
+        # Non-LLM tasks (crack, command) bypass this check since they don't use workers
+        if task_type not in self.NON_LLM_TASK_TYPES:
+            can_dispatch, reason = self.can_dispatch_to_role(target_role)
+            if not can_dispatch:
+                logger.warning(
+                    f"⚠️ Rejecting {task_type} task for {target_role}: {reason}. "
+                    "Will retry when role recovers."
+                )
+                # Don't drop the task - queue it for later when role recovers
+                adjusted_priority = priority + self._get_phase_priority_adjustment(
+                    task_type, target_role
+                )
+                adjusted_priority = max(1, min(10, adjusted_priority))
+                await self._enqueue_deferred_task(
+                    task_type=task_type,
+                    target_role=target_role,
+                    payload=payload,
+                    source_agent=source_agent,
+                    priority=adjusted_priority,
+                )
+                return ""  # Task queued, not lost
+
         start_wait = asyncio.get_event_loop().time()
         total_waited = 0.0
 
