@@ -289,17 +289,24 @@ class DelegationTools(Toolset):
             if not in_table:
                 continue
 
-            # Parse table row: AccountName AccountType DelegationType DelegationRightsTo
+            # Parse table row: AccountName AccountType DelegationType DelegationRightsTo [SPN Exists]
+            # Columns: https://github.com/fortra/impacket/blob/master/examples/findDelegation.py
+            # Last column "SPN Exists" is Yes/No/- which we skip
             parts = stripped.split()
             if len(parts) < 3:
                 continue
 
             account = parts[0]
             account_type = parts[1].lower()
-            # DelegationType may have spaces like "Constrained w/ Protocol Trans."
-            # DelegationRightsTo is the last column
-            delegation_type_raw = " ".join(parts[2:-1]) if len(parts) > 3 else parts[2]
+
+            # Strip "SPN Exists" column if present (Yes/No/-)
+            if parts[-1].lower() in ("yes", "no", "-"):
+                parts = parts[:-1]
+
+            # Now last element is DelegationRightsTo (the target SPN)
+            # DelegationType is everything between account_type and target_spn
             target_spn = parts[-1] if len(parts) > 3 else "N/A"
+            delegation_type_raw = " ".join(parts[2:-1]) if len(parts) > 3 else parts[2]
 
             # Normalize delegation type
             if "unconstrained" in delegation_type_raw.lower():
@@ -1013,7 +1020,7 @@ class CertipyTools(Toolset):
         Queue ESC8 vulnerability for exploitation when detected.
 
         ESC8 requires a two-step attack:
-        1. Start certipy_relay_esc8 to listen for relayed auth
+        1. Start ntlmrelayx_to_adcs to listen for relayed auth
         2. Use coercion (petitpotam/coercer) to force DC authentication
 
         This method adds the vulnerability to state so the orchestrator
@@ -1085,7 +1092,7 @@ class CertipyTools(Toolset):
             "username": username,
             "password": password,
             "attack_steps": [
-                "1. Start certipy_relay_esc8 to listen on attacker interface",
+                "1. Start ntlmrelayx_to_adcs to listen for relayed auth",
                 "2. Use petitpotam or coercer to coerce DC authentication to attacker",
                 "3. Relay will capture DC machine certificate",
                 "4. Use certipy_auth with captured certificate to get DC machine hash",
@@ -1103,7 +1110,7 @@ class CertipyTools(Toolset):
             discovered_by="certipy_find",
             details=details,
             priority=3,  # High priority - ADCS_ESC8 is priority 3 in dispatcher
-            recommended_agent="privesc",
+            recommended_agent="coercion",  # ntlmrelayx_to_adcs is on coercion pod
         )
 
         if not isinstance(self.state, SharedRedTeamState):
@@ -1222,7 +1229,7 @@ class CertipyTools(Toolset):
                 if "🚨" not in result:
                     result = (
                         "🚨 ESC8 DETECTED - WEB ENROLLMENT RELAY POSSIBLE!\n"
-                        "\u2192 Use certipy_relay_esc8 to set up relay listener\n"
+                        "\u2192 Use ntlmrelayx_to_adcs to set up relay listener\n"
                         "\u2192 Use petitpotam or coercer to coerce DC authentication\n"
                         "\u2192 Then use certipy_auth with the captured certificate\n\n" + result
                     )

@@ -18,7 +18,7 @@ from ares.tools.red.common import (
 
 
 def _kill_existing_relay_processes() -> str:
-    """Kill any existing ntlmrelayx/responder processes to free ports.
+    """Kill any existing ntlmrelayx/responder/mitm6 processes to free ports.
 
     Returns:
         Status message about what was killed.
@@ -45,6 +45,17 @@ def _kill_existing_relay_processes() -> str:
         )
         if "killed" in _stdout:
             killed.append("responder")
+    except Exception:
+        pass
+
+    # Kill mitm6 processes (binds to DNS port 53)
+    try:
+        _stdout, _, _code = run_tool(
+            ["bash", "-c", "pkill -9 -f 'm[i]tm6' && echo killed || true"],
+            timeout_seconds=5,
+        )
+        if "killed" in _stdout:
+            killed.append("mitm6")
     except Exception:
         pass
 
@@ -225,7 +236,12 @@ class CoercionNetworkTools(Toolset):
         interface: str = "",
         analyze_mode: bool = False,
     ) -> str:
-        """Poison LLMNR/NBT-NS/MDNS to capture NetNTLMv2 hashes."""
+        """Poison LLMNR/NBT-NS/MDNS to capture NetNTLMv2 hashes.
+
+        Args:
+            interface: Network interface (use value from task prompt, do NOT guess).
+            analyze_mode: Passive mode if True.
+        """
         from ares.core.config import get_default_network_interface
 
         # Kill any existing relay/responder processes to free ports
@@ -262,8 +278,18 @@ class CoercionNetworkTools(Toolset):
         domain: str,
         interface: str = "",
     ) -> str:
-        """IPv6 DNS takeover via DHCPv6. Use with ntlmrelayx for relay."""
+        """IPv6 DNS takeover via DHCPv6. Use with ntlmrelayx for relay.
+
+        Args:
+            domain: Target domain.
+            interface: Network interface (use value from task prompt, do NOT guess).
+        """
         from ares.core.config import get_default_network_interface
+
+        # Kill any existing mitm6/relay processes to free DNS port
+        cleanup_msg = _kill_existing_relay_processes()
+        if cleanup_msg:
+            logger.info(f"[*] Cleanup: {cleanup_msg}")
 
         if not interface:
             interface = get_default_network_interface()

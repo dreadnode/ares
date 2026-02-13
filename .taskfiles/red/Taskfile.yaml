@@ -796,6 +796,9 @@ tasks:
         kubectl exec -n {{.K8S_NAMESPACE}} "$REDIS_CLIENT_POD" -- "${REDIS_ENV[@]}" redis-cli "${REDIS_HOST_ARG[@]}" del ares:operations >/dev/null
         echo "Cleared ares:operations queue"
 
+        kubectl exec -n {{.K8S_NAMESPACE}} "$REDIS_CLIENT_POD" -- "${REDIS_ENV[@]}" redis-cli "${REDIS_HOST_ARG[@]}" del ares:operation:active >/dev/null
+        echo "Cleared ares:operation:active pointer"
+
         echo "Scaling $ORCH_DEPLOY back to $CURRENT_REPLICAS replicas"
         kubectl scale -n {{.K8S_NAMESPACE}} deploy/$ORCH_DEPLOY --replicas="$CURRENT_REPLICAS"
         kubectl rollout status -n {{.K8S_NAMESPACE}} deploy/$ORCH_DEPLOY || true
@@ -845,6 +848,28 @@ tasks:
   multi:sync:align:
     desc: "Sync code changes to PVCs, clear Redis cache, and align cluster pods"
     cmds:
+      - cmd: |
+          # Kill any running red:multi:local processes to prevent them from
+          # re-submitting operations after Redis is cleared
+          LOCAL_PIDS=$(pgrep -f "red:multi:local" 2>/dev/null || true)
+          if [ -n "$LOCAL_PIDS" ]; then
+            echo "=== STOPPING LOCAL CLI SESSIONS ==="
+            echo "Found running red:multi:local processes: $LOCAL_PIDS"
+            for pid in $LOCAL_PIDS; do
+              # Kill the process group to ensure child processes are also killed
+              pkill -TERM -P "$pid" 2>/dev/null || true
+              kill -TERM "$pid" 2>/dev/null || true
+            done
+            sleep 1
+            # Force kill if still running
+            for pid in $LOCAL_PIDS; do
+              if kill -0 "$pid" 2>/dev/null; then
+                echo "Force killing $pid"
+                kill -9 "$pid" 2>/dev/null || true
+              fi
+            done
+            echo "Local CLI sessions stopped"
+          fi
       - cmd: echo "=== SYNCING CODE ==="
       - task: :remote:sync:full
         vars: { NAMESPACE: "{{.K8S_NAMESPACE}}" }

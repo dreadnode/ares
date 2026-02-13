@@ -1267,6 +1267,30 @@ class SharedRedTeamState:
                     f"Credential rejected: duplicate {domain}\\{username} from {source_agent}"
                 )
                 return False
+            # Check for cross-domain duplicates: same username + password but different domain
+            # Only reject if user is KNOWN to exist in only ONE domain (hallucination)
+            # If user exists in multiple domains, it's legitimate password reuse
+            existing_user_pass = f"{existing.username.strip()}:{existing.password.strip()}".lower()
+            new_user_pass = f"{username}:{password}".lower()
+            if existing_user_pass == new_user_pass and existing.domain.strip().lower() != domain:
+                # Check how many domains this user exists in
+                user_domains = {
+                    u.domain.lower()
+                    for u in self.all_users
+                    if u.username.lower() == username.lower() and u.domain
+                }
+                if len(user_domains) == 1 and domain.lower() not in user_domains:
+                    # User only exists in one domain, this is likely a hallucination
+                    logger.warning(
+                        f"Credential rejected: cross-domain duplicate {domain}\\{username} "
+                        f"(user only exists in {existing.domain}) from {source_agent}"
+                    )
+                    return False
+                # User exists in multiple domains or we haven't discovered them yet
+                # Log password reuse but allow it
+                logger.info(
+                    f"Password reuse detected: {username} in {domain} and {existing.domain}"
+                )
         credential.username = username
         credential.domain = domain
         credential.password = password

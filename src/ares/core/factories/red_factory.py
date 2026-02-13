@@ -181,7 +181,7 @@ unstall_hook = retry_with_feedback(
         "4. ACL ABUSE: GenericAll/GenericWrite? → certipy_shadow_auto, targeted_kerberoast, force_change_password\n"
         "5. DELEGATION: Constrained? → constrained_delegation_s4u. Unconstrained? → petitpotam/coercer\n"
         "6. MSSQL: Linked servers? → mssql_enum_linked_servers, mssql_exec_linked\n"
-        "7. ADCS: ESC4? → certipy_template_esc4. ESC8? → certipy_relay_esc8 + petitpotam\n"
+        "7. ADCS: ESC4? → certipy_template_esc4. ESC8? → ntlmrelayx_to_adcs + petitpotam\n"
         "8. LAPS: Try laps_dump for local admin passwords\n"
         "9. Use record_finding to report EVERY discovery\n"
         "10. Continue autonomous execution - don't stop for direction"
@@ -215,7 +215,7 @@ async def vulnerability_discovery_hook(event: ToolEnd):  # noqa: PLR0912
             "🚨 ESC1 ADCS VULNERABILITY FOUND!\n"
             "→ Try certipy_req_esc1 first with the CA name and template from above\n"
             "→ If RPC fails (ept_s_not_registered), use ESC8 relay instead:\n"
-            "   1. certipy_relay_esc8 to start relay listener on web enrollment\n"
+            "   1. ntlmrelayx_to_adcs to start relay listener on web enrollment\n"
             "   2. petitpotam to coerce DC authentication to your relay\n"
             "→ Then run certipy_auth to get Administrator NTLM hash\n"
             "→ DO NOT proceed to other tasks until ESC1/ESC8 is exploited!"
@@ -237,7 +237,7 @@ async def vulnerability_discovery_hook(event: ToolEnd):  # noqa: PLR0912
     if is_esc8:
         redirects.append(
             "🚨 ESC8 ADCS VULNERABILITY FOUND (Web Enrollment)!\n"
-            "→ Use certipy_relay_esc8 to set up relay listener\n"
+            "→ Use ntlmrelayx_to_adcs to set up relay listener\n"
             "→ Then use petitpotam or coercer to coerce DC authentication\n"
             "→ Relay will capture DC certificate\n"
             "→ Use certipy_auth with the captured certificate!"
@@ -406,7 +406,7 @@ def _track_exploitation(tool_name: str) -> None:
         "certipy_req_esc1": "esc1_adcs",
         "certipy_auth": "esc1_adcs",
         "certipy_template_esc4": "esc4_adcs",
-        "certipy_relay_esc8": "esc8_adcs",
+        "ntlmrelayx_to_adcs": "esc8_adcs",
         "certipy_shadow_auto": "acl_abuse",
         # ACL abuse
         "pywhisker": "acl_abuse",
@@ -474,7 +474,7 @@ def _track_vulnerability_findings(result: str, tool_name: str, step: int) -> Non
         ),
         (
             "ESC8" in result and ("exploitable" in result_lower or "vulnerable" in result_lower),
-            ("esc8_adcs", "ADCS ESC8 (Web Enrollment)", "certipy_relay_esc8 + petitpotam"),
+            ("esc8_adcs", "ADCS ESC8 (Web Enrollment)", "ntlmrelayx_to_adcs + petitpotam"),
         ),
         (
             has_acl and is_acl_tool,

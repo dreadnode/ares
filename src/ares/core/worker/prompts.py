@@ -320,11 +320,13 @@ def generate_prompt_from_task(
 
         base_prompt = (
             f"Start network coercion:\n"
-            f"Interface: {interface}\n"
+            f"**NETWORK INTERFACE: `{interface}`** (auto-detected for this environment)\n"
             f"Techniques: {', '.join(techniques)}\n"
             f"Duration: {payload.get('duration', 300)}s\n"
             f"Task ID: {task.task_id}\n\n"
             f"{target_info}"
+            f'**CRITICAL: When calling start_responder or start_mitm6, pass `interface="{interface}"` exactly.**\n'
+            "Do NOT guess interface names (e.g., eth0) - always use the auto-detected value above.\n\n"
             "**STEP BUDGET: ~30 steps max. Work efficiently!**\n\n"
             "**HARD LIMITS:**\n"
             "- Each coercion technique: max 2 attempts per target\n"

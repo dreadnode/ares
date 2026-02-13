@@ -1194,11 +1194,13 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                         password=cred.password,
                     )
 
+                    # Always record attempt to prevent retry storm when throttled
+                    # The deferred queue handles actual retries for deferred tasks
+                    adcs_attempts[cred_key] = (task_id or "", attempt_count + 1, current_time)
                     if task_id:
-                        adcs_attempts[cred_key] = (task_id, attempt_count + 1, current_time)
                         logger.info(f"ADCS enumeration task {task_id} dispatched for {server_ip}")
-                        # Only dispatch one task per server per cycle
-                        break
+                    # Only dispatch one task per server per cycle
+                    break
 
         except asyncio.CancelledError:
             break
@@ -1279,13 +1281,14 @@ async def _auto_share_spider(
                         techniques=["share_spider"],
                     )
 
+                    # Always mark as processed to prevent retry storm when throttled
+                    state.processed_spidered_shares.add(spider_key)
                     if task_id:
-                        state.processed_spidered_shares.add(spider_key)
                         logger.info(
                             f"🕷️ Auto share spider dispatched: {cred.domain or '(local)'}\\{cred.username} -> {share.host}/{share.name} (task {task_id})"
                         )
-                        # Only spider each share once per credential - don't flood
-                        break
+                    # Only spider each share once per credential - don't flood
+                    break
 
             await asyncio.sleep(check_interval)
 
@@ -1426,11 +1429,13 @@ async def _auto_bloodhound(  # noqa: PLR0912
                         techniques=["bloodhound"],
                     )
 
+                    # Always record attempt to prevent retry storm when throttled
+                    # The deferred queue handles actual retries for deferred tasks
+                    bloodhound_attempts[cred_key] = (task_id or "", attempt_count + 1, current_time)
                     if task_id:
-                        bloodhound_attempts[cred_key] = (task_id, attempt_count + 1, current_time)
                         logger.info(f"BloodHound task {task_id} dispatched for {domain}")
-                        # Only dispatch one task per domain per cycle
-                        break
+                    # Only dispatch one task per domain per cycle
+                    break
 
         except asyncio.CancelledError:
             break
@@ -1639,8 +1644,10 @@ async def _auto_credential_access(  # noqa: PLR0912
                             "asrep_roast",  # Users without pre-auth
                         ],
                     )
+                    # Always mark as processed to prevent retry storm when throttled
+                    # The deferred queue handles actual retries for deferred tasks
+                    state.processed_asrep_domains.add(domain.lower())
                     if fruit_task_id:
-                        state.processed_asrep_domains.add(domain.lower())
                         logger.info(
                             f"Auto credential access (low-hanging fruit, no-creds) dispatched for domain {domain}"
                         )
@@ -1688,9 +1695,10 @@ async def _auto_credential_access(  # noqa: PLR0912
                         reason="low_hanging_fruit_new_users",
                         techniques=["username_as_password"],
                     )
+                    # Always mark as processed to prevent retry storm when throttled
+                    state.processed_username_spray.add(domain.lower())
+                    last_user_count[domain.lower()] = len(domain_users)
                     if task_id:
-                        state.processed_username_spray.add(domain.lower())
-                        last_user_count[domain.lower()] = len(domain_users)
                         cred_info = (
                             f"{enum_cred.domain}\\{enum_cred.username}"
                             if enum_cred
@@ -1712,8 +1720,9 @@ async def _auto_credential_access(  # noqa: PLR0912
                         reason="low_hanging_fruit_password_spray",
                         techniques=["password_spray"],
                     )
+                    # Always mark as processed to prevent retry storm when throttled
+                    state.processed_password_spray.add(domain.lower())
                     if task_id:
-                        state.processed_password_spray.add(domain.lower())
                         logger.info(
                             f"Auto password_spray dispatched for {len(domain_users)} users in {domain}"
                         )
@@ -1799,8 +1808,10 @@ async def _auto_credential_access(  # noqa: PLR0912
                             "laps_dump",  # ~2 sec, LAPS local admin passwords
                         ],
                     )
+                # Always mark as processed to prevent retry storm when throttled
+                # The deferred queue handles actual retries for deferred tasks
+                state.processed_cred_expansion.add(key)
                 if cred_task_id:
-                    state.processed_cred_expansion.add(key)
                     logger.info(
                         f"Auto credential access dispatched for {cred.domain or '(unknown)'}\\{cred.username} (source={cred.source or 'unknown'})"
                     )
@@ -1869,8 +1880,9 @@ async def _auto_credential_access(  # noqa: PLR0912
                             if dc_task_id and not hash_task_id:
                                 hash_task_id = dc_task_id
 
+                        # Always mark as processed to prevent retry storm when throttled
+                        state.processed_hash_lateral.add(hash_key)
                         if hash_task_id:
-                            state.processed_hash_lateral.add(hash_key)
                             logger.info(
                                 f"Auto credential access dispatched for {hash_obj.domain or '(unknown)'}\\{hash_obj.username} (hash_type={hash_obj.hash_type or 'unknown'})"
                             )
@@ -1914,8 +1926,10 @@ async def _auto_credential_access(  # noqa: PLR0912
                     domain=hash_obj.domain,
                     priority=crack_priority,
                 )
+                # Always mark as processed to prevent retry storm when throttled
+                # The deferred queue handles actual retries for deferred tasks
+                state.processed_crack_requests.add(crack_key)
                 if crack_task_id:
-                    state.processed_crack_requests.add(crack_key)
                     logger.info(
                         f"Auto crack dispatched for {hash_obj.domain or '(unknown)'}\\{hash_obj.username} ({hash_obj.hash_type or 'unknown'}, priority={crack_priority})"
                     )
@@ -1999,8 +2013,10 @@ async def _auto_crack_dispatch(
                     priority=crack_priority,
                 )
 
+                # Always mark as processed to prevent retry storm when throttled
+                # The deferred queue handles actual retries for deferred tasks
+                state.processed_crack_requests.add(crack_key)
                 if crack_task_id:
-                    state.processed_crack_requests.add(crack_key)
                     logger.info(
                         f"Auto-crack dispatched: {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type}) -> {crack_task_id}"
                     )
@@ -2118,8 +2134,9 @@ async def _auto_coercion(  # noqa: PLR0912
                     },
                 )
 
+                # Always mark as processed to prevent retry storm when throttled
+                state.processed_esc8_servers.add(server_ip)
                 if task_id:
-                    state.processed_esc8_servers.add(server_ip)
                     logger.info(
                         f"🎯 Auto ESC8 coercion dispatched: relay to ADCS {server_hostname or server_ip}, coerce DC {target_dc.hostname or target_dc.ip} (task {task_id})"
                     )
@@ -2152,14 +2169,15 @@ async def _auto_coercion(  # noqa: PLR0912
                     },
                 )
 
+                # Always mark as processed to prevent retry storm when throttled
+                state.processed_coerced_dcs.add(host.ip)
                 if task_id:
-                    state.processed_coerced_dcs.add(host.ip)
                     logger.info(
                         f"🎯 Auto LDAPS relay coercion dispatched: coerce DC {host.hostname or host.ip} "
                         f"for RBCD (task {task_id})"
                     )
-                    # Only do one DC at a time to avoid overwhelming the coercion agent
-                    break
+                # Only do one DC at a time to avoid overwhelming the coercion agent
+                break
 
             # === WRITABLE SHARE NOTIFICATION ===
             # Log writable shares that could be used for file-based coercion (.lnk/.scf drops)

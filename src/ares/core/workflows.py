@@ -288,6 +288,10 @@ async def exploitation_workflow(  # noqa: PLR0912
     failure_counts: dict[str, int] = {}
     max_failures_per_type = 3
 
+    # Track retry counts per vulnerability (prevent infinite retry loops)
+    retry_counts: dict[str, int] = {}
+    max_retries_per_vuln = 2  # Allow 2 retries (3 total attempts)
+
     # Semaphore for parallel exploitation
     exploit_semaphore = asyncio.Semaphore(max_concurrent_exploits)
 
@@ -316,14 +320,18 @@ async def exploitation_workflow(  # noqa: PLR0912
 
             logger.info(f"Processing vulnerability: {vuln_type} on {vuln['target']}")
 
-            # Route to appropriate agent with timeout
+            # Route to appropriate agent with timeout (reduced from 16min to 5min)
             exploit_started = asyncio.get_event_loop().time()
             try:
-                async with asyncio.timeout(960):  # 16 min total
+                async with asyncio.timeout(300):  # 5 min total (was 16 min)
                     result = await _exploit_vulnerability(dispatcher, vuln)
             except asyncio.TimeoutError:
                 logger.error(f"Exploitation of {vuln_id} ({vuln_type}) timed out at dispatch level")
-                result = {"success": False, "error": "Dispatch timeout - workflow blocked"}
+                result = {
+                    "success": False,
+                    "error": "Dispatch timeout - workflow blocked",
+                    "retryable": True,
+                }
 
             exploit_elapsed = asyncio.get_event_loop().time() - exploit_started
             logger.info(
@@ -332,17 +340,30 @@ async def exploitation_workflow(  # noqa: PLR0912
                 f"elapsed={exploit_elapsed:.1f}s"
             )
 
-            # Check if this was a dispatch failure (task deferred or dropped)
-            # vs an actual execution failure. Don't mark as exploited if dispatch failed
-            # so the vulnerability stays in queue for retry.
+            # Check if this was a dispatch failure or timeout (retryable error)
+            # vs an actual execution failure. Don't mark as exploited if retryable
+            # so the vulnerability can be re-processed.
             dispatch_failed = result.get("error") == "Failed to dispatch task"
-            if dispatch_failed:
-                logger.warning(
-                    f"Dispatch failed for {vuln_id} ({vuln_type}) - "
-                    f"NOT marking as exploited, will retry on next cycle"
+            is_retryable = result.get("retryable", False)
+
+            if dispatch_failed or is_retryable:
+                # Track retry count to prevent infinite loops
+                current_retries = retry_counts.get(vuln_id, 0)
+                if current_retries < max_retries_per_vuln:
+                    retry_counts[vuln_id] = current_retries + 1
+                    logger.warning(
+                        f"Retryable failure for {vuln_id} ({vuln_type}): {result.get('error')} - "
+                        f"retry {current_retries + 1}/{max_retries_per_vuln}"
+                    )
+                    in_flight_vulns.discard(vuln_id)
+                    # Remove from dequeued tracking so it can be re-fetched
+                    await dispatcher.requeue_vulnerability(vuln_id)
+                    return  # Don't mark as exploited, don't count as failure
+                logger.error(
+                    f"Max retries ({max_retries_per_vuln}) exceeded for {vuln_id} ({vuln_type}) - "
+                    f"marking as failed"
                 )
-                in_flight_vulns.discard(vuln_id)
-                return  # Don't mark as exploited, don't count as failure
+                # Fall through to mark as failed
 
             # Mark as attempted (only for actual execution attempts)
             await dispatcher.mark_vulnerability_exploited(
@@ -403,7 +424,7 @@ async def exploitation_workflow(  # noqa: PLR0912
                 await asyncio.gather(*active_tasks, return_exceptions=True)
                 active_tasks.clear()
 
-            # Broadcast DA achieved
+            # Broadcast DA achieved (in-memory broadcast to local agents)
             await dispatcher._broadcast(
                 DomainAdminAchieved(
                     source_agent="exploitation_workflow",
@@ -414,17 +435,12 @@ async def exploitation_workflow(  # noqa: PLR0912
                 )
             )
 
-            # Broadcast operation complete to signal workers to stop
-            from ares.core.messages import OperationComplete
-
-            await dispatcher._broadcast(
-                OperationComplete(
-                    source_agent="exploitation_workflow",
-                    operation_id=state.operation_id,
-                    success=True,
-                    summary=f"Domain Admin achieved via {state.domain_admin_path or 'unknown'}",
-                    domain_admin_achieved=True,
-                )
+            # Announce operation complete - this broadcasts to local agents AND
+            # sets Redis status key so remote workers detect completion
+            await dispatcher.announce_operation_complete(
+                source_agent="exploitation_workflow",
+                success=True,
+                summary=f"Domain Admin achieved via {state.domain_admin_path or 'unknown'}",
             )
             break
 
@@ -572,7 +588,7 @@ async def _dispatch_krbtgt(
 async def _wait_with_da_check(
     dispatcher: RedTeamDispatcher,
     task_id: str,
-    timeout: float = 1200.0,
+    timeout: float = 180.0,
     check_interval: float = 10.0,
 ) -> dict[str, Any]:
     """Wait for task completion with periodic DA checks.
@@ -584,7 +600,7 @@ async def _wait_with_da_check(
     Args:
         dispatcher: The RedTeamDispatcher instance
         task_id: Task to wait for
-        timeout: Total timeout in seconds (default 20 minutes)
+        timeout: Total timeout in seconds (default 3 minutes - reduced from 20)
         check_interval: How often to check for DA (default 10 seconds)
 
     Returns:
@@ -604,9 +620,9 @@ async def _wait_with_da_check(
             # Task still running, continue loop to check DA
             continue
 
-    # Total timeout exceeded
-    logger.warning(f"Exploitation task {task_id} timed out after {timeout}s")
-    return {"success": False, "error": "Task timed out"}
+    # Total timeout exceeded - mark as retryable so vuln can be re-processed
+    logger.warning(f"Exploitation task {task_id} timed out after {timeout}s - will allow retry")
+    return {"success": False, "error": "Task timed out", "retryable": True}
 
 
 async def _exploit_vulnerability(
@@ -659,7 +675,8 @@ async def _exploit_vulnerability(
 
     # Wait for task completion with periodic DA checks
     # Uses chunked waits to detect DA achievement and abandon stale tasks early
-    return await _wait_with_da_check(dispatcher, task_id, timeout=1200.0, check_interval=10.0)
+    # Timeout reduced from 1200s (20min) to 180s (3min) to prevent workflow blocking
+    return await _wait_with_da_check(dispatcher, task_id, timeout=180.0, check_interval=10.0)
 
 
 __all__ = [

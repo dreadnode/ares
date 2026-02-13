@@ -419,8 +419,7 @@ def create_role_hooks(
                 "certipy_auth",
                 "certipy_shadow",
                 "certipy_shadow_auto",
-                "certipy_relay",
-                "certipy_relay_esc8",
+                "ntlmrelayx_to_adcs",
             }
             if tool_name in certipy_exploitation_tools and (
                 "success" in result_lower
@@ -454,8 +453,7 @@ def create_role_hooks(
                 "certipy_req",
                 "certipy_req_esc1",
                 "certipy_auth",
-                "certipy_relay",
-                "certipy_relay_esc8",
+                "ntlmrelayx_to_adcs",
             }
             if tool_name in adcs_tools and any(
                 ind in result_lower for ind in adcs_failure_indicators
