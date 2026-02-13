@@ -67,7 +67,7 @@ class CredentialDiscoveryTools(Toolset):
             enum_tools.set_state(self.state)
         return enum_tools._run_user_enum_commands(target, username, password, domain)
 
-    def _extract_users_from_outputs(self, outputs: list[tuple[str, str]]) -> set[str]:
+    def _extract_users_from_outputs(self, outputs: list[tuple[str, str]]) -> set[tuple[str, str]]:
         from ares.tools.red.reconnaissance import NetworkEnumerationTools
 
         return NetworkEnumerationTools()._extract_users_from_outputs(outputs)
@@ -492,9 +492,9 @@ class CredentialDiscoveryTools(Toolset):
                 logger.info(f"[*] Using credential {domain}\\{username} for user recon")
 
             outputs = self._run_user_enum_commands(target, username, password, domain)
-            users = self._extract_users_from_outputs(outputs)
+            user_tuples = self._extract_users_from_outputs(outputs)
 
-            if not users:
+            if not user_tuples:
                 from ares.tools.red.reconnaissance import NetworkEnumerationTools
 
                 helper = NetworkEnumerationTools()
@@ -505,13 +505,16 @@ class CredentialDiscoveryTools(Toolset):
                     logger.warning(f"[!] No users enumerated from {target}")
                 return None
 
+            # Extract just usernames for file (password spraying uses usernames only)
+            usernames = sorted({u[0] for u in user_tuples})
+
             users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
             # Write users file locally for password spraying
-            ok, error = write_users_file_remote(sorted(users), users_file, target_role=None)
+            ok, error = write_users_file_remote(usernames, users_file, target_role=None)
             if not ok:
                 logger.warning(f"[!] Failed to write users file on remote: {error}")
                 return None
-            logger.info(f"[+] Auto-enumerated {len(users)} users to {users_file}")
+            logger.info(f"[+] Auto-enumerated {len(usernames)} users to {users_file}")
             return users_file
 
         except Exception as e:

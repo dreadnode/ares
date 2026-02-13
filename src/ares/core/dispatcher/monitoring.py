@@ -273,7 +273,7 @@ class MonitoringMixin:
         slow_pickup_tasks: list[tuple[str, str, str, float]] = []  # (task_id, type, agent, age)
 
         for task_id, task_info in list(self._shared_state.pending_tasks.items()):
-            # Only clean up tasks still in PENDING or IN_PROGRESS
+            # Skip completed tasks
             if task_info.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
                 continue
 
@@ -282,7 +282,14 @@ class MonitoringMixin:
             activity_time = getattr(task_info, "last_activity_at", None) or task_info.created_at
             age_seconds = (now - activity_time).total_seconds()
 
-            if age_seconds > effective_timeout:
+            # PENDING tasks are waiting in queue - they're NOT stale, just queued
+            # Only clean up IN_PROGRESS tasks that have no activity (worker stopped working)
+            # Use a much longer timeout (10x) for PENDING to avoid killing valid queued tasks
+            if task_info.status == TaskStatus.IN_PROGRESS and age_seconds > effective_timeout:
+                stale_task_ids.append(task_id)
+            elif task_info.status == TaskStatus.PENDING and age_seconds > effective_timeout * 10:
+                # Only clean PENDING tasks if they've been queued for a very long time
+                # This handles cases where tasks never get picked up (e.g., no workers for role)
                 stale_task_ids.append(task_id)
             elif self._should_warn_slow_pickup(
                 task_id, task_info, age_seconds, pickup_warning_threshold

@@ -790,6 +790,52 @@ class RedisTaskQueue:
             logger.warning(f"Failed to publish state update: {e}")
             return 0
 
+    async def publish_shutdown(self, operation_id: str) -> int:
+        """
+        Publish a shutdown notification to subscribers.
+
+        Workers subscribed to this channel will immediately stop processing
+        when they receive this notification.
+
+        Args:
+            operation_id: The operation ID
+
+        Returns:
+            Number of subscribers that received the message
+        """
+        if not self._connected:
+            await self.connect()
+
+        channel = self._state_update_channel(operation_id)
+        message = json.dumps(
+            {
+                "type": "shutdown",
+                "operation_id": operation_id,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        try:
+            count = await self._client.publish(channel, message)
+            logger.info(f"Shutdown notification published to {channel} ({count} subscribers)")
+            return count
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(
+                keyword in error_str
+                for keyword in [
+                    "connection",
+                    "connect",
+                    "closed",
+                    "timeout",
+                    "broken pipe",
+                    "reset",
+                ]
+            ):
+                self._handle_connection_error(e)
+            logger.warning(f"Failed to publish shutdown notification: {e}")
+            return 0
+
     async def subscribe_state_updates(self, operation_id: str):
         """
         Subscribe to state update notifications for an operation.

@@ -91,11 +91,18 @@ class NetworkEnumerationTools(Toolset):
             return f"[+] WinRM reachable on {target} (ports {ports})"
         return f"[!] WinRM not reachable on {target} (ports 5985/5986 closed)"
 
-    def _extract_users_from_outputs(self, outputs: list[tuple[str, str]]) -> set[str]:  # noqa: PLR0912
-        users: set[str] = set()
+    def _extract_users_from_outputs(  # noqa: PLR0912
+        self, outputs: list[tuple[str, str]]
+    ) -> set[tuple[str, str]]:
+        """Extract (username, domain) tuples from user enumeration outputs.
+
+        Parses DOMAIN\\user patterns to extract both username and domain.
+        Returns empty domain string when domain cannot be determined.
+        """
+        users: set[tuple[str, str]] = set()
         user_pattern = r"[A-Za-z0-9._$-]+"
 
-        def _add_user(candidate: str) -> None:
+        def _add_user(candidate: str, domain: str = "") -> None:
             user = candidate.strip()
             if not user or user.endswith("$"):
                 return
@@ -104,7 +111,8 @@ class NetworkEnumerationTools(Toolset):
             # Filter out Kali MOTD garbage and invalid usernames
             if is_motd_garbage(user):
                 return
-            users.add(user)
+            dom = domain.strip().lower() if domain else ""
+            users.add((user, dom))
 
         for label, content in outputs:
             if not content:
@@ -138,12 +146,13 @@ class NetworkEnumerationTools(Toolset):
                     if backslash_match:
                         _add_user(backslash_match.group(1))
                         continue
-                    domain_match = re.search(
-                        rf"[A-Za-z0-9._-]+\\({user_pattern})",
+                    # DOMAIN\user pattern - capture both domain and user
+                    domain_user_match = re.search(
+                        rf"([A-Za-z0-9._-]+)\\({user_pattern})",
                         line,
                     )
-                    if domain_match:
-                        _add_user(domain_match.group(1))
+                    if domain_user_match:
+                        _add_user(domain_user_match.group(2), domain_user_match.group(1))
                         continue
                     rid_match = re.search(r"\bAccount:\s*([A-Za-z0-9._-]+)", line)
                     if rid_match:
@@ -160,12 +169,13 @@ class NetworkEnumerationTools(Toolset):
                     if backslash_match:
                         _add_user(backslash_match.group(1))
                         continue
-                    domain_match = re.search(
-                        rf"[A-Za-z0-9._-]+\\({user_pattern})",
+                    # DOMAIN\user pattern - capture both domain and user
+                    domain_user_match = re.search(
+                        rf"([A-Za-z0-9._-]+)\\({user_pattern})",
                         line,
                     )
-                    if domain_match:
-                        _add_user(domain_match.group(1))
+                    if domain_user_match:
+                        _add_user(domain_user_match.group(2), domain_user_match.group(1))
                         continue
                     rid_match = re.search(r"\bAccount:\s*([A-Za-z0-9._-]+)", line)
                     if rid_match:
@@ -181,12 +191,13 @@ class NetworkEnumerationTools(Toolset):
                     if name_match:
                         _add_user(name_match.group(1))
                         continue
-                    domain_match = re.search(
-                        rf"[A-Za-z0-9._-]+\\({user_pattern})",
+                    # DOMAIN\user pattern - capture both domain and user
+                    domain_user_match = re.search(
+                        rf"([A-Za-z0-9._-]+)\\({user_pattern})",
                         line,
                     )
-                    if domain_match:
-                        _add_user(domain_match.group(1))
+                    if domain_user_match:
+                        _add_user(domain_user_match.group(2), domain_user_match.group(1))
                         continue
 
         return users
@@ -804,9 +815,11 @@ class NetworkEnumerationTools(Toolset):
                 if effective_domain:
                     users = self._extract_users_from_outputs(outputs)
                     found_users = bool(users)
-                    for found_user in sorted(users):
+                    for found_user, extracted_domain in sorted(users):
+                        # Use extracted domain if available, otherwise fall back to effective_domain
+                        user_domain = extracted_domain or effective_domain
                         add_user_to_state(
-                            self.state, found_user, effective_domain, source="netexec_user_enum"
+                            self.state, found_user, user_domain, source="netexec_user_enum"
                         )
 
                     extracted = self._extract_passwords_from_user_enum_output(output)
@@ -1097,20 +1110,23 @@ class NetworkEnumerationTools(Toolset):
         """
         try:
             outputs = self._run_user_enum_commands(target, username, password, domain)
-            users = self._extract_users_from_outputs(outputs)
+            user_tuples = self._extract_users_from_outputs(outputs)
 
-            if not users:
+            if not user_tuples:
                 output = "\n".join(content for _, content in outputs if content).strip()
                 return self._format_enum_failure_message(outputs, output)
 
+            # Extract just usernames for file (password spraying uses usernames only)
+            usernames = sorted({u[0] for u in user_tuples})
+
             # Save to local file for password spraying
             users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
-            ok, error = write_users_file_remote(sorted(users), users_file, target_role=None)
+            ok, error = write_users_file_remote(usernames, users_file, target_role=None)
             if not ok:
                 return f"[!] Failed to write users file on remote: {error}"
 
-            logger.info(f"[+] Saved {len(users)} users to {users_file}")
-            return f"[+] Saved {len(users)} users to {users_file}\nUsers: {', '.join(sorted(users)[:20])}{'...' if len(users) > 20 else ''}"
+            logger.info(f"[+] Saved {len(usernames)} users to {users_file}")
+            return f"[+] Saved {len(usernames)} users to {users_file}\nUsers: {', '.join(usernames[:20])}{'...' if len(usernames) > 20 else ''}"
 
         except Exception as e:
             logger.error(f"Save users to file failed: {e}")

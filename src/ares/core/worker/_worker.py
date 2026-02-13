@@ -1636,7 +1636,26 @@ class RedisWorkerAgent:
                     )
 
                     if message and message.get("type") == "message":
-                        # Received state update notification - refresh state
+                        # Parse the message data to check type
+                        try:
+                            import json
+
+                            data = message.get("data")
+                            if isinstance(data, bytes):
+                                data = data.decode("utf-8")
+                            msg_data = json.loads(data) if data else {}
+                            msg_type = msg_data.get("type", "state_update")
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            msg_type = "state_update"  # Default to state update
+
+                        if msg_type == "shutdown":
+                            # Shutdown notification - stop immediately
+                            logger.info(
+                                f"[{self.agent_name}] Received shutdown notification via pub/sub"
+                            )
+                            self._running = False
+                            return
+                        # State update notification - refresh state
                         logger.debug(
                             f"[{self.agent_name}] Received state update notification via pub/sub"
                         )

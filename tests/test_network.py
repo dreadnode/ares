@@ -187,7 +187,8 @@ class TestNetworkEnumerationTools:
 
         users = tools._extract_users_from_outputs(outputs)
 
-        assert "alans" in users
+        # Should extract both username and domain
+        assert ("alans", "contoso") in users
 
     def test_extract_users_from_netexec_rid_brute_backslash_format(self):
         """Test parsing netexec --rid-brute output with backslash usernames."""
@@ -203,7 +204,8 @@ class TestNetworkEnumerationTools:
 
         users = tools._extract_users_from_outputs(outputs)
 
-        assert "svc-sql" in users
+        # Should extract both username and domain
+        assert ("svc-sql", "contoso") in users
 
     def test_nmap_scan_success(self, red_team_state: RedTeamState):
         """Test successful nmap scan."""

@@ -10,6 +10,8 @@ Priority scheme rationale:
 
 from __future__ import annotations
 
+import pytest
+
 from ares.core.dispatcher import RedTeamDispatcher
 
 
@@ -293,3 +295,216 @@ class TestCredentialAwarePriorityBoost:
             {"can_impersonate_sa": True},
         )
         assert boosted == 3
+
+
+class TestCredentialReEvaluationAtDequeue:
+    """Tests for re-evaluating has_credentials when dequeuing delegation vulnerabilities.
+
+    Bug fix: Constrained delegation exploits were dispatched with has_credentials: False
+    when the account was discovered before being Kerberoasted/cracked. The system should
+    re-evaluate has_credentials at dequeue time, not just at discovery time.
+    """
+
+    @pytest.mark.asyncio
+    async def test_delegation_vuln_gets_credentials_at_dequeue(self):
+        """Delegation vuln queued without creds should get creds at dequeue time."""
+        from ares.core.models import Credential, SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-reeval-1")
+
+        # Step 1: Queue delegation vulnerability WITHOUT credentials
+        vuln_id = await dispatcher.queue_vulnerability(
+            vuln_type="constrained_delegation",
+            target="sql_svc",
+            details={
+                "account_name": "sql_svc",
+                "target_spn": "cifs/dc01.contoso.local",
+                "domain": "contoso.local",
+                "dc_ip": "192.168.58.10",
+                "has_credentials": False,  # No creds at discovery time
+            },
+            discovered_by="recon",
+        )
+        assert vuln_id
+
+        # Verify vulnerability was queued without credentials
+        assert vuln_id in dispatcher._shared_state.discovered_vulnerabilities
+        queued_vuln = dispatcher._shared_state.discovered_vulnerabilities[vuln_id]
+        assert queued_vuln.details.get("has_credentials") is False
+
+        # Step 2: Credential arrives later (e.g., Kerberoast cracked)
+        dispatcher._shared_state.add_credential(
+            Credential(
+                username="sql_svc",
+                password="Password123!",  # pragma: allowlist secret
+                domain="contoso.local",
+                source="cracker",
+            ),
+            "cracker",
+        )
+
+        # Step 3: Dequeue vulnerability - should now have credentials
+        dequeued = await dispatcher.get_next_vulnerability()
+
+        assert dequeued is not None
+        assert dequeued["id"] == vuln_id
+        assert dequeued["details"]["has_credentials"] is True
+        assert dequeued["details"]["username"] == "sql_svc"
+        assert dequeued["details"]["password"] == "Password123!"  # pragma: allowlist secret
+        assert dequeued["details"]["domain"] == "contoso.local"
+
+    @pytest.mark.asyncio
+    async def test_delegation_vuln_without_creds_stays_without_creds(self):
+        """Delegation vuln without matching credential should stay has_credentials=False."""
+        from ares.core.models import Credential, SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-reeval-2")
+
+        # Queue delegation vulnerability WITHOUT credentials
+        vuln_id = await dispatcher.queue_vulnerability(
+            vuln_type="constrained_delegation",
+            target="sql_svc",
+            details={
+                "account_name": "sql_svc",
+                "target_spn": "cifs/dc01.contoso.local",
+                "domain": "contoso.local",
+                "dc_ip": "192.168.58.10",
+                "has_credentials": False,
+            },
+            discovered_by="recon",
+        )
+
+        # Add credential for DIFFERENT user
+        dispatcher._shared_state.add_credential(
+            Credential(
+                username="admin_svc",
+                password="AdminPass123!",  # pragma: allowlist secret
+                domain="contoso.local",
+                source="cracker",
+            ),
+            "cracker",
+        )
+
+        # Dequeue - should still not have credentials
+        dequeued = await dispatcher.get_next_vulnerability()
+
+        assert dequeued is not None
+        assert dequeued["id"] == vuln_id
+        assert dequeued["details"]["has_credentials"] is False
+
+    @pytest.mark.asyncio
+    async def test_unconstrained_delegation_also_gets_credentials(self):
+        """Unconstrained delegation should also get credentials re-evaluated."""
+        from ares.core.models import Credential, SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-reeval-3")
+
+        # Queue unconstrained delegation without credentials
+        await dispatcher.queue_vulnerability(
+            vuln_type="unconstrained_delegation",
+            target="web_svc",
+            details={
+                "account_name": "web_svc",
+                "domain": "contoso.local",
+                "has_credentials": False,
+            },
+            discovered_by="recon",
+        )
+
+        # Add matching credential
+        dispatcher._shared_state.add_credential(
+            Credential(
+                username="web_svc",
+                password="WebPass123!",  # pragma: allowlist secret
+                domain="contoso.local",
+                source="cracker",
+            ),
+            "cracker",
+        )
+
+        # Dequeue - should now have credentials
+        dequeued = await dispatcher.get_next_vulnerability()
+
+        assert dequeued is not None
+        assert dequeued["details"]["has_credentials"] is True
+        assert dequeued["details"]["password"] == "WebPass123!"  # pragma: allowlist secret
+
+    @pytest.mark.asyncio
+    async def test_machine_account_credential_matching(self):
+        """Machine account credentials should match (strip trailing $)."""
+        from ares.core.models import Credential, SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-reeval-4")
+
+        # Queue delegation for machine account (with $ in account_name)
+        # Note: target must be a valid hostname, but account_name contains the $
+        vuln_id = await dispatcher.queue_vulnerability(
+            vuln_type="constrained_delegation",
+            target="web01.contoso.local",  # Valid hostname as target
+            details={
+                "account_name": "WEB01$",  # Machine account with $ suffix
+                "target_spn": "cifs/dc01.contoso.local",
+                "domain": "contoso.local",
+                "has_credentials": False,
+            },
+            discovered_by="recon",
+        )
+        assert vuln_id  # Ensure vulnerability was queued
+
+        # Add credential without $ (e.g., from secretsdump)
+        dispatcher._shared_state.add_credential(
+            Credential(
+                username="WEB01",
+                password="MachinePass123!",  # pragma: allowlist secret
+                domain="contoso.local",
+                source="secretsdump",
+            ),
+            "privesc",
+        )
+
+        # Dequeue - should match (case-insensitive, $ stripped from account_name)
+        dequeued = await dispatcher.get_next_vulnerability()
+
+        assert dequeued is not None
+        assert dequeued["details"]["has_credentials"] is True
+        assert dequeued["details"]["username"] == "WEB01"
+
+    @pytest.mark.asyncio
+    async def test_non_delegation_vuln_not_affected(self):
+        """Non-delegation vulnerabilities should not be modified."""
+        from ares.core.models import Credential, SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-reeval-5")
+
+        # Queue ADCS vulnerability (not delegation)
+        await dispatcher.queue_vulnerability(
+            vuln_type="adcs_esc1",
+            target="dc01.contoso.local",
+            details={
+                "template_name": "User",
+                "ca_name": "contoso-DC01-CA",
+            },
+            discovered_by="recon",
+        )
+
+        # Add some credential
+        dispatcher._shared_state.add_credential(
+            Credential(
+                username="testuser",
+                password="TestPass123!",  # pragma: allowlist secret
+                domain="contoso.local",
+                source="discovery",
+            ),
+            "recon",
+        )
+
+        # Dequeue - should not have has_credentials added
+        dequeued = await dispatcher.get_next_vulnerability()
+
+        assert dequeued is not None
+        assert "has_credentials" not in dequeued["details"]

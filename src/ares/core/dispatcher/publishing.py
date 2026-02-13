@@ -742,6 +742,13 @@ class PublishingMixin:
             if vuln_id in self.shared_state.exploited_vulnerabilities:
                 continue
 
+            # Check if already dequeued (in-progress exploitation via workflow)
+            if vuln_id in self._dequeued_vuln_ids:
+                logger.debug(
+                    f"Skipping auto-exploit for {vuln_id} - already dequeued for exploitation"
+                )
+                continue
+
             # We have credentials for a delegation vulnerability - exploit it!
             target_spn = vuln.details.get("target_spn", "")
             domain = vuln.details.get("domain", credential.domain)
