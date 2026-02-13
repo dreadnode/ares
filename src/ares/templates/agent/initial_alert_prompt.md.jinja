@@ -89,8 +89,8 @@ You MUST run this query FIRST before doing anything else:
 {% set effective_alert_name = labels.rulename if (alert_name == 'DatasourceNoData' and labels.rulename) else alert_name %}
 {% set search_term = effective_alert_name.split(':')[-1].strip().split()[0] if ':' in effective_alert_name else effective_alert_name.split()[0] %}
 ```
-mcp__grafana__query_loki_logs(
-    datasourceUid="<get from mcp__grafana__list_datasources>",
+query_loki_logs(
+    datasourceUid="<get from list_datasources>",
     logql="{deployment=~\".+\"} |= \"{{ search_term }}\"",
     startRfc3339="{{ current_time_minus_2h }}",
     endRfc3339="{{ current_time }}",
@@ -149,7 +149,7 @@ Loki returns JSON like this:
 ## Investigation Checklist
 
 ### Stage 1: TRIAGE
-1. ☐ Run mcp__grafana__list_datasources to find Loki datasource UID
+1. ☐ Run list_datasources to find Loki datasource UID
 2. ☐ Query RECENT logs ({{ current_time_minus_2h }} to {{ current_time }})
 3. ☐ Record evidence with record_evidence() for each finding
 {% if mitre_technique %}

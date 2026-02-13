@@ -353,6 +353,8 @@ class InvestigationOrchestrator:
                     )
 
                     logger.success(f"Agent completed: {result.steps} steps, {result.stop_reason}")
+                    if result.error:
+                        logger.error(f"Agent error detail: {result.error!r}")
 
                     status = "completed"
                     if state.escalated:

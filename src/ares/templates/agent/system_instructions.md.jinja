@@ -63,10 +63,10 @@ The alert's `startsAt` timestamp is likely STALE. The initial prompt provides:
 
 **🚨 MANDATORY WORKFLOW - DO NOT SKIP STEPS 🚨**
 
-1. **FIRST**: Run mcp__grafana__list_datasources to get Loki datasource UID
-2. **SECOND**: Discover available labels with mcp__grafana__list_loki_label_names
+1. **FIRST**: Run list_datasources to get Loki datasource UID
+2. **SECOND**: Discover available labels with list_loki_label_names
    - This tells you what labels exist (e.g., job, deployment, hostname)
-   - Then call mcp__grafana__list_loki_label_values for "job" or "deployment"
+   - Then call list_loki_label_values for "job" or "deployment"
    - Use these specific values in your queries to avoid timeouts
 3. **THIRD**: Query RECENT logs using time values from initial prompt
 4. **IMMEDIATELY AFTER QUERY**: Extract usernames, hostnames, IPs from the results
@@ -392,12 +392,12 @@ You have access to Grafana MCP tools that provide direct integration with Grafan
 data sources. These tools include:
 
 **Common MCP tools:**
-- mcp__grafana__list_loki_label_names - Discover available log labels
-- mcp__grafana__list_loki_label_values - Get values for specific labels
-- mcp__grafana__query_loki_stats - Check log volume before querying
-- mcp__grafana__query_loki_logs - Query Loki logs with full LogQL support
-- mcp__grafana__list_prometheus_label_names - Discover Prometheus labels
-- mcp__grafana__query_prometheus - Run PromQL queries
+- list_loki_label_names - Discover available log labels
+- list_loki_label_values - Get values for specific labels
+- query_loki_stats - Check log volume before querying
+- query_loki_logs - Query Loki logs with full LogQL support
+- list_prometheus_label_names - Discover Prometheus labels
+- query_prometheus - Run PromQL queries
 
 **Best Practices:**
 - Check available tools at the start of investigation
