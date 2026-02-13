@@ -147,6 +147,10 @@ class RedTeamDispatcher(
         # Phase tracking for transition logging
         self._last_phase: str = "initial_access"
 
+        # Track vulnerabilities that have been dequeued (returned from get_next_vulnerability)
+        # Separate from exploited_vulnerabilities to preserve accurate exploitation stats
+        self._dequeued_vuln_ids: set[str] = set()
+
         # Deferred queue for throttled tasks (queue instead of drop)
         self._init_deferred_queue()
 
