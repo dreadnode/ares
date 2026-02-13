@@ -611,8 +611,10 @@ class ResultProcessingMixin:
             elif not any(h.ip == host.ip for h in self.shared_state.all_hosts):
                 self.shared_state.all_hosts.append(host)
 
-        for username in self._extract_users_from_output(output):
-            self._add_user(username, domain, source_agent)
+        for username, extracted_domain in self._extract_users_from_output(output):
+            # Use extracted domain if available, otherwise fall back to target domain
+            user_domain = extracted_domain or domain
+            self._add_user(username, user_domain, source_agent)
 
         creds = self._extract_plaintext_passwords_from_output(output)
         if "password :" in output.lower() and not creds and domain:
@@ -815,42 +817,74 @@ class ResultProcessingMixin:
             )
         return hosts
 
-    def _extract_users_from_output(self: RedTeamDispatcher, output: str) -> list[str]:
-        """Extract usernames from various tool output formats."""
+    def _extract_users_from_output(self: RedTeamDispatcher, output: str) -> list[tuple[str, str]]:
+        """Extract (username, domain) tuples from various tool output formats.
+
+        Parses DOMAIN\\user and user@domain patterns to extract the domain.
+        Returns empty domain string when domain cannot be determined.
+        """
         if not output:
             return []
-        users: list[str] = []
-        seen: set[str] = set()
+        users: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def _add_user(username: str, domain: str = "") -> None:
+            """Add user tuple if not already seen."""
+            user = username.strip()
+            dom = domain.strip().lower() if domain else ""
+            if not user:
+                return
+            key = (user.lower(), dom)
+            if key not in seen:
+                users.append((user, dom))
+                seen.add(key)
+
         for line in output.splitlines():
             stripped = line.strip()
             if not stripped:
                 continue
+
+            # rpcclient user:[username] format
             for match in re.findall(r"user:\[([^\]]+)\]", stripped, re.IGNORECASE):
                 user = match.strip()
-                if user and user not in seen:
-                    users.append(user)
-                    seen.add(user)
+                if user:
+                    _add_user(user, "")
+
+            # Account: username format
             account_match = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)
             if account_match:
-                user = account_match.group(1).strip()
-                if user and user not in seen:
-                    users.append(user)
-                    seen.add(user)
+                _add_user(account_match.group(1), "")
+
+            # samaccountname: username format
             sam_match = re.search(r"samaccountname:\s*([A-Za-z0-9_.-]+)", stripped, re.IGNORECASE)
             if sam_match:
-                user = sam_match.group(1).strip()
-                if user and user not in seen:
-                    users.append(user)
-                    seen.add(user)
+                _add_user(sam_match.group(1), "")
+
+            # DOMAIN\user pattern (e.g., netexec --users, various AD tools)
+            # Line: SMB 192.168.58.7 445 DC01 north.sevenkingdoms.local\samwell.tarly ...
+            domain_user_match = re.search(r"([A-Za-z0-9_.-]+)\\([A-Za-z0-9_.$-]+)", stripped)
+            if domain_user_match:
+                domain = domain_user_match.group(1).strip()
+                user = domain_user_match.group(2).strip()
+                _add_user(user, domain)
+
+            # user@domain UPN pattern (e.g., login logs, email-style identifiers)
+            # Line: User: jon.snow@north.sevenkingdoms.local logged in
+            upn_match = re.search(r"([A-Za-z0-9_.-]+)@([A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)", stripped)
+            if upn_match:
+                user = upn_match.group(1).strip()
+                domain = upn_match.group(2).strip()
+                _add_user(user, domain)
+
+            # SMB output with username and date (netexec --users)
+            # Line: SMB 192.168.58.7 445 APP-SRV01 danj 2026-01-13 21:03:31 ...
             smb_match = re.search(
                 r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.-]+)\s+\d{4}-\d{2}-\d{2}",
                 stripped,
             )
             if smb_match:
-                user = smb_match.group(1).strip()
-                if user and user not in seen:
-                    users.append(user)
-                    seen.add(user)
+                _add_user(smb_match.group(1), "")
+
         return users
 
     def _extract_plaintext_passwords_from_output(  # noqa: PLR0912

@@ -200,5 +200,168 @@ class TestResultProcessingBroadcast:
         assert summarized["success"] is True
 
 
+class TestExtractUsersFromOutput:
+    """Tests for _extract_users_from_output domain parsing."""
+
+    def test_extracts_domain_from_backslash_format(self):
+        """DOMAIN\\user format should extract both username and domain."""
+        from unittest.mock import MagicMock
+
+        from ares.core.dispatcher import RedTeamDispatcher
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher._extract_users_from_output = (
+            RedTeamDispatcher._extract_users_from_output.__get__(dispatcher)
+        )
+
+        output = (
+            "SMB 192.168.58.7 445 DC01 north.sevenkingdoms.local\\samwell.tarly "
+            "2026-01-13 10:00:00 0 Samwell Tarly"
+        )
+
+        users = dispatcher._extract_users_from_output(output)
+
+        # Should extract (username, domain) tuple with correct domain
+        assert ("samwell.tarly", "north.sevenkingdoms.local") in users
+
+    def test_extracts_domain_from_upn_format(self):
+        """user@domain format should extract both username and domain."""
+        from unittest.mock import MagicMock
+
+        from ares.core.dispatcher import RedTeamDispatcher
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher._extract_users_from_output = (
+            RedTeamDispatcher._extract_users_from_output.__get__(dispatcher)
+        )
+
+        output = "User: jon.snow@north.sevenkingdoms.local logged in successfully"
+
+        users = dispatcher._extract_users_from_output(output)
+
+        assert ("jon.snow", "north.sevenkingdoms.local") in users
+
+    def test_rpcclient_format_has_empty_domain(self):
+        """rpcclient user:[name] format should have empty domain."""
+        from unittest.mock import MagicMock
+
+        from ares.core.dispatcher import RedTeamDispatcher
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher._extract_users_from_output = (
+            RedTeamDispatcher._extract_users_from_output.__get__(dispatcher)
+        )
+
+        output = "user:[administrator] rid:[0x1f4]\nuser:[guest] rid:[0x1f5]"
+
+        users = dispatcher._extract_users_from_output(output)
+
+        # Should have empty domain (caller should fall back to target domain)
+        assert ("administrator", "") in users
+        assert ("guest", "") in users
+
+    def test_mixed_domains_extracted_correctly(self):
+        """Output with users from multiple domains should extract all correctly."""
+        from unittest.mock import MagicMock
+
+        from ares.core.dispatcher import RedTeamDispatcher
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher._extract_users_from_output = (
+            RedTeamDispatcher._extract_users_from_output.__get__(dispatcher)
+        )
+
+        # Simulates netexec output with users from different domains
+        output = (
+            "SMB 192.168.58.7 445 DC01 contoso.local\\admin 2026-01-13 10:00:00\n"
+            "SMB 192.168.58.7 445 DC01 fabrikam.local\\svc_sql 2026-01-13 10:00:00\n"
+            "SMB 192.168.58.7 445 DC01 localuser 2026-01-13 10:00:00\n"
+        )
+
+        users = dispatcher._extract_users_from_output(output)
+
+        # Each user should have their correct domain
+        assert ("admin", "contoso.local") in users
+        assert ("svc_sql", "fabrikam.local") in users
+        # localuser has no domain prefix, should have empty domain
+        assert ("localuser", "") in users
+
+
+class TestProcessOutputTextCrossDomain:
+    """Tests for _process_output_text handling cross-domain users correctly.
+
+    Tests that extracted domains from DOMAIN\\user or user@domain patterns
+    are used correctly, not overwritten with the target domain.
+    """
+
+    def test_cross_domain_user_extraction_preserves_domain(self):
+        """Extracted domain should be preserved, not replaced with target domain.
+
+        This tests the fix for the bug where users from other domains
+        (e.g., north.sevenkingdoms.local\\samwell.tarly) were incorrectly
+        added with the target domain (e.g., essos.local).
+        """
+        from unittest.mock import MagicMock
+
+        from ares.core.dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState, Target
+
+        # Set up dispatcher with target domain contoso.local
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = SharedRedTeamState(operation_id="op-test")
+        dispatcher.shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        dispatcher.shared_state.all_users = []
+
+        # Bind the real methods
+        dispatcher._extract_users_from_output = (
+            RedTeamDispatcher._extract_users_from_output.__get__(dispatcher)
+        )
+        dispatcher._add_user = RedTeamDispatcher._add_user.__get__(dispatcher)
+
+        # Output contains users from fabrikam.local (different from target)
+        output = "SMB 192.168.58.7 445 DC01 fabrikam.local\\svc_backup 2026-01-13 10:00:00"
+
+        # Extract users and add them (simulating _process_output_text behavior)
+        target_domain = dispatcher.shared_state.target.domain
+        for username, extracted_domain in dispatcher._extract_users_from_output(output):
+            user_domain = extracted_domain or target_domain
+            dispatcher._add_user(username, user_domain, "test")
+
+        # User should be added with fabrikam.local, NOT contoso.local
+        users = {(u.username, u.domain) for u in dispatcher.shared_state.all_users}
+        assert ("svc_backup", "fabrikam.local") in users
+        # Should NOT have been added with target domain
+        assert ("svc_backup", "contoso.local") not in users
+
+    def test_user_without_domain_falls_back_to_target(self):
+        """Users without extracted domain should use target domain."""
+        from unittest.mock import MagicMock
+
+        from ares.core.dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState, Target
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = SharedRedTeamState(operation_id="op-test")
+        dispatcher.shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        dispatcher.shared_state.all_users = []
+
+        dispatcher._extract_users_from_output = (
+            RedTeamDispatcher._extract_users_from_output.__get__(dispatcher)
+        )
+        dispatcher._add_user = RedTeamDispatcher._add_user.__get__(dispatcher)
+
+        # rpcclient output has no domain info
+        output = "user:[administrator] rid:[0x1f4]"
+
+        target_domain = dispatcher.shared_state.target.domain
+        for username, extracted_domain in dispatcher._extract_users_from_output(output):
+            user_domain = extracted_domain or target_domain
+            dispatcher._add_user(username, user_domain, "test")
+
+        # User should be added with target domain since none was extracted
+        users = {(u.username, u.domain) for u in dispatcher.shared_state.all_users}
+        assert ("administrator", "contoso.local") in users
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
