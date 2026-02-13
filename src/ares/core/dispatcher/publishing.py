@@ -115,6 +115,9 @@ class PublishingMixin:
                             )
                     except Exception as e:
                         logger.warning(f"Failed to dispatch immediate delegation check: {e}")
+
+                    # Check for pending constrained delegation vulnerabilities we can now exploit
+                    await self._exploit_delegation_with_credential(credential, source_agent)
         else:
             logger.debug(
                 f"Credential not published (duplicate/invalid): {credential.domain}\\{credential.username}"
@@ -647,6 +650,61 @@ class PublishingMixin:
             logger.info(f"Vulnerability published: {vuln.vuln_type} on {vuln.target}")
 
         return added
+
+    async def _exploit_delegation_with_credential(
+        self: RedTeamDispatcher,
+        credential: Credential,
+        source_agent: str,
+    ) -> None:
+        """Check for pending delegation vulnerabilities matching this credential and exploit.
+
+        When a credential is cracked, check if we have a pending constrained/unconstrained
+        delegation vulnerability for this account and dispatch the actual exploit.
+        """
+        cred_user = credential.username.lower().rstrip("$")
+
+        for vuln_id, vuln in list(self.shared_state.discovered_vulnerabilities.items()):
+            if vuln.vuln_type not in ("constrained_delegation", "unconstrained_delegation"):
+                continue
+
+            # Check if this vulnerability is for the same account
+            vuln_account = vuln.details.get("account_name", vuln.target).lower().rstrip("$")
+            if vuln_account != cred_user:
+                continue
+
+            # Check if already exploited
+            if vuln.status == "exploited":
+                continue
+
+            # We have credentials for a delegation vulnerability - exploit it!
+            target_spn = vuln.details.get("target_spn", "")
+            domain = vuln.details.get("domain", credential.domain)
+            dc_ip = vuln.details.get("dc_ip", "")
+
+            if vuln.vuln_type == "constrained_delegation" and target_spn:
+                logger.warning(
+                    f"🚀 Auto-exploiting constrained delegation: {credential.username} -> {target_spn}"
+                )
+                try:
+                    await self.request_exploit(
+                        vuln_type="constrained_delegation",
+                        vuln_id=vuln_id,
+                        target=credential.username,
+                        source_agent="auto_delegation",
+                        details={
+                            "account": credential.username,
+                            "account_name": credential.username,
+                            "password": credential.password,
+                            "domain": domain,
+                            "target_spn": target_spn,
+                            "dc_ip": dc_ip,
+                            "impersonate": "Administrator",
+                            "action": "s4u_attack",
+                        },
+                        priority=1,  # Highest priority
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to auto-exploit constrained delegation: {e}")
 
 
 # Import asyncio at module level for wait_for_credential_access_signal

@@ -54,7 +54,7 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
     "dig": ["resolve_domain_controllers"],
     "nslookup": ["resolve_domain_controllers"],
     "whois": [],  # Not directly mapped to a tool method
-    "adidnsdump": [],  # Not directly mapped to a tool method
+    "adidnsdump": ["adidnsdump"],
     # ===================
     # BloodHound
     # ===================
@@ -131,7 +131,7 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
     "mitm6": ["start_mitm6"],
     "coercer": ["coercer"],
     "petitpotam": ["petitpotam", "petitpotam_unauth"],
-    "dfscoerce": [],  # dfscoerce method not found in codebase
+    "dfscoerce": ["dfscoerce"],
     "printerbug": ["unconstrained_coerce_and_capture"],
     "krbrelayx": [],  # Used for relay attacks but no direct method mapping
     "addspn": [],  # Not directly mapped
@@ -140,20 +140,20 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
     # Kerberos Attack Tools
     # ===================
     "nopac": ["nopac"],
-    "krbrelayup": [],  # Not directly mapped in codebase
+    "krbrelayup": ["krbrelayup"],
     # ===================
     # Lateral Movement
     # ===================
     "evil-winrm": ["evil_winrm"],
-    "xfreerdp": [],  # RDP pass-the-hash - not directly mapped
-    "sshpass": [],  # SSH with password - not directly mapped
+    "xfreerdp": ["xfreerdp"],
+    "sshpass": ["ssh_with_password"],
     "proxychains4": [],  # Infrastructure tool, not a method
     # Pass-the-Hash toolkit (apt: passing-the-hash)
-    "pth-winexe": [],  # PTH remote execution - not directly mapped
-    "pth-smbclient": [],  # PTH SMB client - not directly mapped
-    "pth-rpcclient": [],  # PTH RPC client - not directly mapped
+    "pth-winexe": ["pth_winexe"],
+    "pth-smbclient": ["pth_smbclient"],
+    "pth-rpcclient": ["pth_rpcclient"],
     "pth-net": [],  # PTH net commands - not directly mapped
-    "pth-wmic": [],  # PTH WMI client - not directly mapped
+    "pth-wmic": ["pth_wmic"],
     # ===================
     # SMB Tools
     # ===================

