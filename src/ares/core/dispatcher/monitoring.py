@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from loguru import logger
 
@@ -32,6 +32,12 @@ class MonitoringMixin:
     # Rate-limit noisy warnings (class-level to persist across calls)
     _last_hard_cap_warning: float = 0.0
     _hard_cap_warning_interval: float = 30.0  # Only log every 30 seconds
+    _last_pickup_warning: float = 0.0
+    _pickup_warning_interval: float = 60.0  # Only log pickup warnings every 60 seconds
+    # Track tasks we've already warned about - shared across all instances
+    # Using a simple class variable here since MonitoringMixin is only used as a mixin
+    # and tracking is ephemeral (reset on process restart which is fine)
+    _warned_tasks: ClassVar[set[str]] = set()
 
     async def heartbeat(
         self: RedTeamDispatcher,
@@ -261,6 +267,11 @@ class MonitoringMixin:
                     f"using aggressive stale timeout ({effective_timeout}s)"
                 )
 
+        # Early warning for tasks not picked up within 60s
+        # This helps identify worker availability issues before they become stale
+        pickup_warning_threshold = 60  # seconds
+        slow_pickup_tasks: list[tuple[str, str, str, float]] = []  # (task_id, type, agent, age)
+
         for task_id, task_info in list(self._shared_state.pending_tasks.items()):
             # Only clean up tasks still in PENDING or IN_PROGRESS
             if task_info.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
@@ -273,6 +284,16 @@ class MonitoringMixin:
 
             if age_seconds > effective_timeout:
                 stale_task_ids.append(task_id)
+            elif self._should_warn_slow_pickup(
+                task_id, task_info, age_seconds, pickup_warning_threshold
+            ):
+                slow_pickup_tasks.append(
+                    (task_id, task_info.task_type, task_info.assigned_agent, age_seconds)
+                )
+                MonitoringMixin._warned_tasks.add(task_id)
+
+        # Log early warning for slow task pickups
+        self._log_slow_pickup_warning(slow_pickup_tasks)
 
         if stale_task_ids:
             for task_id in stale_task_ids:
@@ -280,6 +301,7 @@ class MonitoringMixin:
                 if stale_task is not None:
                     del self._shared_state.pending_tasks[task_id]
                 self._redis_task_ids.discard(task_id)
+                MonitoringMixin._warned_tasks.discard(task_id)  # Clean up warning tracking
 
                 if stale_task is not None:
                     activity_time = (
@@ -295,6 +317,46 @@ class MonitoringMixin:
                 f"Stale task cleanup: removed {len(stale_task_ids)} tasks "
                 f"(threshold: {effective_timeout}s, at_hard_cap: {is_at_hard_cap})"
             )
+
+    def _should_warn_slow_pickup(
+        self: RedTeamDispatcher,
+        task_id: str,
+        task_info: TaskInfo,
+        age_seconds: float,
+        threshold: float,
+    ) -> bool:
+        """Check if we should warn about a slow task pickup."""
+        return (
+            age_seconds > threshold
+            and task_info.status == TaskStatus.PENDING
+            and task_id not in MonitoringMixin._warned_tasks
+        )
+
+    def _log_slow_pickup_warning(
+        self: RedTeamDispatcher,
+        slow_pickup_tasks: list[tuple[str, str, str, float]],
+    ) -> None:
+        """Log warning for tasks not picked up by workers within expected time."""
+        if not slow_pickup_tasks:
+            return
+
+        current_time = time.monotonic()
+        if (
+            current_time - MonitoringMixin._last_pickup_warning
+            < MonitoringMixin._pickup_warning_interval
+        ):
+            return
+
+        MonitoringMixin._last_pickup_warning = current_time
+        task_summary = ", ".join(
+            f"{t[0][:12]}({t[1]}->{t[2]}, {t[3]:.0f}s)" for t in slow_pickup_tasks[:5]
+        )
+        affected_agents = {t[2] for t in slow_pickup_tasks}
+        logger.warning(
+            f"⚠️ {len(slow_pickup_tasks)} task(s) pending >60s without worker pickup: "
+            f"{task_summary}{'...' if len(slow_pickup_tasks) > 5 else ''} - "
+            f"check worker availability for {affected_agents}"
+        )
 
     async def _reconcile_tasks_with_workers(self: RedTeamDispatcher) -> None:
         """

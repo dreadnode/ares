@@ -738,8 +738,8 @@ class PublishingMixin:
             if vuln_account != cred_user:
                 continue
 
-            # Check if already exploited
-            if vuln.status == "exploited":
+            # Check if already exploited (vuln_id tracked in exploited_vulnerabilities set)
+            if vuln_id in self.shared_state.exploited_vulnerabilities:
                 continue
 
             # We have credentials for a delegation vulnerability - exploit it!
@@ -749,7 +749,8 @@ class PublishingMixin:
 
             if vuln.vuln_type == "constrained_delegation" and target_spn:
                 logger.warning(
-                    f"🚀 Auto-exploiting constrained delegation: {credential.username} -> {target_spn}"
+                    f"🚀 Auto-exploiting constrained delegation: {credential.username} -> {target_spn} "
+                    f"(vuln_id: {vuln_id})"
                 )
                 try:
                     await self.request_exploit(
@@ -757,7 +758,7 @@ class PublishingMixin:
                         vuln_id=vuln_id,
                         target=credential.username,
                         source_agent="auto_delegation",
-                        details={
+                        params={
                             "account": credential.username,
                             "account_name": credential.username,
                             "password": credential.password,
@@ -767,7 +768,6 @@ class PublishingMixin:
                             "impersonate": "Administrator",
                             "action": "s4u_attack",
                         },
-                        priority=1,  # Highest priority
                     )
                 except Exception as e:
                     logger.error(f"Failed to auto-exploit constrained delegation: {e}")

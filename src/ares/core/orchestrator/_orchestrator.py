@@ -2282,10 +2282,8 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
                     continue
 
                 # Dispatch delegation enumeration to PRIVESC agent (has DelegationTools)
-                logger.info(
-                    f"Auto-delegation: Running find_delegation for {cred.domain}\\{cred.username}"
-                )
-
+                # Note: request_privesc_enumeration() has its own deduplication check against
+                # pending_tasks, so it may return "" if a task already exists for this credential.
                 task_id = await dispatcher.request_privesc_enumeration(
                     source_agent="orchestrator",
                     domain=domain,
@@ -2298,7 +2296,14 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
                     # Track as dispatched - will be marked processed only on success
                     dispatched_tasks[task_id] = cred_key
                     logger.info(
-                        f"Auto-delegation task {task_id} dispatched for {cred.domain}\\{cred.username}"
+                        f"Auto-delegation: dispatched find_delegation task {task_id} "
+                        f"for {cred.domain}\\{cred.username}"
+                    )
+                else:
+                    # Task was deferred or deduplicated - don't spam logs
+                    logger.debug(
+                        f"Auto-delegation: find_delegation for {cred.domain}\\{cred.username} "
+                        "was deferred or already pending"
                     )
 
         except asyncio.CancelledError:

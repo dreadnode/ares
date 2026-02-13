@@ -148,6 +148,15 @@ class ResultProcessingMixin:
             if chained > 0:
                 logger.info(f"🎫 Auto-S4U-chain: dispatched {chained} lateral movement task(s)")
 
+        # Mark vulnerability as exploited when exploit task completes
+        if task_info.task_type == "exploit":
+            vuln_id = task_params.get("vuln_id", "")
+            if vuln_id:
+                result_dict = result if isinstance(result, dict) else {"output": str(result)}
+                await self.mark_vulnerability_exploited(vuln_id, success, result_dict)
+                if success:
+                    logger.info(f"✅ Marked vulnerability {vuln_id} as exploited")
+
         # Broadcast completion with summarized result to save orchestrator context
         # Full structured discoveries are already extracted above into shared state
         if success:
@@ -350,19 +359,20 @@ class ResultProcessingMixin:
                 else:
                     details["has_credentials"] = False
 
-            # Queue the vulnerability
-            await self.queue_vulnerability(
+            # Queue the vulnerability and get its ID
+            vuln_id = await self.queue_vulnerability(
                 vuln_type=vuln_type,
                 target=target,
                 details=details,
                 discovered_by=source_agent,
             )
-            queued += 1
+            if vuln_id:
+                queued += 1
 
             # For delegation vulnerabilities with credentials, auto-dispatch exploit
-            if vuln_type in ("constrained_delegation", "unconstrained_delegation"):
+            if vuln_type in ("constrained_delegation", "unconstrained_delegation") and vuln_id:
                 await self._auto_dispatch_delegation_exploit(
-                    vuln_type, target, details, source_agent
+                    vuln_type, target, details, source_agent, vuln_id
                 )
 
         if queued > 0:
@@ -376,8 +386,17 @@ class ResultProcessingMixin:
         target: str,
         details: dict[str, Any],
         source_agent: str,
+        vuln_id: str = "",
     ) -> None:
-        """Auto-dispatch exploitation for delegation vulnerabilities with credentials."""
+        """Auto-dispatch exploitation for delegation vulnerabilities with credentials.
+
+        Args:
+            vuln_type: Type of delegation vulnerability
+            target: Target account for delegation
+            details: Vulnerability details including credentials
+            source_agent: Agent that discovered the vulnerability
+            vuln_id: Vulnerability ID from queue_vulnerability (for tracking exploitation)
+        """
         if not details.get("has_credentials"):
             return
 
@@ -400,13 +419,16 @@ class ResultProcessingMixin:
         if not account_cred:
             return
 
+        # Use provided vuln_id or generate fallback
+        exploit_vuln_id = vuln_id or f"cd_{account.lower()}"
+
         logger.warning(
             f"🚀 Auto-dispatching S4U attack for {account} -> {target_spn} "
-            f"(have credentials, DC: {dc_ip})"
+            f"(have credentials, DC: {dc_ip}, vuln_id: {exploit_vuln_id})"
         )
         await self.request_exploit(
             vuln_type="constrained_delegation",
-            vuln_id=f"cd_{account.lower()}",
+            vuln_id=exploit_vuln_id,
             target=account,
             source_agent="auto_delegation",
             params={

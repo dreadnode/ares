@@ -39,10 +39,31 @@ class ThrottlingMixin:
 
     # Task types that bypass hard cap throttling (critical path to DA)
     # These still use LLM and count against limits, but won't be deferred at hard cap
-    # - exploit: S4U, ESC1-8, MSSQL impersonation - direct DA path
+    # NOTE: "exploit" alone is too broad - MSSQL impersonation is lower value than delegation.
+    # Use CRITICAL_PATH_VULN_TYPES for fine-grained control of which exploit subtypes bypass.
     # NOTE: privesc_enumeration removed - it discovers vulns but doesn't exploit them.
     # Letting enumeration bypass hard cap starves lateral movement and credential access.
     CRITICAL_PATH_TASK_TYPES = frozenset({"exploit"})
+
+    # High-value exploit subtypes that should bypass hard cap (checked via vuln_type in payload)
+    # - constrained_delegation: S4U attack → impersonate Administrator → secretsdump → DA
+    # - unconstrained_delegation: TGT capture → DCSync → DA
+    # - esc1, esc4, esc8: ADCS attacks → domain user cert → DA
+    # - krbtgt_hash: already have DA material
+    # NOT included: mssql_impersonation, mssql_linked_server (lower value, takes long to exploit)
+    CRITICAL_PATH_VULN_TYPES = frozenset(
+        {
+            "constrained_delegation",
+            "unconstrained_delegation",
+            "esc1",
+            "esc4",
+            "esc8",
+            "krbtgt_hash",
+            "adcs_esc1",
+            "adcs_esc4",
+            "adcs_esc8",
+        }
+    )
 
     def _get_throttle_lock(self: RedTeamDispatcher) -> asyncio.Lock:
         """Get or create the throttle lock (lazy init for event loop safety)."""
@@ -100,10 +121,20 @@ class ThrottlingMixin:
         )
 
     async def _check_llm_throttle_drop(
-        self: RedTeamDispatcher, task_type: str, target_role: str, reason: str
+        self: RedTeamDispatcher,
+        task_type: str,
+        target_role: str,
+        reason: str,
+        payload: dict[str, Any] | None = None,
     ) -> bool:
         """
         Check if an LLM task should be dropped due to throttling.
+
+        Args:
+            task_type: Type of task (e.g., "exploit", "recon")
+            target_role: Target worker role
+            reason: Reason for throttle check (for logging)
+            payload: Optional task payload for fine-grained exploit type checking
 
         Returns True if the task should be dropped, False if it should proceed.
         """
@@ -121,21 +152,28 @@ class ThrottlingMixin:
         max_tasks = get_max_concurrent_tasks()
 
         # HARD CAP: If we're 1.5x over the limit, DEFER most tasks
-        # Exception: CRITICAL_PATH_TASK_TYPES (exploit, privesc_enumeration) bypass hard cap
-        # These are the tasks that actually achieve DA - can't starve them
+        # Exception: High-value exploit subtypes bypass hard cap (not all exploits)
         hard_cap = int(max_tasks * 1.5)
         if llm_count >= hard_cap:
-            # Critical path tasks bypass hard cap - they're the DA path
-            if task_type in self.CRITICAL_PATH_TASK_TYPES:
+            # Check if this is a critical path exploit (delegation, ADCS)
+            vuln_type = (payload.get("vuln_type") or "").lower() if payload else ""
+            is_critical_exploit = (
+                task_type in self.CRITICAL_PATH_TASK_TYPES
+                and vuln_type in self.CRITICAL_PATH_VULN_TYPES
+            )
+
+            if is_critical_exploit:
                 logger.info(
                     f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
-                    f"ALLOWING {task_type} (critical path to DA, bypasses hard cap)"
+                    f"ALLOWING {task_type}/{vuln_type} (high-value DA path, bypasses hard cap)"
                 )
                 return False
 
+            # Not a critical path task - defer it
+            task_desc = f"{task_type}/{vuln_type}" if vuln_type else task_type
             logger.warning(
                 f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
-                f"DEFERRING {task_type} task (1.5x over limit)"
+                f"DEFERRING {task_desc} (1.5x over limit)"
             )
             return True
 
@@ -452,7 +490,9 @@ class ThrottlingMixin:
             # Final check - smart throttling to balance worker utilization
             should_wait, _, reason = await self._should_throttle()
             if should_wait and "max concurrent tasks" in reason:
-                drop_task = await self._check_llm_throttle_drop(task_type, target_role, reason)
+                drop_task = await self._check_llm_throttle_drop(
+                    task_type, target_role, reason, payload=payload
+                )
                 if drop_task:
                     # Instead of dropping, queue for later dispatch
                     adjusted_priority = priority + self._get_phase_priority_adjustment(
