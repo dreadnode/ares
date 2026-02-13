@@ -5,10 +5,9 @@ description = "Autonomous SOC Investigation Agent"
 authors = [{ name = "Dreadnode", email = "hello@dreadnode.io" }]
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.11,<3.14"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -108,7 +107,7 @@ markers = [
 
 [tool.mypy]
 strict = true
-python_version = "3.10"
+python_version = "3.11"
 exclude = ["tests", ".hooks", "scripts"]
 
 [[tool.mypy.overrides]]
@@ -156,7 +155,7 @@ disable_error_code = [
 typeCheckingMode = "off" # we prefer mypy and don't want to deal with small differences
 
 [tool.ty.environment]
-python-version = "3.10"
+python-version = "3.11"
 
 [tool.ty.src]
 exclude = [".hooks", "tests"]

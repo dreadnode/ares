@@ -783,7 +783,7 @@ tasks:
           REDIS_HOST_ARG=(-h "$REDIS_HOST" -p 6379)
         fi
 
-        for pattern in "ares:operation:*:state" "ares:operation:*:checkpoint_time" "ares:operations:*:status" "ares:lock:*"; do
+        for pattern in "ares:operation:*:state" "ares:operation:*:checkpoint_time" "ares:operations:*:status" "ares:lock:*" "ares:tasks:*" "ares:results:*"; do
           keys=$(kubectl exec -n {{.K8S_NAMESPACE}} "$REDIS_CLIENT_POD" -- "${REDIS_ENV[@]}" redis-cli "${REDIS_HOST_ARG[@]}" --scan --pattern "$pattern")
           if [ -n "$keys" ]; then
             for key in $keys; do
