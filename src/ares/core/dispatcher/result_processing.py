@@ -294,6 +294,117 @@ class ResultProcessingMixin:
                             f"Trusted domain discovered: {domain_lower} from {target_label}"
                         )
 
+        # Process discovered vulnerabilities (delegation, ADCS, etc.)
+        discovered_vulns = result.get("discovered_vulnerabilities")
+        if isinstance(discovered_vulns, list) and discovered_vulns:
+            await self._process_discovered_vulnerabilities(discovered_vulns, source_agent)
+
+    async def _process_discovered_vulnerabilities(
+        self: RedTeamDispatcher,
+        vulnerabilities: list[dict[str, Any]],
+        source_agent: str,
+    ) -> None:
+        """Process vulnerabilities discovered by workers and queue for exploitation.
+
+        Args:
+            vulnerabilities: List of vulnerability dicts from worker serialization
+            source_agent: Agent that discovered the vulnerabilities
+        """
+        queued = 0
+        for vuln_data in vulnerabilities:
+            if not isinstance(vuln_data, dict):
+                continue
+
+            vuln_id = vuln_data.get("vuln_id", "")
+            vuln_type = vuln_data.get("vuln_type", "")
+            target = vuln_data.get("target", "")
+            details = vuln_data.get("details", {})
+
+            if not vuln_type or not target:
+                continue
+
+            # Check if already queued
+            if vuln_id in self.shared_state.discovered_vulnerabilities:
+                continue
+
+            # Also check for logical duplicates (same type + target)
+            already_exists = any(
+                v.vuln_type == vuln_type and v.target.lower() == target.lower()
+                for v in self.shared_state.discovered_vulnerabilities.values()
+            )
+            if already_exists:
+                continue
+
+            # Queue the vulnerability
+            await self.queue_vulnerability(
+                vuln_type=vuln_type,
+                target=target,
+                details=details,
+                discovered_by=source_agent,
+            )
+            queued += 1
+
+            # For delegation vulnerabilities with credentials, auto-dispatch exploit
+            if vuln_type in ("constrained_delegation", "unconstrained_delegation"):
+                await self._auto_dispatch_delegation_exploit(
+                    vuln_type, target, details, source_agent
+                )
+
+        if queued > 0:
+            logger.warning(
+                f"🎫 Processed {queued} vulnerability(ies) from {source_agent} for exploitation"
+            )
+
+    async def _auto_dispatch_delegation_exploit(
+        self: RedTeamDispatcher,
+        vuln_type: str,
+        target: str,
+        details: dict[str, Any],
+        source_agent: str,
+    ) -> None:
+        """Auto-dispatch exploitation for delegation vulnerabilities with credentials."""
+        if not details.get("has_credentials"):
+            return
+
+        account = details.get("account_name") or details.get("account", target)
+        domain = details.get("domain", "")
+        target_spn = details.get("target_spn", "")
+        dc_ip = details.get("dc_ip", "")
+
+        if vuln_type != "constrained_delegation" or not target_spn:
+            return  # Only auto-dispatch constrained delegation with known SPN
+
+        # Find credential for account
+        account_lower = account.lower().rstrip("$")
+        account_cred = None
+        for cred in self.shared_state.all_credentials:
+            if cred.username.lower() == account_lower and cred.password:
+                account_cred = cred
+                break
+
+        if not account_cred:
+            return
+
+        logger.warning(
+            f"🚀 Auto-dispatching S4U attack for {account} -> {target_spn} "
+            f"(have credentials, DC: {dc_ip})"
+        )
+        await self.request_exploit(
+            vuln_type="constrained_delegation",
+            vuln_id=f"cd_{account.lower()}",
+            target=account,
+            source_agent="auto_delegation",
+            params={
+                "account": account,
+                "account_name": account,
+                "target_spn": target_spn,
+                "domain": account_cred.domain or domain,
+                "username": account_cred.username,
+                "password": account_cred.password,
+                "dc_ip": dc_ip,
+            },
+        )
+
     async def _process_success_result_data(  # noqa: PLR0912
         self: RedTeamDispatcher,
         result: dict[str, Any],

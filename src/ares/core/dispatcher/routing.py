@@ -895,6 +895,14 @@ class RoutingMixin:
             logger.debug(f"Skipping recon request ({reason}) - DA already achieved")
             return ""
 
+        # Skip nmap if all targets have already been scanned
+        if reason == "network_scan" and techniques and "nmap_scan" in techniques:
+            scan_targets = set(target_ips or [])
+            already_scanned = scan_targets & self.shared_state.scanned_targets
+            if scan_targets and scan_targets == already_scanned:
+                logger.info(f"Skipping nmap - all {len(scan_targets)} targets already scanned")
+                return ""
+
         # Normalize domain to FQDN format
         domain = self._normalize_domain(domain)
 

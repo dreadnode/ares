@@ -180,6 +180,228 @@ class DelegationTools(Toolset):
         elif block not in self.state.weaknesses:
             self.state.weaknesses.append(block)
 
+    def _extract_delegation_users(self, output: str, domain: str) -> int:
+        """Extract user accounts from delegation output and add to state.
+
+        Parses impacket-findDelegation output format:
+            AccountName    AccountType    DelegationType                   DelegationRightsTo
+            -----------    -----------    ---------------                  ------------------
+            jon.snow       Person         Constrained w/ Protocol Trans.   cifs/winterfell
+            WINTERFELL$    Computer       Unconstrained                    N/A
+
+        Only adds Person accounts (not Computer accounts ending in $).
+
+        Args:
+            output: Raw output from impacket-findDelegation
+            domain: Domain where delegation was found
+
+        Returns:
+            Number of users added
+        """
+        if not self.state or not output:
+            return 0
+
+        added = 0
+        in_table = False
+
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            lower = stripped.lower()
+
+            # Detect table header
+            if "accountname" in lower and "delegationtype" in lower:
+                in_table = True
+                continue
+
+            # Skip separator lines (dashes)
+            if in_table and set(stripped) <= {"-", " "}:
+                continue
+
+            # Stop at non-table content
+            if in_table and stripped.startswith(("[", "Impacket")):
+                in_table = False
+                continue
+
+            if not in_table:
+                continue
+
+            # Parse table row
+            parts = stripped.split()
+            if len(parts) < 2:
+                continue
+
+            account = parts[0]
+            account_type = parts[1].lower() if len(parts) > 1 else ""
+
+            # Only add person accounts (not machine accounts)
+            if account.endswith("$") or account_type == "computer":
+                continue
+
+            # Add user to state
+            if hasattr(self.state, "add_user") and self.state.add_user(
+                account, domain, source="find_delegation"
+            ):
+                added += 1
+                logger.debug(f"Added delegation user: {domain}\\{account}")
+
+        if added > 0:
+            logger.info(f"[+] Added {added} user(s) from delegation discovery")
+
+        return added
+
+    def _parse_delegation_output(self, output: str) -> list[dict[str, str]]:
+        """Parse impacket-findDelegation output into structured delegation entries.
+
+        Args:
+            output: Raw output from impacket-findDelegation
+
+        Returns:
+            List of dicts with: account, account_type, delegation_type, target_spn
+        """
+        delegations: list[dict[str, str]] = []
+        if not output:
+            return delegations
+
+        in_table = False
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            lower = stripped.lower()
+
+            # Detect table header
+            if "accountname" in lower and "delegationtype" in lower:
+                in_table = True
+                continue
+
+            # Skip separator lines
+            if in_table and set(stripped) <= {"-", " "}:
+                continue
+
+            # Stop at non-table content
+            if in_table and stripped.startswith(("[", "Impacket")):
+                break
+
+            if not in_table:
+                continue
+
+            # Parse table row: AccountName AccountType DelegationType DelegationRightsTo
+            parts = stripped.split()
+            if len(parts) < 3:
+                continue
+
+            account = parts[0]
+            account_type = parts[1].lower()
+            # DelegationType may have spaces like "Constrained w/ Protocol Trans."
+            # DelegationRightsTo is the last column
+            delegation_type_raw = " ".join(parts[2:-1]) if len(parts) > 3 else parts[2]
+            target_spn = parts[-1] if len(parts) > 3 else "N/A"
+
+            # Normalize delegation type
+            if "unconstrained" in delegation_type_raw.lower():
+                delegation_type = "unconstrained"
+            elif "constrained" in delegation_type_raw.lower():
+                delegation_type = "constrained"
+            else:
+                delegation_type = delegation_type_raw.lower()
+
+            delegations.append(
+                {
+                    "account": account,
+                    "account_type": account_type,
+                    "delegation_type": delegation_type,
+                    "target_spn": target_spn,
+                }
+            )
+
+        return delegations
+
+    def _add_delegation_vulnerability(
+        self,
+        account: str,
+        delegation_type: str,
+        target_spn: str,
+        domain: str,
+        dc_ip: str,
+    ) -> bool:
+        """Add a delegation vulnerability to state for auto-exploitation.
+
+        Args:
+            account: Account with delegation (e.g., jon.snow or WINTERFELL$)
+            delegation_type: "constrained" or "unconstrained"
+            target_spn: Target SPN for constrained delegation (e.g., cifs/dc01)
+            domain: Domain name
+            dc_ip: Domain controller IP
+
+        Returns:
+            True if vulnerability was added, False if skipped/duplicate
+        """
+        if not isinstance(self.state, SharedRedTeamState):
+            logger.debug("State does not support add_vulnerability (not SharedRedTeamState)")
+            return False
+
+        account_clean = account.rstrip("$")
+        vuln_type = f"{delegation_type}_delegation"
+        vuln_key = f"{vuln_type}:{account_clean.lower()}"
+
+        # Check for duplicate
+        for v in self.state.discovered_vulnerabilities.values():
+            existing_key = f"{v.vuln_type}:{v.target.lower()}"
+            if existing_key == vuln_key:
+                logger.debug(f"Delegation vulnerability already exists: {vuln_key}")
+                return False
+
+        # Check if we have credentials for this account
+        has_creds = False
+        account_lower = account_clean.lower()
+        for cred in self.state.all_credentials:
+            cred_user = cred.username.lower().rstrip("$")
+            if cred_user == account_lower and cred.password:
+                has_creds = True
+                break
+        # Also check hashes
+        if not has_creds:
+            for h in self.state.all_hashes:
+                hash_user = h.username.lower().rstrip("$")
+                if hash_user == account_lower:
+                    has_creds = True
+                    break
+
+        details = {
+            "account": account,
+            "account_name": account_clean,
+            "delegation_type": delegation_type,
+            "target_spn": target_spn,
+            "domain": domain,
+            "dc_ip": dc_ip,
+            "has_credentials": has_creds,
+        }
+
+        # Priority based on config or defaults
+        priority = 8 if delegation_type == "constrained" else 7
+
+        vuln = VulnerabilityInfo(
+            vuln_id=f"{vuln_type}_{account_clean.lower()}_{uuid.uuid4().hex[:8]}",
+            vuln_type=vuln_type,
+            target=account_clean,
+            discovered_by="find_delegation",
+            details=details,
+            priority=priority,
+            recommended_agent="privesc",
+        )
+
+        self.state.discovered_vulnerabilities[vuln.vuln_id] = vuln
+        cred_status = "✓ has credentials" if has_creds else "✗ no credentials yet"
+        logger.warning(
+            f"🎫 Delegation vulnerability queued: {vuln_type} for {account} "
+            f"(target: {target_spn}, {cred_status})"
+        )
+        return True
+
     @dn.tool_method
     def find_delegation(
         self,
@@ -226,6 +448,24 @@ class DelegationTools(Toolset):
             stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
 
             result = stdout + "\n" + (stderr or "")
+
+            # Extract accounts from delegation output and add to users
+            self._extract_delegation_users(result, domain)
+
+            # Parse and queue delegation vulnerabilities for auto-exploitation
+            delegations = self._parse_delegation_output(result)
+            queued = 0
+            for deleg in delegations:
+                if self._add_delegation_vulnerability(
+                    account=deleg["account"],
+                    delegation_type=deleg["delegation_type"],
+                    target_spn=deleg["target_spn"],
+                    domain=domain,
+                    dc_ip=dc_ip,
+                ):
+                    queued += 1
+            if queued > 0:
+                logger.info(f"[+] Queued {queued} delegation vulnerability(ies) for exploitation")
 
             if "unconstrained" in result.lower():
                 logger.info("[!] Unconstrained delegation found!")

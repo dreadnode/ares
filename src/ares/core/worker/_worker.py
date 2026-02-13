@@ -330,6 +330,21 @@ class RedisWorkerAgent:
                 for u in self.shared_state.all_users
             ]
 
+        # Serialize discovered vulnerabilities (delegation, ADCS, etc.)
+        if self.shared_state.discovered_vulnerabilities:
+            discoveries["discovered_vulnerabilities"] = [
+                {
+                    "vuln_id": v.vuln_id,
+                    "vuln_type": v.vuln_type,
+                    "target": v.target,
+                    "discovered_by": v.discovered_by,
+                    "details": v.details,
+                    "priority": v.priority,
+                    "recommended_agent": v.recommended_agent,
+                }
+                for v in self.shared_state.discovered_vulnerabilities.values()
+            ]
+
         return discoveries
 
     async def _run_agent(self, prompt: str) -> Any:
