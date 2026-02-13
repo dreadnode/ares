@@ -1154,6 +1154,60 @@ class NetworkEnumerationTools(Toolset):
             return f"Save users to file failed: {e}"
 
     @dn.tool_method
+    def zerologon_check(
+        self,
+        dc_ip: str,
+    ) -> str:
+        """
+        Check for CVE-2020-1472 (Zerologon) vulnerability using netexec.
+
+        Zerologon allows unauthenticated attackers to completely compromise
+        Active Directory by exploiting a flaw in Netlogon protocol.
+
+        This is a SAFE check that does not exploit the vulnerability.
+
+        Args:
+            dc_ip: Domain controller IP address
+
+        Returns:
+            Vulnerability check result
+
+        Example:
+            >>> zerologon_check("192.168.58.10")
+        """
+        cmd = [
+            "netexec",
+            "smb",
+            dc_ip,
+            "-u",
+            "",
+            "-p",
+            "",
+            "-M",
+            "zerologon",
+        ]
+
+        try:
+            logger.info(f"[*] Checking Zerologon on {dc_ip}")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if "vuln" in result.lower() or "zerologon" in result.lower():
+                logger.warning("[!] Zerologon vulnerability detected!")
+                result = (
+                    "🚨 ZEROLOGON VULNERABILITY DETECTED!\n"
+                    "→ DC is vulnerable to CVE-2020-1472\n"
+                    "→ Can set DC password to empty (DANGEROUS)\n"
+                    "→ Recommend patching instead of exploitation\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"Zerologon check failed: {e}"
+
+    @dn.tool_method
     def adidnsdump(
         self,
         dc_ip: str,

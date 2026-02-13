@@ -42,6 +42,7 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
         "gpp_password_finder",
         "sysvol_script_search",
         "domain_admin_checker",  # netexec smb -x whoami
+        "zerologon_check",  # netexec smb -M zerologon
     ],
     "rpcclient": ["enumerate_users", "force_change_password"],
     "ldapsearch": [
@@ -179,7 +180,7 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
     # CVE Exploits
     # ===================
     "printnightmare": ["printnightmare"],
-    "zerologon": ["zerologon"],
+    "zerologon": [],  # Zerologon check now uses netexec -M zerologon
     "scmuacbypass": [],  # Not directly mapped
     # ===================
     # Windows Privesc Binaries (run via other methods, e.g., psexec upload+execute)
