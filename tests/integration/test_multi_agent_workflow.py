@@ -52,7 +52,7 @@ from ares.core.workflows import (  # noqa: E402
 
 @pytest.fixture
 def mock_redis():
-    """Create a mock Redis client."""
+    """Create a mock Redis client with ZSET support for vulnerability queue."""
     redis = AsyncMock()
     redis.ping = AsyncMock(return_value=True)
     redis.get = AsyncMock(return_value=None)
@@ -65,6 +65,39 @@ def mock_redis():
     redis.rpop = AsyncMock(return_value=None)
     redis.llen = AsyncMock(return_value=0)
     redis.aclose = AsyncMock()
+
+    # ZSET operations for vulnerability queue
+    zset_data: dict[str, list[tuple[str, float]]] = {}
+
+    async def mock_zadd(key, mapping):
+        if key not in zset_data:
+            zset_data[key] = []
+        for member, score in mapping.items():
+            # Remove existing entry with same member
+            zset_data[key] = [(m, s) for m, s in zset_data[key] if m != member]
+            zset_data[key].append((member, score))
+        return len(mapping)
+
+    async def mock_zrange(key, start, end, withscores=False):
+        if key not in zset_data:
+            return []
+        # Sort by score (priority)
+        sorted_items = sorted(zset_data[key], key=lambda x: x[1])
+        if withscores:
+            return sorted_items
+        return [item[0] for item in sorted_items]
+
+    async def mock_zrem(key, member):
+        if key not in zset_data:
+            return 0
+        original_len = len(zset_data[key])
+        zset_data[key] = [(m, s) for m, s in zset_data[key] if m != member]
+        return original_len - len(zset_data[key])
+
+    redis.zadd = mock_zadd
+    redis.zrange = mock_zrange
+    redis.zrem = mock_zrem
+
     return redis
 
 
