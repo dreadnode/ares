@@ -196,7 +196,7 @@ class TestPriorityVulnerabilityQueue:
         )
 
         assert vuln_id is not None
-        assert "ADCS_ESC1" in vuln_id
+        assert "adcs_esc1" in vuln_id  # vuln_type is normalized to lowercase
         assert vuln_id in dispatcher.shared_state.discovered_vulnerabilities
 
     @pytest.mark.asyncio
@@ -225,7 +225,7 @@ class TestPriorityVulnerabilityQueue:
         # Get vulnerabilities in priority order
         vuln1 = await dispatcher.get_next_vulnerability()
         assert vuln1 is not None
-        assert vuln1["type"] == "ADCS_ESC1"  # Priority 1
+        assert vuln1["type"] == "adcs_esc1"  # Priority 1 (normalized to lowercase)
 
         vuln2 = await dispatcher.get_next_vulnerability()
         assert vuln2 is not None
