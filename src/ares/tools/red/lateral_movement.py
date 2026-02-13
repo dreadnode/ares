@@ -1260,15 +1260,44 @@ WHERE a.permission_name = 'IMPERSONATE';
             result = stdout + "\n" + (stderr or "")
 
             # Check if we found impersonatable users
-            if "impersonatableuser" in result.lower() and (
+            has_sa = "impersonatableuser" in result.lower() and (
                 "sa" in result.lower() or "admin" in result.lower() or "dbo" in result.lower()
-            ):
+            )
+
+            if has_sa:
                 logger.warning("[!] High-value impersonation targets found!")
                 result = (
                     "🚨 IMPERSONATION TARGETS FOUND!\n"
                     "\u2192 Use mssql_impersonate to execute queries as these users\n"
                     "\u2192 Target 'sa' or admin accounts for sysadmin access\n\n" + result
                 )
+
+                # Auto-record vulnerability with can_impersonate_sa for priority boost
+                if isinstance(self.state, SharedRedTeamState):
+                    from ares.core.models import VulnerabilityInfo
+
+                    vuln_id = f"mssql_impersonation_{target}_sa"
+                    if vuln_id not in self.state.discovered_vulnerabilities:
+                        vuln = VulnerabilityInfo(
+                            vuln_id=vuln_id,
+                            vuln_type="mssql_impersonation",
+                            target=target,
+                            discovered_by="mssql_enum_impersonation",
+                            details={
+                                "hostname": target,
+                                "can_impersonate_sa": True,
+                                "username": username,
+                                "password": password,
+                                "domain": domain,
+                                "windows_auth": windows_auth,
+                            },
+                            priority=3,  # Boosted priority for confirmed sa
+                        )
+                        self.state.discovered_vulnerabilities[vuln_id] = vuln
+                        logger.warning(
+                            f"🚀 Auto-queued MSSQL sa impersonation vuln (priority 3) for {target}"
+                        )
+
             elif "impersonatableuser" in result.lower():
                 logger.info("[+] Impersonation rights enumerated")
                 result = (

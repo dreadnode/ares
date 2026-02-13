@@ -314,6 +314,72 @@ class PublishingMixin:
             f"found {len(sql_creds)} potential SQL creds"
         )
 
+        # Proactively dispatch MSSQL impersonation enumeration for each credential
+        # This discovers sa/sysadmin impersonation rights early, triggering priority boost
+        await self._dispatch_mssql_enum(host, sql_creds, source_agent)
+
+    async def _dispatch_mssql_enum(
+        self: RedTeamDispatcher,
+        host: Host,
+        sql_creds: list[dict[str, str]],
+        source_agent: str,
+    ) -> None:
+        """Proactively dispatch MSSQL impersonation enumeration for discovered MSSQL host."""
+        if not self._task_queue:
+            return
+
+        # Track which creds we've already dispatched enum for this host
+        enum_key = f"mssql_enum:{host.ip}"
+        if not hasattr(self, "_mssql_enum_dispatched"):
+            self._mssql_enum_dispatched: set[str] = set()
+
+        # Dispatch enumeration for up to 2 credentials (avoid flooding)
+        dispatched = 0
+        for cred in sql_creds[:2]:
+            cred_key = f"{enum_key}:{cred.get('domain', '')}\\{cred.get('username', '')}"
+            if cred_key in self._mssql_enum_dispatched:
+                continue
+
+            self._mssql_enum_dispatched.add(cred_key)
+
+            payload = {
+                "target": host.ip,
+                "hostname": host.hostname,
+                "username": cred.get("username", ""),
+                "password": cred.get("password", ""),
+                "domain": cred.get("domain", ""),
+                "action": "mssql_enum_impersonation",
+                "note": "Proactive MSSQL impersonation enumeration - check for sa/sysadmin access",
+            }
+
+            task_id = await self._throttled_submit_task(
+                task_type="lateral",  # Uses LateralMovementTools which has mssql_enum_impersonation
+                target_role="lateral",
+                payload=payload,
+                source_agent=source_agent,
+                priority=5,  # Medium-high priority
+            )
+
+            if task_id:
+                task_info = TaskInfo(
+                    task_id=task_id,
+                    task_type="mssql_enum",
+                    assigned_agent="lateral",
+                    params=payload,
+                )
+                self.shared_state.pending_tasks[task_id] = task_info
+                self._redis_task_ids.add(task_id)
+                dispatched += 1
+                logger.info(
+                    f"🔍 Dispatched proactive MSSQL enum for {host.ip} "
+                    f"with {cred.get('domain', '')}\\{cred.get('username', '')}"
+                )
+
+        if dispatched > 0:
+            logger.warning(
+                f"📊 Auto-dispatched {dispatched} MSSQL enumeration task(s) for {host.ip}"
+            )
+
     def _find_sql_credentials(self: RedTeamDispatcher) -> list[dict[str, str]]:
         """
         Find credentials that might work for MSSQL authentication.
