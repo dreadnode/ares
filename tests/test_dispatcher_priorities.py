@@ -21,9 +21,9 @@ class TestVulnerabilityPriorities:
         dispatcher = RedTeamDispatcher()
         priorities = dispatcher._vulnerability_priorities
 
-        assert priorities["ADCS_ESC1"] == 1
-        assert priorities["ADCS_ESC4"] == 2
-        assert priorities["ADCS_ESC8"] == 3
+        assert priorities["adcs_esc1"] == 1
+        assert priorities["adcs_esc4"] == 2
+        assert priorities["adcs_esc8"] == 3
 
     def test_delegation_base_priority(self):
         """Delegation attacks should have base priority 4-6.
@@ -156,7 +156,7 @@ class TestVulnerabilityPriorities:
         priorities = dispatcher._vulnerability_priorities
 
         # ADCS should be highest base priority
-        assert priorities["ADCS_ESC1"] < priorities["constrained_delegation"]
+        assert priorities["adcs_esc1"] < priorities["constrained_delegation"]
 
         # Delegation should be higher than krbtgt (because we get krbtgt via delegation)
         assert priorities["constrained_delegation"] < priorities["krbtgt_hash"]
@@ -174,9 +174,9 @@ class TestVulnerabilityPriorities:
 
         expected_types = [
             # Tier 1: ADCS
-            "ADCS_ESC1",
-            "ADCS_ESC4",
-            "ADCS_ESC8",
+            "adcs_esc1",
+            "adcs_esc4",
+            "adcs_esc8",
             # Tier 2: Delegation
             "constrained_delegation",
             "unconstrained_delegation",
