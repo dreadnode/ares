@@ -335,6 +335,21 @@ class ResultProcessingMixin:
             if already_exists:
                 continue
 
+            # For delegation vulnerabilities, check if we have credentials
+            # (worker might not know about creds orchestrator has discovered)
+            if vuln_type in ("constrained_delegation", "unconstrained_delegation"):
+                account = details.get("account_name") or details.get("account", target)
+                account_lower = account.lower().rstrip("$")
+                for cred in self.shared_state.all_credentials:
+                    if cred.username.lower() == account_lower and cred.password:
+                        details["has_credentials"] = True
+                        details["username"] = cred.username
+                        details["password"] = cred.password
+                        details["domain"] = cred.domain
+                        break
+                else:
+                    details["has_credentials"] = False
+
             # Queue the vulnerability
             await self.queue_vulnerability(
                 vuln_type=vuln_type,
@@ -1403,9 +1418,11 @@ class ResultProcessingMixin:
 
             details: dict[str, Any] = {
                 "account": account,
+                "account_name": account,  # Normalized field for priority boost logic
                 "delegation_type": delegation_type,
                 "target_spn": target_spn,
                 "discovered_by": source_agent,
+                "has_credentials": account_cred is not None,
             }
 
             if account_cred:

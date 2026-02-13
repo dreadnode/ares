@@ -1284,6 +1284,29 @@ class RoutingMixin:
         # Normalize domain to FQDN format
         domain = self._normalize_domain(domain)
 
+        # Deduplication: check if already processed or pending for this credential
+        cred_key = f"{domain.lower()}:{username.lower()}"
+        technique_key = f"{cred_key}:{','.join(sorted(techniques or ['find_delegation']))}"
+
+        # Skip if already successfully processed
+        if cred_key in self.shared_state.processed_delegation_creds:
+            logger.debug(f"Skipping privesc enumeration for {cred_key} - already processed")
+            return ""
+
+        # Skip if there's already a pending task for same credential + techniques
+        for task in self.shared_state.pending_tasks.values():
+            if task.task_type != "privesc_enumeration":
+                continue
+            task_domain = (task.params.get("domain") or "").lower()
+            task_user = (task.params.get("username") or "").lower()
+            task_techniques = task.params.get("techniques") or ["find_delegation"]
+            pending_key = f"{task_domain}:{task_user}:{','.join(sorted(task_techniques))}"
+            if pending_key == technique_key:
+                logger.debug(
+                    f"Skipping privesc enumeration for {cred_key} - already pending (task {task.task_id})"
+                )
+                return ""
+
         self._ensure_credential_in_state(
             username=username,
             domain=domain,

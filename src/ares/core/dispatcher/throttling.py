@@ -40,8 +40,9 @@ class ThrottlingMixin:
     # Task types that bypass hard cap throttling (critical path to DA)
     # These still use LLM and count against limits, but won't be deferred at hard cap
     # - exploit: S4U, ESC1-8, MSSQL impersonation - direct DA path
-    # - privesc_enumeration: discovers exploitable vulns (delegation, ADCS)
-    CRITICAL_PATH_TASK_TYPES = frozenset({"exploit", "privesc_enumeration"})
+    # NOTE: privesc_enumeration removed - it discovers vulns but doesn't exploit them.
+    # Letting enumeration bypass hard cap starves lateral movement and credential access.
+    CRITICAL_PATH_TASK_TYPES = frozenset({"exploit"})
 
     def _get_throttle_lock(self: RedTeamDispatcher) -> asyncio.Lock:
         """Get or create the throttle lock (lazy init for event loop safety)."""

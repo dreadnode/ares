@@ -770,38 +770,45 @@ def get_critical_priority_threshold() -> int:
 # Default vulnerability priorities - used when YAML doesn't specify a priority
 # Lower number = higher priority (exploited first)
 # This is the single source of truth for default priorities
+#
+# NOTE: Constrained delegation with credentials gets boosted to priority 2
+# at queue time (see vulnerability.py queue_vulnerability). The base priority
+# here (4) is used when we don't yet have credentials for the delegated account.
 DEFAULT_VULNERABILITY_PRIORITIES: dict[str, int] = {
-    # Tier 1: ADCS attacks (priority 1-3) - often easiest path to DA
+    # Tier 1: Direct DA paths with credentials (priority 1-2)
+    # These are dynamically boosted at queue time when prerequisites are met
     "ADCS_ESC1": 1,
     "ADCS_ESC4": 2,
+    # Tier 2: ADCS requiring relay setup (priority 3)
     "ADCS_ESC8": 3,
-    # Tier 2: Kerberos keys (priority 4-5) - instant DA if obtained
-    "krbtgt_hash": 4,
-    "domain_admin_hash": 5,
-    # Tier 3: ACL abuse (priority 6)
-    "acl_abuse": 6,
-    # Tier 4: Delegation attacks (priority 7-9)
-    "unconstrained_delegation": 7,
-    "constrained_delegation": 8,
-    "rbcd": 9,
-    # Tier 5: MSSQL attacks (priority 10-11)
+    # Tier 3: Delegation attacks (priority 4-6) - high confidence when creds available
+    # constrained_delegation gets boosted to priority 2 when creds + DC SPN available
+    "constrained_delegation": 4,
+    "unconstrained_delegation": 5,
+    "rbcd": 6,
+    # Tier 4: Kerberos keys (priority 7-8) - instant DA if obtained
+    "krbtgt_hash": 7,
+    "domain_admin_hash": 8,
+    # Tier 5: ACL abuse (priority 9)
+    "acl_abuse": 9,
+    # Tier 6: MSSQL attacks (priority 10-11)
     "mssql_impersonation": 10,
     "mssql_linked": 11,
     "mssql_linked_server": 11,  # Alias
     "mssql_linked_xpcmdshell": 11,  # Alias
     "mssql_xp_cmdshell": 11,  # Alias
-    # Tier 6: Other privilege escalation (priority 12-15)
+    # Tier 7: Other privilege escalation (priority 12-15)
     "gpo_abuse": 12,
     "gpo_write": 12,  # Alias
     "laps_abuse": 13,
     "dcsync": 14,
     "shadow_credentials": 15,
-    # Tier 7: Targeted credential attacks (priority 16-21)
+    # Tier 8: Targeted credential attacks (priority 16-21)
     "gmsa_readable": 16,
     "genericall_domain_admins": 17,
     "kerberoast": 20,
     "asreproast": 21,
-    # Tier 8: Relay and other (priority 22+)
+    # Tier 9: Relay and other (priority 22+)
     "smb_relay_target": 22,
     "adminsd_holder_writable": 23,
     "adminsd_holder_acl": 23,  # Alias
