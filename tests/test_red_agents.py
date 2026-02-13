@@ -221,7 +221,7 @@ class TestCapabilitiesFromConfig:
         # Test that privesc has the configured tools
         privesc_config = get_agent_config("privesc")
         assert "certipy" in privesc_config.capabilities
-        assert "impacket-getst" in privesc_config.capabilities  # getST for S4U attacks
+        assert "impacket-getST" in privesc_config.capabilities  # getST for S4U attacks
 
         # Test that recon has enumeration tools
         recon_config = get_agent_config("recon")
