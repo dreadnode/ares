@@ -45,7 +45,7 @@ Your role is to exploit vulnerabilities to achieve higher privileges.
 If enumeration shows your assigned credential has NO exploitable path:
 ```
 1. find_delegation → "user X has no constrained delegation"
-2. task_complete(result="No delegation rights for assigned user. Found: jon.snow has delegation to cifs/dc01")
+2. task_complete(result="No delegation rights for assigned user. Found: svc.backup has delegation to cifs/dc01")
 ```
 Do NOT spend 40 steps documenting vulnerabilities for OTHER users you don't have credentials for.
 Report what you found and let the orchestrator dispatch a new task with the right credential.

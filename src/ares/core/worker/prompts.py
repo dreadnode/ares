@@ -480,7 +480,7 @@ def _generate_credential_access_prompt(  # noqa: PLR0912
             "**EXECUTE username_as_password:**\n"
             f"1. First save users: save_users_to_file(target='{dc_ip}', username='{username}', password='{password}', domain='{payload.get('domain', '')}')\n"
             f"2. Then spray: username_as_password(target='{dc_ip}', domain='{payload.get('domain', '')}', users_file='/tmp/users.txt')\n\n"
-            "This tests if users have username=password (e.g., hodor:hodor).\n"
+            "This tests if users have username=password (e.g., jsmith:jsmith).\n"
             "Zero lockout risk, one attempt per user.\n"
             "Report any credentials found immediately."
         )
@@ -539,7 +539,7 @@ def _generate_credential_access_prompt(  # noqa: PLR0912
             ),
             "username_as_password": (
                 f"username_as_password(target='{dc_ip}', domain='{payload.get('domain', '')}') "
-                "- test if users have username=password (e.g., hodor:hodor)"
+                "- test if users have username=password (e.g., jsmith:jsmith)"
             ),
             "password_spray": (
                 f"password_spray(target='{dc_ip}', domain='{payload.get('domain', '')}', "
@@ -589,7 +589,7 @@ def _generate_credential_access_prompt(  # noqa: PLR0912
             f"Task ID: {task.task_id}\n\n"
             "**CRITICAL: These techniques work WITHOUT credentials to discover passwords:**\n"
             "1. username_as_password(target=DC_IP, domain=DOMAIN) - HIGH SUCCESS RATE\n"
-            "   Tests if users have username=password (e.g., hodor:hodor)\n"
+            "   Tests if users have username=password (e.g., jsmith:jsmith)\n"
             "   Zero lockout risk, one attempt per user\n\n"
             "2. password_spray - YOU MUST CALL THIS ONCE FOR EACH PASSWORD:\n"
             "   password_spray(target=DC_IP, domain=DOMAIN, password='Password1')  # pragma: allowlist secret\n"

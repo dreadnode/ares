@@ -146,7 +146,7 @@ class TestNetworkEnumerationTools:
 
         port_stdout = (
             "Starting Nmap 7.98 ( https://nmap.org ) at 2026-01-20 17:43 +0000\n"
-            "Nmap scan report for ip-10-1-2-183.us-west-2.compute.internal (10.1.2.183)\n"
+            "Nmap scan report for ip-192-168-58-10.us-west-2.compute.internal (192.168.58.10)\n"
             "Host is up.\n\n"
             "PORT    STATE    SERVICE\n"
             "445/tcp open     microsoft-ds\n\n"
@@ -154,7 +154,7 @@ class TestNetworkEnumerationTools:
         )
         svc_stdout = (
             "Starting Nmap 7.98 ( https://nmap.org ) at 2026-01-20 17:44 +0000\n"
-            "Nmap scan report for ip-10-1-2-183.us-west-2.compute.internal (10.1.2.183)\n"
+            "Nmap scan report for ip-192-168-58-10.us-west-2.compute.internal (192.168.58.10)\n"
             "Host is up.\n\n"
             "PORT    STATE    SERVICE\n"
             "445/tcp open     microsoft-ds\n"
@@ -167,9 +167,9 @@ class TestNetworkEnumerationTools:
                 (port_stdout, "", 0),
                 (svc_stdout, "", 0),
             ]
-            tools.nmap_scan("10.1.2.183")
+            tools.nmap_scan("192.168.58.10")
 
-        host = next(h for h in state.all_hosts if h.ip == "10.1.2.183")
+        host = next(h for h in state.all_hosts if h.ip == "192.168.58.10")
         assert "compute.internal" not in (host.hostname or "").lower()
         assert host.os.lower().startswith("windows")
 

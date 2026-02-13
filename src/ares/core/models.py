@@ -1237,7 +1237,7 @@ class SharedRedTeamState:
         # This handles cases where credential has parent domain but user is in child domain
         domain = self._resolve_credential_domain_from_users(username, domain)
         password = credential.password.strip()
-        # Strip truncation artifacts from LLM extraction (e.g., "Heartsbane..." -> "Heartsbane")
+        # Strip truncation artifacts from LLM extraction (e.g., "Summer2024..." -> "Summer2024")
         while password.endswith("..."):
             password = password[:-3].strip()
         while password.endswith("…"):  # Unicode ellipsis
@@ -2116,7 +2116,7 @@ class SharedRedTeamState:
         """Clean up domain data to fix historical issues.
 
         This method fixes:
-        1. NetBIOS domains that should be FQDNs (e.g., "north" -> remove if "north.x.y" exists)
+        1. NetBIOS domains that should be FQDNs (e.g., "child" -> remove if "child.contoso.local" exists)
         2. Users with parent domain when they only exist in child domain
         3. Credentials with parent domain when user only exists in child domain
         """

@@ -472,8 +472,8 @@ class OrchestratorTools(Toolset):
         Example:
             # Crack by username/domain (hash auto-looked up from state)
             >>> dispatch_crack_hash(
-            ...     username="sansa.stark",
-            ...     domain="north.sevenkingdoms.local",
+            ...     username="svc.sql",
+            ...     domain="contoso.local",
             ...     hash_type="Kerberoast",
             ...     priority=2
             ... )

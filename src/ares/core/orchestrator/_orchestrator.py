@@ -1653,7 +1653,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                         )
 
             # Check for new users without credentials - run username_as_password on them
-            # This catches cases like hodor:hodor where username equals password
+            # This catches cases like jsmith:jsmith where username equals password
             for domain in sorted(_iter_domains):
                 # Find users in this domain that don't have credentials
                 domain_users = [

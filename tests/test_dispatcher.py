@@ -1042,8 +1042,8 @@ class TestCredentialDomainCrossReference:
         """Credential with same username+password but wrong domain should be rejected.
 
         This prevents agent hallucinations where a credential from one domain
-        (e.g., north.sevenkingdoms.local) is incorrectly recorded with a different
-        domain (e.g., essos.local) during cross-domain enumeration.
+        (e.g., contoso.local) is incorrectly recorded with a different
+        domain (e.g., fabrikam.local) during cross-domain enumeration.
         """
         from ares.core.models import Target
 
@@ -1052,8 +1052,8 @@ class TestCredentialDomainCrossReference:
 
         # First credential in correct domain
         cred1 = Credential(
-            username="samwell.tarly",
-            password="Heartsbane",  # pragma: allowlist secret
+            username="john.smith",
+            password="Summer2024!",  # pragma: allowlist secret
             domain="contoso.local",
             source="ldap_description",
         )
@@ -1063,8 +1063,8 @@ class TestCredentialDomainCrossReference:
 
         # Same credential recorded with wrong domain (agent hallucination)
         cred2 = Credential(
-            username="samwell.tarly",
-            password="Heartsbane",  # pragma: allowlist secret
+            username="john.smith",
+            password="Summer2024!",  # pragma: allowlist secret
             domain="fabrikam.local",  # Wrong domain!
             source="recon_bloodhound",
         )

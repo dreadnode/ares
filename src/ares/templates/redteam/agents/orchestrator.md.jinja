@@ -211,15 +211,15 @@ SMB signing check shows unsigned hosts -> start_coercion workflow:
 ## Example Workflow
 
 **IMPORTANT: Replace placeholders with ACTUAL values from operation state!**
-- `<TARGET_SUBNET>` = the target IPs/subnet from state.target (e.g., "10.1.2.0/24" or individual IPs)
+- `<TARGET_SUBNET>` = the target IPs/subnet from state.target (e.g., "192.168.58.0/24" or individual IPs)
 - `<DC_IP>` = the domain controller IP discovered during recon
-- `<DOMAIN>` = the target domain (e.g., "corp.local")
+- `<DOMAIN>` = the target domain (e.g., "contoso.local")
 
 ```
 1. dispatch_recon(task_type="network_scan", targets="<TARGET_SUBNET>")
 2. dispatch_recon(task_type="smb_signing_check", targets="<TARGET_SUBNET>") - RELAY TARGETS!
-3. dispatch_recon(task_type="user_enumeration", targets="DC_IP", domain="corp.local")
-4. dispatch_credential_access(task_type="low_hanging_fruit", targets="DC_IP", domain="corp.local")
+3. dispatch_recon(task_type="user_enumeration", targets="DC_IP", domain="contoso.local")
+4. dispatch_credential_access(task_type="low_hanging_fruit", targets="DC_IP", domain="contoso.local")
 5. [Wait for results with get_pending_tasks()]
 6. AS SOON AS ANY CREDENTIAL IS FOUND:
    a. dispatch_privesc_exploit(task_type="adcs_enumerate", ...) - FIND ADCS VULNS!

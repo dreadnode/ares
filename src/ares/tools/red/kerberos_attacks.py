@@ -186,8 +186,8 @@ class DelegationTools(Toolset):
         Parses impacket-findDelegation output format:
             AccountName    AccountType    DelegationType                   DelegationRightsTo
             -----------    -----------    ---------------                  ------------------
-            jon.snow       Person         Constrained w/ Protocol Trans.   cifs/winterfell
-            WINTERFELL$    Computer       Unconstrained                    N/A
+            svc.backup     Person         Constrained w/ Protocol Trans.   cifs/dc01
+            DC01$          Computer       Unconstrained                    N/A
 
         Only adds Person accounts (not Computer accounts ending in $).
 
@@ -338,7 +338,7 @@ class DelegationTools(Toolset):
         """Add a delegation vulnerability to state for auto-exploitation.
 
         Args:
-            account: Account with delegation (e.g., jon.snow or WINTERFELL$)
+            account: Account with delegation (e.g., svc.backup or DC01$)
             delegation_type: "constrained" or "unconstrained"
             target_spn: Target SPN for constrained delegation (e.g., cifs/dc01)
             domain: Domain name
@@ -1731,7 +1731,7 @@ class TrustAttackTools(Toolset):
             >>> extract_trust_key("contoso.local", "Administrator", "pass", "192.168.58.10", "fabrikam.local")
         """
         # Normalize trusted domain name to get trust account
-        # Trust accounts are NETBIOS$, e.g., ESSOS$
+        # Trust accounts are NETBIOS$, e.g., FABRIKAM$
         trust_domain_name = trusted_domain.split(".", maxsplit=1)[0].upper()
         trust_account = f"{trust_domain_name}$"
 

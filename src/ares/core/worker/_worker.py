@@ -73,7 +73,7 @@ def _update_etc_hosts(hosts_list: list, written_ips: set[str], agent_name: str) 
     FQDN and short hostname aliases on a single line.
 
     For domain controllers, also adds the bare domain name as an alias to enable
-    Kerberos realm resolution (e.g., "10.1.2.183  kingslanding.sevenkingdoms.local kingslanding sevenkingdoms.local").
+    Kerberos realm resolution (e.g., "192.168.58.10  dc01.contoso.local dc01 contoso.local").
 
     Args:
         hosts_list: List of Host objects from shared state
@@ -92,8 +92,8 @@ def _update_etc_hosts(hosts_list: list, written_ips: set[str], agent_name: str) 
             continue
 
         # Build entry with all aliases on one line:
-        # DC: "10.1.2.183  kingslanding.sevenkingdoms.local kingslanding sevenkingdoms.local"
-        # Non-DC: "10.1.2.146  castelblack.north.sevenkingdoms.local castelblack"
+        # DC: "192.168.58.10  dc01.contoso.local dc01 contoso.local"
+        # Non-DC: "192.168.58.22  ws01.contoso.local ws01"
         hostname = host.hostname.lower()
         parts = hostname.split(".")
         short_name = parts[0] if parts else hostname
