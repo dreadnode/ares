@@ -777,10 +777,11 @@ def get_critical_priority_threshold() -> int:
 DEFAULT_VULNERABILITY_PRIORITIES: dict[str, int] = {
     # Tier 1: Direct DA paths with credentials (priority 1-2)
     # These are dynamically boosted at queue time when prerequisites are met
-    "ADCS_ESC1": 1,
-    "ADCS_ESC4": 2,
+    # NOTE: Keys must be lowercase to match vuln_type normalization in queue_vulnerability()
+    "adcs_esc1": 1,
+    "adcs_esc4": 2,
     # Tier 2: ADCS requiring relay setup (priority 3)
-    "ADCS_ESC8": 3,
+    "adcs_esc8": 3,
     # Tier 3: Delegation attacks (priority 4-6) - high confidence when creds available
     # constrained_delegation gets boosted to priority 2 when creds + DC SPN available
     "constrained_delegation": 4,
