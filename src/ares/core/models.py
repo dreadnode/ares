@@ -40,7 +40,12 @@ from rigging.parsing import (
 
 from ares.core.config import get_default_max_retries
 
+# Default retry count for tasks - exported for test compatibility
+DEFAULT_MAX_RETRIES = 3
+
 __all__ = [
+    # Constants
+    "DEFAULT_MAX_RETRIES",
     # Multi-Agent Models
     "AgentInfo",
     "AgentLocalState",
