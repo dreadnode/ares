@@ -104,6 +104,7 @@ async def test_recover_orphaned_operation_runs_and_publishes_status():
             "ares.core.orchestrator_service.run_multi_agent_operation",
             new=AsyncMock(return_value={"ok": True}),
         ) as mock_run,
+        patch.dict(os.environ, {"ARES_MODEL": "test-model"}),
     ):
         await service._recover_orphaned_operation("op-123")
 

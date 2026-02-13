@@ -415,7 +415,7 @@ class TestRetrieveTaskOutput:
             return_value=AsyncIterator(["ares:operation:test-op:output:task-123:abc"])
         )
         mock_redis.get = AsyncMock(return_value=b"full output content here")
-        mock_dispatcher._redis = mock_redis
+        mock_dispatcher._redis_client = mock_redis
 
         result = await orchestrator_tools.retrieve_task_output("task-123")
 
@@ -429,7 +429,7 @@ class TestRetrieveTaskOutput:
         """Test retrieving output that doesn't exist."""
         mock_redis = AsyncMock()
         mock_redis.scan_iter = MagicMock(return_value=AsyncIterator([]))
-        mock_dispatcher._redis = mock_redis
+        mock_dispatcher._redis_client = mock_redis
 
         result = await orchestrator_tools.retrieve_task_output("nonexistent-task")
 
@@ -446,7 +446,7 @@ class TestRetrieveTaskOutput:
             return_value=AsyncIterator(["ares:operation:test-op:output:task-456:def"])
         )
         mock_redis.get = AsyncMock(return_value="string output content")
-        mock_dispatcher._redis = mock_redis
+        mock_dispatcher._redis_client = mock_redis
 
         result = await orchestrator_tools.retrieve_task_output("task-456")
 
