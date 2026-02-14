@@ -686,6 +686,10 @@ def create_role_hooks(
             )
 
             if not task_queue or not operation_id:
+                logger.debug(
+                    f"Cannot publish hash/credential discoveries: "
+                    f"task_queue={task_queue is not None}, operation_id={operation_id}"
+                )
                 return
 
             # Extract and publish hashes
@@ -768,6 +772,10 @@ def create_role_hooks(
             )
 
             if not task_queue or not operation_id:
+                logger.debug(
+                    f"Cannot publish vulnerability discoveries: "
+                    f"task_queue={task_queue is not None}, operation_id={operation_id}"
+                )
                 return
 
             # Extract ADCS vulnerabilities from certipy_find

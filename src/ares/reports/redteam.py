@@ -230,8 +230,9 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
         )
     discovered_vulns.sort(key=lambda v: v.get("priority", 999))  # type: ignore[arg-type,return-value]
 
-    # Format timeline events
+    # Format timeline events and collect MITRE techniques
     timeline = []
+    all_techniques: set[str] = set(state.identified_techniques)
     for event in state.operation_timeline:
         timeline.append(
             {
@@ -240,6 +241,9 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
                 "mitre_techniques": event.mitre_techniques,
             }
         )
+        # Collect techniques from timeline events into the aggregate set
+        if event.mitre_techniques:
+            all_techniques.update(event.mitre_techniques)
 
     # Get target info
     target_ip = state.target.ip if state.target else "Unknown"
@@ -266,7 +270,7 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
         hashes=unique_hashes,
         weaknesses=state.all_weaknesses,
         timeline=timeline,
-        techniques=sorted(state.identified_techniques),
+        techniques=sorted(all_techniques),
         discovered_vulns=discovered_vulns,
         vulnerabilities_found=len(state.discovered_vulnerabilities),
         vulnerabilities_exploited=len(state.exploited_vulnerabilities),
