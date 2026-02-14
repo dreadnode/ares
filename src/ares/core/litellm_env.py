@@ -18,7 +18,9 @@ def configure_litellm_env() -> None:
 
     # Rate limit retry configuration - critical for multi-agent systems
     # where multiple workers share the same API key
-    os.environ.setdefault("LITELLM_NUM_RETRIES", "5")
+    os.environ.setdefault("LITELLM_NUM_RETRIES", "3")
 
-    # Request timeout (seconds) - allow time for complex reasoning
-    os.environ.setdefault("LITELLM_REQUEST_TIMEOUT", "300")
+    # Request timeout (seconds) - reduced from 300s to prevent 14+ minute freezes
+    # when LLM API calls timeout and block the asyncio event loop.
+    # With 3 retries @ 60s = max 3 min blocking instead of 25 min (5 retries @ 300s).
+    os.environ.setdefault("LITELLM_REQUEST_TIMEOUT", "60")

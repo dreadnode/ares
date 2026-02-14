@@ -2,11 +2,16 @@
 
 This module provides background tasks for monitoring agent heartbeats
 and consuming task results from Redis.
+
+The result consumer runs in a separate thread with its own event loop to
+prevent blocking when the main orchestrator's LLM API calls timeout. This
+mirrors the pattern used by workers for threaded heartbeats.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, ClassVar
@@ -18,16 +23,23 @@ from ares.core.config import (
     get_max_redis_consecutive_failures,
     get_redis_retry_base_delay,
     get_redis_retry_max_delay,
+    get_redis_url,
     get_stale_task_timeout,
 )
 from ares.core.models import TaskInfo, TaskStatus
 
 if TYPE_CHECKING:
     from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+    from ares.core.task_queue import RedisTaskQueue
 
 
 class MonitoringMixin:
-    """Heartbeat and result monitoring for agent health and task completion."""
+    """Heartbeat and result monitoring for agent health and task completion.
+
+    The result consumer runs in a separate thread to prevent the orchestrator's
+    LLM API timeouts from blocking background tasks. This mirrors the worker's
+    threaded heartbeat pattern.
+    """
 
     # Rate-limit noisy warnings (class-level to persist across calls)
     _last_hard_cap_warning: float = 0.0
@@ -38,6 +50,11 @@ class MonitoringMixin:
     # Using a simple class variable here since MonitoringMixin is only used as a mixin
     # and tracking is ephemeral (reset on process restart which is fine)
     _warned_tasks: ClassVar[set[str]] = set()
+
+    # Threaded result consumer state (initialized per-instance in dispatcher)
+    _result_consumer_thread: threading.Thread | None = None
+    _result_consumer_stop_event: threading.Event | None = None
+    _last_result_consumer_iteration: float = 0.0  # For watchdog logging
 
     async def heartbeat(
         self: RedTeamDispatcher,
@@ -485,9 +502,9 @@ class MonitoringMixin:
         if not self._task_queue:
             return
 
-        operation_id = getattr(self, "operation_id", None)
-        if not operation_id:
+        if not self._shared_state:
             return
+        operation_id = self._shared_state.operation_id
 
         try:
             discoveries = await self._task_queue.poll_discoveries(operation_id, max_items=50)
@@ -649,6 +666,44 @@ class MonitoringMixin:
             await self.request_exploit(vuln_type, vuln_id, target, source_agent, details)
             logger.warning(f"🚀 Auto-dispatched exploit for {vuln_type} on {target}")
 
+    async def _maintenance_loop(self: RedTeamDispatcher) -> None:
+        """
+        Background task for stale cleanup and task reconciliation.
+
+        This runs on the main event loop, separate from the threaded result consumer.
+        It's okay if this gets blocked occasionally by LLM timeouts since it handles
+        less critical maintenance operations. The critical result consumption path
+        runs in the threaded consumer.
+        """
+        logger.info("Maintenance loop started")
+        consecutive_failures = 0
+
+        while self._running:
+            try:
+                # Clean up stale tasks to prevent throttle deadlock
+                await self._cleanup_stale_tasks()
+
+                # Reconcile tasks with workers to detect orphans
+                await self._reconcile_tasks_with_workers()
+
+                # Reset failure counter on success
+                consecutive_failures = 0
+
+                # Run maintenance every 5 seconds (less frequent than result polling)
+                await asyncio.sleep(5)
+
+            except asyncio.CancelledError:  # noqa: PERF203
+                logger.info("Maintenance loop cancelled")
+                break
+
+            except Exception as e:
+                consecutive_failures += 1
+                logger.warning(f"Maintenance loop error (attempt {consecutive_failures}): {e}")
+                # Don't crash - maintenance failures are less critical
+                await asyncio.sleep(min(15, consecutive_failures * 5))
+
+        logger.info("Maintenance loop stopped")
+
     async def _log_throttle_health(self: RedTeamDispatcher) -> None:
         """
         Log throttle health status for observability.
@@ -704,6 +759,261 @@ class MonitoringMixin:
                 f"pending={pending_count}, in_progress={in_progress_count}, "
                 f"deferred={deferred_total}"
             )
+
+    def _start_threaded_result_consumer(self: RedTeamDispatcher) -> None:
+        """Start the result consumer in a separate thread.
+
+        This prevents LLM API timeouts in the main event loop from blocking
+        background tasks like result consumption and discovery polling.
+        """
+        if self._result_consumer_thread is not None:
+            logger.warning("Threaded result consumer already running")
+            return
+
+        self._result_consumer_stop_event = threading.Event()
+        self._result_consumer_thread = threading.Thread(
+            target=self._threaded_result_consumer_loop,
+            name="orchestrator-result-consumer",
+            daemon=True,
+        )
+        self._result_consumer_thread.start()
+        logger.info("Threaded result consumer started (isolated from main event loop)")
+
+    def _stop_threaded_result_consumer(self: RedTeamDispatcher) -> None:
+        """Stop the threaded result consumer gracefully."""
+        if self._result_consumer_stop_event:
+            self._result_consumer_stop_event.set()
+
+        if self._result_consumer_thread and self._result_consumer_thread.is_alive():
+            self._result_consumer_thread.join(timeout=5.0)
+            if self._result_consumer_thread.is_alive():
+                logger.warning("Threaded result consumer did not stop gracefully")
+            else:
+                logger.info("Threaded result consumer stopped")
+
+        self._result_consumer_thread = None
+        self._result_consumer_stop_event = None
+
+    def _threaded_result_consumer_loop(self: RedTeamDispatcher) -> None:
+        """Run result consumer in a dedicated thread with its own event loop.
+
+        This mirrors the worker's threaded heartbeat pattern. By running in a
+        separate thread, the result consumer continues even when the main
+        orchestrator event loop is blocked by LLM API timeouts.
+
+        The thread creates its own Redis connection to avoid sharing connections
+        across threads (which is not safe for async Redis).
+        """
+        from ares.core.task_queue import RedisTaskQueue
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        # Create a dedicated task queue for this thread
+        redis_url = get_redis_url()
+        task_queue: RedisTaskQueue | None = None
+
+        try:
+            if redis_url:
+                task_queue = RedisTaskQueue(redis_url)
+                loop.run_until_complete(task_queue.connect())
+                logger.debug("Threaded result consumer connected to Redis")
+
+            consecutive_failures = 0
+            health_check_counter = 0
+            watchdog_interval = 5.0  # Log warning if loop takes longer than this
+            stop_event = self._result_consumer_stop_event  # Capture for thread safety
+
+            while stop_event is not None and not stop_event.is_set():
+                iteration_start = time.monotonic()
+
+                try:
+                    # Use the thread's task queue for result checking
+                    loop.run_until_complete(self._threaded_consume_results(task_queue, loop))
+
+                    if consecutive_failures > 0:
+                        logger.info(
+                            f"Threaded result consumer recovered after "
+                            f"{consecutive_failures} failures"
+                        )
+                    consecutive_failures = 0
+
+                    # Log throttle health every 30 cycles (~30 seconds)
+                    health_check_counter += 1
+                    if health_check_counter >= 30:
+                        health_check_counter = 0
+                        loop.run_until_complete(self._log_throttle_health())
+
+                    # Watchdog: log if iteration took too long (indicates blocking)
+                    iteration_duration = time.monotonic() - iteration_start
+                    if iteration_duration > watchdog_interval:
+                        logger.warning(
+                            f"⚠️ Result consumer iteration took {iteration_duration:.1f}s "
+                            f"(expected <{watchdog_interval}s) - possible blocking detected"
+                        )
+
+                except Exception as e:
+                    consecutive_failures += 1
+                    should_stop = self._handle_consumer_error(e, consecutive_failures)
+                    if should_stop:
+                        break
+
+                # Sleep between iterations (use threading.Event for interruptibility)
+                stop_event.wait(timeout=1.0)
+
+        finally:
+            if task_queue:
+                try:
+                    loop.run_until_complete(task_queue.disconnect())
+                except Exception:
+                    pass
+            loop.close()
+            logger.debug("Threaded result consumer loop stopped")
+
+    def _handle_consumer_error(self: RedTeamDispatcher, e: Exception, failures: int) -> bool:
+        """Handle errors in the threaded result consumer. Returns True if should stop."""
+        error_str = str(e).lower()
+        connection_keywords = [
+            "connection",
+            "closed",
+            "timeout",
+            "broken pipe",
+            "reset",
+            "refused",
+            "sentinel",
+        ]
+        is_connection_error = any(kw in error_str for kw in connection_keywords)
+
+        if is_connection_error:
+            max_failures = get_max_redis_consecutive_failures()
+            delay = min(
+                get_redis_retry_base_delay() * (2 ** min(failures - 1, 4)),
+                get_redis_retry_max_delay(),
+            )
+            logger.warning(
+                f"Threaded result consumer Redis error "
+                f"(attempt {failures}/{max_failures}): {e}. "
+                f"Retrying in {delay:.1f}s"
+            )
+
+            if failures >= max_failures:
+                logger.critical(
+                    f"Threaded result consumer failed {failures} times. "
+                    "Redis unavailable - stopping thread."
+                )
+                return True
+
+            time.sleep(delay)
+        else:
+            logger.error(f"Threaded result consumer error: {e}", exc_info=True)
+            time.sleep(1)
+
+        return False
+
+    async def _threaded_consume_results(
+        self: RedTeamDispatcher,
+        task_queue: RedisTaskQueue | None,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """Consume results using the thread's task queue.
+
+        This is called from the threaded result consumer loop. It uses the
+        thread-local task queue for Redis operations but updates the shared
+        dispatcher state (which is thread-safe for the operations we perform).
+
+        NOTE: Stale cleanup and task reconciliation are NOT done here because
+        they use self._task_queue which is bound to the main event loop.
+        Those operations continue to run on the main loop when it's not blocked.
+        This thread focuses on the critical path: result consumption and
+        discovery polling.
+        """
+        if not task_queue:
+            return
+
+        # Check results for all pending Redis tasks
+        task_ids_to_check = list(self._redis_task_ids)
+
+        for task_id in task_ids_to_check:
+            try:
+                result = await task_queue.check_result(task_id)
+                if result:
+                    logger.info(
+                        f"Threaded result consumer received result for task {task_id}: "
+                        f"success={result.success}"
+                    )
+
+                    # Track rate limit status
+                    if result.success:
+                        self.clear_rate_limit_backoff()
+                    elif result.error:
+                        error_str = str(result.error).lower()
+                        rate_limit_indicators = [
+                            "rate limit",
+                            "rate_limit",
+                            "ratelimit",
+                            "too many requests",
+                            "429",
+                            "quota exceeded",
+                            "tokens per min",
+                            "requests per min",
+                            "tpm limit",
+                            "rpm limit",
+                        ]
+                        if any(ind in error_str for ind in rate_limit_indicators):
+                            logger.warning(
+                                f"Task {task_id} failed with rate limit error - triggering backoff"
+                            )
+                            self.record_rate_limit_error()
+
+                    # Remove from tracking set
+                    self._redis_task_ids.discard(task_id)
+
+                    # Complete the task (updates shared state)
+                    await self.complete_task(
+                        task_id=task_id,
+                        success=result.success,
+                        result=result.result,
+                        error=result.error,
+                        source_agent=result.agent_name or result.worker_pod or "unknown",
+                    )
+            except Exception as e:  # noqa: PERF203
+                logger.warning(f"Error checking result for task {task_id}: {e}")
+
+        # Poll for real-time discoveries
+        await self._poll_discoveries_threaded(task_queue)
+
+    async def _poll_discoveries_threaded(
+        self: RedTeamDispatcher,
+        task_queue: RedisTaskQueue,
+    ) -> None:
+        """Poll discoveries using the thread's task queue."""
+        if not self._shared_state:
+            return
+        operation_id = self._shared_state.operation_id
+
+        try:
+            discoveries = await task_queue.poll_discoveries(operation_id, max_items=50)
+            if not discoveries:
+                return
+
+            for discovery in discoveries:
+                discovery_type = discovery.get("type", "")
+                data = discovery.get("data", {})
+                source_agent = discovery.get("source_agent", "unknown")
+
+                if discovery_type == "delegation":
+                    await self._process_realtime_delegation_discovery(data, source_agent)
+                elif discovery_type == "credential":
+                    await self._process_realtime_credential_discovery(data, source_agent)
+                elif discovery_type == "hash":
+                    await self._process_realtime_hash_discovery(data, source_agent)
+                elif discovery_type == "vulnerability":
+                    await self._process_realtime_vulnerability_discovery(data, source_agent)
+                else:
+                    logger.debug(f"Unknown discovery type: {discovery_type}")
+
+        except Exception as e:
+            logger.warning(f"Error polling discoveries (threaded): {e}")
 
 
 __all__ = ["MonitoringMixin"]
