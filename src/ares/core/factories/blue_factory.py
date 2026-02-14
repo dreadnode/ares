@@ -779,19 +779,12 @@ def _compact_loki_result(result: Any) -> Any:
             ):
                 parsed_fields[match.group(1)] = match.group(2)
 
-        # Build compact entry: keep metadata + parsed fields, drop message + raw XML
-        compact_line = {
-            "event_id": line.get("event_id"),
-            "computer": line.get("computer"),
-            "timeCreated": line.get("timeCreated"),
-            "keywords": line.get("keywords"),
-            "source": line.get("source"),
-            "channel": line.get("channel"),
-        }
+        # Keep all fields EXCEPT the two redundant blobs
+        # "message" = prose rendering of event_data (duplicate)
+        # "event_data" = raw XML (replaced by parsed key-value "fields")
+        compact_line = {k: v for k, v in line.items() if k not in ("message", "event_data")}
         if parsed_fields:
             compact_line["fields"] = parsed_fields
-        # Drop: "message" (prose duplicate), "event_data" (raw XML duplicate),
-        # "levelText", "taskText", "opCodeText", "execution", "version", "task"
 
         compacted.append({"timestamp": timestamp, "line": compact_line})
 
