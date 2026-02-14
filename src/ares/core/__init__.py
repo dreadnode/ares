@@ -5,49 +5,47 @@ and vice versa.
 """
 
 __all__ = [
-    # Config
+    "CAPABILITY_REGISTRY",
     "AgentConfig",
-    # Models
     "AgentInfo",
     "AgentLocalState",
     "AgentRole",
-    # Workflow components
     "CredentialTestingTracker",
+    "FilteredToolset",
     "InvestigationState",
-    # Multi-agent components
     "KubernetesPodExecutor",
     "OperationConfig",
     "OperationRecoveryManager",
     "RedTeamDispatcher",
     "RedTeamState",
-    # Redis task queue
     "RedisTaskQueue",
     "RedisWorkerAgent",
     "SharedRedTeamState",
     "TaskMessage",
     "TaskResult",
     "WorkerAgent",
-    # Factories
     "create_investigation_agent",
     "create_multi_agent_ensemble",
     "create_redteam_agent",
     "create_specialized_agent",
-    # Workflow functions
     "credential_expansion_loop",
     "exploitation_workflow",
     "get_agent_config",
+    "get_enabled_tools",
     "get_namespace",
     "get_redis_url",
-    # Utilities
     "get_template_loader",
     "load_config",
     "run_multi_agent_operation",
-    # Worker
     "run_worker",
 ]
 
 # Mapping of attribute names to their (module_path, name) for lazy imports
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    # Capability registry
+    "CAPABILITY_REGISTRY": ("ares.core.capability_registry", "CAPABILITY_REGISTRY"),
+    "FilteredToolset": ("ares.core.capability_registry", "FilteredToolset"),
+    "get_enabled_tools": ("ares.core.capability_registry", "get_enabled_tools"),
     # Config
     "AgentConfig": ("ares.core.config", "AgentConfig"),
     "OperationConfig": ("ares.core.config", "OperationConfig"),

@@ -25,7 +25,7 @@ class TestCertipyFindRouting:
             mock_run_tool.return_value = ("output", "", 0)
 
             tools.certipy_find(
-                domain="domain.local",
+                domain="contoso.local",
                 username="testuser",
                 password="TestPass123",  # pragma: allowlist secret
                 dc_ip="192.168.58.1",
@@ -55,7 +55,7 @@ class TestCertipyFindRouting:
             mock_run_tool.return_value = ("output", "", 0)
 
             tools.certipy_find(
-                domain="domain.local",
+                domain="contoso.local",
                 username="testuser",
                 password="TestPass123",  # pragma: allowlist secret
                 dc_ip="192.168.58.1",
@@ -81,7 +81,7 @@ class TestCertipyFindRouting:
             mock_run_tool.return_value = ("output", "", 0)
 
             tools.certipy_find(
-                domain="domain.local",
+                domain="contoso.local",
                 username="testuser",
                 password="TestPass123",  # pragma: allowlist secret
                 dc_ip="192.168.58.1",
@@ -100,7 +100,7 @@ class TestCertipyFindRouting:
             assert "certipy" in script
             assert "find" in script
             assert "-u" in script
-            assert "testuser@domain.local" in script
+            assert "testuser@contoso.local" in script
             assert "-dc-ip" in script
             assert "192.168.58.1" in script
             assert "-vulnerable" in script
@@ -131,7 +131,7 @@ Certificate Templates
             mock_run_tool.return_value = (esc1_output, "", 0)
 
             result = tools.certipy_find(
-                domain="domain.local",
+                domain="contoso.local",
                 username="testuser",
                 password="TestPass123",  # pragma: allowlist secret
                 dc_ip="192.168.58.1",
@@ -156,7 +156,7 @@ Certificate Templates
 Certificate Authorities
   0
     CA Name                             : domain-CA
-    DNS Name                            : ca.domain.local
+    DNS Name                            : ca.contoso.local
     Web Enrollment                      : Enabled
         """
 
@@ -164,7 +164,7 @@ Certificate Authorities
             mock_run_tool.return_value = (esc8_output, "", 0)
 
             result = tools.certipy_find(
-                domain="domain.local",
+                domain="contoso.local",
                 username="testuser",
                 password="TestPass123",  # pragma: allowlist secret
                 dc_ip="192.168.58.1",
@@ -189,7 +189,7 @@ Certificate Authorities
 Certificate Authorities
   0
     CA Name                             : corp-DC01-CA
-    DNS Name                            : dc01.corp.local
+    DNS Name                            : dc01.contoso.local
     Web Enrollment                      : Enabled
     [!] Vulnerabilities
       ESC8                              : Web Enrollment is vulnerable to NTLM relay
@@ -199,7 +199,7 @@ Certificate Authorities
             mock_run_tool.return_value = (esc8_output, "", 0)
 
             result = tools.certipy_find(
-                domain="corp.local",
+                domain="contoso.local",
                 username="testuser",
                 password="TestPass123",  # pragma: allowlist secret
                 dc_ip="192.168.58.1",
@@ -233,7 +233,7 @@ Certificate Authorities
 Certificate Authorities
   0
     CA Name                             : domain-CA
-    DNS Name                            : ca.domain.local
+    DNS Name                            : ca.contoso.local
     Web Enrollment                      : Enabled
         """
 
@@ -242,13 +242,13 @@ Certificate Authorities
 
             # Run certipy_find twice
             tools.certipy_find(
-                domain="domain.local",
+                domain="contoso.local",
                 username="testuser",
                 password="TestPass123",  # pragma: allowlist secret
                 dc_ip="192.168.58.1",
             )
             tools.certipy_find(
-                domain="domain.local",
+                domain="contoso.local",
                 username="testuser",
                 password="TestPass123",  # pragma: allowlist secret
                 dc_ip="192.168.58.1",

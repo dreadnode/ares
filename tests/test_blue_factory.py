@@ -5,14 +5,16 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from ares.core.config import (
+    get_bonus_queries_for_evidence,
+    get_bonus_queries_for_pyramid_l4,
+    get_max_duplicate_queries,
+    get_max_queries_critical,
+    get_max_queries_per_investigation,
+    get_max_total_queries,
+    get_query_limits_by_stage,
+)
 from ares.core.factories.blue_factory import (
-    BONUS_QUERIES_FOR_EVIDENCE,
-    BONUS_QUERIES_FOR_PYRAMID_L4,
-    MAX_DUPLICATE_QUERIES,
-    MAX_QUERIES_CRITICAL,
-    MAX_QUERIES_PER_INVESTIGATION,
-    MAX_TOTAL_QUERIES,
-    QUERY_LIMITS_BY_STAGE,
     _calculate_bonus_queries,
     _check_duplicate_query,
     _check_query_limit,
@@ -109,7 +111,7 @@ class TestCalculateBonusQueries:
         set_investigation_state(investigation_state)
 
         bonus = _calculate_bonus_queries()
-        assert bonus == BONUS_QUERIES_FOR_EVIDENCE
+        assert bonus == get_bonus_queries_for_evidence()
 
     def test_bonus_for_pyramid_level_4(self, investigation_state: InvestigationState):
         """Test bonus granted for reaching pyramid level 4+."""
@@ -133,7 +135,7 @@ class TestCalculateBonusQueries:
 
         bonus = _calculate_bonus_queries()
         # Should get both evidence bonus and pyramid bonus
-        assert bonus >= BONUS_QUERIES_FOR_EVIDENCE
+        assert bonus >= get_bonus_queries_for_evidence()
 
 
 class TestGetQueryLimit:
@@ -146,7 +148,7 @@ class TestGetQueryLimit:
         factory._current_state = None
         factory._bonus_queries_granted = 0
         limit = _get_query_limit()
-        assert limit == MAX_QUERIES_PER_INVESTIGATION
+        assert limit == get_max_queries_per_investigation()
 
     def test_stage_based_limit(self, investigation_state: InvestigationState):
         """Test limit based on investigation stage."""
@@ -156,7 +158,7 @@ class TestGetQueryLimit:
         set_investigation_state(investigation_state)
 
         limit = _get_query_limit()
-        assert limit == QUERY_LIMITS_BY_STAGE["triage"]
+        assert limit == get_query_limits_by_stage()["triage"]
 
     def test_critical_severity_higher_limit(self, critical_alert: dict):
         """Test higher limit for critical severity."""
@@ -186,10 +188,10 @@ class TestGetQueryLimit:
         set_investigation_state(state)
 
         limit = _get_query_limit()
-        assert limit >= MAX_QUERIES_CRITICAL
+        assert limit >= get_max_queries_critical()
 
     def test_limit_capped_at_max(self, investigation_state: InvestigationState):
-        """Test limit is capped at MAX_TOTAL_QUERIES."""
+        """Test limit is capped at get_max_total_queries()."""
         import ares.core.factories.blue_factory as factory
 
         reset_query_tracking()
@@ -198,7 +200,7 @@ class TestGetQueryLimit:
         set_investigation_state(investigation_state)
 
         limit = _get_query_limit()
-        assert limit <= MAX_TOTAL_QUERIES
+        assert limit <= get_max_total_queries()
 
 
 class TestCheckQueryLimit:
@@ -220,7 +222,7 @@ class TestCheckQueryLimit:
         reset_query_tracking()
         set_investigation_state(investigation_state)
         # Set queries to limit
-        factory._total_queries = MAX_TOTAL_QUERIES + 10
+        factory._total_queries = get_max_total_queries() + 10
 
         result = _check_query_limit()
         assert result is not None
@@ -249,12 +251,12 @@ class TestCheckDuplicateQuery:
         assert result is None
 
     def test_duplicate_allowed_up_to_max(self):
-        """Test duplicates allowed up to MAX_DUPLICATE_QUERIES."""
+        """Test duplicates allowed up to get_max_duplicate_queries()."""
 
         reset_query_tracking()
         query = "SELECT * FROM logs"
 
-        for _ in range(MAX_DUPLICATE_QUERIES):
+        for _ in range(get_max_duplicate_queries()):
             result = _check_duplicate_query(query)
             assert result is None
 
@@ -264,7 +266,7 @@ class TestCheckDuplicateQuery:
 
         reset_query_tracking()
         query = "SELECT * FROM logs"
-        factory._seen_queries[query.strip().lower()] = MAX_DUPLICATE_QUERIES
+        factory._seen_queries[query.strip().lower()] = get_max_duplicate_queries()
 
         result = _check_duplicate_query(query)
         assert result is not None
@@ -630,23 +632,23 @@ class TestConstants:
 
     def test_query_limits_reasonable(self):
         """Test query limits are reasonable values."""
-        assert MAX_QUERIES_PER_INVESTIGATION > 0
-        assert MAX_QUERIES_CRITICAL > MAX_QUERIES_PER_INVESTIGATION
-        assert MAX_TOTAL_QUERIES > MAX_QUERIES_CRITICAL
+        assert get_max_queries_per_investigation() > 0
+        assert get_max_queries_critical() > get_max_queries_per_investigation()
+        assert get_max_total_queries() > get_max_queries_critical()
 
     def test_bonus_queries_positive(self):
         """Test bonus queries are positive."""
-        assert BONUS_QUERIES_FOR_EVIDENCE > 0
-        assert BONUS_QUERIES_FOR_PYRAMID_L4 > 0
+        assert get_bonus_queries_for_evidence() > 0
+        assert get_bonus_queries_for_pyramid_l4() > 0
 
     def test_duplicate_limit_reasonable(self):
         """Test duplicate limit is reasonable."""
-        assert MAX_DUPLICATE_QUERIES >= 1
+        assert get_max_duplicate_queries() >= 1
 
     def test_stage_limits_progressive(self):
         """Test stage limits increase through investigation."""
-        assert QUERY_LIMITS_BY_STAGE["triage"] <= QUERY_LIMITS_BY_STAGE["causation"]
-        assert QUERY_LIMITS_BY_STAGE["causation"] <= QUERY_LIMITS_BY_STAGE["lateral"]
+        assert get_query_limits_by_stage()["triage"] <= get_query_limits_by_stage()["causation"]
+        assert get_query_limits_by_stage()["causation"] <= get_query_limits_by_stage()["lateral"]
 
 
 class TestOptimizeLogqlQuery:

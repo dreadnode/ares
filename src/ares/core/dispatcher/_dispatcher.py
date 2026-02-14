@@ -21,16 +21,17 @@ The dispatcher functionality is split across mixin classes for maintainability:
 from __future__ import annotations
 
 import asyncio
-from asyncio import PriorityQueue, Queue
+from asyncio import Queue
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from ares.core.config import get_agent_heartbeat_timeout
+from ares.core.config import get_agent_heartbeat_timeout, get_vulnerability_priorities
 
 # Import all mixins
 from ares.core.dispatcher.agents import AgentMixin
 from ares.core.dispatcher.announcements import AnnouncementMixin
+from ares.core.dispatcher.deferred_queue import DeferredQueueMixin
 from ares.core.dispatcher.messaging import MessagingMixin
 from ares.core.dispatcher.monitoring import MonitoringMixin
 from ares.core.dispatcher.persistence import PersistenceMixin
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
 
 class RedTeamDispatcher(
     ThrottlingMixin,
+    DeferredQueueMixin,
     AgentMixin,
     MessagingMixin,
     PublishingMixin,
@@ -91,14 +93,18 @@ class RedTeamDispatcher(
         task_id = await dispatcher.request_crack(hash_data, "orchestrator")
     """
 
-    def __init__(self, redis_url: str | None = None):
+    def __init__(self, redis_url: str | None = None, *, is_orchestrator: bool = True):
         """
         Initialize the dispatcher.
 
         Args:
             redis_url: Optional Redis URL for state persistence and task queuing.
                        If not provided, uses in-memory state only.
+            is_orchestrator: Whether this dispatcher is for the orchestrator (True) or
+                            a worker (False). Workers don't run result consumer or
+                            stale task cleanup since they only send results, not consume them.
         """
+        self._is_orchestrator = is_orchestrator
         self._agents: dict[str, AgentInfo] = {}
         self._message_queues: dict[str, Queue[AgentMessage]] = {}
         self._shared_state: SharedRedTeamState | None = None
@@ -120,27 +126,9 @@ class RedTeamDispatcher(
         # Role-based routing
         self._role_queues: dict[AgentRole, str] = {}  # role -> agent_name
 
-        # Priority-based vulnerability queue
-        self._vulnerability_queue: PriorityQueue[tuple[int, str, dict[str, Any]]] = PriorityQueue()
-        self._vulnerability_priorities: dict[str, int] = {
-            "ADCS_ESC1": 1,
-            "ADCS_ESC4": 2,
-            "ADCS_ESC8": 3,
-            "krbtgt_hash": 4,
-            "domain_admin_hash": 5,
-            "acl_abuse": 6,
-            "unconstrained_delegation": 7,
-            "constrained_delegation": 8,
-            "rbcd": 9,
-            "mssql_impersonation": 10,
-            "mssql_linked": 11,
-            "mssql_linked_server": 11,  # Alias for mssql_linked
-            "mssql_xp_cmdshell": 12,
-            "gpo_abuse": 13,
-            "laps_abuse": 14,
-            "dcsync": 15,
-            "shadow_credentials": 16,
-        }
+        # Vulnerability priorities from config (single source of truth)
+        # Lower number = higher priority (exploited first)
+        self._vulnerability_priorities: dict[str, int] = get_vulnerability_priorities()
 
         # Task completion futures for wait_for_task
         self._task_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
@@ -153,10 +141,18 @@ class RedTeamDispatcher(
         self._last_dispatch_time: float = 0.0
         self._rate_limit_errors: int = 0
         self._global_backoff_until: float = 0.0
-        self._throttle_lock = asyncio.Lock()
+        # Lock created lazily to avoid event loop binding issues
+        self._throttle_lock: asyncio.Lock | None = None
 
         # Phase tracking for transition logging
         self._last_phase: str = "initial_access"
+
+        # Track vulnerabilities that have been dequeued (returned from get_next_vulnerability)
+        # Separate from exploited_vulnerabilities to preserve accurate exploitation stats
+        self._dequeued_vuln_ids: set[str] = set()
+
+        # Deferred queue for throttled tasks (queue instead of drop)
+        self._init_deferred_queue()
 
     async def start(self, operation_id: str) -> None:
         """
@@ -188,10 +184,16 @@ class RedTeamDispatcher(
         # Start background tasks
         self._heartbeat_task = asyncio.create_task(self._heartbeat_monitor())
 
-        # Start result consumer for Redis-based task completion
-        if self._task_queue:
+        # Start result consumer for Redis-based task completion (orchestrator only)
+        # Workers send results via task_queue.send_result(), they don't consume them.
+        # Running result consumer on workers causes spurious warnings because workers
+        # recover pending_tasks from Redis but never update them when tasks complete.
+        if self._task_queue and self._is_orchestrator:
             self._result_consumer_task = asyncio.create_task(self._result_consumer())
             logger.info("Result consumer started for Redis task completion")
+
+            # Start deferred queue processor (handles throttled tasks)
+            await self._start_deferred_processor()
 
         logger.info(f"Dispatcher started for operation {operation_id}")
 
@@ -212,6 +214,9 @@ class RedTeamDispatcher(
                 await self._result_consumer_task
             except asyncio.CancelledError:
                 pass
+
+        # Stop deferred queue processor
+        await self._stop_deferred_processor()
 
         # Cleanup background publish tasks in shared state
         if self._shared_state:

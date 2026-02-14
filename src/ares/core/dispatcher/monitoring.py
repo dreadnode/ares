@@ -7,10 +7,20 @@ and consuming task results from Redis.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from loguru import logger
+
+from ares.core.config import (
+    get_max_concurrent_tasks,
+    get_max_redis_consecutive_failures,
+    get_redis_retry_base_delay,
+    get_redis_retry_max_delay,
+    get_stale_task_timeout,
+)
+from ares.core.models import TaskInfo, TaskStatus
 
 if TYPE_CHECKING:
     from ares.core.dispatcher._dispatcher import RedTeamDispatcher
@@ -18,6 +28,16 @@ if TYPE_CHECKING:
 
 class MonitoringMixin:
     """Heartbeat and result monitoring for agent health and task completion."""
+
+    # Rate-limit noisy warnings (class-level to persist across calls)
+    _last_hard_cap_warning: float = 0.0
+    _hard_cap_warning_interval: float = 30.0  # Only log every 30 seconds
+    _last_pickup_warning: float = 0.0
+    _pickup_warning_interval: float = 60.0  # Only log pickup warnings every 60 seconds
+    # Track tasks we've already warned about - shared across all instances
+    # Using a simple class variable here since MonitoringMixin is only used as a mixin
+    # and tracking is ephemeral (reset on process restart which is fine)
+    _warned_tasks: ClassVar[set[str]] = set()
 
     async def heartbeat(
         self: RedTeamDispatcher,
@@ -33,52 +53,83 @@ class MonitoringMixin:
             status: Current status (idle, busy, offline).
             current_task: Current task ID if busy.
         """
+        now = datetime.now(timezone.utc)
         if agent_name in self._agents:
             self._agents[agent_name].status = status
             self._agents[agent_name].current_task = current_task
-            self._agents[agent_name].last_heartbeat = datetime.now(timezone.utc)
+            self._agents[agent_name].last_heartbeat = now
+
+        # Update task activity when worker reports working on it
+        # This keeps the task "alive" in stale detection
+        if current_task and self._shared_state:
+            task_info = self._shared_state.pending_tasks.get(current_task)
+            if task_info:
+                task_info.last_activity_at = now
+                # Also mark as in_progress if still pending
+                if task_info.status == TaskStatus.PENDING:
+                    task_info.status = TaskStatus.IN_PROGRESS
+                    task_info.started_at = now
 
     async def _heartbeat_monitor(self: RedTeamDispatcher) -> None:
-        """Background task to monitor agent heartbeats."""
+        """Background task to monitor agent heartbeats.
+
+        Resilience: Continues running even if individual heartbeat checks fail.
+        Connection errors are logged but don't stop the monitor.
+        """
+        consecutive_failures = 0
+
         while self._running:
-            now = datetime.now(timezone.utc)
+            try:
+                now = datetime.now(timezone.utc)
 
-            # For cross-pod workers, read heartbeats from Redis
-            if self._task_queue:
-                for agent_name in list(self._agents.keys()):
-                    try:
-                        heartbeat_data = await self._task_queue.get_heartbeat(agent_name)
-                        if heartbeat_data:
-                            # Update in-memory state from Redis heartbeat
-                            timestamp_str = heartbeat_data.get("timestamp")
-                            if timestamp_str:
-                                timestamp = datetime.fromisoformat(timestamp_str)
-                                self._agents[agent_name].last_heartbeat = timestamp
-                                self._agents[agent_name].status = heartbeat_data.get(
-                                    "status", "idle"
-                                )
-                                self._agents[agent_name].current_task = heartbeat_data.get(
-                                    "current_task"
-                                )
-                    except Exception as e:  # noqa: PERF203
-                        # Heartbeat failures could indicate auth issues - log at ERROR level
-                        logger.error(
-                            f"Failed to get heartbeat for {agent_name}: {e}. "
-                            "This may indicate authentication failure or misconfiguration.",
-                            exc_info=True,
+                # For cross-pod workers, read heartbeats from Redis
+                if self._task_queue:
+                    for agent_name in list(self._agents.keys()):
+                        try:
+                            heartbeat_data = await self._task_queue.get_heartbeat(agent_name)
+                            if heartbeat_data:
+                                # Update in-memory state from Redis heartbeat
+                                timestamp_str = heartbeat_data.get("timestamp")
+                                if timestamp_str:
+                                    timestamp = datetime.fromisoformat(timestamp_str)
+                                    self._agents[agent_name].last_heartbeat = timestamp
+                                    self._agents[agent_name].status = heartbeat_data.get(
+                                        "status", "idle"
+                                    )
+                                    self._agents[agent_name].current_task = heartbeat_data.get(
+                                        "current_task"
+                                    )
+                        except Exception as e:  # noqa: PERF203
+                            # Heartbeat failures could indicate auth issues - log at ERROR level
+                            logger.error(
+                                f"Failed to get heartbeat for {agent_name}: {e}. "
+                                "This may indicate authentication failure or misconfiguration.",
+                            )
+
+                # Check for stale heartbeats
+                for agent_name, agent_info in list(self._agents.items()):
+                    elapsed = (now - agent_info.last_heartbeat).total_seconds()
+                    stale_threshold = max(60, self._agent_heartbeat_timeout)
+                    if elapsed > stale_threshold and agent_info.status != "offline":
+                        logger.warning(
+                            f"Agent {agent_name} heartbeat stale ({elapsed:.0f}s) - marking offline"
                         )
+                        agent_info.status = "offline"
 
-            # Check for stale heartbeats
-            for agent_name, agent_info in list(self._agents.items()):
-                elapsed = (now - agent_info.last_heartbeat).total_seconds()
-                stale_threshold = max(60, self._agent_heartbeat_timeout)
-                if elapsed > stale_threshold and agent_info.status != "offline":
-                    logger.warning(
-                        f"Agent {agent_name} heartbeat stale ({elapsed:.0f}s) - marking offline"
-                    )
-                    agent_info.status = "offline"
+                # Reset failure counter on success
+                consecutive_failures = 0
+                await asyncio.sleep(15)
 
-            await asyncio.sleep(15)
+            except asyncio.CancelledError:  # noqa: PERF203
+                logger.info("Heartbeat monitor cancelled")
+                break
+
+            except Exception as e:
+                consecutive_failures += 1
+                logger.warning(f"Heartbeat monitor error (attempt {consecutive_failures}): {e}")
+                # Don't crash - heartbeat failures are less critical than result consumer
+                # Just wait and retry
+                await asyncio.sleep(min(15, consecutive_failures * 5))
 
     async def _result_consumer(self: RedTeamDispatcher) -> None:
         """
@@ -88,25 +139,288 @@ class MonitoringMixin:
         task_queue.send_result()) and the dispatcher's in-memory pending_tasks
         tracking. Without this, tasks complete on workers but the orchestrator
         never knows about it.
+
+        Resilience: If Redis becomes unavailable, this consumer will retry with
+        exponential backoff. After MAX_REDIS_CONSECUTIVE_FAILURES, it raises
+        an exception to crash the orchestrator so Kubernetes can restart it.
         """
         logger.info("Result consumer started")
+        consecutive_failures = 0
+        health_check_counter = 0  # Log health every N cycles
 
-        try:
-            while self._running:
+        while self._running:
+            try:
                 await self._consume_pending_results()
+                # Success - reset failure counter and delay
+                if consecutive_failures > 0:
+                    logger.info(f"Result consumer recovered after {consecutive_failures} failures")
+                consecutive_failures = 0
+
+                # Log throttle health every 30 cycles (~30 seconds)
+                health_check_counter += 1
+                if health_check_counter >= 30:
+                    health_check_counter = 0
+                    await self._log_throttle_health()
+
                 await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            logger.info("Result consumer cancelled")
-        except Exception as e:
-            logger.error(f"Result consumer fatal error: {e}", exc_info=True)
+
+            except asyncio.CancelledError:  # noqa: PERF203
+                logger.info("Result consumer cancelled")
+                break
+
+            except Exception as e:
+                consecutive_failures += 1
+                # Check if this is a connection-related error
+                error_str = str(e).lower()
+                is_connection_error = any(
+                    keyword in error_str
+                    for keyword in [
+                        "connection",
+                        "connect",
+                        "closed",
+                        "timeout",
+                        "broken pipe",
+                        "reset",
+                        "refused",
+                        "sentinel",
+                    ]
+                )
+
+                if is_connection_error:
+                    # Exponential backoff with cap
+                    max_failures = get_max_redis_consecutive_failures()
+                    delay = min(
+                        get_redis_retry_base_delay() * (2 ** min(consecutive_failures - 1, 4)),
+                        get_redis_retry_max_delay(),
+                    )
+                    logger.warning(
+                        f"Result consumer Redis error (attempt {consecutive_failures}/"
+                        f"{max_failures}): {e}. Retrying in {delay:.1f}s"
+                    )
+
+                    # Fail fast after too many consecutive failures
+                    if consecutive_failures >= max_failures:
+                        logger.critical(
+                            f"Result consumer failed {consecutive_failures} times consecutively. "
+                            "Redis appears unavailable. Crashing orchestrator for restart."
+                        )
+                        raise RuntimeError(
+                            f"Redis unavailable after {consecutive_failures} consecutive failures"
+                        ) from e
+
+                    await asyncio.sleep(delay)
+                else:
+                    # Non-connection error - log and continue with normal delay
+                    logger.error(f"Result consumer error: {e}", exc_info=True)
+                    await asyncio.sleep(1)
 
         logger.info("Result consumer stopped")
+
+    async def _cleanup_stale_tasks(self: RedTeamDispatcher) -> None:
+        """
+        Clean up tasks that have been pending for too long.
+
+        This prevents throttle deadlock when:
+        - Workers crash without sending results
+        - Tasks get lost in Redis
+        - Network partitions cause result delivery failures
+
+        Tasks older than stale_task_timeout (from config) are removed from:
+        - pending_tasks (decreases LLM task count)
+        - _redis_task_ids (stops result polling)
+
+        Also detects deadlock conditions (at hard cap with no progress) and
+        applies aggressive cleanup to break the deadlock.
+        """
+        if not self._shared_state:
+            return
+
+        stale_timeout = get_stale_task_timeout()
+        now = datetime.now(timezone.utc)
+        stale_task_ids: list[str] = []
+
+        # Count active LLM tasks for deadlock detection
+        llm_count = sum(
+            1
+            for t in self._shared_state.pending_tasks.values()
+            if t.task_type not in ("crack", "command")
+            and t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
+        )
+        max_tasks = get_max_concurrent_tasks()
+        hard_cap = int(max_tasks * 1.5)
+
+        # Deadlock detection: at hard cap with no recent activity
+        # Use shorter timeout when at hard cap to break deadlock faster
+        is_at_hard_cap = llm_count >= hard_cap
+        effective_timeout = stale_timeout // 2 if is_at_hard_cap else stale_timeout
+
+        if is_at_hard_cap:
+            # Rate-limit this warning to avoid log spam (runs every 1s in the loop)
+            current_time = time.monotonic()
+            if (
+                current_time - MonitoringMixin._last_hard_cap_warning
+                >= MonitoringMixin._hard_cap_warning_interval
+            ):
+                MonitoringMixin._last_hard_cap_warning = current_time
+                logger.warning(
+                    f"Throttle at HARD CAP ({llm_count}/{hard_cap}) - "
+                    f"using aggressive stale timeout ({effective_timeout}s)"
+                )
+
+        # Early warning for tasks not picked up within 60s
+        # This helps identify worker availability issues before they become stale
+        pickup_warning_threshold = 60  # seconds
+        slow_pickup_tasks: list[tuple[str, str, str, float]] = []  # (task_id, type, agent, age)
+
+        for task_id, task_info in list(self._shared_state.pending_tasks.items()):
+            # Only clean up tasks still in PENDING or IN_PROGRESS
+            if task_info.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+                continue
+
+            # Use last_activity_at for staleness check (more accurate than created_at)
+            # Falls back to created_at if last_activity_at is not set
+            activity_time = getattr(task_info, "last_activity_at", None) or task_info.created_at
+            age_seconds = (now - activity_time).total_seconds()
+
+            if age_seconds > effective_timeout:
+                stale_task_ids.append(task_id)
+            elif self._should_warn_slow_pickup(
+                task_id, task_info, age_seconds, pickup_warning_threshold
+            ):
+                slow_pickup_tasks.append(
+                    (task_id, task_info.task_type, task_info.assigned_agent, age_seconds)
+                )
+                MonitoringMixin._warned_tasks.add(task_id)
+
+        # Log early warning for slow task pickups
+        self._log_slow_pickup_warning(slow_pickup_tasks)
+
+        if stale_task_ids:
+            for task_id in stale_task_ids:
+                stale_task: TaskInfo | None = self._shared_state.pending_tasks.get(task_id)
+                if stale_task is not None:
+                    del self._shared_state.pending_tasks[task_id]
+                self._redis_task_ids.discard(task_id)
+                MonitoringMixin._warned_tasks.discard(task_id)  # Clean up warning tracking
+
+                if stale_task is not None:
+                    activity_time = (
+                        getattr(stale_task, "last_activity_at", None) or stale_task.created_at
+                    )
+                    logger.warning(
+                        f"Cleaned up stale task {task_id} ({stale_task.task_type} -> "
+                        f"{stale_task.assigned_agent}) - no activity for "
+                        f"{(now - activity_time).total_seconds():.0f}s"
+                    )
+
+            logger.info(
+                f"Stale task cleanup: removed {len(stale_task_ids)} tasks "
+                f"(threshold: {effective_timeout}s, at_hard_cap: {is_at_hard_cap})"
+            )
+
+    def _should_warn_slow_pickup(
+        self: RedTeamDispatcher,
+        task_id: str,
+        task_info: TaskInfo,
+        age_seconds: float,
+        threshold: float,
+    ) -> bool:
+        """Check if we should warn about a slow task pickup."""
+        return (
+            age_seconds > threshold
+            and task_info.status == TaskStatus.PENDING
+            and task_id not in MonitoringMixin._warned_tasks
+        )
+
+    def _log_slow_pickup_warning(
+        self: RedTeamDispatcher,
+        slow_pickup_tasks: list[tuple[str, str, str, float]],
+    ) -> None:
+        """Log warning for tasks not picked up by workers within expected time."""
+        if not slow_pickup_tasks:
+            return
+
+        current_time = time.monotonic()
+        if (
+            current_time - MonitoringMixin._last_pickup_warning
+            < MonitoringMixin._pickup_warning_interval
+        ):
+            return
+
+        MonitoringMixin._last_pickup_warning = current_time
+        task_summary = ", ".join(
+            f"{t[0][:12]}({t[1]}->{t[2]}, {t[3]:.0f}s)" for t in slow_pickup_tasks[:5]
+        )
+        affected_agents = {t[2] for t in slow_pickup_tasks}
+        logger.warning(
+            f"⚠️ {len(slow_pickup_tasks)} task(s) pending >60s without worker pickup: "
+            f"{task_summary}{'...' if len(slow_pickup_tasks) > 5 else ''} - "
+            f"check worker availability for {affected_agents}"
+        )
+
+    async def _reconcile_tasks_with_workers(self: RedTeamDispatcher) -> None:
+        """
+        Reconcile pending_tasks with actual worker state.
+
+        Checks if tasks claimed by workers still have active workers processing them.
+        If a worker's heartbeat shows it's not working on a task we think it has,
+        update the task's activity time to eventually trigger stale cleanup.
+        """
+        if not self._shared_state or not self._task_queue:
+            return
+
+        now = datetime.now(timezone.utc)
+
+        # Build map of what each agent claims to be working on (from heartbeats)
+        worker_current_tasks: dict[str, str | None] = {}
+        for agent_name in list(self._agents.keys()):
+            try:
+                heartbeat_data = await self._task_queue.get_heartbeat(agent_name)
+                if heartbeat_data:
+                    worker_current_tasks[agent_name] = heartbeat_data.get("current_task")
+            except Exception:  # noqa: PERF203
+                pass
+
+        # Check each pending task
+        orphaned_count = 0
+        for task_id, task_info in list(self._shared_state.pending_tasks.items()):
+            if task_info.status != TaskStatus.IN_PROGRESS:
+                continue
+
+            agent = task_info.assigned_agent
+            worker_task = worker_current_tasks.get(agent)
+
+            # If worker's heartbeat shows it's working on THIS task, update activity
+            if worker_task == task_id:
+                task_info.last_activity_at = now
+            # If worker exists but is working on a DIFFERENT task (or idle), this task may be orphaned
+            elif agent in worker_current_tasks and worker_task != task_id:
+                orphaned_count += 1
+                # Don't immediately clean up - just log. Stale cleanup will handle it
+                # based on last_activity_at not being updated.
+                task_age = (now - task_info.last_activity_at).total_seconds()
+                if task_age > 60:  # Only log if no activity for >60s
+                    logger.debug(
+                        f"Task {task_id} may be orphaned: assigned to {agent} but "
+                        f"worker shows current_task={worker_task}, no activity for {task_age:.0f}s"
+                    )
+
+        if orphaned_count > 0:
+            logger.info(
+                f"Task reconciliation: {orphaned_count} potentially orphaned tasks detected"
+            )
 
     async def _consume_pending_results(self: RedTeamDispatcher) -> None:
         """Check and consume results for all pending Redis tasks."""
         if not self._task_queue:
             logger.warning("Result consumer has no task queue; skipping result checks")
             return
+
+        # Periodically clean up stale tasks to prevent throttle deadlock
+        await self._cleanup_stale_tasks()
+
+        # Reconcile tasks with workers every cycle to detect orphans
+        await self._reconcile_tasks_with_workers()
 
         task_ids_to_check = list(self._redis_task_ids)
 
@@ -156,6 +470,62 @@ class MonitoringMixin:
                     )
             except Exception as e:  # noqa: PERF203
                 logger.warning(f"Error checking result for task {task_id}: {e}")
+
+    async def _log_throttle_health(self: RedTeamDispatcher) -> None:
+        """
+        Log throttle health status for observability.
+
+        Call periodically to track throttle state and detect potential deadlocks.
+        """
+        if not self._shared_state:
+            return
+
+        # Count tasks by status
+        pending_count = 0
+        in_progress_count = 0
+        llm_count = 0
+        oldest_task_age = 0.0
+        now = datetime.now(timezone.utc)
+
+        for task_info in self._shared_state.pending_tasks.values():
+            if task_info.status == TaskStatus.PENDING:
+                pending_count += 1
+            elif task_info.status == TaskStatus.IN_PROGRESS:
+                in_progress_count += 1
+
+            if task_info.task_type not in ("crack", "command") and task_info.status in (
+                TaskStatus.PENDING,
+                TaskStatus.IN_PROGRESS,
+            ):
+                llm_count += 1
+
+            # Track oldest task
+            activity_time = getattr(task_info, "last_activity_at", None) or task_info.created_at
+            age = (now - activity_time).total_seconds()
+            oldest_task_age = max(oldest_task_age, age)
+
+        max_tasks = get_max_concurrent_tasks()
+        hard_cap = int(max_tasks * 1.5)
+
+        # Get deferred queue status
+        deferred_status = (
+            self.get_deferred_queue_status() if hasattr(self, "get_deferred_queue_status") else {}
+        )
+        deferred_total = deferred_status.get("total_queued", 0)
+
+        # Log warning if at hard cap or tasks are very old
+        if llm_count >= hard_cap or oldest_task_age > 120:
+            logger.warning(
+                f"Throttle health: llm_tasks={llm_count}/{max_tasks} (hard_cap={hard_cap}), "
+                f"pending={pending_count}, in_progress={in_progress_count}, "
+                f"deferred={deferred_total}, oldest_task_age={oldest_task_age:.0f}s"
+            )
+        else:
+            logger.debug(
+                f"Throttle health: llm_tasks={llm_count}/{max_tasks}, "
+                f"pending={pending_count}, in_progress={in_progress_count}, "
+                f"deferred={deferred_total}"
+            )
 
 
 __all__ = ["MonitoringMixin"]

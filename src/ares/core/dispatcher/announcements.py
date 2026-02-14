@@ -43,8 +43,13 @@ class AnnouncementMixin:
             credential_type: Type of credential (password, hash, ticket).
             source_agent: Agent that achieved it.
         """
+        from datetime import datetime, timezone
+
         self.shared_state.has_domain_admin = True
         self.shared_state.domain_admin_path = attack_path
+        # Record completion time for accurate report duration
+        if not self.shared_state.completed_at:
+            self.shared_state.completed_at = datetime.now(timezone.utc)
 
         await self._broadcast(
             DomainAdminAchieved(
@@ -98,11 +103,18 @@ class AnnouncementMixin:
         """
         Announce that the operation is complete.
 
+        This broadcasts the completion message to in-process agents AND
+        sets the Redis status key so remote workers can detect completion.
+
         Args:
             source_agent: Agent making the announcement.
             success: Whether the operation was successful.
             summary: Summary of the operation.
         """
+        import json
+        from datetime import datetime, timezone
+
+        # Broadcast to in-process agents (in-memory queues)
         await self._broadcast(
             OperationComplete(
                 source_agent=source_agent,
@@ -114,6 +126,29 @@ class AnnouncementMixin:
                 domain_admin_achieved=self.shared_state.has_domain_admin,
             )
         )
+
+        # CRITICAL: Set Redis status key so remote workers detect completion
+        # Workers check is_operation_completed() which reads this key
+        if self._redis_client is not None:
+            try:
+                status_key = f"ares:operations:{self.shared_state.operation_id}:status"
+                status_data = {
+                    "status": "completed",
+                    "success": success,
+                    "summary": summary,
+                    "domain_admin_achieved": self.shared_state.has_domain_admin,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+                await self._redis_client.setex(
+                    status_key,
+                    86400,  # 24 hour TTL
+                    json.dumps(status_data),
+                )
+                logger.info(
+                    f"Published operation completion to Redis: {self.shared_state.operation_id}"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to publish operation status to Redis: {e}")
 
         await self._checkpoint()
         logger.info(f"Operation complete: {summary}")

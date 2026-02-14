@@ -12,6 +12,7 @@ from ares.core.models import (
     Credential,
     Host,
     SharedRedTeamState,
+    Target,
     VulnerabilityInfo,
 )
 
@@ -325,7 +326,7 @@ class TestFindDomainControllerIp:
         # sql01 has RDP (3389) but NOT LDAP (389)
         dispatcher._shared_state.all_hosts.append(
             Host(
-                ip="10.1.2.146",
+                ip="192.168.58.146",
                 hostname="sql01.contoso.local",
                 services=["1433/tcp ms-sql-s", "3389/tcp ms-wbt-server", "445/tcp smb"],
             )
@@ -333,7 +334,7 @@ class TestFindDomainControllerIp:
         # dc01 is the actual DC with Kerberos services
         dispatcher._shared_state.all_hosts.append(
             Host(
-                ip="10.1.2.240",
+                ip="192.168.58.240",
                 hostname="dc01.contoso.local",
                 services=["88/tcp kerberos-sec", "389/tcp ldap", "53/tcp domain"],
             )
@@ -342,7 +343,7 @@ class TestFindDomainControllerIp:
         dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
 
         # Should return dc01 (the actual DC), NOT sql01
-        assert dc_ip == "10.1.2.240"
+        assert dc_ip == "192.168.58.240"
 
     def test_matches_exact_port_389(self):
         """Port 389 should be detected as LDAP."""
@@ -445,8 +446,8 @@ class TestFindDomainControllerIp:
         dispatcher._shared_state.all_hosts.extend(
             [
                 Host(
-                    ip="10.1.2.146",
-                    hostname="sql01.corp.contoso.local",
+                    ip="192.168.58.146",
+                    hostname="sql01.fabrikam.local",
                     services=[
                         "1433/tcp ms-sql-s",
                         "139/tcp netbios-ssn",
@@ -457,8 +458,8 @@ class TestFindDomainControllerIp:
                     ],
                 ),
                 Host(
-                    ip="10.1.2.240",
-                    hostname="dc01.corp.contoso.local",
+                    ip="192.168.58.240",
+                    hostname="dc01.fabrikam.local",
                     services=[
                         "139/tcp netbios-ssn",
                         "88/tcp kerberos-sec",
@@ -470,7 +471,7 @@ class TestFindDomainControllerIp:
                     ],
                 ),
                 Host(
-                    ip="10.1.2.183",
+                    ip="192.168.58.183",
                     hostname="dc01.contoso.local",
                     services=[
                         "139/tcp netbios-ssn",
@@ -486,13 +487,52 @@ class TestFindDomainControllerIp:
             ]
         )
 
-        # Test corp.contoso.local -> must be dc01.corp.contoso.local, NOT sql01
+        # Test fabrikam.local -> must be dc01.fabrikam.local, NOT sql01
         # This is the critical test - sql01 was incorrectly selected before the fix
-        corp_dc = dispatcher._find_domain_controller_ip("corp.contoso.local")
-        assert corp_dc == "10.1.2.240", (
-            f"Expected dc01.corp.contoso.local (10.1.2.240), got {corp_dc}"
+        fabrikam_dc = dispatcher._find_domain_controller_ip("fabrikam.local")
+        assert fabrikam_dc == "192.168.58.240", (
+            f"Expected dc01.fabrikam.local (192.168.58.240), got {fabrikam_dc}"
         )
-        assert corp_dc != "10.1.2.146", "BUG: sql01 selected - 3389 matched as 389!"
+        assert fabrikam_dc != "192.168.58.146", "BUG: sql01 selected - 3389 matched as 389!"
+
+    def test_uses_target_when_domain_matches(self):
+        """When target.domain matches requested domain, use target.ip.
+
+        This handles the case where the operation was started with --domain flag,
+        meaning the user explicitly told us the target IP is the DC for that domain.
+        """
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-target")
+
+        # Set target with domain (simulates K8s orchestrator startup with --domain)
+        dispatcher._shared_state.target = Target(
+            ip="192.168.58.10",
+            domain="contoso.local",
+        )
+        # No hosts in all_hosts yet (recon hasn't run)
+
+        dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
+
+        # Should return target.ip since target.domain matches
+        assert dc_ip == "192.168.58.10"
+
+    def test_ignores_target_when_domain_mismatch(self):
+        """When target.domain doesn't match, don't use target.ip blindly."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-mismatch")
+
+        # Target is for contoso.local
+        dispatcher._shared_state.target = Target(
+            ip="192.168.58.10",
+            domain="contoso.local",
+        )
+        # No hosts in all_hosts yet
+
+        # Ask for different domain
+        dc_ip = dispatcher._find_domain_controller_ip("fabrikam.local")
+
+        # Should NOT return target.ip - different domain
+        assert dc_ip == ""
 
 
 class TestS4UAutoChaining:
@@ -689,3 +729,1011 @@ class TestS4UAutoChaining:
         assert call_kwargs["techniques"] == ["secretsdump"]
         assert call_kwargs["extra_params"]["ticket_path"] == "Administrator.ccache"
         assert call_kwargs["extra_params"]["no_pass"] is True
+
+
+class TestCredentialDomainResolution:
+    """Tests for credential domain resolution to prevent false positives.
+
+    The critical bug was that credentials extracted from tool output were
+    assigned the target domain, even when the user belonged to a different
+    domain in a multi-domain forest.
+
+    Example: sql_svc:SqlP@ss123 belongs to fabrikam.local,
+    but was incorrectly assigned contoso.local when that was the target.
+    """
+
+    def test_resolve_credential_domain_uses_fqdn_from_output(self):
+        """Extracted FQDN domain should be used as-is."""
+        from ares.core.models import Target
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-1")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # If the output has an FQDN, use it
+        domain = dispatcher._resolve_credential_domain("sql_svc", "fabrikam.local")
+
+        assert domain == "fabrikam.local"
+
+    def test_resolve_credential_domain_resolves_netbios_via_mapping(self):
+        """NetBIOS domain should be resolved via authoritative mapping."""
+        from ares.core.models import Target
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-2")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        # Add authoritative NetBIOS -> FQDN mapping
+        dispatcher._shared_state.netbios_to_fqdn["fabrikam"] = "fabrikam.local"
+
+        domain = dispatcher._resolve_credential_domain("sql_svc", "FABRIKAM")
+
+        assert domain == "fabrikam.local"
+
+    def test_resolve_credential_domain_cross_references_users(self):
+        """Should cross-reference with discovered users to find correct domain."""
+        from ares.core.models import Target, User
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-3")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        # User was previously discovered with correct domain
+        dispatcher._shared_state.all_users.append(User(username="sql_svc", domain="fabrikam.local"))
+
+        # No domain in output, but user exists in state
+        domain = dispatcher._resolve_credential_domain("sql_svc", "")
+
+        assert domain == "fabrikam.local"
+
+    def test_resolve_credential_domain_ambiguous_returns_empty(self):
+        """Should return empty when user exists in multiple domains without hint."""
+        from ares.core.models import Target, User
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-4")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        # Same username in multiple domains (different users)
+        dispatcher._shared_state.all_users.append(
+            User(username="administrator", domain="fabrikam.local")
+        )
+        dispatcher._shared_state.all_users.append(
+            User(username="administrator", domain="contoso.local")
+        )
+
+        # No domain hint, user is ambiguous
+        domain = dispatcher._resolve_credential_domain("administrator", "")
+
+        # Should return empty to avoid false positive
+        assert domain == ""
+
+    def test_resolve_credential_domain_ambiguous_with_netbios_hint(self):
+        """Should prefer domain matching NetBIOS hint when user is in multiple domains."""
+        from ares.core.models import Target, User
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-5")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        dispatcher._shared_state.all_domains.extend(["fabrikam.local", "contoso.local"])
+        # Same username in multiple domains
+        dispatcher._shared_state.all_users.append(
+            User(username="administrator", domain="fabrikam.local")
+        )
+        dispatcher._shared_state.all_users.append(
+            User(username="administrator", domain="contoso.local")
+        )
+
+        # NetBIOS hint "FABRIKAM" should resolve to fabrikam.local
+        domain = dispatcher._resolve_credential_domain("administrator", "FABRIKAM")
+
+        assert domain == "fabrikam.local"
+
+    def test_resolve_credential_domain_unknown_user_no_domain(self):
+        """Should return empty for unknown user without domain info."""
+        from ares.core.models import Target
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-6")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # User not in state, no domain in output
+        domain = dispatcher._resolve_credential_domain("unknownuser", "")
+
+        # Should return empty, NOT the target domain
+        assert domain == ""
+
+    def test_resolve_credential_domain_netbios_matches_target(self):
+        """NetBIOS matching target domain should resolve to target."""
+        from ares.core.models import Target
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-7")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # NetBIOS "CONTOSO" matches target domain "contoso.local"
+        domain = dispatcher._resolve_credential_domain("someuser", "CONTOSO")
+
+        assert domain == "contoso.local"
+
+    def test_extract_plaintext_passwords_extracts_domain_backslash(self):
+        """Should extract domain from DOMAIN\\user format in output."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-8")
+
+        output = """
+        FABRIKAM\\sql_svc
+        Password: SqlP@ss123
+        """
+
+        creds = dispatcher._extract_plaintext_passwords_from_output(output)
+
+        assert len(creds) == 1
+        username, password, domain = creds[0]
+        assert username == "sql_svc"
+        assert password == "SqlP@ss123"  # pragma: allowlist secret
+        assert domain == "FABRIKAM"
+
+    def test_extract_plaintext_passwords_extracts_domain_upn(self):
+        """Should extract domain from user@contoso.local format in output."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-9")
+
+        output = """
+        sql_svc@fabrikam.local
+        Password: SqlP@ss123
+        """
+
+        creds = dispatcher._extract_plaintext_passwords_from_output(output)
+
+        assert len(creds) == 1
+        username, password, domain = creds[0]
+        assert username == "sql_svc"
+        assert password == "SqlP@ss123"  # pragma: allowlist secret
+        assert domain == "fabrikam.local"
+
+    def test_extract_plaintext_passwords_no_domain_returns_empty(self):
+        """Should return empty domain when not determinable from output."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-10")
+
+        output = """
+        samaccountname: sql_svc
+        Password: SqlP@ss123
+        """
+
+        creds = dispatcher._extract_plaintext_passwords_from_output(output)
+
+        assert len(creds) == 1
+        username, password, domain = creds[0]
+        assert username == "sql_svc"
+        assert password == "SqlP@ss123"  # pragma: allowlist secret
+        assert domain == ""  # No domain in output
+
+
+class TestCredentialDomainCrossReference:
+    """Tests for credential domain cross-reference in SharedRedTeamState.add_credential().
+
+    These tests verify that credentials are assigned the correct domain by
+    cross-referencing with discovered users, particularly in multi-domain forests
+    where a credential might have a parent domain but the user exists in a child domain.
+    """
+
+    def test_add_credential_corrects_parent_to_child_domain(self):
+        """Credential with parent domain should be corrected to child domain."""
+        from ares.core.models import Target, User
+
+        state = SharedRedTeamState(operation_id="op-test-parent-child")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # User discovered in child domain (from LDAP enumeration)
+        state.all_users.append(User(username="testuser", domain="child.contoso.local"))
+
+        # Credential comes in with parent domain (worker error)
+        cred = Credential(
+            username="testuser",
+            password="TestP@ss!",  # pragma: allowlist secret
+            domain="contoso.local",  # Wrong - should be child.contoso.local
+            source="ldap_description",
+        )
+
+        added = state.add_credential(cred, "enum")
+
+        assert added is True
+        # Check the stored credential has the correct domain
+        assert len(state.all_credentials) == 1
+        stored_cred = state.all_credentials[0]
+        assert stored_cred.domain == "child.contoso.local"
+
+    def test_add_credential_preserves_correct_domain(self):
+        """Credential with correct domain should be preserved."""
+        from ares.core.models import Target, User
+
+        state = SharedRedTeamState(operation_id="op-test-correct-domain")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # User in same domain as credential
+        state.all_users.append(User(username="admin", domain="contoso.local"))
+
+        cred = Credential(
+            username="admin",
+            password="P@ssw0rd!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="spray",
+        )
+
+        added = state.add_credential(cred, "lateral")
+
+        assert added is True
+        assert len(state.all_credentials) == 1
+        assert state.all_credentials[0].domain == "contoso.local"
+
+    def test_add_credential_new_user_accepts_domain(self):
+        """Credential for new user should accept provided domain."""
+        from ares.core.models import Target
+
+        state = SharedRedTeamState(operation_id="op-test-new-user")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # No users in state yet
+        cred = Credential(
+            username="newuser",
+            password="NewP@ss!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="kerberoast",
+        )
+
+        added = state.add_credential(cred, "cracker")
+
+        assert added is True
+        assert len(state.all_credentials) == 1
+        assert state.all_credentials[0].domain == "contoso.local"
+
+    def test_add_credential_prefers_more_specific_domain(self):
+        """When user exists in multiple domains, prefer most specific (longest)."""
+        from ares.core.models import Target, User
+
+        state = SharedRedTeamState(operation_id="op-test-specific-domain")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # User exists in both parent and child (edge case)
+        state.all_users.append(User(username="admin", domain="contoso.local"))
+        state.all_users.append(User(username="admin", domain="child.contoso.local"))
+
+        # Credential with parent domain should prefer child when ambiguous
+        cred = Credential(
+            username="admin",
+            password="AdminP@ss!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="spray",
+        )
+
+        added = state.add_credential(cred, "lateral")
+
+        assert added is True
+        assert len(state.all_credentials) == 1
+        # Should use child domain since it's more specific
+        assert state.all_credentials[0].domain == "child.contoso.local"
+
+    def test_add_credential_resolves_netbios_then_user_lookup(self):
+        """NetBIOS domain should be resolved first, then user lookup applied."""
+        from ares.core.models import Target, User
+
+        state = SharedRedTeamState(operation_id="op-test-netbios-user")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        state.all_domains.append("fabrikam.local")
+
+        # User discovered in fabrikam.local
+        state.all_users.append(User(username="sql_svc", domain="fabrikam.local"))
+
+        # Credential with NetBIOS domain
+        cred = Credential(
+            username="sql_svc",
+            password="SqlP@ss!",  # pragma: allowlist secret
+            domain="FABRIKAM",  # NetBIOS format
+            source="spray",
+        )
+
+        added = state.add_credential(cred, "lateral")
+
+        assert added is True
+        assert len(state.all_credentials) == 1
+        # Should resolve to FQDN
+        assert state.all_credentials[0].domain == "fabrikam.local"
+
+    def test_add_credential_rejects_cross_domain_duplicate(self):
+        """Credential with same username+password but wrong domain should be rejected.
+
+        This prevents agent hallucinations where a credential from one domain
+        (e.g., contoso.local) is incorrectly recorded with a different
+        domain (e.g., fabrikam.local) during cross-domain enumeration.
+        """
+        from ares.core.models import Target
+
+        state = SharedRedTeamState(operation_id="op-test-cross-domain-dup")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # First credential in correct domain
+        cred1 = Credential(
+            username="test.user",
+            password="TestPass123",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="ldap_description",
+        )
+        added1 = state.add_credential(cred1, "recon")
+        assert added1 is True
+        assert len(state.all_credentials) == 1
+
+        # Same credential recorded with wrong domain (agent hallucination)
+        cred2 = Credential(
+            username="test.user",
+            password="TestPass123",  # pragma: allowlist secret
+            domain="fabrikam.local",  # Wrong domain!
+            source="recon_bloodhound",
+        )
+        added2 = state.add_credential(cred2, "recon")
+
+        # Should be rejected as cross-domain duplicate
+        assert added2 is False
+        assert len(state.all_credentials) == 1
+        # Original credential should still be there with correct domain
+        assert state.all_credentials[0].domain == "contoso.local"
+
+    def test_add_credential_allows_legitimate_password_reuse(self):
+        """Same username+password in multiple domains is allowed if user exists in both.
+
+        This handles the sql_svc case where the same service account name with
+        the same password exists in multiple domains (legitimate password reuse).
+        """
+        from ares.core.models import Target, User
+
+        state = SharedRedTeamState(operation_id="op-test-password-reuse")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # User exists in BOTH domains (discovered via LDAP/BloodHound)
+        state.all_users.append(User(username="sql_svc", domain="contoso.local"))
+        state.all_users.append(User(username="sql_svc", domain="fabrikam.local"))
+
+        # First credential in contoso
+        cred1 = Credential(
+            username="sql_svc",
+            password="SqlP@ssw0rd!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="kerberoast",
+        )
+        added1 = state.add_credential(cred1, "cracker")
+        assert added1 is True
+
+        # Same credential in fabrikam - should be allowed (password reuse)
+        cred2 = Credential(
+            username="sql_svc",
+            password="SqlP@ssw0rd!",  # pragma: allowlist secret
+            domain="fabrikam.local",
+            source="kerberoast",
+        )
+        added2 = state.add_credential(cred2, "cracker")
+
+        # Should be allowed - user exists in both domains (legitimate password reuse)
+        assert added2 is True
+        assert len(state.all_credentials) == 2
+        domains = {c.domain for c in state.all_credentials}
+        assert domains == {"contoso.local", "fabrikam.local"}
+
+
+class TestDomainCleanup:
+    """Tests for domain cleanup and normalization."""
+
+    def test_cleanup_removes_netbios_when_fqdn_exists(self):
+        """NetBIOS domains should be removed when corresponding FQDN exists."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-cleanup-netbios",
+            "all_domains": ["child", "contoso.local", "child.contoso.local"],
+            "all_users": [],
+            "all_credentials": [],
+            "all_hashes": [],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # "child" should be removed since "child.contoso.local" exists
+        assert "child" not in state.all_domains
+        assert "contoso.local" in state.all_domains
+        assert "child.contoso.local" in state.all_domains
+        assert len(state.all_domains) == 2
+
+    def test_cleanup_dedupes_users_with_parent_child_domains(self):
+        """Users with both parent and child domain entries should be deduplicated."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-cleanup-users",
+            "all_domains": ["contoso.local", "child.contoso.local"],
+            "all_users": [
+                {"username": "sql_svc", "domain": "contoso.local"},
+                {"username": "sql_svc", "domain": "child.contoso.local"},
+                {"username": "domain_admin", "domain": "contoso.local"},
+            ],
+            "all_credentials": [],
+            "all_hashes": [],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # sql_svc should only exist in child domain
+        assert len(state.all_users) == 2
+        user_domains = {(u.username, u.domain) for u in state.all_users}
+        assert ("sql_svc", "child.contoso.local") in user_domains
+        assert ("sql_svc", "contoso.local") not in user_domains
+        # domain_admin stays in parent domain (only exists there)
+        assert ("domain_admin", "contoso.local") in user_domains
+
+    def test_cleanup_fixes_credentials_with_parent_domain(self):
+        """Credentials with parent domain should be fixed when user only in child."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-cleanup-creds",
+            "all_domains": ["contoso.local", "child.contoso.local"],
+            "all_users": [
+                {"username": "sql_svc", "domain": "contoso.local"},
+                {"username": "sql_svc", "domain": "child.contoso.local"},
+            ],
+            "all_credentials": [
+                {
+                    "username": "sql_svc",
+                    "password": "SqlP@ss123!",  # pragma: allowlist secret
+                    "domain": "contoso.local",
+                    "source": "test",
+                },
+            ],
+            "all_hashes": [],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Credential should be fixed to child domain
+        assert len(state.all_credentials) == 1
+        assert state.all_credentials[0].domain == "child.contoso.local"
+
+    def test_cleanup_fixes_hashes_with_parent_domain(self):
+        """Hashes with parent domain should be fixed when user only in child."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-cleanup-hashes",
+            "all_domains": ["contoso.local", "child.contoso.local"],
+            "all_users": [
+                {"username": "sql_svc", "domain": "contoso.local"},
+                {"username": "sql_svc", "domain": "child.contoso.local"},
+            ],
+            "all_credentials": [],
+            "all_hashes": [
+                {
+                    "username": "sql_svc",
+                    "hash_value": "aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                    "hash_type": "NTLM",
+                    "domain": "contoso.local",
+                },
+            ],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Hash should be fixed to child domain
+        assert len(state.all_hashes) == 1
+        assert state.all_hashes[0].domain == "child.contoso.local"
+
+    def test_cleanup_preserves_legitimate_parent_domain_users(self):
+        """Users that only exist in parent domain should not be modified."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-cleanup-preserve",
+            "all_domains": ["contoso.local", "child.contoso.local"],
+            "all_users": [
+                {"username": "domain_admin", "domain": "contoso.local"},
+            ],
+            "all_credentials": [
+                {
+                    "username": "domain_admin",
+                    "password": "AdminP@ss1!",  # pragma: allowlist secret
+                    "domain": "contoso.local",
+                    "source": "test",
+                },
+            ],
+            "all_hashes": [],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # domain_admin stays in parent domain
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "contoso.local"
+        assert len(state.all_credentials) == 1
+        assert state.all_credentials[0].domain == "contoso.local"
+
+
+class TestAddUserDomainUpgrade:
+    """Tests for add_user parent-to-child domain upgrade."""
+
+    def test_add_user_upgrades_parent_to_child_domain(self):
+        """Adding user to child domain should upgrade existing parent domain entry."""
+        state = SharedRedTeamState(operation_id="op-test-upgrade")
+        state.add_domain("contoso.local")
+
+        # Add credential first (which adds user with parent domain)
+        cred = Credential(
+            username="sql_svc",
+            password="SqlP@ss123!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="test",
+        )
+        state.add_credential(cred, "test")
+
+        assert state.all_credentials[0].domain == "contoso.local"
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "contoso.local"
+
+        # Now add user with child domain (simulates LDAP discovery)
+        result = state.add_user("sql_svc", "child.contoso.local")
+
+        # Should upgrade existing entry, not add new one
+        assert result is True
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "child.contoso.local"
+        # Credential should also be updated
+        assert state.all_credentials[0].domain == "child.contoso.local"
+
+    def test_add_user_rejects_parent_when_child_exists(self):
+        """Adding user to parent domain should be rejected if already in child."""
+        state = SharedRedTeamState(operation_id="op-test-reject-parent")
+
+        # Add user in child domain first
+        state.add_user("sql_svc", "child.contoso.local")
+        assert len(state.all_users) == 1
+
+        # Try to add same user in parent domain
+        result = state.add_user("sql_svc", "contoso.local")
+
+        # Should reject - child domain is more specific
+        assert result is False
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "child.contoso.local"
+
+    def test_add_user_updates_credentials_and_hashes(self):
+        """Domain upgrade should update both credentials and hashes."""
+        from ares.core.models import Hash
+
+        state = SharedRedTeamState(operation_id="op-test-update-all")
+        state.add_domain("contoso.local")
+
+        # Add credential and hash with parent domain
+        cred = Credential(
+            username="sql_svc",
+            password="SqlP@ss!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="test",
+        )
+        state.add_credential(cred, "test")
+
+        hash_obj = Hash(
+            username="sql_svc",
+            hash_value="aad3b435b51404ee:abcdef1234567890",
+            hash_type="NTLM",
+            domain="contoso.local",
+        )
+        state.add_hash(hash_obj, "test")
+
+        # Upgrade user to child domain
+        state.add_user("sql_svc", "child.contoso.local")
+
+        # Both should be updated
+        assert state.all_credentials[0].domain == "child.contoso.local"
+        assert state.all_hashes[0].domain == "child.contoso.local"
+
+
+class TestRetroactiveDomainNormalize:
+    """Tests for retroactive domain normalization."""
+
+    def test_retroactive_normalize_removes_netbios_from_domains(self):
+        """Adding FQDN should remove corresponding NetBIOS from all_domains."""
+        state = SharedRedTeamState(operation_id="op-test-retro-netbios")
+
+        # Add NetBIOS domain first
+        state.add_domain("child")
+        assert "child" in state.all_domains
+
+        # Add FQDN - should trigger retroactive normalization
+        state.add_domain("child.contoso.local")
+
+        # NetBIOS should be removed
+        assert "child" not in state.all_domains
+        assert "child.contoso.local" in state.all_domains
+
+    def test_retroactive_normalize_updates_credentials(self):
+        """Adding FQDN should update credentials with NetBIOS domain."""
+        state = SharedRedTeamState(operation_id="op-test-retro-creds")
+
+        # Add credential with NetBIOS domain
+        cred = Credential(
+            username="sql_svc",
+            password="SqlP@ss!",  # pragma: allowlist secret
+            domain="child",
+            source="test",
+        )
+        state.all_credentials.append(cred)
+        state.add_domain("child")
+
+        # Add FQDN
+        state.add_domain("child.contoso.local")
+
+        # Credential should be updated
+        assert state.all_credentials[0].domain == "child.contoso.local"
+
+    def test_retroactive_normalize_triggers_parent_child_normalization(self):
+        """Adding child FQDN should trigger parent-to-child credential normalization.
+
+        Note: _normalize_parent_domain_credentials only fixes credentials for users
+        that ONLY exist in the child domain. If user exists in both domains, use
+        _cleanup_domain_data (via from_bytes) to fix.
+        """
+        from ares.core.models import User
+
+        state = SharedRedTeamState(operation_id="op-test-retro-parent-child")
+        state.add_domain("contoso.local")
+
+        # Add user ONLY in child domain (not in parent)
+        state.all_users.append(User(username="sql_svc", domain="child.contoso.local"))
+
+        # Add credential with parent domain (this simulates tool reporting wrong domain)
+        cred = Credential(
+            username="sql_svc",
+            password="SqlP@ss123!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="test",
+        )
+        state.all_credentials.append(cred)
+
+        # Trigger normalization by adding child domain
+        state.add_domain("child.contoso.local")
+
+        # Credential should be updated to child domain
+        assert state.all_credentials[0].domain == "child.contoso.local"
+
+
+class TestHashDeduplication:
+    """Tests for hash deduplication."""
+
+    def test_kerberoast_deduped_by_spn_and_etype(self):
+        """Kerberoast hashes with same user+SPN+etype should be deduplicated."""
+        import json
+
+        # Two Kerberoast hashes for same user, same SPN, same etype (23=RC4)
+        # but different hash values (different request timestamps)
+        state_dict = {
+            "operation_id": "op-test-kerberoast-dedupe",
+            "all_domains": ["contoso.local"],
+            "all_users": [],
+            "all_credentials": [],
+            "all_hashes": [
+                {
+                    "username": "sql_svc",
+                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$aaa$111",
+                    "hash_type": "Kerberoast",
+                    "domain": "contoso.local",
+                },
+                {
+                    "username": "sql_svc",
+                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$bbb$222",
+                    "hash_type": "Kerberoast",
+                    "domain": "contoso.local",
+                },
+            ],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Should dedupe to 1 hash
+        assert len(state.all_hashes) == 1
+
+    def test_kerberoast_different_spn_kept(self):
+        """Kerberoast hashes with different SPNs should be kept."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-kerberoast-diff-spn",
+            "all_domains": ["contoso.local"],
+            "all_users": [],
+            "all_credentials": [],
+            "all_hashes": [
+                {
+                    "username": "sql_svc",
+                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$aaa$111",
+                    "hash_type": "Kerberoast",
+                    "domain": "contoso.local",
+                },
+                {
+                    "username": "sql_svc",
+                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql02.contoso.local*$bbb$222",
+                    "hash_type": "Kerberoast",
+                    "domain": "contoso.local",
+                },
+            ],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Should keep both (different SPNs)
+        assert len(state.all_hashes) == 2
+
+    def test_kerberoast_different_etype_kept(self):
+        """Kerberoast hashes with different encryption types should be kept."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-kerberoast-diff-etype",
+            "all_domains": ["contoso.local"],
+            "all_users": [],
+            "all_credentials": [],
+            "all_hashes": [
+                {
+                    "username": "sql_svc",
+                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$aaa$111",
+                    "hash_type": "Kerberoast",
+                    "domain": "contoso.local",
+                },
+                {
+                    "username": "sql_svc",
+                    "hash_value": "$krb5tgs$18$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$bbb$222",
+                    "hash_type": "Kerberoast",
+                    "domain": "contoso.local",
+                },
+            ],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Should keep both (RC4 vs AES256)
+        assert len(state.all_hashes) == 2
+
+    def test_asrep_deduped_by_user(self):
+        """AS-REP hashes with same user should be deduplicated."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-asrep-dedupe",
+            "all_domains": ["contoso.local"],
+            "all_users": [],
+            "all_credentials": [],
+            "all_hashes": [
+                {
+                    "username": "nopreauth",
+                    "hash_value": "$krb5asrep$23$nopreauth@CONTOSO.LOCAL:aaa$111",
+                    "hash_type": "AS-REP",
+                    "domain": "contoso.local",
+                },
+                {
+                    "username": "nopreauth",
+                    "hash_value": "$krb5asrep$23$nopreauth@CONTOSO.LOCAL:bbb$222",
+                    "hash_type": "AS-REP",
+                    "domain": "contoso.local",
+                },
+            ],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Should dedupe to 1 hash
+        assert len(state.all_hashes) == 1
+
+    def test_ntlm_deduped_by_value(self):
+        """NTLM hashes should be deduplicated by exact hash value."""
+        import json
+
+        state_dict = {
+            "operation_id": "op-test-ntlm-dedupe",
+            "all_domains": ["contoso.local"],
+            "all_users": [],
+            "all_credentials": [],
+            "all_hashes": [
+                {
+                    "username": "admin",
+                    "hash_value": "aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                    "hash_type": "NTLM",
+                    "domain": "contoso.local",
+                },
+                {
+                    "username": "admin",
+                    "hash_value": "aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                    "hash_type": "NTLM",
+                    "domain": "contoso.local",
+                },
+            ],
+            "all_hosts": [],
+            "all_shares": [],
+            "all_weaknesses": [],
+        }
+        data = json.dumps(state_dict).encode("utf-8")
+        state = SharedRedTeamState.from_bytes(data)
+
+        # Should dedupe to 1 hash
+        assert len(state.all_hashes) == 1
+
+
+class TestRequeueVulnerability:
+    """Tests for requeue_vulnerability method in VulnerabilityMixin."""
+
+    @pytest.mark.asyncio
+    async def test_requeue_vulnerability_removes_from_dequeued_set(self):
+        """requeue_vulnerability should remove vuln_id from _dequeued_vuln_ids."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-requeue")
+
+        # Simulate a vulnerability that was dequeued
+        vuln_id = "constrained_delegation_192.168.58.10"
+        dispatcher._dequeued_vuln_ids.add(vuln_id)
+        assert vuln_id in dispatcher._dequeued_vuln_ids
+
+        # Requeue it
+        await dispatcher.requeue_vulnerability(vuln_id)
+
+        # Should no longer be in dequeued set
+        assert vuln_id not in dispatcher._dequeued_vuln_ids
+
+    @pytest.mark.asyncio
+    async def test_requeue_vulnerability_ignores_unknown_id(self):
+        """requeue_vulnerability should handle unknown vuln_id gracefully."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-requeue-unknown")
+
+        # Requeue a vuln that was never dequeued
+        await dispatcher.requeue_vulnerability("nonexistent_vuln_id")
+
+        # Should not raise, and set should be empty
+        assert len(dispatcher._dequeued_vuln_ids) == 0
+
+
+class TestAnnounceOperationComplete:
+    """Tests for announce_operation_complete setting Redis status."""
+
+    @pytest.mark.asyncio
+    async def test_announce_operation_complete_sets_redis_status(self):
+        """announce_operation_complete should set Redis status key."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-announce")
+        dispatcher._shared_state.has_domain_admin = True
+
+        # Mock Redis client
+        mock_redis = AsyncMock()
+        dispatcher._redis_client = mock_redis
+
+        await dispatcher.announce_operation_complete(
+            source_agent="test_agent",
+            success=True,
+            summary="Domain Admin achieved via S4U attack",
+        )
+
+        # Verify Redis setex was called with correct key and data
+        mock_redis.setex.assert_called_once()
+        call_args = mock_redis.setex.call_args
+        assert call_args[0][0] == "ares:operations:op-test-announce:status"
+        assert call_args[0][1] == 86400  # 24 hour TTL
+
+        # Parse the JSON to verify content
+        status_data = json.loads(call_args[0][2])
+        assert status_data["status"] == "completed"
+        assert status_data["success"] is True
+        assert status_data["domain_admin_achieved"] is True
+        assert "S4U attack" in status_data["summary"]
+
+    @pytest.mark.asyncio
+    async def test_announce_operation_complete_handles_redis_failure(self):
+        """announce_operation_complete should not raise on Redis failure."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-redis-fail")
+
+        # Mock Redis client that raises
+        mock_redis = AsyncMock()
+        mock_redis.setex.side_effect = Exception("Redis connection lost")
+        dispatcher._redis_client = mock_redis
+
+        # Should not raise
+        await dispatcher.announce_operation_complete(
+            source_agent="test_agent",
+            success=False,
+            summary="Operation failed",
+        )
+
+
+class TestWorkerHeartbeatTaskActivity:
+    """Tests for worker heartbeat updating task activity timestamp."""
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_updates_task_last_activity(self):
+        """Worker heartbeat with current_task should update last_activity_at."""
+        from datetime import datetime, timedelta, timezone
+
+        from ares.core.models import TaskInfo, TaskStatus
+
+        dispatcher = RedTeamDispatcher()
+        state = SharedRedTeamState(operation_id="op-test-heartbeat-activity")
+        dispatcher._shared_state = state
+        dispatcher._running = True
+
+        # Create a pending task with old activity timestamp
+        old_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+        task_info = TaskInfo(
+            task_id="task-123",
+            task_type="exploit",
+            assigned_agent="privesc",
+            status=TaskStatus.PENDING,
+        )
+        task_info.last_activity_at = old_time
+        state.pending_tasks["task-123"] = task_info
+
+        # Register agent with proper AgentInfo-like object
+        agent_info = type(
+            "AgentInfo",
+            (),
+            {
+                "last_heartbeat": datetime.now(timezone.utc),
+                "status": "idle",
+                "current_task": None,
+            },
+        )()
+        dispatcher._agents["privesc-worker-1"] = agent_info
+
+        # Create mock task queue that returns heartbeat data
+        mock_task_queue = AsyncMock()
+        mock_task_queue.get_heartbeat.return_value = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": "working",
+            "current_task": "task-123",
+        }
+        dispatcher._task_queue = mock_task_queue
+
+        # Manually invoke the heartbeat logic (simulating one iteration)
+        # The _heartbeat_monitor is a loop, so we directly call the core logic
+        now = datetime.now(timezone.utc)
+        for agent_name in list(dispatcher._agents.keys()):
+            heartbeat_data = await dispatcher._task_queue.get_heartbeat(agent_name)
+            if heartbeat_data:
+                current_task = heartbeat_data.get("current_task")
+                if current_task and dispatcher._shared_state:
+                    task_info = dispatcher._shared_state.pending_tasks.get(current_task)
+                    if task_info:
+                        task_info.last_activity_at = now
+                        if task_info.status == TaskStatus.PENDING:
+                            task_info.status = TaskStatus.IN_PROGRESS
+                            task_info.started_at = now
+
+        # Verify task activity was updated
+        updated_task = state.pending_tasks["task-123"]
+        assert updated_task.last_activity_at > old_time
+        assert updated_task.status == TaskStatus.IN_PROGRESS

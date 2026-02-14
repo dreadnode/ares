@@ -7,8 +7,6 @@ vars:
   SUCCESS: '\033[0;32m[SUCCESS]\033[0m'
   ERROR: '\033[0;31m[ERROR]\033[0m'
   WARN: '\033[1;33m[WARN]\033[0m'
-  # Defaults
-  NAMESPACE: '{{.NAMESPACE | default "attack-simulation"}}'
   ORCH_CONTAINER: '{{.ORCH_CONTAINER | default "orchestrator"}}'
   WORKER_CONTAINER: '{{.WORKER_CONTAINER | default ""}}'
   PARALLELISM: '{{.PARALLELISM | default "10"}}'
@@ -40,14 +38,14 @@ tasks:
         fi
 
         # Check if ares pods exist
-        POD_COUNT=$(kubectl get pods -n {{.NAMESPACE}} \
+        POD_COUNT=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
           -l ares.dreadnode.io/component=red-team \
           --field-selector=status.phase=Running \
           -o json 2>/dev/null | jq '.items | length')
 
         if [ "$POD_COUNT" = "0" ] || [ -z "$POD_COUNT" ]; then
-          echo -e "{{.ERROR}} No running ares pods found in namespace {{.NAMESPACE}}"
-          echo -e "{{.INFO}} Check with: kubectl get pods -n {{.NAMESPACE}}"
+          echo -e "{{.ERROR}} No running ares pods found in namespace {{.K8S_NAMESPACE}}"
+          echo -e "{{.INFO}} Check with: kubectl get pods -n {{.K8S_NAMESPACE}}"
           exit 1
         fi
 
@@ -56,7 +54,7 @@ tasks:
       - |
         echo ""
         echo -e "{{.INFO}} Starting hot-reload development"
-        echo -e "{{.INFO}} Namespace: {{.NAMESPACE}}"
+        echo -e "{{.INFO}} Namespace: {{.K8S_NAMESPACE}}"
         echo -e "{{.INFO}} Watching: {{.WATCH_DIR}}/**/*.py"
         echo ""
         echo -e "{{.SUCCESS}} File sync active! Edit files and save to trigger sync."
@@ -71,13 +69,13 @@ tasks:
           echo -e "{{.INFO}} [$(date +%H:%M:%S)] Detected: $relative_path"
 
           # Get all running pods and sync to each
-          PODS=$(kubectl get pods -n {{.NAMESPACE}} \
+          PODS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
             -l ares.dreadnode.io/component=red-team \
             --field-selector=status.phase=Running \
             -o json | jq -r '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | .metadata.name' | tr '\n' ' ')
 
           # Also get orchestrator
-          ORCH_POD=$(kubectl get pods -n {{.NAMESPACE}} \
+          ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
             -l app.kubernetes.io/name=ares-orchestrator \
             --field-selector=status.phase=Running \
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
@@ -91,7 +89,7 @@ tasks:
               verify="{{.VERIFY_PVC_DIFF}}"
               worker_container="{{.WORKER_CONTAINER}}"
               if [ -z "$worker_container" ]; then
-                worker_container=$(kubectl get pod -n {{.NAMESPACE}} "$pod" \
+                worker_container=$(kubectl get pod -n {{.K8S_NAMESPACE}} "$pod" \
                   -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
               fi
               if [ -n "$worker_container" ]; then
@@ -100,17 +98,17 @@ tasks:
                 container_flag=()
               fi
               if kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
-                  -n {{.NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
+                  -n {{.K8S_NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
                 echo -e "{{.SUCCESS}}   -> $pod"
               elif kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
-                  -n {{.NAMESPACE}} 2>/dev/null; then
+                  -n {{.K8S_NAMESPACE}} 2>/dev/null; then
                 echo -e "{{.SUCCESS}}   -> $pod"
               else
                 echo -e "{{.WARN}}   x $pod (failed)"
               fi
               if [ "$verify" = "true" ]; then
                 local_hash=$(shasum -a 256 "$file" 2>/dev/null | awk "{print \$1}")
-                remote_hash=$(kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
+                remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} "${container_flag[@]}" "$pod" -- \
                   sha256sum "/ares/src/ares/$rel" 2>/dev/null | awk "{print \$1}")
                 if [ -z "$remote_hash" ]; then
                   remote_hash="MISSING"
@@ -132,14 +130,14 @@ tasks:
           # Sync to orchestrator (PVC only)
           if [ -n "$ORCH_POD" ]; then
             if kubectl cp "$changed_file" "$ORCH_POD:{{.PVC_PATH}}/src/ares/$relative_path" \
-                -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
+                -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
               echo -e "{{.SUCCESS}}   -> $ORCH_POD"
             else
               echo -e "{{.WARN}}   x $ORCH_POD (failed)"
             fi
             if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
               local_hash=$(shasum -a 256 "$changed_file" 2>/dev/null | awk "{print \$1}")
-              remote_hash=$(kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+              remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
                 sha256sum "/ares/src/ares/$relative_path" 2>/dev/null | awk "{print \$1}")
               if [ -z "$remote_hash" ]; then
                 remote_hash="MISSING"
@@ -168,16 +166,16 @@ tasks:
       FILES: '{{.FILES | default ""}}'
     cmds:
       - |
-        echo -e "{{.INFO}} Syncing code to pods in {{.NAMESPACE}}"
+        echo -e "{{.INFO}} Syncing code to pods in {{.K8S_NAMESPACE}}"
 
         # Get orchestrator pod first (so we can exclude it from workers)
-        ORCH_POD=$(kubectl get pods -n {{.NAMESPACE}} \
+        ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
           -l app.kubernetes.io/name=ares-orchestrator \
           --field-selector=status.phase=Running \
           -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
         # Get worker pods, excluding atomic role and orchestrator (orchestrator synced separately below)
-        PODS=$(kubectl get pods -n {{.NAMESPACE}} \
+        PODS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
           -l ares.dreadnode.io/component=red-team \
           --field-selector=status.phase=Running \
           -o json | jq -r --arg orch "$ORCH_POD" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
@@ -213,7 +211,7 @@ tasks:
               verify="{{.VERIFY_PVC_DIFF}}"
               worker_container="{{.WORKER_CONTAINER}}"
               if [ -z "$worker_container" ]; then
-                worker_container=$(kubectl get pod -n {{.NAMESPACE}} "$pod" \
+                worker_container=$(kubectl get pod -n {{.K8S_NAMESPACE}} "$pod" \
                   -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
               fi
               if [ -n "$worker_container" ]; then
@@ -222,17 +220,17 @@ tasks:
                 container_flag=()
               fi
               if kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
-                  -n {{.NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
+                  -n {{.K8S_NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
                 echo -e "{{.SUCCESS}}   -> $pod"
               elif kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
-                  -n {{.NAMESPACE}} 2>/dev/null; then
+                  -n {{.K8S_NAMESPACE}} 2>/dev/null; then
                 echo -e "{{.SUCCESS}}   -> $pod"
               else
                 echo -e "{{.WARN}}   x $pod"
               fi
               if [ "$verify" = "true" ]; then
                 local_hash=$(shasum -a 256 "$file" 2>/dev/null | awk "{print \$1}")
-                remote_hash=$(kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
+                remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} "${container_flag[@]}" "$pod" -- \
                   sha256sum "/ares/src/ares/$rel" 2>/dev/null | awk "{print \$1}")
                 if [ -z "$remote_hash" ]; then
                   remote_hash="MISSING"
@@ -254,14 +252,14 @@ tasks:
           # Sync to orchestrator (PVC only)
           if [ -n "$ORCH_POD" ]; then
             if kubectl cp "$f" "$ORCH_POD:{{.PVC_PATH}}/src/ares/$relative_path" \
-                -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
+                -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
               echo -e "{{.SUCCESS}}   -> $ORCH_POD"
             else
               echo -e "{{.WARN}}   x $ORCH_POD"
             fi
             if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
               local_hash=$(shasum -a 256 "$f" 2>/dev/null | awk "{print \$1}")
-              remote_hash=$(kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+              remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
                 sha256sum "/ares/src/ares/$relative_path" 2>/dev/null | awk "{print \$1}")
               if [ -z "$remote_hash" ]; then
                 remote_hash="MISSING"
@@ -290,16 +288,16 @@ tasks:
     silent: true
     cmds:
       - |
-        echo -e "{{.INFO}} Full sync to pods in {{.NAMESPACE}}"
+        echo -e "{{.INFO}} Full sync to pods in {{.K8S_NAMESPACE}}"
 
         # Get orchestrator pod first (so we can exclude it from workers)
-        ORCH_POD=$(kubectl get pods -n {{.NAMESPACE}} \
+        ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
           -l app.kubernetes.io/name=ares-orchestrator \
           --field-selector=status.phase=Running \
           -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
         # Get worker pods, excluding atomic role and orchestrator (orchestrator synced separately below)
-        PODS=$(kubectl get pods -n {{.NAMESPACE}} \
+        PODS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
           -l ares.dreadnode.io/component=red-team \
           --field-selector=status.phase=Running \
           -o json | jq -r --arg orch "$ORCH_POD" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
@@ -330,7 +328,7 @@ tasks:
             manifest="$2"
             worker_container="{{.WORKER_CONTAINER}}"
             if [ -z "$worker_container" ]; then
-              worker_container=$(kubectl get pod -n {{.NAMESPACE}} "$pod" \
+              worker_container=$(kubectl get pod -n {{.K8S_NAMESPACE}} "$pod" \
                 -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
             fi
             if [ -n "$worker_container" ]; then
@@ -339,22 +337,22 @@ tasks:
               container_flag=()
             fi
             sync_ok="false"
-            if kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
+            if kubectl exec -n {{.K8S_NAMESPACE}} "${container_flag[@]}" "$pod" -- \
                 mkdir -p {{.PVC_PATH}}/src/ares 2>/dev/null && \
               kubectl cp src/ares/. "$pod":{{.PVC_PATH}}/src/ares \
-                -n {{.NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
+                -n {{.K8S_NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
               sync_ok="true"
             elif kubectl cp src/ares/. "$pod":{{.PVC_PATH}}/src/ares \
-                -n {{.NAMESPACE}} 2>/dev/null; then
+                -n {{.K8S_NAMESPACE}} 2>/dev/null; then
               sync_ok="true"
             fi
             if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
-              if [ "$sync_ok" = "true" ] && kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
+              if [ "$sync_ok" = "true" ] && kubectl exec -n {{.K8S_NAMESPACE}} "${container_flag[@]}" "$pod" -- \
                   mkdir -p {{.PVC_PATH}}/tmp 2>/dev/null && \
                 kubectl cp "$manifest" "$pod:{{.PVC_PATH}}/tmp/ares.sha256" \
-                  -n {{.NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
+                  -n {{.K8S_NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
                 set +e
-                verify_out=$(kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
+                verify_out=$(kubectl exec -n {{.K8S_NAMESPACE}} "${container_flag[@]}" "$pod" -- \
                   sh -c "cd {{.PVC_PATH}}/src/ares && sha256sum -c {{.PVC_PATH}}/tmp/ares.sha256" 2>&1)
                 verify_rc=$?
                 set -e
@@ -390,19 +388,19 @@ tasks:
         # Sync to orchestrator
         if [ -n "$ORCH_POD" ]; then
           sync_ok="false"
-          if kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+          if kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
               mkdir -p {{.PVC_PATH}}/src/ares 2>/dev/null && \
             kubectl cp src/ares/. "$ORCH_POD":{{.PVC_PATH}}/src/ares \
-              -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
+              -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
             sync_ok="true"
           fi
           if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
-            if [ "$sync_ok" = "true" ] && kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+            if [ "$sync_ok" = "true" ] && kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
                 mkdir -p {{.PVC_PATH}}/tmp 2>/dev/null && \
               kubectl cp "$MANIFEST" "$ORCH_POD:{{.PVC_PATH}}/tmp/ares.sha256" \
-                -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
+                -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
               set +e
-              verify_out=$(kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+              verify_out=$(kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
                 sh -c "cd {{.PVC_PATH}}/src/ares && sha256sum -c {{.PVC_PATH}}/tmp/ares.sha256" 2>&1)
               verify_rc=$?
               set -e
@@ -487,18 +485,18 @@ tasks:
         sh: echo "{{.FILE}}" | sed 's|^src/ares/||'
       WORKER_PODS:
         sh: |
-          ORCH_POD=$(kubectl get pods -n {{.NAMESPACE}} \
+          ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
             -l app.kubernetes.io/name=ares-orchestrator \
             --field-selector=status.phase=Running \
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-          kubectl get pods -n {{.NAMESPACE}} \
+          kubectl get pods -n {{.K8S_NAMESPACE}} \
             -l ares.dreadnode.io/component=red-team \
             --field-selector=status.phase=Running \
             -o json | jq -r --arg orch "$ORCH_POD" \
             '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ' | xargs
       ORCH_POD:
         sh: |
-          kubectl get pods -n {{.NAMESPACE}} \
+          kubectl get pods -n {{.K8S_NAMESPACE}} \
             -l app.kubernetes.io/name=ares-orchestrator \
             --field-selector=status.phase=Running \
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
@@ -533,7 +531,7 @@ tasks:
         sh: |
           container="{{.WORKER_CONTAINER}}"
           if [ -z "$container" ]; then
-            container=$(kubectl get pod -n {{.NAMESPACE}} "{{.POD}}" \
+            container=$(kubectl get pod -n {{.K8S_NAMESPACE}} "{{.POD}}" \
               -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
           fi
           echo "$container"
@@ -541,17 +539,17 @@ tasks:
       - cmd: |
           # Ensure directory exists
           if [ -n "{{.CONTAINER}}" ]; then
-            kubectl exec -n {{.NAMESPACE}} {{.POD}} -c {{.CONTAINER}} -- \
+            kubectl exec -n {{.K8S_NAMESPACE}} {{.POD}} -c {{.CONTAINER}} -- \
               mkdir -p $(dirname {{.PVC_PATH}}/src/ares/{{.REL_PATH}}) 2>/dev/null || true
           else
-            kubectl exec -n {{.NAMESPACE}} {{.POD}} -- \
+            kubectl exec -n {{.K8S_NAMESPACE}} {{.POD}} -- \
               mkdir -p $(dirname {{.PVC_PATH}}/src/ares/{{.REL_PATH}}) 2>/dev/null || true
           fi
 
           # Copy file
           if [ -n "{{.CONTAINER}}" ]; then
             if kubectl cp "{{.FILE}}" "{{.POD}}:{{.PVC_PATH}}/src/ares/{{.REL_PATH}}" \
-                -n {{.NAMESPACE}} -c {{.CONTAINER}} 2>/dev/null; then
+                -n {{.K8S_NAMESPACE}} -c {{.CONTAINER}} 2>/dev/null; then
               echo -e "{{.SUCCESS}}   -> {{.POD}}"
             else
               echo -e "{{.WARN}}   x {{.POD}}"
@@ -559,7 +557,7 @@ tasks:
             fi
           else
             if kubectl cp "{{.FILE}}" "{{.POD}}:{{.PVC_PATH}}/src/ares/{{.REL_PATH}}" \
-                -n {{.NAMESPACE}} 2>/dev/null; then
+                -n {{.K8S_NAMESPACE}} 2>/dev/null; then
               echo -e "{{.SUCCESS}}   -> {{.POD}}"
             else
               echo -e "{{.WARN}}   x {{.POD}}"
@@ -571,10 +569,10 @@ tasks:
           if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
             local_hash=$(shasum -a 256 "{{.FILE}}" 2>/dev/null | awk '{print $1}')
             if [ -n "{{.CONTAINER}}" ]; then
-              remote_hash=$(kubectl exec -n {{.NAMESPACE}} -c {{.CONTAINER}} "{{.POD}}" -- \
+              remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} -c {{.CONTAINER}} "{{.POD}}" -- \
                 sha256sum "{{.PVC_PATH}}/src/ares/{{.REL_PATH}}" 2>/dev/null | awk '{print $1}')
             else
-              remote_hash=$(kubectl exec -n {{.NAMESPACE}} "{{.POD}}" -- \
+              remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} "{{.POD}}" -- \
                 sha256sum "{{.PVC_PATH}}/src/ares/{{.REL_PATH}}" 2>/dev/null | awk '{print $1}')
             fi
 
@@ -599,12 +597,12 @@ tasks:
     cmds:
       - cmd: |
           # Ensure directory exists
-          kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "{{.POD}}" -- \
+          kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "{{.POD}}" -- \
             mkdir -p $(dirname {{.PVC_PATH}}/src/ares/{{.REL_PATH}}) 2>/dev/null || true
 
           # Copy file
           if kubectl cp "{{.FILE}}" "{{.POD}}:{{.PVC_PATH}}/src/ares/{{.REL_PATH}}" \
-              -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
+              -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
             echo -e "{{.SUCCESS}}   -> {{.POD}}"
           else
             echo -e "{{.WARN}}   x {{.POD}}"
@@ -614,7 +612,7 @@ tasks:
           # Verify if enabled
           if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
             local_hash=$(shasum -a 256 "{{.FILE}}" 2>/dev/null | awk '{print $1}')
-            remote_hash=$(kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "{{.POD}}" -- \
+            remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "{{.POD}}" -- \
               sha256sum "{{.PVC_PATH}}/src/ares/{{.REL_PATH}}" 2>/dev/null | awk '{print $1}')
 
             if [ -z "$remote_hash" ]; then
@@ -635,25 +633,25 @@ tasks:
     silent: true
     cmds:
       - |
-        echo -e "{{.INFO}} Restarting deployments and statefulsets in {{.NAMESPACE}}..."
+        echo -e "{{.INFO}} Restarting deployments and statefulsets in {{.K8S_NAMESPACE}}..."
 
         # Restart worker agents (deployments)
-        kubectl rollout restart deployment -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team 2>/dev/null || true
+        kubectl rollout restart deployment -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team 2>/dev/null || true
 
         # Restart worker agents (statefulsets)
-        kubectl rollout restart statefulset -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team 2>/dev/null || true
+        kubectl rollout restart statefulset -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team 2>/dev/null || true
 
         # Restart orchestrator (has different label)
-        kubectl rollout restart deployment -n {{.NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator 2>/dev/null || true
+        kubectl rollout restart deployment -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator 2>/dev/null || true
 
         echo -e "{{.SUCCESS}} Rollout initiated"
         echo -e "{{.INFO}} Checking worker status..."
 
-        kubectl rollout status deployment -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team --timeout=60s 2>/dev/null || true
-        kubectl rollout status statefulset -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team --timeout=60s 2>/dev/null || true
+        kubectl rollout status deployment -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team --timeout=60s 2>/dev/null || true
+        kubectl rollout status statefulset -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team --timeout=60s 2>/dev/null || true
 
         echo -e "{{.INFO}} Checking orchestrator status..."
-        kubectl rollout status deployment -n {{.NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator --timeout=60s 2>/dev/null || true
+        kubectl rollout status deployment -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator --timeout=60s 2>/dev/null || true
 
         echo ""
         echo -e "{{.SUCCESS}} All pods restarted"
@@ -677,12 +675,12 @@ tasks:
           exit 1
         fi
 
-        ORCH_POD=$(kubectl get pods -n {{.NAMESPACE}} \
+        ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
           -l app.kubernetes.io/name=ares-orchestrator \
           --field-selector=status.phase=Running \
           -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
-        PODS=$(kubectl get pods -n {{.NAMESPACE}} \
+        PODS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
           -l ares.dreadnode.io/component=red-team \
           --field-selector=status.phase=Running \
           -o json | jq -r --arg orch "$ORCH_POD" \
@@ -700,7 +698,7 @@ tasks:
             pod="$1"
             worker_container="{{.WORKER_CONTAINER}}"
             if [ -z "$worker_container" ]; then
-              worker_container=$(kubectl get pod -n {{.NAMESPACE}} "$pod" \
+              worker_container=$(kubectl get pod -n {{.K8S_NAMESPACE}} "$pod" \
                 -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
             fi
             if [ -n "$worker_container" ]; then
@@ -708,9 +706,9 @@ tasks:
             else
               container_flag=()
             fi
-            if kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
+            if kubectl exec -n {{.K8S_NAMESPACE}} "${container_flag[@]}" "$pod" -- \
                 rm -rf {{.PVC_PATH}}/src/ares 2>/dev/null && \
-              kubectl exec -n {{.NAMESPACE}} "${container_flag[@]}" "$pod" -- \
+              kubectl exec -n {{.K8S_NAMESPACE}} "${container_flag[@]}" "$pod" -- \
                 mkdir -p {{.PVC_PATH}}/src/ares 2>/dev/null; then
               echo -e "{{.SUCCESS}}   -> $pod"
             else
@@ -721,9 +719,9 @@ tasks:
         fi
 
         if [ -n "$ORCH_POD" ]; then
-          if kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+          if kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
               rm -rf {{.PVC_PATH}}/src/ares 2>/dev/null && \
-            kubectl exec -n {{.NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+            kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
               mkdir -p {{.PVC_PATH}}/src/ares 2>/dev/null; then
             echo -e "{{.SUCCESS}}   -> $ORCH_POD"
           else
@@ -733,8 +731,8 @@ tasks:
 
         if [ "{{.ROLLOUT}}" = "true" ]; then
           echo -e "{{.INFO}} Restarting deployments after PVC clear..."
-          kubectl rollout restart deployment -n {{.NAMESPACE}} -l ares.dreadnode.io/component=red-team 2>/dev/null || true
-          kubectl rollout restart deployment -n {{.NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator 2>/dev/null || true
+          kubectl rollout restart deployment -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team 2>/dev/null || true
+          kubectl rollout restart deployment -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator 2>/dev/null || true
           echo -e "{{.SUCCESS}} Rollout initiated"
         fi
 
@@ -747,14 +745,14 @@ tasks:
     cmds:
       - |
         echo ""
-        echo -e "{{.INFO}} Pod Status in {{.NAMESPACE}}"
+        echo -e "{{.INFO}} Pod Status in {{.K8S_NAMESPACE}}"
         echo "========================================"
-        kubectl get pods -n {{.NAMESPACE}} -o wide 2>/dev/null || echo -e "{{.ERROR}} Failed to get pods"
+        kubectl get pods -n {{.K8S_NAMESPACE}} -o wide 2>/dev/null || echo -e "{{.ERROR}} Failed to get pods"
 
         echo ""
         echo -e "{{.INFO}} Deployments"
         echo "========================================"
-        kubectl get deployments -n {{.NAMESPACE}} 2>/dev/null || echo -e "{{.ERROR}} Failed to get deployments"
+        kubectl get deployments -n {{.K8S_NAMESPACE}} 2>/dev/null || echo -e "{{.ERROR}} Failed to get deployments"
 
   # ============================================================================
   # LOGS: Tail pod logs
@@ -791,17 +789,17 @@ tasks:
 
         if [ "{{.FOLLOW}}" = "true" ]; then
           if [ -n "$CONTAINER_ARGS" ]; then
-            kubectl logs -n {{.NAMESPACE}} $SELECTOR $CONTAINER_ARGS --tail={{.LINES}} -f --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} 2>/dev/null || \
-              kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} -f --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}}
+            kubectl logs -n {{.K8S_NAMESPACE}} $SELECTOR $CONTAINER_ARGS --tail={{.LINES}} -f --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} 2>/dev/null || \
+              kubectl logs -n {{.K8S_NAMESPACE}} $SELECTOR --tail={{.LINES}} -f --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}}
           else
-            kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} -f --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}}
+            kubectl logs -n {{.K8S_NAMESPACE}} $SELECTOR --tail={{.LINES}} -f --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}}
           fi
         else
           if [ -n "$CONTAINER_ARGS" ]; then
-            kubectl logs -n {{.NAMESPACE}} $SELECTOR $CONTAINER_ARGS --tail={{.LINES}} --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} 2>/dev/null || \
-              kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}}
+            kubectl logs -n {{.K8S_NAMESPACE}} $SELECTOR $CONTAINER_ARGS --tail={{.LINES}} --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} 2>/dev/null || \
+              kubectl logs -n {{.K8S_NAMESPACE}} $SELECTOR --tail={{.LINES}} --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}}
           else
-            kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}}
+            kubectl logs -n {{.K8S_NAMESPACE}} $SELECTOR --tail={{.LINES}} --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}}
           fi
         fi
 
@@ -852,10 +850,10 @@ tasks:
         echo -e "{{.INFO}} Lines: {{.LINES}}, Since: $SINCE_DISPLAY"
 
         if [ -n "$CONTAINER_ARGS" ]; then
-          kubectl logs -n {{.NAMESPACE}} $SELECTOR $CONTAINER_ARGS --tail={{.LINES}} $TIME_FILTER --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} 2>/dev/null > "$OUTPUT_FILE" || \
-            kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} $TIME_FILTER --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} > "$OUTPUT_FILE"
+          kubectl logs -n {{.K8S_NAMESPACE}} $SELECTOR $CONTAINER_ARGS --tail={{.LINES}} $TIME_FILTER --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} 2>/dev/null > "$OUTPUT_FILE" || \
+            kubectl logs -n {{.K8S_NAMESPACE}} $SELECTOR --tail={{.LINES}} $TIME_FILTER --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} > "$OUTPUT_FILE"
         else
-          kubectl logs -n {{.NAMESPACE}} $SELECTOR --tail={{.LINES}} $TIME_FILTER --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} > "$OUTPUT_FILE"
+          kubectl logs -n {{.K8S_NAMESPACE}} $SELECTOR --tail={{.LINES}} $TIME_FILTER --prefix=true --max-log-requests={{.MAX_LOG_REQUESTS}} > "$OUTPUT_FILE"
         fi
 
         LINE_COUNT=$(wc -l < "$OUTPUT_FILE" | tr -d ' ')
@@ -880,22 +878,22 @@ tasks:
       CMD: '{{.CMD | default "bash"}}'
     cmds:
       - |
-        POD=$(kubectl get pods -n {{.NAMESPACE}} -l ares.dreadnode.io/role={{.ROLE}} -o name 2>/dev/null | head -1)
+        POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role={{.ROLE}} -o name 2>/dev/null | head -1)
 
         if [ -z "$POD" ]; then
           echo -e "{{.ERROR}} No pod found with role: {{.ROLE}}"
           echo -e "{{.INFO}} Available roles:"
-          kubectl get pods -n {{.NAMESPACE}} -o json 2>/dev/null | \
+          kubectl get pods -n {{.K8S_NAMESPACE}} -o json 2>/dev/null | \
             jq -r '.items[].metadata.labels["ares.dreadnode.io/role"] // empty' | sort -u | sed 's/^/  - /'
           exit 1
         fi
 
         echo -e "{{.INFO}} Executing in $POD..."
         if [ -n "{{.WORKER_CONTAINER}}" ]; then
-          kubectl exec -it -n {{.NAMESPACE}} $POD -c {{.WORKER_CONTAINER}} -- {{.CMD}} 2>/dev/null || \
-            kubectl exec -it -n {{.NAMESPACE}} $POD -- {{.CMD}}
+          kubectl exec -it -n {{.K8S_NAMESPACE}} $POD -c {{.WORKER_CONTAINER}} -- {{.CMD}} 2>/dev/null || \
+            kubectl exec -it -n {{.K8S_NAMESPACE}} $POD -- {{.CMD}}
         else
-          kubectl exec -it -n {{.NAMESPACE}} $POD -- {{.CMD}}
+          kubectl exec -it -n {{.K8S_NAMESPACE}} $POD -- {{.CMD}}
         fi
 
   # ============================================================================
@@ -912,7 +910,7 @@ tasks:
         echo -e "{{.INFO}} Verifying {{.FILE}} in {{.ROLE}} agent..."
         echo "========================================"
 
-        POD=$(kubectl get pods -n {{.NAMESPACE}} -l ares.dreadnode.io/role={{.ROLE}} -o name 2>/dev/null | head -1)
+        POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role={{.ROLE}} -o name 2>/dev/null | head -1)
 
         if [ -z "$POD" ]; then
           echo -e "{{.ERROR}} No pod found with role: {{.ROLE}}"
@@ -920,11 +918,11 @@ tasks:
         fi
 
         if [ -n "{{.WORKER_CONTAINER}}" ]; then
-          kubectl exec -n {{.NAMESPACE}} $POD -c {{.WORKER_CONTAINER}} -- \
+          kubectl exec -n {{.K8S_NAMESPACE}} $POD -c {{.WORKER_CONTAINER}} -- \
             head -50 {{.PVC_PATH}}/src/ares/{{.FILE}} 2>/dev/null || \
-            kubectl exec -n {{.NAMESPACE}} $POD -- \
+            kubectl exec -n {{.K8S_NAMESPACE}} $POD -- \
               head -50 {{.PVC_PATH}}/src/ares/{{.FILE}}
         else
-          kubectl exec -n {{.NAMESPACE}} $POD -- \
+          kubectl exec -n {{.K8S_NAMESPACE}} $POD -- \
             head -50 {{.PVC_PATH}}/src/ares/{{.FILE}}
         fi

@@ -57,19 +57,29 @@ class OperationRequest:
             cred_data = data["initial_credential"]
             initial_cred = cred_data  # Keep as dict for now
 
+        # Resolve model - check request env_vars first (they haven't been applied to os.environ yet)
+        env_vars = data.get("env_vars") or {}
+        model = (
+            data.get("model")
+            or env_vars.get("ARES_ORCHESTRATOR_MODEL")
+            or env_vars.get("ARES_MODEL")
+            or os.environ.get("ARES_ORCHESTRATOR_MODEL")
+            or os.environ.get("ARES_MODEL")
+        )
+
         return cls(
             operation_id=data["operation_id"],
             target_domain=data["target_domain"],
             target_ips=data["target_ips"],
             initial_credential=initial_cred,
             resume_from_checkpoint=data.get("resume_from_checkpoint", False),
-            model=data.get("model")
-            or os.environ.get("ARES_ORCHESTRATOR_MODEL")
-            or os.environ.get("ARES_MODEL"),
+            model=model,
             max_steps=data.get("max_steps", 200),
             checkpoint_interval=data.get("checkpoint_interval", 60),
-            report_dir=data.get("report_dir") or os.environ.get("ARES_REPORT_DIR"),
-            env_vars=data.get("env_vars"),
+            report_dir=data.get("report_dir")
+            or env_vars.get("ARES_REPORT_DIR")
+            or os.environ.get("ARES_REPORT_DIR"),
+            env_vars=env_vars or None,
         )
 
 
@@ -204,7 +214,9 @@ class OrchestratorService:
             await recovery_manager.start()
 
             try:
-                state = await recovery_manager.recover_operation(operation_id, auto_requeue=True)
+                state, _requeued_task_ids = await recovery_manager.recover_operation(
+                    operation_id, auto_requeue=True
+                )
             finally:
                 await recovery_manager.stop()
 
@@ -223,9 +235,30 @@ class OrchestratorService:
             target_ips = [h.ip for h in state.all_hosts if h.ip]
             if not target_ips and state.target and state.target.ip:
                 target_ips = [state.target.ip]
+
+            # Load stored model from Redis (required for recovery)
+            model: str | None = None
+            model_key = f"ares:operation:{operation_id}:model"
+            if self.task_queue and self.task_queue._client:
+                stored_model = await self.task_queue._client.get(model_key)
+                if stored_model:
+                    model = (
+                        stored_model.decode()
+                        if isinstance(stored_model, bytes)
+                        else str(stored_model)
+                    )
+            if not model:
+                # Fallback to environment variables if model not stored
+                model = os.environ.get("ARES_ORCHESTRATOR_MODEL") or os.environ.get("ARES_MODEL")
+            if not model:
+                raise ValueError(
+                    f"No model stored for operation {operation_id} and no "
+                    "ARES_ORCHESTRATOR_MODEL/ARES_MODEL in environment"
+                )
+
             logger.info(
                 f"Resuming operation {operation_id}: "
-                f"target={target_domain}, "
+                f"target={target_domain}, model={model}, "
                 f"credentials={len(state.all_credentials)}, "
                 f"hosts={len(state.all_hosts)}"
             )
@@ -241,6 +274,7 @@ class OrchestratorService:
                 report_dir=self._report_dir,
                 redis_url=self.redis_url,
                 namespace=self.namespace,
+                model=model,
             )
 
             # Publish completion status
@@ -415,6 +449,7 @@ class OrchestratorService:
         Args:
             request_data: Operation request data from Redis
         """
+        started_at = datetime.now(timezone.utc)
         try:
             # Fetch env_vars from separate key if not in request (security: secrets stored separately)
             if not request_data.get("env_vars") and request_data.get("operation_id"):
@@ -514,7 +549,22 @@ class OrchestratorService:
                 },
             )
 
-            logger.success(f"Operation {request.operation_id} completed successfully")
+            completed_at = datetime.now(timezone.utc)
+            elapsed = (completed_at - started_at).total_seconds()
+            hours, remainder = divmod(int(elapsed), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            if hours > 0:
+                duration_str = f"{hours}h {minutes}m {seconds}s"
+            elif minutes > 0:
+                duration_str = f"{minutes}m {seconds}s"
+            else:
+                duration_str = f"{seconds}s"
+            start_str = started_at.strftime("%H:%M:%S")
+            end_str = completed_at.strftime("%H:%M:%S")
+            logger.success(
+                f"Operation {request.operation_id} completed successfully "
+                f"(started {start_str}, ended {end_str}, duration {duration_str})"
+            )
 
         except Exception as e:
             logger.error(f"Error processing operation: {e}")

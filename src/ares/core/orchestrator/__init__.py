@@ -18,10 +18,14 @@ Usage:
 
 from __future__ import annotations
 
+# Re-export config getters for backwards compatibility
+from ares.core.config import (
+    get_crack_task_grace_period,
+    get_max_runtime,
+)
+
 # Re-export main entry point and helper functions used by tests
 from ares.core.orchestrator._orchestrator import (
-    CRACK_TASK_GRACE_PERIOD,
-    DEFAULT_MAX_RUNTIME,
     _auto_adcs_enumeration,
     _auto_bloodhound,
     _auto_coercion,
@@ -33,8 +37,6 @@ from ares.core.orchestrator._orchestrator import (
 )
 
 __all__ = [
-    "CRACK_TASK_GRACE_PERIOD",
-    "DEFAULT_MAX_RUNTIME",
     "_auto_adcs_enumeration",
     "_auto_bloodhound",
     "_auto_coercion",
@@ -42,5 +44,7 @@ __all__ = [
     "_auto_delegation_enumeration",
     "_build_redteam_report_state",
     "_wait_for_crack_tasks",
+    "get_crack_task_grace_period",
+    "get_max_runtime",
     "run_multi_agent_operation",
 ]

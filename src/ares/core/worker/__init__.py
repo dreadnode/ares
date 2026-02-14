@@ -39,10 +39,14 @@ Functions:
 
 from __future__ import annotations
 
+# Re-export config getters for backwards compatibility
+from ares.core.config import (
+    get_rate_limit_backoff_delays,
+    get_rate_limit_max_retries,
+)
+
 # Re-export main classes and functions from _worker.py
 from ares.core.worker._worker import (
-    RATE_LIMIT_BACKOFF_DELAYS,
-    RATE_LIMIT_MAX_RETRIES,
     RedisWorkerAgent,
     WorkerAgent,
     logger,
@@ -66,8 +70,6 @@ from ares.core.worker.prompts import (
 )
 
 __all__ = [
-    "RATE_LIMIT_BACKOFF_DELAYS",
-    "RATE_LIMIT_MAX_RETRIES",
     "TASK_PROMPTS",
     "RedisWorkerAgent",
     "WorkerAgent",
@@ -77,6 +79,8 @@ __all__ = [
     "get_active_operation_pointer",
     "get_operation_model",
     "get_operation_model_overrides",
+    "get_rate_limit_backoff_delays",
+    "get_rate_limit_max_retries",
     "logger",
     "resolve_dc_ip_for_domain",
     "run_worker",

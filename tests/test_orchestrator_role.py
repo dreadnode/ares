@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import pytest
 
+from ares.core.capability_registry import get_enabled_tools
+from ares.core.config import get_agent_config
 from ares.core.factories.red_agents import (
+    ALL_TOOLSETS,
     ROLE_INSTRUCTIONS,
-    ROLE_MAX_STEPS,
-    ROLE_TOOLSETS,
     create_role_hooks,
     load_agent_instructions,
 )
@@ -75,34 +76,53 @@ class TestOrchestratorTemplate:
 
 
 class TestOrchestratorMaxSteps:
-    """Tests for orchestrator max steps configuration."""
+    """Tests for orchestrator max steps configuration (from YAML config)."""
 
     def test_orchestrator_has_max_steps(self):
-        """ORCHESTRATOR should have max_steps configured."""
-        assert AgentRole.ORCHESTRATOR in ROLE_MAX_STEPS
-        assert ROLE_MAX_STEPS[AgentRole.ORCHESTRATOR] > 0
+        """ORCHESTRATOR should have max_steps configured in YAML."""
+        config = get_agent_config("orchestrator")
+        assert config.max_steps > 0
 
     def test_recon_has_max_steps(self):
-        """RECON should have its own max_steps configured."""
-        assert AgentRole.RECON in ROLE_MAX_STEPS
-        assert ROLE_MAX_STEPS[AgentRole.RECON] > 0
+        """RECON should have its own max_steps configured in YAML."""
+        config = get_agent_config("recon")
+        assert config.max_steps > 0
 
 
-class TestOrchestratorToolsets:
-    """Tests that orchestrator is NOT in ROLE_TOOLSETS (uses OrchestratorTools separately)."""
+class TestCapabilityBasedToolsets:
+    """Tests for capability-based toolset configuration.
 
-    def test_orchestrator_not_in_role_toolsets(self):
-        """ORCHESTRATOR should NOT be in ROLE_TOOLSETS.
+    The new architecture uses YAML capabilities to control which tools each
+    role has access to, rather than hardcoded ROLE_TOOLSETS mappings.
+    """
 
-        The orchestrator uses OrchestratorTools which are wired up separately
-        in the orchestrator.py module, not via the standard toolset mechanism.
-        """
-        assert AgentRole.ORCHESTRATOR not in ROLE_TOOLSETS
+    def test_all_toolsets_is_comprehensive(self):
+        """ALL_TOOLSETS should contain all available toolset classes."""
+        assert len(ALL_TOOLSETS) > 10, "ALL_TOOLSETS should have many toolset classes"
 
-    def test_recon_has_toolsets(self):
-        """RECON worker should have toolsets configured."""
-        assert AgentRole.RECON in ROLE_TOOLSETS
-        assert len(ROLE_TOOLSETS[AgentRole.RECON]) > 0
+    def test_recon_capabilities_map_to_tools(self):
+        """RECON role capabilities should map to expected tools."""
+        config = get_agent_config("recon")
+        enabled = get_enabled_tools(set(config.capabilities))
+
+        # RECON should have network scanning tools
+        assert "nmap_scan" in enabled or "smb_sweep" in enabled
+
+    def test_credential_access_capabilities_map_to_tools(self):
+        """CREDENTIAL_ACCESS role capabilities should map to expected tools."""
+        config = get_agent_config("credential_access")
+        enabled = get_enabled_tools(set(config.capabilities))
+
+        # Should have credential discovery tools
+        assert len(enabled) > 0
+
+    def test_lateral_capabilities_map_to_tools(self):
+        """LATERAL role capabilities should map to expected tools."""
+        config = get_agent_config("lateral")
+        enabled = get_enabled_tools(set(config.capabilities))
+
+        # Should have lateral movement tools
+        assert len(enabled) > 0
 
 
 class TestOrchestratorHooks:
@@ -278,18 +298,20 @@ class TestArchitecturalSeparation:
         )
         assert has_worker_concept
 
-    def test_all_worker_roles_have_toolsets(self):
-        """All worker roles (non-orchestrator) should have toolsets."""
+    def test_all_worker_roles_have_capabilities_configured(self):
+        """All worker roles (non-orchestrator) should have capabilities in config."""
         worker_roles = [
-            AgentRole.RECON,
-            AgentRole.CREDENTIAL_ACCESS,
-            AgentRole.CRACKER,
-            AgentRole.ACL,
-            AgentRole.PRIVESC,
-            AgentRole.LATERAL,
-            AgentRole.COERCION,
+            "recon",
+            "credential_access",
+            "cracker",
+            "acl",
+            "privesc",
+            "lateral",
+            "coercion",
         ]
 
         for role in worker_roles:
-            assert role in ROLE_TOOLSETS, f"{role.value} should have toolsets"
-            assert len(ROLE_TOOLSETS[role]) > 0, f"{role.value} should have at least one toolset"
+            config = get_agent_config(role)
+            assert len(config.capabilities) > 0, (
+                f"{role} should have at least one capability configured"
+            )

@@ -29,10 +29,49 @@ if TYPE_CHECKING:
 class ThrottlingMixin:
     """Rate limiting and phase detection for task dispatch."""
 
+    # Type annotation for lazy-init lock (allows None before first use)
+    _throttle_lock: asyncio.Lock | None
+
     # Task types that don't use LLM (shouldn't count against LLM rate limit)
     # - crack: runs hashcat/john directly
     # - command: direct shell execution for remote ops
     NON_LLM_TASK_TYPES = frozenset({"crack", "command"})
+
+    # Task types that bypass hard cap throttling (critical path to DA)
+    # These still use LLM and count against limits, but won't be deferred at hard cap
+    # NOTE: "exploit" alone is too broad - MSSQL impersonation is lower value than delegation.
+    # Use CRITICAL_PATH_VULN_TYPES for fine-grained control of which exploit subtypes bypass.
+    # NOTE: privesc_enumeration removed - it discovers vulns but doesn't exploit them.
+    # Letting enumeration bypass hard cap starves lateral movement and credential access.
+    CRITICAL_PATH_TASK_TYPES = frozenset({"exploit"})
+
+    # High-value exploit subtypes that should bypass hard cap (checked via vuln_type in payload)
+    # - constrained_delegation: S4U attack → impersonate Administrator → secretsdump → DA
+    # - unconstrained_delegation: TGT capture → DCSync → DA
+    # - esc1, esc4, esc8: ADCS attacks → domain user cert → DA
+    # - krbtgt_hash: already have DA material
+    # NOT included: mssql_impersonation, mssql_linked_server (lower value, takes long to exploit)
+    CRITICAL_PATH_VULN_TYPES = frozenset(
+        {
+            "constrained_delegation",
+            "unconstrained_delegation",
+            "esc1",
+            "esc4",
+            "esc8",
+            "krbtgt_hash",
+            "adcs_esc1",
+            "adcs_esc4",
+            "adcs_esc8",
+        }
+    )
+
+    def _get_throttle_lock(self: RedTeamDispatcher) -> asyncio.Lock:
+        """Get or create the throttle lock (lazy init for event loop safety)."""
+        lock = self._throttle_lock
+        if lock is None:
+            lock = asyncio.Lock()
+            self._throttle_lock = lock
+        return lock
 
     async def _get_pending_task_count(self: RedTeamDispatcher) -> int:
         """Get the number of pending/in-progress tasks."""
@@ -59,6 +98,17 @@ class ThrottlingMixin:
             if t.assigned_agent == role and t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
         )
 
+    async def _get_queue_length(self: RedTeamDispatcher, role: str) -> int:
+        """Get Redis queue length for a specific role (tasks waiting to be picked up)."""
+        if not self._task_queue or not self._task_queue._client:
+            return 0
+        try:
+            queue_key = f"ares:tasks:{role}"
+            return await self._task_queue._client.llen(queue_key)
+        except Exception as e:
+            logger.debug(f"Failed to get queue length for {role}: {e}")
+            return 0
+
     async def _get_llm_task_count(self: RedTeamDispatcher) -> int:
         """Get count of pending LLM-using tasks (excludes crack, command)."""
         if not self._shared_state:
@@ -69,6 +119,139 @@ class ThrottlingMixin:
             if t.task_type not in self.NON_LLM_TASK_TYPES
             and t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
         )
+
+    async def _check_llm_throttle_drop(
+        self: RedTeamDispatcher,
+        task_type: str,
+        target_role: str,
+        reason: str,
+        payload: dict[str, Any] | None = None,
+    ) -> bool:
+        """
+        Check if an LLM task should be dropped due to throttling.
+
+        Args:
+            task_type: Type of task (e.g., "exploit", "recon")
+            target_role: Target worker role
+            reason: Reason for throttle check (for logging)
+            payload: Optional task payload for fine-grained exploit type checking
+
+        Returns True if the task should be dropped, False if it should proceed.
+        """
+        # Non-LLM tasks (crack, command) don't hit rate limits - always allow
+        if task_type in self.NON_LLM_TASK_TYPES:
+            logger.debug(
+                f"Throttle at {reason} but ALLOWING {task_type} task "
+                f"(non-LLM task, no rate limit impact)"
+            )
+            return False
+
+        # LLM task - apply throttling rules
+        role_pending = await self._get_pending_count_by_role(target_role)
+        llm_count = await self._get_llm_task_count()
+        max_tasks = get_max_concurrent_tasks()
+
+        # HARD CAP: If we're 1.5x over the limit, DEFER most tasks
+        # Exception: High-value exploit subtypes bypass hard cap (not all exploits)
+        hard_cap = int(max_tasks * 1.5)
+        if llm_count >= hard_cap:
+            # Check if this is a critical path exploit (delegation, ADCS)
+            vuln_type = (payload.get("vuln_type") or "").lower() if payload else ""
+            is_critical_exploit = (
+                task_type in self.CRITICAL_PATH_TASK_TYPES
+                and vuln_type in self.CRITICAL_PATH_VULN_TYPES
+            )
+
+            # Also check for delegation enumeration - these discover constrained delegation
+            # which is a critical path to DA. Without this, find_delegation tasks get deferred
+            # for 60s+ and can be evicted from deferred queue before processing.
+            techniques = payload.get("techniques", []) if payload else []
+            is_delegation_enum = task_type == "privesc_enumeration" and any(
+                "delegation" in t.lower() for t in techniques
+            )
+
+            if is_critical_exploit or is_delegation_enum:
+                bypass_reason = (
+                    f"{task_type}/{vuln_type}"
+                    if is_critical_exploit
+                    else f"{task_type}/find_delegation"
+                )
+                logger.info(
+                    f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
+                    f"ALLOWING {bypass_reason} (high-value DA path, bypasses hard cap)"
+                )
+                return False
+
+            # Not a critical path task - defer it
+            task_desc = f"{task_type}/{vuln_type}" if vuln_type else task_type
+            logger.warning(
+                f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
+                f"DEFERRING {task_desc} (1.5x over limit)"
+            )
+            return True
+
+        # SOFT CAP: If we're over the limit but under hard cap, apply selective throttling
+        # Allow through if role needs minimum slots OR task has high priority
+        if llm_count >= max_tasks:
+            # Guarantee each role has at least min_slots_per_role tasks
+            if role_pending < get_min_slots_per_role():
+                logger.info(
+                    f"Throttle SOFT CAP: {llm_count} running (limit: {max_tasks}) - ALLOWING {task_type} for {target_role} "
+                    f"(role has {role_pending} pending, min={get_min_slots_per_role()})"
+                )
+                return False
+
+            # Check phase priority - only high priority tasks get through
+            phase = self._get_operation_phase()
+            adjustment = self._get_phase_priority_adjustment(task_type, target_role)
+            if adjustment < 0:  # Negative = high priority for current phase
+                logger.info(
+                    f"Throttle SOFT CAP: {llm_count} running (limit: {max_tasks}) - ALLOWING {task_type} "
+                    f"(high priority adj={adjustment} in {phase} phase)"
+                )
+                return False
+
+            # At capacity and not high priority - defer
+            logger.debug(
+                f"Throttle SOFT CAP: {llm_count} running (limit: {max_tasks}) - DEFERRING {task_type} "
+                f"({phase} phase, priority adj={adjustment})"
+            )
+            return True
+
+        # Below soft cap - use original role-based logic
+        # Guarantee each role has at least min_slots_per_role tasks
+        if role_pending < get_min_slots_per_role():
+            logger.info(
+                f"Throttle at {reason} but ALLOWING {task_type} task for {target_role} "
+                f"(role has {role_pending} pending, min={get_min_slots_per_role()})"
+            )
+            return False
+
+        # Role already has tasks queued - check phase priority
+        phase = self._get_operation_phase()
+        adjustment = self._get_phase_priority_adjustment(task_type, target_role)
+
+        # In domain_dominance phase, only allow high-priority tasks
+        if phase == "domain_dominance" and adjustment >= 0:
+            logger.debug(
+                f"Throttle at {reason} - DEFERRING {task_type} task "
+                f"(domain_dominance phase, low priority adj={adjustment})"
+            )
+            return True
+
+        # In other phases, defer only clearly low-priority tasks (adj > 1)
+        if adjustment > 1:
+            logger.debug(
+                f"Throttle at {reason} - DEFERRING {task_type} task "
+                f"({phase} phase, low priority adj={adjustment})"
+            )
+            return True
+
+        logger.info(
+            f"Throttle at {reason} but ALLOWING {task_type} task "
+            f"({phase} phase, priority adj={adjustment})"
+        )
+        return False
 
     def _get_operation_phase(self: RedTeamDispatcher) -> str:
         """
@@ -274,14 +457,51 @@ class ThrottlingMixin:
         Returns:
             Task ID if submitted, empty string on failure
         """
+        # HALT: If DA achieved, reject all new tasks immediately
+        if self._shared_state and self._shared_state.has_domain_admin:
+            logger.debug(f"Rejecting {task_type} task - Domain Admin achieved, halting new tasks")
+            return ""
+
         if not self._task_queue:
             logger.warning("No task queue available for throttled submit")
             return ""
 
-        async with self._throttle_lock:
-            start_wait = asyncio.get_event_loop().time()
-            total_waited = 0.0
+        start_wait = asyncio.get_event_loop().time()
+        total_waited = 0.0
 
+        # FAILSAFE: If target worker is idle (queue empty), skip throttle wait entirely.
+        # No point burning time waiting when the worker has nothing to do.
+        # Check WITHOUT holding lock to avoid blocking other tasks.
+        role_queue_len = await self._get_queue_length(target_role)
+        role_pending = await self._get_pending_count_by_role(target_role)
+
+        # Check if this is a critical path task that should skip the wait loop
+        techniques = payload.get("techniques", []) if payload else []
+        is_delegation_enum = task_type == "privesc_enumeration" and any(
+            "delegation" in t.lower() for t in techniques
+        )
+        vuln_type = (payload.get("vuln_type") or "").lower() if payload else ""
+        is_critical_exploit = (
+            task_type in self.CRITICAL_PATH_TASK_TYPES
+            and vuln_type in self.CRITICAL_PATH_VULN_TYPES
+        )
+        skip_wait_loop = is_delegation_enum or is_critical_exploit
+
+        if role_queue_len == 0 and role_pending == 0:
+            logger.debug(
+                f"Bypassing throttle for {task_type} - {target_role} worker is idle "
+                f"(queue={role_queue_len}, pending={role_pending})"
+            )
+            # Skip directly to submit (acquire lock below)
+        elif skip_wait_loop:
+            logger.debug(
+                f"Bypassing throttle wait for {task_type} - critical path task "
+                f"(delegation_enum={is_delegation_enum}, critical_exploit={is_critical_exploit})"
+            )
+            # Skip directly to submit - critical path tasks bypass 60s wait loop
+        else:
+            # Wait loop - DO NOT hold the lock during sleep to avoid deadlock.
+            # Multiple tasks waiting for the lock while one sleeps causes timeout.
             while total_waited < max_wait:
                 should_wait, wait_time, reason = await self._should_throttle()
 
@@ -297,49 +517,38 @@ class ThrottlingMixin:
                 await asyncio.sleep(actual_wait)
                 total_waited = asyncio.get_event_loop().time() - start_wait
 
+        # Acquire lock only for the final check and submit - this is the critical section
+        async with self._get_throttle_lock():
             # Final check - smart throttling to balance worker utilization
             should_wait, _, reason = await self._should_throttle()
             if should_wait and "max concurrent tasks" in reason:
-                # Check if this role has any pending tasks
-                role_pending = await self._get_pending_count_by_role(target_role)
+                drop_task = await self._check_llm_throttle_drop(
+                    task_type, target_role, reason, payload=payload
+                )
+                if drop_task:
+                    # Instead of dropping, queue for later dispatch
+                    adjusted_priority = priority + self._get_phase_priority_adjustment(
+                        task_type, target_role
+                    )
+                    adjusted_priority = max(1, min(10, adjusted_priority))
 
-                # Non-LLM tasks (crack, command) don't hit rate limits - always allow
-                if task_type in self.NON_LLM_TASK_TYPES:
-                    logger.debug(
-                        f"Throttle at {reason} but ALLOWING {task_type} task "
-                        f"(non-LLM task, no rate limit impact)"
+                    queued = await self._enqueue_deferred_task(
+                        task_type=task_type,
+                        target_role=target_role,
+                        payload=payload,
+                        source_agent=source_agent,
+                        priority=adjusted_priority,
                     )
-                # Guarantee each role has at least min_slots_per_role tasks
-                # This prevents worker starvation - no role is completely idle
-                elif role_pending < get_min_slots_per_role():
-                    logger.info(
-                        f"Throttle at {reason} but ALLOWING {task_type} task for {target_role} "
-                        f"(role has {role_pending} pending, min={get_min_slots_per_role()})"
+                    # Return empty string - caller sees it as "not immediately dispatched"
+                    # but the task is queued rather than lost
+                    if queued:
+                        return ""  # Task queued, not lost
+                    # Queue rejected the task (full with higher priority tasks)
+                    logger.warning(
+                        f"Task {task_type} for {target_role} dropped - "
+                        f"throttled and deferred queue rejected"
                     )
-                else:
-                    # Role already has tasks queued - check phase priority
-                    phase = self._get_operation_phase()
-                    adjustment = self._get_phase_priority_adjustment(task_type, target_role)
-
-                    # In domain_dominance phase, only allow high-priority tasks
-                    # (exploit, lateral, credential_access for final DC dump)
-                    if phase == "domain_dominance" and adjustment >= 0:
-                        logger.debug(
-                            f"Throttle at {reason} - DROPPING {task_type} task "
-                            f"(domain_dominance phase, low priority adj={adjustment})"
-                        )
-                        return ""
-                    # In other phases, drop only clearly low-priority tasks (adj > 1)
-                    if adjustment > 1:
-                        logger.debug(
-                            f"Throttle at {reason} - DROPPING {task_type} task "
-                            f"({phase} phase, low priority adj={adjustment})"
-                        )
-                        return ""
-                    logger.info(
-                        f"Throttle at {reason} but ALLOWING {task_type} task "
-                        f"({phase} phase, priority adj={adjustment})"
-                    )
+                    return ""
 
             # Apply phase-aware priority adjustment
             adjusted_priority = priority + self._get_phase_priority_adjustment(

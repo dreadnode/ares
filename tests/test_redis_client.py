@@ -115,7 +115,7 @@ async def test_create_redis_client_uses_sentinel(monkeypatch: pytest.MonkeyPatch
         "password": "redis-pass",  # pragma: allowlist secret
         "db": 1,
         "decode_responses": True,
-        "socket_timeout": None,
+        "socket_timeout": 30.0,  # Always 30s to prevent hangs during failover
         "socket_connect_timeout": 5.0,
         "health_check_interval": 10.0,
     }

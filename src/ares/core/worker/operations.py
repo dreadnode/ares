@@ -230,6 +230,35 @@ async def get_operation_model_overrides(redis_url: str, operation_id: str) -> di
             pass
 
 
+async def is_operation_completed(redis_url: str, operation_id: str) -> bool:
+    """Check if an operation has been marked as completed.
+
+    Args:
+        redis_url: Redis connection URL
+        operation_id: Operation ID to check
+
+    Returns:
+        True if operation status is "completed" or "failed", False otherwise
+    """
+    client = await create_redis_client(redis_url, decode_responses=True)
+    try:
+        status_key = f"ares:operations:{operation_id}:status"
+        status_data = await client.get(status_key)
+        if not status_data:
+            return False
+        data = json.loads(str(status_data))
+        status = data.get("status", "")
+        return status in ("completed", "failed")
+    except Exception as e:
+        logger.debug(f"Failed to check operation status for {operation_id}: {e}")
+        return False
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+
 async def get_active_operation_pointer(redis_url: str, max_operation_age: int = 300) -> str | None:
     """Fetch a valid active operation pointer from Redis, if present."""
     client = await create_redis_client(redis_url, decode_responses=True)
@@ -267,4 +296,5 @@ __all__ = [
     "get_active_operation_pointer",
     "get_operation_model",
     "get_operation_model_overrides",
+    "is_operation_completed",
 ]

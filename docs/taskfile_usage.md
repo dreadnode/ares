@@ -57,7 +57,7 @@ This will:
 1. Retrieve API keys from 1Password:
    - `Dreadnode Dev Platform` → `api-key` field
    - `Ares Grafana MCP` → `grafana-token` field (blue team only)
-   - `claude.ai` → `dreadnode-api-key` field
+   - `Dreadnode Claude` → `dreadnode-api-key` field
 2. Start the agent with the configured platform (https://platform.dev.plundr.ai/)
 
 ## Available Tasks
@@ -250,6 +250,20 @@ List multi-agent Redis operations, statuses, and locks:
 
 ```bash
 task ares:red:multi:redis:list
+```
+
+**Syncing Code to Pods:**
+
+Hot-sync code changes to pods without restarting (for Python changes):
+
+```bash
+task red:multi:sync:code
+```
+
+Full sync with Redis clear and pod rollout (clean slate):
+
+```bash
+task red:multi:sync:align
 ```
 
 #### `task ares:investigate`
@@ -483,7 +497,7 @@ Ares expects the following items in 1Password:
    - Field: `grafana-token`
    - Used for: Alert polling and Loki/Prometheus queries
 
-3. **claude.ai** (Required)
+3. **Dreadnode Claude** (Required)
    - Field: `dreadnode-api-key`
    - Used for: Claude model inference
 
@@ -507,7 +521,7 @@ op item create \
 # Create Anthropic item
 op item create \
   --category="API Credential" \
-  --title="claude.ai" \
+  --title="Dreadnode Claude" \
   dreadnode-api-key="your-anthropic-api-key"
 ```
 
@@ -523,7 +537,7 @@ op item get "Dreadnode Dev Platform" --fields api-key --reveal
 op item get "Ares Grafana MCP" --fields grafana-token --reveal
 
 # Test Anthropic key
-op item get "claude.ai" --fields dreadnode-api-key --reveal
+op item get "Dreadnode Claude" --fields api-key --reveal
 ```
 
 ## Common Workflows
@@ -596,10 +610,16 @@ task ares:reports:latest
 Use remote tasks to sync code to running pods and manage dev PVCs.
 
 ```bash
-# One-time sync of current branch changes
+# Hot-sync code to all pods without restart (most Python changes work immediately)
+task red:multi:sync:code
+
+# Full sync + clear Redis + rollout pods (for clean slate)
+task red:multi:sync:align
+
+# One-time sync of current branch changes (low-level)
 task remote:sync:branch
 
-# Full sync of src/ares tree
+# Full sync of src/ares tree (low-level)
 task remote:sync:full
 
 # Clear dev code from PVCs (wipes /ares/src/ares in pods)

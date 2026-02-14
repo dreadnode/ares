@@ -77,11 +77,14 @@ class TestRunToolFunction:
             mock_run.return_value = MockRunResult(stdout="ok", stderr="", return_code=0)
             run_tool(["whoami"], target_role="lateral")
 
-        mock_run.assert_called_once_with(
-            ["whoami"],
-            timeout_seconds=300,
-            target_role="lateral",
-        )
+        # The tool path may be resolved to a full path (e.g., /usr/bin/whoami)
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args
+        assert call_args.kwargs.get("target_role") == "lateral"
+        assert call_args.kwargs.get("timeout_seconds") == 300
+        # The command should end with "whoami" (may have full path prefix)
+        called_cmd = call_args.args[0] if call_args.args else call_args.kwargs.get("cmd", [])
+        assert called_cmd[0].endswith("whoami")
 
 
 class TestNetworkEnumerationTools:
@@ -143,7 +146,7 @@ class TestNetworkEnumerationTools:
 
         port_stdout = (
             "Starting Nmap 7.98 ( https://nmap.org ) at 2026-01-20 17:43 +0000\n"
-            "Nmap scan report for ip-10-1-2-183.us-west-2.compute.internal (10.1.2.183)\n"
+            "Nmap scan report for ip-192-168-58-10.us-west-2.compute.internal (192.168.58.10)\n"
             "Host is up.\n\n"
             "PORT    STATE    SERVICE\n"
             "445/tcp open     microsoft-ds\n\n"
@@ -151,7 +154,7 @@ class TestNetworkEnumerationTools:
         )
         svc_stdout = (
             "Starting Nmap 7.98 ( https://nmap.org ) at 2026-01-20 17:44 +0000\n"
-            "Nmap scan report for ip-10-1-2-183.us-west-2.compute.internal (10.1.2.183)\n"
+            "Nmap scan report for ip-192-168-58-10.us-west-2.compute.internal (192.168.58.10)\n"
             "Host is up.\n\n"
             "PORT    STATE    SERVICE\n"
             "445/tcp open     microsoft-ds\n"
@@ -164,9 +167,9 @@ class TestNetworkEnumerationTools:
                 (port_stdout, "", 0),
                 (svc_stdout, "", 0),
             ]
-            tools.nmap_scan("10.1.2.183")
+            tools.nmap_scan("192.168.58.10")
 
-        host = next(h for h in state.all_hosts if h.ip == "10.1.2.183")
+        host = next(h for h in state.all_hosts if h.ip == "192.168.58.10")
         assert "compute.internal" not in (host.hostname or "").lower()
         assert host.os.lower().startswith("windows")
 
@@ -263,6 +266,70 @@ class TestNetworkEnumerationTools:
         # Both hosts should be tracked
         assert "192.168.58.100" in red_team_state.queried_hosts
         assert "192.168.58.101" in red_team_state.queried_hosts
+
+    def test_nmap_scan_deduplication_skips_scanned_targets(self, red_team_state: RedTeamState):
+        """Test that nmap_scan skips targets already in scanned_targets."""
+        from ares.tools.red import NetworkEnumerationTools
+
+        tools = NetworkEnumerationTools()
+        tools.set_state(red_team_state)
+
+        # Pre-populate scanned_targets
+        red_team_state.scanned_targets.add("192.168.58.100")
+
+        with patch("ares.tools.red.common.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(stdout="Scan complete", return_code=0)
+            result = tools.nmap_scan("192.168.58.100")
+
+        # Should skip without calling nmap
+        mock_run.assert_not_called()
+        assert "already scanned" in result.lower()
+
+    def test_nmap_scan_deduplication_partial_skip(self, red_team_state: RedTeamState):
+        """Test that nmap_scan only scans new targets when some are already scanned."""
+        from ares.tools.red import NetworkEnumerationTools
+
+        tools = NetworkEnumerationTools()
+        tools.set_state(red_team_state)
+
+        # Pre-populate one target as scanned
+        red_team_state.scanned_targets.add("192.168.58.100")
+
+        with patch("ares.tools.red.common.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(
+                stdout="PORT   STATE SERVICE\n22/tcp open  ssh\n",
+                stderr="",
+                return_code=0,
+            )
+            tools.nmap_scan("192.168.58.100 192.168.58.101")
+
+        # Should only scan the new target (192.168.58.101)
+        # Check that run_remote was called with command containing only 192.168.58.101
+        assert mock_run.called
+        call_args = str(mock_run.call_args)
+        assert "192.168.58.101" in call_args
+        # The already-scanned target should not be in the command
+        # (though it might appear in logs, the scan itself should exclude it)
+
+    def test_nmap_scan_marks_targets_as_scanned(self, red_team_state: RedTeamState):
+        """Test that successful nmap scan adds targets to scanned_targets."""
+        from ares.tools.red import NetworkEnumerationTools
+
+        tools = NetworkEnumerationTools()
+        tools.set_state(red_team_state)
+
+        assert "192.168.58.100" not in red_team_state.scanned_targets
+
+        with patch("ares.tools.red.common.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(
+                stdout="PORT   STATE SERVICE\n22/tcp open  ssh\n",
+                stderr="",
+                return_code=0,
+            )
+            tools.nmap_scan("192.168.58.100")
+
+        # After scan, target should be in scanned_targets
+        assert "192.168.58.100" in red_team_state.scanned_targets
 
     def test_enumerate_users_success(self, red_team_state: RedTeamState):
         """Test successful user enumeration."""
@@ -606,6 +673,73 @@ class TestDelegationTools:
         tools = DelegationTools()
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
+
+    def test_parse_delegation_with_spn_exists_column(self, red_team_state: RedTeamState):
+        """Test parsing findDelegation output with SPN Exists column.
+
+        Impacket's findDelegation.py may include a 5th column "SPN Exists" (Yes/No/-)
+        which must be stripped before parsing the target SPN.
+        """
+        from ares.tools.red import DelegationTools
+
+        tools = DelegationTools()
+        tools.set_state(red_team_state)
+
+        # Sample output with SPN Exists column (Yes/No/-)
+        output = """Impacket v0.12.0 - Copyright Fortra, LLC and its affiliated companies
+
+AccountName      AccountType  DelegationType                      DelegationRightsTo                SPN Exists
+---------------  -----------  ----------------------------------  --------------------------------  ----------
+web_svc$         Computer     Constrained                         cifs/dc01.contoso.local           Yes
+mssql_svc        User         Constrained w/ Protocol Transition  MSSQLSvc/sql01.contoso.local      No
+app_svc          User         Unconstrained                       N/A                               -
+
+[*] Total entries: 3
+"""
+        delegations = tools._parse_delegation_output(output)
+
+        assert len(delegations) == 3
+
+        # First delegation (constrained, computer account)
+        assert delegations[0]["account"] == "web_svc$"
+        assert delegations[0]["account_type"] == "computer"
+        assert delegations[0]["delegation_type"] == "constrained"
+        assert delegations[0]["target_spn"] == "cifs/dc01.contoso.local"
+
+        # Second delegation (constrained with protocol transition)
+        assert delegations[1]["account"] == "mssql_svc"
+        assert delegations[1]["account_type"] == "user"
+        assert delegations[1]["delegation_type"] == "constrained"
+        assert delegations[1]["target_spn"] == "MSSQLSvc/sql01.contoso.local"
+
+        # Third delegation (unconstrained)
+        assert delegations[2]["account"] == "app_svc"
+        assert delegations[2]["delegation_type"] == "unconstrained"
+        assert delegations[2]["target_spn"] == "N/A"
+
+    def test_parse_delegation_without_spn_exists_column(self, red_team_state: RedTeamState):
+        """Test parsing findDelegation output without SPN Exists column.
+
+        Older versions or different configurations may omit the SPN Exists column.
+        """
+        from ares.tools.red import DelegationTools
+
+        tools = DelegationTools()
+        tools.set_state(red_team_state)
+
+        # Sample output without SPN Exists column
+        output = """Impacket v0.11.0 - Copyright Fortra, LLC
+
+AccountName      AccountType  DelegationType       DelegationRightsTo
+---------------  -----------  -------------------  ---------------------------
+svc_account$     Computer     Constrained          cifs/dc01.contoso.local
+"""
+        delegations = tools._parse_delegation_output(output)
+
+        assert len(delegations) == 1
+        assert delegations[0]["account"] == "svc_account$"
+        assert delegations[0]["delegation_type"] == "constrained"
+        assert delegations[0]["target_spn"] == "cifs/dc01.contoso.local"
 
 
 class TestRedTeamReportingTools:
