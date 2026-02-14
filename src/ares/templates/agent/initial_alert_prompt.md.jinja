@@ -91,7 +91,11 @@ You MUST run this query FIRST before doing anything else:
 ```
 query_loki_logs(
     datasourceUid="<get from list_datasources>",
-    logql="{deployment=~\".+\"} |= \"{{ search_term }}\"",
+{% if labels.deployment %}
+    logql="{deployment=\"{{ labels.deployment }}\"} |= \"{{ search_term }}\"",
+{% else %}
+    logql="{job=\"<get from list_loki_label_values>\"} |= \"{{ search_term }}\"",
+{% endif %}
     startRfc3339="{{ current_time_minus_2h }}",
     endRfc3339="{{ current_time }}",
     limit=100

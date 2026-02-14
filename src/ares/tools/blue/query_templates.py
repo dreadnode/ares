@@ -216,6 +216,47 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         return sum(len(s.get("values", [])) for s in streams)
 
     # =========================================================================
+    # UNIFIED DETECTION QUERY DISPATCHER
+    # =========================================================================
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def run_detection_query(
+        self,
+        query_name: str,
+        target_host: str | None = None,
+        hours_back: int | None = None,
+    ) -> dict[str, Any]:
+        """Run a pre-built detection query by name.
+
+        Use list_query_templates() first to see available queries.
+        Each query targets a specific MITRE ATT&CK technique.
+
+        Args:
+            query_name: Name of the detection query (e.g. "detect_dcsync",
+                "detect_pass_the_hash", "detect_kerberoasting").
+                Use list_query_templates() to see all available names.
+            target_host: Optional hostname/IP to focus detection on.
+            hours_back: Hours of logs to search (default: 1 hour).
+
+        Returns:
+            Query results with detection indicators and MITRE mappings.
+        """
+        method = getattr(self, query_name, None)
+        if method is None or not query_name.startswith("detect_"):
+            available = [t["name"] for t in self.list_query_templates() if t["name"].startswith("detect_")]
+            return {
+                "status": "error",
+                "error": f"Unknown query: '{query_name}'. Available: {available}",
+            }
+
+        # All detect_* methods accept (target_host_or_ip, hours_back) as first two args
+        try:
+            return await method(target_host, hours_back)
+        except TypeError:
+            # Some methods use different param names, try without target
+            return await method(hours_back=hours_back)
+
+    # =========================================================================
     # RECONNAISSANCE & DISCOVERY (TA0007)
     # Maps to: nmap_scan, enumerate_users, enumerate_shares
     # =========================================================================
@@ -771,13 +812,13 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # Event 5145: Detailed file share access
         # Look for sensitive file extensions and paths
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(5145|file.*access|share.*access|smbclient)"'
             ' |~ "(?i)(\\.ps1|\\.bat|\\.cmd|\\.xml|\\.config|sysvol|netlogon|groups\\.xml)"'
         )
 
         if target_host:
-            logql = f'{{job=~".+", hostname=~".*{target_host}.*"}}' + logql.split("}", 1)[1]
+            logql = self._build_selector(hostname=target_host) + logql.split("}", 1)[1]
 
         logger.info(f"SMB file access detection: {logql}")
 
@@ -818,7 +859,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # Event 4887: Certificate Services approved certificate request
         # Look for certipy patterns, suspicious certificate requests
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(4886|4887|4876|certipy|certificate.*request)"'
             ' |~ "(?i)(esc[0-9]|enrollee.*supplies.*subject|altname|upn)"'
         )
@@ -859,7 +900,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # Look for: msDS-AllowedToActOnBehalfOfOtherIdentity modification
         # S4U2Self/S4U2Proxy ticket requests, delegation attribute changes
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(delegation|msds-allowedtoactonbehalf|rbcd|s4u2)"'
             ' |~ "(?i)(impersonate|constrained|unconstrained|getst|addcomputer)"'
         )
@@ -896,7 +937,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         # LDAP recon patterns, BloodHound/SharpHound signatures
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(bloodhound|sharphound|adexplorer|ldap.*query)"'
             ' |~ "(?i)(acl|objectsid|memberof|primarygroup|msds)"'
         )
@@ -939,7 +980,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # Event 4769 with suspicious patterns (krbtgt access, invalid timestamps)
         # Look for ticketer tool patterns, krbtgt references
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(golden.*ticket|krbtgt|ticketer|krbcred)"'
             ' |~ "(?i)(forged|4769|kerberos.*ticket|enterprise.*admin)"'
         )
@@ -984,13 +1025,13 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         # Event 4688: Process Creation (with command line logging)
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(4688|powershell|pwsh|cmd\\.exe|wscript|cscript)"'
             ' |~ "(?i)(encodedcommand|bypass|hidden|downloadstring|invoke)"'
         )
 
         if target_host:
-            logql = f'{{job=~".+", hostname=~".*{target_host}.*"}}' + logql.split("}", 1)[1]
+            logql = self._build_selector(hostname=target_host) + logql.split("}", 1)[1]
 
         logger.info(f"Suspicious execution detection: {logql}")
 
@@ -1029,7 +1070,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # Certipy recon queries LDAP for certificate templates
         # Look for: msPKI-Certificate-Name-Flag, msPKI-Enrollment-Flag queries
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(certipy|ldap|389|636)"'
             ' |~ "(?i)(mspki|pkienrollmentservice|certificatetemplates|pki)"'
         )
@@ -1070,7 +1111,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - Certificate request with SAN different from requester
         # - Event 4886/4887 with suspicious SAN
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(4886|4887|certificate.*request|certipy)"'
             ' |~ "(?i)(san=|subjectaltname|upn=|enrollee.*supplies|ct_flag)"'
         )
@@ -1110,7 +1151,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # ESC4 involves modifying certificate template attributes
         # Event 5136: Directory service object modified (on certificate template)
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(5136|ldap.*modify|template.*modif)"'
             ' |~ "(?i)(pki|certificatetemplate|mspki|enrollmentflag)"'
         )
@@ -1151,7 +1192,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - NTLM relay patterns
         # - PetitPotam/PrinterBug coercion followed by cert request
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(certsrv|certfnsh|certenroll|ntlmrelayx)"'
             ' |~ "(?i)(relay|coerce|petitpotam|printerbug|dfscoerce)"'
         )
@@ -1190,7 +1231,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # PKINIT authentication, certificate-based Kerberos
         # Event 4768 with certificate auth
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(pkinit|pkca|smartcard|certificate.*auth)"'
             ' |~ "(?i)(4768|tgt.*request|kerberos|certipy.*auth)"'
         )
@@ -1234,7 +1275,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - trusteddomain objectclass queries
         # - crossRef objects for forest structure
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(ldap|389|636|bloodhound|sharphound)"'
             ' |~ "(?i)(trusteddomain|crossref|trusttype|trustdirection|trustattributes)"'
         )
@@ -1273,7 +1314,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - nTSecurityDescriptor attribute requests
         # - Large LDAP queries for DACL
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(ldap|389|636|bloodhound|sharphound)"'
             ' |~ "(?i)(ntsecuritydescriptor|dacl|securitydescriptor|allowedtoactonbehalf)"'
         )
@@ -1312,7 +1353,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - NetSessionEnum (srvsvc)
         # - NetWkstaUserEnum (wkssvc)
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(srvsvc|wkssvc|netsession|netwksta)"'
             ' |~ "(?i)(enum|bloodhound|sharphound|session.*collection)"'
         )
@@ -1351,7 +1392,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - groupPolicyContainer objectclass
         # - gPLink, gPCFileSysPath attributes
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(ldap|389|636|bloodhound|sharphound)"'
             ' |~ "(?i)(grouppolicycontainer|gplink|gpcfilesyspath|gpo)"'
         )
@@ -1390,7 +1431,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - operatingsystem, operatingsystemversion
         # - serviceprincipalname, msds-allowedtodelegateto
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(ldap|389|636|bloodhound|sharphound)"'
             ' |~ "(?i)(objectclass=computer|operatingsystem|serviceprincipalname|allowedtodelegateto)"'
         )
@@ -1437,13 +1478,13 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - cmd.exe /Q /c with output redirection to ADMIN$
         # - __InstanceCreationEvent subscription
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(wmi|win32_process|root\\\\cimv2)"'
             ' |~ "(?i)(wmiexec|impacket|cmd.*\\/q.*\\/c|127\\.0\\.0\\.1.*admin\\$)"'
         )
 
         if target_host:
-            logql = f'{{job=~".+", hostname=~".*{target_host}.*"}}' + logql.split("}", 1)[1]
+            logql = self._build_selector(hostname=target_host) + logql.split("}", 1)[1]
 
         logger.info(f"Wmiexec detection: {logql}")
 
@@ -1483,13 +1524,13 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - Service binary in ADMIN$ or C:\Windows
         # - RemComSvc or similar service names
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(7045|service.*install|psexec|remcom)"'
             ' |~ "(?i)(admin\\$|\\\\\\\\.*\\\\admin|service.*creat|cmd\\.exe)"'
         )
 
         if target_host:
-            logql = f'{{job=~".+", hostname=~".*{target_host}.*"}}' + logql.split("}", 1)[1]
+            logql = self._build_selector(hostname=target_host) + logql.split("}", 1)[1]
 
         logger.info(f"Psexec detection: {logql}")
 
@@ -1529,13 +1570,13 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - BTOBTO service name pattern (default)
         # - Output to C:\__output or __output
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(7045|service|smbexec)"'
             ' |~ "(?i)(btobto|cmd.*echo.*\\^>|__output|execute\\.bat)"'
         )
 
         if target_host:
-            logql = f'{{job=~".+", hostname=~".*{target_host}.*"}}' + logql.split("}", 1)[1]
+            logql = self._build_selector(hostname=target_host) + logql.split("}", 1)[1]
 
         logger.info(f"Smbexec detection: {logql}")
 
@@ -1575,13 +1616,13 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - Task name pattern (random characters)
         # - cmd.exe /C execution in task
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(4698|4699|4700|4701|schtask|taskscheduler|atsvc)"'
             ' |~ "(?i)(atexec|impacket|cmd.*\\/c|schtasks)"'
         )
 
         if target_host:
-            logql = f'{{job=~".+", hostname=~".*{target_host}.*"}}' + logql.split("}", 1)[1]
+            logql = self._build_selector(hostname=target_host) + logql.split("}", 1)[1]
 
         logger.info(f"Atexec detection: {logql}")
 
@@ -1620,13 +1661,13 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - MMC20.Application, ShellWindows, ShellBrowserWindow instantiation
         # - Process created by mmc.exe or explorer.exe
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(dcom|135/tcp|rpc|mmc20|shellwindows|shellbrowser)"'
             ' |~ "(?i)(dcomexec|impacket|executeshellcommand|document\\.application)"'
         )
 
         if target_host:
-            logql = f'{{job=~".+", hostname=~".*{target_host}.*"}}' + logql.split("}", 1)[1]
+            logql = self._build_selector(hostname=target_host) + logql.split("}", 1)[1]
 
         logger.info(f"Dcomexec detection: {logql}")
 
@@ -1666,13 +1707,13 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - Event 4663: Object access on registry
         # - reg save commands
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(registry|hklm|winreg|samr)"'
             ' |~ "(?i)(sam|system|security|secretsdump|reg.*save)"'
         )
 
         if target_host:
-            logql = f'{{job=~".+", hostname=~".*{target_host}.*"}}' + logql.split("}", 1)[1]
+            logql = self._build_selector(hostname=target_host) + logql.split("}", 1)[1]
 
         logger.info(f"SAM dump detection: {logql}")
 
@@ -1711,13 +1752,13 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - LSA policy queries
         # - $MACHINE.ACC, DefaultPassword, NL$KM patterns
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(lsa|security|policy|secrets)"'
             ' |~ "(?i)(\\$machine|defaultpassword|nl\\$|dpapi|secretsdump)"'
         )
 
         if target_host:
-            logql = f'{{job=~".+", hostname=~".*{target_host}.*"}}' + logql.split("}", 1)[1]
+            logql = self._build_selector(hostname=target_host) + logql.split("}", 1)[1]
 
         logger.info(f"LSA secrets dump detection: {logql}")
 
@@ -1754,7 +1795,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - Rapid auth attempts with same NTLM challenge
         # - SMB signing not required warnings
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(ntlm|relay|responder|inveigh)"'
             ' |~ "(?i)(ntlmrelayx|smbrelay|signing.*not.*required|coerce)"'
         )
@@ -1796,13 +1837,13 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # - Multiple share recon
         # - File browsing patterns
         logql = (
-            '{job=~".+"}'
+            f'{self._build_selector()}'
             ' |~ "(?i)(smb|445/tcp|cifs|smbclient)"'
             ' |~ "(?i)(impacket|tree.*connect|shares.*enum|file.*access)"'
         )
 
         if target_host:
-            logql = f'{{job=~".+", hostname=~".*{target_host}.*"}}' + logql.split("}", 1)[1]
+            logql = self._build_selector(hostname=target_host) + logql.split("}", 1)[1]
 
         logger.info(f"Smbclient detection: {logql}")
 
