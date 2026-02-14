@@ -455,7 +455,8 @@ class TestRedisTaskQueueSubmit:
         )
 
         # Verify priority is in the pushed data
-        call_args = mock_redis_client.lpush.call_args
+        # High priority (<=2) uses rpush to front of queue
+        call_args = mock_redis_client.rpush.call_args
         pushed_json = call_args[0][1]
         pushed_data = json.loads(pushed_json)
         assert pushed_data["priority"] == 1
