@@ -565,6 +565,7 @@ class RedTeamState:
 
     # Operation tracking
     queried_hosts: set[str] = field(default_factory=set)
+    scanned_targets: set[str] = field(default_factory=set)
     tested_credentials: set[str] = field(default_factory=set)
     timeline: list[TimelineEvent] = field(default_factory=list)
     identified_techniques: set[str] = field(default_factory=set)
@@ -1237,7 +1238,7 @@ class SharedRedTeamState:
         # This handles cases where credential has parent domain but user is in child domain
         domain = self._resolve_credential_domain_from_users(username, domain)
         password = credential.password.strip()
-        # Strip truncation artifacts from LLM extraction (e.g., "Summer2024..." -> "Summer2024")
+        # Strip truncation artifacts from LLM extraction (e.g., "Password123..." -> "Password123")
         while password.endswith("..."):
             password = password[:-3].strip()
         while password.endswith("…"):  # Unicode ellipsis
@@ -2294,7 +2295,7 @@ class SharedRedTeamState:
         domains: set[str] = set()
         if state.target and state.target.domain:
             domains.add(state.target.domain.strip().lower())
-        # Extract from target hostname (e.g., dc.example.local -> example.local)
+        # Extract from target hostname (e.g., dc.contoso.local -> contoso.local)
         if state.target and state.target.hostname:
             hostname = state.target.hostname.strip().lower()
             if "." in hostname:

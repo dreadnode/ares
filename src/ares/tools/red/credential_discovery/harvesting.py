@@ -210,8 +210,8 @@ class CredentialHarvestingTools(Toolset):
         Example:
             >>> secretsdump("192.168.58.100", "admin", password="pass")  # pragma: allowlist secret
             >>> secretsdump("192.168.58.100", "admin", hash="aad3b4...")
-            >>> secretsdump("dc01.domain.local", "Administrator", no_pass=True)
-            >>> secretsdump("dc01.domain.local", "Administrator", no_pass=True, ticket_path="admin.ccache")
+            >>> secretsdump("dc01.contoso.local", "Administrator", no_pass=True)
+            >>> secretsdump("dc01.contoso.local", "Administrator", no_pass=True, ticket_path="admin.ccache")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if hash and not is_ntlm_hash(hash):
@@ -325,7 +325,7 @@ class CredentialHarvestingTools(Toolset):
         obtain service account passwords, which often have elevated privileges.
 
         Args:
-            domain: Target domain (e.g., 'example.local')
+            domain: Target domain (e.g., 'contoso.local')
             username: Valid domain username
             password: Password for the username
             dc_ip: Domain controller IP address
@@ -334,7 +334,7 @@ class CredentialHarvestingTools(Toolset):
             Kerberos TGS hashes for service accounts that can be cracked offline
 
         Example:
-            >>> kerberoast("example.local", "user", "pass", "192.168.58.100")
+            >>> kerberoast("contoso.local", "user", "pass", "192.168.58.100")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -396,7 +396,7 @@ class CredentialHarvestingTools(Toolset):
         valid principals even when SMB/LDAP recon is blocked.
 
         Args:
-            domain: Target domain (e.g., 'example.local')
+            domain: Target domain (e.g., 'contoso.local')
             dc_ip: Domain controller IP address
             users_file: Path to usernames file (optional)
 
@@ -542,7 +542,7 @@ class CredentialHarvestingTools(Toolset):
         cracked offline to obtain user passwords.
 
         Args:
-            domain: Target domain (e.g., 'example.local')
+            domain: Target domain (e.g., 'contoso.local')
             username: Valid domain username (for recon)
             password: Password for the username
             dc_ip: Domain controller IP address
@@ -551,7 +551,7 @@ class CredentialHarvestingTools(Toolset):
             AS-REP hashes for vulnerable user accounts
 
         Example:
-            >>> asrep_roast("example.local", "user", "pass", "192.168.58.100")
+            >>> asrep_roast("contoso.local", "user", "pass", "192.168.58.100")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:

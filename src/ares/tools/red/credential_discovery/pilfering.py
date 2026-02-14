@@ -97,7 +97,7 @@ class SharePilferingTools(Toolset):
             List of interesting files found
 
         Example:
-            >>> smbclient_spider("192.168.58.10", "SYSVOL", "user", "pass", "domain.local")
+            >>> smbclient_spider("192.168.58.10", "SYSVOL", "user", "pass", "contoso.local")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -286,7 +286,7 @@ class SharePilferingTools(Toolset):
             Decrypted GPP passwords if found
 
         Example:
-            >>> gpp_password_finder("192.168.58.10", "user", "pass", "domain.local")
+            >>> gpp_password_finder("192.168.58.10", "user", "pass", "contoso.local")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -352,7 +352,7 @@ class SharePilferingTools(Toolset):
             Scripts containing potential credentials
 
         Example:
-            >>> sysvol_script_search("192.168.58.10", "user", "pass", "domain.local")
+            >>> sysvol_script_search("192.168.58.10", "user", "pass", "contoso.local")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -578,7 +578,7 @@ class SharePilferingTools(Toolset):
             NTDS extraction results
 
         Example:
-            >>> ntds_dit_extract("192.168.58.10", "Administrator", password="P@ss", domain="domain.local")  # pragma: allowlist secret
+            >>> ntds_dit_extract("192.168.58.10", "Administrator", password="P@ss", domain="contoso.local")  # pragma: allowlist secret
         """
         resolved_password = self._resolve_password(username, domain, password)
         if (

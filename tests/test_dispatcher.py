@@ -872,7 +872,7 @@ class TestCredentialDomainResolution:
         assert domain == "FABRIKAM"
 
     def test_extract_plaintext_passwords_extracts_domain_upn(self):
-        """Should extract domain from user@domain.local format in output."""
+        """Should extract domain from user@contoso.local format in output."""
         dispatcher = RedTeamDispatcher()
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-9")
 
@@ -1052,8 +1052,8 @@ class TestCredentialDomainCrossReference:
 
         # First credential in correct domain
         cred1 = Credential(
-            username="john.smith",
-            password="Summer2024!",  # pragma: allowlist secret
+            username="test.user",
+            password="TestPass123",  # pragma: allowlist secret
             domain="contoso.local",
             source="ldap_description",
         )
@@ -1063,8 +1063,8 @@ class TestCredentialDomainCrossReference:
 
         # Same credential recorded with wrong domain (agent hallucination)
         cred2 = Credential(
-            username="john.smith",
-            password="Summer2024!",  # pragma: allowlist secret
+            username="test.user",
+            password="TestPass123",  # pragma: allowlist secret
             domain="fabrikam.local",  # Wrong domain!
             source="recon_bloodhound",
         )
@@ -1737,73 +1737,3 @@ class TestWorkerHeartbeatTaskActivity:
         updated_task = state.pending_tasks["task-123"]
         assert updated_task.last_activity_at > old_time
         assert updated_task.status == TaskStatus.IN_PROGRESS
-
-
-class TestCredentialAttachmentForDelegation:
-    """Tests for credential lookup in routing for delegation exploits."""
-
-    @pytest.mark.asyncio
-    async def test_attach_credentials_for_constrained_delegation(self):
-        """Should attach credentials from state when has_credentials=True but password missing."""
-        dispatcher = RedTeamDispatcher()
-        state = SharedRedTeamState(operation_id="op-test-cred-attach")
-        state.target = Target(ip="192.168.58.10", domain="contoso.local")
-        dispatcher._shared_state = state
-
-        # Add credential to state
-        cred = Credential(
-            username="web_svc",
-            password="WebSvcP@ss!",  # pragma: allowlist secret
-            domain="contoso.local",
-            source="kerberoast",
-        )
-        state.add_credential(cred, "cracker")
-
-        # Mock task queue to capture submitted payloads
-        submitted_payloads = []
-        mock_task_queue = AsyncMock()
-
-        async def capture_submit(task_type, target_role, payload, source_agent, priority=5):
-            submitted_payloads.append(
-                {"task_type": task_type, "target_role": target_role, "payload": payload}
-            )
-            return "task-123"
-
-        mock_task_queue.submit_task.side_effect = capture_submit
-        dispatcher._task_queue = mock_task_queue
-
-        # Register a mock worker for the privesc role (needed for role health check)
-        from datetime import datetime, timezone
-
-        from ares.core.models import AgentInfo, AgentRole
-
-        privesc_agent = AgentInfo(
-            name="privesc_worker",
-            role=AgentRole.PRIVESC,
-            status="idle",
-            last_heartbeat=datetime.now(timezone.utc),
-            pod_name="test-privesc-pod",
-        )
-        dispatcher._agents["privesc_worker"] = privesc_agent
-
-        # Call request_exploit with delegation vuln that has has_credentials=True but no password
-        await dispatcher.request_exploit(
-            vuln_type="constrained_delegation",
-            vuln_id="test-vuln-001",
-            target="dc01.contoso.local",
-            source_agent="test_agent",
-            params={
-                "account_name": "web_svc",
-                "target_spn": "cifs/dc01.contoso.local",
-                "domain": "contoso.local",
-                "dc_ip": "192.168.58.10",
-                "has_credentials": True,
-                # No password in params - should be looked up from state
-            },
-        )
-
-        # Verify task was submitted with attached credentials
-        assert len(submitted_payloads) == 1
-        payload = submitted_payloads[0]["payload"]
-        assert payload["password"] == "WebSvcP@ss!"  # pragma: allowlist secret
-        assert payload["username"] == "web_svc"

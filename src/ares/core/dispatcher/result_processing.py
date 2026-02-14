@@ -7,6 +7,7 @@ from task output.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from datetime import datetime, timezone
@@ -70,22 +71,6 @@ class ResultProcessingMixin:
                 f"Retried task {task_id} completed after {task_info.retry_count} retries: "
                 f"success={success}"
             )
-
-        # Track role health for circuit breaker detection
-        role = task_info.assigned_agent
-        is_circuit_breaker_failure = bool(
-            not success
-            and error
-            and any(
-                ind in error.lower()
-                for ind in ["circuit breaker", "tool failures", "consecutive failures"]
-            )
-        )
-
-        if success:
-            self.record_role_task_success(role)
-        else:
-            self.record_role_task_failure(role, is_circuit_breaker=is_circuit_breaker_failure)
 
         task_result = TaskResult(
             task_id=task_id,
@@ -276,6 +261,9 @@ class ResultProcessingMixin:
                 )
                 await self.publish_hash(hash_obj, source_agent)
                 if hash_obj.cracked_password:
+                    logger.debug(
+                        f"Creating credential from cracked hash: {hash_obj.domain}\\{hash_obj.username}"
+                    )
                     cracked_cred = Credential(
                         username=hash_obj.username,
                         password=hash_obj.cracked_password,
@@ -285,7 +273,20 @@ class ResultProcessingMixin:
                         parent_id=hash_obj.id,  # Cracked cred links to its hash
                         attack_step=hash_obj.attack_step + 1,
                     )
-                    await self.publish_credential(cracked_cred, source_agent)
+                    try:
+                        await asyncio.wait_for(
+                            self.publish_credential(cracked_cred, source_agent),
+                            timeout=30.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            f"Timeout publishing cracked credential {hash_obj.domain}\\{hash_obj.username} - "
+                            "publish_credential blocked for 30s"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Error publishing cracked credential {hash_obj.domain}\\{hash_obj.username}: {e}"
+                        )
 
         discovered_shares = result.get("discovered_shares")
         if isinstance(discovered_shares, list):
@@ -611,10 +612,8 @@ class ResultProcessingMixin:
             elif not any(h.ip == host.ip for h in self.shared_state.all_hosts):
                 self.shared_state.all_hosts.append(host)
 
-        for username, extracted_domain in self._extract_users_from_output(output):
-            # Use extracted domain if available, otherwise fall back to target domain
-            user_domain = extracted_domain or domain
-            self._add_user(username, user_domain, source_agent)
+        for username in self._extract_users_from_output(output):
+            self._add_user(username, domain, source_agent)
 
         creds = self._extract_plaintext_passwords_from_output(output)
         if "password :" in output.lower() and not creds and domain:
@@ -817,74 +816,42 @@ class ResultProcessingMixin:
             )
         return hosts
 
-    def _extract_users_from_output(self: RedTeamDispatcher, output: str) -> list[tuple[str, str]]:
-        """Extract (username, domain) tuples from various tool output formats.
-
-        Parses DOMAIN\\user and user@domain patterns to extract the domain.
-        Returns empty domain string when domain cannot be determined.
-        """
+    def _extract_users_from_output(self: RedTeamDispatcher, output: str) -> list[str]:
+        """Extract usernames from various tool output formats."""
         if not output:
             return []
-        users: list[tuple[str, str]] = []
-        seen: set[tuple[str, str]] = set()
-
-        def _add_user(username: str, domain: str = "") -> None:
-            """Add user tuple if not already seen."""
-            user = username.strip()
-            dom = domain.strip().lower() if domain else ""
-            if not user:
-                return
-            key = (user.lower(), dom)
-            if key not in seen:
-                users.append((user, dom))
-                seen.add(key)
-
+        users: list[str] = []
+        seen: set[str] = set()
         for line in output.splitlines():
             stripped = line.strip()
             if not stripped:
                 continue
-
-            # rpcclient user:[username] format
             for match in re.findall(r"user:\[([^\]]+)\]", stripped, re.IGNORECASE):
                 user = match.strip()
-                if user:
-                    _add_user(user, "")
-
-            # Account: username format
+                if user and user not in seen:
+                    users.append(user)
+                    seen.add(user)
             account_match = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)
             if account_match:
-                _add_user(account_match.group(1), "")
-
-            # samaccountname: username format
+                user = account_match.group(1).strip()
+                if user and user not in seen:
+                    users.append(user)
+                    seen.add(user)
             sam_match = re.search(r"samaccountname:\s*([A-Za-z0-9_.-]+)", stripped, re.IGNORECASE)
             if sam_match:
-                _add_user(sam_match.group(1), "")
-
-            # DOMAIN\user pattern (e.g., netexec --users, various AD tools)
-            # Line: SMB 192.168.58.7 445 DC01 north.sevenkingdoms.local\samwell.tarly ...
-            domain_user_match = re.search(r"([A-Za-z0-9_.-]+)\\([A-Za-z0-9_.$-]+)", stripped)
-            if domain_user_match:
-                domain = domain_user_match.group(1).strip()
-                user = domain_user_match.group(2).strip()
-                _add_user(user, domain)
-
-            # user@domain UPN pattern (e.g., login logs, email-style identifiers)
-            # Line: User: jon.snow@north.sevenkingdoms.local logged in
-            upn_match = re.search(r"([A-Za-z0-9_.-]+)@([A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)", stripped)
-            if upn_match:
-                user = upn_match.group(1).strip()
-                domain = upn_match.group(2).strip()
-                _add_user(user, domain)
-
-            # SMB output with username and date (netexec --users)
-            # Line: SMB 192.168.58.7 445 APP-SRV01 danj 2026-01-13 21:03:31 ...
+                user = sam_match.group(1).strip()
+                if user and user not in seen:
+                    users.append(user)
+                    seen.add(user)
             smb_match = re.search(
                 r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.-]+)\s+\d{4}-\d{2}-\d{2}",
                 stripped,
             )
             if smb_match:
-                _add_user(smb_match.group(1), "")
-
+                user = smb_match.group(1).strip()
+                if user and user not in seen:
+                    users.append(user)
+                    seen.add(user)
         return users
 
     def _extract_plaintext_passwords_from_output(  # noqa: PLR0912

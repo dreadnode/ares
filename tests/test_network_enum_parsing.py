@@ -152,16 +152,16 @@ def test_extract_users_filters_motd_garbage():
 
     users = tool._extract_users_from_outputs(outputs)
 
-    # Valid users should be extracted with their domain
-    assert ("admin", "contoso") in users
-    assert ("john.doe", "contoso") in users
+    # Valid users should be extracted
+    assert "admin" in users
+    assert "john.doe" in users
 
     # MOTD garbage should not be included
-    for username, _ in users:
-        assert "┏" not in username
-        assert "┃" not in username
-        assert "minimal" not in username.lower()
-        assert "kali" not in username.lower()
+    for user in users:
+        assert "┏" not in user
+        assert "┃" not in user
+        assert "minimal" not in user.lower()
+        assert "kali" not in user.lower()
 
 
 def test_extract_users_filters_motd_patterns():
@@ -180,17 +180,16 @@ def test_extract_users_filters_motd_patterns():
     ]
 
     users = tool._extract_users_from_outputs(outputs)
-    usernames = {u[0] for u in users}
 
-    # Valid users should be extracted (rpcclient doesn't include domain, so empty)
-    assert "administrator" in usernames
-    assert "svc-sql" in usernames
-    assert "jane.doe" in usernames
+    # Valid users should be extracted
+    assert "administrator" in users
+    assert "svc-sql" in users
+    assert "jane.doe" in users
 
     # MOTD patterns should not create invalid users
-    for username, _ in users:
-        assert "kali" not in username.lower()
-        assert "message" not in username.lower()
+    for user in users:
+        assert "kali" not in user.lower()
+        assert "message" not in user.lower()
 
 
 def test_extract_users_filters_path_like_strings():
@@ -208,15 +207,15 @@ def test_extract_users_filters_path_like_strings():
 
     users = tool._extract_users_from_outputs(outputs)
 
-    # Valid users should be extracted with their domain
-    assert ("bob_smith", "contoso") in users
-    assert ("alice_jones", "contoso") in users
+    # Valid users should be extracted
+    assert "bob_smith" in users
+    assert "alice_jones" in users
 
     # Path-like strings should not be included as users
     # (the /tmp/users.txt line is filtered by is_motd_line)
-    for username, _ in users:
-        assert "/" not in username
-        assert "tmp" not in username.lower()
+    for user in users:
+        assert "/" not in user
+        assert "tmp" not in user.lower()
 
 
 def test_extract_users_handles_mixed_garbage_and_valid():
@@ -241,12 +240,10 @@ def test_extract_users_handles_mixed_garbage_and_valid():
     ]
 
     users = tool._extract_users_from_outputs(outputs)
-    usernames = {u[0] for u in users}
 
     # Should extract valid users from multiple sources
-    # admin has domain from CONTOSO\admin pattern, svc-web has no domain from rpcclient
-    assert ("admin", "contoso") in users
-    assert "svc-web" in usernames
+    assert "admin" in users
+    assert "svc-web" in users
 
     # Should have filtered garbage
     assert len(users) == 2

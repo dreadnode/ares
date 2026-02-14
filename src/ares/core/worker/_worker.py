@@ -1389,34 +1389,6 @@ class RedisWorkerAgent:
             return "Agent failed"
         if stop_reason == "error":
             return "Agent stopped with error"
-
-        # Detect circuit breaker trips - Finish(reason="Circuit breaker...") is a failure
-        # even though stop_reason="finish" and failed=False
-        if stop_reason == "finish":
-            # Check for circuit breaker in the result text or finish reason
-            result_text = str(getattr(result, "output", ""))
-            content = str(getattr(result, "content", ""))
-            # Also check messages for circuit breaker mentions
-            messages = getattr(result, "messages", [])
-            last_msg = ""
-            if messages:
-                try:
-                    last_msg = str(messages[-1]) if messages else ""
-                except Exception:
-                    pass
-
-            circuit_breaker_indicators = [
-                "circuit breaker",
-                "Circuit breaker",
-                "CIRCUIT BREAKER",
-            ]
-            for text in (result_text, content, last_msg):
-                for indicator in circuit_breaker_indicators:
-                    if indicator in text:
-                        return (
-                            "Circuit breaker tripped - agent stopped due to repeated tool failures"
-                        )
-
         return None
 
     def _summarize_agent_result(self, result: Any) -> str:
@@ -1636,26 +1608,7 @@ class RedisWorkerAgent:
                     )
 
                     if message and message.get("type") == "message":
-                        # Parse the message data to check type
-                        try:
-                            import json
-
-                            data = message.get("data")
-                            if isinstance(data, bytes):
-                                data = data.decode("utf-8")
-                            msg_data = json.loads(data) if data else {}
-                            msg_type = msg_data.get("type", "state_update")
-                        except (json.JSONDecodeError, UnicodeDecodeError):
-                            msg_type = "state_update"  # Default to state update
-
-                        if msg_type == "shutdown":
-                            # Shutdown notification - stop immediately
-                            logger.info(
-                                f"[{self.agent_name}] Received shutdown notification via pub/sub"
-                            )
-                            self._running = False
-                            return
-                        # State update notification - refresh state
+                        # Received state update notification - refresh state
                         logger.debug(
                             f"[{self.agent_name}] Received state update notification via pub/sub"
                         )

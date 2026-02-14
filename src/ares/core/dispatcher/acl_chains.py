@@ -4,10 +4,10 @@ This module provides tools for tracking and executing multi-hop ACL abuse chains
 discovered through BloodHound analysis. ACL chains allow privilege escalation
 through a series of intermediate accounts.
 
-Example chain: svc.backup -> helpdesk01 -> admin01 -> Domain Admins
-- svc.backup has ForceChangePassword on helpdesk01
-- helpdesk01 has WriteDacl on admin01
-- admin01 has GenericAll on Domain Admins
+Example chain: user1 -> user2 -> user3 -> Domain Admins
+- user1 has ForceChangePassword on user2
+- user2 has WriteDacl on user3
+- user3 has GenericAll on Domain Admins
 """
 
 from __future__ import annotations

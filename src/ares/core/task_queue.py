@@ -212,10 +212,18 @@ class RedisTaskQueue:
         queue_key = self._task_queue_key(target_role)
 
         try:
-            # LPUSH for FIFO (workers use BRPOP from right)
-            await self._client.lpush(queue_key, task.model_dump_json())
-
-            logger.info(f"Task {task_id} submitted to {queue_key}")
+            # Priority-based insertion:
+            # - priority <= 2 (urgent): RPUSH to front of queue (processed first)
+            # - priority > 2 (normal): LPUSH to back of queue (FIFO order)
+            # Workers use BRPOP from right, so RPUSH items are processed immediately.
+            if priority <= 2:
+                await self._client.rpush(queue_key, task.model_dump_json())
+                logger.info(
+                    f"Task {task_id} URGENT (priority={priority}) submitted to front of {queue_key}"
+                )
+            else:
+                await self._client.lpush(queue_key, task.model_dump_json())
+                logger.info(f"Task {task_id} submitted to {queue_key}")
             return task_id
 
         except Exception as e:
@@ -788,52 +796,6 @@ class RedisTaskQueue:
                 self._handle_connection_error(e)
             # Don't raise - pub/sub failures shouldn't break the main flow
             logger.warning(f"Failed to publish state update: {e}")
-            return 0
-
-    async def publish_shutdown(self, operation_id: str) -> int:
-        """
-        Publish a shutdown notification to subscribers.
-
-        Workers subscribed to this channel will immediately stop processing
-        when they receive this notification.
-
-        Args:
-            operation_id: The operation ID
-
-        Returns:
-            Number of subscribers that received the message
-        """
-        if not self._connected:
-            await self.connect()
-
-        channel = self._state_update_channel(operation_id)
-        message = json.dumps(
-            {
-                "type": "shutdown",
-                "operation_id": operation_id,
-                "ts": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-
-        try:
-            count = await self._client.publish(channel, message)
-            logger.info(f"Shutdown notification published to {channel} ({count} subscribers)")
-            return count
-        except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in [
-                    "connection",
-                    "connect",
-                    "closed",
-                    "timeout",
-                    "broken pipe",
-                    "reset",
-                ]
-            ):
-                self._handle_connection_error(e)
-            logger.warning(f"Failed to publish shutdown notification: {e}")
             return 0
 
     async def subscribe_state_updates(self, operation_id: str):

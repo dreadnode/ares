@@ -147,12 +147,6 @@ class AnnouncementMixin:
                 logger.info(
                     f"Published operation completion to Redis: {self.shared_state.operation_id}"
                 )
-
-                # Publish shutdown notification via pub/sub for immediate worker notification
-                # Workers subscribe to this channel and will stop immediately on receiving this
-                if self._task_queue is not None:
-                    await self._task_queue.publish_shutdown(self.shared_state.operation_id)
-
             except Exception as e:
                 logger.warning(f"Failed to publish operation status to Redis: {e}")
 

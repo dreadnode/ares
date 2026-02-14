@@ -92,35 +92,6 @@ class RoutingMixin:
 
         return None, 0
 
-    def _find_credential_by_username(
-        self: RedTeamDispatcher,
-        username: str,
-        domain: str | None = None,
-    ) -> Credential | None:
-        """Find a credential by username and optionally domain.
-
-        Returns the Credential object if found, preferring credentials with passwords.
-        """
-        username_lower = username.lower().strip()
-        domain_lower = domain.lower().strip() if domain else ""
-
-        credential_without_password = None
-        for cred in self.shared_state.all_credentials:
-            if cred.username.lower().strip() != username_lower:
-                continue
-            # Check domain match if specified
-            if domain_lower:
-                cred_domain = cred.domain.lower().strip() if cred.domain else ""
-                if cred_domain != domain_lower and domain_lower not in cred_domain:
-                    continue
-            # Prefer credentials with passwords
-            if cred.password:
-                return cred
-            if not credential_without_password:
-                credential_without_password = cred
-
-        return credential_without_password
-
     def _find_domain_credential(self: RedTeamDispatcher, domain: str) -> Credential | None:
         """Find a credential for the specified domain."""
         domain_lower = domain.lower() if domain else ""
@@ -331,34 +302,6 @@ class RoutingMixin:
 
         return ""
 
-    def _ensure_dc_ip_in_payload(
-        self: RedTeamDispatcher,
-        payload: dict[str, Any],
-        context: str = "task",
-    ) -> None:
-        """Ensure dc_ip is set in payload, resolving from domain if needed.
-
-        Modifies payload in place. Tries multiple sources in order:
-        1. _find_domain_controller_ip() lookup
-        2. target_ip from payload
-        3. shared_state.target.ip fallback
-
-        Args:
-            payload: Task payload dict to update (modified in place).
-            context: Context string for logging (e.g., "exploit ESC1").
-        """
-        if payload.get("dc_ip") or not payload.get("domain"):
-            return
-
-        dc_ip = self._find_domain_controller_ip(payload["domain"])
-        if not dc_ip:
-            dc_ip = payload.get("target_ip", "")
-        if not dc_ip and self.shared_state.target:
-            dc_ip = self.shared_state.target.ip
-        if dc_ip:
-            payload["dc_ip"] = dc_ip
-            logger.info(f"Resolved dc_ip={dc_ip} for {context}")
-
     def _extract_ticket_path_from_output(self: RedTeamDispatcher, output: str) -> str:
         """Extract .ccache ticket path from S4U attack or getTGT output.
 
@@ -385,10 +328,10 @@ class RoutingMixin:
         """Extract target host from SPN.
 
         Args:
-            spn: Service Principal Name (e.g., 'cifs/DC01.domain.local')
+            spn: Service Principal Name (e.g., 'cifs/DC01.contoso.local')
 
         Returns:
-            Host FQDN (e.g., 'DC01.domain.local') or None if not extractable
+            Host FQDN (e.g., 'DC01.contoso.local') or None if not extractable
         """
         if not spn or "/" not in spn:
             return None
@@ -1229,21 +1172,9 @@ class RoutingMixin:
             **params,
         }
 
-        # Attach credentials from state when has_credentials=True but no password provided
+        # Track attack chain - look up credential from params
         username = payload.get("username") or payload.get("account_name", "")
         domain = payload.get("domain", "")
-        if payload.get("has_credentials") and not payload.get("password") and username:
-            cred = self._find_credential_by_username(username, domain)
-            if cred and cred.password:
-                payload["password"] = cred.password
-                # Also ensure username is set (may only have account_name)
-                if not payload.get("username"):
-                    payload["username"] = cred.username
-                logger.debug(
-                    f"Attached password from state for {username}@{domain} in exploit {vuln_type}"
-                )
-
-        # Track attack chain - look up credential from params
         password = payload.get("password", "")
         if username:
             parent_id, parent_step = self._find_credential_id(username, domain, password)
@@ -1251,7 +1182,15 @@ class RoutingMixin:
             payload["parent_attack_step"] = parent_step
 
         # Ensure dc_ip is resolved for exploit tasks that need it
-        self._ensure_dc_ip_in_payload(payload, context=f"exploit {vuln_type}")
+        if not payload.get("dc_ip") and payload.get("domain"):
+            dc_ip = self._find_domain_controller_ip(payload["domain"])
+            if not dc_ip:
+                dc_ip = payload.get("target_ip", "")
+            if not dc_ip and self.shared_state.target:
+                dc_ip = self.shared_state.target.ip
+            if dc_ip:
+                payload["dc_ip"] = dc_ip
+                logger.info(f"Resolved dc_ip={dc_ip} for exploit {vuln_type}")
 
         if self._task_queue:
             # Use priority=1 (highest) - exploit tasks are the actual DA path.

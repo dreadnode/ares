@@ -252,6 +252,20 @@ List multi-agent Redis operations, statuses, and locks:
 task ares:red:multi:redis:list
 ```
 
+**Syncing Code to Pods:**
+
+Hot-sync code changes to pods without restarting (for Python changes):
+
+```bash
+task red:multi:sync:code
+```
+
+Full sync with Redis clear and pod rollout (clean slate):
+
+```bash
+task red:multi:sync:align
+```
+
 #### `task ares:investigate`
 
 Investigate a specific alert from a JSON file.
@@ -596,10 +610,16 @@ task ares:reports:latest
 Use remote tasks to sync code to running pods and manage dev PVCs.
 
 ```bash
-# One-time sync of current branch changes
+# Hot-sync code to all pods without restart (most Python changes work immediately)
+task red:multi:sync:code
+
+# Full sync + clear Redis + rollout pods (for clean slate)
+task red:multi:sync:align
+
+# One-time sync of current branch changes (low-level)
 task remote:sync:branch
 
-# Full sync of src/ares tree
+# Full sync of src/ares tree (low-level)
 task remote:sync:full
 
 # Clear dev code from PVCs (wipes /ares/src/ares in pods)

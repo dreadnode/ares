@@ -311,7 +311,7 @@ class TestPrivescTrackExploitationHook:
 Certificate Authorities
   0
     CA Name                             : corp-DC01-CA
-    DNS Name                            : dc01.corp.local
+    DNS Name                            : dc01.contoso.local
     Certificate Subject                 : CN=corp-DC01-CA
     [!] Vulnerabilities
       ESC8                              : Web Enrollment is vulnerable
@@ -343,8 +343,8 @@ Certificate Authorities
 
         # Simulate successful certipy_auth output
         certipy_auth_output = """
-[*] Using principal: Administrator@corp.local
-[*] Got hash for 'Administrator@corp.local': aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0
+[*] Using principal: Administrator@contoso.local
+[*] Got hash for 'Administrator@contoso.local': aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0
         """
 
         event = self._make_tool_end_event("certipy_auth", certipy_auth_output)

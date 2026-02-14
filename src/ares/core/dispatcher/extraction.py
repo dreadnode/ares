@@ -284,18 +284,8 @@ def extract_shares_from_output(output: str, default_host: str = "") -> list[Shar
             if not name or name.lower() == "share":
                 continue
 
-            # parts[1] might be permissions or first word of comment if permissions empty
-            raw_perm = parts[1].strip().upper() if len(parts) > 1 else ""
-
-            # Valid permissions contain READ or WRITE (e.g., "READ", "WRITE", "READ,WRITE")
-            # If it doesn't look like a permission, it's probably the comment
-            if raw_perm and ("READ" in raw_perm or "WRITE" in raw_perm):
-                permissions = parts[1].strip()
-                comment = parts[2].strip() if len(parts) > 2 else ""
-            else:
-                # No valid permissions - everything after name is comment
-                permissions = ""
-                comment = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
+            permissions = parts[1].strip() if len(parts) > 1 else ""
+            comment = parts[2].strip() if len(parts) > 2 else ""
 
             key = (current_host.lower(), name.lower())
             if key in seen:

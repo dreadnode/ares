@@ -691,7 +691,7 @@ class TestExtractDomains:
         assert "fabrikam.local" in domains
 
     def test_extracts_domains_from_nested_fqdns(self) -> None:
-        """Test that domains are extracted from nested FQDNs like sub.domain.local."""
+        """Test that domains are extracted from nested FQDNs like sub.contoso.local."""
         from ares.core.models import Host, SharedRedTeamState
 
         state = SharedRedTeamState(operation_id="test-op")
@@ -741,11 +741,11 @@ class TestExtractDomains:
         from ares.core.models import SharedRedTeamState, Target
 
         state = SharedRedTeamState(operation_id="test-op")
-        state.target = Target(ip="192.168.58.1", hostname="dc01.corp.local")
+        state.target = Target(ip="192.168.58.1", hostname="dc01.contoso.local")
 
         domains = SharedRedTeamState._extract_domains(state)
 
-        assert "corp.local" in domains
+        assert "contoso.local" in domains
 
     def test_handles_hosts_without_fqdn(self) -> None:
         """Test that hosts without dots in hostname don't cause issues."""
@@ -870,7 +870,7 @@ class TestResolveNetBIOSToFQDN:
         state = SharedRedTeamState(operation_id="test-op")
         # Multiple domains that could match "corp"
         state.all_domains = [
-            "corp.local",  # shorter
+            "contoso.local",  # shorter
             "corp.contoso.local",  # longer, more specific
         ]
 

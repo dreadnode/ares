@@ -14,7 +14,6 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
-from ares.core.dispatcher.extraction import extract_shares_from_output
 from ares.core.models import Credential, Host, Share
 from ares.tools.red.common import (
     AnyRedTeamState,
@@ -91,18 +90,11 @@ class NetworkEnumerationTools(Toolset):
             return f"[+] WinRM reachable on {target} (ports {ports})"
         return f"[!] WinRM not reachable on {target} (ports 5985/5986 closed)"
 
-    def _extract_users_from_outputs(  # noqa: PLR0912
-        self, outputs: list[tuple[str, str]]
-    ) -> set[tuple[str, str]]:
-        """Extract (username, domain) tuples from user enumeration outputs.
-
-        Parses DOMAIN\\user patterns to extract both username and domain.
-        Returns empty domain string when domain cannot be determined.
-        """
-        users: set[tuple[str, str]] = set()
+    def _extract_users_from_outputs(self, outputs: list[tuple[str, str]]) -> set[str]:  # noqa: PLR0912
+        users: set[str] = set()
         user_pattern = r"[A-Za-z0-9._$-]+"
 
-        def _add_user(candidate: str, domain: str = "") -> None:
+        def _add_user(candidate: str) -> None:
             user = candidate.strip()
             if not user or user.endswith("$"):
                 return
@@ -111,8 +103,7 @@ class NetworkEnumerationTools(Toolset):
             # Filter out Kali MOTD garbage and invalid usernames
             if is_motd_garbage(user):
                 return
-            dom = domain.strip().lower() if domain else ""
-            users.add((user, dom))
+            users.add(user)
 
         for label, content in outputs:
             if not content:
@@ -146,13 +137,12 @@ class NetworkEnumerationTools(Toolset):
                     if backslash_match:
                         _add_user(backslash_match.group(1))
                         continue
-                    # DOMAIN\user pattern - capture both domain and user
-                    domain_user_match = re.search(
-                        rf"([A-Za-z0-9._-]+)\\({user_pattern})",
+                    domain_match = re.search(
+                        rf"[A-Za-z0-9._-]+\\({user_pattern})",
                         line,
                     )
-                    if domain_user_match:
-                        _add_user(domain_user_match.group(2), domain_user_match.group(1))
+                    if domain_match:
+                        _add_user(domain_match.group(1))
                         continue
                     rid_match = re.search(r"\bAccount:\s*([A-Za-z0-9._-]+)", line)
                     if rid_match:
@@ -169,13 +159,12 @@ class NetworkEnumerationTools(Toolset):
                     if backslash_match:
                         _add_user(backslash_match.group(1))
                         continue
-                    # DOMAIN\user pattern - capture both domain and user
-                    domain_user_match = re.search(
-                        rf"([A-Za-z0-9._-]+)\\({user_pattern})",
+                    domain_match = re.search(
+                        rf"[A-Za-z0-9._-]+\\({user_pattern})",
                         line,
                     )
-                    if domain_user_match:
-                        _add_user(domain_user_match.group(2), domain_user_match.group(1))
+                    if domain_match:
+                        _add_user(domain_match.group(1))
                         continue
                     rid_match = re.search(r"\bAccount:\s*([A-Za-z0-9._-]+)", line)
                     if rid_match:
@@ -191,13 +180,12 @@ class NetworkEnumerationTools(Toolset):
                     if name_match:
                         _add_user(name_match.group(1))
                         continue
-                    # DOMAIN\user pattern - capture both domain and user
-                    domain_user_match = re.search(
-                        rf"([A-Za-z0-9._-]+)\\({user_pattern})",
+                    domain_match = re.search(
+                        rf"[A-Za-z0-9._-]+\\({user_pattern})",
                         line,
                     )
-                    if domain_user_match:
-                        _add_user(domain_user_match.group(2), domain_user_match.group(1))
+                    if domain_match:
+                        _add_user(domain_match.group(1))
                         continue
 
         return users
@@ -483,6 +471,20 @@ class NetworkEnumerationTools(Toolset):
 
         targets = target.split()
 
+        # Deduplication: skip targets that have already been scanned
+        if self.state and hasattr(self.state, "scanned_targets"):
+            already_scanned = self.state.scanned_targets
+            targets_to_scan = [t for t in targets if t not in already_scanned]
+
+            if not targets_to_scan:
+                logger.info(f"[*] All {len(targets)} targets already scanned, skipping nmap")
+                return f"All targets already scanned: {', '.join(targets)}"
+
+            if len(targets_to_scan) < len(targets):
+                skipped = len(targets) - len(targets_to_scan)
+                logger.info(f"[*] Skipping {skipped} already-scanned targets")
+                targets = targets_to_scan
+
         try:
             logger.info(f"[*] Phase 1: Fast port discovery on {len(targets)} target(s)")
 
@@ -504,6 +506,7 @@ class NetworkEnumerationTools(Toolset):
                 if self.state:
                     for ip in targets:
                         self.state.queried_hosts.add(ip)
+                        self.state.scanned_targets.add(ip)
                 if self.state:
                     parsed_hosts = _parse_nmap_hosts(stdout)
                     for host in parsed_hosts:
@@ -524,6 +527,9 @@ class NetworkEnumerationTools(Toolset):
                 logger.warning(f"[!] Service scan had issues: {svc_stderr}")
                 # Return port scan results if service scan fails
                 if self.state:
+                    for ip in targets:
+                        self.state.queried_hosts.add(ip)
+                        self.state.scanned_targets.add(ip)
                     parsed_hosts = _parse_nmap_hosts(stdout)
                     for host in parsed_hosts:
                         if hasattr(self.state, "add_host"):
@@ -538,6 +544,7 @@ class NetworkEnumerationTools(Toolset):
             if self.state:
                 for ip in targets:
                     self.state.queried_hosts.add(ip)
+                    self.state.scanned_targets.add(ip)
 
                 parsed_hosts = _parse_nmap_hosts(svc_stdout)
                 for host in parsed_hosts:
@@ -815,11 +822,9 @@ class NetworkEnumerationTools(Toolset):
                 if effective_domain:
                     users = self._extract_users_from_outputs(outputs)
                     found_users = bool(users)
-                    for found_user, extracted_domain in sorted(users):
-                        # Use extracted domain if available, otherwise fall back to effective_domain
-                        user_domain = extracted_domain or effective_domain
+                    for found_user in sorted(users):
                         add_user_to_state(
-                            self.state, found_user, user_domain, source="netexec_user_enum"
+                            self.state, found_user, effective_domain, source="netexec_user_enum"
                         )
 
                     extracted = self._extract_passwords_from_user_enum_output(output)
@@ -916,6 +921,44 @@ class NetworkEnumerationTools(Toolset):
                 )
             return hosts
 
+        def _parse_netexec_shares(output: str) -> list[Share]:
+            shares: list[Share] = []
+            in_table = False
+            for line in output.splitlines():
+                if not line.startswith("SMB"):
+                    continue
+                body = re.sub(r"^SMB\s+\S+\s+\d+\s+\S+\s+", "", line).strip()
+                if not body:
+                    continue
+                lower = body.lower()
+                if lower.startswith("share") and "permission" in lower:
+                    in_table = True
+                    continue
+                if in_table and set(body) <= {"-", " "}:
+                    continue
+                if in_table and (body.startswith("[") or lower.startswith("smb")):
+                    in_table = False
+                    continue
+                if not in_table:
+                    continue
+                parts = body.split(None, 2)
+                if not parts:
+                    continue
+                name = parts[0].strip()
+                if not name or name.lower() == "share":
+                    continue
+                permissions = parts[1].strip() if len(parts) > 1 else ""
+                comment = parts[2].strip() if len(parts) > 2 else ""
+                shares.append(
+                    Share(
+                        host=target,
+                        name=name,
+                        permissions=permissions,
+                        comment=comment,
+                    )
+                )
+            return shares
+
         def _run_share_enum(
             auth_user: str, auth_pass: str, auth_domain: str, auth_desc: str
         ) -> tuple[str, list[Share], bool]:
@@ -945,7 +988,7 @@ class NetworkEnumerationTools(Toolset):
                 logger.warning(f"[enumerate_shares] {auth_desc} failed on {target}: access denied")
                 return output, [], False
 
-            shares = extract_shares_from_output(output, default_host=target)
+            shares = _parse_netexec_shares(output)
             if shares:
                 logger.info(
                     f"[enumerate_shares] {auth_desc} found {len(shares)} shares on {target}: "
@@ -1110,23 +1153,20 @@ class NetworkEnumerationTools(Toolset):
         """
         try:
             outputs = self._run_user_enum_commands(target, username, password, domain)
-            user_tuples = self._extract_users_from_outputs(outputs)
+            users = self._extract_users_from_outputs(outputs)
 
-            if not user_tuples:
+            if not users:
                 output = "\n".join(content for _, content in outputs if content).strip()
                 return self._format_enum_failure_message(outputs, output)
 
-            # Extract just usernames for file (password spraying uses usernames only)
-            usernames = sorted({u[0] for u in user_tuples})
-
             # Save to local file for password spraying
             users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
-            ok, error = write_users_file_remote(usernames, users_file, target_role=None)
+            ok, error = write_users_file_remote(sorted(users), users_file, target_role=None)
             if not ok:
                 return f"[!] Failed to write users file on remote: {error}"
 
-            logger.info(f"[+] Saved {len(usernames)} users to {users_file}")
-            return f"[+] Saved {len(usernames)} users to {users_file}\nUsers: {', '.join(usernames[:20])}{'...' if len(usernames) > 20 else ''}"
+            logger.info(f"[+] Saved {len(users)} users to {users_file}")
+            return f"[+] Saved {len(users)} users to {users_file}\nUsers: {', '.join(sorted(users)[:20])}{'...' if len(users) > 20 else ''}"
 
         except Exception as e:
             logger.error(f"Save users to file failed: {e}")
@@ -1496,7 +1536,7 @@ class PostureValidationTools(Toolset):
             target: Domain controller IP address
             username: Username for LDAP authentication
             password: Password for authentication
-            domain: Target domain (e.g., 'example.local')
+            domain: Target domain (e.g., 'contoso.local')
 
         Returns:
             LDAP output listing accounts with sidHistory
@@ -1744,7 +1784,7 @@ class BloodHoundTools(Toolset):
                 if hostname not in result["discovered_hosts"]:
                     result["discovered_hosts"].append(hostname)
 
-            # Match domain references like "DC01.domain.local" or computer names in output
+            # Match domain references like "DC01.contoso.local" or computer names in output
             # Look for FQDN patterns that appear to be computer names
             fqdn_matches = re.findall(r"\b([A-Za-z0-9\-]+\.[A-Za-z0-9\-\.]+\.local)\b", line)
             for fqdn in fqdn_matches:
@@ -1827,7 +1867,7 @@ class BloodHoundTools(Toolset):
         CRITICAL: Run this with ANY valid credentials to find escalation paths.
 
         Args:
-            domain: Target domain (e.g., 'example.local')
+            domain: Target domain (e.g., 'contoso.local')
             username: Valid domain username
             password: Password for authentication
             dc_ip: Domain controller IP address
@@ -1840,7 +1880,7 @@ class BloodHoundTools(Toolset):
             - recommended_actions: Specific next steps with tool parameters
 
         Example:
-            >>> run_bloodhound("example.local", "dave.lee", "ExamplePass123!", "192.168.58.10")
+            >>> run_bloodhound("contoso.local", "dave.lee", "ExamplePass123!", "192.168.58.10")
         """
         # DEDUP CHECK: Skip if already ran BloodHound for this domain (prevents duplicate work)
         if self.state:
@@ -1880,13 +1920,13 @@ class BloodHoundTools(Toolset):
 
                 # Extract DC hostnames from SRV records
                 for line in srv_output.splitlines():
-                    # Match patterns like "svr hostname = hostname.domain.local"
+                    # Match patterns like "svr hostname = hostname.contoso.local"
                     srv_match = re.search(r"svr hostname = ([^\s]+)", line, re.IGNORECASE)
                     if srv_match:
                         hostname = srv_match.group(1).rstrip(".")
                         dc_hostnames.append(hostname)
                         logger.debug(f"Found DC hostname: {hostname}")
-                    # Also match "service = 0 100 389 hostname.domain.local"
+                    # Also match "service = 0 100 389 hostname.contoso.local"
                     service_match = re.search(
                         r"service = \d+ \d+ \d+ ([^\s]+)", line, re.IGNORECASE
                     )
@@ -1909,7 +1949,7 @@ class BloodHoundTools(Toolset):
                         ptr_cmd, timeout_seconds=15, target_role=None
                     )
                     ptr_output = ptr_stdout or ptr_stderr or ""
-                    # Extract hostname from PTR record: "name = hostname.domain.local"
+                    # Extract hostname from PTR record: "name = hostname.contoso.local"
                     for line in ptr_output.splitlines():
                         ptr_match = re.search(r"name = ([^\s]+)", line, re.IGNORECASE)
                         if ptr_match:

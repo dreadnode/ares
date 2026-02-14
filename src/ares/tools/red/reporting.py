@@ -57,7 +57,7 @@ class RedTeamReportingTools(Toolset):
             Confirmation of recorded credential
 
         Example:
-            >>> record_credential("admin", password="P@ssw0rd!", domain="domain.local", source="cracked_hash", is_admin=True)  # pragma: allowlist secret
+            >>> record_credential("admin", password="P@ssw0rd!", domain="contoso.local", source="cracked_hash", is_admin=True)  # pragma: allowlist secret
         """
         if not self.state:
             return "[!] No operation state available"
@@ -167,12 +167,9 @@ class RedTeamReportingTools(Toolset):
         Use this to track hosts where you have gained access.
         Important for tracking lateral movement progress.
 
-        IMPORTANT: This is for HOSTS (machines/servers), not user accounts!
-        Do NOT call this when you compromise a user account - use record_credential instead.
-
         Args:
-            ip: IP address of the host (REQUIRED, must be valid IPv4 like "192.168.58.22")
-            hostname: Hostname if known (e.g., "DC01", "WORKSTATION1", NOT usernames like "john.doe")
+            ip: IP address of the host
+            hostname: Hostname if known
             os: Operating system
             access_level: Level of access (user, local_admin, domain_admin)
             notes: Additional notes about the compromise
@@ -185,27 +182,6 @@ class RedTeamReportingTools(Toolset):
         """
         if not self.state:
             return "[!] No operation state available"
-
-        # Validate IP address format
-        ip = ip.strip() if ip else ""
-        if not ip:
-            return "[!] IP address is required. This tool is for hosts, not user accounts."
-
-        # Basic IP format validation (IPv4)
-        parts = ip.split(".")
-        if len(parts) != 4:
-            return f"[!] Invalid IP address format: '{ip}'. Expected IPv4 like '192.168.58.22'."
-        try:
-            for part in parts:
-                num = int(part)
-                if num < 0 or num > 255:
-                    return f"[!] Invalid IP address: '{ip}'. Each octet must be 0-255."
-        except ValueError:
-            return f"[!] Invalid IP address: '{ip}'. Must contain only numbers and dots."
-
-        # Warn if hostname looks like a username (contains lowercase with dots like "john.doe")
-        if hostname and "." in hostname and hostname.islower() and not hostname.endswith(".local"):
-            return f"[!] '{hostname}' looks like a username, not a hostname. Use record_credential for user accounts."
 
         host = Host(
             ip=ip,

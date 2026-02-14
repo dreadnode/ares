@@ -13,13 +13,30 @@ from typing import Annotated
 import cyclopts
 from loguru import logger
 
-from ares.core.config import get_redis_url, get_vulnerability_priorities
-from ares.core.orchestrator_client import (
+
+# Suppress DEBUG/INFO logs from noisy modules (Redis client, config) in CLI output.
+# Keep all logs from cli_ops itself and show WARNING+ from other modules.
+def _cli_log_filter(record):
+    """Filter out DEBUG/INFO from noisy modules, keep all from cli_ops."""
+    module = record["name"]
+    level = record["level"].no
+    # Allow all logs from this module
+    if module in {"ares.cli_ops", "__main__"}:
+        return True
+    # For other modules, only show WARNING (30) and above
+    return level >= 30
+
+
+logger.remove()
+logger.add(sys.stderr, filter=_cli_log_filter)
+
+from ares.core.config import get_redis_url, get_vulnerability_priorities  # noqa: E402
+from ares.core.orchestrator_client import (  # noqa: E402
     get_operation_status,
     submit_operation,
     wait_for_operation_completion,
 )
-from ares.core.redis_client import create_redis_client
+from ares.core.redis_client import create_redis_client  # noqa: E402
 
 
 def _get_vuln_priorities() -> dict[str, int]:
@@ -334,16 +351,31 @@ async def submit(
 
 @app.command
 async def status(
-    operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
+    operation_id: Annotated[str | None, cyclopts.Parameter(help="Operation ID")] = None,
     *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Use the latest operation (prefer running)")
+    ] = False,
     redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
 ) -> None:
     """Get the status of an operation.
 
-    Example:
+    Examples:
         ares-ops status multiagent-abc123
+        ares-ops status --latest
     """
     resolved_redis_url = redis_url or get_redis_url()
+
+    # Resolve operation ID
+    if latest and not operation_id:
+        operation_id = await _resolve_latest_operation(resolved_redis_url)
+        if not operation_id:
+            logger.error("No operations found")
+            sys.exit(1)
+        logger.info(f"Using latest operation: {operation_id}")
+    elif not operation_id:
+        logger.error("Either operation_id or --latest is required")
+        sys.exit(1)
 
     try:
         result = await get_operation_status(
@@ -1095,8 +1127,11 @@ async def report(
 
 @app.command
 async def tasks(
-    operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
+    operation_id: Annotated[str | None, cyclopts.Parameter(help="Operation ID")] = None,
     *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Use the latest operation (prefer running)")
+    ] = False,
     task_status: Annotated[
         str, cyclopts.Parameter(help="Filter by status (running/completed/failed/pending/all)")
     ] = "running",
@@ -1105,12 +1140,24 @@ async def tasks(
 ) -> None:
     """List tasks for an operation.
 
-    Example:
-        ares-ops tasks op-20250128-123456 --status running --role lateral
+    Examples:
+        ares-ops tasks op-20250128-123456 --task-status running --role lateral
+        ares-ops tasks --latest --task-status running
     """
     import json as json_module
 
     resolved_redis_url = redis_url or get_redis_url()
+
+    # Resolve operation ID
+    if latest and not operation_id:
+        operation_id = await _resolve_latest_operation(resolved_redis_url)
+        if not operation_id:
+            logger.error("No operations found")
+            sys.exit(1)
+        logger.info(f"Using latest operation: {operation_id}")
+    elif not operation_id:
+        logger.error("Either operation_id or --latest is required")
+        sys.exit(1)
 
     try:
         client = await create_redis_client(resolved_redis_url, decode_responses=True)
@@ -1170,6 +1217,19 @@ async def tasks(
         sys.exit(1)
 
 
+def _format_duration(seconds: float) -> str:
+    """Format duration in seconds to human-readable string."""
+    if seconds < 0:
+        return "0s"
+    hours, remainder = divmod(int(seconds), 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes > 0:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
 @app.command(name="list")
 async def list_operations(
     *,
@@ -1184,6 +1244,7 @@ async def list_operations(
         ares-ops list              # List all operations
         ares-ops list --latest     # Print only the latest/running operation ID
     """
+    from ares.core.models import SharedRedTeamState
     from ares.core.task_queue import RedisTaskQueue
 
     resolved_redis_url = redis_url or get_redis_url()
@@ -1197,20 +1258,21 @@ async def list_operations(
         return items[0][1]
 
     try:
-        client = await create_redis_client(resolved_redis_url, decode_responses=True)
+        # Use decode_responses=False so we can read both state (bytes) and strings
+        client = await create_redis_client(resolved_redis_url, decode_responses=False)
         await client.ping()
 
-        # Gather all operations with their checkpoint times and running status
-        all_ops: list[
-            tuple[datetime | None, str, bool]
-        ] = []  # (checkpoint_time, op_id, is_running)
+        # Gather all operations with their checkpoint times, running status, and start time
+        # (checkpoint_time, op_id, is_running, started_at)
+        all_ops: list[tuple[datetime | None, str, bool, datetime | None]] = []
 
         # Check for running operations (have locks)
         # Use KEYS instead of SCAN for reliability - SCAN can miss keys
         running_ops: set[str] = set()
         lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
         for key in lock_keys:
-            parts = key.split(":", 2)
+            key_str = key.decode() if isinstance(key, bytes) else key
+            parts = key_str.split(":", 2)
             if len(parts) >= 3:
                 running_ops.add(parts[2])
 
@@ -1218,19 +1280,36 @@ async def list_operations(
         # Use KEYS instead of SCAN for reliability - SCAN can miss keys
         state_keys = await client.keys("ares:operation:*:state")
         for key in state_keys:
-            parts = key.split(":")
+            key_str = key.decode() if isinstance(key, bytes) else key
+            parts = key_str.split(":")
             if len(parts) < 3:
                 continue
             op_id = parts[2]
-            checkpoint = await client.get(f"ares:operation:{op_id}:checkpoint_time")
+
+            # Get checkpoint time
+            checkpoint_raw = await client.get(f"ares:operation:{op_id}:checkpoint_time")
             checkpoint_time = None
-            if checkpoint:
+            if checkpoint_raw:
+                checkpoint_str = (
+                    checkpoint_raw.decode() if isinstance(checkpoint_raw, bytes) else checkpoint_raw
+                )
                 try:
-                    checkpoint_time = datetime.fromisoformat(checkpoint)
+                    checkpoint_time = datetime.fromisoformat(checkpoint_str)
                 except Exception:
                     pass
+
+            # Get started_at from state
+            started_at = None
+            state_data = await client.get(f"ares:operation:{op_id}:state")
+            if state_data:
+                try:
+                    state = SharedRedTeamState.from_bytes(state_data)
+                    started_at = state.started_at
+                except Exception:
+                    pass
+
             is_running = op_id in running_ops
-            all_ops.append((checkpoint_time, op_id, is_running))
+            all_ops.append((checkpoint_time, op_id, is_running, started_at))
 
         await client.aclose()
 
@@ -1240,25 +1319,140 @@ async def list_operations(
 
         if latest:
             # Prefer running operations, then fall back to latest by checkpoint time
-            running = [(t, op) for t, op, is_running in all_ops if is_running]
+            running = [(t, op) for t, op, is_running, _ in all_ops if is_running]
             if running:
                 print(pick_latest(running))
             else:
-                print(pick_latest([(t, op) for t, op, _ in all_ops]))
+                print(pick_latest([(t, op) for t, op, _, _ in all_ops]))
             return
 
         # Full listing
         print("Multi-Agent Operations:")
-        print("=" * 60)
+        print("=" * 70)
         # Sort by checkpoint time (newest first)
         all_ops.sort(key=lambda x: x[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-        for checkpoint_time, op_id, is_running in all_ops:
+        now = datetime.now(timezone.utc)
+        for checkpoint_time, op_id, is_running, started_at in all_ops:
             status = " [running]" if is_running else ""
+
+            # Calculate runtime
+            runtime_str = ""
+            if started_at:
+                # For running ops, runtime is until now; for completed, until checkpoint
+                end_time = now if is_running else (checkpoint_time or now)
+                runtime_seconds = (end_time - started_at).total_seconds()
+                runtime_str = f" runtime: {_format_duration(runtime_seconds)}"
+
             time_str = checkpoint_time.isoformat() if checkpoint_time else "unknown"
-            print(f"  {op_id}: checkpoint at {time_str}{status}")
+            print(f"  {op_id}: checkpoint at {time_str}{status}{runtime_str}")
 
     except Exception as e:
         logger.error(f"Failed to list operations: {e}")
+        sys.exit(1)
+
+
+@app.command
+async def runtime(
+    operation_id: Annotated[str | None, cyclopts.Parameter(help="Operation ID")] = None,
+    *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Use the latest operation (prefer running)")
+    ] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Show runtime for an operation.
+
+    Displays the elapsed time since the operation started, plus key metrics.
+
+    Examples:
+        ares-ops runtime --latest
+        ares-ops runtime op-20250128-123456
+    """
+    from ares.core.models import SharedRedTeamState
+    from ares.core.task_queue import RedisTaskQueue
+
+    resolved_redis_url = redis_url or get_redis_url()
+
+    # Resolve operation ID
+    if latest and not operation_id:
+        operation_id = await _resolve_latest_operation(resolved_redis_url)
+        if not operation_id:
+            logger.error("No operations found")
+            sys.exit(1)
+    elif not operation_id:
+        logger.error("Either operation_id or --latest is required")
+        sys.exit(1)
+
+    try:
+        client = await create_redis_client(resolved_redis_url, decode_responses=False)
+
+        # Get state
+        state_data = await client.get(f"ares:operation:{operation_id}:state")
+        if not state_data:
+            logger.error(f"No state found for operation: {operation_id}")
+            await client.aclose()
+            sys.exit(1)
+
+        state = SharedRedTeamState.from_bytes(state_data)
+
+        # Check if running
+        lock_key = f"{RedisTaskQueue.LOCK_PREFIX}:{operation_id}"
+        is_running = await client.exists(lock_key) > 0
+
+        await client.aclose()
+
+        now = datetime.now(timezone.utc)
+        started_at = state.started_at
+        completed_at = state.completed_at
+
+        # Calculate runtime
+        if completed_at:
+            runtime_seconds = (completed_at - started_at).total_seconds()
+            status = "completed"
+        elif is_running:
+            runtime_seconds = (now - started_at).total_seconds()
+            status = "running"
+        else:
+            # Not running, no completed_at - use checkpoint time or now
+            checkpoint_raw = await create_redis_client(resolved_redis_url, decode_responses=True)
+            checkpoint_str = await checkpoint_raw.get(
+                f"ares:operation:{operation_id}:checkpoint_time"
+            )
+            await checkpoint_raw.aclose()
+            if checkpoint_str:
+                try:
+                    checkpoint_time = datetime.fromisoformat(checkpoint_str)
+                    runtime_seconds = (checkpoint_time - started_at).total_seconds()
+                except Exception:
+                    runtime_seconds = (now - started_at).total_seconds()
+            else:
+                runtime_seconds = (now - started_at).total_seconds()
+            status = "stopped"
+
+        # Output
+        print(f"Operation: {operation_id}")
+        print(f"Status:    {status}")
+        print(f"Started:   {started_at.isoformat()}")
+        print(f"Runtime:   {_format_duration(runtime_seconds)}")
+        print()
+
+        # Key metrics
+        creds = len(state.all_credentials)
+        hashes = len(state.all_hashes)
+        hosts = len(state.all_hosts)
+        vulns = len(state.discovered_vulnerabilities)
+        exploited = len(state.exploited_vulnerabilities)
+
+        print(f"Credentials: {creds}  Hashes: {hashes}  Hosts: {hosts}")
+        print(f"Vulns: {vulns} discovered, {exploited} exploited")
+
+        if state.has_domain_admin:
+            print("\n*** DOMAIN ADMIN ACHIEVED ***")
+        if state.has_golden_ticket:
+            print("*** GOLDEN TICKET OBTAINED ***")
+
+    except Exception as e:
+        logger.error(f"Failed to get runtime: {e}")
         sys.exit(1)
 
 

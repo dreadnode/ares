@@ -67,7 +67,7 @@ class CredentialDiscoveryTools(Toolset):
             enum_tools.set_state(self.state)
         return enum_tools._run_user_enum_commands(target, username, password, domain)
 
-    def _extract_users_from_outputs(self, outputs: list[tuple[str, str]]) -> set[tuple[str, str]]:
+    def _extract_users_from_outputs(self, outputs: list[tuple[str, str]]) -> set[str]:
         from ares.tools.red.reconnaissance import NetworkEnumerationTools
 
         return NetworkEnumerationTools()._extract_users_from_outputs(outputs)
@@ -253,7 +253,7 @@ class CredentialDiscoveryTools(Toolset):
 
         Args:
             target: Domain controller IP address
-            domain: Target domain (e.g., 'example.local')
+            domain: Target domain (e.g., 'contoso.local')
             username: Username for LDAP authentication
             password: Password for authentication
 
@@ -261,7 +261,7 @@ class CredentialDiscoveryTools(Toolset):
             Users with non-empty descriptions (check for passwords!)
 
         Example:
-            >>> ldap_search_descriptions("192.168.58.10", "example.local", "user", "pass")
+            >>> ldap_search_descriptions("192.168.58.10", "contoso.local", "user", "pass")
         """
         # Validate required credentials
         if not username or not username.strip():
@@ -368,8 +368,8 @@ class CredentialDiscoveryTools(Toolset):
             Successful authentications (look for valid credentials)
 
         Example:
-            >>> password_spray("192.168.58.10", "child.example.local", "Password1")  # auto-enumerate
-            >>> password_spray("192.168.58.10", "child.example.local", "Password1", "/tmp/users.txt")
+            >>> password_spray("192.168.58.10", "child.contoso.local", "Password1")  # auto-enumerate
+            >>> password_spray("192.168.58.10", "child.contoso.local", "Password1", "/tmp/users.txt")
         """
         try:
             if not users_file:
@@ -492,9 +492,9 @@ class CredentialDiscoveryTools(Toolset):
                 logger.info(f"[*] Using credential {domain}\\{username} for user recon")
 
             outputs = self._run_user_enum_commands(target, username, password, domain)
-            user_tuples = self._extract_users_from_outputs(outputs)
+            users = self._extract_users_from_outputs(outputs)
 
-            if not user_tuples:
+            if not users:
                 from ares.tools.red.reconnaissance import NetworkEnumerationTools
 
                 helper = NetworkEnumerationTools()
@@ -505,16 +505,13 @@ class CredentialDiscoveryTools(Toolset):
                     logger.warning(f"[!] No users enumerated from {target}")
                 return None
 
-            # Extract just usernames for file (password spraying uses usernames only)
-            usernames = sorted({u[0] for u in user_tuples})
-
             users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
             # Write users file locally for password spraying
-            ok, error = write_users_file_remote(usernames, users_file, target_role=None)
+            ok, error = write_users_file_remote(sorted(users), users_file, target_role=None)
             if not ok:
                 logger.warning(f"[!] Failed to write users file on remote: {error}")
                 return None
-            logger.info(f"[+] Auto-enumerated {len(usernames)} users to {users_file}")
+            logger.info(f"[+] Auto-enumerated {len(users)} users to {users_file}")
             return users_file
 
         except Exception as e:
@@ -548,8 +545,8 @@ class CredentialDiscoveryTools(Toolset):
             Users with username=password combinations
 
         Example:
-            >>> username_as_password("192.168.58.10", "child.example.local")  # auto-enumerate
-            >>> username_as_password("192.168.58.10", "child.example.local", "/tmp/users.txt")
+            >>> username_as_password("192.168.58.10", "child.contoso.local")  # auto-enumerate
+            >>> username_as_password("192.168.58.10", "child.contoso.local", "/tmp/users.txt")
         """
         try:
             if not users_file:
@@ -669,7 +666,7 @@ class CredentialDiscoveryTools(Toolset):
             Password policy details from the domain controller
 
         Example:
-            >>> password_policy("192.168.58.10", "example.local", "user", "pass")
+            >>> password_policy("192.168.58.10", "contoso.local", "user", "pass")
         """
         cmd = [
             "netexec",
@@ -774,7 +771,7 @@ class CredentialDiscoveryTools(Toolset):
             LAPS passwords for computers where you have read access
 
         Example:
-            >>> laps_dump("192.168.58.10", "example.local", "user", "pass")
+            >>> laps_dump("192.168.58.10", "contoso.local", "user", "pass")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:

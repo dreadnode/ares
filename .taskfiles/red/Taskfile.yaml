@@ -34,7 +34,7 @@ tasks:
   # ===========================================================================
 
   multi:
-    desc: "Run multi-agent red team operation (usage: task red:multi [TARGET=dreadgoad] [DOMAIN=sevenkingdoms.local])"
+    desc: "Run multi-agent red team operation (usage: task red:multi [TARGET=dreadgoad] [DOMAIN=contoso.local])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
@@ -335,53 +335,81 @@ tasks:
         echo "Report saved: $REPORT_FILE"
 
   multi:status:
-    desc: "Check multi-agent operation status (usage: task red:multi:status OPERATION_ID=op-xxx)"
+    desc: "Check multi-agent operation status (usage: task red:multi:status [OPERATION_ID=op-xxx] [LATEST=true])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
     preconditions:
-      - sh: test -n "{{.OPERATION_ID}}"
-        msg: "OPERATION_ID variable is required. Usage: task red:multi:status OPERATION_ID=op-xxx"
-    cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops status "{{.OPERATION_ID}}"
-
-  multi:tasks:running:
-    desc: "List running tasks for an operation (usage: task red:multi:tasks:running OPERATION_ID=op-xxx [ROLE=lateral])"
-    silent: true
-    vars:
-      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
-      ROLE: '{{.ROLE | default ""}}'
-    preconditions:
-      - sh: test -n "{{.OPERATION_ID}}"
-        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required"
     cmds:
       - |
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        OP_ID_ARG=""
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ID_ARG="{{.OPERATION_ID}}"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops status $OP_ID_ARG $LATEST_FLAG
+
+  multi:tasks:running:
+    desc: "List running tasks for an operation (usage: task red:multi:tasks:running [OPERATION_ID=op-xxx] [LATEST=true] [ROLE=lateral])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+      ROLE: '{{.ROLE | default ""}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required"
+    cmds:
+      - |
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        OP_ID_ARG=""
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ID_ARG="{{.OPERATION_ID}}"
+        fi
         ROLE_ARG=""
         if [ -n "{{.ROLE}}" ]; then
           ROLE_ARG="--role {{.ROLE}}"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops tasks "{{.OPERATION_ID}}" --task-status running $ROLE_ARG
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops tasks $OP_ID_ARG $LATEST_FLAG --task-status running $ROLE_ARG
 
   multi:tasks:list:
-    desc: "List tasks for an operation (usage: task red:multi:tasks:list OPERATION_ID=op-xxx [ROLE=lateral] [STATUS=pending|in_progress|running|completed|failed|all])"
+    desc: "List tasks for an operation (usage: task red:multi:tasks:list [OPERATION_ID=op-xxx] [LATEST=true] [ROLE=lateral] [STATUS=pending|in_progress|running|completed|failed|all])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
       ROLE: '{{.ROLE | default ""}}'
       STATUS: '{{.STATUS | default "running"}}'
       VALID_STATUSES: "pending in_progress running completed failed cancelled retrying all"
     preconditions:
-      - sh: test -n "{{.OPERATION_ID}}"
-        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required"
       - sh: echo "{{.VALID_STATUSES}}" | grep -qw "{{.STATUS}}"
         msg: "Invalid STATUS '{{.STATUS}}'. Valid values: pending, in_progress, running, completed, failed, cancelled, retrying, all"
     cmds:
       - |
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        OP_ID_ARG=""
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ID_ARG="{{.OPERATION_ID}}"
+        fi
         ROLE_ARG=""
         if [ -n "{{.ROLE}}" ]; then
           ROLE_ARG="--role {{.ROLE}}"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops tasks "{{.OPERATION_ID}}" --task-status {{.STATUS}} $ROLE_ARG
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops tasks $OP_ID_ARG $LATEST_FLAG --task-status {{.STATUS}} $ROLE_ARG
 
   multi:list:
     desc: "List multi-agent operations (usage: task red:multi:list [LATEST=true])"
@@ -395,6 +423,27 @@ tasks:
           LATEST_FLAG="--latest"
         fi
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops list $LATEST_FLAG
+
+  multi:runtime:
+    desc: "Show runtime for an operation (usage: task red:multi:runtime [OPERATION_ID=op-xxx] [LATEST=true])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required"
+    cmds:
+      - |
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        OP_ID_ARG=""
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ID_ARG="{{.OPERATION_ID}}"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops runtime $OP_ID_ARG $LATEST_FLAG
 
   multi:queue:
     desc: "List multi-agent operations and state from the Redis queue"
@@ -433,7 +482,7 @@ tasks:
       - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops backfill-domains "{{.OPERATION_ID}}"
 
   multi:inject-credential:
-    desc: "Inject a credential into operation shared state (usage: task red:multi:inject-credential OPERATION_ID=op-xxx USERNAME=john.smith PASSWORD=secret [DOMAIN=contoso.local])"
+    desc: "Inject a credential into operation shared state (usage: task red:multi:inject-credential OPERATION_ID=op-xxx USERNAME=testuser PASSWORD=secret [DOMAIN=contoso.local])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
@@ -509,7 +558,7 @@ tasks:
   # ===========================================================================
 
   multi:local:
-    desc: "Run multi-agent red team operation using .env file (usage: task red:multi:local [TARGET=dreadgoad] [DOMAIN=sevenkingdoms.local])"
+    desc: "Run multi-agent red team operation using .env file (usage: task red:multi:local [TARGET=dreadgoad] [DOMAIN=contoso.local])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
@@ -880,6 +929,14 @@ tasks:
       - cmd: echo "=== ROLLING OUT ==="
       - task: :remote:rollout
         vars: { NAMESPACE: "{{.K8S_NAMESPACE}}" }
+
+  multi:sync:code:
+    desc: "Hot-sync code to pods without restart (for Python changes that don't need pod restart)"
+    silent: true
+    cmds:
+      - task: :remote:sync:full
+        vars: { NAMESPACE: "{{.K8S_NAMESPACE}}" }
+      - cmd: echo -e "{{.SUCCESS}} Code synced. Changes take effect on next CLI/tool invocation (no restart needed for most Python changes)."
 
   multi:sync:config:
     desc: "Sync config/multi-agent-production.yaml to all pods"

@@ -38,10 +38,10 @@ Your role is to **delegate tasks to specialized worker agents** and coordinate t
    - `dispatch_recon(task_type="network_scan", targets="<TARGET_SUBNET>")` - Use actual target IPs from state!
    - `dispatch_recon(task_type="user_enumeration", targets="<DC_IP>", domain="<DOMAIN>")`
    - `dispatch_recon(task_type="smb_signing_check", targets="<TARGET_SUBNET>")` - Find relay targets!
-   - `dispatch_recon(task_type="bloodhound", targets="DC_IP", domain="corp.local", username="user", password="pass")`  <!-- pragma: allowlist secret -->
+   - `dispatch_recon(task_type="bloodhound", targets="DC_IP", domain="contoso.local", username="user", password="pass")`  <!-- pragma: allowlist secret -->
 
 2. **Dispatch Low-Hanging Fruit** (to CREDENTIAL_ACCESS worker)
-   - `dispatch_credential_access(task_type="low_hanging_fruit", targets="DC_IP", domain="corp.local")`
+   - `dispatch_credential_access(task_type="low_hanging_fruit", targets="DC_IP", domain="contoso.local")`
    - Runs: username_as_password, password_spray, ldap_descriptions, sysvol_search, gpp_passwords
 
 3. **Dispatch Credential Expansion** (IMMEDIATELY when creds found)
@@ -50,7 +50,7 @@ Your role is to **delegate tasks to specialized worker agents** and coordinate t
    - `dispatch_credential_access(task_type="asrep_roast", ...)`
 
 4. **Dispatch ADCS Enumeration** (when credentials available)
-   - `dispatch_privesc_exploit(task_type="adcs_enumerate", targets="DC_IP", domain="corp.local", ...)`
+   - `dispatch_privesc_exploit(task_type="adcs_enumerate", targets="DC_IP", domain="contoso.local", ...)`
    - Runs certipy_find to discover ESC1-ESC15 vulnerabilities
    - **CRITICAL**: Run this early - ADCS is often the fastest path to DA!
    - Look for CertEnroll shares or port 443 on CA servers as indicators

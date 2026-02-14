@@ -303,7 +303,7 @@ def _create_completion_tools(
 
         Example:
             >>> await announce_domain_admin(
-            ...     domain="example.local",
+            ...     domain="contoso.local",
             ...     username="Administrator",
             ...     credential_type="password",
             ...     attack_path="ADCS ESC1 exploit -> cert auth"
@@ -348,7 +348,7 @@ async def run_multi_agent_operation(  # noqa: PLR0912
 
     Args:
         operation_id: Unique identifier for this operation
-        target_domain: Target domain (e.g., "example.local")
+        target_domain: Target domain (e.g., "contoso.local")
         target_ips: List of target IPs to scan
         initial_credential: Optional initial credential
         resume_from_checkpoint: Resume from previous checkpoint
@@ -494,8 +494,6 @@ async def run_multi_agent_operation(  # noqa: PLR0912
             # Run the orchestrator agent with crash recovery
             while orchestrator_crash_count < max_orchestrator_crashes:
                 try:
-                    # Checkpoint before blocking operation to prevent state loss
-                    await recovery.checkpoint(dispatcher.shared_state)
                     logger.info(f"🤖 Connecting to {model}...")
                     result = await orchestrator_agent.run(initial_prompt)
                     _log_orchestrator_result(result, model)
@@ -535,8 +533,6 @@ async def run_multi_agent_operation(  # noqa: PLR0912
                             f"Orchestrator crashed but has progress ({len(state.all_credentials)} creds, "
                             f"{len(state.all_hashes)} hashes). Continuing background tasks and retrying..."
                         )
-                        # Checkpoint state before retry to preserve progress
-                        await recovery.checkpoint(dispatcher.shared_state)
                         # Give background tasks time to work before retrying
                         await asyncio.sleep(30)
                     elif not has_progress:
@@ -1490,7 +1486,7 @@ def _has_constrained_delegation_for_target(state: SharedRedTeamState, target_ip:
         # Also check hostname in target_spn
         target_spn = vuln.details.get("target_spn", "")
         if target_spn:
-            # Extract hostname from SPN (e.g., cifs/dc01.domain.local -> dc01.domain.local)
+            # Extract hostname from SPN (e.g., cifs/dc01.contoso.local -> dc01.contoso.local)
             spn_host = target_spn.split("/", 1)[1] if "/" in target_spn else ""
             for host in state.all_hosts:
                 if (
@@ -1657,7 +1653,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                         )
 
             # Check for new users without credentials - run username_as_password on them
-            # This catches cases like jsmith:jsmith where username equals password
+            # This catches cases like testuser:testuser where username equals password
             for domain in sorted(_iter_domains):
                 # Find users in this domain that don't have credentials
                 domain_users = [

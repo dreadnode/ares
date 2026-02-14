@@ -475,7 +475,7 @@ class MultiAgentArgs:
     """Multi-agent red team arguments.
 
     Attributes:
-        target_domain: Target domain (e.g., example.local).
+        target_domain: Target domain (e.g., contoso.local).
         target_ips: Comma-separated list of target IPs.
         config_file: Path to config file (auto-detected if not specified).
         redis_url: Redis URL for state persistence (from config if not specified).
@@ -518,12 +518,12 @@ async def multi_agent(
     - Coercion: Network coercion (responder, mitm6)
 
     Args:
-        target_domain: Target domain (e.g., example.local)
+        target_domain: Target domain (e.g., contoso.local)
         target_ips: Comma-separated list of target IPs
 
     Example:
-        uv run ares multi-agent example.local "192.168.58.10,192.168.58.11"
-        uv run ares multi-agent corp.local "192.168.58.1" --multi-args.redis-url redis://redis:6379
+        uv run ares multi-agent contoso.local "192.168.58.10,192.168.58.11"
+        uv run ares multi-agent contoso.local "192.168.58.1" --multi-args.redis-url redis://redis:6379
     """
     import uuid
 

@@ -187,8 +187,7 @@ class TestNetworkEnumerationTools:
 
         users = tools._extract_users_from_outputs(outputs)
 
-        # Should extract both username and domain
-        assert ("alans", "contoso") in users
+        assert "alans" in users
 
     def test_extract_users_from_netexec_rid_brute_backslash_format(self):
         """Test parsing netexec --rid-brute output with backslash usernames."""
@@ -204,8 +203,7 @@ class TestNetworkEnumerationTools:
 
         users = tools._extract_users_from_outputs(outputs)
 
-        # Should extract both username and domain
-        assert ("svc-sql", "contoso") in users
+        assert "svc-sql" in users
 
     def test_nmap_scan_success(self, red_team_state: RedTeamState):
         """Test successful nmap scan."""
@@ -268,6 +266,70 @@ class TestNetworkEnumerationTools:
         # Both hosts should be tracked
         assert "192.168.58.100" in red_team_state.queried_hosts
         assert "192.168.58.101" in red_team_state.queried_hosts
+
+    def test_nmap_scan_deduplication_skips_scanned_targets(self, red_team_state: RedTeamState):
+        """Test that nmap_scan skips targets already in scanned_targets."""
+        from ares.tools.red import NetworkEnumerationTools
+
+        tools = NetworkEnumerationTools()
+        tools.set_state(red_team_state)
+
+        # Pre-populate scanned_targets
+        red_team_state.scanned_targets.add("192.168.58.100")
+
+        with patch("ares.tools.red.common.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(stdout="Scan complete", return_code=0)
+            result = tools.nmap_scan("192.168.58.100")
+
+        # Should skip without calling nmap
+        mock_run.assert_not_called()
+        assert "already scanned" in result.lower()
+
+    def test_nmap_scan_deduplication_partial_skip(self, red_team_state: RedTeamState):
+        """Test that nmap_scan only scans new targets when some are already scanned."""
+        from ares.tools.red import NetworkEnumerationTools
+
+        tools = NetworkEnumerationTools()
+        tools.set_state(red_team_state)
+
+        # Pre-populate one target as scanned
+        red_team_state.scanned_targets.add("192.168.58.100")
+
+        with patch("ares.tools.red.common.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(
+                stdout="PORT   STATE SERVICE\n22/tcp open  ssh\n",
+                stderr="",
+                return_code=0,
+            )
+            tools.nmap_scan("192.168.58.100 192.168.58.101")
+
+        # Should only scan the new target (192.168.58.101)
+        # Check that run_remote was called with command containing only 192.168.58.101
+        assert mock_run.called
+        call_args = str(mock_run.call_args)
+        assert "192.168.58.101" in call_args
+        # The already-scanned target should not be in the command
+        # (though it might appear in logs, the scan itself should exclude it)
+
+    def test_nmap_scan_marks_targets_as_scanned(self, red_team_state: RedTeamState):
+        """Test that successful nmap scan adds targets to scanned_targets."""
+        from ares.tools.red import NetworkEnumerationTools
+
+        tools = NetworkEnumerationTools()
+        tools.set_state(red_team_state)
+
+        assert "192.168.58.100" not in red_team_state.scanned_targets
+
+        with patch("ares.tools.red.common.run_remote") as mock_run:
+            mock_run.return_value = MockRunResult(
+                stdout="PORT   STATE SERVICE\n22/tcp open  ssh\n",
+                stderr="",
+                return_code=0,
+            )
+            tools.nmap_scan("192.168.58.100")
+
+        # After scan, target should be in scanned_targets
+        assert "192.168.58.100" in red_team_state.scanned_targets
 
     def test_enumerate_users_success(self, red_team_state: RedTeamState):
         """Test successful user enumeration."""

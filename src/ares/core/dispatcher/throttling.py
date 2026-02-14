@@ -162,10 +162,23 @@ class ThrottlingMixin:
                 and vuln_type in self.CRITICAL_PATH_VULN_TYPES
             )
 
-            if is_critical_exploit:
+            # Also check for delegation enumeration - these discover constrained delegation
+            # which is a critical path to DA. Without this, find_delegation tasks get deferred
+            # for 60s+ and can be evicted from deferred queue before processing.
+            techniques = payload.get("techniques", []) if payload else []
+            is_delegation_enum = task_type == "privesc_enumeration" and any(
+                "delegation" in t.lower() for t in techniques
+            )
+
+            if is_critical_exploit or is_delegation_enum:
+                bypass_reason = (
+                    f"{task_type}/{vuln_type}"
+                    if is_critical_exploit
+                    else f"{task_type}/find_delegation"
+                )
                 logger.info(
                     f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
-                    f"ALLOWING {task_type}/{vuln_type} (high-value DA path, bypasses hard cap)"
+                    f"ALLOWING {bypass_reason} (high-value DA path, bypasses hard cap)"
                 )
                 return False
 
@@ -453,29 +466,6 @@ class ThrottlingMixin:
             logger.warning("No task queue available for throttled submit")
             return ""
 
-        # Check role health before dispatching - detect dead workers or tripped circuit breakers
-        # Non-LLM tasks (crack, command) bypass this check since they don't use workers
-        if task_type not in self.NON_LLM_TASK_TYPES:
-            can_dispatch, reason = self.can_dispatch_to_role(target_role)
-            if not can_dispatch:
-                logger.warning(
-                    f"⚠️ Rejecting {task_type} task for {target_role}: {reason}. "
-                    "Will retry when role recovers."
-                )
-                # Don't drop the task - queue it for later when role recovers
-                adjusted_priority = priority + self._get_phase_priority_adjustment(
-                    task_type, target_role
-                )
-                adjusted_priority = max(1, min(10, adjusted_priority))
-                await self._enqueue_deferred_task(
-                    task_type=task_type,
-                    target_role=target_role,
-                    payload=payload,
-                    source_agent=source_agent,
-                    priority=adjusted_priority,
-                )
-                return ""  # Task queued, not lost
-
         start_wait = asyncio.get_event_loop().time()
         total_waited = 0.0
 
@@ -484,12 +474,31 @@ class ThrottlingMixin:
         # Check WITHOUT holding lock to avoid blocking other tasks.
         role_queue_len = await self._get_queue_length(target_role)
         role_pending = await self._get_pending_count_by_role(target_role)
+
+        # Check if this is a critical path task that should skip the wait loop
+        techniques = payload.get("techniques", []) if payload else []
+        is_delegation_enum = task_type == "privesc_enumeration" and any(
+            "delegation" in t.lower() for t in techniques
+        )
+        vuln_type = (payload.get("vuln_type") or "").lower() if payload else ""
+        is_critical_exploit = (
+            task_type in self.CRITICAL_PATH_TASK_TYPES
+            and vuln_type in self.CRITICAL_PATH_VULN_TYPES
+        )
+        skip_wait_loop = is_delegation_enum or is_critical_exploit
+
         if role_queue_len == 0 and role_pending == 0:
             logger.debug(
                 f"Bypassing throttle for {task_type} - {target_role} worker is idle "
                 f"(queue={role_queue_len}, pending={role_pending})"
             )
             # Skip directly to submit (acquire lock below)
+        elif skip_wait_loop:
+            logger.debug(
+                f"Bypassing throttle wait for {task_type} - critical path task "
+                f"(delegation_enum={is_delegation_enum}, critical_exploit={is_critical_exploit})"
+            )
+            # Skip directly to submit - critical path tasks bypass 60s wait loop
         else:
             # Wait loop - DO NOT hold the lock during sleep to avoid deadlock.
             # Multiple tasks waiting for the lock while one sleeps causes timeout.

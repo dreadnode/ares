@@ -85,7 +85,7 @@ IF you find a krbtgt hash via secretsdump:
 
 1. **IMMEDIATELY use golden_ticket tool**
    - Use a compromised user with PASSWORD (not hash)
-   - Set compromised_domain and target_domain (format: domain.local or subdomain.domain.local)
+   - Set compromised_domain and target_domain (format: contoso.local or subdomain.contoso.local)
    - Most likely successful path: subdomain as compromised domain, parent domain as target
    - Target ALL available domains for lateral movement
    - **IMPORTANT**: Pass compromised_dc_ip and target_dc_ip parameters with DC IP addresses
@@ -94,7 +94,7 @@ IF you find a krbtgt hash via secretsdump:
 
 3. **If golden ticket succeeds but secrets aren't dumped**:
    - Use secretsdump with no_pass=True and Administrator username
-   - Try on EVERY domain/subdomain (domain.local, dcname.domain.local, host.domain.local)
+   - Try on EVERY domain/subdomain (contoso.local, dcname.contoso.local, host.contoso.local)
    - Check domain controller parent and child FQDNs
    - **YOU MUST ATTEMPT TO CRACK ALL RETURNED NTLM HASHES**
 

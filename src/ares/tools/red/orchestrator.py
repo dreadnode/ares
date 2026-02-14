@@ -144,7 +144,7 @@ class OrchestratorTools(Toolset):
                 - "domain_info": Gather domain controller and trust information
                 - "bloodhound": Run BloodHound collection and analysis (requires creds)
             targets: Comma-separated target IPs, hostnames, or CIDR ranges (e.g., "192.168.58.0/24,192.168.58.5")
-            domain: Target domain (e.g., "corp.local")
+            domain: Target domain (e.g., "contoso.local")
             username: Username for authenticated enumeration (optional)
             password: Password for authenticated enumeration (optional)
             hash_value: NTLM hash for pass-the-hash (optional)
@@ -167,14 +167,14 @@ class OrchestratorTools(Toolset):
             >>> dispatch_recon(
             ...     task_type="user_enumeration",
             ...     targets="192.168.58.1",
-            ...     domain="corp.local"
+            ...     domain="contoso.local"
             ... )
 
             # BloodHound with credentials
             >>> dispatch_recon(
             ...     task_type="bloodhound",
             ...     targets="192.168.58.1",
-            ...     domain="corp.local",
+            ...     domain="contoso.local",
             ...     username="user1",
             ...     password="P@ssw0rd"  # pragma: allowlist secret
             ... )
@@ -294,7 +294,7 @@ class OrchestratorTools(Toolset):
                 - "lsassy": Dump LSASS memory (requires admin access)
                 - "share_spider": Search accessible shares for credentials
             targets: Comma-separated target IPs or hostnames (e.g., "192.168.58.1,192.168.58.2")
-            domain: Target domain (e.g., "corp.local")
+            domain: Target domain (e.g., "contoso.local")
             username: Username for authenticated actions (optional)
             password: Password for authenticated actions (optional)
             hash_value: NTLM hash for pass-the-hash (optional)
@@ -310,7 +310,7 @@ class OrchestratorTools(Toolset):
             >>> dispatch_credential_access(
             ...     task_type="low_hanging_fruit",
             ...     targets="192.168.58.1",
-            ...     domain="corp.local",
+            ...     domain="contoso.local",
             ...     details='{"users_file": "/tmp/users.txt"}'
             ... )
 
@@ -318,7 +318,7 @@ class OrchestratorTools(Toolset):
             >>> dispatch_credential_access(
             ...     task_type="secretsdump",
             ...     targets="192.168.58.1,192.168.58.2",
-            ...     domain="corp.local",
+            ...     domain="contoso.local",
             ...     username="admin",
             ...     password="P@ssw0rd"  # pragma: allowlist secret
             ... )
@@ -326,7 +326,7 @@ class OrchestratorTools(Toolset):
             # Kerberoast to find service accounts
             >>> dispatch_credential_access(
             ...     task_type="kerberoast",
-            ...     domain="corp.local",
+            ...     domain="contoso.local",
             ...     username="user1",
             ...     password="password123"  # pragma: allowlist secret
             ... )
@@ -472,7 +472,7 @@ class OrchestratorTools(Toolset):
         Example:
             # Crack by username/domain (hash auto-looked up from state)
             >>> dispatch_crack_hash(
-            ...     username="svc.sql",
+            ...     username="svc_sql",
             ...     domain="contoso.local",
             ...     hash_type="Kerberoast",
             ...     priority=2
@@ -554,7 +554,7 @@ class OrchestratorTools(Toolset):
         Example:
             >>> dispatch_acl_analysis(
             ...     target_user="svc_backup",
-            ...     domain="corp.local",
+            ...     domain="contoso.local",
             ...     find_path_to="Domain Admins"
             ... )
         """
@@ -620,7 +620,7 @@ class OrchestratorTools(Toolset):
             ...     target_host="192.168.58.10",
             ...     username="Administrator",
             ...     hash_value="aad3b435b51404ee:...",
-            ...     domain="corp.local"
+            ...     domain="contoso.local"
             ... )
         """
         # Validate username is not empty
@@ -706,7 +706,7 @@ class OrchestratorTools(Toolset):
             ...     vuln_type="ADCS_ESC1",
             ...     target="corp-CA",
             ...     template="VulnerableTemplate",
-            ...     ca="corp.local\\corp-CA"
+            ...     ca="contoso.local\\corp-CA"
             ... )
         """
         if not vuln_id:
@@ -857,9 +857,9 @@ class OrchestratorTools(Toolset):
 
         Example:
             >>> dispatch_esc8_attack(
-            ...     ca_host="dc01.corp.local",
+            ...     ca_host="dc01.contoso.local",
             ...     dc_ip="192.168.58.10",
-            ...     domain="corp.local",
+            ...     domain="contoso.local",
             ...     username="user",
             ...     password="pass",  # pragma: allowlist secret
             ...     attacker_ip="192.168.58.100"

@@ -6,6 +6,7 @@ shared state. Includes MSSQL auto-detection and ADCS enumeration support.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -101,23 +102,41 @@ class PublishingMixin:
                         f"{credential.domain}\\{credential.username}"
                     )
                     try:
-                        task_id = await self.request_privesc_enumeration(
-                            source_agent="orchestrator",
-                            domain=credential.domain,
-                            username=credential.username,
-                            password=credential.password,
-                            techniques=["find_delegation"],
+                        task_id = await asyncio.wait_for(
+                            self.request_privesc_enumeration(
+                                source_agent="orchestrator",
+                                domain=credential.domain,
+                                username=credential.username,
+                                password=credential.password,
+                                techniques=["find_delegation"],
+                            ),
+                            timeout=30.0,
                         )
                         if task_id:
                             logger.info(
                                 f"🚀 Immediate delegation task {task_id} dispatched for "
                                 f"{credential.domain}\\{credential.username}"
                             )
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            f"Timeout dispatching delegation check for {credential.domain}\\{credential.username}"
+                        )
                     except Exception as e:
                         logger.warning(f"Failed to dispatch immediate delegation check: {e}")
 
                     # Check for pending constrained delegation vulnerabilities we can now exploit
-                    await self._exploit_delegation_with_credential(credential, source_agent)
+                    try:
+                        await asyncio.wait_for(
+                            self._exploit_delegation_with_credential(credential, source_agent),
+                            timeout=30.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            f"Timeout in _exploit_delegation_with_credential for "
+                            f"{credential.domain}\\{credential.username}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error exploiting delegation with credential: {e}")
         else:
             logger.debug(
                 f"Credential not published (duplicate/invalid): {credential.domain}\\{credential.username}"
@@ -742,13 +761,6 @@ class PublishingMixin:
             if vuln_id in self.shared_state.exploited_vulnerabilities:
                 continue
 
-            # Check if already dequeued (in-progress exploitation via workflow)
-            if vuln_id in self._dequeued_vuln_ids:
-                logger.debug(
-                    f"Skipping auto-exploit for {vuln_id} - already dequeued for exploitation"
-                )
-                continue
-
             # We have credentials for a delegation vulnerability - exploit it!
             target_spn = vuln.details.get("target_spn", "")
             domain = vuln.details.get("domain", credential.domain)
@@ -760,27 +772,31 @@ class PublishingMixin:
                     f"(vuln_id: {vuln_id})"
                 )
                 try:
-                    await self.request_exploit(
-                        vuln_type="constrained_delegation",
-                        vuln_id=vuln_id,
-                        target=credential.username,
-                        source_agent="auto_delegation",
-                        params={
-                            "account": credential.username,
-                            "account_name": credential.username,
-                            "password": credential.password,
-                            "domain": domain,
-                            "target_spn": target_spn,
-                            "dc_ip": dc_ip,
-                            "impersonate": "Administrator",
-                            "action": "s4u_attack",
-                        },
+                    await asyncio.wait_for(
+                        self.request_exploit(
+                            vuln_type="constrained_delegation",
+                            vuln_id=vuln_id,
+                            target=credential.username,
+                            source_agent="auto_delegation",
+                            params={
+                                "account": credential.username,
+                                "account_name": credential.username,
+                                "password": credential.password,
+                                "domain": domain,
+                                "target_spn": target_spn,
+                                "dc_ip": dc_ip,
+                                "impersonate": "Administrator",
+                                "action": "s4u_attack",
+                            },
+                        ),
+                        timeout=30.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        f"Timeout auto-exploiting constrained delegation: {credential.username} -> {target_spn}"
                     )
                 except Exception as e:
                     logger.error(f"Failed to auto-exploit constrained delegation: {e}")
 
-
-# Import asyncio at module level for wait_for_credential_access_signal
-import asyncio  # noqa: E402
 
 __all__ = ["PublishingMixin"]
