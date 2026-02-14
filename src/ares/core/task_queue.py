@@ -829,6 +829,129 @@ class RedisTaskQueue:
         logger.info(f"Subscribed to state updates on {channel}")
         return pubsub
 
+    # === Real-Time Discovery Queue ===
+    #
+    # Workers publish discoveries (credentials, hashes, vulnerabilities) immediately
+    # during task execution. The orchestrator polls this queue and can dispatch
+    # follow-up tasks (e.g., exploit tasks) without waiting for task completion.
+
+    DISCOVERY_QUEUE_PREFIX = "ares:discoveries"
+    DISCOVERY_TTL = 3600  # 1 hour - discoveries also in final result, this is for speed
+
+    def _discovery_queue_key(self, operation_id: str) -> str:
+        """Get discovery queue key for an operation."""
+        return f"{self.DISCOVERY_QUEUE_PREFIX}:{operation_id}"
+
+    async def publish_discovery(
+        self,
+        operation_id: str,
+        discovery_type: str,
+        data: dict,
+        source_agent: str = "",
+        task_id: str = "",
+    ) -> bool:
+        """
+        Publish a discovery for immediate processing by orchestrator.
+
+        Workers call this when they discover credentials, hashes, vulnerabilities, etc.
+        The orchestrator can then dispatch follow-up tasks immediately.
+
+        Args:
+            operation_id: The operation ID
+            discovery_type: Type of discovery (credential, hash, vulnerability, delegation, etc.)
+            data: Discovery data (varies by type)
+            source_agent: Agent that made the discovery
+            task_id: Task ID that produced this discovery
+
+        Returns:
+            True if published successfully
+        """
+        if not self._connected:
+            await self.connect()
+
+        queue_key = self._discovery_queue_key(operation_id)
+        message = json.dumps(
+            {
+                "type": discovery_type,
+                "data": data,
+                "source_agent": source_agent,
+                "task_id": task_id,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        try:
+            await self._client.lpush(queue_key, message)
+            await self._client.expire(queue_key, self.DISCOVERY_TTL)
+            logger.debug(f"Published {discovery_type} discovery to {queue_key}")
+            return True
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(
+                keyword in error_str
+                for keyword in [
+                    "connection",
+                    "connect",
+                    "closed",
+                    "timeout",
+                    "broken pipe",
+                    "reset",
+                ]
+            ):
+                self._handle_connection_error(e)
+            logger.warning(f"Failed to publish discovery: {e}")
+            return False
+
+    async def poll_discoveries(self, operation_id: str, max_items: int = 100) -> list[dict]:
+        """
+        Poll for pending discoveries (non-blocking).
+
+        Args:
+            operation_id: The operation ID
+            max_items: Maximum discoveries to retrieve per poll
+
+        Returns:
+            List of discovery dicts
+        """
+        if not self._connected:
+            await self.connect()
+
+        queue_key = self._discovery_queue_key(operation_id)
+        discoveries = []
+
+        try:
+            # Use pipeline for efficiency
+            pipe = self._client.pipeline()
+            for _ in range(max_items):
+                pipe.rpop(queue_key)
+            results = await pipe.execute()
+
+            for data in results:
+                if data is None:
+                    break
+                try:
+                    discoveries.append(json.loads(data))
+                except json.JSONDecodeError:
+                    logger.warning(f"Invalid discovery JSON: {data}")
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(
+                keyword in error_str
+                for keyword in [
+                    "connection",
+                    "connect",
+                    "closed",
+                    "timeout",
+                    "broken pipe",
+                    "reset",
+                ]
+            ):
+                self._handle_connection_error(e)
+            logger.warning(f"Failed to poll discoveries: {e}")
+
+        return discoveries
+
 
 __all__ = [
     "RedisTaskQueue",

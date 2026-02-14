@@ -471,6 +471,184 @@ class MonitoringMixin:
             except Exception as e:  # noqa: PERF203
                 logger.warning(f"Error checking result for task {task_id}: {e}")
 
+        # Poll for real-time discoveries from workers
+        await self._poll_discoveries()
+
+    async def _poll_discoveries(self: RedTeamDispatcher) -> None:
+        """
+        Poll and process real-time discoveries from workers.
+
+        Workers publish discoveries (delegation findings, credentials, etc.) immediately
+        during task execution. This allows the orchestrator to dispatch follow-up tasks
+        (e.g., exploit tasks) without waiting for the enumeration task to complete.
+        """
+        if not self._task_queue:
+            return
+
+        operation_id = getattr(self, "operation_id", None)
+        if not operation_id:
+            return
+
+        try:
+            discoveries = await self._task_queue.poll_discoveries(operation_id, max_items=50)
+            if not discoveries:
+                return
+
+            for discovery in discoveries:
+                discovery_type = discovery.get("type", "")
+                data = discovery.get("data", {})
+                source_agent = discovery.get("source_agent", "unknown")
+
+                if discovery_type == "delegation":
+                    await self._process_realtime_delegation_discovery(data, source_agent)
+                elif discovery_type == "credential":
+                    await self._process_realtime_credential_discovery(data, source_agent)
+                elif discovery_type == "hash":
+                    await self._process_realtime_hash_discovery(data, source_agent)
+                elif discovery_type == "vulnerability":
+                    await self._process_realtime_vulnerability_discovery(data, source_agent)
+                else:
+                    logger.debug(f"Unknown discovery type: {discovery_type}")
+
+        except Exception as e:
+            logger.warning(f"Error polling discoveries: {e}")
+
+    async def _process_realtime_delegation_discovery(
+        self: RedTeamDispatcher, data: dict, source_agent: str
+    ) -> None:
+        """Process a real-time delegation discovery and dispatch exploit if applicable."""
+        account = data.get("account", "")
+        delegation_type = data.get("delegation_type", "").lower()
+        target_spn = data.get("target_spn", "")
+
+        if not account or not delegation_type:
+            return
+
+        vuln_type = (
+            "constrained_delegation"
+            if delegation_type == "constrained"
+            else "unconstrained_delegation"
+        )
+
+        logger.info(
+            f"📡 Processing real-time {vuln_type} discovery: {account} -> {target_spn or 'any'}"
+        )
+
+        # Queue vulnerability and dispatch exploit using existing logic
+        # This reuses _auto_queue_delegation_vulnerabilities which handles deduplication
+        queued = await self._auto_queue_delegation_vulnerabilities([data], source_agent)
+        if queued > 0:
+            logger.warning(
+                f"🚀 Real-time delegation exploit dispatched for {account} "
+                f"(queued {queued} vuln(s))"
+            )
+
+    async def _process_realtime_credential_discovery(
+        self: RedTeamDispatcher, data: dict, source_agent: str
+    ) -> None:
+        """Process a real-time credential discovery."""
+        from ares.core.models import Credential
+
+        username = data.get("username", "")
+        password = data.get("password", "")
+        domain = data.get("domain", "")
+
+        if not username or not password:
+            return
+
+        cred = Credential(
+            username=username,
+            password=password,
+            domain=domain,
+            source=f"realtime:{source_agent}",
+            is_admin=data.get("is_admin", False),
+        )
+
+        # publish_credential handles deduplication and triggers auto-exploit
+        await self.publish_credential(cred, source_agent)
+        logger.info(f"📡 Real-time credential: {domain}\\{username}")
+
+    async def _process_realtime_hash_discovery(
+        self: RedTeamDispatcher, data: dict, source_agent: str
+    ) -> None:
+        """Process a real-time hash discovery."""
+        from ares.core.models import Hash
+
+        username = data.get("username", "")
+        hash_value = data.get("hash_value", "")
+        hash_type = data.get("hash_type", "NTLM")
+        domain = data.get("domain", "")
+
+        if not username or not hash_value:
+            return
+
+        hash_obj = Hash(
+            username=username,
+            hash_value=hash_value,
+            hash_type=hash_type,
+            domain=domain,
+            source=f"realtime:{source_agent}",
+        )
+
+        # publish_hash handles deduplication and DA detection
+        await self.publish_hash(hash_obj, source_agent)
+        logger.info(f"📡 Real-time hash: {domain}\\{username} ({hash_type})")
+
+    async def _process_realtime_vulnerability_discovery(
+        self: RedTeamDispatcher, data: dict, source_agent: str
+    ) -> None:
+        """Process a real-time vulnerability discovery and queue for exploitation."""
+        from ares.core.models import VulnerabilityInfo
+
+        vuln_type = data.get("vuln_type", "")
+        target = data.get("target", "")
+        vuln_id = data.get("vuln_id", "")
+
+        if not vuln_type or not target:
+            return
+
+        # Generate vuln_id if not provided
+        if not vuln_id:
+            vuln_id = f"{vuln_type}_{target}".replace(".", "_").replace(":", "_")
+
+        # Check for duplicates
+        if vuln_id in self.shared_state.discovered_vulnerabilities:
+            logger.debug(f"Skipping duplicate vulnerability: {vuln_id}")
+            return
+
+        # Create and store vulnerability
+        details = data.get("details", {})
+        priority = data.get("priority", 5)
+
+        vuln = VulnerabilityInfo(
+            vuln_id=vuln_id,
+            vuln_type=vuln_type,
+            target=target,
+            discovered_by=f"realtime:{source_agent}",
+            details=details,
+            priority=priority,
+        )
+
+        self.shared_state.discovered_vulnerabilities[vuln_id] = vuln
+        logger.warning(f"📡 Real-time vulnerability: {vuln_type} on {target}")
+
+        # Auto-dispatch exploit task for high-value vulnerabilities
+        high_value_vulns = {
+            "constrained_delegation",
+            "unconstrained_delegation",
+            "esc1",
+            "esc4",
+            "esc8",
+            "adcs_esc1",
+            "adcs_esc4",
+            "adcs_esc8",
+            "mssql_impersonation",
+        }
+
+        if vuln_type.lower() in high_value_vulns:
+            await self.request_exploit(vuln_type, vuln_id, target, source_agent, details)
+            logger.warning(f"🚀 Auto-dispatched exploit for {vuln_type} on {target}")
+
     async def _log_throttle_health(self: RedTeamDispatcher) -> None:
         """
         Log throttle health status for observability.

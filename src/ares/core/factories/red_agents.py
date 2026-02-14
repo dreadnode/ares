@@ -109,6 +109,41 @@ UNIVERSAL_TOOLSETS: list[type] = [
     RedTeamReportingTools,
 ]
 
+# Tools that extract Kerberos/NTLM hashes for real-time publishing
+HASH_EXTRACTION_TOOLS: set[str] = {
+    # Kerberos hashes
+    "kerberoast",
+    "targeted_kerberoast",
+    "asrep_roast",
+    "kerberos_user_enum_noauth",
+    # NTLM hashes
+    "secretsdump",
+    "secretsdump_kerberos",
+    "ntds_dit_extract",
+    "certipy_auth",
+    "gmsa_dump_passwords",
+    "dump_lsass",
+    "extract_trust_key",
+}
+
+# Tools that extract plaintext credentials for real-time publishing
+CREDENTIAL_EXTRACTION_TOOLS: set[str] = {
+    "gpp_password_finder",
+    "sysvol_script_search",
+    "laps_dump",
+    "ldap_search_descriptions",
+    "smbclient_spider",
+    "dump_lsass",
+    "secretsdump",  # Also extracts cached creds
+}
+
+# Tools that extract vulnerabilities for real-time publishing
+VULNERABILITY_EXTRACTION_TOOLS: dict[str, str] = {
+    "certipy_find": "adcs",
+    "mssql_enum_impersonation": "mssql_impersonation",
+    "mssql_enum_linked_servers": "mssql_linked_server",
+}
+
 
 # System instruction templates per role
 ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
@@ -551,6 +586,268 @@ def create_role_hooks(
             return None
 
         hooks.append(track_coercion_futility)
+
+    # Real-time delegation discovery publishing for PRIVESC role
+    # When find_delegation discovers constrained/unconstrained delegation,
+    # publish immediately so orchestrator can dispatch exploit tasks without
+    # waiting for the enumeration task to complete
+    if role == AgentRole.PRIVESC:
+
+        async def publish_delegation_discoveries(event: ToolEnd) -> None:
+            """Publish delegation findings immediately for real-time exploitation."""
+            if not isinstance(event, ToolEnd):
+                return
+
+            tool_name = (
+                event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
+            )
+            if tool_name != "find_delegation":
+                return
+
+            if not event.message or not event.message.content:
+                return
+
+            output = fix_tool_output_encoding(str(event.message.content))
+            if not output:
+                return
+
+            # Extract delegation findings using dispatcher's existing parser
+            delegations = dispatcher._extract_delegation_from_output(output)
+            if not delegations:
+                return
+
+            # Publish each delegation finding to discovery queue
+            task_queue = getattr(dispatcher, "_task_queue", None)
+            operation_id = getattr(shared_state, "operation_id", None) or getattr(
+                dispatcher, "operation_id", None
+            )
+
+            if not task_queue or not operation_id:
+                logger.debug(
+                    f"Cannot publish delegation discoveries: "
+                    f"task_queue={task_queue is not None}, operation_id={operation_id}"
+                )
+                return
+
+            for deleg in delegations:
+                try:
+                    await task_queue.publish_discovery(
+                        operation_id=operation_id,
+                        discovery_type="delegation",
+                        data=deleg,
+                        source_agent=log_name,
+                        task_id="",  # Will be filled by current task context if available
+                    )
+                    logger.info(
+                        f"📡 [{log_name}] Published delegation discovery: "
+                        f"{deleg.get('account')} ({deleg.get('delegation_type')})"
+                    )
+                except Exception as e:  # noqa: PERF203
+                    logger.warning(f"Failed to publish delegation discovery: {e}")
+
+            return
+
+        hooks.append(publish_delegation_discoveries)
+
+    # Real-time hash and credential extraction for roles that harvest credentials
+    # Tool sets defined at module level: HASH_EXTRACTION_TOOLS, CREDENTIAL_EXTRACTION_TOOLS
+    # Roles that should have extraction hooks
+    # RECON included because SMB enumeration, LDAP dumps can reveal credentials
+    extraction_roles = {
+        AgentRole.CREDENTIAL_ACCESS,
+        AgentRole.PRIVESC,
+        AgentRole.LATERAL,
+        AgentRole.ACL,
+        AgentRole.RECON,
+    }
+
+    if role in extraction_roles:
+        from ares.core.dispatcher.extraction import extract_plaintext_passwords_from_output
+
+        async def publish_hash_and_credential_discoveries(event: ToolEnd) -> None:
+            """Extract and publish hashes/credentials from tool output."""
+            if not isinstance(event, ToolEnd):
+                return
+
+            tool_name = (
+                event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
+            )
+
+            if not event.message or not event.message.content:
+                return
+
+            output = fix_tool_output_encoding(str(event.message.content))
+            if not output or len(output) < 20:
+                return
+
+            task_queue = getattr(dispatcher, "_task_queue", None)
+            operation_id = getattr(shared_state, "operation_id", None) or getattr(
+                dispatcher, "operation_id", None
+            )
+
+            if not task_queue or not operation_id:
+                return
+
+            # Extract and publish hashes
+            if tool_name in HASH_EXTRACTION_TOOLS:
+                hashes = dispatcher._extract_hashes_from_output(output)
+                for h in hashes:
+                    try:
+                        await task_queue.publish_discovery(
+                            operation_id=operation_id,
+                            discovery_type="hash",
+                            data={
+                                "username": h.username,
+                                "hash_value": h.hash_value,
+                                "hash_type": h.hash_type,
+                                "domain": h.domain,
+                            },
+                            source_agent=log_name,
+                        )
+                        logger.info(
+                            f"📡 [{log_name}] Published hash: {h.domain}\\{h.username} ({h.hash_type})"
+                        )
+                    except Exception as e:  # noqa: PERF203
+                        logger.warning(f"Failed to publish hash discovery: {e}")
+
+            # Extract and publish credentials
+            if tool_name in CREDENTIAL_EXTRACTION_TOOLS:
+                creds = extract_plaintext_passwords_from_output(output)
+                for username, password in creds:
+                    try:
+                        await task_queue.publish_discovery(
+                            operation_id=operation_id,
+                            discovery_type="credential",
+                            data={
+                                "username": username,
+                                "password": password,
+                                "domain": shared_state.target_domain or "",
+                            },
+                            source_agent=log_name,
+                        )
+                        logger.info(f"📡 [{log_name}] Published credential: {username}")
+                    except Exception as e:  # noqa: PERF203
+                        logger.warning(f"Failed to publish credential discovery: {e}")
+
+            return
+
+        hooks.append(publish_hash_and_credential_discoveries)
+
+    # Real-time vulnerability discovery publishing
+    # Tool set defined at module level: VULNERABILITY_EXTRACTION_TOOLS
+    vuln_extraction_roles = {
+        AgentRole.PRIVESC,  # certipy_find
+        AgentRole.LATERAL,  # mssql_enum_impersonation
+    }
+
+    if role in vuln_extraction_roles:
+        import re
+
+        async def publish_vulnerability_discoveries(event: ToolEnd) -> None:  # noqa: PLR0912
+            """Extract and publish vulnerability discoveries from tool output."""
+            if not isinstance(event, ToolEnd):
+                return
+
+            tool_name = (
+                event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
+            )
+
+            if tool_name not in VULNERABILITY_EXTRACTION_TOOLS:
+                return
+
+            if not event.message or not event.message.content:
+                return
+
+            output = fix_tool_output_encoding(str(event.message.content))
+            if not output or len(output) < 20:
+                return
+
+            task_queue = getattr(dispatcher, "_task_queue", None)
+            operation_id = getattr(shared_state, "operation_id", None) or getattr(
+                dispatcher, "operation_id", None
+            )
+
+            if not task_queue or not operation_id:
+                return
+
+            # Extract ADCS vulnerabilities from certipy_find
+            if tool_name == "certipy_find":
+                esc_matches = re.findall(r"(ESC\d+)", output, re.IGNORECASE)
+                seen_esc = set()
+                for esc in esc_matches:
+                    esc_type = esc.upper()
+                    if esc_type in seen_esc:
+                        continue
+                    seen_esc.add(esc_type)
+
+                    # Extract target from tool call args, fallback to shared_state
+                    target = ""
+                    if hasattr(event, "tool_call") and event.tool_call:
+                        args = getattr(event.tool_call, "arguments", {}) or {}
+                        target = args.get("dc_ip", "") or args.get("domain", "")
+                    if not target:
+                        # Fallback to first DC or target domain
+                        # domain_controllers is dict[str, str] mapping domain -> IP
+                        dc_ip = (
+                            next(iter(shared_state.domain_controllers.values()), "")
+                            if shared_state.domain_controllers
+                            else ""
+                        )
+                        target = shared_state.dc_ip or shared_state.target_domain or dc_ip
+                    if not target:
+                        logger.debug(f"Skipping ADCS vuln {esc_type}: no target available")
+                        continue
+
+                    try:
+                        await task_queue.publish_discovery(
+                            operation_id=operation_id,
+                            discovery_type="vulnerability",
+                            data={
+                                "vuln_type": f"adcs_{esc_type.lower()}",
+                                "target": target,
+                                "details": {"esc_type": esc_type},
+                                "priority": 2 if esc_type in ("ESC1", "ESC4", "ESC8") else 5,
+                            },
+                            source_agent=log_name,
+                        )
+                        logger.warning(f"📡 [{log_name}] Published ADCS vuln: {esc_type}")
+                    except Exception as e:
+                        logger.warning(f"Failed to publish ADCS vulnerability: {e}")
+
+            # Extract MSSQL impersonation from mssql_enum_impersonation
+            elif tool_name == "mssql_enum_impersonation":
+                if "impersonatableuser" in output.lower() and (
+                    "sa" in output.lower() or "admin" in output.lower()
+                ):
+                    target = ""
+                    if hasattr(event, "tool_call") and event.tool_call:
+                        args = getattr(event.tool_call, "arguments", {}) or {}
+                        target = args.get("target", "") or args.get("host", "")
+                    if not target:
+                        logger.debug("Skipping MSSQL impersonation vuln: no target available")
+                        return
+
+                    try:
+                        await task_queue.publish_discovery(
+                            operation_id=operation_id,
+                            discovery_type="vulnerability",
+                            data={
+                                "vuln_type": "mssql_impersonation",
+                                "target": target,
+                                "details": {"can_impersonate_sa": True},
+                                "priority": 3,
+                            },
+                            source_agent=log_name,
+                        )
+                        logger.warning(
+                            f"📡 [{log_name}] Published MSSQL impersonation vuln: {target}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to publish MSSQL vulnerability: {e}")
+
+            return
+
+        hooks.append(publish_vulnerability_discoveries)
 
     # Unstall hook for all roles - provides context-specific guidance when agent stalls
     role_feedback = {

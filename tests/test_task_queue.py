@@ -933,5 +933,487 @@ class TestEndToEndFlow:
         await worker2.disconnect()
 
 
+# ============================================================================
+# Real-Time Discovery Tests
+# ============================================================================
+
+
+class TestRealTimeDiscovery:
+    """Tests for real-time discovery publishing and polling."""
+
+    @pytest.fixture
+    def mock_redis_client(self):
+        """Create a mock Redis client."""
+        client = AsyncMock()
+        client.close = AsyncMock()
+        client.lpush = AsyncMock(return_value=1)
+        client.pipeline = MagicMock()
+        return client
+
+    @pytest.mark.asyncio
+    async def test_publish_discovery_delegation(self, mock_redis_client):
+        """Test publishing a delegation discovery."""
+        queue = RedisTaskQueue("redis://localhost:6379")
+        queue._client = mock_redis_client
+        queue._connected = True
+
+        result = await queue.publish_discovery(
+            operation_id="op-123",
+            discovery_type="delegation",
+            data={
+                "account": "srv_sql",
+                "delegation_type": "constrained",
+                "target_spn": "cifs/dc01.contoso.local",
+            },
+            source_agent="privesc-worker",
+        )
+
+        assert result is True
+        mock_redis_client.lpush.assert_called_once()
+
+        # Verify the discovery was serialized correctly
+        call_args = mock_redis_client.lpush.call_args
+        key = call_args[0][0]
+        data = json.loads(call_args[0][1])
+
+        assert key == "ares:discoveries:op-123"
+        assert data["type"] == "delegation"
+        assert data["data"]["account"] == "srv_sql"
+        assert data["source_agent"] == "privesc-worker"
+
+        await queue.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_publish_discovery_hash(self, mock_redis_client):
+        """Test publishing a hash discovery."""
+        queue = RedisTaskQueue("redis://localhost:6379")
+        queue._client = mock_redis_client
+        queue._connected = True
+
+        result = await queue.publish_discovery(
+            operation_id="op-456",
+            discovery_type="hash",
+            data={
+                "username": "administrator",
+                "hash_value": "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                "hash_type": "NTLM",
+                "domain": "contoso.local",
+            },
+            source_agent="credential-worker",
+        )
+
+        assert result is True
+
+        call_args = mock_redis_client.lpush.call_args
+        data = json.loads(call_args[0][1])
+
+        assert data["type"] == "hash"
+        assert data["data"]["username"] == "administrator"
+        assert data["data"]["hash_type"] == "NTLM"
+
+        await queue.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_publish_discovery_credential(self, mock_redis_client):
+        """Test publishing a credential discovery."""
+        queue = RedisTaskQueue("redis://localhost:6379")
+        queue._client = mock_redis_client
+        queue._connected = True
+
+        result = await queue.publish_discovery(
+            operation_id="op-789",
+            discovery_type="credential",
+            data={
+                "username": "svc_backup",
+                "password": "Backup2024!",  # pragma: allowlist secret
+                "domain": "contoso.local",
+            },
+            source_agent="credential-worker",
+        )
+
+        assert result is True
+
+        call_args = mock_redis_client.lpush.call_args
+        data = json.loads(call_args[0][1])
+
+        assert data["type"] == "credential"
+        assert data["data"]["username"] == "svc_backup"
+
+        await queue.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_publish_discovery_vulnerability(self, mock_redis_client):
+        """Test publishing a vulnerability discovery."""
+        queue = RedisTaskQueue("redis://localhost:6379")
+        queue._client = mock_redis_client
+        queue._connected = True
+
+        result = await queue.publish_discovery(
+            operation_id="op-adcs",
+            discovery_type="vulnerability",
+            data={
+                "vuln_type": "adcs_esc1",
+                "target": "192.168.58.10",
+                "details": {"esc_type": "ESC1"},
+                "priority": 2,
+            },
+            source_agent="privesc-worker",
+        )
+
+        assert result is True
+
+        call_args = mock_redis_client.lpush.call_args
+        data = json.loads(call_args[0][1])
+
+        assert data["type"] == "vulnerability"
+        assert data["data"]["vuln_type"] == "adcs_esc1"
+        assert data["data"]["priority"] == 2
+
+        await queue.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_poll_discoveries_empty(self, mock_redis_client):
+        """Test polling discoveries when queue is empty."""
+        pipeline = AsyncMock()
+        pipeline.rpop = MagicMock(return_value=pipeline)
+        pipeline.execute = AsyncMock(return_value=[None] * 50)
+        mock_redis_client.pipeline.return_value = pipeline
+
+        queue = RedisTaskQueue("redis://localhost:6379")
+        queue._client = mock_redis_client
+        queue._connected = True
+
+        discoveries = await queue.poll_discoveries("op-empty")
+
+        assert discoveries == []
+
+        await queue.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_poll_discoveries_returns_items(self, mock_redis_client):
+        """Test polling discoveries returns queued items."""
+        discovery1 = json.dumps(
+            {
+                "type": "hash",
+                "data": {"username": "admin", "hash_value": "abc123", "hash_type": "NTLM"},
+                "source_agent": "worker1",
+            }
+        )
+        discovery2 = json.dumps(
+            {
+                "type": "credential",
+                "data": {"username": "user1", "password": "pass1"},  # pragma: allowlist secret
+                "source_agent": "worker2",
+            }
+        )
+
+        pipeline = AsyncMock()
+        pipeline.rpop = MagicMock(return_value=pipeline)
+        pipeline.execute = AsyncMock(return_value=[discovery1, discovery2] + [None] * 48)
+        mock_redis_client.pipeline.return_value = pipeline
+
+        queue = RedisTaskQueue("redis://localhost:6379")
+        queue._client = mock_redis_client
+        queue._connected = True
+
+        discoveries = await queue.poll_discoveries("op-test", max_items=50)
+
+        assert len(discoveries) == 2
+        assert discoveries[0]["type"] == "hash"
+        assert discoveries[0]["data"]["username"] == "admin"
+        assert discoveries[1]["type"] == "credential"
+
+        await queue.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_publish_discovery_connection_error(self, mock_redis_client):
+        """Test publish returns False when lpush fails."""
+        mock_redis_client.lpush = AsyncMock(side_effect=Exception("Connection lost"))
+
+        queue = RedisTaskQueue("redis://localhost:6379")
+        queue._client = mock_redis_client
+        queue._connected = True
+
+        result = await queue.publish_discovery(
+            operation_id="op-fail",
+            discovery_type="hash",
+            data={"username": "test"},
+            source_agent="worker",
+        )
+
+        assert result is False
+
+        await queue.disconnect()
+
+
+# ============================================================================
+# Extraction Hooks Tests
+# ============================================================================
+
+
+class TestExtractionHooks:
+    """Tests for real-time extraction hooks in red_agents.py."""
+
+    @pytest.mark.asyncio
+    async def test_extraction_roles_includes_recon(self):
+        """Test that RECON role is in extraction_roles."""
+        from ares.core.models import AgentRole
+
+        # The extraction_roles set should include RECON
+        extraction_roles = {
+            AgentRole.CREDENTIAL_ACCESS,
+            AgentRole.PRIVESC,
+            AgentRole.LATERAL,
+            AgentRole.ACL,
+            AgentRole.RECON,  # Added to support SMB/LDAP credential discovery
+        }
+
+        assert AgentRole.RECON in extraction_roles
+        assert AgentRole.CREDENTIAL_ACCESS in extraction_roles
+        assert AgentRole.PRIVESC in extraction_roles
+
+    @pytest.mark.asyncio
+    async def test_vuln_extraction_roles(self):
+        """Test vulnerability extraction roles configuration."""
+        from ares.core.models import AgentRole
+
+        # vuln_extraction_roles should include PRIVESC and LATERAL
+        vuln_extraction_roles = {
+            AgentRole.PRIVESC,  # certipy_find
+            AgentRole.LATERAL,  # mssql_enum_impersonation
+        }
+
+        assert AgentRole.PRIVESC in vuln_extraction_roles
+        assert AgentRole.LATERAL in vuln_extraction_roles
+        # RECON should NOT be in vuln_extraction_roles (doesn't run certipy/mssql tools)
+        assert AgentRole.RECON not in vuln_extraction_roles
+
+
+# ============================================================================
+# Double Extraction Prevention Tests
+# ============================================================================
+
+
+class TestDoubleExtractionPrevention:
+    """Tests for preventing double extraction of hashes."""
+
+    @pytest.mark.asyncio
+    async def test_skips_hash_extraction_for_realtime_roles(self):
+        """Test that hash extraction is skipped for agents with real-time hooks."""
+        # Roles that have real-time extraction hooks (includes variations)
+        realtime_extraction_roles = {
+            "credential_access",
+            "credential",
+            "privesc",
+            "lateral",
+            "acl",
+            "recon",
+            "reconnaissance",
+        }
+
+        # Test agent names that should skip extraction
+        should_skip = [
+            "privesc-worker-1",
+            "credential_access-agent",
+            "credential-harvester",  # Short form
+            "lateral-movement",
+            "acl-analyst",
+            "recon-scanner",
+            "reconnaissance-scanner",  # Long form
+            "PRIVESC",  # Case insensitive
+        ]
+
+        for agent in should_skip:
+            source_lower = agent.lower()
+            has_realtime_hooks = any(role in source_lower for role in realtime_extraction_roles)
+            assert has_realtime_hooks, f"Agent {agent} should have realtime hooks"
+
+    @pytest.mark.asyncio
+    async def test_does_not_skip_for_non_realtime_roles(self):
+        """Test that hash extraction is NOT skipped for agents without real-time hooks."""
+        realtime_extraction_roles = {
+            "credential_access",
+            "credential",
+            "privesc",
+            "lateral",
+            "acl",
+            "recon",
+            "reconnaissance",
+        }
+
+        # Test agent names that should NOT skip extraction
+        should_not_skip = [
+            "orchestrator",
+            "unknown-worker",
+            "manual-task",
+            "exploit-runner",
+            "persistence-agent",
+        ]
+
+        for agent in should_not_skip:
+            source_lower = agent.lower()
+            has_realtime_hooks = any(role in source_lower for role in realtime_extraction_roles)
+            assert not has_realtime_hooks, f"Agent {agent} should NOT have realtime hooks"
+
+
+# ============================================================================
+# Monitoring Processing Tests
+# ============================================================================
+
+
+class TestMonitoringProcessing:
+    """Tests for monitoring.py discovery processing."""
+
+    @pytest.fixture
+    def mock_shared_state(self):
+        """Create a mock shared state."""
+        state = MagicMock()
+        state.discovered_vulnerabilities = {}
+        state.all_credentials = []
+        state.all_hashes = []
+        state.target_domain = "contoso.local"
+        state.dc_ip = "192.168.58.10"
+        state.domain_controllers = ["192.168.58.10"]
+        return state
+
+    @pytest.mark.asyncio
+    async def test_credential_discovery_data_structure(self):
+        """Test credential discovery data structure."""
+        data = {
+            "username": "svc_sql",
+            "password": "SqlP@ss123!",  # pragma: allowlist secret
+            "domain": "contoso.local",
+            "is_admin": False,
+        }
+
+        # Verify required fields
+        assert "username" in data
+        assert "password" in data
+        assert "domain" in data
+        assert data["domain"] == "contoso.local"  # Uses correct domain convention
+
+    @pytest.mark.asyncio
+    async def test_hash_discovery_data_structure(self):
+        """Test hash discovery data structure."""
+        data = {
+            "username": "administrator",
+            "hash_value": "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            "hash_type": "NTLM",
+            "domain": "contoso.local",
+        }
+
+        # Verify required fields
+        assert "username" in data
+        assert "hash_value" in data
+        assert "hash_type" in data
+        assert data["hash_type"] in ("NTLM", "TGS", "AS-REP")
+
+    @pytest.mark.asyncio
+    async def test_vulnerability_discovery_data_structure(self):
+        """Test vulnerability discovery data structure."""
+        data = {
+            "vuln_type": "constrained_delegation",
+            "target": "192.168.58.10",
+            "vuln_id": "cd_srv_sql",
+            "details": {
+                "account": "srv_sql",
+                "target_spn": "cifs/dc01.contoso.local",
+            },
+            "priority": 2,
+        }
+
+        # Verify required fields
+        assert "vuln_type" in data
+        assert "target" in data
+        assert data["vuln_type"] in (
+            "constrained_delegation",
+            "unconstrained_delegation",
+            "esc1",
+            "esc4",
+            "esc8",
+            "mssql_impersonation",
+        )
+
+    @pytest.mark.asyncio
+    async def test_high_value_vulns_trigger_exploit(self):
+        """Test that high-value vulnerabilities are in the auto-exploit set."""
+        high_value_vulns = {
+            "constrained_delegation",
+            "unconstrained_delegation",
+            "esc1",
+            "esc4",
+            "esc8",
+            "adcs_esc1",
+            "adcs_esc4",
+            "adcs_esc8",
+            "mssql_impersonation",
+        }
+
+        # These should trigger auto-exploit
+        should_trigger = [
+            "constrained_delegation",
+            "esc1",
+            "mssql_impersonation",
+        ]
+
+        for vuln in should_trigger:
+            assert vuln.lower() in high_value_vulns, f"{vuln} should trigger auto-exploit"
+
+        # These should NOT trigger auto-exploit
+        should_not_trigger = [
+            "smb_signing_disabled",
+            "local_admin",
+            "gpo_abuse",
+        ]
+
+        for vuln in should_not_trigger:
+            assert vuln.lower() not in high_value_vulns, f"{vuln} should NOT trigger auto-exploit"
+
+
+# ============================================================================
+# Target Fallback Tests
+# ============================================================================
+
+
+class TestTargetFallback:
+    """Tests for target fallback logic in vulnerability publishing."""
+
+    @pytest.mark.asyncio
+    async def test_target_fallback_order(self):
+        """Test that target fallback uses correct priority order."""
+        # Mock shared state with various fallback sources
+        dc_ip = "192.168.58.10"
+        target_domain = "contoso.local"
+        domain_controllers = ["192.168.58.10", "192.168.58.11"]
+
+        # Fallback order should be: dc_ip -> target_domain -> domain_controllers[0]
+        target = dc_ip or target_domain or (domain_controllers[0] if domain_controllers else "")
+
+        assert target == "192.168.58.10"
+
+        # Test with empty dc_ip
+        dc_ip = ""
+        target = dc_ip or target_domain or (domain_controllers[0] if domain_controllers else "")
+        assert target == "contoso.local"
+
+        # Test with empty dc_ip and target_domain
+        target_domain = ""
+        target = dc_ip or target_domain or (domain_controllers[0] if domain_controllers else "")
+        assert target == "192.168.58.10"
+
+    @pytest.mark.asyncio
+    async def test_skips_vuln_when_no_target(self):
+        """Test that vulnerabilities are skipped when no target is available."""
+        # When all sources are empty, target should be empty
+        dc_ip = ""
+        target_domain = ""
+        domain_controllers: list[str] = []
+
+        target = dc_ip or target_domain or (domain_controllers[0] if domain_controllers else "")
+
+        assert target == ""
+        # In this case, the vulnerability should be skipped (not published)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

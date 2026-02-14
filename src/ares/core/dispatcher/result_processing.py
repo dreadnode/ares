@@ -654,22 +654,42 @@ class ResultProcessingMixin:
             await self.publish_share(share, source_agent)
 
         # Extract hashes (Kerberoast, AS-REP, NTLM) from tool output
-        for hash_obj in self._extract_hashes_from_output(output):
-            # Track attack chain
-            if parent_credential_id:
-                hash_obj.parent_id = parent_credential_id
-                hash_obj.attack_step = parent_attack_step + 1
-            await self.publish_hash(hash_obj, source_agent)
+        # Skip extraction for agents with real-time hooks to avoid double processing
+        # (those agents already publish via task_queue.publish_discovery in hooks)
+        # Include variations: recon/reconnaissance, credential/credential_access, etc.
+        realtime_extraction_roles = {
+            "credential_access",
+            "credential",
+            "privesc",
+            "lateral",
+            "acl",
+            "recon",
+            "reconnaissance",
+        }
+        source_lower = source_agent.lower()
+        has_realtime_hooks = any(role in source_lower for role in realtime_extraction_roles)
+
+        if not has_realtime_hooks:
+            for hash_obj in self._extract_hashes_from_output(output):
+                # Track attack chain
+                if parent_credential_id:
+                    hash_obj.parent_id = parent_credential_id
+                    hash_obj.attack_step = parent_attack_step + 1
+                await self.publish_hash(hash_obj, source_agent)
 
         # Extract and auto-queue delegation vulnerabilities from findDelegation output
-        delegations = self._extract_delegation_from_output(output)
-        if delegations:
-            queued = await self._auto_queue_delegation_vulnerabilities(delegations, source_agent)
-            if queued > 0:
-                logger.warning(
-                    f"🎫 Auto-delegation: queued {queued} delegation vulnerability(ies) "
-                    f"for exploitation from {source_agent}"
+        # Skip for agents with real-time hooks (they publish via _process_realtime_delegation_discovery)
+        if not has_realtime_hooks:
+            delegations = self._extract_delegation_from_output(output)
+            if delegations:
+                queued = await self._auto_queue_delegation_vulnerabilities(
+                    delegations, source_agent
                 )
+                if queued > 0:
+                    logger.warning(
+                        f"🎫 Auto-delegation: queued {queued} delegation vulnerability(ies) "
+                        f"for exploitation from {source_agent}"
+                    )
 
         # Extract and auto-queue BloodHound vulnerabilities (GPO abuse, local admin, ACL)
         bloodhound_vulns = self._extract_bloodhound_vulns_from_output(output)
