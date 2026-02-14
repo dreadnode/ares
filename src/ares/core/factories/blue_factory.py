@@ -1,6 +1,8 @@
 """Factory for creating investigation agents with presets."""
 
 import functools
+import json as json_mod
+import re
 import uuid
 from typing import Any
 
@@ -668,7 +670,7 @@ def create_rate_limited_mcp_tool(
                     if meta.get("retry_count", 0) > 0:
                         logger.info(f"Query succeeded after {meta['retry_count']} retries")
 
-                return result
+                return _compact_loki_result(result)
 
             except Exception as e:
                 logger.error(f"Resilient execution failed: {e}")
@@ -689,7 +691,7 @@ def create_rate_limited_mcp_tool(
             _record_query(tool_name, kwargs, result_count, result_data=result)
             # Only count successful queries against the limit
             _count_successful_query(result_count)
-            return result
+            return _compact_loki_result(result)
         except Exception as e:
             error_str = str(e)
             # Handle gRPC timeout from mcp-grafana (10s default timeout)
@@ -715,6 +717,98 @@ def create_rate_limited_mcp_tool(
     rate_limited_wrapper.__name__ = tool_name
     rate_limited_wrapper._ares_rate_limited = True
     return rate_limited_wrapper
+
+
+def _compact_loki_result(result: Any) -> Any:
+    """Remove redundant data from Loki MCP responses to reduce token usage.
+
+    Windows Security Event logs contain the same data three times:
+    1. event_data: raw XML fields (<Data Name='X'>val</Data>)
+    2. message: human-readable prose with the same fields
+    3. JSON metadata (event_id, computer, etc.)
+
+    This function parses event_data XML into a clean dict and drops
+    the redundant 'message' and raw XML, cutting ~60-70% of tokens
+    while keeping all security-relevant fields.
+    """
+    # MCP tools return list[ContentText] — extract the text payload
+    if isinstance(result, list) and len(result) > 0:
+        item = result[0]
+        text = getattr(item, "text", None)
+        if text is None:
+            return result
+    elif isinstance(result, str):
+        text = result
+    else:
+        return result
+
+    try:
+        data = json_mod.loads(text)
+    except (json_mod.JSONDecodeError, TypeError):
+        return result
+
+    if not isinstance(data, dict) or "data" not in data:
+        return result
+
+    entries = data.get("data", [])
+    if not isinstance(entries, list):
+        return result
+
+    compacted = []
+    for entry in entries:
+        line_str = entry.get("line", "")
+        timestamp = entry.get("timestamp", "")
+
+        # Parse the log line JSON
+        try:
+            line = json_mod.loads(line_str) if isinstance(line_str, str) else line_str
+        except (json_mod.JSONDecodeError, TypeError):
+            compacted.append(entry)
+            continue
+
+        if not isinstance(line, dict):
+            compacted.append(entry)
+            continue
+
+        # Parse event_data XML into clean key-value pairs
+        event_data_xml = line.get("event_data", "")
+        parsed_fields = {}
+        if event_data_xml:
+            for match in re.finditer(
+                r"<Data Name='([^']+)'[^>]*>([^<]*)</Data>", event_data_xml
+            ):
+                parsed_fields[match.group(1)] = match.group(2)
+
+        # Build compact entry: keep metadata + parsed fields, drop message + raw XML
+        compact_line = {
+            "event_id": line.get("event_id"),
+            "computer": line.get("computer"),
+            "timeCreated": line.get("timeCreated"),
+            "keywords": line.get("keywords"),
+            "source": line.get("source"),
+            "channel": line.get("channel"),
+        }
+        if parsed_fields:
+            compact_line["fields"] = parsed_fields
+        # Drop: "message" (prose duplicate), "event_data" (raw XML duplicate),
+        # "levelText", "taskText", "opCodeText", "execution", "version", "task"
+
+        compacted.append({"timestamp": timestamp, "line": compact_line})
+
+    original_chars = len(text)
+    compact_json = json_mod.dumps({"data": compacted, "count": len(compacted)})
+    saved_pct = (1 - len(compact_json) / original_chars) * 100 if original_chars else 0
+    logger.info(
+        f"📦 Compacted Loki result: {original_chars:,} → {len(compact_json):,} chars "
+        f"({saved_pct:.0f}% reduction, {len(compacted)} entries)"
+    )
+
+    # Return in the same format the SDK expects
+    if isinstance(result, list) and hasattr(result[0], "text"):
+        # Reconstruct ContentText
+        result[0].text = compact_json
+        return result
+    return compact_json
 
 
 def _extract_result_count(result: Any) -> int | None:
