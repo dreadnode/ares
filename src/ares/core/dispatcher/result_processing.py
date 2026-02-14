@@ -54,11 +54,11 @@ class ResultProcessingMixin:
             error: Error message (if failed).
             source_agent: Agent completing the task.
         """
-        if task_id not in self.shared_state.pending_tasks:
+        # Use atomic pop to avoid TOCTOU race with _cleanup_stale_tasks()
+        task_info = self.shared_state.pending_tasks.pop(task_id, None)
+        if task_info is None:
             logger.warning(f"Unknown task: {task_id}")
             return
-
-        task_info = self.shared_state.pending_tasks.pop(task_id)
         was_retry = task_info.status == TaskStatus.RETRYING
 
         task_info.status = TaskStatus.COMPLETED if success else TaskStatus.FAILED
