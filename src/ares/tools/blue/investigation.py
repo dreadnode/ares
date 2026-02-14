@@ -338,7 +338,7 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
             >>> get_suggested_evidence()
             [
                 {'type': 'ip', 'value': '192.168.58.100', 'source_query_id': 'q-0001'},
-                {'type': 'hostname', 'value': 'dc01.domain.local', 'source_query_id': 'q-0001'},
+                {'type': 'hostname', 'value': 'dc01.contoso.local', 'source_query_id': 'q-0001'},
                 {'type': 'user', 'value': 'DOMAIN\\\\admin', 'source_query_id': 'q-0002'},
             ]
 
@@ -382,8 +382,8 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
                 },
                 'pivot_suggestions': [
                     {
-                        'host': 'dc01.domain.local',
-                        'discovered_from': ['ws01.domain.local'],
+                        'host': 'dc01.contoso.local',
+                        'discovered_from': ['ws01.contoso.local'],
                         'priority': 3,
                         'suggested_queries': ['...'],
                         'suggested_actions': ['...']
@@ -453,13 +453,13 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
 
         Example:
             >>> record_lateral_connection(
-            ...     source_host="ws01.domain.local",
-            ...     destination_host="dc01.domain.local",
+            ...     source_host="ws01.contoso.local",
+            ...     destination_host="dc01.contoso.local",
             ...     connection_type="smb",
             ...     user="admin",
             ...     mitre_technique="T1021.002"
             ... )
-            'Recorded SMB connection: ws01.domain.local -> dc01.domain.local'
+            'Recorded SMB connection: ws01.contoso.local -> dc01.contoso.local'
         """
         if not self.state:
             return "ERROR: No investigation state"
@@ -504,7 +504,7 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
             {
                 'cluster_id': 'cluster-0001',
                 'related_alert_count': 3,
-                'common_hosts': ['dc01.domain.local', 'ws01.domain.local'],
+                'common_hosts': ['dc01.contoso.local', 'ws01.contoso.local'],
                 'common_users': ['admin'],
                 'techniques_in_cluster': ['T1558.003', 'T1078.002'],
                 'recommendation': 'This alert is part of a cluster...'

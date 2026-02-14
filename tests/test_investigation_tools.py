@@ -405,9 +405,9 @@ class TestTrackHostInvestigation:
         tools = InvestigationTools()
         tools.set_state(investigation_state)
 
-        result = tools.track_host_investigation("dc01.domain.local")
+        result = tools.track_host_investigation("dc01.contoso.local")
 
-        assert "dc01.domain.local" in investigation_state.queried_hosts
+        assert "dc01.contoso.local" in investigation_state.queried_hosts
         assert isinstance(result, str)  # Returns rendered template
 
 
@@ -425,9 +425,9 @@ class TestTrackUserInvestigation:
         tools = InvestigationTools()
         tools.set_state(investigation_state)
 
-        result = tools.track_user_investigation("admin@domain.local")
+        result = tools.track_user_investigation("admin@contoso.local")
 
-        assert "admin@domain.local" in investigation_state.queried_users
+        assert "admin@contoso.local" in investigation_state.queried_users
         assert isinstance(result, str)  # Returns rendered template
 
 
@@ -452,7 +452,7 @@ class TestGetSuggestedEvidence:
         with patch("ares.tools.blue.investigation.get_suggested_iocs") as mock_get:
             mock_get.return_value = [
                 {"type": "ip", "value": "192.168.58.100", "source_query_id": "q-0001"},
-                {"type": "hostname", "value": "dc01.domain.local", "source_query_id": "q-0001"},
+                {"type": "hostname", "value": "dc01.contoso.local", "source_query_id": "q-0001"},
             ]
             result = tools.get_suggested_evidence()
 
@@ -512,16 +512,16 @@ class TestRecordLateralConnection:
         tools.set_state(investigation_state)
 
         result = tools.record_lateral_connection(
-            source_host="ws01.domain.local",
-            destination_host="dc01.domain.local",
+            source_host="ws01.contoso.local",
+            destination_host="dc01.contoso.local",
             connection_type="smb",
             user="admin",
             mitre_technique="T1021.002",
         )
 
         assert "SMB" in result
-        assert "ws01.domain.local" in result
-        assert "dc01.domain.local" in result
+        assert "ws01.contoso.local" in result
+        assert "dc01.contoso.local" in result
         assert len(investigation_state.lateral_graph.connections) == 1
 
     def test_record_connection_same_host(self, investigation_state):
@@ -565,7 +565,7 @@ class TestGetCorrelatedAlerts:
         investigation_state.correlation_context = {
             "cluster_id": "cluster-0001",
             "related_alerts": 3,
-            "common_hosts": ["dc01.domain.local"],
+            "common_hosts": ["dc01.contoso.local"],
             "common_users": ["admin"],
             "common_ips": ["192.168.58.100"],
             "techniques_in_cluster": ["T1558.003"],

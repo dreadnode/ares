@@ -5,7 +5,9 @@ Imports are lazy to prevent blue team factory from being loaded in red team cont
 
 __all__ = [
     # Multi-agent factories
-    "ROLE_TOOLSETS",
+    "ALL_TOOLSETS",
+    "ROLE_CALLBACK_TOOLS",
+    "UNIVERSAL_TOOLSETS",
     "create_agent_info",
     # Single-agent factories
     "create_investigation_agent",
@@ -32,7 +34,9 @@ def __getattr__(name: str):
 
     # Red team multi-agent factories
     if name in (
-        "ROLE_TOOLSETS",
+        "ALL_TOOLSETS",
+        "ROLE_CALLBACK_TOOLS",
+        "UNIVERSAL_TOOLSETS",
         "create_agent_info",
         "create_multi_agent_ensemble",
         "create_role_hooks",

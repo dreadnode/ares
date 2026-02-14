@@ -60,24 +60,19 @@ async def create_redis_client(redis_url: str | None = None, *, decode_responses:
         raise RuntimeError("redis package required: pip install redis") from e
 
     sentinel = get_redis_sentinel_config()
-    default_socket_timeout = None if sentinel else 30.0
+    # Always use 30s socket timeout - None causes hangs during Redis failover
+    default_socket_timeout = 30.0
     socket_timeout = _parse_optional_float(
         os.getenv("REDIS_SOCKET_TIMEOUT"), default_socket_timeout
     )
     socket_connect_timeout = _parse_optional_float(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT"), 5.0)
     health_check_interval = _parse_optional_float(os.getenv("REDIS_HEALTH_CHECK_INTERVAL"), 10.0)
     logger.debug(
-        "Redis client config: socket_timeout={}, connect_timeout={}, health_check={}",
-        socket_timeout,
-        socket_connect_timeout,
-        health_check_interval,
+        f"Redis client config: socket_timeout={socket_timeout}, connect_timeout={socket_connect_timeout}, health_check={health_check_interval}"
     )
     if sentinel:
         logger.info(
-            "Connecting to Redis via Sentinel {}:{} (master: {})",
-            sentinel["host"],
-            sentinel["port"],
-            sentinel["master"],
+            f"Connecting to Redis via Sentinel {sentinel['host']}:{sentinel['port']} (master: {sentinel['master']})"
         )
         sentinel_client = redis_async.Sentinel(
             [(sentinel["host"], sentinel["port"])],

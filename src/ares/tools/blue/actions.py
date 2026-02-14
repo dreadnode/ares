@@ -300,6 +300,6 @@ async def escalate_investigation(
         },
     )
 
-    logger.warning(f"Investigation escalated: {reason}")
+    logger.info(f"Investigation escalated: {reason}")
 
     return f"Investigation escalated with severity={severity}. Human analyst notified."

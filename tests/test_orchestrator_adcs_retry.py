@@ -19,14 +19,14 @@ class TestAutoAdcsEnumerationRetry:
     def shared_state(self) -> SharedRedTeamState:
         """Create a shared state with ADCS server and credentials."""
         state = SharedRedTeamState(operation_id="test-op")
-        state.target = Target(ip="192.168.58.1", domain="domain.local")
+        state.target = Target(ip="192.168.58.1", domain="contoso.local")
 
         # Add a credential
         state.all_credentials.append(
             Credential(
                 username="testuser",
                 password="TestPass123",  # pragma: allowlist secret
-                domain="domain.local",
+                domain="contoso.local",
                 source="spray",
             )
         )
@@ -49,7 +49,7 @@ class TestAutoAdcsEnumerationRetry:
         dispatcher = MagicMock()
         dispatcher.shared_state = shared_state
         dispatcher.find_adcs_servers = MagicMock(
-            return_value=[("192.168.58.10", "ca.domain.local")]
+            return_value=[("192.168.58.10", "ca.contoso.local")]
         )
         dispatcher.request_adcs_enumeration = AsyncMock(return_value="exploit_adcs_001")
         return dispatcher
@@ -78,7 +78,7 @@ class TestAutoAdcsEnumerationRetry:
         mock_dispatcher.request_adcs_enumeration.assert_called_once_with(
             source_agent="orchestrator",
             target_ip="192.168.58.10",
-            domain="domain.local",
+            domain="contoso.local",
             username="testuser",
             password="TestPass123",  # pragma: allowlist secret
         )
@@ -233,7 +233,7 @@ class TestAutoAdcsEnumerationRetry:
             Credential(
                 username="admin",
                 password="AdminPass456",  # pragma: allowlist secret
-                domain="domain.local",
+                domain="contoso.local",
                 source="kerberoast",
             )
         )
@@ -289,7 +289,7 @@ class TestAdcsServerDetection:
                 permissions="READ",
             )
         )
-        state.all_hosts.append(Host(ip="192.168.58.10", hostname="ca.domain.local"))
+        state.all_hosts.append(Host(ip="192.168.58.10", hostname="ca.contoso.local"))
 
         # Create a simple object that has find_adcs_servers behavior
         class MockDispatcher:
@@ -302,7 +302,7 @@ class TestAdcsServerDetection:
         result = dispatcher.find_adcs_servers()
 
         assert len(result) == 1
-        assert result[0] == ("192.168.58.10", "ca.domain.local")
+        assert result[0] == ("192.168.58.10", "ca.contoso.local")
 
     def test_find_adcs_servers_case_insensitive(self):
         """Test that CertEnroll detection is case-insensitive."""

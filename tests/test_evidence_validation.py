@@ -1,8 +1,7 @@
 """Tests for evidence validation and IOC extraction."""
 
+from ares.core.config import get_max_stored_results, get_unvalidated_confidence_penalty
 from ares.core.evidence_validation import (
-    MAX_STORED_RESULTS,
-    UNVALIDATED_CONFIDENCE_PENALTY,
     StoredQueryResult,
     _classify_ioc,
     _extract_patterns_from_string,
@@ -87,7 +86,7 @@ class TestStoreQueryResult:
     def test_store_extracts_values(self):
         """Test store extracts searchable values."""
         reset_evidence_validation()
-        data = {"ip": "192.168.58.100", "user": "admin@domain.local"}
+        data = {"ip": "192.168.58.100", "user": "admin@contoso.local"}
         store_query_result("test", "query", data, 2)
 
         # Check via suggested IOCs
@@ -96,15 +95,16 @@ class TestStoreQueryResult:
         assert any("192.168.58.100" in v for v in values)
 
     def test_store_respects_max_limit(self):
-        """Test store respects MAX_STORED_RESULTS."""
+        """Test store respects max_stored_results config."""
         reset_evidence_validation()
+        max_stored = get_max_stored_results()
 
         # Store more than max
-        for i in range(MAX_STORED_RESULTS + 5):
+        for i in range(max_stored + 5):
             store_query_result("test", f"query{i}", {f"val{i}": f"data{i}"}, 1)
 
-        # Should only have MAX_STORED_RESULTS
-        assert len(get_recent_query_ids()) == MAX_STORED_RESULTS
+        # Should only have max_stored_results
+        assert len(get_recent_query_ids()) == max_stored
 
 
 class TestExtractSearchableValues:
@@ -117,10 +117,10 @@ class TestExtractSearchableValues:
 
     def test_extract_from_dict(self):
         """Test extracting from dictionary."""
-        data = {"ip": "192.168.58.1", "host": "server01.domain.local"}
+        data = {"ip": "192.168.58.1", "host": "server01.contoso.local"}
         values = _extract_searchable_values(data)
         assert "192.168.58.1" in values
-        assert "server01.domain.local" in values
+        assert "server01.contoso.local" in values
 
     def test_extract_from_list(self):
         """Test extracting from list."""
@@ -165,9 +165,9 @@ class TestExtractPatternsFromString:
 
     def test_extract_hostname(self):
         """Test extracting hostnames."""
-        text = "Host: server01.domain.local connected"
+        text = "Host: server01.contoso.local connected"
         patterns = _extract_patterns_from_string(text)
-        assert "server01.domain.local" in patterns
+        assert "server01.contoso.local" in patterns
 
     def test_extract_domain_user(self):
         """Test extracting domain\\user format."""
@@ -177,9 +177,9 @@ class TestExtractPatternsFromString:
 
     def test_extract_email_user(self):
         """Test extracting user@domain format."""
-        text = "User admin@domain.local authenticated"
+        text = "User admin@contoso.local authenticated"
         patterns = _extract_patterns_from_string(text)
-        assert "admin@domain.local" in patterns
+        assert "admin@contoso.local" in patterns
 
     def test_extract_json_username_fields(self):
         """Test extracting usernames from JSON fields."""
@@ -191,9 +191,9 @@ class TestExtractPatternsFromString:
 
     def test_extract_computer_name(self):
         """Test extracting computer names."""
-        text = '{"Computer": "DC01.domain.local"}'
+        text = '{"Computer": "DC01.contoso.local"}'
         patterns = _extract_patterns_from_string(text)
-        assert "dc01.domain.local" in patterns
+        assert "dc01.contoso.local" in patterns
 
     def test_extract_process_name(self):
         """Test extracting process names."""
@@ -250,15 +250,15 @@ class TestValidateEvidenceValue:
     def test_validate_case_insensitive(self):
         """Test validation is case insensitive."""
         reset_evidence_validation()
-        store_query_result("test", "query", {"host": "DC01.Domain.LOCAL"}, 1)
+        store_query_result("test", "query", {"host": "DC01.Contoso.LOCAL"}, 1)
 
-        validated, _query_id = validate_evidence_value("dc01.domain.local")
+        validated, _query_id = validate_evidence_value("dc01.contoso.local")
         assert validated is True
 
     def test_validate_partial_match(self):
         """Test validating partial match."""
         reset_evidence_validation()
-        store_query_result("test", "query", {"user": "admin@domain.local"}, 1)
+        store_query_result("test", "query", {"user": "admin@contoso.local"}, 1)
 
         # Partial match on domain portion
         validated, _query_id = validate_evidence_value("admin")
@@ -334,7 +334,7 @@ class TestClassifyIOC:
 
     def test_classify_user_email(self):
         """Test classifying user@domain."""
-        assert _classify_ioc("admin@domain.local") == "user"
+        assert _classify_ioc("admin@contoso.local") == "user"
 
     def test_classify_md5_hash(self):
         """Test classifying MD5 hash."""
@@ -368,7 +368,7 @@ class TestAdjustConfidenceForValidation:
     def test_unvalidated_penalty(self):
         """Test unvalidated evidence gets penalty."""
         result = adjust_confidence_for_validation(0.8, validated=False)
-        expected = 0.8 - UNVALIDATED_CONFIDENCE_PENALTY
+        expected = 0.8 - get_unvalidated_confidence_penalty()
         assert result == expected
 
     def test_unvalidated_minimum(self):
@@ -476,7 +476,7 @@ class TestAutoExtractEvidenceFromQuery:
 
     def test_extract_hostname(self):
         """Test extracting hostname evidence."""
-        result = {"host": "server01.domain.local"}
+        result = {"host": "server01.contoso.local"}
         evidence = auto_extract_evidence_from_query(result, "test query")
 
         host_evidence = [e for e in evidence if e["type"] == "hostname"]

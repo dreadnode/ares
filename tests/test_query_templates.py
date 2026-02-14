@@ -1153,8 +1153,8 @@ class TestInternalHelperMethods:
     def test_build_selector_with_extra_labels_regex_dot(self, tools: QueryTemplateTools):
         """Test _build_selector with extra_labels containing dots."""
         # extra_labels with dots should use regex
-        selector = tools._build_selector(extra_labels={"host": "server.domain.local"})
-        assert 'host=~"server.domain.local"' in selector
+        selector = tools._build_selector(extra_labels={"host": "server.contoso.local"})
+        assert 'host=~"server.contoso.local"' in selector
 
     def test_build_event_filter_empty(self, tools: QueryTemplateTools):
         """Test _build_event_filter with empty list."""

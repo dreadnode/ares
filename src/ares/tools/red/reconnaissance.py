@@ -5,7 +5,6 @@ security posture validation, and BloodHound collection.
 """
 
 import json
-import logging
 import re
 import shlex
 import uuid
@@ -13,19 +12,19 @@ from typing import Any
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
+from loguru import logger
 
-from ares.core.models import Credential, Host, Share, User
+from ares.core.models import Credential, Host, Share
 from ares.tools.red.common import (
     AnyRedTeamState,
     add_credential_to_state,
+    add_user_to_state,
     format_weakness_block,
     is_motd_garbage,
     is_motd_line,
     run_tool,
     write_users_file_remote,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class NetworkEnumerationTools(Toolset):
@@ -472,6 +471,20 @@ class NetworkEnumerationTools(Toolset):
 
         targets = target.split()
 
+        # Deduplication: skip targets that have already been scanned
+        if self.state and hasattr(self.state, "scanned_targets"):
+            already_scanned = self.state.scanned_targets
+            targets_to_scan = [t for t in targets if t not in already_scanned]
+
+            if not targets_to_scan:
+                logger.info(f"[*] All {len(targets)} targets already scanned, skipping nmap")
+                return f"All targets already scanned: {', '.join(targets)}"
+
+            if len(targets_to_scan) < len(targets):
+                skipped = len(targets) - len(targets_to_scan)
+                logger.info(f"[*] Skipping {skipped} already-scanned targets")
+                targets = targets_to_scan
+
         try:
             logger.info(f"[*] Phase 1: Fast port discovery on {len(targets)} target(s)")
 
@@ -493,6 +506,7 @@ class NetworkEnumerationTools(Toolset):
                 if self.state:
                     for ip in targets:
                         self.state.queried_hosts.add(ip)
+                        self.state.scanned_targets.add(ip)
                 if self.state:
                     parsed_hosts = _parse_nmap_hosts(stdout)
                     for host in parsed_hosts:
@@ -513,6 +527,9 @@ class NetworkEnumerationTools(Toolset):
                 logger.warning(f"[!] Service scan had issues: {svc_stderr}")
                 # Return port scan results if service scan fails
                 if self.state:
+                    for ip in targets:
+                        self.state.queried_hosts.add(ip)
+                        self.state.scanned_targets.add(ip)
                     parsed_hosts = _parse_nmap_hosts(stdout)
                     for host in parsed_hosts:
                         if hasattr(self.state, "add_host"):
@@ -527,6 +544,7 @@ class NetworkEnumerationTools(Toolset):
             if self.state:
                 for ip in targets:
                     self.state.queried_hosts.add(ip)
+                    self.state.scanned_targets.add(ip)
 
                 parsed_hosts = _parse_nmap_hosts(svc_stdout)
                 for host in parsed_hosts:
@@ -805,18 +823,8 @@ class NetworkEnumerationTools(Toolset):
                     users = self._extract_users_from_outputs(outputs)
                     found_users = bool(users)
                     for found_user in sorted(users):
-                        if any(
-                            u.username == found_user and u.domain == effective_domain
-                            for u in self.state.users
-                        ):
-                            continue
-                        self.state.users.append(
-                            User(
-                                username=found_user,
-                                domain=effective_domain,
-                                description="",
-                                is_admin=False,
-                            )
+                        add_user_to_state(
+                            self.state, found_user, effective_domain, source="netexec_user_enum"
                         )
 
                     extracted = self._extract_passwords_from_user_enum_output(output)
@@ -1151,9 +1159,9 @@ class NetworkEnumerationTools(Toolset):
                 output = "\n".join(content for _, content in outputs if content).strip()
                 return self._format_enum_failure_message(outputs, output)
 
-            # Save to file on recon pod where netexec commands execute
+            # Save to local file for password spraying
             users_file = "/tmp/users.txt"  # nosec B108  # noqa: S108
-            ok, error = write_users_file_remote(sorted(users), users_file, target_role="recon")
+            ok, error = write_users_file_remote(sorted(users), users_file, target_role=None)
             if not ok:
                 return f"[!] Failed to write users file on remote: {error}"
 
@@ -1163,6 +1171,118 @@ class NetworkEnumerationTools(Toolset):
         except Exception as e:
             logger.error(f"Save users to file failed: {e}")
             return f"Save users to file failed: {e}"
+
+    @dn.tool_method
+    def zerologon_check(
+        self,
+        dc_ip: str,
+    ) -> str:
+        """
+        Check for CVE-2020-1472 (Zerologon) vulnerability using netexec.
+
+        Zerologon allows unauthenticated attackers to completely compromise
+        Active Directory by exploiting a flaw in Netlogon protocol.
+
+        This is a SAFE check that does not exploit the vulnerability.
+
+        Args:
+            dc_ip: Domain controller IP address
+
+        Returns:
+            Vulnerability check result
+
+        Example:
+            >>> zerologon_check("192.168.58.10")
+        """
+        cmd = [
+            "netexec",
+            "smb",
+            dc_ip,
+            "-u",
+            "",
+            "-p",
+            "",
+            "-M",
+            "zerologon",
+        ]
+
+        try:
+            logger.info(f"[*] Checking Zerologon on {dc_ip}")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if "vuln" in result.lower() or "zerologon" in result.lower():
+                logger.warning("[!] Zerologon vulnerability detected!")
+                result = (
+                    "🚨 ZEROLOGON VULNERABILITY DETECTED!\n"
+                    "→ DC is vulnerable to CVE-2020-1472\n"
+                    "→ Can set DC password to empty (DANGEROUS)\n"
+                    "→ Recommend patching instead of exploitation\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            return f"Zerologon check failed: {e}"
+
+    @dn.tool_method
+    def adidnsdump(
+        self,
+        dc_ip: str,
+        domain: str,
+        username: str,
+        password: str,
+    ) -> str:
+        """
+        Enumerate AD-integrated DNS records via LDAP.
+
+        Discovers internal hostnames, hidden servers, and network segments
+        by dumping DNS zones from Active Directory. Useful for finding
+        additional targets that may not be visible via network scanning.
+
+        Args:
+            dc_ip: Domain controller IP address
+            domain: Target domain (e.g., 'contoso.local')
+            username: Username for LDAP authentication
+            password: Password for authentication
+
+        Returns:
+            DNS zone information including hostnames and IP addresses
+
+        Example:
+            >>> adidnsdump("192.168.58.10", "contoso.local", "user", "pass")
+        """
+        cmd = [
+            "adidnsdump",
+            "-u",
+            f"{domain}\\{username}",
+            "-p",
+            password,
+            "--print-zones",
+            dc_ip,
+        ]
+
+        try:
+            logger.info(f"[*] Dumping AD-integrated DNS from {dc_ip}")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # Log success indicators
+            if "zone" in result.lower() or "record" in result.lower():
+                logger.info("[+] AD DNS zones enumerated successfully")
+                result = (
+                    "📋 AD-INTEGRATED DNS ENUMERATED\n"
+                    "→ Check output for internal hostnames and IPs\n"
+                    "→ Look for hidden servers, dev hosts, and network segments\n\n" + result
+                )
+
+            return result
+
+        except Exception as e:
+            logger.error(f"adidnsdump failed: {e}")
+            return f"adidnsdump failed: {e}"
 
 
 class PostureValidationTools(Toolset):
@@ -1416,7 +1536,7 @@ class PostureValidationTools(Toolset):
             target: Domain controller IP address
             username: Username for LDAP authentication
             password: Password for authentication
-            domain: Target domain (e.g., 'example.local')
+            domain: Target domain (e.g., 'contoso.local')
 
         Returns:
             LDAP output listing accounts with sidHistory
@@ -1579,6 +1699,7 @@ class BloodHoundTools(Toolset):
             "collection_successful": False,
             "json_files_created": [],
             "discovered_hosts": [],  # Computer hostnames from collection
+            "trusted_domains": [],  # Domain trusts discovered
             "computers_found": 0,
             "raw_output": raw_output,
         }
@@ -1663,7 +1784,7 @@ class BloodHoundTools(Toolset):
                 if hostname not in result["discovered_hosts"]:
                     result["discovered_hosts"].append(hostname)
 
-            # Match domain references like "DC01.domain.local" or computer names in output
+            # Match domain references like "DC01.contoso.local" or computer names in output
             # Look for FQDN patterns that appear to be computer names
             fqdn_matches = re.findall(r"\b([A-Za-z0-9\-]+\.[A-Za-z0-9\-\.]+\.local)\b", line)
             for fqdn in fqdn_matches:
@@ -1673,6 +1794,34 @@ class BloodHoundTools(Toolset):
                     hostname_part = fqdn.split(".")[0]
                     if hostname_part.isupper() or len(hostname_part) <= 15:
                         result["discovered_hosts"].append(fqdn)
+
+        # Extract trusted domains from BloodHound output
+        # BloodHound discovers trusts and outputs domain references
+        trust_patterns = [
+            r"trust[^\n]*?([a-zA-Z0-9\-]+\.[a-zA-Z0-9\-]+\.(?:local|com|net|org))",
+            r"domain:\s*([a-zA-Z0-9\-]+\.[a-zA-Z0-9\-]+\.(?:local|com|net|org))",
+            r"forest[^\n]*?([a-zA-Z0-9\-]+\.[a-zA-Z0-9\-]+\.(?:local|com|net|org))",
+        ]
+        for pattern in trust_patterns:
+            trust_matches = re.findall(pattern, raw_output, re.IGNORECASE)
+            for trust_domain in trust_matches:
+                trust_domain_lower = trust_domain.lower()
+                if trust_domain_lower not in result["trusted_domains"]:
+                    result["trusted_domains"].append(trust_domain_lower)
+
+        # Also extract domains from discovered host FQDNs (parent/sibling domains)
+        for host in result["discovered_hosts"]:
+            if "." in host:
+                parts = host.lower().split(".", 1)
+                if len(parts) > 1:
+                    host_domain = parts[1]
+                    # Skip common non-domain suffixes and duplicates
+                    is_valid = host_domain and host_domain not in result["trusted_domains"]
+                    is_not_infra = not any(
+                        host_domain.endswith(x) for x in [".internal", ".compute", ".amazonaws.com"]
+                    )
+                    if is_valid and is_not_infra:
+                        result["trusted_domains"].append(host_domain)
 
         # Standard recommendations for BloodHound output
         if result["collection_successful"]:
@@ -1718,7 +1867,7 @@ class BloodHoundTools(Toolset):
         CRITICAL: Run this with ANY valid credentials to find escalation paths.
 
         Args:
-            domain: Target domain (e.g., 'example.local')
+            domain: Target domain (e.g., 'contoso.local')
             username: Valid domain username
             password: Password for authentication
             dc_ip: Domain controller IP address
@@ -1731,8 +1880,14 @@ class BloodHoundTools(Toolset):
             - recommended_actions: Specific next steps with tool parameters
 
         Example:
-            >>> run_bloodhound("example.local", "dave.lee", "ExamplePass123!", "192.168.58.10")
+            >>> run_bloodhound("contoso.local", "dave.lee", "ExamplePass123!", "192.168.58.10")
         """
+        # DEDUP CHECK: Skip if already ran BloodHound for this domain (prevents duplicate work)
+        if self.state:
+            domain_key = domain.lower()
+            if domain_key in getattr(self.state, "processed_bloodhound_domains", set()):
+                return f"BloodHound already completed for {domain} - skipping to save time"
+
         cmd = [
             "bloodhound-python",
             "-d",
@@ -1759,19 +1914,19 @@ class BloodHoundTools(Toolset):
             try:
                 nslookup_cmd = ["nslookup", "-type=srv", srv_query, dc_ip]
                 srv_stdout, srv_stderr, _ = run_tool(
-                    nslookup_cmd, timeout_seconds=30, target_role="recon"
+                    nslookup_cmd, timeout_seconds=30, target_role=None
                 )
                 srv_output = srv_stdout or srv_stderr or ""
 
                 # Extract DC hostnames from SRV records
                 for line in srv_output.splitlines():
-                    # Match patterns like "svr hostname = hostname.domain.local"
+                    # Match patterns like "svr hostname = hostname.contoso.local"
                     srv_match = re.search(r"svr hostname = ([^\s]+)", line, re.IGNORECASE)
                     if srv_match:
                         hostname = srv_match.group(1).rstrip(".")
                         dc_hostnames.append(hostname)
                         logger.debug(f"Found DC hostname: {hostname}")
-                    # Also match "service = 0 100 389 hostname.domain.local"
+                    # Also match "service = 0 100 389 hostname.contoso.local"
                     service_match = re.search(
                         r"service = \d+ \d+ \d+ ([^\s]+)", line, re.IGNORECASE
                     )
@@ -1791,10 +1946,10 @@ class BloodHoundTools(Toolset):
                 try:
                     ptr_cmd = ["nslookup", dc_ip, dc_ip]
                     ptr_stdout, ptr_stderr, _ = run_tool(
-                        ptr_cmd, timeout_seconds=15, target_role="recon"
+                        ptr_cmd, timeout_seconds=15, target_role=None
                     )
                     ptr_output = ptr_stdout or ptr_stderr or ""
-                    # Extract hostname from PTR record: "name = hostname.domain.local"
+                    # Extract hostname from PTR record: "name = hostname.contoso.local"
                     for line in ptr_output.splitlines():
                         ptr_match = re.search(r"name = ([^\s]+)", line, re.IGNORECASE)
                         if ptr_match:
@@ -1839,7 +1994,7 @@ class BloodHoundTools(Toolset):
 
         try:
             logger.info(f"[*] Running BloodHound collection for {domain}")
-            stdout, stderr, _ = run_tool(cmd, timeout_seconds=600, target_role="recon")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=600, target_role=None)
 
             raw_output = stdout + "\n" + (stderr or "")
 

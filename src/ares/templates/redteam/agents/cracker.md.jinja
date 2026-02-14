@@ -47,10 +47,10 @@ Your role is to receive hash cracking requests and report cracked credentials ba
 3. **Execute Cracking**
    ```
    # Hashcat (preferred)
-   hashcat_crack(hash_value=HASH, hash_type="NTLM", wordlist="rockyou.txt")
+   crack_with_hashcat(hash_value=HASH, hashcat_mode=1000, wordlist_path="/usr/share/wordlists/rockyou.txt")
 
    # John (fallback)
-   john_crack(hash_value=HASH, format="ntlm", wordlist="rockyou.txt")
+   crack_with_john(hash_value=HASH, hash_format="ntlm", wordlist_path="/usr/share/wordlists/rockyou.txt")
    ```
 
 4. **Report Results**
@@ -79,10 +79,10 @@ Your role is to receive hash cracking requests and report cracked credentials ba
 
 | Tool | Use Case |
 |------|----------|
-| hashcat_crack | GPU-accelerated cracking |
-| john_crack | CPU cracking with rules |
-| report_cracked_credential | Broadcast success |
-| report_crack_failed | Report failure |
+| crack_with_hashcat | GPU-accelerated cracking |
+| crack_with_john | CPU cracking with rules |
+| report_cracked_credential | Broadcast success (via CrackerCallbackTools) |
+| report_crack_failed | Report failure (via CrackerCallbackTools) |
 | task_complete | Mark task done |
 
 ## Tooling
@@ -117,7 +117,7 @@ report_cracked_credential(
     username="svc_backup",
     password="Winter2024!",  # pragma: allowlist secret
     original_hash="aad3b435b51404ee:...",
-    domain="corp.local",
+    domain="contoso.local",
     method="hashcat"
 )
 ```

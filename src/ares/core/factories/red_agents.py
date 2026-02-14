@@ -11,12 +11,13 @@ from typing import TYPE_CHECKING, Any
 
 import dreadnode as dn
 from dreadnode.agent import Agent, Thread
-from dreadnode.agent.events import AgentStalled, ToolEnd, ToolStart
-from dreadnode.agent.hooks import retry_with_feedback
+from dreadnode.agent.events import AgentStalled, GenerationEnd, StepStart, ToolEnd, ToolStart
+from dreadnode.agent.hooks import retry_with_feedback, summarize_when_long
 from dreadnode.agent.stop import tool_use
 from loguru import logger
 
-from ares.core.config import get_agent_config
+from ares.core.capability_registry import FilteredToolset, get_enabled_tools
+from ares.core.config import get_agent_config, get_max_context_tokens, get_min_messages_to_keep
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.models import AgentInfo, AgentRole, SharedRedTeamState
 from ares.core.templates import get_template_loader
@@ -26,12 +27,15 @@ from ares.tools.red import (
     CertipyTools,
     CoercionNetworkTools,
     CoercionTools,
+    CrackerCallbackTools,
     CrackingTools,
     CredentialDiscoveryTools,
     CredentialHarvestingTools,
     CVEExploitTools,
     DelegationTools,
+    GMSATools,
     GoldenTicketTools,
+    LateralCallbackTools,
     LateralMovementTools,
     MSSQLTools,
     NetworkEnumerationTools,
@@ -43,6 +47,8 @@ from ares.tools.red import (
 
 if TYPE_CHECKING:
     from ares.core.k8s_executor import KubernetesPodExecutor
+
+from dreadnode.agent.reactions import Finish, Reaction
 
 
 def fix_tool_output_encoding(content: str) -> str:
@@ -59,47 +65,49 @@ def fix_tool_output_encoding(content: str) -> str:
     return content.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
 
 
-# Tool assignments per agent role
+# All available toolset classes for filtering by capabilities
+# Each role gets ALL toolsets, but FilteredToolset restricts to capability-enabled tools
 # Note: ORCHESTRATOR is not included here - it uses OrchestratorTools which are
 # wired up separately in the orchestrator.py module
-ROLE_TOOLSETS: dict[AgentRole, list[type]] = {
-    AgentRole.RECON: [
-        NetworkEnumerationTools,
-        BloodHoundTools,
-        RedTeamReportingTools,
-    ],
-    AgentRole.CREDENTIAL_ACCESS: [
-        NetworkEnumerationTools,
-        CredentialDiscoveryTools,
-        CredentialHarvestingTools,
-        SharePilferingTools,
-    ],
-    AgentRole.CRACKER: [
-        CrackingTools,
-    ],
-    AgentRole.ACL: [
-        ACLExploitTools,
-    ],
-    AgentRole.PRIVESC: [
-        CertipyTools,
-        DelegationTools,
-        MSSQLTools,
-        CVEExploitTools,
-        GoldenTicketTools,
-        TrustAttackTools,
-        LateralMovementTools,  # Added for kerberos_secretsdump after S4U attack
-    ],
-    AgentRole.LATERAL: [
-        LateralMovementTools,
-        CredentialHarvestingTools,
-        SharePilferingTools,
-        PostureValidationTools,
-    ],
-    AgentRole.COERCION: [
-        CoercionTools,
-        CoercionNetworkTools,
-    ],
+ALL_TOOLSETS: list[type] = [
+    # Reconnaissance
+    NetworkEnumerationTools,
+    BloodHoundTools,
+    PostureValidationTools,
+    # Credential discovery
+    CredentialDiscoveryTools,
+    CredentialHarvestingTools,
+    SharePilferingTools,
+    # Cracking
+    CrackingTools,
+    # ACL exploitation
+    ACLExploitTools,
+    # Privilege escalation
+    CertipyTools,
+    DelegationTools,
+    MSSQLTools,
+    CVEExploitTools,
+    GoldenTicketTools,
+    TrustAttackTools,
+    GMSATools,
+    # Lateral movement
+    LateralMovementTools,
+    # Coercion/relay
+    CoercionTools,
+    CoercionNetworkTools,
+]
+
+# Role-specific callback tools (not capability-filtered)
+# These are added automatically based on role
+ROLE_CALLBACK_TOOLS: dict[AgentRole, list[type]] = {
+    AgentRole.CRACKER: [CrackerCallbackTools],
+    AgentRole.LATERAL: [LateralCallbackTools],
 }
+
+# Always-included toolsets (reporting is needed by all roles)
+UNIVERSAL_TOOLSETS: list[type] = [
+    RedTeamReportingTools,
+]
 
 
 # System instruction templates per role
@@ -115,17 +123,8 @@ ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
 }
 
 
-# Default max steps per role
-ROLE_MAX_STEPS: dict[AgentRole, int] = {
-    AgentRole.ORCHESTRATOR: 200,  # Coordinator role with dispatching
-    AgentRole.RECON: 200,
-    AgentRole.CREDENTIAL_ACCESS: 120,
-    AgentRole.CRACKER: 50,
-    AgentRole.ACL: 150,  # ACL analysis requires complex path finding
-    AgentRole.PRIVESC: 100,
-    AgentRole.LATERAL: 200,
-    AgentRole.COERCION: 30,
-}
+# Default max steps fallback when role not in YAML config
+DEFAULT_MAX_STEPS = 75
 
 
 def load_agent_instructions(role: AgentRole) -> str:
@@ -185,6 +184,14 @@ def create_role_hooks(
     hooks = []
     log_name = display_name or role.value
 
+    # Circuit breaker state - track consecutive failures per tool
+    # This prevents agents from infinitely retrying the same failing approach
+    consecutive_failures: dict[str, int] = {}
+    circuit_breaker_threshold = 3  # Stop after 3 consecutive failures on same tool
+    circuit_breaker_tripped = (
+        False  # Flag to prevent redundant Finish reactions from parallel calls
+    )
+
     # Common logging hooks
     async def log_tool_usage(event: ToolStart):
         """Log tool calls for observability."""
@@ -192,35 +199,135 @@ def create_role_hooks(
             logger.info(f"🔧 [{log_name}] Tool: {event.tool_call.name}")
             dn.log_metric(f"multiagent_{log_name}_tool_{event.tool_call.name}", 1, mode="count")
 
-    async def log_tool_result(event: ToolEnd):
-        """Log tool results."""
+    async def log_tool_result(event: ToolEnd) -> Reaction | None:  # noqa: PLR0912
+        """Log tool results and apply circuit breaker for repeated failures."""
         if not isinstance(event, ToolEnd):
-            return
+            return None
 
-        if hasattr(event, "tool_call") and event.tool_call:
-            if hasattr(event, "error") and event.error:
-                logger.warning(f"❌ [{log_name}] {event.tool_call.name} failed: {event.error}")
+        if not (hasattr(event, "tool_call") and event.tool_call):
+            return None
+
+        tool_name = event.tool_call.name
+        is_error = False
+
+        if hasattr(event, "error") and event.error:
+            is_error = True
+            logger.warning(f"❌ [{log_name}] {tool_name} failed: {event.error}")
+        else:
+            content = fix_tool_output_encoding(
+                str(event.message.content) if event.message and event.message.content else ""
+            )
+            if not content:
+                logger.info(f"✅ [{log_name}] {tool_name}: (empty)")
             else:
-                content = fix_tool_output_encoding(
-                    str(event.message.content) if event.message and event.message.content else ""
+                # Detect error content returned by rigging's exception catching
+                # (ValidationError, JSONDecodeError are caught and returned as error XML)
+                # Also detect common tool failure patterns
+                # NOTE: Be careful not to match on status reports that mention failures
+                # e.g. get_exploitation_status() returns "Task timed out" for OTHER tasks
+                is_error = (
+                    content.startswith('<error type="')
+                    or "ValidationError" in content
+                    or "[-] ERROR" in content
                 )
-                if not content:
-                    logger.info(f"✅ [{log_name}] {event.tool_call.name}: (empty)")
+                # Only match "Login failed" / "timed out" if they appear at the start
+                # (actual tool errors), not in the middle of status reports
+                if not is_error:
+                    first_line = content.split("\n")[0].lower() if content else ""
+                    is_error = first_line.startswith(
+                        ("login failed", "error:", "timed out", "task timed out")
+                    )
+                icon = "❌" if is_error else "✅"
+                log_fn = logger.warning if is_error else logger.info
+
+                # Show first 50 lines, max 5000 chars
+                lines = content.split("\n")[:50]
+                result = "\n".join(lines)
+                truncated = len(lines) < len(content.split("\n")) or len(content) > 5000
+                if len(result) > 5000:
+                    result = result[:5000]
+                    truncated = True
+                suffix = " ..." if truncated else ""
+                if "\n" in result:
+                    log_fn(f"{icon} [{log_name}] {tool_name}:\n{result}{suffix}")
                 else:
-                    # Show first 50 lines, max 5000 chars
-                    lines = content.split("\n")[:50]
-                    result = "\n".join(lines)
-                    truncated = len(lines) < len(content.split("\n")) or len(content) > 5000
-                    if len(result) > 5000:
-                        result = result[:5000]
-                        truncated = True
-                    suffix = " ..." if truncated else ""
-                    if "\n" in result:
-                        logger.info(f"✅ [{log_name}] {event.tool_call.name}:\n{result}{suffix}")
-                    else:
-                        logger.info(f"✅ [{log_name}] {event.tool_call.name}: {result}{suffix}")
+                    log_fn(f"{icon} [{log_name}] {tool_name}: {result}{suffix}")
+
+        # Circuit breaker logic
+        # Use nonlocal to modify the tripped flag
+        nonlocal circuit_breaker_tripped
+
+        # If already tripped, return Finish immediately to stop parallel calls
+        if circuit_breaker_tripped:
+            return Finish(reason="Circuit breaker already tripped - stopping agent")
+
+        if is_error:
+            consecutive_failures[tool_name] = consecutive_failures.get(tool_name, 0) + 1
+            fail_count = consecutive_failures[tool_name]
+
+            if fail_count >= circuit_breaker_threshold:
+                # Set flag BEFORE returning to prevent race with parallel calls
+                circuit_breaker_tripped = True
+                logger.error(
+                    f"🔌 [{log_name}] Circuit breaker tripped: {tool_name} failed "
+                    f"{fail_count} times consecutively - stopping agent"
+                )
+                return Finish(
+                    reason=f"Circuit breaker: {tool_name} failed {fail_count} times consecutively. "
+                    "The approach is not working - task will be retried with a different strategy."
+                )
+            if fail_count >= 2:
+                logger.warning(
+                    f"⚠️ [{log_name}] {tool_name} failed {fail_count}x consecutively "
+                    f"(circuit breaker at {circuit_breaker_threshold})"
+                )
+        else:
+            # Reset failure counter on success
+            consecutive_failures[tool_name] = 0
+
+        return None
 
     hooks.extend([log_tool_usage, log_tool_result])
+
+    # Context management for ALL roles: summarize conversation when approaching token limits
+    # This prevents context window exhaustion from accumulated tool outputs
+    # Default threshold is ~100k tokens (~85% of 128k window for Sonnet)
+    # Configurable via ARES_MAX_CONTEXT_TOKENS and ARES_MIN_MESSAGES_TO_KEEP
+    max_tokens = get_max_context_tokens()
+    min_messages = get_min_messages_to_keep()
+    _summarize_hook = summarize_when_long(
+        max_tokens=max_tokens,
+        min_messages_to_keep=min_messages,
+    )
+
+    async def context_aware_summarize(event: StepStart | GenerationEnd) -> Reaction | None:
+        """Wrap summarize_when_long with logging for observability."""
+        # Log token count on each step start
+        if isinstance(event, StepStart):
+            last_gen = event.get_latest_event_by_type(GenerationEnd)
+            if last_gen and last_gen.usage:
+                tokens = last_gen.usage.input_tokens
+                pct = (tokens / max_tokens) * 100
+                if pct >= 80:
+                    logger.warning(
+                        f"📊 [{log_name}] Context: {tokens:,} / {max_tokens:,} tokens ({pct:.0f}%)"
+                    )
+                elif pct >= 50:
+                    logger.info(
+                        f"📊 [{log_name}] Context: {tokens:,} / {max_tokens:,} tokens ({pct:.0f}%)"
+                    )
+
+        # Call the actual summarization hook
+        result = await _summarize_hook(event)
+
+        if result is not None:
+            logger.success(
+                f"📝 [{log_name}] Conversation summarized! Keeping {min_messages} recent messages"
+            )
+
+        return result
+
+    hooks.append(context_aware_summarize)
 
     # Role-specific hooks
     if role == AgentRole.ORCHESTRATOR:
@@ -248,6 +355,24 @@ def create_role_hooks(
 
         hooks.append(check_domain_admin)
 
+        # Stop orchestrator when DA is achieved externally (by worker agents)
+        # This handles the case where a worker discovers krbtgt hash via secretsdump
+        # and sets has_domain_admin=True, but the orchestrator LLM doesn't know to stop
+        async def stop_on_external_domain_admin(event: StepStart) -> Finish | None:
+            """Stop orchestrator when Domain Admin is achieved by worker agents."""
+            if not isinstance(event, StepStart):
+                return None
+
+            if shared_state.has_domain_admin:
+                logger.success(
+                    "🎯 Domain Admin detected (achieved externally) - stopping orchestrator agent"
+                )
+                return Finish(reason="Domain Admin achieved by worker agent")
+
+            return None
+
+        hooks.append(stop_on_external_domain_admin)
+
     elif role == AgentRole.CRACKER:
         # Cracker broadcasts cracked credentials
         async def broadcast_cracked(event: ToolEnd):
@@ -273,7 +398,13 @@ def create_role_hooks(
         hooks.append(broadcast_cracked)
 
     elif role == AgentRole.PRIVESC:
-        # PrivEsc monitors for successful exploitation
+        # PrivEsc monitors for successful exploitation AND futility
+        _privesc_failures: dict[str, Any] = {
+            "adcs_failures": 0,
+            "delegation_failures": 0,
+            "failed_targets": set(),
+        }
+
         async def track_exploitation(event: ToolEnd):
             if not isinstance(event, ToolEnd):
                 return None
@@ -282,6 +413,7 @@ def create_role_hooks(
                 return None
 
             result = fix_tool_output_encoding(str(event.message.content))
+            result_lower = result.lower()
             tool_name = (
                 event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
             )
@@ -294,22 +426,131 @@ def create_role_hooks(
                 "certipy_auth",
                 "certipy_shadow",
                 "certipy_shadow_auto",
-                "certipy_relay",
-                "certipy_relay_esc8",
+                "ntlmrelayx_to_adcs",
             }
             if tool_name in certipy_exploitation_tools and (
-                "success" in result.lower()
-                or ".pfx" in result.lower()
-                or ("hash" in result.lower() and ":" in result)
+                "success" in result_lower
+                or ".pfx" in result_lower
+                or ("hash" in result_lower and ":" in result)
             ):
                 return (
                     "✅ ADCS EXPLOITATION SUCCESSFUL!\n"
                     "→ Report the obtained credential/certificate\n"
                     "→ Use certipy_auth to get NTLM hash if needed"
                 )
+
+            # Track ADCS failures - detect unreachable CA/web enrollment
+            adcs_failure_indicators = [
+                "connection refused",
+                "errno 111",
+                "timed out",
+                "timeout",
+                "web enrollment",
+                "no ca found",
+                "rpc unavailable",
+                "rpc_s_server_unavailable",
+                "access denied",
+                "could not connect",
+                "name or service not known",
+                "no route to host",
+            ]
+            adcs_tools = {
+                "certipy_find",
+                "certipy_request",
+                "certipy_req",
+                "certipy_req_esc1",
+                "certipy_auth",
+                "ntlmrelayx_to_adcs",
+            }
+            if tool_name in adcs_tools and any(
+                ind in result_lower for ind in adcs_failure_indicators
+            ):
+                _privesc_failures["adcs_failures"] += 1
+                # Extract target from tool args if possible
+                if hasattr(event, "tool_call") and event.tool_call and event.tool_call.arguments:
+                    try:
+                        import json
+
+                        args = json.loads(event.tool_call.arguments)
+                        target = args.get("ca_server") or args.get("target") or args.get("dc_ip")
+                        if target:
+                            _privesc_failures["failed_targets"].add(target)
+                    except Exception:
+                        pass
+
+                failures = _privesc_failures["adcs_failures"]
+                if failures >= 2:
+                    targets = ", ".join(_privesc_failures["failed_targets"]) or "CA"
+                    return (
+                        f"⚠️ ADCS FUTILITY: {failures} failures on {targets}\n"
+                        "→ CA web enrollment appears unreachable\n"
+                        "→ STOP retrying ADCS attacks - call task_complete with failure\n"
+                        "→ Try OTHER attack paths (delegation, GPO abuse) if available"
+                    )
+
+            # Track delegation failures
+            delegation_tools = {"constrained_delegation_s4u", "getST", "s4u_attack"}
+            if tool_name in delegation_tools and any(
+                ind in result_lower for ind in ["failed", "error", "denied", "refused", "not found"]
+            ):
+                _privesc_failures["delegation_failures"] += 1
+                if _privesc_failures["delegation_failures"] >= 3:
+                    return (
+                        f"⚠️ DELEGATION FUTILITY: {_privesc_failures['delegation_failures']} failures\n"
+                        "→ STOP retrying delegation attacks\n"
+                        "→ Try OTHER attack paths or call task_complete"
+                    )
+
             return None
 
         hooks.append(track_exploitation)
+
+    elif role == AgentRole.COERCION:
+        # Coercion monitors for futility - too many failures indicate target unreachable
+        _coercion_failures: dict[str, Any] = {"count": 0, "targets": set()}
+
+        async def track_coercion_futility(event: ToolEnd):
+            if not isinstance(event, ToolEnd) or not event.message:
+                return None
+
+            result = fix_tool_output_encoding(str(event.message.content)).lower()
+            tool_name = (
+                event.tool_call.name if hasattr(event, "tool_call") and event.tool_call else ""
+            )
+
+            coercion_tools = {"petitpotam", "coercer", "printerbug", "dfscoerce"}
+            if tool_name in coercion_tools:
+                # Track target
+                if hasattr(event, "tool_call") and event.tool_call and event.tool_call.arguments:
+                    try:
+                        import json
+
+                        args = json.loads(event.tool_call.arguments)
+                        _coercion_failures["targets"].add(args.get("target", "unknown"))
+                    except Exception:
+                        pass
+
+                # Check for failures
+                failure_indicators = [
+                    "connection refused",
+                    "timed out",
+                    "no response",
+                    "access denied",
+                    "failed",
+                    "rpc_s_server_unavailable",
+                ]
+                if any(ind in result for ind in failure_indicators):
+                    _coercion_failures["count"] += 1
+
+                    if _coercion_failures["count"] >= 3:
+                        targets = ", ".join(_coercion_failures["targets"])
+                        return (
+                            f"COERCION FUTILITY: {_coercion_failures['count']} failures on targets: {targets}\n"
+                            "→ If all targets exhausted, call task_complete now."
+                        )
+            return None
+
+        hooks.append(track_coercion_futility)
 
     # Unstall hook for all roles - provides context-specific guidance when agent stalls
     role_feedback = {
@@ -354,11 +595,12 @@ def create_role_hooks(
             "3. Execute ACL abuse: shadow credentials, targeted kerberoast, password change"
         ),
         AgentRole.PRIVESC: (
-            "You seem stuck. As privesc agent, focus on:\n"
-            "1. Process pending exploit requests\n"
-            "2. ADCS exploitation: certipy_req_esc1, certipy_auth\n"
-            "3. Delegation attacks: constrained_delegation_s4u\n"
-            "4. Report successful exploitations"
+            "You seem stuck. CHECK YOUR PROGRESS:\n"
+            "1. ADCS 'connection refused'/'timed out'? → CA unreachable, STOP trying ADCS\n"
+            "2. Web enrollment failed? → Skip ESC8, try other paths\n"
+            "3. Delegation failed 2+ times? → Move to next attack vector\n"
+            "4. All attack paths exhausted? → Call task_complete with summary\n\n"
+            "**DO NOT** keep retrying unreachable services. Report failure and move on."
         ),
         AgentRole.LATERAL: (
             "You seem stuck. As lateral agent, focus on:\n"
@@ -371,10 +613,12 @@ def create_role_hooks(
             "7. Use task_complete when access achieved or all methods exhausted"
         ),
         AgentRole.COERCION: (
-            "You seem stuck. As coercion agent, focus on:\n"
-            "1. Start responder/mitm6 if not running\n"
-            "2. Use coercion techniques (petitpotam, coercer)\n"
-            "3. Report captured hashes"
+            "You seem stuck. CHECK YOUR PROGRESS:\n"
+            "1. All targets attempted? → Call task_complete with summary\n"
+            "2. petitpotam/coercer failed? → Skip to next target\n"
+            "3. Saw 'connection refused'/'timed out'? → Target blocked, skip it\n"
+            "4. responder/ntlmrelayx running? → Wait for captures, don't restart\n\n"
+            "**DO NOT** retry failed techniques on same target."
         ),
     }
 
@@ -388,7 +632,7 @@ def create_role_hooks(
     return hooks
 
 
-def create_specialized_agent(
+def create_specialized_agent(  # noqa: PLR0912
     role: AgentRole,
     model: str,
     shared_state: SharedRedTeamState,
@@ -400,6 +644,11 @@ def create_specialized_agent(
 ) -> Agent:
     """
     Create a specialized agent for a specific role.
+
+    Tools are determined by the capabilities list in the YAML configuration.
+    The capability registry maps capability strings (e.g., "nmap", "impacket-secretsdump")
+    to specific tool method names, and FilteredToolset ensures only those methods
+    are exposed to the agent.
 
     Args:
         role: Agent specialization.
@@ -414,11 +663,19 @@ def create_specialized_agent(
     Returns:
         Configured Dreadnode Agent.
     """
-    # Get toolsets for this role
-    toolset_classes = ROLE_TOOLSETS.get(role, [])
+    # Get capabilities from config - this is now the source of truth for tool access
+    agent_config = get_agent_config(role.value)
+    enabled_tools = get_enabled_tools(set(agent_config.capabilities))
+
+    if not enabled_tools:
+        logger.warning(
+            f"No capabilities configured for role {role.value} - agent will have limited tools"
+        )
+
     tools: list[Any] = []
 
-    for cls in toolset_classes:
+    # Instantiate all toolsets and filter by capabilities
+    for cls in ALL_TOOLSETS:
         try:
             toolset = cls()
             # Set shared state on toolset (all toolsets accept AnyRedTeamState)
@@ -428,9 +685,44 @@ def create_specialized_agent(
                 toolset.set_dispatcher(dispatcher)
             if hasattr(toolset, "set_executor") and pod_executor:
                 toolset.set_executor(pod_executor)
-            tools.append(toolset)
+
+            # Wrap with capability filter
+            filtered = FilteredToolset(toolset, enabled_tools)
+
+            # Only add if this toolset has at least one enabled tool
+            if filtered.get_tools():
+                tools.append(filtered)
+                logger.debug(
+                    f"[{role.value}] Added {cls.__name__} with "
+                    f"{len(filtered.get_tools())} enabled tools"
+                )
         except Exception as e:  # noqa: PERF203
             logger.warning(f"Failed to initialize toolset {cls.__name__}: {e}")
+
+    # Add universal toolsets (not capability-filtered)
+    for cls in UNIVERSAL_TOOLSETS:
+        try:
+            toolset = cls()
+            if hasattr(toolset, "set_state"):
+                toolset.set_state(shared_state)
+            if hasattr(toolset, "set_dispatcher"):
+                toolset.set_dispatcher(dispatcher)
+            tools.append(toolset)
+        except Exception as e:  # noqa: PERF203
+            logger.warning(f"Failed to initialize universal toolset {cls.__name__}: {e}")
+
+    # Add role-specific callback tools (not capability-filtered)
+    callback_toolsets = ROLE_CALLBACK_TOOLS.get(role, [])
+    for cls in callback_toolsets:
+        try:
+            toolset = cls()
+            if hasattr(toolset, "set_state"):
+                toolset.set_state(shared_state)
+            if hasattr(toolset, "set_dispatcher"):
+                toolset.set_dispatcher(dispatcher)
+            tools.append(toolset)
+        except Exception as e:  # noqa: PERF203
+            logger.warning(f"Failed to initialize callback toolset {cls.__name__}: {e}")
 
     # Add additional tools
     if additional_tools:
@@ -456,11 +748,10 @@ def create_specialized_agent(
         )
 
     agent_name = f"ares-{role.value.replace('_', '-')}"
-    max_steps = max_steps or ROLE_MAX_STEPS.get(role, 100)
-    if role == AgentRole.LATERAL and max_steps < 300:
-        max_steps = 300
-    if role == AgentRole.CRACKER and max_steps < 150:
-        max_steps = 150
+    # Use role-specific limit from YAML config as hard cap (single source of truth)
+    # This stops agents from spinning for 200 steps burning millions of tokens
+    role_limit = agent_config.max_steps or DEFAULT_MAX_STEPS
+    max_steps = min(max_steps or role_limit, role_limit)
 
     logger.info(f"Creating {agent_name} agent with {len(tools)} toolsets, max_steps={max_steps}")
 
@@ -633,14 +924,16 @@ def request_assistance(issue: str, context: str = "") -> str:
     Returns:
         Confirmation that assistance was requested
     """
-    logger.warning(f"Assistance requested: {issue}")
+    logger.info(f"Assistance requested: {issue}")
     return f"⚠️ Assistance requested for: {issue}"
 
 
 __all__ = [
+    "ALL_TOOLSETS",
+    "DEFAULT_MAX_STEPS",
+    "ROLE_CALLBACK_TOOLS",
     "ROLE_INSTRUCTIONS",
-    "ROLE_MAX_STEPS",
-    "ROLE_TOOLSETS",
+    "UNIVERSAL_TOOLSETS",
     "create_agent_info",
     "create_multi_agent_ensemble",
     "create_role_hooks",

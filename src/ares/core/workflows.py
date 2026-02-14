@@ -181,8 +181,7 @@ async def credential_expansion_loop(  # noqa: PLR0912
             for host in hosts:
                 if not host.ip:
                     logger.debug(
-                        "Skipping lateral movement for %s: missing host IP",
-                        host.hostname or "unknown-host",
+                        f"Skipping lateral movement for {host.hostname or 'unknown-host'}: missing host IP"
                     )
                     continue
                 for domain_override in domain_variants:
@@ -216,10 +215,7 @@ async def credential_expansion_loop(  # noqa: PLR0912
                         tasks_dispatched.append(task_id)
                         new_tests += 1
                         logger.debug(
-                            "Dispatched lateral test: %s\\%s -> %s",
-                            domain_override,
-                            cred.username,
-                            host.ip,
+                            f"Dispatched lateral test: {domain_override}\\{cred.username} -> {host.ip}"
                         )
 
                     tracker.mark_tested(test_cred, host)
@@ -255,18 +251,19 @@ async def credential_expansion_loop(  # noqa: PLR0912
     return tracker
 
 
-async def exploitation_workflow(
+async def exploitation_workflow(  # noqa: PLR0912
     dispatcher: RedTeamDispatcher,
     check_interval: float = 10.0,
     max_runtime: float = 7200.0,  # 2 hours default
+    max_concurrent_exploits: int = 3,
 ) -> dict[str, Any]:
     """
-    Main exploitation loop.
+    Main exploitation loop with parallel exploit execution.
 
     Continuously:
-    1. Get next highest priority vulnerability
-    2. Route to appropriate agent for exploitation
-    3. Monitor result and update state
+    1. Get next highest priority vulnerabilities (up to max_concurrent_exploits)
+    2. Route to appropriate agents for parallel exploitation
+    3. Monitor results and update state
     4. If exploitation yields credentials -> trigger credential expansion
     5. If Domain Admin achieved -> halt and report
 
@@ -274,6 +271,7 @@ async def exploitation_workflow(
         dispatcher: The RedTeamDispatcher instance
         check_interval: Seconds between queue checks when empty
         max_runtime: Maximum runtime in seconds
+        max_concurrent_exploits: Maximum concurrent exploits (default: 3)
 
     Returns:
         Summary of exploitation results
@@ -290,7 +288,119 @@ async def exploitation_workflow(
     failure_counts: dict[str, int] = {}
     max_failures_per_type = 3
 
-    logger.info("Starting exploitation workflow")
+    # Track retry counts per vulnerability (prevent infinite retry loops)
+    retry_counts: dict[str, int] = {}
+    max_retries_per_vuln = 2  # Allow 2 retries (3 total attempts)
+
+    # Semaphore for parallel exploitation
+    exploit_semaphore = asyncio.Semaphore(max_concurrent_exploits)
+
+    # Track active exploit tasks
+    active_tasks: set[asyncio.Task[None]] = set()
+
+    # Track in-flight vuln IDs to prevent duplicate dispatches (token burn prevention)
+    in_flight_vulns: set[str] = set()
+
+    logger.info(
+        f"Starting exploitation workflow with max {max_concurrent_exploits} concurrent exploits"
+    )
+
+    async def process_exploit(vuln: dict[str, Any]) -> None:
+        """Process a single exploit with semaphore protection."""
+        nonlocal exploited_count, credentials_gained
+
+        vuln_type = vuln["type"]
+        vuln_id = vuln["id"]
+
+        async with exploit_semaphore:
+            # Check for DA before starting (may have been achieved by parallel exploit)
+            if dispatcher.shared_state.has_domain_admin:
+                logger.debug(f"Skipping {vuln_id} - Domain Admin already achieved")
+                return
+
+            logger.info(f"Processing vulnerability: {vuln_type} on {vuln['target']}")
+
+            # Route to appropriate agent with timeout (reduced from 16min to 5min)
+            exploit_started = asyncio.get_event_loop().time()
+            try:
+                async with asyncio.timeout(300):  # 5 min total (was 16 min)
+                    result = await _exploit_vulnerability(dispatcher, vuln)
+            except asyncio.TimeoutError:
+                logger.error(f"Exploitation of {vuln_id} ({vuln_type}) timed out at dispatch level")
+                result = {
+                    "success": False,
+                    "error": "Dispatch timeout - workflow blocked",
+                    "retryable": True,
+                }
+
+            exploit_elapsed = asyncio.get_event_loop().time() - exploit_started
+            logger.info(
+                f"Exploit result for {vuln_id} ({vuln_type}): "
+                f"success={result.get('success')} error={result.get('error')} "
+                f"elapsed={exploit_elapsed:.1f}s"
+            )
+
+            # Check if this was a dispatch failure or timeout (retryable error)
+            # vs an actual execution failure. Don't mark as exploited if retryable
+            # so the vulnerability can be re-processed.
+            dispatch_failed = result.get("error") == "Failed to dispatch task"
+            is_retryable = result.get("retryable", False)
+
+            if dispatch_failed or is_retryable:
+                # Track retry count to prevent infinite loops
+                current_retries = retry_counts.get(vuln_id, 0)
+                if current_retries < max_retries_per_vuln:
+                    retry_counts[vuln_id] = current_retries + 1
+                    logger.warning(
+                        f"Retryable failure for {vuln_id} ({vuln_type}): {result.get('error')} - "
+                        f"retry {current_retries + 1}/{max_retries_per_vuln}"
+                    )
+                    in_flight_vulns.discard(vuln_id)
+                    # Remove from dequeued tracking so it can be re-fetched
+                    await dispatcher.requeue_vulnerability(vuln_id)
+                    return  # Don't mark as exploited, don't count as failure
+                logger.error(
+                    f"Max retries ({max_retries_per_vuln}) exceeded for {vuln_id} ({vuln_type}) - "
+                    f"marking as failed"
+                )
+                # Fall through to mark as failed
+
+            # Mark as attempted (only for actual execution attempts)
+            await dispatcher.mark_vulnerability_exploited(
+                vuln_id,
+                success=result.get("success", False),
+                result=result,
+            )
+
+            # Remove from in-flight tracking (allows re-queue if needed, but won't duplicate)
+            in_flight_vulns.discard(vuln_id)
+
+            exploited_count += 1
+
+            # Track failures by type
+            if not result.get("success"):
+                failure_counts[vuln_type] = failure_counts.get(vuln_type, 0) + 1
+                if failure_counts[vuln_type] >= max_failures_per_type:
+                    logger.warning(
+                        f"{vuln_type} has failed {max_failures_per_type} times - "
+                        f"will skip remaining {vuln_type} vulns"
+                    )
+
+            # If exploitation yielded credentials, trigger expansion
+            result_payload: dict[str, Any] | None = None
+            if isinstance(result, dict):
+                result_payload = (
+                    result.get("result") if isinstance(result.get("result"), dict) else result
+                )
+
+            if (
+                result.get("success")
+                and isinstance(result_payload, dict)
+                and (result_payload.get("credential") or result_payload.get("hash"))
+            ):
+                credentials_gained += 1
+                logger.info("Exploitation yielded credentials, triggering expansion loop")
+                await credential_expansion_loop(dispatcher, max_iterations=5)
 
     while True:
         # Check runtime limit
@@ -303,6 +413,18 @@ async def exploitation_workflow(
         state = dispatcher.shared_state
         if state.has_domain_admin:
             logger.success("Domain Admin achieved! Halting exploitation workflow.")
+
+            # Cancel all active exploitation tasks immediately
+            if active_tasks:
+                logger.info(f"Cancelling {len(active_tasks)} active exploit tasks...")
+                for task in list(active_tasks):
+                    if not task.done():
+                        task.cancel()
+                # Wait briefly for cancellations to propagate
+                await asyncio.gather(*active_tasks, return_exceptions=True)
+                active_tasks.clear()
+
+            # Broadcast DA achieved (in-memory broadcast to local agents)
             await dispatcher._broadcast(
                 DomainAdminAchieved(
                     source_agent="exploitation_workflow",
@@ -312,78 +434,72 @@ async def exploitation_workflow(
                     credential_type="credential",
                 )
             )
+
+            # Announce operation complete - this broadcasts to local agents AND
+            # sets Redis status key so remote workers detect completion
+            await dispatcher.announce_operation_complete(
+                source_agent="exploitation_workflow",
+                success=True,
+                summary=f"Domain Admin achieved via {state.domain_admin_path or 'unknown'}",
+            )
             break
 
-        # Get next vulnerability to exploit
-        vuln = await dispatcher.get_next_vulnerability()
-        if not vuln:
-            # No vulnerabilities in queue, wait for agents to discover more
-            logger.debug("No vulnerabilities in queue, waiting...")
-            await asyncio.sleep(check_interval)
-            continue
+        # Clean up completed tasks
+        done_tasks = {t for t in active_tasks if t.done()}
+        for task in done_tasks:
+            active_tasks.discard(task)
+            # Check for exceptions
+            if task.exception():
+                logger.warning(f"Exploit task failed with exception: {task.exception()}")
 
-        vuln_type = vuln["type"]
+        # Get next vulnerability if we have capacity
+        if len(active_tasks) < max_concurrent_exploits:
+            vuln = await dispatcher.get_next_vulnerability()
+            if not vuln:
+                if active_tasks:
+                    # Wait for any active task to complete
+                    await asyncio.sleep(1.0)
+                    continue
+                # No vulnerabilities and no active tasks, wait for discovery
+                logger.debug("No vulnerabilities in queue, waiting...")
+                await asyncio.sleep(check_interval)
+                continue
 
-        # Skip vulnerability types that have failed too many times
-        if failure_counts.get(vuln_type, 0) >= max_failures_per_type:
-            logger.warning(
-                f"Skipping {vuln_type} - failed {max_failures_per_type} times, moving to next"
-            )
-            # Mark as exploited (even though failed) to prevent infinite loop
-            # This ensures get_next_vulnerability() won't return it again
-            dispatcher.shared_state.mark_exploited(vuln["id"])
-            await dispatcher.mark_vulnerability_exploited(
-                vuln["id"],
-                success=False,
-                result={"error": f"Skipped: {vuln_type} failed {max_failures_per_type} times"},
-            )
-            continue
+            vuln_id = vuln["id"]
+            vuln_type = vuln["type"]
 
-        logger.info(f"Processing vulnerability: {vuln_type} on {vuln['target']}")
+            # FAILSAFE: Skip if already in-flight (prevents duplicate dispatch / token burn)
+            if vuln_id in in_flight_vulns:
+                logger.debug(f"Skipping {vuln_id} - already in-flight")
+                continue
 
-        # Route to appropriate agent
-        exploit_started = asyncio.get_event_loop().time()
-        result = await _exploit_vulnerability(dispatcher, vuln)
-        exploit_elapsed = asyncio.get_event_loop().time() - exploit_started
-        logger.info(
-            f"Exploit result for {vuln['id']} ({vuln_type}): "
-            f"success={result.get('success')} error={result.get('error')} "
-            f"elapsed={exploit_elapsed:.1f}s"
-        )
-
-        # Mark as attempted
-        await dispatcher.mark_vulnerability_exploited(
-            vuln["id"],
-            success=result.get("success", False),
-            result=result,
-        )
-
-        exploited_count += 1
-
-        # Track failures by type
-        if not result.get("success"):
-            failure_counts[vuln_type] = failure_counts.get(vuln_type, 0) + 1
-            if failure_counts[vuln_type] >= max_failures_per_type:
+            # Skip vulnerability types that have failed too many times
+            if failure_counts.get(vuln_type, 0) >= max_failures_per_type:
                 logger.warning(
-                    f"{vuln_type} has failed {max_failures_per_type} times - "
-                    "will skip remaining {vuln_type} vulns"
+                    f"Skipping {vuln_type} - failed {max_failures_per_type} times, moving to next"
                 )
+                dispatcher.shared_state.mark_exploited(vuln["id"])
+                await dispatcher.mark_vulnerability_exploited(
+                    vuln["id"],
+                    success=False,
+                    result={"error": f"Skipped: {vuln_type} failed {max_failures_per_type} times"},
+                )
+                continue
 
-        # If exploitation yielded credentials, trigger expansion
-        result_payload: dict[str, Any] | None = None
-        if isinstance(result, dict):
-            result_payload = (
-                result.get("result") if isinstance(result.get("result"), dict) else result
-            )
+            # Mark as in-flight BEFORE launching (prevents duplicate dispatch)
+            in_flight_vulns.add(vuln_id)
 
-        if (
-            result.get("success")
-            and isinstance(result_payload, dict)
-            and (result_payload.get("credential") or result_payload.get("hash"))
-        ):
-            credentials_gained += 1
-            logger.info("Exploitation yielded credentials, triggering expansion loop")
-            await credential_expansion_loop(dispatcher, max_iterations=5)
+            # Launch exploit task
+            task = asyncio.create_task(process_exploit(vuln))
+            active_tasks.add(task)
+        else:
+            # At capacity, wait briefly before checking again
+            await asyncio.sleep(1.0)
+
+    # Wait for remaining active tasks to complete
+    if active_tasks:
+        logger.info(f"Waiting for {len(active_tasks)} remaining exploit tasks...")
+        await asyncio.gather(*active_tasks, return_exceptions=True)
 
     return {
         "runtime_seconds": asyncio.get_event_loop().time() - start_time,
@@ -400,13 +516,21 @@ async def _dispatch_exploit(
     target: str,
     details: dict[str, Any],
 ) -> str:
-    return await dispatcher.request_exploit(
-        vuln_type=vuln_type,
-        vuln_id=vuln_id,
-        target=target,
-        source_agent="orchestrator",
-        params=details,
-    )
+    logger.debug(f"Dispatching exploit request: {vuln_type} on {target} (vuln_id={vuln_id})")
+    try:
+        async with asyncio.timeout(90):  # 90s timeout (must be > throttle max_wait of 60s)
+            task_id = await dispatcher.request_exploit(
+                vuln_type=vuln_type,
+                vuln_id=vuln_id,
+                target=target,
+                source_agent="orchestrator",
+                params=details,
+            )
+        logger.debug(f"Exploit dispatched successfully: task_id={task_id}")
+        return task_id
+    except asyncio.TimeoutError:
+        logger.error(f"Exploit dispatch timed out for {vuln_id} - possible throttle deadlock")
+        return ""
 
 
 async def _dispatch_acl(dispatcher: RedTeamDispatcher, details: dict[str, Any]) -> str:
@@ -449,8 +573,7 @@ async def _dispatch_krbtgt(
                 return task_id
         else:
             logger.warning(
-                "krbtgt hash found for %s but no credential available for raise_child",
-                krbtgt_domain,
+                f"krbtgt hash found for {krbtgt_domain} but no credential available for raise_child"
             )
 
     return await dispatcher.request_lateral_movement(
@@ -460,6 +583,46 @@ async def _dispatch_krbtgt(
         hash_value=details.get("hash_value", ""),
         domain=krbtgt_domain,
     )
+
+
+async def _wait_with_da_check(
+    dispatcher: RedTeamDispatcher,
+    task_id: str,
+    timeout: float = 180.0,
+    check_interval: float = 10.0,
+) -> dict[str, Any]:
+    """Wait for task completion with periodic DA checks.
+
+    Instead of waiting for the full timeout, this function checks every
+    `check_interval` seconds if DA has been achieved. If so, it abandons
+    the wait early to allow the workflow to halt quickly.
+
+    Args:
+        dispatcher: The RedTeamDispatcher instance
+        task_id: Task to wait for
+        timeout: Total timeout in seconds (default 3 minutes - reduced from 20)
+        check_interval: How often to check for DA (default 10 seconds)
+
+    Returns:
+        Task result dict, or abandoned result if DA achieved during wait
+    """
+    start = asyncio.get_event_loop().time()
+    while (asyncio.get_event_loop().time() - start) < timeout:
+        # Check if DA achieved during wait
+        if dispatcher.shared_state.has_domain_admin:
+            logger.info(f"DA achieved - abandoning wait for task {task_id}")
+            return {"success": False, "error": "Cancelled: DA achieved", "abandoned": True}
+
+        # Try to get result with short timeout
+        try:
+            return await dispatcher.wait_for_task(task_id, timeout=check_interval)
+        except asyncio.TimeoutError:
+            # Task still running, continue loop to check DA
+            continue
+
+    # Total timeout exceeded - mark as retryable so vuln can be re-processed
+    logger.warning(f"Exploitation task {task_id} timed out after {timeout}s - will allow retry")
+    return {"success": False, "error": "Task timed out", "retryable": True}
 
 
 async def _exploit_vulnerability(
@@ -510,13 +673,10 @@ async def _exploit_vulnerability(
         logger.warning(f"Failed to dispatch exploitation for {vuln_type}")
         return {"success": False, "error": "Failed to dispatch task"}
 
-    # Wait for task completion (with timeout)
-    # ACL tasks take 7-10 minutes each + queue wait time, so use 15 minute timeout
-    try:
-        return await dispatcher.wait_for_task(task_id, timeout=900)
-    except asyncio.TimeoutError:
-        logger.warning(f"Exploitation task {task_id} timed out after 15 minutes")
-        return {"success": False, "error": "Task timed out"}
+    # Wait for task completion with periodic DA checks
+    # Uses chunked waits to detect DA achievement and abandon stale tasks early
+    # Timeout reduced from 1200s (20min) to 180s (3min) to prevent workflow blocking
+    return await _wait_with_da_check(dispatcher, task_id, timeout=180.0, check_interval=10.0)
 
 
 __all__ = [

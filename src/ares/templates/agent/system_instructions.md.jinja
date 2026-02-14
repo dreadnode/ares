@@ -464,7 +464,7 @@ record_evidence(
 # Record the source host (level 4)
 record_evidence(
     evidence_type="hostname",
-    value="dc01.child.example.local",
+    value="dc01.child.contoso.local",
     source="Event 4662 SubjectLogonId correlated with 4624",
     timestamp="2026-01-10T14:30:00Z",
     pyramid_level=4,
@@ -503,7 +503,7 @@ Each result contains:
 
 **Step 1: Parse the `line` field as JSON**
 The `line` field contains the actual log entry with:
-- `computer`: The hostname (e.g., "dc01.child.example.local")
+- `computer`: The hostname (e.g., "dc01.child.contoso.local")
 - `event_id`: Windows Event ID
 - `event_data`: XML containing user/IP/SID data
 - `message`: Human-readable event description
@@ -526,14 +526,14 @@ Look for these XML patterns:
 
 If query returns:
 ```
-computer: dc01.child.example.local
+computer: dc01.child.contoso.local
 event_data: <Data Name='TargetUserName'>bob.jones</Data>
             <Data Name='IpAddress'>10.0.4.186</Data>
 ```
 
 You MUST call:
 ```python
-record_evidence(evidence_type="hostname", value="dc01.child.example.local", ...)
+record_evidence(evidence_type="hostname", value="dc01.child.contoso.local", ...)
 record_evidence(evidence_type="user", value="bob.jones", ...)
 record_evidence(evidence_type="ip", value="10.0.4.186", ...)
 ```
@@ -605,7 +605,7 @@ Example with all three parameters:
 ```
 complete_investigation(
     summary="Detected DCSync attack. User bob.jones executed replication requests "
-            "from dc01.child.example.local. NTLM hashes exfiltrated for "
+            "from dc01.child.contoso.local. NTLM hashes exfiltrated for "
             "multiple domain accounts. Confidence: High based on Event 4662 correlation.",
     attack_synopsis="Initial access occurred via password spray at 14:30 UTC with "
                    "47 failed logons against 12 accounts. Successful authentication "
@@ -614,7 +614,7 @@ complete_investigation(
     recommendations=[
         "IMMEDIATE: Reset krbtgt password twice (10 hours apart)",
         "IMMEDIATE: Reset all compromised account passwords",
-        "Isolate source host dc01.child.example.local",
+        "Isolate source host dc01.child.contoso.local",
         "Block source IP at network perimeter",
         "Hunt for golden ticket usage (Event 4769 with RC4)",
         "Review all privileged account access in past 24 hours"

@@ -311,6 +311,9 @@ class TestDispatcherRedisIntegration:
         self, dispatcher_with_redis, mock_redis_client
     ):
         """Test ACL analysis request goes through Redis queue."""
+        # ACL analysis requires BloodHound to have run first
+        dispatcher_with_redis.shared_state.processed_bloodhound_domains.add("contoso.local")
+
         task_id = await dispatcher_with_redis.request_acl_analysis(
             target_user="compromised",
             domain="contoso.local",
@@ -645,6 +648,8 @@ class TestOrchestratorWorkerFlow:
         dispatcher = RedTeamDispatcher(redis_url="redis://localhost:6379")
         dispatcher._redis_client = mock_redis_client
         dispatcher._shared_state = SharedRedTeamState(operation_id="multi-role-test")
+        # ACL analysis requires BloodHound to have run first
+        dispatcher._shared_state.processed_bloodhound_domains.add("contoso.local")
         dispatcher._running = True
         if dispatcher._task_queue:
             dispatcher._task_queue._client = mock_redis_client

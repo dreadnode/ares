@@ -328,8 +328,8 @@ class TestEdgeCases:
         """Test report with special characters in target."""
         red_team_state.target = Target(
             ip="192.168.58.100",
-            hostname="server-01.domain.local",
-            domain="domain.local",
+            hostname="server-01.contoso.local",
+            domain="contoso.local",
             os="Windows Server 2019 <Special>",
         )
         report = generator.generate(red_team_state)

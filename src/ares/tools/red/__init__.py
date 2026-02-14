@@ -21,6 +21,7 @@ from ares.tools.red.cve_exploits import CVEExploitTools
 from ares.tools.red.kerberos_attacks import (
     CertipyTools,
     DelegationTools,
+    GMSATools,
     GoldenTicketTools,
     TrustAttackTools,
 )
@@ -57,6 +58,7 @@ __all__ = [
     "CredentialDiscoveryTools",
     "CredentialHarvestingTools",
     "DelegationTools",
+    "GMSATools",
     "GoldenTicketTools",
     "LateralCallbackTools",
     "LateralMovementTools",

