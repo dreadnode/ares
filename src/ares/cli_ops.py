@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import shutil
 import sys
 import uuid
@@ -12,18 +13,92 @@ from typing import Annotated
 import cyclopts
 from loguru import logger
 
-from ares.core.config import get_redis_url
-from ares.core.orchestrator_client import (
+
+# Suppress DEBUG/INFO logs from noisy modules (Redis client, config) in CLI output.
+# Keep all logs from cli_ops itself and show WARNING+ from other modules.
+def _cli_log_filter(record):
+    """Filter out DEBUG/INFO from noisy modules, keep all from cli_ops."""
+    module = record["name"]
+    level = record["level"].no
+    # Allow all logs from this module
+    if module in {"ares.cli_ops", "__main__"}:
+        return True
+    # For other modules, only show WARNING (30) and above
+    return level >= 30
+
+
+logger.remove()
+logger.add(sys.stderr, filter=_cli_log_filter)
+
+from ares.core.config import get_redis_url, get_vulnerability_priorities  # noqa: E402
+from ares.core.orchestrator_client import (  # noqa: E402
     get_operation_status,
     submit_operation,
     wait_for_operation_completion,
 )
-from ares.core.redis_client import create_redis_client
+from ares.core.redis_client import create_redis_client  # noqa: E402
+
+
+def _get_vuln_priorities() -> dict[str, int]:
+    """Get vulnerability priorities with lowercase aliases for CLI convenience."""
+    priorities = get_vulnerability_priorities()
+    # Add lowercase aliases for CLI convenience (e.g., "esc1" -> "ADCS_ESC1")
+    aliases = {
+        "esc1": priorities.get("ADCS_ESC1", 1),
+        "esc4": priorities.get("ADCS_ESC4", 2),
+        "esc8": priorities.get("ADCS_ESC8", 3),
+        "smb_signing_disabled": priorities.get("smb_relay_target", 22),
+    }
+    return {**priorities, **aliases}
+
 
 app = cyclopts.App(
     name="ares-ops",
     help="Submit and manage operations with the Ares orchestrator service",
 )
+
+
+async def _generate_local_report(
+    operation_id: str,
+    redis_url: str,
+    report_dir: Path | None = None,
+) -> Path | None:
+    """Generate a comprehensive report locally from Redis state.
+
+    This pulls the operation state from Redis and generates a detailed
+    report with full attack path, credentials, and hashes.
+
+    Args:
+        operation_id: The operation to generate a report for.
+        redis_url: Redis connection URL.
+        report_dir: Directory to save the report (default: ./reports).
+
+    Returns:
+        Path to the generated report, or None if state not found.
+    """
+    from ares.core.models import SharedRedTeamState
+    from ares.reports import generate_comprehensive_report
+
+    client = await create_redis_client(redis_url, decode_responses=False)
+    try:
+        data = await client.get(f"ares:operation:{operation_id}:state")
+        if not data:
+            logger.warning(f"No state found for operation {operation_id}")
+            return None
+
+        state = SharedRedTeamState.from_bytes(data)
+        report_content = generate_comprehensive_report(state)
+
+        resolved_dir = Path(report_dir or "./reports").resolve()
+        resolved_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = f"{operation_id}_report.md"
+        output_path = resolved_dir / filename
+        output_path.write_text(report_content)
+        logger.success(f"Report saved: {output_path}")
+        return output_path
+    finally:
+        await client.aclose()
 
 
 def _persist_report(
@@ -32,6 +107,11 @@ def _persist_report(
     operation_id: str,
     report_dir: Path | None = None,
 ) -> Path | None:
+    """Legacy report persistence from orchestrator result.
+
+    This is a fallback that uses the report_markdown from the orchestrator.
+    Prefer using _generate_local_report for comprehensive reports.
+    """
     result_payload = status.get("result") if isinstance(status.get("result"), dict) else None
     report_markdown = None
     report_path = None
@@ -243,7 +323,8 @@ async def submit(
 
         if wait and result["status"] == "completed":
             logger.success("Operation completed successfully!")
-            _persist_report(result, operation_id=operation_id)
+            # Generate comprehensive report from Redis state
+            await _generate_local_report(operation_id, resolved_redis_url)
         elif wait and result["status"] == "failed":
             logger.error(f"Operation failed: {result.get('error', 'Unknown error')}")
 
@@ -270,16 +351,31 @@ async def submit(
 
 @app.command
 async def status(
-    operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
+    operation_id: Annotated[str | None, cyclopts.Parameter(help="Operation ID")] = None,
     *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Use the latest operation (prefer running)")
+    ] = False,
     redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
 ) -> None:
     """Get the status of an operation.
 
-    Example:
+    Examples:
         ares-ops status multiagent-abc123
+        ares-ops status --latest
     """
     resolved_redis_url = redis_url or get_redis_url()
+
+    # Resolve operation ID
+    if latest and not operation_id:
+        operation_id = await _resolve_latest_operation(resolved_redis_url)
+        if not operation_id:
+            logger.error("No operations found")
+            sys.exit(1)
+        logger.info(f"Using latest operation: {operation_id}")
+    elif not operation_id:
+        logger.error("Either operation_id or --latest is required")
+        sys.exit(1)
 
     try:
         result = await get_operation_status(
@@ -294,7 +390,8 @@ async def status(
 
             if result["status"] == "completed":
                 logger.success("Operation completed successfully")
-                _persist_report(result, operation_id=operation_id)
+                # Generate comprehensive report from Redis state
+                await _generate_local_report(operation_id, resolved_redis_url)
             elif result["status"] == "failed":
                 logger.error(f"Operation failed: {result.get('error', 'Unknown')}")
         else:
@@ -332,7 +429,8 @@ async def wait_for(
 
         if result["status"] == "completed":
             logger.success("Operation completed successfully!")
-            _persist_report(result, operation_id=operation_id)
+            # Generate comprehensive report from Redis state
+            await _generate_local_report(operation_id, resolved_redis_url)
         elif result["status"] == "failed":
             logger.error(f"Operation failed: {result.get('error', 'Unknown error')}")
 
@@ -382,6 +480,129 @@ def _dedup_hashes(hashes: list) -> list:
         if key not in seen:
             seen.add(key)
             result.append(h)
+    return result
+
+
+def _normalize_source_label(source: str) -> str:
+    """Convert internal source identifiers to human-readable labels.
+
+    Maps task types, tool names, and internal identifiers to clean labels
+    for display in loot output.
+    """
+    if not source:
+        return "Unknown"
+
+    # Remove duplicate source patterns (e.g., "Task input (x):Task input (x)")
+    if ":" in source:
+        parts = source.split(":")
+        if len(parts) >= 2 and parts[0] == parts[1]:
+            source = parts[0]
+
+    # Strip "Task input (...)" wrapper - extract task type from task ID
+    lower = source.lower()
+    if "task input" in lower:
+        # Extract task type from "Task input (exploit_xxx)" -> "exploit"
+        match = re.search(r"\((\w+)_[a-f0-9]+\)", source)
+        if match:
+            source = match.group(1)
+            lower = source.lower()  # Update lower for label lookup
+
+    # Map internal names to human-readable labels
+    label_map = {
+        # Task types
+        "exploit": "Exploitation",
+        "recon": "Reconnaissance",
+        "lateral": "Lateral Movement",
+        "privesc": "Privilege Escalation",
+        "privesc_enumeration": "Privesc Enumeration",
+        "credential_access": "Credential Access",
+        "acl_analysis": "ACL Analysis",
+        "crack": "Password Cracking",
+        # Tool-based sources
+        "netexec_user_enum": "NetExec User Enum",
+        "netexec_smb": "NetExec SMB",
+        "bloodhound": "BloodHound",
+        "kerberoast": "Kerberoasting",
+        "asreproast": "AS-REP Roasting",
+        "secretsdump": "Secretsdump",  # pragma: allowlist secret
+        "lsassy": "LSASSY",
+        "share_spider": "Share Spider",
+        "gpp_password": "GPP Passwords",  # nosec B105 # pragma: allowlist secret
+        "ldap_search": "LDAP Search",
+        "kerberos_noauth": "Kerberos Enum",
+        "user_description": "LDAP Description",
+        "manual-inject": "Manual Injection",
+        # Generic fallbacks
+        "worker": "Agent Discovery",
+        "task": "Task Output",
+        "unknown": "Unknown",
+    }
+
+    # Check for exact match first
+    if lower in label_map:
+        return label_map[lower]
+
+    # Check for prefix matches (e.g., "recon_task" -> "Reconnaissance")
+    for key, label in label_map.items():
+        if lower.startswith(key):
+            return label
+
+    # Check for task ID patterns (e.g., "exploit_abc123" -> "Exploitation")
+    task_match = re.match(r"^(\w+)_[a-f0-9]{8,}$", lower)
+    if task_match:
+        task_type = task_match.group(1)
+        if task_type in label_map:
+            return label_map[task_type]
+
+    # Return original with title case if no mapping found
+    return source.replace("_", " ").title()
+
+
+def _parse_weakness_block(block: str) -> dict[str, str]:
+    """Parse a markdown weakness block into structured fields.
+
+    Weakness blocks have this format:
+        ### Title Here
+        **Vulnerability:** Description
+        - **Affected Resource:** resource
+        - **Discovery Method:** method
+        - **Impact:** impact text
+
+    Returns:
+        Dictionary with keys: title, vulnerability, affected_resource,
+        discovery_method, impact, attack_path
+    """
+    result: dict[str, str] = {}
+
+    if not block:
+        return result
+
+    lines = block.strip().split("\n")
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+
+        # Parse title (### Title or **Title**)
+        if stripped.startswith("### "):
+            result["title"] = stripped[4:].strip()
+        elif stripped.startswith("**") and ":**" not in stripped and stripped.endswith("**"):
+            # Bold title without colon (e.g., **Domain Admin Achieved**)
+            result["title"] = stripped.strip("*").strip()
+
+        # Parse **Key:** Value patterns (e.g., "**Vulnerability:** text" or "- **Impact:** text")
+        # Note: The colon is inside the bold markers: **Key:**
+        elif ":**" in stripped:
+            # Handle both "**Key:** Value" and "- **Key:** Value"
+            clean = stripped.lstrip("-").strip()
+            # Match **Key:** patterns where colon is inside the bold
+            match = re.match(r"\*\*([^*:]+):\*\*\s*(.*)$", clean)
+            if match:
+                key = match.group(1).strip().lower().replace(" ", "_")
+                value = match.group(2).strip()
+                result[key] = value
+
     return result
 
 
@@ -437,7 +658,12 @@ def _print_loot(state, *, json_output: bool = False) -> None:
                 for h in state.all_hosts
             ],
             "users": [
-                {"username": u.username, "domain": u.domain, "is_admin": u.is_admin}
+                {
+                    "username": u.username,
+                    "domain": u.domain,
+                    "is_admin": u.is_admin,
+                    "source": u.source if hasattr(u, "source") else "",
+                }
                 for u in unique_users
             ],
             "credentials": [
@@ -478,11 +704,43 @@ def _print_loot(state, *, json_output: bool = False) -> None:
         print("*** GOLDEN TICKET OBTAINED ***")
     print()
 
-    # Domains
+    # Domains (with hierarchy indicator)
     domains = sorted({d.strip().lower() for d in getattr(state, "all_domains", []) if d})
+    # Classify domains as forest roots vs child domains
+    forest_roots: list[str] = []
+    child_domains: dict[str, str] = {}  # child -> parent
+    for domain in domains:
+        parts = domain.split(".")
+        if len(parts) >= 3:
+            # Check if parent domain exists in our list
+            parent = ".".join(parts[1:])
+            if parent in domains:
+                child_domains[domain] = parent
+            else:
+                forest_roots.append(domain)
+        else:
+            # Two-part domains (e.g., contoso.local) are forest roots
+            forest_roots.append(domain)
+
     print(f"Domains ({len(domains)}):")
-    for domain in domains or ["None"]:
-        print(f"  - {domain}")
+    if not domains:
+        print("  - None")
+    else:
+        # Display forest roots first, then their children indented
+        displayed: set[str] = set()
+        for root in sorted(forest_roots):
+            print(f"  - {root} (forest root)")
+            displayed.add(root)
+            # Find and display child domains of this root
+            for child, parent in sorted(child_domains.items()):
+                if parent == root:
+                    print(f"    └─ {child} (child)")
+                    displayed.add(child)
+        # Display any remaining child domains (whose parent isn't a direct forest root)
+        for child in sorted(child_domains.keys()):
+            if child not in displayed:
+                parent = child_domains[child]
+                print(f"  - {child} (child of {parent})")
     print()
 
     # Hosts (with DC indicator, OS, and open ports/services)
@@ -501,12 +759,19 @@ def _print_loot(state, *, json_output: bool = False) -> None:
                 print(f"      {svc}")
     print()
 
-    # Users
+    # Users - group by source for readability
     print(f"Users ({len(unique_users)}):")
+    users_by_source: dict[str, list] = {}
     for user in unique_users:
-        prefix = f"{user.domain}\\{user.username}" if user.domain else user.username
-        suffix = " (admin)" if user.is_admin else ""
-        print(f"  - {prefix}{suffix}")
+        src = user.source if hasattr(user, "source") and user.source else "unknown"
+        src = _normalize_source_label(src)
+        users_by_source.setdefault(src, []).append(user)
+    for src, users in sorted(users_by_source.items()):
+        print(f"  [{src}] ({len(users)})")
+        for user in users:
+            prefix = f"{user.domain}\\{user.username}" if user.domain else user.username
+            suffix = " (admin)" if user.is_admin else ""
+            print(f"    - {prefix}{suffix}")
     print()
 
     # Credentials
@@ -533,10 +798,29 @@ def _print_loot(state, *, json_output: bool = False) -> None:
         print(f"  - {line}")
     print()
 
-    # Weaknesses
+    # Weaknesses - parse markdown blocks and display cleanly
     print(f"Weaknesses ({len(state.all_weaknesses)}):")
-    for w in state.all_weaknesses or ["None"]:
-        print(f"  - {w}")
+    if not state.all_weaknesses:
+        print("  None")
+    else:
+        for i, w in enumerate(state.all_weaknesses, 1):
+            parsed = _parse_weakness_block(w)
+            title = parsed.get("title", "Untitled Weakness")
+            vuln = parsed.get("vulnerability", "")
+            impact = parsed.get("impact", "")
+            resource = parsed.get("affected_resource", "")
+
+            # Print compact summary
+            print(f"  {i}. {title}")
+            if vuln:
+                # Truncate long vulnerability descriptions
+                vuln_display = vuln[:80] + "..." if len(vuln) > 80 else vuln
+                print(f"     └─ {vuln_display}")
+            if resource:
+                print(f"     Resource: {resource}")
+            if impact:
+                impact_display = impact[:60] + "..." if len(impact) > 60 else impact
+                print(f"     Impact: {impact_display}")
 
 
 def _print_diff(prev_snapshot: dict, curr_snapshot: dict, state) -> None:
@@ -791,9 +1075,63 @@ async def _loot_watch(
 
 
 @app.command
-async def tasks(
-    operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
+async def report(
+    operation_id: Annotated[str | None, cyclopts.Parameter(help="Operation ID")] = None,
     *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Use the latest operation (prefer running)")
+    ] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+    output_dir: Annotated[
+        str, cyclopts.Parameter(help="Output directory for report (default: ./reports)")
+    ] = "./reports",
+) -> None:
+    """Generate a comprehensive markdown report for an operation.
+
+    The report includes full attack path, all credentials with passwords,
+    NTLM hashes, discovered vulnerabilities, and timeline events.
+
+    Examples:
+        ares-ops report op-20250128-123456
+        ares-ops report --latest
+        ares-ops report --latest --output-dir ./my-reports
+    """
+    resolved_redis_url = redis_url or get_redis_url()
+
+    # Resolve operation ID
+    if latest and not operation_id:
+        operation_id = await _resolve_latest_operation(resolved_redis_url)
+        if not operation_id:
+            logger.error("No operations found")
+            sys.exit(1)
+        logger.info(f"Using latest operation: {operation_id}")
+    elif not operation_id:
+        logger.error("Either operation_id or --latest is required")
+        sys.exit(1)
+
+    try:
+        report_path = await _generate_local_report(
+            operation_id,
+            resolved_redis_url,
+            report_dir=Path(output_dir),
+        )
+        if report_path:
+            logger.success(f"Report generated: {report_path}")
+        else:
+            logger.error(f"Failed to generate report for {operation_id}")
+            sys.exit(1)
+    except Exception as e:
+        logger.error(f"Failed to generate report: {e}")
+        sys.exit(1)
+
+
+@app.command
+async def tasks(
+    operation_id: Annotated[str | None, cyclopts.Parameter(help="Operation ID")] = None,
+    *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Use the latest operation (prefer running)")
+    ] = False,
     task_status: Annotated[
         str, cyclopts.Parameter(help="Filter by status (running/completed/failed/pending/all)")
     ] = "running",
@@ -802,12 +1140,24 @@ async def tasks(
 ) -> None:
     """List tasks for an operation.
 
-    Example:
-        ares-ops tasks op-20250128-123456 --status running --role lateral
+    Examples:
+        ares-ops tasks op-20250128-123456 --task-status running --role lateral
+        ares-ops tasks --latest --task-status running
     """
     import json as json_module
 
     resolved_redis_url = redis_url or get_redis_url()
+
+    # Resolve operation ID
+    if latest and not operation_id:
+        operation_id = await _resolve_latest_operation(resolved_redis_url)
+        if not operation_id:
+            logger.error("No operations found")
+            sys.exit(1)
+        logger.info(f"Using latest operation: {operation_id}")
+    elif not operation_id:
+        logger.error("Either operation_id or --latest is required")
+        sys.exit(1)
 
     try:
         client = await create_redis_client(resolved_redis_url, decode_responses=True)
@@ -867,6 +1217,19 @@ async def tasks(
         sys.exit(1)
 
 
+def _format_duration(seconds: float) -> str:
+    """Format duration in seconds to human-readable string."""
+    if seconds < 0:
+        return "0s"
+    hours, remainder = divmod(int(seconds), 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes > 0:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
 @app.command(name="list")
 async def list_operations(
     *,
@@ -881,6 +1244,7 @@ async def list_operations(
         ares-ops list              # List all operations
         ares-ops list --latest     # Print only the latest/running operation ID
     """
+    from ares.core.models import SharedRedTeamState
     from ares.core.task_queue import RedisTaskQueue
 
     resolved_redis_url = redis_url or get_redis_url()
@@ -894,20 +1258,21 @@ async def list_operations(
         return items[0][1]
 
     try:
-        client = await create_redis_client(resolved_redis_url, decode_responses=True)
+        # Use decode_responses=False so we can read both state (bytes) and strings
+        client = await create_redis_client(resolved_redis_url, decode_responses=False)
         await client.ping()
 
-        # Gather all operations with their checkpoint times and running status
-        all_ops: list[
-            tuple[datetime | None, str, bool]
-        ] = []  # (checkpoint_time, op_id, is_running)
+        # Gather all operations with their checkpoint times, running status, and start time
+        # (checkpoint_time, op_id, is_running, started_at)
+        all_ops: list[tuple[datetime | None, str, bool, datetime | None]] = []
 
         # Check for running operations (have locks)
         # Use KEYS instead of SCAN for reliability - SCAN can miss keys
         running_ops: set[str] = set()
         lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
         for key in lock_keys:
-            parts = key.split(":", 2)
+            key_str = key.decode() if isinstance(key, bytes) else key
+            parts = key_str.split(":", 2)
             if len(parts) >= 3:
                 running_ops.add(parts[2])
 
@@ -915,19 +1280,36 @@ async def list_operations(
         # Use KEYS instead of SCAN for reliability - SCAN can miss keys
         state_keys = await client.keys("ares:operation:*:state")
         for key in state_keys:
-            parts = key.split(":")
+            key_str = key.decode() if isinstance(key, bytes) else key
+            parts = key_str.split(":")
             if len(parts) < 3:
                 continue
             op_id = parts[2]
-            checkpoint = await client.get(f"ares:operation:{op_id}:checkpoint_time")
+
+            # Get checkpoint time
+            checkpoint_raw = await client.get(f"ares:operation:{op_id}:checkpoint_time")
             checkpoint_time = None
-            if checkpoint:
+            if checkpoint_raw:
+                checkpoint_str = (
+                    checkpoint_raw.decode() if isinstance(checkpoint_raw, bytes) else checkpoint_raw
+                )
                 try:
-                    checkpoint_time = datetime.fromisoformat(checkpoint)
+                    checkpoint_time = datetime.fromisoformat(checkpoint_str)
                 except Exception:
                     pass
+
+            # Get started_at from state
+            started_at = None
+            state_data = await client.get(f"ares:operation:{op_id}:state")
+            if state_data:
+                try:
+                    state = SharedRedTeamState.from_bytes(state_data)
+                    started_at = state.started_at
+                except Exception:
+                    pass
+
             is_running = op_id in running_ops
-            all_ops.append((checkpoint_time, op_id, is_running))
+            all_ops.append((checkpoint_time, op_id, is_running, started_at))
 
         await client.aclose()
 
@@ -937,25 +1319,140 @@ async def list_operations(
 
         if latest:
             # Prefer running operations, then fall back to latest by checkpoint time
-            running = [(t, op) for t, op, is_running in all_ops if is_running]
+            running = [(t, op) for t, op, is_running, _ in all_ops if is_running]
             if running:
                 print(pick_latest(running))
             else:
-                print(pick_latest([(t, op) for t, op, _ in all_ops]))
+                print(pick_latest([(t, op) for t, op, _, _ in all_ops]))
             return
 
         # Full listing
         print("Multi-Agent Operations:")
-        print("=" * 60)
+        print("=" * 70)
         # Sort by checkpoint time (newest first)
         all_ops.sort(key=lambda x: x[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-        for checkpoint_time, op_id, is_running in all_ops:
+        now = datetime.now(timezone.utc)
+        for checkpoint_time, op_id, is_running, started_at in all_ops:
             status = " [running]" if is_running else ""
+
+            # Calculate runtime
+            runtime_str = ""
+            if started_at:
+                # For running ops, runtime is until now; for completed, until checkpoint
+                end_time = now if is_running else (checkpoint_time or now)
+                runtime_seconds = (end_time - started_at).total_seconds()
+                runtime_str = f" runtime: {_format_duration(runtime_seconds)}"
+
             time_str = checkpoint_time.isoformat() if checkpoint_time else "unknown"
-            print(f"  {op_id}: checkpoint at {time_str}{status}")
+            print(f"  {op_id}: checkpoint at {time_str}{status}{runtime_str}")
 
     except Exception as e:
         logger.error(f"Failed to list operations: {e}")
+        sys.exit(1)
+
+
+@app.command
+async def runtime(
+    operation_id: Annotated[str | None, cyclopts.Parameter(help="Operation ID")] = None,
+    *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Use the latest operation (prefer running)")
+    ] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Show runtime for an operation.
+
+    Displays the elapsed time since the operation started, plus key metrics.
+
+    Examples:
+        ares-ops runtime --latest
+        ares-ops runtime op-20250128-123456
+    """
+    from ares.core.models import SharedRedTeamState
+    from ares.core.task_queue import RedisTaskQueue
+
+    resolved_redis_url = redis_url or get_redis_url()
+
+    # Resolve operation ID
+    if latest and not operation_id:
+        operation_id = await _resolve_latest_operation(resolved_redis_url)
+        if not operation_id:
+            logger.error("No operations found")
+            sys.exit(1)
+    elif not operation_id:
+        logger.error("Either operation_id or --latest is required")
+        sys.exit(1)
+
+    try:
+        client = await create_redis_client(resolved_redis_url, decode_responses=False)
+
+        # Get state
+        state_data = await client.get(f"ares:operation:{operation_id}:state")
+        if not state_data:
+            logger.error(f"No state found for operation: {operation_id}")
+            await client.aclose()
+            sys.exit(1)
+
+        state = SharedRedTeamState.from_bytes(state_data)
+
+        # Check if running
+        lock_key = f"{RedisTaskQueue.LOCK_PREFIX}:{operation_id}"
+        is_running = await client.exists(lock_key) > 0
+
+        await client.aclose()
+
+        now = datetime.now(timezone.utc)
+        started_at = state.started_at
+        completed_at = state.completed_at
+
+        # Calculate runtime
+        if completed_at:
+            runtime_seconds = (completed_at - started_at).total_seconds()
+            status = "completed"
+        elif is_running:
+            runtime_seconds = (now - started_at).total_seconds()
+            status = "running"
+        else:
+            # Not running, no completed_at - use checkpoint time or now
+            checkpoint_raw = await create_redis_client(resolved_redis_url, decode_responses=True)
+            checkpoint_str = await checkpoint_raw.get(
+                f"ares:operation:{operation_id}:checkpoint_time"
+            )
+            await checkpoint_raw.aclose()
+            if checkpoint_str:
+                try:
+                    checkpoint_time = datetime.fromisoformat(checkpoint_str)
+                    runtime_seconds = (checkpoint_time - started_at).total_seconds()
+                except Exception:
+                    runtime_seconds = (now - started_at).total_seconds()
+            else:
+                runtime_seconds = (now - started_at).total_seconds()
+            status = "stopped"
+
+        # Output
+        print(f"Operation: {operation_id}")
+        print(f"Status:    {status}")
+        print(f"Started:   {started_at.isoformat()}")
+        print(f"Runtime:   {_format_duration(runtime_seconds)}")
+        print()
+
+        # Key metrics
+        creds = len(state.all_credentials)
+        hashes = len(state.all_hashes)
+        hosts = len(state.all_hosts)
+        vulns = len(state.discovered_vulnerabilities)
+        exploited = len(state.exploited_vulnerabilities)
+
+        print(f"Credentials: {creds}  Hashes: {hashes}  Hosts: {hosts}")
+        print(f"Vulns: {vulns} discovered, {exploited} exploited")
+
+        if state.has_domain_admin:
+            print("\n*** DOMAIN ADMIN ACHIEVED ***")
+        if state.has_golden_ticket:
+            print("*** GOLDEN TICKET OBTAINED ***")
+
+    except Exception as e:
+        logger.error(f"Failed to get runtime: {e}")
         sys.exit(1)
 
 
@@ -1297,7 +1794,7 @@ async def inject_credential(
             )
         else:
             await client.aclose()
-            logger.warning(f"Credential already exists: {domain}\\{username}")
+            logger.info(f"Credential already exists: {domain}\\{username}")
 
     except Exception as e:
         logger.error(f"Failed to inject credential: {e}")
@@ -1364,12 +1861,20 @@ async def inject_vulnerability(
         if account_name:
             vuln_details["account_name"] = account_name
 
+        # Look up priority from config (default to 99 if unknown)
+        vuln_priorities = _get_vuln_priorities()
+        priority = vuln_priorities.get(vuln_type.lower(), 99)
+        # Also check without lowercase for case-sensitive types like ADCS_ESC1
+        if priority == 99:
+            priority = vuln_priorities.get(vuln_type, 99)
+
         vuln = VulnerabilityInfo(
             vuln_id=f"{vuln_type}_{target_ip}_{account_name or 'manual'}",
             vuln_type=vuln_type,
             target=target_ip,
             discovered_by="manual-inject",
             details=vuln_details,
+            priority=priority,
         )
 
         state.discovered_vulnerabilities[vuln.vuln_id] = vuln
@@ -1387,7 +1892,8 @@ async def inject_vulnerability(
         await tq.disconnect()
 
         logger.success(
-            f"Injected vulnerability: {vuln_type} on {target_ip} ({n} subscribers notified)"
+            f"Injected vulnerability: {vuln_type} on {target_ip} "
+            f"(priority={priority}, {n} subscribers notified)"
         )
         logger.info(f"Details: {vuln_details}")
 

@@ -60,7 +60,8 @@ async def create_redis_client(redis_url: str | None = None, *, decode_responses:
         raise RuntimeError("redis package required: pip install redis") from e
 
     sentinel = get_redis_sentinel_config()
-    default_socket_timeout = None if sentinel else 30.0
+    # Always use 30s socket timeout - None causes hangs during Redis failover
+    default_socket_timeout = 30.0
     socket_timeout = _parse_optional_float(
         os.getenv("REDIS_SOCKET_TIMEOUT"), default_socket_timeout
     )

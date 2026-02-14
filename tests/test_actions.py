@@ -303,13 +303,13 @@ class TestGenerateFallbackSynopsis:
         populated_investigation_state.attack_synopsis = ""  # Clear to trigger generation
         # Add many hosts (more than 5)
         populated_investigation_state.queried_hosts = {
-            "host1.domain.local",
-            "host2.domain.local",
-            "host3.domain.local",
-            "host4.domain.local",
-            "host5.domain.local",
-            "host6.domain.local",
-            "host7.domain.local",
+            "host1.contoso.local",
+            "host2.contoso.local",
+            "host3.contoso.local",
+            "host4.contoso.local",
+            "host5.contoso.local",
+            "host6.contoso.local",
+            "host7.contoso.local",
         }
         completion_tools.set_state(populated_investigation_state)
         completion_tools._generate_fallback_synopsis()

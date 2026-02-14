@@ -475,7 +475,7 @@ class MultiAgentArgs:
     """Multi-agent red team arguments.
 
     Attributes:
-        target_domain: Target domain (e.g., example.local).
+        target_domain: Target domain (e.g., contoso.local).
         target_ips: Comma-separated list of target IPs.
         config_file: Path to config file (auto-detected if not specified).
         redis_url: Redis URL for state persistence (from config if not specified).
@@ -518,12 +518,12 @@ async def multi_agent(
     - Coercion: Network coercion (responder, mitm6)
 
     Args:
-        target_domain: Target domain (e.g., example.local)
+        target_domain: Target domain (e.g., contoso.local)
         target_ips: Comma-separated list of target IPs
 
     Example:
-        uv run ares multi-agent example.local "192.168.58.10,192.168.58.11"
-        uv run ares multi-agent corp.local "192.168.58.1" --multi-args.redis-url redis://redis:6379
+        uv run ares multi-agent contoso.local "192.168.58.10,192.168.58.11"
+        uv run ares multi-agent contoso.local "192.168.58.1" --multi-args.redis-url redis://redis:6379
     """
     import uuid
 
@@ -744,13 +744,8 @@ async def worker(
     # workers to start without ARES_MODEL in the ConfigMap.
     if not model and not operation_id:
         logger.info("No model specified - will fetch from operation config after discovery")
+    # max_steps from CLI takes precedence, otherwise use YAML config (single source of truth)
     max_steps = worker_args.max_steps if worker_args.max_steps > 0 else agent_config.max_steps
-    if role == "lateral" and max_steps < 300:
-        max_steps = 300
-    if role == "cracker" and max_steps < 150:
-        max_steps = 150
-    if role == "acl" and max_steps < 150:
-        max_steps = 150  # ACL analysis requires complex path finding
 
     # Configure Dreadnode (optional - don't fail if platform unavailable)
     dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")

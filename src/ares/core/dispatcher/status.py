@@ -24,6 +24,62 @@ class StatusMixin:
         """Get all pending tasks."""
         return list(self.shared_state.pending_tasks.values())
 
+    def is_role_registered(self: RedTeamDispatcher, role: str) -> bool:
+        """Check if any agent with this role is registered.
+
+        This is a simple registration check that does NOT depend on heartbeat
+        freshness. Use this to verify that agents exist for a role, not to
+        check if they're actively working.
+
+        Args:
+            role: Worker role name (e.g., "privesc", "recon", "lateral")
+
+        Returns:
+            True if at least one agent for this role is registered
+        """
+        for agent_info in self._agents.values():
+            if agent_info.role.value.lower() == role.lower():
+                return True
+        return False
+
+    def get_role_health(self: RedTeamDispatcher, role: str) -> dict[str, Any]:
+        """Get health status for a worker role (for monitoring/logging only).
+
+        This method is informational - it does NOT block task dispatching.
+        Use it for dashboards, logging, and diagnostics.
+
+        Args:
+            role: Worker role name
+
+        Returns:
+            Dict with online count, total count, and any stale agents
+        """
+        role_lower = role.lower()
+        now = datetime.now(timezone.utc)
+        stale_threshold = max(60, self._agent_heartbeat_timeout)
+
+        online_count = 0
+        total_count = 0
+        stale_agents: list[str] = []
+
+        for name, agent_info in self._agents.items():
+            if agent_info.role.value.lower() != role_lower:
+                continue
+            total_count += 1
+            elapsed = (now - agent_info.last_heartbeat).total_seconds()
+            if elapsed <= stale_threshold and agent_info.status != "offline":
+                online_count += 1
+            else:
+                stale_agents.append(name)
+
+        return {
+            "role": role,
+            "is_registered": total_count > 0,
+            "online_count": online_count,
+            "total_count": total_count,
+            "stale_agents": stale_agents,
+        }
+
     def get_agent_status(self: RedTeamDispatcher) -> dict[str, dict]:
         """Get status of all registered agents."""
         return {
@@ -148,6 +204,26 @@ class StatusMixin:
                 }
                 for vid in failed
             ],
+        }
+
+    def get_throttle_status(self: RedTeamDispatcher) -> dict[str, Any]:
+        """Get throttling and deferred queue status for monitoring.
+
+        Returns dict with:
+            - llm_task_count: Current number of LLM tasks in flight
+            - max_concurrent_tasks: Configured limit
+            - deferred_queue: Status of deferred task queue
+            - phase: Current operation phase
+        """
+        from ares.core.config import get_max_concurrent_tasks
+
+        deferred_status = self.get_deferred_queue_status()
+        phase = self._get_operation_phase()
+
+        return {
+            "max_concurrent_tasks": get_max_concurrent_tasks(),
+            "phase": phase,
+            "deferred_queue": deferred_status,
         }
 
 

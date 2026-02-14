@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from ares.core.models import DEFAULT_MAX_RETRIES, SharedRedTeamState, TaskStatus
+from ares.core.config import get_default_max_retries
+from ares.core.models import SharedRedTeamState, TaskStatus
 from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue
 
@@ -25,7 +26,7 @@ class RecoveryError(Exception):
     """Raised when recovery fails."""
 
 
-def _merge_state(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+def _merge_state(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:  # noqa: PLR0912
     """Merge existing checkpoint data into current state to prevent regressions."""
     # Hosts, domains, users (using built-in dedup methods)
     for host in existing.all_hosts:
@@ -33,7 +34,7 @@ def _merge_state(target: SharedRedTeamState, existing: SharedRedTeamState) -> No
     for domain in getattr(existing, "all_domains", []):
         target.add_domain(domain)
     for user in existing.all_users:
-        target.add_user(user.username, user.domain)
+        target.add_user(user.username, user.domain, user.source)
 
     # Credentials (preserve original source fields)
     _merge_credentials(target, existing)
@@ -57,16 +58,44 @@ def _merge_state(target: SharedRedTeamState, existing: SharedRedTeamState) -> No
     if existing.has_golden_ticket and not target.has_golden_ticket:
         target.has_golden_ticket = True
 
+    # Preserve earliest completed_at timestamp (prefer existing if set)
+    if existing.completed_at and not target.completed_at:
+        target.completed_at = existing.completed_at
+
+    # Merge domain controller cache (prefer existing mappings)
+    for domain, ip in existing.domain_controllers.items():
+        if domain not in target.domain_controllers:
+            target.domain_controllers[domain] = ip
+
+    # Merge NetBIOS to FQDN mappings (prefer existing mappings)
+    for netbios, fqdn in existing.netbios_to_fqdn.items():
+        if netbios not in target.netbios_to_fqdn:
+            target.netbios_to_fqdn[netbios] = fqdn
+
+    # Merge persistence tracking (CRITICAL for orchestrator visibility)
+    _merge_golden_tickets(target, existing)
+    _merge_acl_chains(target, existing)
+    _merge_gmsa_accounts(target, existing)
+    _merge_adminsd_backdoors(target, existing)
+
+    # Merge background task deduplication tracking (CRITICAL for preventing duplicate work)
+    _merge_background_task_tracking(target, existing)
+
     # Safety net: scan merged hashes for DA indicators if flag not yet set
+    # NOTE: Only krbtgt counts as DA proof - Administrator could be LOCAL admin on workstation
     if not target.has_domain_admin:
+        from datetime import datetime, timezone
+
         for h in target.all_hashes:
             ht = (h.hash_type or "").strip().lower()
             un = (h.username or "").strip().lower()
-            if ht == "ntlm" and un in ("krbtgt", "administrator"):
+            if ht == "ntlm" and un == "krbtgt":
                 target.has_domain_admin = True
                 target.domain_admin_path = (
-                    f"secretsdump → {un} NTLM hash found in state (detected during merge)"
+                    "secretsdump → krbtgt NTLM hash found in state (detected during merge)"
                 )
+                if not target.completed_at:
+                    target.completed_at = datetime.now(timezone.utc)
                 break
 
     # Merge dynamic tracking attributes (set via object.__setattr__)
@@ -127,6 +156,74 @@ def _merge_timeline(target: SharedRedTeamState, existing: SharedRedTeamState) ->
             target.operation_timeline.append(event)
 
 
+def _merge_golden_tickets(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+    """Merge golden tickets from existing state into target."""
+    seen = {t.get("domain", "").lower() for t in target.golden_tickets}
+    for ticket in existing.golden_tickets:
+        domain = ticket.get("domain", "").lower()
+        if domain and domain not in seen:
+            seen.add(domain)
+            target.golden_tickets.append(ticket)
+
+
+def _merge_acl_chains(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+    """Merge ACL chains from existing state into target."""
+    seen = {c.get("chain_id", "") for c in target.acl_chains}
+    for chain in existing.acl_chains:
+        chain_id = chain.get("chain_id", "")
+        if chain_id and chain_id not in seen:
+            seen.add(chain_id)
+            target.acl_chains.append(chain)
+
+
+def _merge_gmsa_accounts(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+    """Merge gMSA accounts from existing state into target."""
+    seen = {g.get("account", "").lower() for g in target.gmsa_accounts}
+    for gmsa in existing.gmsa_accounts:
+        account = gmsa.get("account", "").lower()
+        if account and account not in seen:
+            seen.add(account)
+            target.gmsa_accounts.append(gmsa)
+
+
+def _merge_adminsd_backdoors(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
+    """Merge AdminSDHolder backdoors from existing state into target."""
+    seen = set(target.adminsd_holder_backdoors)
+    for backdoor in existing.adminsd_holder_backdoors:
+        if backdoor and backdoor not in seen:
+            seen.add(backdoor)
+            target.adminsd_holder_backdoors.append(backdoor)
+
+
+def _merge_background_task_tracking(
+    target: SharedRedTeamState, existing: SharedRedTeamState
+) -> None:
+    """Merge background task deduplication sets from existing state into target.
+
+    These sets track which operations have already been performed to prevent
+    duplicate work after orchestrator restart.
+    """
+    # Merge all the tracking sets (union operation)
+    target.processed_cred_expansion |= existing.processed_cred_expansion
+    target.processed_hash_lateral |= existing.processed_hash_lateral
+    target.processed_crack_requests |= existing.processed_crack_requests
+    target.processed_asrep_domains |= existing.processed_asrep_domains
+    target.processed_username_spray |= existing.processed_username_spray
+    target.processed_password_spray |= existing.processed_password_spray
+    target.processed_secretsdump |= existing.processed_secretsdump
+    target.dispatched_acl_steps |= existing.dispatched_acl_steps
+    # Coercion and delegation tracking
+    target.processed_esc8_servers |= existing.processed_esc8_servers
+    target.processed_coerced_dcs |= existing.processed_coerced_dcs
+    target.processed_writable_shares |= existing.processed_writable_shares
+    target.processed_delegation_creds |= existing.processed_delegation_creds
+    # Additional automation tracking
+    target.processed_adcs_servers |= existing.processed_adcs_servers
+    target.processed_bloodhound_domains |= existing.processed_bloodhound_domains
+    target.processed_spidered_shares |= existing.processed_spidered_shares
+    target.processed_expansion_creds |= existing.processed_expansion_creds
+
+
 class OperationRecoveryManager:
     """
     Handle pod restarts and operation recovery.
@@ -144,7 +241,7 @@ class OperationRecoveryManager:
         await manager.checkpoint(state)
 
         # Recover after pod restart
-        state = await manager.recover_operation(operation_id)
+        state, requeued_task_ids = await manager.recover_operation(operation_id)
     """
 
     def __init__(
@@ -245,7 +342,7 @@ class OperationRecoveryManager:
         self,
         operation_id: str,
         auto_requeue: bool = True,
-    ) -> SharedRedTeamState:
+    ) -> tuple[SharedRedTeamState, list[str]]:
         """
         Recover state from last checkpoint.
 
@@ -257,7 +354,9 @@ class OperationRecoveryManager:
             auto_requeue: If True, automatically requeue interrupted tasks.
 
         Returns:
-            Recovered SharedRedTeamState.
+            Tuple of (recovered state, list of requeued task IDs).
+            The caller should add requeued task IDs to dispatcher._redis_task_ids
+            so the result consumer can track them.
 
         Raises:
             RecoveryError: If no checkpoint found or recovery fails.
@@ -278,6 +377,7 @@ class OperationRecoveryManager:
             interrupted_count = 0
             requeued_count = 0
             failed_count = 0
+            requeued_task_ids: list[str] = []
 
             # Create task queue for requeuing
             task_queue = RedisTaskQueue(self._redis_url) if auto_requeue else None
@@ -300,7 +400,7 @@ class OperationRecoveryManager:
                         if task.status == TaskStatus.IN_PROGRESS:
                             task.retry_count += 1
 
-                        max_retries = getattr(task, "max_retries", DEFAULT_MAX_RETRIES)
+                        max_retries = getattr(task, "max_retries", get_default_max_retries())
                         if auto_requeue and task.retry_count <= max_retries:
                             task.status = TaskStatus.RETRYING
                             if task.retry_count > 0:
@@ -317,6 +417,7 @@ class OperationRecoveryManager:
                                     retry_count=task.retry_count,
                                 )
                                 requeued_count += 1
+                                requeued_task_ids.append(task_id)
                                 logger.info(
                                     f"Task {task_id} requeued for retry "
                                     f"({task.retry_count}/{max_retries})"
@@ -353,7 +454,7 @@ class OperationRecoveryManager:
                 )
                 logger.info(f"Recovered state from checkpoint at {checkpoint_str}")
 
-            return state
+            return state, requeued_task_ids
 
         except RecoveryError:
             raise
@@ -665,7 +766,7 @@ class OperationResumeHelper:
                         "params": task.params,
                         "assigned_agent": task.assigned_agent,
                         "retry_count": getattr(task, "retry_count", 0),
-                        "max_retries": getattr(task, "max_retries", DEFAULT_MAX_RETRIES),
+                        "max_retries": getattr(task, "max_retries", get_default_max_retries()),
                     }
                 )
 

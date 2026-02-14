@@ -4,7 +4,6 @@ This module provides toolsets for recording findings during
 red team operations.
 """
 
-import logging
 from datetime import datetime, timezone
 
 import dreadnode as dn
@@ -15,8 +14,6 @@ from ares.tools.red.common import (
     AnyRedTeamState,
     format_weakness_block,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class RedTeamReportingTools(Toolset):
@@ -60,7 +57,7 @@ class RedTeamReportingTools(Toolset):
             Confirmation of recorded credential
 
         Example:
-            >>> record_credential("admin", password="P@ssw0rd!", domain="domain.local", source="cracked_hash", is_admin=True)  # pragma: allowlist secret
+            >>> record_credential("admin", password="P@ssw0rd!", domain="contoso.local", source="cracked_hash", is_admin=True)  # pragma: allowlist secret
         """
         if not self.state:
             return "[!] No operation state available"
@@ -230,20 +227,28 @@ class RedTeamReportingTools(Toolset):
         if not self.state:
             return "[!] No operation state available"
 
-        if not hasattr(self.state, "timeline"):
+        # Support both RedTeamState (timeline) and SharedRedTeamState (operation_timeline)
+        timeline_attr = None
+        if hasattr(self.state, "timeline"):
+            timeline_attr = "timeline"
+        elif hasattr(self.state, "operation_timeline"):
+            timeline_attr = "operation_timeline"
+
+        if not timeline_attr:
             return "[!] Timeline not available in operation state"
 
+        timeline = getattr(self.state, timeline_attr)
         techniques = [t.strip() for t in mitre_techniques.split(",") if t.strip()]
 
         event = TimelineEvent(
-            id=f"evt-{len(self.state.timeline):04d}",  # type: ignore[union-attr]
+            id=f"evt-{len(timeline):04d}",
             timestamp=datetime.now(timezone.utc),
             description=description,
             mitre_techniques=techniques,
             confidence=confidence,
             source="manual_recording",
         )
-        self.state.timeline.append(event)  # type: ignore[union-attr]
+        timeline.append(event)
 
         return f"[+] Recorded timeline event: {description}"
 

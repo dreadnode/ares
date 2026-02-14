@@ -6,11 +6,39 @@ and dispatch tasks to specialized worker agents.
 
 from __future__ import annotations
 
+import ipaddress
 from typing import TYPE_CHECKING, Any
 
 import dreadnode as dn
 from dreadnode.agent.tools import Toolset
 from loguru import logger
+
+from ares.core.config import get_default_network_interface
+
+
+def _ip_in_targets(ip: str, targets: list[str]) -> bool:
+    """Check if IP falls within any target range (individual IP or CIDR)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+
+    # Pre-parse targets into networks and individual IPs
+    networks = []
+    ips = set()
+    for t in targets:
+        if "/" in t:
+            try:
+                networks.append(ipaddress.ip_network(t, strict=False))
+            except ValueError:
+                pass
+        else:
+            ips.add(t)
+
+    if ip in ips:
+        return True
+    return any(addr in net for net in networks)
+
 
 if TYPE_CHECKING:
     from ares.core.dispatcher import RedTeamDispatcher
@@ -116,7 +144,7 @@ class OrchestratorTools(Toolset):
                 - "domain_info": Gather domain controller and trust information
                 - "bloodhound": Run BloodHound collection and analysis (requires creds)
             targets: Comma-separated target IPs, hostnames, or CIDR ranges (e.g., "192.168.58.0/24,192.168.58.5")
-            domain: Target domain (e.g., "corp.local")
+            domain: Target domain (e.g., "contoso.local")
             username: Username for authenticated enumeration (optional)
             password: Password for authenticated enumeration (optional)
             hash_value: NTLM hash for pass-the-hash (optional)
@@ -139,14 +167,14 @@ class OrchestratorTools(Toolset):
             >>> dispatch_recon(
             ...     task_type="user_enumeration",
             ...     targets="192.168.58.1",
-            ...     domain="corp.local"
+            ...     domain="contoso.local"
             ... )
 
             # BloodHound with credentials
             >>> dispatch_recon(
             ...     task_type="bloodhound",
             ...     targets="192.168.58.1",
-            ...     domain="corp.local",
+            ...     domain="contoso.local",
             ...     username="user1",
             ...     password="P@ssw0rd"  # pragma: allowlist secret
             ... )
@@ -165,19 +193,27 @@ class OrchestratorTools(Toolset):
 
         techniques = technique_map.get(task_type, [task_type])
 
-        # Deduplicate network scans: skip targets already scanned with nmap
+        # Deduplicate network scans: skip if hosts already discovered in target range
         if task_type == "network_scan" and target_ips:
+            # Primary check: hosts with services IN THE REQUESTED RANGE
+            hosts_in_range = [
+                h
+                for h in self.shared_state.all_hosts
+                if h.services and _ip_in_targets(h.ip, target_ips)
+            ]
+            if hosts_in_range:
+                return (
+                    f"✓ Network scan already complete for this range. "
+                    f"{len(hosts_in_range)} hosts with services found. "
+                    f"No new nmap scan needed."
+                )
+
+            # Secondary check: scanned_targets tracking (for individual IPs)
             already_scanned = set(self.shared_state.scanned_targets)
-            # Fallback: also treat IPs as scanned if they already have services in shared state
-            # (handles case where orchestrator restarted before _complete_task could mark them)
-            hosts_with_services = {h.ip for h in self.shared_state.all_hosts if h.services}
-            already_scanned |= hosts_with_services
             unscanned = [ip for ip in target_ips if ip not in already_scanned]
             if not unscanned:
-                scanned_hosts = len(self.shared_state.all_hosts)
                 return (
-                    f"✓ All targets already scanned ({len(target_ips)} targets). "
-                    f"{scanned_hosts} hosts in shared state. "
+                    f"✓ All targets in scanned_targets ({len(target_ips)} targets). "
                     f"No new nmap scan needed."
                 )
             if len(unscanned) < len(target_ips):
@@ -203,7 +239,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to dispatch recon - no recon agent available"
+            return "✗ Recon task dropped (throttled or low priority in current phase)"
 
         logger.info(f"Dispatched recon ({task_type}): {task_id}")
 
@@ -258,7 +294,7 @@ class OrchestratorTools(Toolset):
                 - "lsassy": Dump LSASS memory (requires admin access)
                 - "share_spider": Search accessible shares for credentials
             targets: Comma-separated target IPs or hostnames (e.g., "192.168.58.1,192.168.58.2")
-            domain: Target domain (e.g., "corp.local")
+            domain: Target domain (e.g., "contoso.local")
             username: Username for authenticated actions (optional)
             password: Password for authenticated actions (optional)
             hash_value: NTLM hash for pass-the-hash (optional)
@@ -274,7 +310,7 @@ class OrchestratorTools(Toolset):
             >>> dispatch_credential_access(
             ...     task_type="low_hanging_fruit",
             ...     targets="192.168.58.1",
-            ...     domain="corp.local",
+            ...     domain="contoso.local",
             ...     details='{"users_file": "/tmp/users.txt"}'
             ... )
 
@@ -282,7 +318,7 @@ class OrchestratorTools(Toolset):
             >>> dispatch_credential_access(
             ...     task_type="secretsdump",
             ...     targets="192.168.58.1,192.168.58.2",
-            ...     domain="corp.local",
+            ...     domain="contoso.local",
             ...     username="admin",
             ...     password="P@ssw0rd"  # pragma: allowlist secret
             ... )
@@ -290,7 +326,7 @@ class OrchestratorTools(Toolset):
             # Kerberoast to find service accounts
             >>> dispatch_credential_access(
             ...     task_type="kerberoast",
-            ...     domain="corp.local",
+            ...     domain="contoso.local",
             ...     username="user1",
             ...     password="password123"  # pragma: allowlist secret
             ... )
@@ -332,7 +368,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to dispatch credential access - no credential_access agent available"
+            return "✗ Credential access task dropped (throttled or low priority in current phase)"
 
         logger.info(f"Dispatched credential access ({task_type}): {task_id}")
 
@@ -355,11 +391,53 @@ class OrchestratorTools(Toolset):
             return f"✓ Credential access complete: {result.result}"
         return f"✗ Credential access failed: {result.error}"
 
+    def _lookup_hash_from_state(self, username: str, domain: str, hash_type: str) -> str | None:
+        """Look up actual hash value from state by username/domain/type."""
+        hash_type_lower = hash_type.lower().replace("-", "").replace("_", "")
+        for h in self.shared_state.all_hashes:
+            h_type = (h.hash_type or "").lower().replace("-", "").replace("_", "")
+            h_domain = (h.domain or "").lower()
+            h_user = (h.username or "").lower()
+            if (
+                h_user == username.lower()
+                and h_domain == domain.lower()
+                and (
+                    h_type == hash_type_lower
+                    or hash_type_lower in h_type
+                    or h_type in hash_type_lower
+                )
+            ):
+                return h.hash_value
+        return None
+
+    def _is_valid_hash_value(self, hash_value: str) -> bool:
+        """Check if hash_value looks like an actual hash (not a label/identifier)."""
+        if not hash_value:
+            return False
+        v = hash_value.strip()
+
+        # Kerberos hashes start with $
+        if v.startswith("$"):
+            return True
+
+        # NTLM hashes are LM:NT format (32 hex chars each)
+        # e.g., "aad3b435b51404eeaad3b435b51404ee:abcdef1234567890..."
+        if ":" in v:
+            parts = v.split(":")
+            if len(parts) >= 2:
+                # Check if first part looks like hex (LM hash is 32 chars)
+                first_part = parts[0]
+                if len(first_part) == 32 and all(c in "0123456789abcdefABCDEF" for c in first_part):
+                    return True
+
+        # Invalid: labels like "AS-REP:domain\user", "NTLM:username"
+        return False
+
     @dn.tool_method
     async def dispatch_crack_hash(
         self,
-        hash_value: str,
-        hash_type: str,
+        hash_value: str = "",
+        hash_type: str = "",
         priority: int = 5,
         username: str = "",
         domain: str = "",
@@ -370,15 +448,20 @@ class OrchestratorTools(Toolset):
         """
         Send hash to CrackerAgent for cracking.
 
-        The cracker agent will use hashcat or john to attempt to crack
-        the hash and report results back.
+        NOTE: Background automation handles hash cracking automatically.
+        Only use this tool if you need to manually trigger cracking with
+        specific priority or wordlist settings.
+
+        The hash_value will be auto-looked up from state if username/domain
+        are provided and hash_value is missing or invalid.
 
         Args:
-            hash_value: The hash to crack
-            hash_type: Type - NTLM, NetNTLMv2, Kerberos, AS-REP
+            hash_value: The actual hash (e.g., "$krb5tgs$..." or "aad3b435:...").
+                       If not provided, will lookup from state using username/domain.
+            hash_type: Type - NTLM, NetNTLMv2, Kerberoast, AS-REP
             priority: 1=urgent (krbtgt), 2=admin, 5=normal, 10=low
-            username: Associated username (helps prioritization)
-            domain: Associated domain
+            username: Username to crack (used for lookup if hash_value missing)
+            domain: Domain (used for lookup if hash_value missing)
             wordlist: Wordlist to use (default: rockyou.txt)
             wait_for_result: If True, wait for cracking to complete
             timeout: Max time to wait if wait_for_result=True (seconds)
@@ -387,16 +470,36 @@ class OrchestratorTools(Toolset):
             Task ID for tracking, or cracked result if wait_for_result=True
 
         Example:
-            # Crack admin hash with high priority
+            # Crack by username/domain (hash auto-looked up from state)
             >>> dispatch_crack_hash(
-            ...     hash_value="aad3b435b51404eeaad3b435b51404ee:...",
-            ...     hash_type="NTLM",
-            ...     priority=2,
-            ...     username="Administrator"
+            ...     username="svc_sql",
+            ...     domain="contoso.local",
+            ...     hash_type="Kerberoast",
+            ...     priority=2
             ... )
         """
+        resolved_hash = hash_value
+
+        # Auto-lookup hash from state if hash_value is missing or invalid
+        if not self._is_valid_hash_value(hash_value):
+            if username and domain and hash_type:
+                looked_up = self._lookup_hash_from_state(username, domain, hash_type)
+                if looked_up:
+                    resolved_hash = looked_up
+                    logger.info(f"Auto-resolved hash for {domain}\\{username} from state")
+                else:
+                    return (
+                        f"✗ Could not find hash for {domain}\\{username} ({hash_type}) in state. "
+                        "Use get_all_hashes to see available hashes."
+                    )
+            else:
+                return (
+                    "✗ Invalid hash_value provided and missing username/domain/hash_type for lookup. "
+                    "Provide either a valid hash (starting with $ or containing :) or username+domain+hash_type."
+                )
+
         task_id = await self.dispatcher.request_crack(
-            hash_value=hash_value,
+            hash_value=resolved_hash,
             hash_type=hash_type,
             source_agent=self._agent_name,
             username=username,
@@ -406,7 +509,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to dispatch crack request - no cracker agent available"
+            return "✗ Crack task dropped (throttled or low priority in current phase)"
 
         logger.info(f"Dispatched crack request: {task_id}")
 
@@ -451,7 +554,7 @@ class OrchestratorTools(Toolset):
         Example:
             >>> dispatch_acl_analysis(
             ...     target_user="svc_backup",
-            ...     domain="corp.local",
+            ...     domain="contoso.local",
             ...     find_path_to="Domain Admins"
             ... )
         """
@@ -463,7 +566,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to dispatch ACL analysis - no ACL agent available"
+            return "✗ ACL analysis task dropped (throttled or low priority in current phase)"
 
         logger.info(f"Dispatched ACL analysis: {task_id}")
 
@@ -517,7 +620,7 @@ class OrchestratorTools(Toolset):
             ...     target_host="192.168.58.10",
             ...     username="Administrator",
             ...     hash_value="aad3b435b51404ee:...",
-            ...     domain="corp.local"
+            ...     domain="contoso.local"
             ... )
         """
         # Validate username is not empty
@@ -546,7 +649,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to dispatch lateral movement - no lateral agent available"
+            return "✗ Lateral movement task dropped (throttled or low priority in current phase)"
 
         logger.info(f"Dispatched lateral movement: {task_id}")
         auth_method = "password" if password else "hash" if hash_value else "unknown"
@@ -582,8 +685,11 @@ class OrchestratorTools(Toolset):
 
         The privesc agent specializes in ADCS, delegation, and MSSQL attacks.
 
+        NOTE: For ADCS_ESC8 (web enrollment relay), use dispatch_esc8_attack() instead.
+        ESC8 requires ntlmrelayx which is only available on the COERCION agent.
+
         Args:
-            vuln_type: Vulnerability type - ADCS_ESC1, ADCS_ESC4, ADCS_ESC8,
+            vuln_type: Vulnerability type - ADCS_ESC1, ADCS_ESC4,
                       DELEGATION_UNCONSTRAINED, DELEGATION_CONSTRAINED, MSSQL_IMPERSONATION
             target: Target to exploit (CA name, server, etc.)
             vuln_id: Optional vulnerability ID for tracking
@@ -600,16 +706,32 @@ class OrchestratorTools(Toolset):
             ...     vuln_type="ADCS_ESC1",
             ...     target="corp-CA",
             ...     template="VulnerableTemplate",
-            ...     ca="corp.local\\corp-CA"
+            ...     ca="contoso.local\\corp-CA"
             ... )
         """
         if not vuln_id:
             vuln_id = f"{vuln_type}_{target}".replace(" ", "_")
 
-        if vuln_type == "ADCS_ESC8":
-            kwargs = dict(kwargs)
-            if not kwargs.get("coerce_target"):
-                kwargs["coerce_target"] = kwargs.get("dc_host") or kwargs.get("ca_host") or target
+        # Check if vulnerability is already exploited (prevents duplicate dispatch)
+        if await self.dispatcher._is_vulnerability_exploited(vuln_id):
+            return (
+                f"⏭️ Vulnerability {vuln_id} already exploited or attempted. "
+                "Use get_exploitation_status() to see results."
+            )
+
+        # Also check shared_state.exploited_vulnerabilities
+        if vuln_id in self.shared_state.exploited_vulnerabilities:
+            return (
+                f"⏭️ Vulnerability {vuln_id} already in exploited list. "
+                "Use get_exploitation_status() to see results."
+            )
+
+        # ESC8 requires ntlmrelayx on COERCION agent - redirect to dispatch_esc8_attack
+        if vuln_type.upper() == "ADCS_ESC8":
+            return (
+                "❌ ADCS_ESC8 requires ntlmrelayx which is on the COERCION agent.\n"
+                "Use dispatch_esc8_attack() instead, which coordinates relay + coercion."
+            )
 
         task_id = await self.dispatcher.request_exploit(
             vuln_type=vuln_type,
@@ -620,7 +742,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to dispatch exploitation - no privesc agent available"
+            return "✗ Exploitation task dropped (throttled or low priority in current phase)"
 
         logger.info(f"Dispatched exploitation: {task_id}")
 
@@ -640,7 +762,7 @@ class OrchestratorTools(Toolset):
     @dn.tool_method
     async def start_coercion(
         self,
-        interface: str = "eth0",
+        interface: str | None = None,
         techniques: str = "LLMNR,NBT-NS,mDNS",
         duration: int = 300,
         wait_for_result: bool = False,
@@ -652,7 +774,7 @@ class OrchestratorTools(Toolset):
         The coercion agent will run responder/mitm6 to capture hashes.
 
         Args:
-            interface: Network interface to use
+            interface: Network interface to use (auto-detected if not specified)
             techniques: Comma-separated coercion techniques (LLMNR, NBT-NS, mDNS)
             duration: How long to run in seconds (default: 300)
             wait_for_result: If True, wait for coercion to complete
@@ -663,11 +785,15 @@ class OrchestratorTools(Toolset):
 
         Example:
             >>> start_coercion(
-            ...     interface="eth0",
             ...     techniques="LLMNR,NBT-NS",
             ...     duration=600
             ... )
         """
+        # Auto-detect interface if not specified (handles AWS ens5 vs eth0)
+        if interface is None:
+            interface = get_default_network_interface()
+            logger.debug(f"Auto-detected network interface: {interface}")
+
         tech_list = [t.strip() for t in techniques.split(",")]
 
         task_id = await self.dispatcher.request_coercion(
@@ -678,7 +804,7 @@ class OrchestratorTools(Toolset):
         )
 
         if not task_id:
-            return "✗ Failed to start coercion - no coercion agent available"
+            return "✗ Coercion task dropped (throttled or low priority in current phase)"
 
         logger.info(f"Dispatched coercion: {task_id}")
 
@@ -712,9 +838,9 @@ class OrchestratorTools(Toolset):
         """
         Dispatch ESC8 relay attack (ADCS Web Enrollment exploitation).
 
-        ESC8 requires coordination between PRIVESC (relay listener) and COERCION (petitpotam).
-        This tool dispatches both tasks in the correct sequence:
-        1. PRIVESC starts certipy relay to listen for relayed auth
+        ESC8 requires the COERCION agent which has both ntlmrelayx and petitpotam.
+        This tool dispatches both tasks to COERCION in sequence:
+        1. COERCION starts ntlmrelayx_to_adcs to relay auth to ADCS web enrollment
         2. COERCION runs petitpotam to coerce DC to authenticate to relay
 
         Args:
@@ -731,9 +857,9 @@ class OrchestratorTools(Toolset):
 
         Example:
             >>> dispatch_esc8_attack(
-            ...     ca_host="dc01.corp.local",
+            ...     ca_host="dc01.contoso.local",
             ...     dc_ip="192.168.58.10",
-            ...     domain="corp.local",
+            ...     domain="contoso.local",
             ...     username="user",
             ...     password="pass",  # pragma: allowlist secret
             ...     attacker_ip="192.168.58.100"
@@ -741,8 +867,10 @@ class OrchestratorTools(Toolset):
         """
         results = []
 
-        # Step 1: Dispatch ESC8 exploit to PRIVESC (starts relay listener)
-        exploit_params = {
+        # Step 1: Dispatch ESC8 relay to COERCION (starts ntlmrelayx_to_adcs listener)
+        # NOTE: ntlmrelayx is on the coercion pod, not privesc
+        relay_payload = {
+            "task_type": "esc8_relay",
             "ca_host": ca_host,
             "ca_name": ca_name or ca_host,
             "dc_ip": dc_ip,
@@ -750,22 +878,24 @@ class OrchestratorTools(Toolset):
             "username": username,
             "password": password,
             "attacker_ip": attacker_ip,
-            "coerce_target": dc_ip,  # Tell privesc where to expect coerced auth from
+            "note": f"ESC8 relay - start ntlmrelayx_to_adcs targeting {ca_host}",
         }
 
-        privesc_task_id = await self.dispatcher.request_exploit(
-            vuln_type="ADCS_ESC8",
-            vuln_id=f"ADCS_ESC8_{ca_host}",
-            target=ca_host,
+        relay_task_id = await self.dispatcher.request_coercion(
             source_agent=self._agent_name,
-            params=exploit_params,
+            interface="",  # Auto-detect on worker
+            techniques=["ntlmrelayx_to_adcs"],
+            duration=120,  # Relay needs to stay up for coercion
+            payload_override=relay_payload,
         )
 
-        if privesc_task_id:
-            results.append(f"✓ Relay listener task dispatched to PRIVESC: {privesc_task_id}")
-            logger.info(f"ESC8 relay task {privesc_task_id} dispatched to privesc")
+        if relay_task_id:
+            results.append(f"✓ Relay listener task dispatched to COERCION: {relay_task_id}")
+            logger.info(f"ESC8 relay task {relay_task_id} dispatched to coercion")
         else:
-            results.append("✗ Failed to dispatch relay listener - no privesc agent available")
+            results.append(
+                "✗ Relay listener task dropped (throttled or low priority in current phase)"
+            )
 
         # Step 2: Dispatch petitpotam to COERCION
         # Use request_coercion with petitpotam-specific parameters
@@ -791,15 +921,15 @@ class OrchestratorTools(Toolset):
             results.append(f"✓ PetitPotam coercion task dispatched to COERCION: {coercion_task_id}")
             logger.info(f"ESC8 coercion task {coercion_task_id} dispatched to coercion")
         else:
-            results.append("✗ Failed to dispatch coercion - no coercion agent available")
+            results.append("✗ Coercion task dropped (throttled or low priority in current phase)")
 
         # Provide next steps
         results.append("")
         results.append("📋 ESC8 Attack Workflow:")
-        results.append("  1. PRIVESC will start certipy relay listener")
-        results.append("  2. COERCION will run petitpotam against DC")
+        results.append("  1. COERCION starts ntlmrelayx_to_adcs relay listener")
+        results.append("  2. COERCION runs petitpotam to coerce DC")
         results.append("  3. DC authenticates to relay, capturing certificate")
-        results.append("  4. PRIVESC uses certipy_auth with captured cert for NTLM hash")
+        results.append("  4. Use certipy_auth with captured cert for NTLM hash")
         results.append("")
         results.append("→ Monitor with get_pending_tasks()")
         results.append("→ Check results with get_all_hashes() after completion")
@@ -970,9 +1100,10 @@ class OrchestratorTools(Toolset):
         Get all hashes discovered by any agent.
 
         Useful for tracking which hashes need cracking.
+        Note: Background automation handles hash cracking automatically.
 
         Returns:
-            Formatted list of discovered hashes
+            Formatted list of discovered hashes with full hash values
         """
         hashes = self.shared_state.all_hashes
 
@@ -985,13 +1116,64 @@ class OrchestratorTools(Toolset):
 
         for h in hashes:
             status = "✓ CRACKED" if h.cracked_password else "⏳ pending"
-            lines.append(f"  • {h.domain}\\{h.username}: {h.hash_type} [{status}]")
+            lines.append(f"  • {h.domain}\\{h.username} ({h.hash_type}) [{status}]")
+            lines.append(f"    hash_value: {h.hash_value}")
             if h.cracked_password:
+                lines.append(f"    cracked: {h.cracked_password}")
                 cracked += 1
             else:
                 uncracked += 1
 
         lines.append(f"\nSummary: {cracked} cracked, {uncracked} pending")
+        lines.append("\nNote: Background automation handles cracking automatically.")
+        return "\n".join(lines)
+
+    @dn.tool_method
+    def get_hash_value(self, username: str, domain: str, hash_type: str = "") -> str:
+        """
+        Get the full hash value for a specific user from state.
+
+        Useful when you need the actual hash string for manual operations.
+
+        Args:
+            username: The username to look up
+            domain: The domain to look up
+            hash_type: Optional hash type filter (NTLM, Kerberoast, AS-REP)
+
+        Returns:
+            The full hash value or error message
+        """
+        matches = []
+        for h in self.shared_state.all_hashes:
+            h_domain = (h.domain or "").lower()
+            h_user = (h.username or "").lower()
+            if h_user == username.lower() and h_domain == domain.lower():
+                if hash_type:
+                    h_type = (h.hash_type or "").lower().replace("-", "").replace("_", "")
+                    filter_type = hash_type.lower().replace("-", "").replace("_", "")
+                    if filter_type not in h_type and h_type not in filter_type:
+                        continue
+                matches.append(h)
+
+        if not matches:
+            return f"✗ No hash found for {domain}\\{username}" + (
+                f" with type {hash_type}" if hash_type else ""
+            )
+
+        if len(matches) == 1:
+            h = matches[0]
+            result = f"Hash for {h.domain}\\{h.username} ({h.hash_type}):\n{h.hash_value}"
+            if h.cracked_password:
+                result += f"\n\nCracked password: {h.cracked_password}"
+            return result
+
+        # Multiple matches - return all
+        lines = [f"Found {len(matches)} hashes for {domain}\\{username}:"]
+        for h in matches:
+            lines.append(f"\n{h.hash_type}:")
+            lines.append(h.hash_value)
+            if h.cracked_password:
+                lines.append(f"  Cracked: {h.cracked_password}")
         return "\n".join(lines)
 
     @dn.tool_method
@@ -1194,7 +1376,7 @@ class OrchestratorTools(Toolset):
 
         if added:
             return f"✓ Credential broadcast to all agents: {domain}\\{username}"
-        return f"[i] Credential already known: {domain}\\{username}"
+        return f"Credential already known: {domain}\\{username}"
 
     @dn.tool_method
     async def announce_domain_admin(
@@ -1423,7 +1605,41 @@ class OrchestratorTools(Toolset):
 
         if added:
             return f"✓ Host registered: {hostname or ip} ({os})"
-        return f"[i] Host already known: {hostname or ip}"
+        return f"Host already known: {hostname or ip}"
+
+    @dn.tool_method
+    async def retrieve_task_output(self, task_id: str) -> str:
+        """
+        Retrieve full output for a task that was offloaded to Redis.
+
+        When tool outputs are very large (>5000 chars), they are automatically
+        offloaded to Redis to save context space. Use this tool to retrieve
+        the full output when you need to examine details.
+
+        Look for messages containing "[Full output stored:" to identify
+        offloaded outputs.
+
+        Args:
+            task_id: The task ID to retrieve output for
+
+        Returns:
+            Full task output or error message
+
+        Example:
+            >>> retrieve_task_output(task_id="recon-abc123")
+        """
+        from ares.core.context_manager import retrieve_offloaded_output
+
+        redis = self.dispatcher._redis_client
+        if redis is None:
+            return "✗ Redis not available - output retrieval requires Redis connection"
+
+        operation_id = self.shared_state.operation_id
+        output = await retrieve_offloaded_output(redis, operation_id, task_id)
+
+        if output:
+            return f"Full output for task {task_id}:\n\n{output}"
+        return f"✗ No offloaded output found for task {task_id}"
 
 
 class CrackerCallbackTools(Toolset):
@@ -1469,11 +1685,26 @@ class CrackerCallbackTools(Toolset):
         """
         from ares.core.models import Credential
 
+        # Find the parent hash to link for attack chain
+        parent_hash_id = None
+        parent_attack_step = 0
+        normalized_domain = domain.lower().strip()
+        normalized_user = username.lower().strip()
+        for h in self.state.all_hashes:
+            if h.hash_value == original_hash or (
+                h.username.lower() == normalized_user and h.domain.lower() == normalized_domain
+            ):
+                parent_hash_id = h.id
+                parent_attack_step = h.attack_step
+                break
+
         cred = Credential(
             username=username,
             password=password,
             domain=domain,
             source=f"cracked:{method}",
+            parent_id=parent_hash_id,
+            attack_step=parent_attack_step + 1 if parent_hash_id else 0,
         )
 
         await self.dispatcher.publish_credential(cred, self._agent_name)

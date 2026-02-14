@@ -23,7 +23,12 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from loguru import logger
 
-from ares.core.config import get_redis_url
+from ares.core.config import (
+    get_agent_task_timeout,
+    get_rate_limit_backoff_delays,
+    get_rate_limit_max_retries,
+    get_redis_url,
+)
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.exceptions import AuthenticationError, ConfigurationError, CriticalWorkerError
 from ares.core.factories.red_agents import create_agent_info, create_specialized_agent
@@ -40,11 +45,13 @@ from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue, TaskMessage
 
 # Import from split modules
+from ares.core.worker.cleanup import close_litellm_clients
 from ares.core.worker.operations import (
     discover_active_operation,
     get_active_operation_pointer,
     get_operation_model,
     get_operation_model_overrides,
+    is_operation_completed,
 )
 from ares.core.worker.prompts import (
     TASK_PROMPTS,
@@ -52,16 +59,76 @@ from ares.core.worker.prompts import (
     generate_prompt_from_task,
 )
 from ares.tools.red import CrackerCallbackTools, CrackingTools, LateralCallbackTools
+from ares.tools.red.common import clear_credential_context, set_credential_context
 
 if TYPE_CHECKING:
     from dreadnode.agent import Agent
 
 
-# Rate limit retry configuration
-# Short delays because TPM window resets every 60s; with max_concurrent_tasks=1
-# we only need to wait for the window to roll over
-RATE_LIMIT_BACKOFF_DELAYS = [5.0, 10.0, 20.0, 40.0, 60.0, 60.0]  # 6 retries with short waits
-RATE_LIMIT_MAX_RETRIES = len(RATE_LIMIT_BACKOFF_DELAYS)
+def _update_etc_hosts(hosts_list: list, written_ips: set[str], agent_name: str) -> set[str]:
+    """Update /etc/hosts with discovered hosts for DNS resolution.
+
+    Adds entries for hosts with both IP and hostname to /etc/hosts, enabling
+    AD hostname resolution without relying on DNS. Entries include both
+    FQDN and short hostname aliases on a single line.
+
+    For domain controllers, also adds the bare domain name as an alias to enable
+    Kerberos realm resolution (e.g., "192.168.58.10  dc01.contoso.local dc01 contoso.local").
+
+    Args:
+        hosts_list: List of Host objects from shared state
+        written_ips: Set of IPs already written (to avoid duplicates)
+        agent_name: Agent name for logging
+
+    Returns:
+        Updated set of written IPs
+    """
+    new_entries: list[str] = []
+
+    for host in hosts_list:
+        if not host.ip or not host.hostname:
+            continue
+        if host.ip in written_ips:
+            continue
+
+        # Build entry with all aliases on one line:
+        # DC: "192.168.58.10  dc01.contoso.local dc01 contoso.local"
+        # Non-DC: "192.168.58.22  ws01.contoso.local ws01"
+        hostname = host.hostname.lower()
+        parts = hostname.split(".")
+        short_name = parts[0] if parts else hostname
+
+        # Start with FQDN and short name
+        aliases = [hostname]
+        if short_name != hostname:
+            aliases.append(short_name)
+
+        # For domain controllers, add bare domain as alias for Kerberos realm resolution
+        if host.is_dc and len(parts) >= 2:
+            domain = ".".join(parts[1:])
+            if domain:
+                aliases.append(domain)
+
+        entry = f"{host.ip}  {' '.join(aliases)}"
+        new_entries.append(entry)
+        written_ips.add(host.ip)
+
+    if new_entries:
+        try:
+            # Append new entries to /etc/hosts
+            with open("/etc/hosts", "a") as f:
+                f.write(f"\n# Ares discovered hosts ({agent_name})\n")
+                for entry in new_entries:
+                    f.write(f"{entry}\n")
+            logger.info(f"[{agent_name}] Updated /etc/hosts with {len(new_entries)} entries")
+            for entry in new_entries:
+                logger.debug(f"[{agent_name}] Added hosts entry: {entry}")
+        except PermissionError:
+            logger.warning(f"[{agent_name}] Cannot update /etc/hosts: permission denied")
+        except OSError as e:
+            logger.warning(f"[{agent_name}] Cannot update /etc/hosts: {e}")
+
+    return written_ips
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -175,6 +242,8 @@ class RedisWorkerAgent:
         # Threaded state subscriber for real-time pub/sub updates
         self._state_subscriber_thread: threading.Thread | None = None
         self._state_subscriber_stop_event = threading.Event()
+        # Track hosts written to /etc/hosts to avoid duplicates
+        self._hosts_written_to_etc: set[str] = set()
 
     def _run_agent_sync(self, prompt: str) -> Any:
         """Run the async agent in a dedicated event loop (thread-safe helper)."""
@@ -259,6 +328,21 @@ class RedisWorkerAgent:
                     "is_admin": u.is_admin,
                 }
                 for u in self.shared_state.all_users
+            ]
+
+        # Serialize discovered vulnerabilities (delegation, ADCS, etc.)
+        if self.shared_state.discovered_vulnerabilities:
+            discoveries["discovered_vulnerabilities"] = [
+                {
+                    "vuln_id": v.vuln_id,
+                    "vuln_type": v.vuln_type,
+                    "target": v.target,
+                    "discovered_by": v.discovered_by,
+                    "details": v.details,
+                    "priority": v.priority,
+                    "recommended_agent": v.recommended_agent,
+                }
+                for v in self.shared_state.discovered_vulnerabilities.values()
             ]
 
         return discoveries
@@ -431,6 +515,25 @@ class RedisWorkerAgent:
             f"(type={task.task_type}, payload={payload_snapshot})"
         )
 
+        # Set credential context from task payload for attack chain tracking
+        # This allows tools (e.g., secretsdump) to set parent_id on discoveries
+        if payload_snapshot:
+            parent_cred_id = payload_snapshot.get("parent_credential_id")
+            parent_step = payload_snapshot.get("parent_attack_step", 0)
+            source_user = payload_snapshot.get("username", "")
+            source_domain = payload_snapshot.get("domain", "")
+            if parent_cred_id or source_user:
+                set_credential_context(
+                    parent_id=parent_cred_id,
+                    attack_step=parent_step,
+                    source_username=source_user,
+                    source_domain=source_domain,
+                )
+                logger.debug(
+                    f"Credential context set: parent_id={parent_cred_id}, "
+                    f"step={parent_step}, user={source_domain}\\{source_user}"
+                )
+
         try:
             await self._refresh_shared_state()
             # Handle "command" tasks directly via subprocess (no agent needed)
@@ -456,59 +559,79 @@ class RedisWorkerAgent:
                 )
                 return
 
-            # Run agent with rate limit retry
+            # Run agent with rate limit retry and task-level timeout
             # Note: Rate limit errors can appear as:
             # 1. Exceptions raised during _run_agent()
             # 2. Errors returned in result.error or result.last_error (dreadnode SDK catches them)
             result = None
             last_rate_limit_error: str | Exception | None = None
-            for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
-                try:
-                    attempt_msg = (
-                        f" (retry {attempt}/{RATE_LIMIT_MAX_RETRIES})" if attempt > 0 else ""
-                    )
-                    logger.info(
-                        f"[{self.agent_name}] Running agent for task {task.task_id}{attempt_msg}"
-                    )
-                    result = await self._run_agent(prompt)
-
-                    # Check if rate limit error was returned in result (SDK catches exceptions)
-                    result_error = getattr(result, "error", None) or getattr(
-                        result, "last_error", None
-                    )
-                    if result_error and _is_rate_limit_error(Exception(str(result_error))):
-                        if attempt < RATE_LIMIT_MAX_RETRIES:
-                            delay = RATE_LIMIT_BACKOFF_DELAYS[attempt]
-                            logger.warning(
-                                f"[{self.agent_name}] ⏳ Rate limit in result for task {task.task_id}, "
-                                f"backing off {delay}s (attempt {attempt + 1}/{RATE_LIMIT_MAX_RETRIES}): "
-                                f"{result_error}"
+            agent_timeout = get_agent_task_timeout()
+            rate_limit_delays = get_rate_limit_backoff_delays()
+            rate_limit_max_retries = get_rate_limit_max_retries()
+            try:
+                async with asyncio.timeout(agent_timeout):
+                    for attempt in range(rate_limit_max_retries + 1):
+                        try:
+                            attempt_msg = (
+                                f" (retry {attempt}/{rate_limit_max_retries})"
+                                if attempt > 0
+                                else ""
                             )
-                            last_rate_limit_error = str(result_error)
-                            result = None  # Clear result to retry
-                            await asyncio.sleep(delay)
-                            continue
-                        # Out of retries - will be handled below
-                        last_rate_limit_error = str(result_error)
-                        result = None
-                        break
+                            logger.info(
+                                f"[{self.agent_name}] Running agent for task {task.task_id}{attempt_msg}"
+                            )
+                            result = await self._run_agent(prompt)
 
-                    if attempt > 0:
-                        logger.success(
-                            f"[{self.agent_name}] Task {task.task_id} succeeded after {attempt} retries"
-                        )
-                    break  # Success, exit retry loop
-                except Exception as e:
-                    if _is_rate_limit_error(e) and attempt < RATE_LIMIT_MAX_RETRIES:
-                        delay = RATE_LIMIT_BACKOFF_DELAYS[attempt]
-                        logger.warning(
-                            f"[{self.agent_name}] ⏳ Rate limit exception for task {task.task_id}, "
-                            f"backing off {delay}s (attempt {attempt + 1}/{RATE_LIMIT_MAX_RETRIES}): {e}"
-                        )
-                        last_rate_limit_error = e
-                        await asyncio.sleep(delay)
-                        continue
-                    raise  # Re-raise if not rate limit or out of retries
+                            # Check if rate limit error was returned in result (SDK catches exceptions)
+                            result_error = getattr(result, "error", None) or getattr(
+                                result, "last_error", None
+                            )
+                            if result_error and _is_rate_limit_error(Exception(str(result_error))):
+                                if attempt < rate_limit_max_retries:
+                                    delay = rate_limit_delays[attempt]
+                                    logger.warning(
+                                        f"[{self.agent_name}] ⏳ Rate limit in result for task {task.task_id}, "
+                                        f"backing off {delay}s (attempt {attempt + 1}/{rate_limit_max_retries}): "
+                                        f"{result_error}"
+                                    )
+                                    last_rate_limit_error = str(result_error)
+                                    result = None  # Clear result to retry
+                                    await asyncio.sleep(delay)
+                                    continue
+                                # Out of retries - will be handled below
+                                last_rate_limit_error = str(result_error)
+                                result = None
+                                break
+
+                            if attempt > 0:
+                                logger.success(
+                                    f"[{self.agent_name}] Task {task.task_id} succeeded after {attempt} retries"
+                                )
+                            break  # Success, exit retry loop
+                        except Exception as e:
+                            if _is_rate_limit_error(e) and attempt < rate_limit_max_retries:
+                                delay = rate_limit_delays[attempt]
+                                logger.warning(
+                                    f"[{self.agent_name}] ⏳ Rate limit exception for task {task.task_id}, "
+                                    f"backing off {delay}s (attempt {attempt + 1}/{rate_limit_max_retries}): {e}"
+                                )
+                                last_rate_limit_error = e
+                                await asyncio.sleep(delay)
+                                continue
+                            raise  # Re-raise if not rate limit or out of retries
+            except TimeoutError:
+                logger.warning(
+                    f"[{self.agent_name}] ⏱️ Task {task.task_id} timed out after "
+                    f"{agent_timeout}s - agent stuck in retry loop"
+                )
+                await self.task_queue.send_result(
+                    task_id=task.task_id,
+                    success=False,
+                    error=f"Task timeout: agent exceeded {agent_timeout}s limit",
+                    worker_pod=self.pod_name,
+                    agent_name=self.agent_name,
+                )
+                return
 
             if result is None:
                 # All retries exhausted due to rate limits
@@ -739,6 +862,8 @@ class RedisWorkerAgent:
                 logger.warning(f"[{self.agent_name}] Failed to record task status: {status_error}")
         finally:
             self._current_task = None
+            # Clear credential context to prevent leakage between tasks
+            clear_credential_context()
 
     async def _refresh_shared_state(self) -> None:
         if not self.redis_url or not self.operation_id:
@@ -765,6 +890,10 @@ class RedisWorkerAgent:
                 f"{len(fresh.all_hosts)} hosts"
             )
             self.shared_state = fresh
+            # Update /etc/hosts with any hosts present in initial state
+            self._hosts_written_to_etc = _update_etc_hosts(
+                fresh.all_hosts, self._hosts_written_to_etc, self.agent_name
+            )
             return
 
         # Track counts before merge
@@ -822,7 +951,7 @@ class RedisWorkerAgent:
         for hash_obj in local_hashes:
             current.add_hash(hash_obj, self.agent_name)
         for user in local_users:
-            current.add_user(user.username, user.domain)
+            current.add_user(user.username, user.domain, user.source)
         for weakness in local_weaknesses:
             if weakness not in current.all_weaknesses:
                 current.all_weaknesses.append(weakness)
@@ -854,6 +983,11 @@ class RedisWorkerAgent:
                 f"hosts {old_hosts}->{new_hosts}, "
                 f"shares {old_shares}->{new_shares}"
             )
+
+        # Update /etc/hosts with newly discovered hosts for DNS resolution
+        self._hosts_written_to_etc = _update_etc_hosts(
+            current.all_hosts, self._hosts_written_to_etc, self.agent_name
+        )
 
     async def _execute_crack_task(self, task: TaskMessage) -> None:
         payload = task.payload or {}
@@ -1034,6 +1168,14 @@ class RedisWorkerAgent:
         """Return True if a switch is requested and the worker should exit."""
         if not self.redis_url or not self.operation_id:
             return False
+
+        # Check if operation has completed
+        if await is_operation_completed(self.redis_url, self.operation_id):
+            logger.info(f"Operation {self.operation_id} has completed; shutting down worker")
+            self._running = False
+            return True
+
+        # Check if active pointer switched to different operation
         active_op = await get_active_operation_pointer(
             self.redis_url, max_operation_age=self.max_operation_age
         )
@@ -1681,6 +1823,14 @@ class WorkerAgent:
         """Return True if a switch is requested and the worker should exit."""
         if not self.redis_url or not self.operation_id:
             return False
+
+        # Check if operation has completed
+        if await is_operation_completed(self.redis_url, self.operation_id):
+            logger.info(f"Operation {self.operation_id} has completed; shutting down worker")
+            self._running = False
+            return True
+
+        # Check if active pointer switched to different operation
         active_op = await get_active_operation_pointer(
             self.redis_url, max_operation_age=self.max_operation_age
         )
@@ -1910,6 +2060,11 @@ async def run_worker(  # noqa: PLR0912
         discovery_timeout: Max seconds to wait for operation discovery (default: None = wait forever).
         use_redis_queue: If True, poll Redis queue for tasks (Kubernetes mode).
     """
+    # Apply rigging patches for case-insensitive tool parameters
+    from ares.core.rigging_patches import apply as apply_rigging_patches
+
+    apply_rigging_patches()
+
     configure_litellm_env()
 
     # Resolve config defaults
@@ -1997,7 +2152,8 @@ async def run_worker(  # noqa: PLR0912
             logger.info("Worker connected to Redis task queue")
 
         # Create dispatcher for state management and fallback messaging
-        dispatcher = RedTeamDispatcher(redis_url=redis_url)
+        # Workers don't need result consumer (they send results, not consume them)
+        dispatcher = RedTeamDispatcher(redis_url=redis_url, is_orchestrator=False)
         await dispatcher.start(operation_id)
 
         # Try to recover existing state
@@ -2073,6 +2229,7 @@ async def run_worker(  # noqa: PLR0912
             if task_queue:
                 await task_queue.disconnect()
             await dispatcher.stop()
+            await close_litellm_clients()
             logger.info(f"Worker {agent_info.name} shutdown complete")
 
         if pointer_switched and discover_operation:

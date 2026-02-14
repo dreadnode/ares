@@ -57,17 +57,39 @@ async def test_create_multi_agent_ensemble_uses_env_models(monkeypatch):
     assert mock_create.call_args_list[1].kwargs["model"] == "worker-model"
 
 
-def test_create_specialized_agent_uses_set_state_when_shared_state_missing(monkeypatch):
-    created: dict[str, MagicMock] = {}
+def test_create_specialized_agent_uses_set_state(monkeypatch):
+    """Test that create_specialized_agent calls set_state on all toolsets."""
+    created_instances: list[MagicMock] = []
 
     class DummyToolset:
         def __init__(self) -> None:
             self.set_state = MagicMock()
-            created["instance"] = self
+            self.set_dispatcher = MagicMock()
+            created_instances.append(self)
 
+        def get_tools(self, *, variant=None):
+            # Return a mock tool to ensure toolset is included
+            mock_tool = MagicMock()
+            mock_tool.name = "nmap_scan"  # Match a capability
+            return [mock_tool]
+
+    # Mock ALL_TOOLSETS and UNIVERSAL_TOOLSETS to use our dummy
     monkeypatch.setattr(
-        "ares.core.factories.red_agents.ROLE_TOOLSETS",
-        {AgentRole.RECON: [DummyToolset]},
+        "ares.core.factories.red_agents.ALL_TOOLSETS",
+        [DummyToolset],
+    )
+    monkeypatch.setattr(
+        "ares.core.factories.red_agents.UNIVERSAL_TOOLSETS",
+        [],
+    )
+    monkeypatch.setattr(
+        "ares.core.factories.red_agents.ROLE_CALLBACK_TOOLS",
+        {},
+    )
+    # Mock get_enabled_tools to return our tool name
+    monkeypatch.setattr(
+        "ares.core.factories.red_agents.get_enabled_tools",
+        lambda _caps: {"nmap_scan"},
     )
     monkeypatch.setattr(
         "ares.core.factories.red_agents.load_agent_instructions",
@@ -91,7 +113,9 @@ def test_create_specialized_agent_uses_set_state_when_shared_state_missing(monke
         dispatcher=dispatcher,
     )
 
-    created["instance"].set_state.assert_called_once_with(shared_state)
+    # Verify set_state was called on at least one toolset instance
+    assert len(created_instances) > 0, "No toolset instances created"
+    created_instances[0].set_state.assert_called_once_with(shared_state)
 
 
 class TestCapabilitiesFromConfig:
@@ -194,23 +218,28 @@ class TestCapabilitiesFromConfig:
 
         clear_config_cache()  # Ensure fresh load
 
-        # Test that privesc has the new tools we added
+        # Test that privesc has the configured tools
         privesc_config = get_agent_config("privesc")
-        assert "sweetpotato" in privesc_config.capabilities
-        assert "sharpgpoabuse" in privesc_config.capabilities
         assert "certipy" in privesc_config.capabilities
+        assert "impacket-getST" in privesc_config.capabilities  # getST for S4U attacks
 
-        # Test that recon has the impacket tools
+        # Test that recon has enumeration tools
         recon_config = get_agent_config("recon")
-        assert "impacket-getnpusers" in recon_config.capabilities
-        assert "impacket-secretsdump" in recon_config.capabilities
+        assert "nmap" in recon_config.capabilities
+        assert "bloodhound-python" in recon_config.capabilities
+        assert "netexec" in recon_config.capabilities
 
-        # Test that credential_access has rpcclient
+        # Test that credential_access has credential harvesting tools
         cred_config = get_agent_config("credential_access")
         assert "rpcclient" in cred_config.capabilities
-        assert "netexec" in cred_config.capabilities
-        assert "ldapsearch" in cred_config.capabilities
         assert "smbclient" in cred_config.capabilities
+        assert "impacket-secretsdump" in cred_config.capabilities
+
+        # Test that lateral has movement tools
+        lateral_config = get_agent_config("lateral")
+        assert "evil-winrm" in lateral_config.capabilities
+        assert "impacket-psexec" in lateral_config.capabilities
+        assert "impacket-secretsdump" in lateral_config.capabilities
 
     def test_template_renders_capabilities_from_config(self):
         """Integration test: verify templates render capabilities from config."""
@@ -282,7 +311,7 @@ class TestPrivescTrackExploitationHook:
 Certificate Authorities
   0
     CA Name                             : corp-DC01-CA
-    DNS Name                            : dc01.corp.local
+    DNS Name                            : dc01.contoso.local
     Certificate Subject                 : CN=corp-DC01-CA
     [!] Vulnerabilities
       ESC8                              : Web Enrollment is vulnerable
@@ -314,8 +343,8 @@ Certificate Authorities
 
         # Simulate successful certipy_auth output
         certipy_auth_output = """
-[*] Using principal: Administrator@corp.local
-[*] Got hash for 'Administrator@corp.local': aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0
+[*] Using principal: Administrator@contoso.local
+[*] Got hash for 'Administrator@contoso.local': aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0
         """
 
         event = self._make_tool_end_event("certipy_auth", certipy_auth_output)
@@ -425,3 +454,92 @@ class TestRoleHooks:
 
         # PRIVESC should have multiple hooks (exploitation tracking + unstall)
         assert len(hooks) >= 2, "PRIVESC should have exploitation tracking and unstall hooks"
+
+    def test_orchestrator_has_summarize_when_long_hook(self):
+        """Test that ORCHESTRATOR role includes summarize_when_long hook for context management."""
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+
+        # ORCHESTRATOR should have multiple hooks including summarize_when_long
+        # (log_tool_usage, log_tool_result, summarize_when_long, check_domain_admin, unstall)
+        assert len(hooks) >= 4, "ORCHESTRATOR should have summarize_when_long and other hooks"
+
+    def test_all_roles_get_summarize_hook(self):
+        """Test that ALL roles get summarize_when_long hook for context management."""
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        all_roles = [
+            AgentRole.ORCHESTRATOR,
+            AgentRole.RECON,
+            AgentRole.CREDENTIAL_ACCESS,
+            AgentRole.CRACKER,
+            AgentRole.ACL,
+            AgentRole.PRIVESC,
+            AgentRole.LATERAL,
+            AgentRole.COERCION,
+        ]
+
+        for role in all_roles:
+            hooks = create_role_hooks(role, dispatcher, shared_state)
+            # All roles should have at least 3 hooks:
+            # log_tool_usage, log_tool_result, context_aware_summarize
+            assert len(hooks) >= 3, (
+                f"Role {role} should have at least 3 hooks (including summarize_when_long)"
+            )
+
+        # Orchestrator should have MORE hooks than workers due to domain admin checking
+        orchestrator_hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+        worker_hooks = create_role_hooks(AgentRole.RECON, dispatcher, shared_state)
+        assert len(orchestrator_hooks) > len(worker_hooks), (
+            "ORCHESTRATOR should have additional domain admin hooks"
+        )
+
+
+class TestContextManagementHooks:
+    """Tests for context management hooks in red_agents."""
+
+    def test_summarize_when_long_uses_config_values(self, monkeypatch):
+        """Test that summarize_when_long hook uses config values."""
+        # Mock the config functions
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_max_context_tokens",
+            lambda: 50000,
+        )
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_min_messages_to_keep",
+            lambda: 5,
+        )
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        # Create hooks - this should use our mocked config values
+        hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+
+        # Verify hooks were created (we can't easily verify the exact values
+        # passed to summarize_when_long, but we can verify hooks exist)
+        assert len(hooks) > 0
+
+    def test_get_max_context_tokens_used_in_hooks(self):
+        """Test that get_max_context_tokens is imported and available."""
+        from ares.core.factories.red_agents import get_max_context_tokens
+
+        # Should return a reasonable default (100k for ~85% of 128k window)
+        result = get_max_context_tokens()
+        assert result >= 50000  # Should be at least 50k tokens
+        assert result <= 200000  # But not more than 200k
+
+    def test_get_min_messages_to_keep_used_in_hooks(self):
+        """Test that get_min_messages_to_keep is imported and available."""
+        from ares.core.factories.red_agents import get_min_messages_to_keep
+
+        # Should return a reasonable default
+        result = get_min_messages_to_keep()
+        assert result >= 5  # At least 5 messages
+        assert result <= 50  # But not more than 50

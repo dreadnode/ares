@@ -273,6 +273,10 @@ class LocalExecutor:
         # Use shlex.join for proper shell quoting (handles parentheses, spaces, etc.)
         command_str = shlex.join(command) if isinstance(command, list) else command
 
+        # Wrap in bash login shell to ensure PATH includes ~/.local/bin, pipx, etc.
+        # Without this, /bin/sh won't find tools like netexec installed via pipx
+        wrapped_cmd = f"bash -lc {shlex.quote(command_str)}"
+
         # Log full command for debugging (truncate very long ones like hashes)
         if len(command_str) > 500:
             logger.debug(f"Executing locally: {command_str[:200]}...{command_str[-100:]}")
@@ -281,7 +285,7 @@ class LocalExecutor:
 
         try:
             result = subprocess.run(  # noqa: S602  # nosec B602
-                command_str,
+                wrapped_cmd,
                 shell=True,  # nosec B602
                 capture_output=True,
                 text=True,

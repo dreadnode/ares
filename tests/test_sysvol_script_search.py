@@ -92,7 +92,7 @@ class TestSysvolScriptSearch:
 
         with patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run:
 
-            def side_effect(cmd, timeout_seconds=300):
+            def side_effect(cmd, timeout_seconds=300, target_role=None):
                 cmd_str = " ".join(cmd)
                 if "ls" in cmd_str:
                     return ("login.bat", "", 0)
@@ -126,7 +126,7 @@ class TestSysvolScriptSearch:
 
         with patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run:
 
-            def side_effect(cmd, timeout_seconds=300):
+            def side_effect(cmd, timeout_seconds=300, target_role=None):
                 cmd_str = " ".join(cmd)
                 if "ls" in cmd_str and "*.bat" in cmd_str:
                     return ("mount.bat", "", 0)
@@ -181,7 +181,7 @@ class TestSysvolScriptSearch:
 
         with patch("ares.tools.red.credential_discovery.pilfering.run_tool") as mock_run:
 
-            def side_effect(cmd, timeout_seconds=300):
+            def side_effect(cmd, timeout_seconds=300, target_role=None):
                 cmd_str = " ".join(cmd)
                 for ext in ["*.bat", "*.cmd", "*.ps1", "*.vbs", "*.wsf", "*.inf"]:
                     if ext in cmd_str:
@@ -278,7 +278,7 @@ class TestSysvolScriptSearchPatterns:
         ):
             mock_store.return_value = True
 
-            def side_effect(cmd, timeout_seconds=300):
+            def side_effect(cmd, timeout_seconds=300, target_role=None):
                 cmd_str = " ".join(cmd)
                 if "ls" in cmd_str and "*.ps1" in cmd_str:
                     return ("script.ps1", "", 0)
@@ -320,7 +320,7 @@ class TestSysvolScriptSearchPatterns:
         ):
             mock_store.return_value = True
 
-            def side_effect(cmd, timeout_seconds=300):
+            def side_effect(cmd, timeout_seconds=300, target_role=None):
                 cmd_str = " ".join(cmd)
                 if "ls" in cmd_str and "*.ps1" in cmd_str:
                     return ("script.ps1", "", 0)
@@ -371,7 +371,7 @@ class TestSysvolScriptSearchPatterns:
         ):
             mock_store.return_value = True
 
-            def side_effect(cmd, timeout_seconds=300):
+            def side_effect(cmd, timeout_seconds=300, target_role=None):
                 cmd_str = " ".join(cmd)
                 if "ls" in cmd_str and "*.ps1" in cmd_str:
                     return ("creds.ps1", "", 0)
@@ -415,7 +415,7 @@ class TestSysvolScriptSearchPatterns:
         ):
             mock_store.return_value = True
 
-            def side_effect(cmd, timeout_seconds=300):
+            def side_effect(cmd, timeout_seconds=300, target_role=None):
                 cmd_str = " ".join(cmd)
                 if "ls" in cmd_str and "*.bat" in cmd_str:
                     return ("setup.bat", "", 0)

@@ -212,10 +212,18 @@ class RedisTaskQueue:
         queue_key = self._task_queue_key(target_role)
 
         try:
-            # LPUSH for FIFO (workers use BRPOP from right)
-            await self._client.lpush(queue_key, task.model_dump_json())
-
-            logger.info(f"Task {task_id} submitted to {queue_key}")
+            # Priority-based insertion:
+            # - priority <= 2 (urgent): RPUSH to front of queue (processed first)
+            # - priority > 2 (normal): LPUSH to back of queue (FIFO order)
+            # Workers use BRPOP from right, so RPUSH items are processed immediately.
+            if priority <= 2:
+                await self._client.rpush(queue_key, task.model_dump_json())
+                logger.info(
+                    f"Task {task_id} URGENT (priority={priority}) submitted to front of {queue_key}"
+                )
+            else:
+                await self._client.lpush(queue_key, task.model_dump_json())
+                logger.info(f"Task {task_id} submitted to {queue_key}")
             return task_id
 
         except Exception as e:
@@ -593,6 +601,7 @@ class RedisTaskQueue:
         self,
         operation_id: str,
         ttl_seconds: int = 7200,
+        force: bool = False,
     ) -> bool:
         """
         Acquire exclusive lock for an operation using SETNX.
@@ -600,6 +609,7 @@ class RedisTaskQueue:
         Args:
             operation_id: The operation to lock
             ttl_seconds: Lock expiry time (default: 2 hours)
+            force: If True, forcefully acquire lock (for resume scenarios)
 
         Returns:
             True if lock acquired, False if already held by another process
@@ -608,6 +618,14 @@ class RedisTaskQueue:
             await self.connect()
 
         key = f"{self.LOCK_PREFIX}:{operation_id}"
+
+        if force:
+            # Force acquire: delete existing lock and set new one
+            await self._client.delete(key)
+            await self._client.set(key, "locked", ex=ttl_seconds)
+            logger.info(f"Force-acquired operation lock for {operation_id}")
+            return True
+
         # SETNX-style: only set if not exists
         result = await self._client.set(key, "locked", nx=True, ex=ttl_seconds)
 

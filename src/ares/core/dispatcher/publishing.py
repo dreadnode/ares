@@ -6,6 +6,7 @@ shared state. Includes MSSQL auto-detection and ADCS enumeration support.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -25,6 +26,7 @@ from ares.core.models import (
     Host,
     Share,
     TaskInfo,
+    TimelineEvent,
     VulnerabilityInfo,
 )
 
@@ -52,7 +54,7 @@ class PublishingMixin:
         Returns:
             True if credential was new and added.
         """
-        self._add_user(credential.username, credential.domain)
+        self._add_user(credential.username, credential.domain, source_agent)
         added = self.shared_state.add_credential(credential, source_agent)
 
         if added:
@@ -68,8 +70,73 @@ class PublishingMixin:
                 ),
                 exclude=source_agent,
             )
+            # Add timeline event for credential discovery
+            import uuid
+            from datetime import datetime, timezone
+
+            self.shared_state.operation_timeline.append(
+                TimelineEvent(
+                    id=f"evt-cred-{uuid.uuid4().hex[:8]}",
+                    timestamp=datetime.now(timezone.utc),
+                    source=source_agent,
+                    description=f"Credential discovered: {credential.domain}\\{credential.username} via {credential.source}",
+                    mitre_techniques=["T1078"] if is_admin else ["T1552"],
+                )
+            )
             await self._checkpoint()
             logger.info(f"Credential published: {credential.domain}\\{credential.username}")
+
+            # Immediate delegation check for high-value credentials (cracked hashes)
+            # Cracked Kerberoast/AS-REP hashes may have constrained delegation rights
+            is_cracked = credential.source and (
+                "cracker" in credential.source.lower()
+                or "cracked" in credential.source.lower()
+                or "kerberoast" in credential.source.lower()
+                or "asrep" in credential.source.lower()
+            )
+            if is_cracked and credential.password and credential.domain:
+                cred_key = f"{credential.domain.lower()}:{credential.username.lower()}"
+                if cred_key not in self.shared_state.processed_delegation_creds:
+                    logger.info(
+                        f"🚀 Immediate delegation check for cracked credential: "
+                        f"{credential.domain}\\{credential.username}"
+                    )
+                    try:
+                        task_id = await asyncio.wait_for(
+                            self.request_privesc_enumeration(
+                                source_agent="orchestrator",
+                                domain=credential.domain,
+                                username=credential.username,
+                                password=credential.password,
+                                techniques=["find_delegation"],
+                            ),
+                            timeout=30.0,
+                        )
+                        if task_id:
+                            logger.info(
+                                f"🚀 Immediate delegation task {task_id} dispatched for "
+                                f"{credential.domain}\\{credential.username}"
+                            )
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            f"Timeout dispatching delegation check for {credential.domain}\\{credential.username}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to dispatch immediate delegation check: {e}")
+
+                    # Check for pending constrained delegation vulnerabilities we can now exploit
+                    try:
+                        await asyncio.wait_for(
+                            self._exploit_delegation_with_credential(credential, source_agent),
+                            timeout=30.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            f"Timeout in _exploit_delegation_with_credential for "
+                            f"{credential.domain}\\{credential.username}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error exploiting delegation with credential: {e}")
         else:
             logger.debug(
                 f"Credential not published (duplicate/invalid): {credential.domain}\\{credential.username}"
@@ -108,6 +175,25 @@ class PublishingMixin:
                     priority=priority,
                 ),
                 exclude=source_agent,
+            )
+            # Add timeline event for hash discovery
+            import uuid
+            from datetime import datetime, timezone
+
+            is_critical = hash_obj.username.lower() in ("krbtgt", "administrator")
+            event_desc = (
+                f"Hash discovered: {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type})"
+            )
+            if is_critical:
+                event_desc = f"CRITICAL: {event_desc}"
+            self.shared_state.operation_timeline.append(
+                TimelineEvent(
+                    id=f"evt-hash-{uuid.uuid4().hex[:8]}",
+                    timestamp=datetime.now(timezone.utc),
+                    source=source_agent,
+                    description=event_desc,
+                    mitre_techniques=["T1003"],  # OS Credential Dumping
+                )
             )
             await self._checkpoint()
             logger.info(
@@ -242,10 +328,76 @@ class PublishingMixin:
             details=details,
             discovered_by=source_agent,
         )
-        logger.warning(
+        logger.info(
             f"Auto-queued MSSQL vulnerability for {host.ip} ({host.hostname}) - "
             f"found {len(sql_creds)} potential SQL creds"
         )
+
+        # Proactively dispatch MSSQL impersonation enumeration for each credential
+        # This discovers sa/sysadmin impersonation rights early, triggering priority boost
+        await self._dispatch_mssql_enum(host, sql_creds, source_agent)
+
+    async def _dispatch_mssql_enum(
+        self: RedTeamDispatcher,
+        host: Host,
+        sql_creds: list[dict[str, str]],
+        source_agent: str,
+    ) -> None:
+        """Proactively dispatch MSSQL impersonation enumeration for discovered MSSQL host."""
+        if not self._task_queue:
+            return
+
+        # Track which creds we've already dispatched enum for this host
+        enum_key = f"mssql_enum:{host.ip}"
+        if not hasattr(self, "_mssql_enum_dispatched"):
+            self._mssql_enum_dispatched: set[str] = set()
+
+        # Dispatch enumeration for up to 2 credentials (avoid flooding)
+        dispatched = 0
+        for cred in sql_creds[:2]:
+            cred_key = f"{enum_key}:{cred.get('domain', '')}\\{cred.get('username', '')}"
+            if cred_key in self._mssql_enum_dispatched:
+                continue
+
+            self._mssql_enum_dispatched.add(cred_key)
+
+            payload = {
+                "target": host.ip,
+                "hostname": host.hostname,
+                "username": cred.get("username", ""),
+                "password": cred.get("password", ""),
+                "domain": cred.get("domain", ""),
+                "action": "mssql_enum_impersonation",
+                "note": "Proactive MSSQL impersonation enumeration - check for sa/sysadmin access",
+            }
+
+            task_id = await self._throttled_submit_task(
+                task_type="lateral",  # Uses LateralMovementTools which has mssql_enum_impersonation
+                target_role="lateral",
+                payload=payload,
+                source_agent=source_agent,
+                priority=5,  # Medium-high priority
+            )
+
+            if task_id:
+                task_info = TaskInfo(
+                    task_id=task_id,
+                    task_type="mssql_enum",
+                    assigned_agent="lateral",
+                    params=payload,
+                )
+                self.shared_state.pending_tasks[task_id] = task_info
+                self._redis_task_ids.add(task_id)
+                dispatched += 1
+                logger.info(
+                    f"🔍 Dispatched proactive MSSQL enum for {host.ip} "
+                    f"with {cred.get('domain', '')}\\{cred.get('username', '')}"
+                )
+
+        if dispatched > 0:
+            logger.warning(
+                f"📊 Auto-dispatched {dispatched} MSSQL enumeration task(s) for {host.ip}"
+            )
 
     def _find_sql_credentials(self: RedTeamDispatcher) -> list[dict[str, str]]:
         """
@@ -412,7 +564,7 @@ class PublishingMixin:
             )
 
             queued += 2  # Queued both linked_server and impersonation
-            logger.warning(
+            logger.info(
                 f"Periodic scan: queued MSSQL vulnerabilities (linked_server + impersonation) for "
                 f"{host.ip} ({host.hostname}) with {len(sql_creds)} SQL credentials"
             )
@@ -477,6 +629,10 @@ class PublishingMixin:
         )
 
         dc_ip = self._find_domain_controller_ip(domain)
+
+        # Track attack chain
+        parent_id, parent_step = self._find_credential_id(username, domain, password)
+
         payload = {
             "vuln_type": "adcs_enumerate",
             "vuln_id": f"adcs_enumerate_{target_ip}_{hash(f'{domain}{username}') % 10000:04d}",
@@ -486,6 +642,8 @@ class PublishingMixin:
             "username": username,
             "password": password,
             "note": "Auto-detected ADCS server (CertEnroll share). Run certipy_find to enumerate ESC1-ESC15 vulnerabilities.",
+            "parent_credential_id": parent_id,
+            "parent_attack_step": parent_step,
         }
 
         # Use Redis task queue if available (Kubernetes multi-pod mode)
@@ -495,6 +653,7 @@ class PublishingMixin:
                 target_role="privesc",
                 payload=payload,
                 source_agent=source_agent,
+                priority=1,  # Exploit tasks get highest priority
             )
             if not task_id:
                 return ""
@@ -573,12 +732,71 @@ class PublishingMixin:
                 exclude=source_agent,
             )
             await self._checkpoint()
-            logger.warning(f"Vulnerability published: {vuln.vuln_type} on {vuln.target}")
+            logger.info(f"Vulnerability published: {vuln.vuln_type} on {vuln.target}")
 
         return added
 
+    async def _exploit_delegation_with_credential(
+        self: RedTeamDispatcher,
+        credential: Credential,
+        source_agent: str,
+    ) -> None:
+        """Check for pending delegation vulnerabilities matching this credential and exploit.
 
-# Import asyncio at module level for wait_for_credential_access_signal
-import asyncio  # noqa: E402
+        When a credential is cracked, check if we have a pending constrained/unconstrained
+        delegation vulnerability for this account and dispatch the actual exploit.
+        """
+        cred_user = credential.username.lower().rstrip("$")
+
+        for vuln_id, vuln in list(self.shared_state.discovered_vulnerabilities.items()):
+            if vuln.vuln_type not in ("constrained_delegation", "unconstrained_delegation"):
+                continue
+
+            # Check if this vulnerability is for the same account
+            vuln_account = vuln.details.get("account_name", vuln.target).lower().rstrip("$")
+            if vuln_account != cred_user:
+                continue
+
+            # Check if already exploited (vuln_id tracked in exploited_vulnerabilities set)
+            if vuln_id in self.shared_state.exploited_vulnerabilities:
+                continue
+
+            # We have credentials for a delegation vulnerability - exploit it!
+            target_spn = vuln.details.get("target_spn", "")
+            domain = vuln.details.get("domain", credential.domain)
+            dc_ip = vuln.details.get("dc_ip", "")
+
+            if vuln.vuln_type == "constrained_delegation" and target_spn:
+                logger.warning(
+                    f"🚀 Auto-exploiting constrained delegation: {credential.username} -> {target_spn} "
+                    f"(vuln_id: {vuln_id})"
+                )
+                try:
+                    await asyncio.wait_for(
+                        self.request_exploit(
+                            vuln_type="constrained_delegation",
+                            vuln_id=vuln_id,
+                            target=credential.username,
+                            source_agent="auto_delegation",
+                            params={
+                                "account": credential.username,
+                                "account_name": credential.username,
+                                "password": credential.password,
+                                "domain": domain,
+                                "target_spn": target_spn,
+                                "dc_ip": dc_ip,
+                                "impersonate": "Administrator",
+                                "action": "s4u_attack",
+                            },
+                        ),
+                        timeout=30.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        f"Timeout auto-exploiting constrained delegation: {credential.username} -> {target_spn}"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to auto-exploit constrained delegation: {e}")
+
 
 __all__ = ["PublishingMixin"]

@@ -28,14 +28,14 @@ class TestCrackSkipLogic:
             Credential(
                 username="testuser",
                 password="KnownPassword123",  # pragma: allowlist secret
-                domain="domain.local",
+                domain="contoso.local",
                 source="previous_crack",
             )
         )
 
         # This is the logic used in _execute_crack_task
         username = "testuser"
-        domain = "domain.local"
+        domain = "contoso.local"
 
         password_known = False
         known_password = None
@@ -56,13 +56,13 @@ class TestCrackSkipLogic:
             Credential(
                 username="TestUser",  # Different case
                 password="KnownPassword123",  # pragma: allowlist secret
-                domain="DOMAIN.LOCAL",  # Different case
+                domain="CONTOSO.LOCAL",  # Different case
                 source="previous_crack",
             )
         )
 
         username = "testuser"
-        domain = "domain.local"
+        domain = "contoso.local"
 
         password_known = False
         for cred in shared_state.all_credentials:
@@ -80,13 +80,13 @@ class TestCrackSkipLogic:
             Credential(
                 username="otheruser",
                 password="OtherPassword",  # pragma: allowlist secret
-                domain="domain.local",
+                domain="contoso.local",
                 source="spray",
             )
         )
 
         username = "testuser"
-        domain = "domain.local"
+        domain = "contoso.local"
 
         password_known = False
         for cred in shared_state.all_credentials:
@@ -110,7 +110,7 @@ class TestCrackSkipLogic:
         )
 
         username = "testuser"
-        domain = "domain.local"
+        domain = "contoso.local"
 
         password_known = False
         for cred in shared_state.all_credentials:
@@ -128,13 +128,13 @@ class TestCrackSkipLogic:
             Credential(
                 username="testuser",
                 password="",  # Empty password
-                domain="domain.local",
+                domain="contoso.local",
                 source="hash_only",
             )
         )
 
         username = "testuser"
-        domain = "domain.local"
+        domain = "contoso.local"
 
         password_known = False
         for cred in shared_state.all_credentials:
@@ -149,7 +149,7 @@ class TestCrackSkipLogic:
     def test_no_credentials_does_not_match(self, shared_state):
         """Test that empty credentials list doesn't trigger skip."""
         username = "testuser"
-        domain = "domain.local"
+        domain = "contoso.local"
 
         password_known = False
         for cred in shared_state.all_credentials:
@@ -167,7 +167,7 @@ class TestCrackSkipLogic:
             Credential(
                 username="user1",
                 password="Pass1",  # pragma: allowlist secret
-                domain="domain.local",
+                domain="contoso.local",
                 source="spray",
             )
         )
@@ -175,7 +175,7 @@ class TestCrackSkipLogic:
             Credential(
                 username="testuser",
                 password="TargetPassword",  # pragma: allowlist secret
-                domain="domain.local",
+                domain="contoso.local",
                 source="spray",
             )
         )
@@ -183,13 +183,13 @@ class TestCrackSkipLogic:
             Credential(
                 username="user3",
                 password="Pass3",  # pragma: allowlist secret
-                domain="domain.local",
+                domain="contoso.local",
                 source="spray",
             )
         )
 
         username = "testuser"
-        domain = "domain.local"
+        domain = "contoso.local"
 
         password_known = False
         known_password = None

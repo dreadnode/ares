@@ -7,12 +7,16 @@ from task output.
 
 from __future__ import annotations
 
+import asyncio
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from ares.core.config import get_max_output_chars
+from ares.core.context_manager import summarize_task_result
 from ares.core.messages import TaskComplete, TaskFailed
 from ares.core.models import (
     Credential,
@@ -22,6 +26,7 @@ from ares.core.models import (
     TaskResult,
     TaskStatus,
     User,
+    VulnerabilityInfo,
 )
 
 if TYPE_CHECKING:
@@ -108,20 +113,30 @@ class ResultProcessingMixin:
             else:
                 target_label = target_ip
 
+        # Extract parent credential tracking from task params for attack chain
+        parent_credential_id = task_params.get("parent_credential_id")
+        parent_attack_step = task_params.get("parent_attack_step", 0)
+
         # Process discoveries from result dict (even if task failed)
         # Workers serialize discoveries and send them regardless of success/failure
         if isinstance(result, dict):
-            await self._process_discovered_data(result, source_agent, target_label)
+            await self._process_discovered_data(
+                result, source_agent, target_label, parent_credential_id, parent_attack_step
+            )
 
         # Process additional result fields only on success
         if success and isinstance(result, dict):
-            await self._process_success_result_data(result, task_id, source_agent)
+            await self._process_success_result_data(
+                result, task_id, source_agent, parent_credential_id, parent_attack_step
+            )
             output = self._extract_output_from_result(result)
         elif success and isinstance(result, str):
             output = result.strip()
 
         if output:
-            await self._process_output_text(output, source_agent)
+            await self._process_output_text(
+                output, source_agent, parent_credential_id, parent_attack_step
+            )
 
         # Auto-chain lateral movement after successful S4U attack
         if success and task_info.task_type == "exploit":
@@ -132,15 +147,32 @@ class ResultProcessingMixin:
                 source_agent=source_agent,
             )
             if chained > 0:
-                logger.warning(f"🎫 Auto-S4U-chain: dispatched {chained} lateral movement task(s)")
+                logger.info(f"🎫 Auto-S4U-chain: dispatched {chained} lateral movement task(s)")
 
-        # Broadcast completion
+        # Mark vulnerability as exploited when exploit task completes
+        if task_info.task_type == "exploit":
+            vuln_id = task_params.get("vuln_id", "")
+            if vuln_id:
+                result_dict = result if isinstance(result, dict) else {"output": str(result)}
+                await self.mark_vulnerability_exploited(vuln_id, success, result_dict)
+                if success:
+                    logger.info(f"✅ Marked vulnerability {vuln_id} as exploited")
+
+        # Broadcast completion with summarized result to save orchestrator context
+        # Full structured discoveries are already extracted above into shared state
         if success:
+            # Summarize result to prevent context bloat in orchestrator
+            # Keeps structured discoveries, truncates large raw outputs
+            broadcast_result = result
+            if isinstance(result, dict):
+                broadcast_result = summarize_task_result(
+                    result, task_info.task_type, max_output_chars=get_max_output_chars()
+                )
             await self._broadcast(
                 TaskComplete(
                     source_agent=source_agent,
                     task_id=task_id,
-                    result={"task_type": task_info.task_type, "data": result},
+                    result={"task_type": task_info.task_type, "data": broadcast_result},
                 )
             )
         else:
@@ -163,8 +195,18 @@ class ResultProcessingMixin:
         result: dict[str, Any],
         source_agent: str,
         target_label: str,
+        parent_credential_id: str | None = None,
+        parent_attack_step: int = 0,
     ) -> None:
-        """Process discovered_* fields from worker result."""
+        """Process discovered_* fields from worker result.
+
+        Args:
+            result: Task result dictionary.
+            source_agent: Agent that produced the result.
+            target_label: Label for logging.
+            parent_credential_id: ID of credential used to discover these items (for attack chain).
+            parent_attack_step: Attack step of parent credential.
+        """
         discovered_hosts = result.get("discovered_hosts")
         if isinstance(discovered_hosts, list) and discovered_hosts:
             logger.info(f"Processing {len(discovered_hosts)} discovered hosts from {target_label}")
@@ -194,6 +236,8 @@ class ResultProcessingMixin:
                     domain=c.get("domain", ""),
                     source=c.get("source", f"worker:{source_agent}"),
                     is_admin=c.get("is_admin", False),
+                    parent_id=parent_credential_id,  # Track attack chain
+                    attack_step=parent_attack_step + 1 if parent_credential_id else 0,
                 )
                 await self.publish_credential(credential, source_agent)
 
@@ -212,17 +256,37 @@ class ResultProcessingMixin:
                     domain=h.get("domain", ""),
                     cracked_password=h.get("cracked_password", ""),
                     source=h.get("source", ""),
+                    parent_id=parent_credential_id,  # Track attack chain
+                    attack_step=parent_attack_step + 1 if parent_credential_id else 0,
                 )
                 await self.publish_hash(hash_obj, source_agent)
                 if hash_obj.cracked_password:
+                    logger.debug(
+                        f"Creating credential from cracked hash: {hash_obj.domain}\\{hash_obj.username}"
+                    )
                     cracked_cred = Credential(
                         username=hash_obj.username,
                         password=hash_obj.cracked_password,
                         domain=hash_obj.domain,
                         source=f"cracked:{source_agent}",
                         is_admin=False,
+                        parent_id=hash_obj.id,  # Cracked cred links to its hash
+                        attack_step=hash_obj.attack_step + 1,
                     )
-                    await self.publish_credential(cracked_cred, source_agent)
+                    try:
+                        await asyncio.wait_for(
+                            self.publish_credential(cracked_cred, source_agent),
+                            timeout=30.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            f"Timeout publishing cracked credential {hash_obj.domain}\\{hash_obj.username} - "
+                            "publish_credential blocked for 30s"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Error publishing cracked credential {hash_obj.domain}\\{hash_obj.username}: {e}"
+                        )
 
         discovered_shares = result.get("discovered_shares")
         if isinstance(discovered_shares, list):
@@ -242,24 +306,182 @@ class ResultProcessingMixin:
             for u in discovered_users:
                 if not isinstance(u, dict):
                     continue
-                self._add_user(u.get("username", ""), u.get("domain", ""))
+                self._add_user(u.get("username", ""), u.get("domain", ""), source_agent)
+
+        # Process trusted domains (from BloodHound, nltest, etc.)
+        trusted_domains = result.get("trusted_domains")
+        if isinstance(trusted_domains, list):
+            for td in trusted_domains:
+                if isinstance(td, str) and td.strip():
+                    domain_lower = td.strip().lower()
+                    if domain_lower not in self.shared_state.trusted_domains:
+                        self.shared_state.trusted_domains.append(domain_lower)
+                        logger.info(
+                            f"Trusted domain discovered: {domain_lower} from {target_label}"
+                        )
+
+        # Process discovered vulnerabilities (delegation, ADCS, etc.)
+        discovered_vulns = result.get("discovered_vulnerabilities")
+        if isinstance(discovered_vulns, list) and discovered_vulns:
+            await self._process_discovered_vulnerabilities(discovered_vulns, source_agent)
+
+    async def _process_discovered_vulnerabilities(
+        self: RedTeamDispatcher,
+        vulnerabilities: list[dict[str, Any]],
+        source_agent: str,
+    ) -> None:
+        """Process vulnerabilities discovered by workers and queue for exploitation.
+
+        Args:
+            vulnerabilities: List of vulnerability dicts from worker serialization
+            source_agent: Agent that discovered the vulnerabilities
+        """
+        queued = 0
+        for vuln_data in vulnerabilities:
+            if not isinstance(vuln_data, dict):
+                continue
+
+            vuln_id = vuln_data.get("vuln_id", "")
+            vuln_type = vuln_data.get("vuln_type", "")
+            target = vuln_data.get("target", "")
+            details = vuln_data.get("details", {})
+
+            if not vuln_type or not target:
+                continue
+
+            # Check if already queued
+            if vuln_id in self.shared_state.discovered_vulnerabilities:
+                continue
+
+            # Also check for logical duplicates (same type + target)
+            already_exists = any(
+                v.vuln_type == vuln_type and v.target.lower() == target.lower()
+                for v in self.shared_state.discovered_vulnerabilities.values()
+            )
+            if already_exists:
+                continue
+
+            # For delegation vulnerabilities, check if we have credentials
+            # (worker might not know about creds orchestrator has discovered)
+            if vuln_type in ("constrained_delegation", "unconstrained_delegation"):
+                account = details.get("account_name") or details.get("account", target)
+                account_lower = account.lower().rstrip("$")
+                for cred in self.shared_state.all_credentials:
+                    if cred.username.lower() == account_lower and cred.password:
+                        details["has_credentials"] = True
+                        details["username"] = cred.username
+                        details["password"] = cred.password
+                        details["domain"] = cred.domain
+                        break
+                else:
+                    details["has_credentials"] = False
+
+            # Queue the vulnerability and get its ID
+            vuln_id = await self.queue_vulnerability(
+                vuln_type=vuln_type,
+                target=target,
+                details=details,
+                discovered_by=source_agent,
+            )
+            if vuln_id:
+                queued += 1
+
+            # For delegation vulnerabilities with credentials, auto-dispatch exploit
+            if vuln_type in ("constrained_delegation", "unconstrained_delegation") and vuln_id:
+                await self._auto_dispatch_delegation_exploit(
+                    vuln_type, target, details, source_agent, vuln_id
+                )
+
+        if queued > 0:
+            logger.warning(
+                f"🎫 Processed {queued} vulnerability(ies) from {source_agent} for exploitation"
+            )
+
+    async def _auto_dispatch_delegation_exploit(
+        self: RedTeamDispatcher,
+        vuln_type: str,
+        target: str,
+        details: dict[str, Any],
+        source_agent: str,
+        vuln_id: str = "",
+    ) -> None:
+        """Auto-dispatch exploitation for delegation vulnerabilities with credentials.
+
+        Args:
+            vuln_type: Type of delegation vulnerability
+            target: Target account for delegation
+            details: Vulnerability details including credentials
+            source_agent: Agent that discovered the vulnerability
+            vuln_id: Vulnerability ID from queue_vulnerability (for tracking exploitation)
+        """
+        if not details.get("has_credentials"):
+            return
+
+        account = details.get("account_name") or details.get("account", target)
+        domain = details.get("domain", "")
+        target_spn = details.get("target_spn", "")
+        dc_ip = details.get("dc_ip", "")
+
+        if vuln_type != "constrained_delegation" or not target_spn:
+            return  # Only auto-dispatch constrained delegation with known SPN
+
+        # Find credential for account
+        account_lower = account.lower().rstrip("$")
+        account_cred = None
+        for cred in self.shared_state.all_credentials:
+            if cred.username.lower() == account_lower and cred.password:
+                account_cred = cred
+                break
+
+        if not account_cred:
+            return
+
+        # Use provided vuln_id or generate fallback
+        exploit_vuln_id = vuln_id or f"cd_{account.lower()}"
+
+        logger.warning(
+            f"🚀 Auto-dispatching S4U attack for {account} -> {target_spn} "
+            f"(have credentials, DC: {dc_ip}, vuln_id: {exploit_vuln_id})"
+        )
+        await self.request_exploit(
+            vuln_type="constrained_delegation",
+            vuln_id=exploit_vuln_id,
+            target=account,
+            source_agent="auto_delegation",
+            params={
+                "account": account,
+                "account_name": account,
+                "target_spn": target_spn,
+                "domain": account_cred.domain or domain,
+                "username": account_cred.username,
+                "password": account_cred.password,
+                "dc_ip": dc_ip,
+            },
+        )
 
     async def _process_success_result_data(  # noqa: PLR0912
         self: RedTeamDispatcher,
         result: dict[str, Any],
         task_id: str,
         source_agent: str,
+        parent_credential_id: str | None = None,
+        parent_attack_step: int = 0,
     ) -> None:
         """Process credential/hash/share fields from successful result."""
+        # Calculate attack_step for discoveries (parent + 1)
+        discovery_step = parent_attack_step + 1 if parent_credential_id else 0
+
         cred_data = result.get("credential")
         if isinstance(cred_data, dict):
-            self._add_user(cred_data.get("username", ""), cred_data.get("domain", ""))
+            self._add_user(cred_data.get("username", ""), cred_data.get("domain", ""), source_agent)
             credential = Credential(
                 username=cred_data.get("username", ""),
                 password=cred_data.get("password", ""),
                 domain=cred_data.get("domain", ""),
                 source=cred_data.get("source", f"task:{task_id}"),
                 is_admin=cred_data.get("is_admin", False),
+                parent_id=parent_credential_id,
+                attack_step=discovery_step,
             )
             await self.publish_credential(credential, source_agent)
 
@@ -268,13 +490,15 @@ class ResultProcessingMixin:
             for cred in creds_data:
                 if not isinstance(cred, dict):
                     continue
-                self._add_user(cred.get("username", ""), cred.get("domain", ""))
+                self._add_user(cred.get("username", ""), cred.get("domain", ""), source_agent)
                 credential = Credential(
                     username=cred.get("username", ""),
                     password=cred.get("password", ""),
                     domain=cred.get("domain", ""),
                     source=cred.get("source", f"task:{task_id}"),
                     is_admin=cred.get("is_admin", False),
+                    parent_id=parent_credential_id,
+                    attack_step=discovery_step,
                 )
                 await self.publish_credential(credential, source_agent)
 
@@ -286,6 +510,8 @@ class ResultProcessingMixin:
                 hash_type=hash_data.get("hash_type", "NTLM"),
                 domain=hash_data.get("domain", ""),
                 cracked_password=hash_data.get("cracked_password", ""),
+                parent_id=parent_credential_id,
+                attack_step=discovery_step,
             )
             await self.publish_hash(hash_obj, source_agent)
             if hash_obj.cracked_password:
@@ -295,6 +521,8 @@ class ResultProcessingMixin:
                     domain=hash_obj.domain,
                     source=f"hash:{task_id}",
                     is_admin=False,
+                    parent_id=hash_obj.id,
+                    attack_step=hash_obj.attack_step + 1,
                 )
                 await self.publish_credential(cracked_cred, source_agent)
 
@@ -309,6 +537,8 @@ class ResultProcessingMixin:
                     hash_type=h.get("hash_type", "NTLM"),
                     domain=h.get("domain", ""),
                     cracked_password=h.get("cracked_password", ""),
+                    parent_id=parent_credential_id,
+                    attack_step=discovery_step,
                 )
                 await self.publish_hash(hash_obj, source_agent)
                 if hash_obj.cracked_password:
@@ -318,6 +548,8 @@ class ResultProcessingMixin:
                         domain=hash_obj.domain,
                         source=f"hash:{task_id}",
                         is_admin=False,
+                        parent_id=hash_obj.id,
+                        attack_step=hash_obj.attack_step + 1,
                     )
                     await self.publish_credential(cracked_cred, source_agent)
 
@@ -356,9 +588,20 @@ class ResultProcessingMixin:
         return "\n".join(output_parts).strip()
 
     async def _process_output_text(  # noqa: PLR0912
-        self: RedTeamDispatcher, output: str, source_agent: str
+        self: RedTeamDispatcher,
+        output: str,
+        source_agent: str,
+        parent_credential_id: str | None = None,
+        parent_attack_step: int = 0,
     ) -> None:
-        """Process raw output text to extract discoveries."""
+        """Process raw output text to extract discoveries.
+
+        Args:
+            output: Raw text output from tool.
+            source_agent: Agent that produced the output.
+            parent_credential_id: ID of credential used to run the command (for attack chain).
+            parent_attack_step: Attack step of parent credential.
+        """
         domain = ""
         if self.shared_state.target and self.shared_state.target.domain:
             domain = self.shared_state.target.domain
@@ -370,21 +613,39 @@ class ResultProcessingMixin:
                 self.shared_state.all_hosts.append(host)
 
         for username in self._extract_users_from_output(output):
-            self._add_user(username, domain)
+            self._add_user(username, domain, source_agent)
 
         creds = self._extract_plaintext_passwords_from_output(output)
         if "password :" in output.lower() and not creds and domain:
             self.shared_state.pending_credential_findings.add(f"{domain}:unknown")
-        for username, password in creds:
-            if domain:
-                self.shared_state.pending_credential_findings.add(f"{domain}:{username}".lower())
-            self._add_user(username, domain)
+        for username, password, extracted_domain in creds:
+            # Resolve the correct domain using multiple strategies
+            resolved_domain = self._resolve_credential_domain(username, extracted_domain)
+            if not resolved_domain:
+                # Fall back to target domain if we have one - better to add credential
+                # with potentially wrong domain than to drop it entirely
+                if domain:
+                    resolved_domain = domain
+                    logger.debug(
+                        f"Domain resolution failed for {username}, falling back to target domain: {domain}"
+                    )
+                else:
+                    logger.debug(
+                        f"Skipping credential {username}:{password[:3]}*** - no domain available"
+                    )
+                    continue
+            self.shared_state.pending_credential_findings.add(
+                f"{resolved_domain}:{username}".lower()
+            )
+            self._add_user(username, resolved_domain, source_agent)
             credential = Credential(
                 username=username,
                 password=password,
-                domain=domain,
+                domain=resolved_domain,
                 source="user_description",
                 is_admin=False,
+                parent_id=parent_credential_id,  # Track attack chain
+                attack_step=parent_attack_step + 1 if parent_credential_id else 0,
             )
             await self.publish_credential(credential, source_agent)
 
@@ -394,6 +655,10 @@ class ResultProcessingMixin:
 
         # Extract hashes (Kerberoast, AS-REP, NTLM) from tool output
         for hash_obj in self._extract_hashes_from_output(output):
+            # Track attack chain
+            if parent_credential_id:
+                hash_obj.parent_id = parent_credential_id
+                hash_obj.attack_step = parent_attack_step + 1
             await self.publish_hash(hash_obj, source_agent)
 
         # Extract and auto-queue delegation vulnerabilities from findDelegation output
@@ -418,8 +683,85 @@ class ResultProcessingMixin:
                     f"for exploitation from {source_agent}"
                 )
 
-    def _add_user(self: RedTeamDispatcher, username: str, domain: str) -> bool:
-        """Add a user to the shared state."""
+        # Extract and auto-queue gMSA accounts for password retrieval
+        gmsa_accounts = self._extract_gmsa_from_output(output)
+        if gmsa_accounts:
+            queued = await self._auto_queue_gmsa_vulnerabilities(gmsa_accounts, source_agent)
+            if queued > 0:
+                logger.warning(
+                    f"🔑 Auto-gMSA: queued {queued} gMSA account(s) "
+                    f"for password retrieval from {source_agent}"
+                )
+
+        # Extract ACL chains from BloodHound shortest path output
+        self._extract_acl_chains_from_output(output, source_agent)
+
+    def _extract_acl_chains_from_output(
+        self: RedTeamDispatcher, output: str, source_agent: str
+    ) -> None:
+        """
+        Extract ACL chains from BloodHound output and register for tracking.
+
+        Parses BloodHound shortest path output to identify multi-hop
+        ACL abuse chains to Domain Admin.
+        """
+        from ares.core.dispatcher.acl_chains import ACLChainTracker
+
+        # Only process if output looks like BloodHound path data
+        path_indicators = ["shortest path", "attack path", "->", "-["]
+        if not any(indicator in output.lower() for indicator in path_indicators):
+            return
+
+        # Initialize tracker if not present (with state for persistence!)
+        if not hasattr(self, "_acl_chain_tracker"):
+            self._acl_chain_tracker = ACLChainTracker(state=self.shared_state)
+        elif self._acl_chain_tracker._state is None:
+            self._acl_chain_tracker.set_state(self.shared_state)
+
+        tracker: ACLChainTracker = self._acl_chain_tracker
+        domain = ""
+        if self.shared_state.target and self.shared_state.target.domain:
+            domain = self.shared_state.target.domain
+
+        # Split output into potential paths
+        lines = output.split("\n")
+        current_path: list[str] = []
+        chains_found = 0
+
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line:
+                if current_path:
+                    path_text = " ".join(current_path)
+                    chain = tracker.create_chain_from_bloodhound_path(
+                        path_text, domain, source_agent
+                    )
+                    if chain:
+                        chains_found += 1
+                    current_path = []
+            elif "->" in line or "-[" in line:
+                current_path.append(line)
+
+        # Handle last path
+        if current_path:
+            path_text = " ".join(current_path)
+            chain = tracker.create_chain_from_bloodhound_path(path_text, domain, source_agent)
+            if chain:
+                chains_found += 1
+
+        if chains_found > 0:
+            logger.warning(
+                f"🔗 Extracted {chains_found} ACL chain(s) from BloodHound output ({source_agent})"
+            )
+
+    def _add_user(self: RedTeamDispatcher, username: str, domain: str, source: str = "") -> bool:
+        """Add a user to the shared state.
+
+        Args:
+            username: The username.
+            domain: The domain.
+            source: Tool/method that discovered this user.
+        """
         if not username:
             return False
         normalized = username.strip()
@@ -430,7 +772,7 @@ class ResultProcessingMixin:
         for existing in self.shared_state.all_users:
             if existing.username == normalized and existing.domain == domain:
                 return False
-        self.shared_state.all_users.append(User(username=normalized, domain=domain))
+        self.shared_state.all_users.append(User(username=normalized, domain=domain, source=source))
         return True
 
     def _extract_hosts_from_output(self: RedTeamDispatcher, output: str) -> list[Host]:
@@ -514,17 +856,35 @@ class ResultProcessingMixin:
 
     def _extract_plaintext_passwords_from_output(  # noqa: PLR0912
         self: RedTeamDispatcher, output: str
-    ) -> list[tuple[str, str]]:
-        """Extract username/password pairs from tool output."""
+    ) -> list[tuple[str, str, str]]:
+        """Extract username/password/domain tuples from tool output.
+
+        Returns:
+            List of (username, password, domain) tuples. Domain may be empty
+            if not determinable from output.
+        """
         if not output:
             return []
-        creds: list[tuple[str, str]] = []
+        creds: list[tuple[str, str, str]] = []
         seen: set[tuple[str, str]] = set()
         current_user = ""
+        current_domain = ""
         for line in output.splitlines():
             stripped = line.strip()
             if not stripped:
                 continue
+
+            # Extract domain from DOMAIN\user or user@domain patterns
+            domain_user_match = re.search(r"([A-Za-z0-9_.-]+)\\([A-Za-z0-9_.-]+)", stripped)
+            if domain_user_match:
+                current_domain = domain_user_match.group(1).strip()
+                current_user = domain_user_match.group(2).strip()
+
+            upn_match = re.search(r"([A-Za-z0-9_.-]+)@([A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)", stripped)
+            if upn_match:
+                current_user = upn_match.group(1).strip()
+                current_domain = upn_match.group(2).strip()
+
             user_match = re.search(r"user:\[([^\]]+)\]", stripped, re.IGNORECASE)
             if user_match:
                 current_user = user_match.group(1).strip()
@@ -541,6 +901,7 @@ class ResultProcessingMixin:
                 continue
             password = pass_match.group(1).strip()
             username = ""
+            extracted_domain = current_domain
             smb_match = re.search(
                 r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.-]+)\s+\d{4}-\d{2}-\d{2}.*Password\s*:\s*",
                 stripped,
@@ -559,8 +920,80 @@ class ResultProcessingMixin:
             if key in seen:
                 continue
             seen.add(key)
-            creds.append(key)
+            creds.append((username, password, extracted_domain))
         return creds
+
+    def _resolve_credential_domain(  # noqa: PLR0912
+        self: RedTeamDispatcher, username: str, extracted_domain: str
+    ) -> str:
+        """Resolve the correct domain for a credential.
+
+        Uses multiple strategies to determine the correct domain:
+        1. Use extracted domain if it's an FQDN
+        2. Resolve NetBIOS domain to FQDN via known mappings
+        3. Cross-reference with discovered users to find the correct domain
+        4. Only use target domain if user is confirmed to exist there
+
+        Args:
+            username: The username to resolve domain for
+            extracted_domain: Domain extracted from tool output (may be empty or NetBIOS)
+
+        Returns:
+            The resolved FQDN domain, or empty string if not determinable
+        """
+        username_lower = username.lower()
+
+        # If we have an extracted FQDN domain, use it
+        if extracted_domain and "." in extracted_domain:
+            return extracted_domain.lower()
+
+        # If we have a NetBIOS domain, try to resolve it
+        if extracted_domain:
+            netbios_lower = extracted_domain.lower()
+            # Check authoritative NetBIOS -> FQDN mapping
+            if netbios_lower in self.shared_state.netbios_to_fqdn:
+                return self.shared_state.netbios_to_fqdn[netbios_lower]
+            # Check known domains for matching FQDN pattern
+            for domain in self.shared_state.all_domains:
+                domain_lower = domain.lower()
+                if domain_lower.startswith(netbios_lower + "."):
+                    return domain_lower
+
+        # Cross-reference with discovered users to find correct domain
+        matching_domains: list[str] = []
+        for user in self.shared_state.all_users:
+            if user.username.lower() == username_lower and user.domain:
+                matching_domains.append(user.domain.lower())
+
+        # If user exists in exactly one domain, use it
+        unique_domains = list(set(matching_domains))
+        if len(unique_domains) == 1:
+            return unique_domains[0]
+
+        # If user exists in multiple domains, prefer the one matching extracted NetBIOS
+        if len(unique_domains) > 1 and extracted_domain:
+            netbios_lower = extracted_domain.lower()
+            for domain in unique_domains:
+                if domain.startswith(netbios_lower + "."):
+                    return domain
+
+        # If user exists in multiple domains with no NetBIOS hint, don't guess
+        if len(unique_domains) > 1:
+            logger.debug(f"Credential domain ambiguous for {username}: found in {unique_domains}")
+            return ""
+
+        # No user found - only use target domain if we have NetBIOS match
+        if extracted_domain:
+            target_domain = ""
+            if self.shared_state.target and self.shared_state.target.domain:
+                target_domain = self.shared_state.target.domain.lower()
+            netbios_lower = extracted_domain.lower()
+            if target_domain and target_domain.startswith(netbios_lower + "."):
+                return target_domain
+
+        # Cannot determine domain - return empty to avoid false positives
+        logger.debug(f"Cannot determine domain for credential: {username}")
+        return ""
 
     def _extract_shares_from_output(  # noqa: PLR0912
         self: RedTeamDispatcher, output: str, default_host: str = ""
@@ -725,6 +1158,166 @@ class ResultProcessingMixin:
 
         return hashes
 
+    def _extract_gmsa_from_output(self: RedTeamDispatcher, output: str) -> list[dict[str, str]]:
+        """
+        Extract gMSA (Group Managed Service Account) from LDAP/BloodHound output.
+
+        Detects gMSA accounts from:
+        - ldapsearch output (objectClass=msDS-GroupManagedServiceAccount)
+        - BloodHound output (gMSA service accounts)
+        - netexec ldap output with gMSA discovery
+
+        Returns:
+            List of dicts with 'account' and optionally 'principals_allowed' keys
+        """
+        if not output:
+            return []
+
+        gmsa_accounts: list[dict[str, str]] = []
+        seen: set[str] = set()
+        output_lower = output.lower()
+
+        # Check if gMSA-related content is present
+        if not any(
+            kw in output_lower
+            for kw in [
+                "gmsa",
+                "msds-groupmanagedserviceaccount",
+                "managedserviceaccount",
+                "msds-managedpassword",
+            ]
+        ):
+            return []
+
+        # Pattern 1: LDAP objectClass=msDS-GroupManagedServiceAccount with sAMAccountName
+        # dn: CN=svc_gmsa,CN=Managed Service Accounts,DC=contoso,DC=local
+        # sAMAccountName: svc_gmsa$
+        ldap_pattern = re.compile(
+            r"(?:samaccountname|cn)[:\s]+([a-zA-Z0-9_\-]+\$?)",
+            re.IGNORECASE,
+        )
+
+        # Pattern 2: netexec/bloodhound gMSA output
+        # gMSA: svc_gmsa$ - PrincipalsAllowedToRetrieveManagedPassword: SERVER01$
+        gmsa_explicit_pattern = re.compile(
+            r"gmsa[:\s]+([a-zA-Z0-9_\-]+\$?)(?:.*principals.*?allowed.*?:?\s*([^\n]+))?",
+            re.IGNORECASE,
+        )
+
+        # Pattern 3: msDS-GroupManagedServiceAccount in objectClass
+        objclass_pattern = re.compile(
+            r"objectclass.*?msds-groupmanagedserviceaccount.*?(?:samaccountname|cn)[:\s]+([a-zA-Z0-9_\-]+\$?)",
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        for pattern in [gmsa_explicit_pattern, objclass_pattern]:
+            for match in pattern.finditer(output):
+                account = match.group(1).strip()
+                if not account or account.lower() in seen:
+                    continue
+                seen.add(account.lower())
+
+                gmsa_info: dict[str, str] = {"account": account}
+
+                # Try to extract principals allowed to read password
+                if match.lastindex and match.lastindex >= 2 and match.group(2):
+                    gmsa_info["principals_allowed"] = match.group(2).strip()
+
+                gmsa_accounts.append(gmsa_info)
+                logger.info(f"[*] Detected gMSA account: {account}")
+
+        # Also check for standalone mentions in msDS-GroupManagedServiceAccount context
+        if "msds-groupmanagedserviceaccount" in output_lower:
+            for match in ldap_pattern.finditer(output):
+                account = match.group(1).strip()
+                # gMSA accounts typically end with $
+                if account.endswith("$") and account.lower() not in seen:
+                    seen.add(account.lower())
+                    gmsa_accounts.append({"account": account})
+                    logger.info(f"[*] Detected gMSA account from LDAP: {account}")
+
+        return gmsa_accounts
+
+    async def _auto_queue_gmsa_vulnerabilities(
+        self: RedTeamDispatcher,
+        gmsa_accounts: list[dict[str, str]],
+        source_agent: str,
+    ) -> int:
+        """
+        Auto-queue gMSA accounts for password retrieval.
+
+        Args:
+            gmsa_accounts: List of gMSA findings from _extract_gmsa_from_output
+            source_agent: Agent that discovered the gMSA accounts
+
+        Returns:
+            Number of gMSA retrieval tasks queued
+        """
+        queued = 0
+        domain = ""
+        if self.shared_state.target and self.shared_state.target.domain:
+            domain = self.shared_state.target.domain
+
+        # Get existing gMSA accounts from state to avoid duplicates
+        existing_gmsa = {g.get("account", "").lower() for g in self.shared_state.gmsa_accounts}
+
+        for gmsa in gmsa_accounts:
+            account = gmsa.get("account", "")
+            if not account:
+                continue
+
+            account_lower = account.lower()
+
+            # Store in state.gmsa_accounts for persistence (if not already there)
+            if account_lower not in existing_gmsa:
+                gmsa_entry = {
+                    "account": account,
+                    "domain": domain,
+                    "principals_allowed": gmsa.get("principals_allowed", "unknown"),
+                    "discovered_by": source_agent,
+                    "discovered_at": datetime.now(timezone.utc).isoformat(),
+                }
+                self.shared_state.gmsa_accounts.append(gmsa_entry)
+                existing_gmsa.add(account_lower)
+                logger.info(f"🔑 gMSA account stored in state: {account}")
+
+            # Check if already queued as vulnerability
+            vuln_key = f"gmsa_readable:{account_lower}"
+            if vuln_key in [
+                v.vuln_type + ":" + v.target.lower()
+                for v in self.shared_state.discovered_vulnerabilities.values()
+            ]:
+                continue
+
+            # Queue for gMSA password retrieval
+            dc_ip = ""
+            if self.shared_state.target:
+                dc_ip = self.shared_state.target.ip
+
+            vuln = VulnerabilityInfo(
+                vuln_type="gmsa_readable",
+                target=account,
+                details={
+                    "account": account,
+                    "principals_allowed": gmsa.get("principals_allowed", "unknown"),
+                    "domain": domain,
+                    "dc_ip": dc_ip,
+                    "action": f"Use gmsa_dump_passwords or gmsa_read_password_bloodyad to retrieve {account} NTLM hash",
+                    "description": f"🔑 gMSA account {account} detected - may be readable for password retrieval",
+                },
+            )
+
+            vuln_id = f"vuln-gmsa-{uuid.uuid4().hex[:8]}"
+            self.shared_state.discovered_vulnerabilities[vuln_id] = vuln
+            await self.queue_vulnerability(
+                vuln.vuln_type, vuln.target, vuln.details, "gmsa_extractor"
+            )
+            queued += 1
+
+            logger.info(f"🔑 Auto-queued gMSA password retrieval for {account}")
+
+        return queued
+
     def _extract_delegation_from_output(  # noqa: PLR0912
         self: RedTeamDispatcher, output: str
     ) -> list[dict[str, str]]:
@@ -864,9 +1457,11 @@ class ResultProcessingMixin:
 
             details: dict[str, Any] = {
                 "account": account,
+                "account_name": account,  # Normalized field for priority boost logic
                 "delegation_type": delegation_type,
                 "target_spn": target_spn,
                 "discovered_by": source_agent,
+                "has_credentials": account_cred is not None,
             }
 
             if account_cred:
@@ -1069,6 +1664,145 @@ class ResultProcessingMixin:
                             "description": f"{principal} has dangerous ACL permissions on {target}",
                         },
                     }
+                )
+
+        # HIGH PRIORITY: Detect GenericAll/WriteMember on Domain Admins (instant DA path)
+        # This is the FASTEST path to DA - just add yourself to Domain Admins!
+        da_acl_patterns = [
+            # Pattern: "user has GenericAll on Domain Admins"
+            r"(\S+)\s+(?:has\s+)?(?:genericall|writemember|writedacl|genericwrite)\s+(?:on|to)\s+(?:group\s+)?['\"]?(?:domain\s*admins|cn=domain\s*admins)['\"]?",
+            # Pattern: "GenericAll: Domain Admins -> user"
+            r"(?:genericall|writemember|writedacl|genericwrite)\s*[:\-=]\s*(?:domain\s*admins|cn=domain\s*admins)\s*(?:->|→|to)\s*(\S+)",
+            # Pattern: "Domain Admins: GenericAll from user"
+            r"(?:domain\s*admins|cn=domain\s*admins)\s*[:\-]\s*(?:genericall|writemember|writedacl)\s+(?:from|by)\s+(\S+)",
+            # Pattern from bloodhound-python output
+            r"(\S+).*(?:MemberOf|AddMember|GenericAll|WriteDacl).*(?:Domain\s*Admins|DOMAIN\s*ADMINS)",
+        ]
+
+        for pattern in da_acl_patterns:
+            for match in re.finditer(pattern, output, re.IGNORECASE):
+                principal = match.group(1).strip() if match.groups() else ""
+
+                if not principal or len(principal) < 2:
+                    continue
+
+                # Skip if it's a built-in account or the target itself
+                principal_lower = principal.lower()
+                if principal_lower in (
+                    "domain admins",
+                    "enterprise admins",
+                    "administrators",
+                    "system",
+                ):
+                    continue
+
+                key = f"genericall_domain_admins:{principal_lower}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                vulns.append(
+                    {
+                        "vuln_type": "genericall_domain_admins",
+                        "target": "Domain Admins",
+                        "principal": principal,
+                        "details": {
+                            "instant_da": True,
+                            "action": "Use bloodyad_add_group_member to add yourself to Domain Admins!",
+                            "description": f"🚨 INSTANT DA PATH: {principal} has write access to Domain Admins group!",
+                        },
+                    }
+                )
+                logger.warning(
+                    f"🚨 HIGH-VALUE: {principal} has GenericAll/WriteMember on Domain Admins - INSTANT DA PATH!"
+                )
+
+        # HIGH PRIORITY: Detect GPO write on DC-linked GPOs (gpo_write vuln)
+        # Look for GPO permissions that include DC linking info
+        gpo_dc_patterns = [
+            # Pattern: GPO linked to Domain Controllers
+            r"(?:gpo|group\s*policy)\s+['\"]?([^'\"]+)['\"]?\s+(?:linked\s+to|applies\s+to)\s+(?:domain\s*controllers|dc)",
+            # Pattern: WriteProperty/WriteDacl on GPO with DC mention
+            r"(?:writeproperty|writedacl|genericall|genericwrite)\s+(?:on|to)\s+(?:gpo\s+)?['\"]?([^'\"]+)['\"]?.*(?:domain\s*controllers|dc\s*ou)",
+            # Pattern from BloodHound: GPO -> OU (Domain Controllers)
+            r"['\"]?([^'\"]+)['\"]?\s*->\s*(?:domain\s*controllers\s*ou|ou=domain\s*controllers)",
+        ]
+
+        for pattern in gpo_dc_patterns:
+            for match in re.finditer(pattern, output_lower, re.IGNORECASE):
+                gpo_name = match.group(1).strip()
+
+                if not gpo_name or len(gpo_name) < 3:
+                    continue
+
+                key = f"gpo_write:{gpo_name.lower()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                vulns.append(
+                    {
+                        "vuln_type": "gpo_write",
+                        "target": gpo_name,
+                        "principal": "",
+                        "details": {
+                            "gpo_name": gpo_name,
+                            "dc_linked": True,
+                            "action": "Use pygpoabuse_immediate_task to create scheduled task as SYSTEM on DC!",
+                            "description": f"🚨 DA PATH: GPO '{gpo_name}' is linked to Domain Controllers and writable!",
+                        },
+                    }
+                )
+                logger.warning(
+                    f"🚨 HIGH-VALUE: GPO '{gpo_name}' linked to DC with write permissions - DA PATH!"
+                )
+
+        # PERSISTENCE: Detect GenericAll on AdminSDHolder (persistence backdoor)
+        # AdminSDHolder ACE propagates to all protected groups via SDProp
+        adminsd_patterns = [
+            # Pattern: GenericAll/WriteDacl on AdminSDHolder
+            r"(\S+).*(?:genericall|writedacl|genericwrite).*(?:adminsdholder|cn=adminsdholder)",
+            # Pattern: AdminSDHolder: GenericAll from user
+            r"(?:adminsdholder|cn=adminsdholder).*(?:genericall|writedacl).*(?:from|by|->|→)\s*(\S+)",
+            # BloodHound edge format
+            r"(\S+)\s*-(?:GenericAll|WriteDacl)->.*AdminSDHolder",
+        ]
+
+        for pattern in adminsd_patterns:
+            for match in re.finditer(pattern, output, re.IGNORECASE):
+                principal = match.group(1).strip() if match.groups() else ""
+
+                if not principal or len(principal) < 2:
+                    continue
+
+                principal_lower = principal.lower()
+                if principal_lower in (
+                    "domain admins",
+                    "enterprise admins",
+                    "administrators",
+                    "system",
+                ):
+                    continue
+
+                key = f"adminsd_holder_acl:{principal_lower}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                vulns.append(
+                    {
+                        "vuln_type": "adminsd_holder_acl",
+                        "target": "AdminSDHolder",
+                        "principal": principal,
+                        "details": {
+                            "persistence": True,
+                            "action": "Use adminsd_holder_add_ace to plant persistent backdoor on all protected groups!",
+                            "description": f"🔒 PERSISTENCE PATH: {principal} can modify AdminSDHolder - permanent DA backdoor!",
+                        },
+                    }
+                )
+                logger.warning(
+                    f"🔒 PERSISTENCE: {principal} has GenericAll on AdminSDHolder - can plant permanent backdoor!"
                 )
 
         return vulns

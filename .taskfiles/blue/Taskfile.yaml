@@ -17,13 +17,13 @@ tasks:
     silent: true
     vars:
       ANTHROPIC_API_KEY:
-        sh: op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo ""
+        sh: op item get "Dreadnode Claude" --fields api-key --reveal 2>/dev/null || echo ""
       DREADNODE_API_KEY:
         sh: op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo ""
       GRAFANA_SERVICE_ACCOUNT_TOKEN:
         sh: op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo ""
       OPENAI_API_KEY:
-        sh: op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null || echo ""
+        sh: op item get "Openai" --fields dreadnode-personal-api-key --reveal 2>/dev/null || echo ""
       MODEL_ARG:
         sh: |
           if [ -n "{{.MODEL_ALL}}" ]; then
@@ -110,13 +110,13 @@ tasks:
     silent: true
     vars:
       ANTHROPIC_API_KEY:
-        sh: op item get "claude.ai" --fields dreadnode-api-key --reveal 2>/dev/null || echo ""
+        sh: op item get "Dreadnode Claude" --fields api-key --reveal 2>/dev/null || echo ""
       DREADNODE_API_KEY:
         sh: op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo ""
       GRAFANA_SERVICE_ACCOUNT_TOKEN:
         sh: op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo ""
       OPENAI_API_KEY:
-        sh: op item get "Openai" --fields dreadnode-api-key --reveal 2>/dev/null || echo ""
+        sh: op item get "Openai" --fields dreadnode-personal-api-key --reveal 2>/dev/null || echo ""
       MODEL_ARG:
         sh: |
           if [ -n "{{.MODEL_ALL}}" ]; then
