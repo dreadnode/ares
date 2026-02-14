@@ -539,6 +539,124 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
             ),
         }
 
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    def get_queued_queries(self) -> dict:
+        """Get auto-queued pivot and chain queries that should be executed next.
+
+        The system automatically queues follow-up queries based on:
+        1. **Pivot queries**: Hosts discovered via lateral movement detection
+           that need investigation to understand full attack scope.
+        2. **Chain queries**: Follow-up detection methods triggered by evidence
+           type (e.g., finding DCSync evidence queues golden ticket detection).
+
+        CALL THIS after running detection queries to check for auto-generated
+        follow-up work. Execute the queued queries to ensure full investigation
+        scope before completing the investigation.
+
+        Returns:
+            Dict with pivot_queries, chain_queries, and recommendations.
+
+        Example:
+            >>> get_queued_queries()
+            {
+                'pivot_queries': [
+                    {
+                        'type': 'pivot',
+                        'host': 'dc01.contoso.local',
+                        'reason': 'Discovered via lateral movement detection',
+                        'suggested_methods': ['detect_lateral_movement', ...]
+                    }
+                ],
+                'chain_queries': ['detect_golden_ticket', 'detect_lateral_movement'],
+                'total_queued': 3,
+                'recommendation': 'Execute these queries to expand investigation scope'
+            }
+
+        See Also:
+            detect_lateral_movement: Triggers auto-pivot when lateral movement found.
+            record_evidence: Evidence types trigger chained query recommendations.
+        """
+        if not self.state:
+            return {"error": "No investigation state"}
+
+        # Get top priority queued queries
+        pivot_queries = self.state.queued_pivot_queries[:3]
+        chain_queries = self.state.queued_chain_queries[:3]
+
+        total_queued = len(self.state.queued_pivot_queries) + len(self.state.queued_chain_queries)
+
+        result = {
+            "pivot_queries": pivot_queries,
+            "chain_queries": chain_queries,
+            "total_queued": total_queued,
+            "executed_query_types": list(self.state.executed_query_types)[:10],
+        }
+
+        if total_queued > 0:
+            result["recommendation"] = (
+                f"Execute these {total_queued} queued queries to expand investigation scope. "
+                "Pivot queries investigate hosts discovered via lateral movement. "
+                "Chain queries follow up on evidence types with related detections."
+            )
+        else:
+            result["recommendation"] = (
+                "No auto-queued queries. Run detection queries (detect_lateral_movement, "
+                "detect_pass_the_hash, etc.) to trigger auto-pivot and chaining."
+            )
+
+        # Log metrics
+        dn.log_metric("pivot_queries_queued", len(self.state.queued_pivot_queries))
+        dn.log_metric("chain_queries_queued", len(self.state.queued_chain_queries))
+
+        return result
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    def pop_queued_pivot(self) -> dict | None:
+        """Pop the highest priority pivot query from the queue.
+
+        Use this to get the next pivot query to execute and remove it from
+        the queue. Returns None if no pivot queries are queued.
+
+        Returns:
+            The next pivot query dict or None if queue is empty.
+
+        Example:
+            >>> pop_queued_pivot()
+            {
+                'type': 'pivot',
+                'host': 'dc01.contoso.local',
+                'reason': 'Discovered via lateral movement detection',
+                'suggested_methods': ['detect_lateral_movement', ...]
+            }
+        """
+        if not self.state or not self.state.queued_pivot_queries:
+            return None
+
+        pivot = self.state.queued_pivot_queries.pop(0)
+        logger.info(f"Popped pivot query for host: {pivot.get('host', 'unknown')}")
+        return pivot
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    def pop_queued_chain(self) -> str | None:
+        """Pop the highest priority chain query from the queue.
+
+        Use this to get the next chained detection method to execute and
+        remove it from the queue. Returns None if no chain queries are queued.
+
+        Returns:
+            The next chain query method name or None if queue is empty.
+
+        Example:
+            >>> pop_queued_chain()
+            'detect_golden_ticket'
+        """
+        if not self.state or not self.state.queued_chain_queries:
+            return None
+
+        method = self.state.queued_chain_queries.pop(0)
+        logger.info(f"Popped chain query method: {method}")
+        return method
+
 
 class QuestionEngineTools(Toolset):  # type: ignore[misc]
     """Tools for the question engines that drive the investigation.

@@ -685,6 +685,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         result["_query_template"] = "pass_the_hash"
         result["_mitre_technique"] = "T1550.002"
         result["_red_team_tool"] = "domain_admin_checker"
+        result["_auto_pivot"] = True  # Triggers auto-pivot investigation
 
         return result
 
@@ -740,6 +741,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         result["_query_template"] = "lateral_movement"
         result["_mitre_technique"] = "T1021"
         result["_mitre_subtechniques"] = ["T1021.002", "T1021.003", "T1021.006"]
+        result["_auto_pivot"] = True  # Triggers auto-pivot investigation
 
         return result
 
@@ -1449,6 +1451,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         result["_query_template"] = "impacket_wmiexec"
         result["_mitre_technique"] = "T1047"
         result["_red_team_tool"] = "wmiexec"
+        result["_auto_pivot"] = True  # Triggers auto-pivot investigation
 
         return result
 
@@ -1494,6 +1497,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         result["_query_template"] = "impacket_psexec"
         result["_mitre_technique"] = "T1569.002"
         result["_red_team_tool"] = "psexec"
+        result["_auto_pivot"] = True  # Triggers auto-pivot investigation
 
         return result
 
@@ -1539,6 +1543,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         result["_query_template"] = "impacket_smbexec"
         result["_mitre_technique"] = "T1569.002"
         result["_red_team_tool"] = "smbexec"
+        result["_auto_pivot"] = True  # Triggers auto-pivot investigation
 
         return result
 
@@ -1629,6 +1634,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         result["_query_template"] = "impacket_dcomexec"
         result["_mitre_technique"] = "T1021.003"
         result["_red_team_tool"] = "dcomexec"
+        result["_auto_pivot"] = True  # Triggers auto-pivot investigation
 
         return result
 

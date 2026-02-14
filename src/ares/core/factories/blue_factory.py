@@ -52,6 +52,22 @@ _seen_queries: dict[str, int] = {}  # Track query -> count to detect loops
 _current_state: "InvestigationState | None" = None
 _bonus_queries_granted = 0  # Track bonus queries granted
 
+# Evidence type to follow-up detection methods mapping for auto-chaining
+EVIDENCE_CHAIN_MAP: dict[str, list[str]] = {
+    # Evidence type → follow-up detection methods to queue
+    "kerberoast_hash": ["detect_pass_the_hash", "detect_lateral_movement"],
+    "dcsync": ["detect_golden_ticket", "detect_lateral_movement"],
+    "s4u_delegation": ["detect_dcsync_replication", "detect_lsa_secrets_access"],
+    "credential": ["detect_pass_the_hash", "detect_lateral_movement"],
+    "service_creation": ["detect_impacket_psexec", "detect_suspicious_execution"],
+    "pass_the_hash": ["detect_lateral_movement", "detect_remote_execution"],
+    "golden_ticket": ["detect_lateral_movement", "detect_dcsync_replication"],
+    "lateral_movement": ["detect_service_creation", "detect_scheduled_task"],
+    "psexec": ["detect_service_creation", "detect_lateral_movement"],
+    "wmiexec": ["detect_lateral_movement", "detect_service_creation"],
+    "smbexec": ["detect_service_creation", "detect_lateral_movement"],
+}
+
 # LogQL optimization patterns - broad selectors that cause timeouts
 _BROAD_SELECTOR_PATTERNS = [
     '{job=~".+"}',
@@ -60,6 +76,133 @@ _BROAD_SELECTOR_PATTERNS = [
     '{app=~".+"}',
     '{hostname=~".+"}',
 ]
+
+
+def _extract_hosts_from_results(result_data: dict) -> set[str]:
+    """Extract target hosts from lateral movement detection results.
+
+    Args:
+        result_data: Query result containing lateral movement detections
+
+    Returns:
+        Set of lowercase hostnames discovered in the results
+    """
+    hosts: set[str] = set()
+    results = result_data.get("results", [])
+    if not isinstance(results, list):
+        return hosts
+
+    host_fields = [
+        "target_host",
+        "TargetHost",
+        "computer",
+        "Computer",
+        "dest_host",
+        "destination",
+        "TargetComputer",
+    ]
+    event_fields = ["TargetServerName", "TargetComputer", "IpAddress"]
+
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        for field in host_fields:
+            if item.get(field):
+                hosts.add(str(item[field]).lower())
+        event_data = item.get("event_data", {})
+        if isinstance(event_data, dict):
+            for field in event_fields:
+                if event_data.get(field):
+                    hosts.add(str(event_data[field]).lower())
+    return hosts
+
+
+def _queue_pivot_queries(state: "InvestigationState", result_data: dict) -> None:
+    """Queue pivot queries for hosts discovered via lateral movement detection.
+
+    When lateral movement is detected, this function extracts target hosts
+    from the results and queues follow-up queries to investigate those hosts.
+
+    Args:
+        state: Current investigation state
+        result_data: Query result containing lateral movement detections
+    """
+    if not state or not result_data:
+        return
+
+    # Extract hosts from various result formats
+    hosts_to_investigate = _extract_hosts_from_results(result_data)
+
+    # Remove already-queried hosts
+    hosts_to_investigate -= state.queried_hosts
+
+    if not hosts_to_investigate:
+        return
+
+    # Queue pivot queries for each new host
+    for host in hosts_to_investigate:
+        # Add host to pending in lateral graph if available
+        if state.lateral_graph and hasattr(state.lateral_graph, "pending_hosts"):
+            state.lateral_graph.pending_hosts.add(host)
+
+        # Queue follow-up queries for this host
+        pivot_query = {
+            "type": "pivot",
+            "host": host,
+            "reason": "Discovered via lateral movement detection",
+            "suggested_methods": [
+                "detect_lateral_movement",
+                "detect_service_creation",
+                "detect_suspicious_execution",
+            ],
+        }
+        if pivot_query not in state.queued_pivot_queries:
+            state.queued_pivot_queries.append(pivot_query)
+
+    if hosts_to_investigate:
+        logger.info(
+            f"🔄 Auto-queued pivot investigation for {len(hosts_to_investigate)} hosts: "
+            f"{', '.join(list(hosts_to_investigate)[:3])}{'...' if len(hosts_to_investigate) > 3 else ''}"
+        )
+
+
+def _queue_chained_queries(evidence_type: str, state: "InvestigationState") -> None:
+    """Queue follow-up detection methods based on evidence type.
+
+    When evidence is found, this function determines what follow-up
+    detection methods should be run to expand investigation scope.
+
+    Args:
+        evidence_type: Type of evidence found (e.g., "kerberoast_hash", "dcsync")
+        state: Current investigation state
+    """
+    if not state or not evidence_type:
+        return
+
+    # Normalize evidence type for lookup
+    normalized_type = evidence_type.lower().replace("-", "_").replace(" ", "_")
+
+    # Look up chained queries for this evidence type
+    chain = EVIDENCE_CHAIN_MAP.get(normalized_type, [])
+
+    if not chain:
+        return
+
+    # Queue methods that haven't been executed yet
+    new_methods = []
+    for method_name in chain:
+        if (
+            method_name not in state.executed_query_types
+            and method_name not in state.queued_chain_queries
+        ):
+            state.queued_chain_queries.append(method_name)
+            new_methods.append(method_name)
+
+    if new_methods:
+        logger.info(
+            f"🔗 Auto-queued {len(new_methods)} chained queries for {evidence_type}: "
+            f"{', '.join(new_methods)}"
+        )
 
 
 def _optimize_logql_query(query: str) -> tuple[str, bool]:
@@ -359,8 +502,20 @@ def _record_query(
                             f"🔍 Auto-extracted {added_count} IOCs from query results "
                             f"(total evidence: {len(_current_state.evidence)})"
                         )
+
+                        # AUTO-CHAIN: Queue follow-up queries based on evidence types
+                        for item in extracted:
+                            _queue_chained_queries(item["type"], _current_state)
+
             except Exception as e:
                 logger.warning(f"Auto-extraction failed: {e}")
+
+            # AUTO-PIVOT: Queue pivot queries for lateral movement detections
+            if result_data and isinstance(result_data, dict) and result_data.get("_auto_pivot"):
+                _queue_pivot_queries(_current_state, result_data)
+
+            # Track executed query type for deduplication
+            _current_state.executed_query_types.add(tool_name)
 
 
 def create_rate_limited_mcp_tool(

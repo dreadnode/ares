@@ -187,6 +187,39 @@ For HIGH and CRITICAL severity alerts, you MUST perform lateral investigation.
 **ANTI-PATTERN**: Skipping lateral analysis and going straight to synthesis
 **CORRECT PATTERN**: analyze_lateral_movement() -> investigate pending hosts -> record connections -> build attack path
 
+### Auto-Generated Query Recommendations
+
+After running detection queries, call `get_queued_queries()` to check for auto-generated follow-up work:
+
+- **Pivot queries**: Hosts discovered via lateral movement detection that need investigation
+  - When you detect lateral movement (psexec, wmiexec, pass-the-hash), the system automatically
+    extracts target hosts and queues them for investigation
+  - These are HIGH PRIORITY - an attacker may have moved to these hosts
+
+- **Chain queries**: Follow-up detections based on evidence type
+  - When you find evidence (e.g., DCSync), related detections are automatically queued
+  - Examples: DCSync → queue golden ticket detection, Pass-the-Hash → queue lateral movement
+
+**MANDATORY**: Execute queued queries before completing the investigation to ensure full scope coverage.
+
+```python
+# Check for auto-queued queries
+queued = get_queued_queries()
+
+# If pivot queries exist, investigate each host
+for pivot in queued.get("pivot_queries", []):
+    host = pivot["host"]
+    # Run suggested detection methods on this host
+    detect_lateral_movement(source_host=host)
+    track_host_investigation(host)
+
+# If chain queries exist, run those detection methods
+for method in queued.get("chain_queries", []):
+    # Execute the chained detection method
+    # e.g., detect_golden_ticket(), detect_dcsync_replication()
+    ...
+```
+
 ### Stage 4: SYNTHESIS (Generate report)
 1. Call get_investigation_summary() to review findings
 2. Call assess_pyramid_state() to check if you've climbed to TTPs

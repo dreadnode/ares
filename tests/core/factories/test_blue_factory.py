@@ -15,6 +15,7 @@ from ares.core.config import (
     get_query_limits_by_stage,
 )
 from ares.core.factories.blue_factory import (
+    EVIDENCE_CHAIN_MAP,
     _calculate_bonus_queries,
     _check_duplicate_query,
     _check_query_limit,
@@ -23,6 +24,8 @@ from ares.core.factories.blue_factory import (
     _get_query_limit,
     _increment_query_attempt,
     _optimize_logql_query,
+    _queue_chained_queries,
+    _queue_pivot_queries,
     _record_query,
     create_investigation_agent,
     create_rate_limited_mcp_tool,
@@ -783,3 +786,247 @@ class TestExtractResultCountEdgeCases:
             }
         }
         assert _extract_result_count(result) == 0
+
+
+class TestQueuePivotQueries:
+    """Tests for _queue_pivot_queries function."""
+
+    def test_queue_pivot_queries_extracts_hosts(self, investigation_state: InvestigationState):
+        """Test that pivot queries are queued for discovered hosts."""
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        result_data = {
+            "_auto_pivot": True,
+            "results": [
+                {"target_host": "dc01.contoso.local", "event_id": 4624},
+                {"TargetHost": "sql01.contoso.local", "event_id": 4648},
+                {"computer": "ws01.contoso.local", "event_id": 7045},
+            ],
+        }
+
+        _queue_pivot_queries(investigation_state, result_data)
+
+        # Should have 3 pivot queries queued
+        assert len(investigation_state.queued_pivot_queries) == 3
+
+        # Check that hosts are correctly extracted
+        queued_hosts = {q["host"] for q in investigation_state.queued_pivot_queries}
+        assert "dc01.contoso.local" in queued_hosts
+        assert "sql01.contoso.local" in queued_hosts
+        assert "ws01.contoso.local" in queued_hosts
+
+    def test_queue_pivot_queries_skips_already_queried_hosts(
+        self, investigation_state: InvestigationState
+    ):
+        """Test that already-queried hosts are not re-queued."""
+        reset_query_tracking()
+
+        # Mark a host as already queried
+        investigation_state.queried_hosts.add("dc01.contoso.local")
+        set_investigation_state(investigation_state)
+
+        result_data = {
+            "_auto_pivot": True,
+            "results": [
+                {"target_host": "dc01.contoso.local"},
+                {"target_host": "ws01.contoso.local"},
+            ],
+        }
+
+        _queue_pivot_queries(investigation_state, result_data)
+
+        # Only ws01 should be queued (dc01 was already queried)
+        assert len(investigation_state.queued_pivot_queries) == 1
+        assert investigation_state.queued_pivot_queries[0]["host"] == "ws01.contoso.local"
+
+    def test_queue_pivot_queries_extracts_from_event_data(
+        self, investigation_state: InvestigationState
+    ):
+        """Test extraction from nested event_data field."""
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        result_data = {
+            "_auto_pivot": True,
+            "results": [
+                {
+                    "event_id": 4624,
+                    "event_data": {
+                        "TargetServerName": "fs01.contoso.local",
+                        "IpAddress": "192.168.58.50",
+                    },
+                },
+            ],
+        }
+
+        _queue_pivot_queries(investigation_state, result_data)
+
+        queued_hosts = {q["host"] for q in investigation_state.queued_pivot_queries}
+        assert "fs01.contoso.local" in queued_hosts
+        assert "192.168.58.50" in queued_hosts
+
+    def test_queue_pivot_queries_empty_result(self, investigation_state: InvestigationState):
+        """Test no error with empty result data."""
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        _queue_pivot_queries(investigation_state, {})
+        _queue_pivot_queries(investigation_state, None)  # type: ignore[arg-type]
+
+        assert len(investigation_state.queued_pivot_queries) == 0
+
+    def test_queue_pivot_queries_no_duplicates(self, investigation_state: InvestigationState):
+        """Test that duplicate hosts are not queued multiple times."""
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        result_data = {
+            "_auto_pivot": True,
+            "results": [
+                {"target_host": "DC01.contoso.local"},
+                {"target_host": "dc01.contoso.local"},  # Same host, different case
+            ],
+        }
+
+        _queue_pivot_queries(investigation_state, result_data)
+
+        # Should only have 1 unique host (lowercase normalized)
+        assert len(investigation_state.queued_pivot_queries) == 1
+
+
+class TestQueueChainedQueries:
+    """Tests for _queue_chained_queries function."""
+
+    def test_queue_chained_queries_dcsync(self, investigation_state: InvestigationState):
+        """Test that DCSync evidence queues related detections."""
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        _queue_chained_queries("dcsync", investigation_state)
+
+        # Should queue golden ticket and lateral movement detections
+        assert "detect_golden_ticket" in investigation_state.queued_chain_queries
+        assert "detect_lateral_movement" in investigation_state.queued_chain_queries
+
+    def test_queue_chained_queries_pass_the_hash(self, investigation_state: InvestigationState):
+        """Test that pass-the-hash evidence queues related detections."""
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        _queue_chained_queries("pass_the_hash", investigation_state)
+
+        assert "detect_lateral_movement" in investigation_state.queued_chain_queries
+        assert "detect_remote_execution" in investigation_state.queued_chain_queries
+
+    def test_queue_chained_queries_skips_executed(self, investigation_state: InvestigationState):
+        """Test that already-executed queries are not re-queued."""
+        reset_query_tracking()
+
+        # Mark a query type as already executed
+        investigation_state.executed_query_types.add("detect_golden_ticket")
+        set_investigation_state(investigation_state)
+
+        _queue_chained_queries("dcsync", investigation_state)
+
+        # Golden ticket should not be queued (already executed)
+        assert "detect_golden_ticket" not in investigation_state.queued_chain_queries
+        # But lateral movement should be queued
+        assert "detect_lateral_movement" in investigation_state.queued_chain_queries
+
+    def test_queue_chained_queries_unknown_type(self, investigation_state: InvestigationState):
+        """Test that unknown evidence types don't cause errors."""
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        _queue_chained_queries("unknown_evidence_type", investigation_state)
+
+        # Should not queue anything
+        assert len(investigation_state.queued_chain_queries) == 0
+
+    def test_queue_chained_queries_normalizes_type(self, investigation_state: InvestigationState):
+        """Test that evidence type is normalized for lookup."""
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        # Try with different formats
+        _queue_chained_queries("pass-the-hash", investigation_state)  # With dashes
+
+        # Should still match pass_the_hash
+        assert len(investigation_state.queued_chain_queries) > 0
+
+    def test_queue_chained_queries_no_duplicates(self, investigation_state: InvestigationState):
+        """Test that the same query is not queued twice."""
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        _queue_chained_queries("dcsync", investigation_state)
+        initial_count = len(investigation_state.queued_chain_queries)
+
+        _queue_chained_queries("dcsync", investigation_state)
+
+        # Count should not increase
+        assert len(investigation_state.queued_chain_queries) == initial_count
+
+
+class TestEvidenceChainMap:
+    """Tests for EVIDENCE_CHAIN_MAP constant."""
+
+    def test_evidence_chain_map_has_expected_keys(self):
+        """Test that EVIDENCE_CHAIN_MAP has expected evidence types."""
+        expected_types = [
+            "kerberoast_hash",
+            "dcsync",
+            "s4u_delegation",
+            "credential",
+            "service_creation",
+            "pass_the_hash",
+            "golden_ticket",
+            "lateral_movement",
+            "psexec",
+            "wmiexec",
+            "smbexec",
+        ]
+
+        for evidence_type in expected_types:
+            assert evidence_type in EVIDENCE_CHAIN_MAP, f"Missing {evidence_type}"
+
+    def test_evidence_chain_map_values_are_lists(self):
+        """Test that all EVIDENCE_CHAIN_MAP values are lists of strings."""
+        for key, value in EVIDENCE_CHAIN_MAP.items():
+            assert isinstance(value, list), f"{key} value is not a list"
+            for method in value:
+                assert isinstance(method, str), f"{key} contains non-string method"
+
+    def test_evidence_chain_map_methods_look_like_detect_methods(self):
+        """Test that chained methods follow naming convention."""
+        for key, methods in EVIDENCE_CHAIN_MAP.items():
+            for method in methods:
+                assert method.startswith("detect_"), (
+                    f"{key} has method {method} that doesn't start with 'detect_'"
+                )
+
+
+class TestInvestigationStateQueueFields:
+    """Tests for new queue fields on InvestigationState."""
+
+    def test_state_has_queued_pivot_queries(self, investigation_state: InvestigationState):
+        """Test state has queued_pivot_queries field."""
+        assert hasattr(investigation_state, "queued_pivot_queries")
+        assert isinstance(investigation_state.queued_pivot_queries, list)
+
+    def test_state_has_queued_chain_queries(self, investigation_state: InvestigationState):
+        """Test state has queued_chain_queries field."""
+        assert hasattr(investigation_state, "queued_chain_queries")
+        assert isinstance(investigation_state.queued_chain_queries, list)
+
+    def test_state_has_executed_query_types(self, investigation_state: InvestigationState):
+        """Test state has executed_query_types field."""
+        assert hasattr(investigation_state, "executed_query_types")
+        assert isinstance(investigation_state.executed_query_types, set)
+
+    def test_queued_fields_default_to_empty(self, investigation_state: InvestigationState):
+        """Test queue fields default to empty collections."""
+        assert len(investigation_state.queued_pivot_queries) == 0
+        assert len(investigation_state.queued_chain_queries) == 0
+        assert len(investigation_state.executed_query_types) == 0
