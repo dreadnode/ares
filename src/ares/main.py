@@ -809,6 +809,297 @@ async def worker(
         raise
 
 
+@dataclass
+class EvalArgs:
+    """Evaluation arguments.
+
+    Attributes:
+        output_dir: Directory for evaluation results.
+        poll_timeout: Seconds to wait for alerts per scenario.
+        ci: CI mode - output JSON to stdout and use exit codes.
+        synthetic: Use synthetic alerts (don't wait for real Grafana alerts).
+        min_score: Minimum overall score to pass (0.0-1.0, CI mode only).
+        min_ioc_rate: Minimum IOC detection rate to pass (0.0-1.0, CI mode only).
+        min_technique_rate: Minimum technique coverage to pass (0.0-1.0, CI mode only).
+        parallel: Number of scenarios to run in parallel (dataset only).
+    """
+
+    output_dir: str = "./eval_results"
+    poll_timeout: int = 60
+    ci: bool = False
+    synthetic: bool = False
+    min_score: float = 0.5
+    min_ioc_rate: float = 0.5
+    min_technique_rate: float = 0.5
+    parallel: int = 1
+
+
+# Cyclopts decorator typing not yet fully supported by type checkers
+@app.command(name="evaluate")  # type: ignore[untyped-decorator]
+async def evaluate(
+    red_state_file: str,
+    *,
+    args: Args | None = None,
+    eval_args: EvalArgs | None = None,
+    dn_args: DreadnodeArgs | None = None,
+) -> None:
+    """
+    Evaluate blue team investigation against a red team operation.
+
+    Takes a red team state file (JSON) and evaluates the blue team's
+    ability to detect and investigate the activities. Polls Grafana
+    for real alerts - if no alert fired, that's a detection gap finding.
+
+    Args:
+        red_state_file: Path to red team state JSON file.
+
+    Example:
+        uv run ares evaluate ./red_state.json
+        uv run ares evaluate ./red_state.json --args.model claude-sonnet-4-20250514
+    """
+    args = args or Args()
+    eval_args = eval_args or EvalArgs()
+    dn_args = dn_args or DreadnodeArgs()
+
+    model = _resolve_model(args.model)
+    if not model:
+        logger.error("No model specified. Set ARES_MODEL or pass --args.model.")
+        return
+
+    # Prefer GRAFANA_SERVICE_ACCOUNT_TOKEN, fallback to GRAFANA_API_KEY for compatibility
+    grafana_api_key = (
+        args.grafana_api_key
+        or os.getenv("GRAFANA_SERVICE_ACCOUNT_TOKEN", "")
+        or os.getenv("GRAFANA_API_KEY", "")
+    )
+    dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
+
+    # Configure Dreadnode (also configures LiteLLM environment)
+    dn = _configure_dreadnode()
+    try:
+        dn.configure(
+            server=dn_args.server,
+            token=dreadnode_token,
+            organization=dn_args.organization,
+            workspace=dn_args.workspace,
+            project=dn_args.project,
+            console=dn_args.console,
+        )
+    except Exception as e:
+        logger.warning(f"Dreadnode platform unavailable: {e}")
+
+    # Validate inputs
+    state_path = Path(red_state_file)
+    if not state_path.exists():
+        logger.error(f"Red team state file not found: {state_path}")
+        return
+
+    # Log startup
+    logger.info("=" * 60)
+    logger.info("ARES BLUE TEAM EVALUATION")
+    logger.info("=" * 60)
+    logger.info(f"Red State: {state_path}")
+    logger.info(f"Model: {model}")
+    logger.info(f"Grafana: {args.grafana_url}")
+    logger.info(f"Poll Timeout: {eval_args.poll_timeout}s")
+    logger.info(f"Output Dir: {eval_args.output_dir}")
+    logger.info("=" * 60)
+
+    from ares.eval import EvaluationRunner, EvaluationScenario
+
+    runner = EvaluationRunner(
+        model=model,
+        grafana_url=args.grafana_url,
+        grafana_api_key=grafana_api_key,
+        max_steps=args.max_steps,
+        output_dir=eval_args.output_dir,
+    )
+
+    scenario = EvaluationScenario(
+        red_state=state_path,
+        name=state_path.stem,
+    )
+
+    with dn.run(tags=["blue-team-evaluation", state_path.stem]):
+        result = await runner.evaluate_scenario(
+            scenario,
+            poll_timeout_seconds=eval_args.poll_timeout,
+            inject_synthetic=eval_args.synthetic,
+        )
+
+    # CI mode: JSON output and exit codes
+    if eval_args.ci:
+        import json
+        import sys
+
+        # Check pass/fail against thresholds
+        passed = (
+            result.overall_score >= eval_args.min_score
+            and result.ioc_detection_rate >= eval_args.min_ioc_rate
+            and result.technique_coverage >= eval_args.min_technique_rate
+        )
+
+        output = {
+            "passed": passed,
+            "result": result.to_dict(),
+            "thresholds": {
+                "min_score": eval_args.min_score,
+                "min_ioc_rate": eval_args.min_ioc_rate,
+                "min_technique_rate": eval_args.min_technique_rate,
+            },
+        }
+        print(json.dumps(output, indent=2, default=str))
+
+        # Exit with appropriate code
+        sys.exit(0 if passed else 1)
+
+    logger.success("")
+    logger.success("=" * 60)
+    logger.success("EVALUATION COMPLETE")
+    logger.success("=" * 60)
+    logger.success(result.to_summary())
+    logger.success("")
+
+
+# Cyclopts decorator typing not yet fully supported by type checkers
+@app.command(name="evaluate-dataset")  # type: ignore[untyped-decorator]
+async def evaluate_dataset(
+    dataset_path: str,
+    *,
+    args: Args | None = None,
+    eval_args: EvalArgs | None = None,
+    dn_args: DreadnodeArgs | None = None,
+) -> None:
+    """
+    Evaluate blue team against a dataset of red team operations.
+
+    Takes either:
+    - A directory of red team state JSON files
+    - A JSON file defining a dataset of scenarios
+
+    Example:
+        uv run ares evaluate-dataset ./red_states/
+        uv run ares evaluate-dataset ./scenarios.json --eval-args.output-dir ./results/
+    """
+    args = args or Args()
+    eval_args = eval_args or EvalArgs()
+    dn_args = dn_args or DreadnodeArgs()
+
+    model = _resolve_model(args.model)
+    if not model:
+        logger.error("No model specified. Set ARES_MODEL or pass --args.model.")
+        return
+
+    # Prefer GRAFANA_SERVICE_ACCOUNT_TOKEN, fallback to GRAFANA_API_KEY for compatibility
+    grafana_api_key = (
+        args.grafana_api_key
+        or os.getenv("GRAFANA_SERVICE_ACCOUNT_TOKEN", "")
+        or os.getenv("GRAFANA_API_KEY", "")
+    )
+    dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
+
+    # Configure Dreadnode (also configures LiteLLM environment)
+    dn = _configure_dreadnode()
+    try:
+        dn.configure(
+            server=dn_args.server,
+            token=dreadnode_token,
+            organization=dn_args.organization,
+            workspace=dn_args.workspace,
+            project=dn_args.project,
+            console=dn_args.console,
+        )
+    except Exception as e:
+        logger.warning(f"Dreadnode platform unavailable: {e}")
+
+    # Load dataset
+    dataset_path_obj = Path(dataset_path)
+    if not dataset_path_obj.exists():
+        logger.error(f"Dataset path not found: {dataset_path}")
+        return
+
+    from ares.eval import EvaluationDataset, EvaluationRunner
+
+    if dataset_path_obj.is_dir():
+        dataset = EvaluationDataset.from_directory(dataset_path_obj)
+    elif dataset_path_obj.suffix == ".json":
+        dataset = EvaluationDataset.from_json(dataset_path_obj)
+    else:
+        logger.error("Dataset must be a directory or JSON file")
+        return
+
+    if not dataset.scenarios:
+        logger.error("No scenarios found in dataset")
+        return
+
+    # Log startup
+    logger.info("=" * 60)
+    logger.info("ARES BLUE TEAM DATASET EVALUATION")
+    logger.info("=" * 60)
+    logger.info(f"Dataset: {dataset.name}")
+    logger.info(f"Scenarios: {len(dataset)}")
+    logger.info(f"Model: {model}")
+    logger.info(f"Grafana: {args.grafana_url}")
+    logger.info(f"Poll Timeout: {eval_args.poll_timeout}s")
+    logger.info(f"Output Dir: {eval_args.output_dir}")
+    logger.info("=" * 60)
+
+    runner = EvaluationRunner(
+        model=model,
+        grafana_url=args.grafana_url,
+        grafana_api_key=grafana_api_key,
+        max_steps=args.max_steps,
+        output_dir=eval_args.output_dir,
+        inject_synthetic_alerts=eval_args.synthetic,
+    )
+
+    result = await runner.evaluate_dataset(
+        dataset,
+        poll_timeout_seconds=eval_args.poll_timeout,
+        max_concurrent=eval_args.parallel,
+    )
+
+    # CI mode: JSON output and exit codes
+    if eval_args.ci:
+        import json
+        import sys
+
+        # Check pass/fail against thresholds
+        passed = (
+            result.avg_overall_score >= eval_args.min_score
+            and result.avg_ioc_detection_rate >= eval_args.min_ioc_rate
+            and result.avg_technique_coverage >= eval_args.min_technique_rate
+        )
+
+        output = {
+            "passed": passed,
+            "summary": {
+                "count": result.count,
+                "pass_rate": result.pass_rate,
+                "avg_overall_score": result.avg_overall_score,
+                "avg_ioc_detection_rate": result.avg_ioc_detection_rate,
+                "avg_technique_coverage": result.avg_technique_coverage,
+            },
+            "thresholds": {
+                "min_score": eval_args.min_score,
+                "min_ioc_rate": eval_args.min_ioc_rate,
+                "min_technique_rate": eval_args.min_technique_rate,
+            },
+            "results": result.to_dict(),
+        }
+        print(json.dumps(output, indent=2, default=str))
+
+        # Exit with appropriate code
+        sys.exit(0 if passed else 1)
+
+    logger.success("")
+    logger.success("=" * 60)
+    logger.success("DATASET EVALUATION COMPLETE")
+    logger.success("=" * 60)
+    logger.success(result.to_summary())
+    logger.success("")
+
+
 # Cyclopts decorator typing not yet fully supported by type checkers
 @app.command  # type: ignore[untyped-decorator]
 def version() -> None:

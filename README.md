@@ -20,6 +20,7 @@ Agent SDK and MITRE ATT&CK framework.
 - [Usage](#usage)
 - [Blue Team Investigation Workflow](#blue-team-investigation-workflow)
 - [Red Team Operation Workflow](#red-team-operation-workflow)
+- [Blue Team Evaluation](#blue-team-evaluation)
 - [Development](#development)
 - [Configuration](#configuration)
 - [Observability](#observability)
@@ -36,6 +37,16 @@ Agent SDK and MITRE ATT&CK framework.
 - Maps findings to MITRE ATT&CK techniques
 - Generates markdown reports with timeline and recommendations
 - Detects DCSync, authentication patterns, and attack indicators
+
+### Evaluation Framework
+
+- Measures blue team investigation effectiveness against red team ground truth
+- Scores IOC detection, MITRE technique coverage, Pyramid of Pain elevation,
+  timeline accuracy, and evidence quality
+- Supports both real Grafana alert polling and synthetic alert injection
+- Generates gap analysis reports with prioritized detection recommendations
+- CI-compatible with JSON output, exit codes, and configurable pass thresholds
+- Dataset evaluation for batch scoring across multiple scenarios
 
 ### Red Team - Penetration Testing
 
@@ -371,6 +382,134 @@ For each new credential discovered:
 5. Crack discovered hashes and loop back
 
 Example report location: `reports/redteam-<operation-id>_report.md`
+
+## Blue Team Evaluation
+
+The evaluation framework measures how effectively the blue team SOC agent
+detects and investigates red team activities. It uses the red team's operation
+state as ground truth — extracting expected IOCs, MITRE techniques, timeline
+events, and vulnerabilities — then scores the blue team's investigation against
+those expectations.
+
+### Commands
+
+#### Single Scenario
+
+Evaluate the blue team against one red team operation:
+
+```bash
+# Evaluate with real Grafana alerts
+uv run ares evaluate ./red_state.json \
+  --args.model claude-sonnet-4-20250514 \
+  --args.grafana-url https://grafana.example.com
+
+# Evaluate with synthetic alerts (no Grafana required)
+uv run ares evaluate ./red_state.json --eval-args.synthetic
+
+# CI mode: JSON output, exit code 0/1 based on thresholds
+uv run ares evaluate ./red_state.json \
+  --eval-args.ci \
+  --eval-args.synthetic \
+  --eval-args.min-score 0.6 \
+  --eval-args.min-ioc-rate 0.5 \
+  --eval-args.min-technique-rate 0.5
+```
+
+#### Dataset Evaluation
+
+Evaluate against multiple scenarios at once:
+
+```bash
+# From a directory of red team state JSON files
+uv run ares evaluate-dataset ./red_states/
+
+# From a dataset manifest JSON file, with parallel execution
+uv run ares evaluate-dataset ./scenarios.json \
+  --eval-args.parallel 4 \
+  --eval-args.output-dir ./results/
+```
+
+#### Evaluation Arguments (`--eval-args.*`)
+
+| Option                           | Default          | Description                                     |
+| -------------------------------- | ---------------- | ----------------------------------------------- |
+| `--eval-args.output-dir`         | `./eval_results` | Directory for evaluation result JSON files      |
+| `--eval-args.poll-timeout`       | `60`             | Seconds to wait for Grafana alerts per scenario |
+| `--eval-args.ci`                 | `false`          | CI mode — JSON to stdout, exit code 0/1         |
+| `--eval-args.synthetic`          | `false`          | Use synthetic alerts instead of polling Grafana |
+| `--eval-args.min-score`          | `0.5`            | Minimum overall score to pass (CI mode)         |
+| `--eval-args.min-ioc-rate`       | `0.5`            | Minimum IOC detection rate to pass (CI mode)    |
+| `--eval-args.min-technique-rate` | `0.5`            | Minimum technique coverage to pass (CI mode)    |
+| `--eval-args.parallel`           | `1`              | Concurrent scenarios for dataset evaluation     |
+
+### Scoring
+
+Each investigation is scored across six dimensions, grouped into three
+categories:
+
+| Component          | Category     | Effective Weight |
+| ------------------ | ------------ | ---------------- |
+| IOC Detection      | Detection    | 17.5%            |
+| Technique Coverage | Detection    | 17.5%            |
+| Pyramid Elevation  | Quality      | 15%              |
+| Evidence Quality   | Quality      | 15%              |
+| Stage Progress     | Completeness | 17.5%            |
+| Timeline Accuracy  | Completeness | 17.5%            |
+
+**Category weights:** Detection 35%, Quality 30%, Completeness 35%.
+
+**Component details:**
+
+- **IOC Detection** — Compares evidence found against expected IOCs (IPs,
+  hostnames, users, hashes). Uses fuzzy matching for hostnames and
+  `domain\user` formats. Required IOCs are weighted 60%, optional 40%.
+- **Technique Coverage** — Compares identified MITRE techniques against
+  expected techniques. Supports parent/sub-technique matching (T1003 matches
+  T1003.001 and vice versa). Required techniques weighted 60%, optional 40%.
+- **Pyramid Elevation** — Measures how high up the Pyramid of Pain the
+  investigation climbed. 70% weight on highest level reached, 30% on the ratio
+  of evidence at Tools/TTPs level.
+- **Evidence Quality** — Evaluates average confidence (40%), validation rate
+  (30%), and TTP-level evidence ratio (30%).
+- **Stage Progress** — How far through the investigation stages the agent
+  progressed: Triage (0.25), Causation (0.50), Lateral (0.75), Synthesis (1.0).
+- **Timeline Accuracy** — Matches investigation timeline events against
+  expected events using regex, substring, and keyword overlap matching (60%),
+  plus technique association accuracy (40%).
+
+Results are graded A through F based on overall score, with pass/fail
+determined by configurable thresholds on overall score, IOC detection rate,
+and technique coverage.
+
+### Synthetic Alerts
+
+The `--eval-args.synthetic` flag bypasses Grafana polling and generates a
+synthetic alert from the red team ground truth. The alert type and severity
+are chosen based on the most significant expected techniques:
+
+| Technique Pattern | Alert Name                  | Severity |
+| ----------------- | --------------------------- | -------- |
+| T1003 (cred dump) | `CredentialDumpingDetected` | Critical |
+| T1558 (Kerberos)  | `KerberosAttackDetected`    | Critical |
+| T1021 (lateral)   | `LateralMovementDetected`   | High     |
+| Other             | `SuspiciousActivity`        | Warning  |
+
+This is useful for testing investigation quality in isolation without
+requiring a live Grafana instance. Note that synthetic mode always reports
+`alert_fired: true`, so it does not test detection coverage.
+
+### Gap Analysis
+
+After evaluation, the framework can generate a gap analysis report identifying:
+
+- Missed IOCs and techniques with prioritized recommendations
+- Missing alert coverage (no alert fired)
+- Low Pyramid of Pain elevation with log source recommendations
+- Incomplete investigations with workflow improvement suggestions
+
+Recommendations are categorized (log source, detection rule, query,
+training) and prioritized (critical, high, medium, low) with MITRE technique
+mappings and implementation hints.
 
 ## Development
 
