@@ -705,8 +705,45 @@ def create_investigation_agent(
     # - default_label_selector: Override with specific labels like '{job="eventlog"}'
     #   for better performance instead of scanning all streams
     # - default_hours_back: Defaults to 1 hour (reduced from 4) for faster queries
+    # - mcp_query_fn: MCP query function for authenticated Loki queries
     # Example: QueryTemplateTools(loki_url=loki_url, default_label_selector='{job="windows"}')
-    query_template_tools = QueryTemplateTools(loki_url=loki_url)
+
+    # Extract MCP query_loki_logs function if available (fixes auth issues with direct HTTP)
+    mcp_query_fn = None
+    if grafana_mcp_tools:
+        for tool in grafana_mcp_tools:
+            tool_name = getattr(tool, "name", "") or getattr(tool, "__name__", "")
+            if "query_loki_logs" in tool_name:
+                # Extract the underlying function from the MCP tool
+                tool_fn = getattr(tool, "fn", None)
+                if tool_fn is None and callable(tool):
+                    tool_fn = tool
+
+                if tool_fn:
+                    # Create a wrapper that matches our expected signature
+                    async def mcp_loki_wrapper(
+                        datasource_uid: str,
+                        logql: str,
+                        start_time: str,
+                        end_time: str,
+                        limit: int,
+                        _fn=tool_fn,
+                    ):
+                        return await _fn(
+                            datasourceUid=datasource_uid,
+                            logql=logql,
+                            startRfc3339=start_time,
+                            endRfc3339=end_time,
+                            limit=limit,
+                        )
+
+                    mcp_query_fn = mcp_loki_wrapper
+                    logger.info(
+                        "QueryTemplateTools will use MCP query_loki_logs for authenticated queries"
+                    )
+                break
+
+    query_template_tools = QueryTemplateTools(loki_url=loki_url, mcp_query_fn=mcp_query_fn)
 
     learning_tools = LearningTools()
 

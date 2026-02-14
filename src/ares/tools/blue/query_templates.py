@@ -4,6 +4,7 @@ Provides ready-to-use LogQL queries mapped to MITRE ATT&CK techniques,
 specifically designed to detect attacks performed by the Ares red team agent.
 """
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -11,6 +12,10 @@ import dreadnode as dn
 import httpx
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
+
+# Type alias for MCP query function signature:
+# (datasource_uid, logql, start_time, end_time, limit) -> result
+MCPQueryFn = Callable[[str, str, str, str, int], Awaitable[Any]]
 
 
 class QueryTemplateTools(Toolset):  # type: ignore[misc]
@@ -30,19 +35,24 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
     - Avoid {job=~".+"} - use specific labels when possible
 
     Attributes:
-        loki_url: Base URL of the Loki instance.
+        loki_url: Base URL of the Loki instance (fallback for direct HTTP queries).
         timeout: HTTP request timeout in seconds.
         default_label_selector: Base label selector for queries. Defaults to
             '{job="eventlog"}' for Windows event logs. Override for other log
             types (e.g., '{job="syslog"}', '{deployment="windows-dc"}').
             NEVER use broad patterns like '{job=~".+"}' - they scan all streams and timeout.
         default_hours_back: Default time range for queries. Shorter ranges are faster.
+        mcp_query_fn: Optional MCP query function for authenticated Loki queries.
+            If provided, uses MCP instead of direct HTTP calls to avoid auth issues.
+        datasource_uid: Loki datasource UID for MCP queries (default: "loki").
     """
 
     loki_url: str
     timeout: int = 30
     default_label_selector: str = '{job="eventlog"}'
     default_hours_back: int = 1  # Reduced from 4 hours for faster queries
+    mcp_query_fn: MCPQueryFn | None = None
+    datasource_uid: str = "loki"
 
     def _build_selector(
         self,
@@ -119,13 +129,44 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         end_time: str,
         limit: int = 500,
     ) -> dict[str, Any]:
-        """Execute a LogQL query against Loki."""
+        """Execute a LogQL query against Loki.
+
+        Uses MCP query function if available (preferred, handles authentication).
+        Falls back to direct HTTP calls if MCP is not configured.
+        """
         if '=~".*"' in logql or "=~'.*'" in logql:
             return {
                 "status": "error",
                 "error": "Query contains empty-compatible regex '.*'. Use '.+' instead.",
             }
 
+        # Prefer MCP-based query if available (handles auth correctly)
+        if self.mcp_query_fn is not None:
+            try:
+                logger.debug(f"Using MCP query_loki_logs for: {logql[:100]}...")
+                result = await self.mcp_query_fn(
+                    self.datasource_uid,
+                    logql,
+                    start_time,
+                    end_time,
+                    min(limit, 100),  # MCP tool has max 100 limit
+                )
+                # MCP returns list of results, wrap in standard format
+                if isinstance(result, list):
+                    return {
+                        "status": "success",
+                        "data": {"result": result},
+                    }
+                return result
+            except Exception as e:
+                logger.error(f"MCP Loki query failed: {e}")
+                return {"status": "error", "error": str(e), "data": {"result": []}}
+
+        # Fallback to direct HTTP (may fail with 302 redirect if auth required)
+        logger.warning(
+            "Using direct HTTP for Loki query - this may fail with auth errors. "
+            "Consider passing mcp_query_fn for authenticated queries."
+        )
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.get(
@@ -137,6 +178,17 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
                         "limit": limit,
                     },
                 )
+                # Check for redirect (common auth issue)
+                if response.status_code == 302:
+                    logger.error(
+                        "Loki returned 302 redirect - authentication required. "
+                        "Use MCP-based queries (mcp_query_fn) for authenticated access."
+                    )
+                    return {
+                        "status": "error",
+                        "error": "Authentication required (302 redirect). Use MCP query tools.",
+                        "data": {"result": []},
+                    }
                 response.raise_for_status()
                 return response.json()
         except httpx.HTTPError as e:
@@ -1756,6 +1808,234 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         return result
 
     # =========================================================================
+    # ADDITIONAL CREDENTIAL ACCESS DETECTIONS
+    # Maps to: S4U delegation abuse, DCSync with GUIDs, LSA secrets, RemoteRegistry
+    # =========================================================================
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def detect_s4u_delegation(
+        self,
+        domain_controller: str | None = None,
+        hours_back: int | None = None,
+    ) -> dict[str, Any]:
+        """Detect S4U2Self/S4U2Proxy constrained delegation abuse.
+
+        Detects red team's constrained delegation exploitation using impacket-getST
+        to impersonate privileged users via S4U protocol extensions.
+
+        MITRE ATT&CK: T1558.003 (Kerberoasting - S4U variant)
+
+        Detection logic:
+        - Event 4769: TGS request with S4U ticket options
+        - Impersonation of privileged accounts (Administrator, Domain Admins)
+        - Service ticket requests to sensitive SPNs (CIFS, HTTP on DCs)
+
+        Args:
+            domain_controller: Optional DC hostname to focus on.
+            hours_back: Hours of logs to search (default: 1 hour).
+
+        Returns:
+            Query results with S4U delegation abuse indicators.
+        """
+        dn.log_metric("query_template_s4u_delegation", 1, mode="count")
+        start_time, end_time = self._get_time_range(hours_back)
+
+        selector = self._build_selector(hostname=domain_controller)
+        # Event 4769: Kerberos Service Ticket Operations
+        event_filter = self._build_event_filter(["4769"])
+        # S4U patterns and impersonation indicators
+        tool_filter = self._build_pattern_filter(
+            [
+                "s4u2self",
+                "s4u2proxy",
+                "constrained.delegation",
+                "impersonate",
+                "forwardable",
+                "getst",
+                "cifs/",
+                "http/",
+                "administrator",
+                "trustedfordelegation",
+            ]
+        )
+
+        logql = f"{selector} {event_filter} {tool_filter}"
+
+        logger.info(f"S4U delegation detection: {logql}")
+
+        result = await self._query_loki(logql, start_time, end_time, limit=500)
+        result["_query_template"] = "s4u_delegation"
+        result["_mitre_technique"] = "T1558.003"
+        result["_red_team_tool"] = "get_st"
+        result["_severity"] = "critical"
+
+        return result
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def detect_dcsync_replication(
+        self,
+        domain_controller: str | None = None,
+        hours_back: int | None = None,
+    ) -> dict[str, Any]:
+        """Detect DCSync attacks using DS-Replication GUIDs.
+
+        Detects red team's secretsdump DCSync by looking for Event 4662
+        with specific DS-Replication-Get-Changes GUIDs that indicate
+        directory replication requests.
+
+        MITRE ATT&CK: T1003.006 (DCSync)
+
+        Detection logic:
+        - Event 4662: Directory Service Access with replication GUIDs
+        - GUIDs: 1131f6aa (Get-Changes), 1131f6ad (Get-Changes-All),
+                 89e95b76 (Get-Changes-In-Filtered-Set)
+
+        Args:
+            domain_controller: Optional DC hostname.
+            hours_back: Hours of logs to search (default: 1 hour).
+
+        Returns:
+            Query results with DCSync indicators.
+        """
+        dn.log_metric("query_template_dcsync_replication", 1, mode="count")
+        start_time, end_time = self._get_time_range(hours_back)
+
+        selector = self._build_selector(hostname=domain_controller)
+        # Event 4662: Operation performed on directory object
+        event_filter = self._build_event_filter(["4662"])
+        # DS-Replication GUIDs
+        guid_filter = self._build_pattern_filter(
+            [
+                "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2",  # DS-Replication-Get-Changes
+                "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2",  # DS-Replication-Get-Changes-All
+                "89e95b76-444d-4c62-991a-0facbeda640c",  # DS-Replication-Get-Changes-In-Filtered-Set
+                "1131f6aa",  # Short form
+                "1131f6ad",  # Short form
+                "89e95b76",  # Short form
+            ],
+            case_insensitive=True,
+        )
+
+        logql = f"{selector} {event_filter} {guid_filter}"
+
+        logger.info(f"DCSync replication detection: {logql}")
+
+        result = await self._query_loki(logql, start_time, end_time, limit=500)
+        result["_query_template"] = "dcsync_replication"
+        result["_mitre_technique"] = "T1003.006"
+        result["_red_team_tool"] = "secretsdump"
+        result["_severity"] = "critical"
+        result["_attack_chain_indicator"] = "domain_admin"
+
+        return result
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def detect_lsa_secrets_access(
+        self,
+        target_host: str | None = None,
+        hours_back: int | None = None,
+    ) -> dict[str, Any]:
+        """Detect LSA Secrets extraction attempts.
+
+        Detects red team's secretsdump LSA secrets extraction which
+        targets cached credentials, service account passwords, and
+        other sensitive data stored in registry.
+
+        MITRE ATT&CK: T1003.004 (LSA Secrets)
+
+        Detection logic:
+        - Events 4656/4663: Object handle/access to LSA secrets keys
+        - Registry access to SECURITY\\Policy\\Secrets
+        - secretsdump tool patterns
+
+        Args:
+            target_host: Optional target hostname.
+            hours_back: Hours of logs to search (default: 1 hour).
+
+        Returns:
+            Query results with LSA secrets access indicators.
+        """
+        dn.log_metric("query_template_lsa_secrets", 1, mode="count")
+        start_time, end_time = self._get_time_range(hours_back)
+
+        selector = self._build_selector(hostname=target_host)
+        # Events for object access
+        event_filter = self._build_event_filter(["4656", "4663", "4658"])
+        # LSA secrets patterns
+        tool_filter = self._build_pattern_filter(
+            [
+                "security.policy.secrets",
+                "lsa.secrets",
+                "dpapi",
+                "defaultpassword",
+                "nlkm",
+                "cachedlogon",
+                "lsadump",
+                "reg.query.*security",
+            ]
+        )
+
+        logql = f"{selector} {event_filter} {tool_filter}"
+
+        logger.info(f"LSA secrets access detection: {logql}")
+
+        result = await self._query_loki(logql, start_time, end_time, limit=500)
+        result["_query_template"] = "lsa_secrets_access"
+        result["_mitre_technique"] = "T1003.004"
+        result["_red_team_tool"] = "secretsdump"
+        result["_severity"] = "high"
+
+        return result
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def detect_remote_registry_start(
+        self,
+        target_host: str | None = None,
+        hours_back: int | None = None,
+    ) -> dict[str, Any]:
+        """Detect RemoteRegistry service being started remotely.
+
+        Detects red team's secretsdump enabling RemoteRegistry to
+        extract bootKey and registry secrets from remote hosts.
+
+        MITRE ATT&CK: T1569.002 (Service Execution)
+
+        Detection logic:
+        - Event 7036: Service Control Manager (service state change)
+        - RemoteRegistry service being started
+        - Often precedes credential dumping
+
+        Args:
+            target_host: Optional target hostname.
+            hours_back: Hours of logs to search (default: 1 hour).
+
+        Returns:
+            Query results with RemoteRegistry service indicators.
+        """
+        dn.log_metric("query_template_remote_registry", 1, mode="count")
+        start_time, end_time = self._get_time_range(hours_back)
+
+        # Use System log for service events
+        if target_host:
+            selector = f'{{job="eventlog", hostname=~"{target_host}"}}'
+        else:
+            selector = '{job="eventlog"}'
+
+        # Event 7036: Service Control Manager
+        logql = f'{selector} |~ "(7036|7045)" |~ "(?i)(remoteregistry|remote.registry)" |~ "(?i)(running|started|start)"'
+
+        logger.info(f"RemoteRegistry service detection: {logql}")
+
+        result = await self._query_loki(logql, start_time, end_time, limit=500)
+        result["_query_template"] = "remote_registry_start"
+        result["_mitre_technique"] = "T1569.002"
+        result["_red_team_tool"] = "secretsdump"
+        result["_severity"] = "medium"
+        result["_precursor_indicator"] = "credential_dumping"
+
+        return result
+
+    # =========================================================================
     # HOST/USER INVESTIGATION HELPERS
     # =========================================================================
 
@@ -1906,6 +2186,38 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
                 "mitre": "T1110",
                 "tactic": "credential_access",
                 "red_team_tool": None,
+            },
+            {
+                "name": "detect_s4u_delegation",
+                "description": "Detect S4U2Self/S4U2Proxy constrained delegation abuse",
+                "mitre": "T1558.003",
+                "tactic": "credential_access",
+                "red_team_tool": "get_st",
+                "severity": "critical",
+            },
+            {
+                "name": "detect_dcsync_replication",
+                "description": "Detect DCSync via DS-Replication GUIDs (4662)",
+                "mitre": "T1003.006",
+                "tactic": "credential_access",
+                "red_team_tool": "secretsdump",
+                "severity": "critical",
+            },
+            {
+                "name": "detect_lsa_secrets_access",
+                "description": "Detect LSA Secrets extraction attempts",
+                "mitre": "T1003.004",
+                "tactic": "credential_access",
+                "red_team_tool": "secretsdump",
+                "severity": "high",
+            },
+            {
+                "name": "detect_remote_registry_start",
+                "description": "Detect RemoteRegistry service start (precursor to dumping)",
+                "mitre": "T1569.002",
+                "tactic": "execution",
+                "red_team_tool": "secretsdump",
+                "severity": "medium",
             },
             # Lateral Movement
             {
