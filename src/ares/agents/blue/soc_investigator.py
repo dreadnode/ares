@@ -378,6 +378,7 @@ class InvestigationOrchestrator:
                         "evidence_count": len(state.evidence),
                         "techniques_identified": list(state.identified_techniques),
                         "highest_pyramid_level": state.highest_pyramid_level,
+                        "state": state,  # Full state for evaluation framework
                     }
 
                 except asyncio.TimeoutError:
@@ -406,6 +407,7 @@ class InvestigationOrchestrator:
                         "evidence_count": len(state.evidence),
                         "techniques_identified": list(state.identified_techniques),
                         "highest_pyramid_level": state.highest_pyramid_level,
+                        "state": state,  # Full state for evaluation framework
                     }
 
                 except Exception as e:
