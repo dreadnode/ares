@@ -223,13 +223,20 @@ def create_role_hooks(
                 # Detect error content returned by rigging's exception catching
                 # (ValidationError, JSONDecodeError are caught and returned as error XML)
                 # Also detect common tool failure patterns
+                # NOTE: Be careful not to match on status reports that mention failures
+                # e.g. get_exploitation_status() returns "Task timed out" for OTHER tasks
                 is_error = (
                     content.startswith('<error type="')
                     or "ValidationError" in content
-                    or "Login failed" in content
-                    or "timed out" in content.lower()
                     or "[-] ERROR" in content
                 )
+                # Only match "Login failed" / "timed out" if they appear at the start
+                # (actual tool errors), not in the middle of status reports
+                if not is_error:
+                    first_line = content.split("\n")[0].lower() if content else ""
+                    is_error = first_line.startswith(
+                        ("login failed", "error:", "timed out", "task timed out")
+                    )
                 icon = "❌" if is_error else "✅"
                 log_fn = logger.warning if is_error else logger.info
 
