@@ -227,6 +227,24 @@ class InvestigationOrchestrator:
                 self._mcp_client = None
                 self._mcp_tools = None
 
+    def _extract_mitre_technique(self, alert: dict, state: InvestigationState) -> None:
+        """Extract MITRE technique ID from alert labels or annotations."""
+        labels = alert.get("labels", {})
+        annotations = alert.get("annotations", {})
+        for key in ["mitre_technique", "mitre", "technique_id", "technique"]:
+            tech_id = labels.get(key) or annotations.get(key)
+            if not tech_id:
+                continue
+            state.identified_techniques.add(tech_id)
+            technique = self.mitre_client.get_technique(tech_id)
+            if technique:
+                state.technique_names[tech_id] = technique.name
+                state.technique_to_tactic[tech_id] = technique.tactic or "Unknown"
+                if technique.tactic:
+                    state.identified_tactics.add(technique.tactic)
+            logger.info(f"Auto-recorded MITRE technique from alert: {tech_id}")
+            break
+
     async def investigate(self, alert: dict, correlation_context: dict | None = None) -> dict:
         """Run a full investigation on an alert.
 
@@ -284,33 +302,7 @@ class InvestigationOrchestrator:
             await self._post_started_annotation(investigation_id, alert)
 
             # Auto-extract and record MITRE technique from alert
-            labels = alert.get("labels", {})
-            annotations = alert.get("annotations", {})
-            for key in ["mitre_technique", "mitre", "technique_id", "technique"]:
-                if labels.get(key):
-                    tech_id = labels[key]
-                    state.identified_techniques.add(tech_id)
-                    # Resolve technique name and tactic
-                    technique = self.mitre_client.get_technique(tech_id)
-                    if technique:
-                        state.technique_names[tech_id] = technique.name
-                        state.technique_to_tactic[tech_id] = technique.tactic or "Unknown"
-                        if technique.tactic:
-                            state.identified_tactics.add(technique.tactic)
-                    logger.info(f"Auto-recorded MITRE technique from alert: {tech_id}")
-                    break
-                if annotations.get(key):
-                    tech_id = annotations[key]
-                    state.identified_techniques.add(tech_id)
-                    # Resolve technique name and tactic
-                    technique = self.mitre_client.get_technique(tech_id)
-                    if technique:
-                        state.technique_names[tech_id] = technique.name
-                        state.technique_to_tactic[tech_id] = technique.tactic or "Unknown"
-                        if technique.tactic:
-                            state.identified_tactics.add(technique.tactic)
-                    logger.info(f"Auto-recorded MITRE technique from alert: {tech_id}")
-                    break
+            self._extract_mitre_technique(alert, state)
 
             self._create_alert_timeline_event(state, alert)
 
@@ -353,6 +345,8 @@ class InvestigationOrchestrator:
                     )
 
                     logger.success(f"Agent completed: {result.steps} steps, {result.stop_reason}")
+                    if result.error:
+                        logger.error(f"Agent error detail: {result.error!r}")
 
                     status = "completed"
                     if state.escalated:

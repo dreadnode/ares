@@ -518,6 +518,16 @@ async def connect_grafana_mcp(
     mcp_grafana_path = find_mcp_grafana()
     logger.info(f"Found mcp-grafana at: {mcp_grafana_path}")
 
+    # Increase rigging's MCP initialize timeout from the default 5s.
+    # mcp-grafana spends ~6s on datasource discovery before it's ready,
+    # so the default 5s timeout causes a BrokenResourceError in the TaskGroup.
+    # Note: must use importlib because `rigging.tools.mcp` is shadowed by the
+    # `mcp` function re-export in rigging.tools.__init__.
+    import importlib
+
+    _rg_mcp_mod = importlib.import_module("rigging.tools.mcp")
+    _rg_mcp_mod.INITIALIZE_TIMEOUT = 30
+
     # Connect to MCP server using the new environment variable name
     client = rg.mcp(
         "stdio",
