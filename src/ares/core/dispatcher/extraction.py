@@ -284,8 +284,19 @@ def extract_shares_from_output(output: str, default_host: str = "") -> list[Shar
             if not name or name.lower() == "share":
                 continue
 
-            permissions = parts[1].strip() if len(parts) > 1 else ""
-            comment = parts[2].strip() if len(parts) > 2 else ""
+            # Validate permissions - netexec only outputs READ, WRITE, or READ,WRITE
+            # If parts[1] isn't a valid permission, it's actually the comment
+            # (happens when share has no permissions, e.g., "ADMIN$  Remote Admin")
+            valid_perms = {"read", "write", "read,write", "write,read"}
+            raw_perm = parts[1].strip().lower() if len(parts) > 1 else ""
+
+            if raw_perm in valid_perms:
+                permissions = parts[1].strip().upper()
+                comment = parts[2].strip() if len(parts) > 2 else ""
+            else:
+                # No valid permission - parts[1:] is actually the comment
+                permissions = ""
+                comment = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
 
             key = (current_host.lower(), name.lower())
             if key in seen:

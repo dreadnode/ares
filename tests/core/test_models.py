@@ -716,25 +716,27 @@ class TestExtractDomains:
         )
 
         state = SharedRedTeamState(operation_id="test-op")
-        state.target = Target(ip="192.168.58.1", hostname="dc.target.local", domain="target.local")
-        state.all_users = [User(username="admin", domain="users.local")]
+        state.target = Target(
+            ip="192.168.58.1", hostname="dc.contoso.local", domain="contoso.local"
+        )
+        state.all_users = [User(username="admin", domain="child.contoso.local")]
         state.all_credentials = [
             Credential(
                 username="admin",
                 password="pass",  # pragma: allowlist secret
-                domain="creds.local",
+                domain="corp.contoso.local",
             )
         ]
-        state.all_hashes = [Hash(username="admin", hash_value="abc", domain="hashes.local")]
-        state.all_hosts = [Host(ip="192.168.58.2", hostname="server.hosts.local")]
+        state.all_hashes = [Hash(username="admin", hash_value="abc", domain="fabrikam.local")]
+        state.all_hosts = [Host(ip="192.168.58.2", hostname="server.child.fabrikam.local")]
 
         domains = SharedRedTeamState._extract_domains(state)
 
-        assert "target.local" in domains  # from target.domain
-        assert "users.local" in domains  # from user
-        assert "creds.local" in domains  # from credential
-        assert "hashes.local" in domains  # from hash
-        assert "hosts.local" in domains  # from host FQDN
+        assert "contoso.local" in domains  # from target.domain
+        assert "child.contoso.local" in domains  # from user
+        assert "corp.contoso.local" in domains  # from credential
+        assert "fabrikam.local" in domains  # from hash
+        assert "child.fabrikam.local" in domains  # from host FQDN
 
     def test_extracts_domain_from_target_hostname(self) -> None:
         """Test that domain is extracted from target hostname FQDN."""
@@ -1072,30 +1074,30 @@ class TestHashDomainValidation:
     def test_hash_domain_corrected_when_user_known_in_different_domain(self) -> None:
         """Test that hash domain is corrected when user is known to exist elsewhere.
 
-        Scenario: kerberoast against essos.local returns hash with ESSOS realm,
-        but BloodHound already found samwell.tarly in north.sevenkingdoms.local.
-        The hash domain should be corrected to north.sevenkingdoms.local.
+        Scenario: kerberoast against fabrikam.local returns hash with FABRIKAM realm,
+        but BloodHound already found svc.backup in child.contoso.local.
+        The hash domain should be corrected to child.contoso.local.
         """
         from ares.core.models import Hash, SharedRedTeamState
 
         state = SharedRedTeamState(operation_id="test-op")
 
-        # Simulate BloodHound discovering user in north.sevenkingdoms.local
-        state.add_user("samwell.tarly", "north.sevenkingdoms.local", source="bloodhound")
+        # Simulate BloodHound discovering user in child.contoso.local
+        state.add_user("svc.backup", "child.contoso.local", source="bloodhound")
 
-        # Now a hash comes in with wrong domain (ESSOS realm from kerberoast)
+        # Now a hash comes in with wrong domain (FABRIKAM realm from kerberoast)
         hash_obj = Hash(
-            username="samwell.tarly",
-            hash_value="$krb5tgs$23$*samwell.tarly$ESSOS$http/web01$abc123",
+            username="svc.backup",
+            hash_value="$krb5tgs$23$*svc.backup$FABRIKAM$http/web01$abc123",
             hash_type="Kerberoast",
-            domain="essos.local",  # Wrong domain from Kerberos realm
+            domain="fabrikam.local",  # Wrong domain from Kerberos realm
         )
         result = state.add_hash(hash_obj, "kerberoast")
 
         assert result is True
         assert len(state.all_hashes) == 1
         # Domain should be corrected to the known domain
-        assert state.all_hashes[0].domain == "north.sevenkingdoms.local"
+        assert state.all_hashes[0].domain == "child.contoso.local"
 
     def test_hash_domain_not_changed_when_matches_known_domain(self) -> None:
         """Test that hash domain is preserved when it matches known user domain."""
@@ -1103,20 +1105,20 @@ class TestHashDomainValidation:
 
         state = SharedRedTeamState(operation_id="test-op")
 
-        # User known in essos.local
-        state.add_user("daenerys", "essos.local", source="bloodhound")
+        # User known in fabrikam.local
+        state.add_user("svc.sql", "fabrikam.local", source="bloodhound")
 
         # Hash comes in with correct domain
         hash_obj = Hash(
-            username="daenerys",
-            hash_value="$krb5tgs$23$*daenerys$ESSOS$http/web01$def456",
+            username="svc.sql",
+            hash_value="$krb5tgs$23$*svc.sql$FABRIKAM$http/web01$def456",
             hash_type="Kerberoast",
-            domain="essos.local",
+            domain="fabrikam.local",
         )
         result = state.add_hash(hash_obj, "kerberoast")
 
         assert result is True
-        assert state.all_hashes[0].domain == "essos.local"
+        assert state.all_hashes[0].domain == "fabrikam.local"
 
     def test_hash_domain_accepted_when_user_not_previously_seen(self) -> None:
         """Test that hash domain is accepted as-is when user not previously discovered."""
@@ -1140,28 +1142,28 @@ class TestHashDomainValidation:
         """Test that longer FQDN is preferred when user exists in multiple domains.
 
         In AD forests, child domains are more specific. If a user exists in both
-        sevenkingdoms.local and north.sevenkingdoms.local, prefer the child.
+        contoso.local and child.contoso.local, prefer the child.
         """
         from ares.core.models import Hash, SharedRedTeamState
 
         state = SharedRedTeamState(operation_id="test-op")
 
         # User seen in multiple domains (parent and child)
-        state.add_user("testuser", "sevenkingdoms.local", source="ldap")
-        state.add_user("testuser", "north.sevenkingdoms.local", source="bloodhound")
+        state.add_user("testuser", "contoso.local", source="ldap")
+        state.add_user("testuser", "child.contoso.local", source="bloodhound")
 
         # Hash comes in with wrong domain
         hash_obj = Hash(
             username="testuser",
             hash_value="aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890",
             hash_type="NTLM",
-            domain="essos.local",  # Wrong domain
+            domain="fabrikam.local",  # Wrong domain
         )
         result = state.add_hash(hash_obj, "secretsdump")
 
         assert result is True
         # Should prefer the longer (more specific) FQDN
-        assert state.all_hashes[0].domain == "north.sevenkingdoms.local"
+        assert state.all_hashes[0].domain == "child.contoso.local"
 
 
 class TestAddUserNetBIOSResolution:
@@ -1179,6 +1181,65 @@ class TestAddUserNetBIOSResolution:
         assert result is True
         assert len(state.all_users) == 1
         assert state.all_users[0].domain == "corp.contoso.local"
+
+
+class TestSiblingDomainHandling:
+    """Tests for sibling domain handling in multi-forest environments."""
+
+    def test_user_domain_corrected_from_target_fallback_to_specific(self) -> None:
+        """Test that user domain is corrected when discovered with specific domain after target fallback."""
+        from ares.core.models import SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        # Target is fabrikam.local but user is actually in child.contoso.local
+        state.target = Target(ip="192.168.58.1", domain="fabrikam.local")
+
+        # First discovery with target fallback
+        result1 = state.add_user("svc_backup", "fabrikam.local")
+        assert result1 is True
+        assert state.all_users[0].domain == "fabrikam.local"
+
+        # Second discovery with correct specific domain
+        result2 = state.add_user("svc_backup", "child.contoso.local")
+        assert result2 is True  # Should update, not add duplicate
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "child.contoso.local"
+
+    def test_user_rejected_when_target_fallback_after_specific(self) -> None:
+        """Test that target fallback domain is rejected when user already has specific domain."""
+        from ares.core.models import SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="192.168.58.1", domain="fabrikam.local")
+
+        # First discovery with specific domain
+        result1 = state.add_user("svc_backup", "child.contoso.local")
+        assert result1 is True
+        assert state.all_users[0].domain == "child.contoso.local"
+
+        # Second discovery with target fallback should be rejected
+        result2 = state.add_user("svc_backup", "fabrikam.local")
+        assert result2 is False
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "child.contoso.local"
+
+    def test_sibling_domain_conflict_keeps_first(self) -> None:
+        """Test that when two non-target sibling domains conflict, first one is kept."""
+        from ares.core.models import SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        # Target is a third domain, so both discoveries are "specific"
+        state.target = Target(ip="192.168.58.1", domain="contoso.local")
+
+        # First discovery in one domain
+        result1 = state.add_user("testuser", "child.contoso.local")
+        assert result1 is True
+
+        # Second discovery in sibling domain should be rejected (keep first)
+        result2 = state.add_user("testuser", "fabrikam.local")
+        assert result2 is False
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "child.contoso.local"
 
 
 class TestRetroactiveDomainNormalization:

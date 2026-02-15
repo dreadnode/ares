@@ -292,11 +292,11 @@ class TestOperationRecoveryManagerInit:
     def test_init_with_params(self):
         """Test initialization with custom parameters."""
         manager = OperationRecoveryManager(
-            redis_url="redis://localhost:6379",
+            redis_url="redis://192.168.58.99:6379",
             checkpoint_interval=30,
         )
 
-        assert manager._redis_url == "redis://localhost:6379"
+        assert manager._redis_url == "redis://192.168.58.99:6379"
         assert manager._checkpoint_interval == 30
 
 
@@ -314,7 +314,7 @@ class TestOperationRecoveryManagerRecovery:
     @pytest.mark.asyncio
     async def test_recover_operation_no_checkpoint(self, mock_redis_client):
         """Test recovery fails when no checkpoint exists."""
-        manager = OperationRecoveryManager(redis_url="redis://localhost:6379")
+        manager = OperationRecoveryManager(redis_url="redis://192.168.58.99:6379")
         manager._redis_client = mock_redis_client
         mock_redis_client.get.return_value = None
 
@@ -326,7 +326,7 @@ class TestOperationRecoveryManagerRecovery:
         self, mock_redis_client, state_with_in_progress_tasks
     ):
         """Test recovery requeues in-progress, pending, and retrying tasks."""
-        manager = OperationRecoveryManager(redis_url="redis://localhost:6379")
+        manager = OperationRecoveryManager(redis_url="redis://192.168.58.99:6379")
         manager._redis_client = mock_redis_client
 
         # Mock get to return state for first call, and checkpoint time for second
@@ -378,7 +378,7 @@ class TestOperationRecoveryManagerRecovery:
         self, mock_redis_client, state_with_max_retries_exceeded
     ):
         """Test recovery marks tasks with max retries as failed."""
-        manager = OperationRecoveryManager(redis_url="redis://localhost:6379")
+        manager = OperationRecoveryManager(redis_url="redis://192.168.58.99:6379")
         manager._redis_client = mock_redis_client
 
         # Mock get to return state for first call, and checkpoint time for second
@@ -413,7 +413,7 @@ class TestOperationRecoveryManagerRecovery:
         self, mock_redis_client, state_with_in_progress_tasks
     ):
         """Test recovery with auto_requeue disabled marks all as failed."""
-        manager = OperationRecoveryManager(redis_url="redis://localhost:6379")
+        manager = OperationRecoveryManager(redis_url="redis://192.168.58.99:6379")
         manager._redis_client = mock_redis_client
 
         # Mock get to return state for first call, and checkpoint time for second
@@ -694,6 +694,112 @@ class TestMergeStateDomainAdminDetection:
 
         assert target.has_domain_admin is True
         assert target.domain_admin_path == "S4U → secretsdump → krbtgt"
+
+
+class TestOperationRecoveryManagerConnectionHandling:
+    """Tests for Redis connection error handling and reconnection."""
+
+    @pytest.fixture
+    def sample_state_for_checkpoint(self):
+        """Create a minimal state for checkpoint testing."""
+        return SharedRedTeamState(
+            operation_id="test-op",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_retries_on_connection_error(
+        self, mock_redis_client, sample_state_for_checkpoint
+    ):
+        """Test that checkpoint retries once on connection error."""
+        manager = OperationRecoveryManager(redis_url="redis://192.168.58.99:6379")
+        manager._redis_client = mock_redis_client
+        manager._connected = True
+
+        # First call fails with timeout, second succeeds
+        mock_redis_client.get.side_effect = [
+            TimeoutError("Timeout reading from 192.168.58.99:6379"),
+            None,  # No existing checkpoint
+        ]
+        mock_redis_client.set.return_value = True
+        mock_redis_client.expire.return_value = True
+
+        # Mock create_redis_client for reconnection
+        with patch("ares.core.recovery.create_redis_client", return_value=mock_redis_client):
+            # Checkpoint should succeed after retry
+            result = await manager.checkpoint(sample_state_for_checkpoint)
+
+            # Should have called get twice (once for initial attempt, once after reconnect)
+            assert mock_redis_client.get.call_count == 2
+            assert result is True
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_fails_after_retry_exhausted(
+        self, mock_redis_client, sample_state_for_checkpoint
+    ):
+        """Test that checkpoint fails if retry also fails."""
+        manager = OperationRecoveryManager(redis_url="redis://192.168.58.99:6379")
+        manager._redis_client = mock_redis_client
+        manager._connected = True
+
+        # Both attempts fail with connection error
+        mock_redis_client.get.side_effect = [
+            TimeoutError("Timeout reading from 192.168.58.99:6379"),
+            ConnectionError("Connection reset"),
+        ]
+
+        # Mock create_redis_client for reconnection
+        with patch("ares.core.recovery.create_redis_client", return_value=mock_redis_client):
+            result = await manager.checkpoint(sample_state_for_checkpoint)
+
+            # Should have attempted twice
+            assert mock_redis_client.get.call_count == 2
+            # Should fail after retry exhausted
+            assert result is False
+
+    @pytest.mark.asyncio
+    async def test_handle_connection_error_resets_state(self, mock_redis_client):
+        """Test that _handle_connection_error resets connection state."""
+        manager = OperationRecoveryManager(redis_url="redis://192.168.58.99:6379")
+        manager._redis_client = mock_redis_client
+        manager._connected = True
+
+        error = TimeoutError("Timeout reading from 192.168.58.99:6379")
+        manager._handle_connection_error(error)
+
+        assert manager._connected is False
+        assert manager._redis_client is None
+
+    @pytest.mark.asyncio
+    async def test_is_connection_error_detects_timeout(self):
+        """Test that _is_connection_error detects timeout errors."""
+        manager = OperationRecoveryManager()
+
+        assert manager._is_connection_error(TimeoutError("Timeout reading from x"))
+        assert manager._is_connection_error(ConnectionError("Connection reset"))
+        assert manager._is_connection_error(Exception("broken pipe"))
+        assert manager._is_connection_error(Exception("Connection closed"))
+
+        # Non-connection errors should not match
+        assert not manager._is_connection_error(ValueError("Invalid value"))
+        assert not manager._is_connection_error(KeyError("missing key"))
+
+    @pytest.mark.asyncio
+    async def test_ensure_connected_reconnects_when_client_none(self):
+        """Test that _ensure_connected reconnects when client is None."""
+        manager = OperationRecoveryManager(redis_url="redis://192.168.58.99:6379")
+        manager._redis_client = None
+        manager._connected = False
+
+        mock_client = AsyncMock()
+        mock_client.ping = AsyncMock(return_value=True)
+
+        with patch("ares.core.recovery.create_redis_client", return_value=mock_client):
+            result = await manager._ensure_connected()
+
+            assert result is True
+            assert manager._connected is True
+            assert manager._redis_client is mock_client
 
 
 if __name__ == "__main__":

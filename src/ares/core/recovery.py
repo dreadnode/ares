@@ -244,6 +244,17 @@ class OperationRecoveryManager:
         state, requeued_task_ids = await manager.recover_operation(operation_id)
     """
 
+    # Connection error keywords to detect stale/failed connections
+    _CONNECTION_ERROR_KEYWORDS = (
+        "connection",
+        "connect",
+        "closed",
+        "timeout",
+        "broken pipe",
+        "reset",
+        "reading from",
+    )
+
     def __init__(
         self,
         k8s_executor: KubernetesPodExecutor | None = None,
@@ -261,9 +272,58 @@ class OperationRecoveryManager:
         self._k8s = k8s_executor
         self._redis_url = redis_url
         self._redis_client = None
+        self._connected = False
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_task: asyncio.Task | None = None
         self._running = False
+
+    def _is_connection_error(self, error: Exception) -> bool:
+        """Check if an exception is a connection-related error."""
+        error_str = str(error).lower()
+        return any(keyword in error_str for keyword in self._CONNECTION_ERROR_KEYWORDS)
+
+    def _handle_connection_error(self, error: Exception) -> None:
+        """
+        Handle Redis connection errors by resetting connection state.
+
+        This allows the next operation to attempt reconnection via Sentinel,
+        which will discover the current master (handles pod restarts/failover).
+        """
+        self._connected = False
+        if self._redis_client:
+            # Don't await close here - just drop the stale client reference
+            # The client will be recreated on next _ensure_connected()
+            self._redis_client = None
+        logger.warning(f"Redis connection error, will reconnect: {error}")
+
+    async def _ensure_connected(self) -> bool:
+        """
+        Ensure Redis client is connected, reconnecting if needed.
+
+        Returns:
+            True if connected, False if connection failed.
+        """
+        # If client already exists (e.g., set directly in tests), consider connected
+        if self._redis_client is not None:
+            if not self._connected:
+                # Mark as connected if client was set directly
+                self._connected = True
+            return True
+
+        if not self._redis_url:
+            return False
+
+        try:
+            self._redis_client = await create_redis_client(self._redis_url)
+            await self._redis_client.ping()
+            self._connected = True
+            logger.info("Recovery manager reconnected to Redis")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to connect to Redis: {e}")
+            self._redis_client = None
+            self._connected = False
+            return False
 
     async def start(self) -> None:
         """Initialize Redis connection."""
@@ -271,6 +331,7 @@ class OperationRecoveryManager:
             try:
                 self._redis_client = await create_redis_client(self._redis_url)
                 await self._redis_client.ping()
+                self._connected = True
                 logger.info(f"Recovery manager connected to Redis: {self._redis_url}")
             except Exception as e:
                 logger.warning(f"Failed to connect to Redis: {e}")
@@ -288,10 +349,16 @@ class OperationRecoveryManager:
 
         if self._redis_client:
             await self._redis_client.close()
+            self._redis_client = None
+            self._connected = False
 
     async def checkpoint(self, state: SharedRedTeamState) -> bool:
         """
         Save state checkpoint to Redis.
+
+        Handles connection errors by reconnecting and retrying once.
+        This is important because Redis connections can go stale during
+        long-running operations (e.g., LLM calls that block the event loop).
 
         Args:
             state: The shared state to checkpoint.
@@ -299,7 +366,11 @@ class OperationRecoveryManager:
         Returns:
             True if checkpoint was saved successfully.
         """
-        if self._redis_client is None:
+        return await self._checkpoint_with_retry(state, retry=True)
+
+    async def _checkpoint_with_retry(self, state: SharedRedTeamState, retry: bool = True) -> bool:
+        """Internal checkpoint implementation with optional retry on connection error."""
+        if not await self._ensure_connected():
             return False
 
         try:
@@ -335,6 +406,11 @@ class OperationRecoveryManager:
             return True
 
         except Exception as e:
+            if self._is_connection_error(e):
+                self._handle_connection_error(e)
+                if retry:
+                    logger.info("Retrying checkpoint after reconnection...")
+                    return await self._checkpoint_with_retry(state, retry=False)
             logger.error(f"Failed to save checkpoint: {e}")
             return False
 
@@ -361,7 +437,7 @@ class OperationRecoveryManager:
         Raises:
             RecoveryError: If no checkpoint found or recovery fails.
         """
-        if self._redis_client is None:
+        if not await self._ensure_connected():
             raise RecoveryError("Redis not available for recovery")
 
         try:
@@ -471,7 +547,7 @@ class OperationRecoveryManager:
         Returns:
             Datetime of last checkpoint, or None if not found.
         """
-        if self._redis_client is None:
+        if not await self._ensure_connected():
             return None
 
         try:
@@ -479,9 +555,11 @@ class OperationRecoveryManager:
             data = await self._redis_client.get(time_key)
             if data:
                 return datetime.fromisoformat(data.decode())
-        except (OSError, ValueError) as e:
-            # OSError: Redis connection issues, ValueError: invalid datetime format
-            logger.warning(f"Failed to get checkpoint time: {e}")
+        except Exception as e:
+            if self._is_connection_error(e):
+                self._handle_connection_error(e)
+            else:
+                logger.warning(f"Failed to get checkpoint time: {e}")
 
         return None
 
@@ -495,14 +573,15 @@ class OperationRecoveryManager:
         Returns:
             True if checkpoint exists.
         """
-        if self._redis_client is None:
+        if not await self._ensure_connected():
             return False
 
         try:
             key = f"ares:operation:{operation_id}:state"
             return await self._redis_client.exists(key) > 0
-        except OSError:
-            # Redis connection issue
+        except Exception as e:
+            if self._is_connection_error(e):
+                self._handle_connection_error(e)
             return False
 
     async def delete_checkpoint(self, operation_id: str) -> bool:
@@ -515,7 +594,7 @@ class OperationRecoveryManager:
         Returns:
             True if deleted successfully.
         """
-        if self._redis_client is None:
+        if not await self._ensure_connected():
             return False
 
         try:
@@ -524,8 +603,9 @@ class OperationRecoveryManager:
             await self._redis_client.delete(key, time_key)
             logger.info(f"Deleted checkpoint for operation {operation_id}")
             return True
-        except OSError as e:
-            # Redis connection issue
+        except Exception as e:
+            if self._is_connection_error(e):
+                self._handle_connection_error(e)
             logger.error(f"Failed to delete checkpoint: {e}")
             return False
 
@@ -639,7 +719,7 @@ class OperationRecoveryManager:
         Returns:
             List of operation info dicts.
         """
-        if self._redis_client is None:
+        if not await self._ensure_connected():
             return []
 
         try:
@@ -662,8 +742,9 @@ class OperationRecoveryManager:
 
             return operations
 
-        except OSError as e:
-            # Redis connection issue
+        except Exception as e:
+            if self._is_connection_error(e):
+                self._handle_connection_error(e)
             logger.error(f"Failed to list operations: {e}")
             return []
 
@@ -677,7 +758,7 @@ class OperationRecoveryManager:
         Returns:
             Number of checkpoints removed.
         """
-        if self._redis_client is None:
+        if not await self._ensure_connected():
             return 0
 
         try:
@@ -699,8 +780,9 @@ class OperationRecoveryManager:
 
             return removed
 
-        except (OSError, ValueError) as e:
-            # OSError: Redis connection, ValueError: datetime parsing
+        except Exception as e:
+            if self._is_connection_error(e):
+                self._handle_connection_error(e)
             logger.error(f"Failed to cleanup checkpoints: {e}")
             return 0
 

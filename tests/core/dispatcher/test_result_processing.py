@@ -309,5 +309,111 @@ class TestDelegationCheckTimeoutHandling:
             await asyncio.wait_for(slow_delegation_check(), timeout=0.01)
 
 
+class TestShareExtractionFromOutput:
+    """Tests for _extract_shares_from_output parsing."""
+
+    def test_share_permissions_parsed_correctly(self):
+        """Shares with READ/WRITE permissions are parsed correctly."""
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+
+        dispatcher = RedTeamDispatcher()
+
+        netexec_output = """
+SMB         192.168.58.10   445    DC01       [*] Enumerated shares
+SMB         192.168.58.10   445    DC01       Share           Permissions     Comment
+SMB         192.168.58.10   445    DC01       -----           -----------     -------
+SMB         192.168.58.10   445    DC01       NETLOGON        READ            Logon server share
+SMB         192.168.58.10   445    DC01       SYSVOL          READ            Logon server share
+SMB         192.168.58.10   445    DC01       all             READ,WRITE
+"""
+        shares = dispatcher._extract_shares_from_output(netexec_output)
+
+        assert len(shares) == 3
+        netlogon = next(s for s in shares if s.name == "NETLOGON")
+        sysvol = next(s for s in shares if s.name == "SYSVOL")
+        all_share = next(s for s in shares if s.name == "all")
+
+        assert netlogon.permissions == "READ"
+        assert sysvol.permissions == "READ"
+        assert all_share.permissions == "READ,WRITE"
+
+    def test_share_no_permissions_not_confused_with_comment(self):
+        """Shares without permissions should not have comment parsed as permission.
+
+        This tests the bug where ADMIN$ with comment "Remote Admin" was showing
+        permission as "Remote" instead of empty.
+        """
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+
+        dispatcher = RedTeamDispatcher()
+
+        # Real netexec output - ADMIN$ and C$ have no permissions, just comments
+        netexec_output = """
+SMB         192.168.58.20   445    WS01      [*] Enumerated shares
+SMB         192.168.58.20   445    WS01      Share           Permissions     Comment
+SMB         192.168.58.20   445    WS01      -----           -----------     -------
+SMB         192.168.58.20   445    WS01      ADMIN$                          Remote Admin
+SMB         192.168.58.20   445    WS01      C$                              Default share
+SMB         192.168.58.20   445    WS01      IPC$            READ            Remote IPC
+SMB         192.168.58.20   445    WS01      public                          Basic share
+"""
+        shares = dispatcher._extract_shares_from_output(netexec_output)
+
+        assert len(shares) == 4
+
+        admin = next(s for s in shares if s.name == "ADMIN$")
+        c_share = next(s for s in shares if s.name == "C$")
+        ipc = next(s for s in shares if s.name == "IPC$")
+        public = next(s for s in shares if s.name == "public")
+
+        # ADMIN$ should have empty permissions, not "Remote"
+        assert admin.permissions == ""
+        assert admin.comment == "Remote Admin"
+
+        # C$ should have empty permissions, not "Default"
+        assert c_share.permissions == ""
+        assert c_share.comment == "Default share"
+
+        # IPC$ has actual READ permission
+        assert ipc.permissions == "READ"
+        assert ipc.comment == "Remote IPC"
+
+        # public has no permission
+        assert public.permissions == ""
+        assert public.comment == "Basic share"
+
+
+class TestSharePermissionSanitization:
+    """Tests for _sanitize_share_permissions validating agent results."""
+
+    def test_valid_permissions_are_uppercased(self):
+        """Valid permissions should be uppercased."""
+        from ares.core.dispatcher.result_processing import _sanitize_share_permissions
+
+        assert _sanitize_share_permissions("read") == "READ"
+        assert _sanitize_share_permissions("write") == "WRITE"
+        assert _sanitize_share_permissions("read,write") == "READ,WRITE"
+        assert _sanitize_share_permissions("READ,WRITE") == "READ,WRITE"
+
+    def test_invalid_permissions_rejected(self):
+        """Invalid permissions (comment text) should be rejected."""
+        from ares.core.dispatcher.result_processing import _sanitize_share_permissions
+
+        # These are all first words of share comments, not permissions
+        assert _sanitize_share_permissions("Remote") == ""
+        assert _sanitize_share_permissions("Default") == ""
+        assert _sanitize_share_permissions("Basic") == ""
+        assert _sanitize_share_permissions("Active") == ""
+        assert _sanitize_share_permissions("Logon") == ""
+
+    def test_empty_and_whitespace_handled(self):
+        """Empty and whitespace-only strings handled gracefully."""
+        from ares.core.dispatcher.result_processing import _sanitize_share_permissions
+
+        assert _sanitize_share_permissions("") == ""
+        assert _sanitize_share_permissions("   ") == ""
+        assert _sanitize_share_permissions(None) == ""
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

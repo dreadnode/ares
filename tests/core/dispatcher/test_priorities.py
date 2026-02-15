@@ -10,7 +10,10 @@ Priority scheme rationale:
 
 from __future__ import annotations
 
+import pytest
+
 from ares.core.dispatcher import RedTeamDispatcher
+from ares.core.models import SharedRedTeamState
 
 
 class TestVulnerabilityPriorities:
@@ -293,6 +296,232 @@ class TestCredentialAwarePriorityBoost:
             {"can_impersonate_sa": True},
         )
         assert boosted == 3
+
+
+class TestDelegationCredentialPrerequisite:
+    """Tests for deferring delegation vulns until credentials exist."""
+
+    def test_account_has_credentials_with_password(self):
+        """Should return True when account has cleartext password."""
+        from ares.core.models import Credential
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-op")
+
+        # Add credential with password
+        cred = Credential(
+            username="svc_backup",
+            password="Backup123!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "test")
+
+        assert dispatcher._account_has_credentials("svc_backup") is True
+        assert dispatcher._account_has_credentials("SVC_BACKUP") is True  # Case insensitive
+        assert dispatcher._account_has_credentials("svc_backup$") is True  # Strips $
+
+    def test_account_has_credentials_without_password(self):
+        """Should return False when account has no cleartext password."""
+        from ares.core.models import Credential
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-op")
+
+        # Add credential without password (hash only)
+        cred = Credential(
+            username="svc_backup",
+            password="",
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "test")
+
+        assert dispatcher._account_has_credentials("svc_backup") is False
+
+    def test_account_has_credentials_unknown_account(self):
+        """Should return False for unknown accounts."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-op")
+
+        assert dispatcher._account_has_credentials("unknown.user") is False
+        assert dispatcher._account_has_credentials("") is False
+
+    @pytest.mark.asyncio
+    async def test_get_next_vulnerability_defers_delegation_without_creds(self):
+        """Constrained delegation vuln should be deferred when no credentials exist."""
+        from ares.core.models import VulnerabilityInfo
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-defer")
+
+        # Add constrained delegation vulnerability without credentials
+        vuln = VulnerabilityInfo(
+            vuln_id="cd_svc_backup_12345678",
+            vuln_type="constrained_delegation",
+            target="svc_backup",
+            discovered_by="recon",
+            details={
+                "account_name": "svc_backup",
+                "target_spn": "cifs/dc01.contoso.local",
+                "domain": "contoso.local",
+            },
+            priority=4,
+        )
+        dispatcher.shared_state.add_vulnerability(vuln)
+
+        # No credentials for svc_backup - should return None (deferred)
+        result = await dispatcher.get_next_vulnerability()
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_next_vulnerability_returns_delegation_with_creds(self):
+        """Constrained delegation vuln should be returned when credentials exist."""
+        from ares.core.models import Credential, VulnerabilityInfo
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-with-creds")
+
+        # Add credential for the account
+        cred = Credential(
+            username="svc_backup",
+            password="Backup123!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "cracker")
+
+        # Add constrained delegation vulnerability
+        vuln = VulnerabilityInfo(
+            vuln_id="cd_svc_backup_12345678",
+            vuln_type="constrained_delegation",
+            target="svc_backup",
+            discovered_by="recon",
+            details={
+                "account_name": "svc_backup",
+                "target_spn": "cifs/dc01.contoso.local",
+                "domain": "contoso.local",
+            },
+            priority=4,
+        )
+        dispatcher.shared_state.add_vulnerability(vuln)
+
+        # With credentials - should return the vulnerability
+        result = await dispatcher.get_next_vulnerability()
+
+        assert result is not None
+        assert result["id"] == "cd_svc_backup_12345678"
+        assert result["type"] == "constrained_delegation"
+
+    @pytest.mark.asyncio
+    async def test_get_next_vulnerability_skips_delegation_returns_other(self):
+        """Should skip delegation without creds and return next available vuln."""
+        from ares.core.models import VulnerabilityInfo
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-skip")
+
+        # Add constrained delegation WITHOUT credentials (should be skipped)
+        cd_vuln = VulnerabilityInfo(
+            vuln_id="cd_svc_backup_12345678",
+            vuln_type="constrained_delegation",
+            target="svc_backup",
+            discovered_by="recon",
+            details={"account_name": "svc_backup"},
+            priority=2,  # Higher priority
+        )
+        dispatcher.shared_state.add_vulnerability(cd_vuln)
+
+        # Add MSSQL vuln (no credential prereq, lower priority but available)
+        mssql_vuln = VulnerabilityInfo(
+            vuln_id="mssql_impersonation_192.168.58.20",
+            vuln_type="mssql_impersonation",
+            target="192.168.58.20",
+            discovered_by="recon",
+            details={"can_impersonate_sa": True},
+            priority=10,
+        )
+        dispatcher.shared_state.add_vulnerability(mssql_vuln)
+
+        # Should skip delegation (no creds) and return MSSQL
+        result = await dispatcher.get_next_vulnerability()
+
+        assert result is not None
+        assert result["id"] == "mssql_impersonation_192.168.58.20"
+        assert result["type"] == "mssql_impersonation"
+
+    @pytest.mark.asyncio
+    async def test_get_next_vulnerability_uses_account_key_fallback(self):
+        """Should check both account_name and account keys for delegation."""
+        from ares.core.models import Credential, VulnerabilityInfo
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-account-key")
+
+        # Add credential
+        cred = Credential(
+            username="svc_backup",
+            password="Backup123!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "cracker")
+
+        # Add vulnerability using "account" key instead of "account_name"
+        vuln = VulnerabilityInfo(
+            vuln_id="cd_svc_backup_abcd1234",
+            vuln_type="constrained_delegation",
+            target="svc_backup",
+            discovered_by="recon",
+            details={
+                "account": "svc_backup",  # Uses "account" key
+                "target_spn": "cifs/dc01.contoso.local",
+            },
+            priority=4,
+        )
+        dispatcher.shared_state.add_vulnerability(vuln)
+
+        # Should find credential using fallback key
+        result = await dispatcher.get_next_vulnerability()
+
+        assert result is not None
+        assert result["id"] == "cd_svc_backup_abcd1234"
+
+    def test_can_exploit_vulnerability_delegation_with_creds(self):
+        """Constrained delegation should be exploitable when credentials exist."""
+        from ares.core.models import Credential
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-can-exploit")
+
+        cred = Credential(
+            username="svc_backup",
+            password="Backup123!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "test")
+
+        result = dispatcher._can_exploit_vulnerability(
+            "constrained_delegation", {"account_name": "svc_backup"}
+        )
+        assert result is True
+
+    def test_can_exploit_vulnerability_delegation_without_creds(self):
+        """Constrained delegation should NOT be exploitable without credentials."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-no-exploit")
+
+        result = dispatcher._can_exploit_vulnerability(
+            "constrained_delegation", {"account_name": "svc_backup"}
+        )
+        assert result is False
+
+    def test_can_exploit_vulnerability_other_types_always_true(self):
+        """Non-delegation vulnerabilities should always be exploitable."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-other-vuln")
+
+        # MSSQL, ADCS, etc. don't require credential prereq check
+        assert dispatcher._can_exploit_vulnerability("mssql_impersonation", {}) is True
+        assert dispatcher._can_exploit_vulnerability("adcs_esc1", {}) is True
+        assert dispatcher._can_exploit_vulnerability("krbtgt_hash", {}) is True
 
 
 class TestThrottleBypass:

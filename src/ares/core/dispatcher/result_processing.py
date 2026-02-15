@@ -33,6 +33,31 @@ if TYPE_CHECKING:
     from ares.core.dispatcher._dispatcher import RedTeamDispatcher
 
 
+# Valid SMB share permissions from netexec
+_VALID_SHARE_PERMISSIONS = {"read", "write", "read,write", "write,read", "full"}
+
+
+def _sanitize_share_permissions(raw_permissions: str) -> str:
+    """Validate and sanitize share permissions from agent results.
+
+    Agents may incorrectly parse netexec output and return comment text
+    (e.g., "Remote", "Default", "Basic") as permissions. This validates
+    that permissions are actually valid SMB permissions.
+
+    Args:
+        raw_permissions: The permissions string from agent result.
+
+    Returns:
+        Uppercased permissions if valid, empty string otherwise.
+    """
+    if not raw_permissions:
+        return ""
+    normalized = raw_permissions.strip().lower()
+    if normalized in _VALID_SHARE_PERMISSIONS:
+        return raw_permissions.strip().upper()
+    return ""
+
+
 class ResultProcessingMixin:
     """Task result processing and data extraction."""
 
@@ -302,7 +327,7 @@ class ResultProcessingMixin:
                 share = Share(
                     host=s.get("host", ""),
                     name=s.get("name", ""),
-                    permissions=s.get("permissions", ""),
+                    permissions=_sanitize_share_permissions(s.get("permissions", "")),
                     comment=s.get("comment", ""),
                 )
                 await self.publish_share(share, source_agent)
@@ -564,7 +589,7 @@ class ResultProcessingMixin:
             share = Share(
                 host=share_data.get("host", share_data.get("host_ip", "")),
                 name=share_data.get("name", share_data.get("share_name", "")),
-                permissions=share_data.get("permissions", ""),
+                permissions=_sanitize_share_permissions(share_data.get("permissions", "")),
                 comment=share_data.get("comment", share_data.get("description", "")),
             )
             await self.publish_share(share, source_agent)
@@ -577,7 +602,7 @@ class ResultProcessingMixin:
                 share = Share(
                     host=s.get("host", s.get("host_ip", "")),
                     name=s.get("name", s.get("share_name", "")),
-                    permissions=s.get("permissions", ""),
+                    permissions=_sanitize_share_permissions(s.get("permissions", "")),
                     comment=s.get("comment", s.get("description", "")),
                 )
                 await self.publish_share(share, source_agent)
@@ -618,8 +643,10 @@ class ResultProcessingMixin:
             elif not any(h.ip == host.ip for h in self.shared_state.all_hosts):
                 self.shared_state.all_hosts.append(host)
 
-        for username in self._extract_users_from_output(output):
-            self._add_user(username, domain, source_agent)
+        for username, extracted_domain in self._extract_users_from_output(output):
+            # Use extracted domain if available, otherwise fall back to target domain
+            user_domain = extracted_domain or domain
+            self._add_user(username, user_domain, source_agent)
 
         creds = self._extract_plaintext_passwords_from_output(output)
         if "password :" in output.lower() and not creds and domain:
@@ -842,42 +869,84 @@ class ResultProcessingMixin:
             )
         return hosts
 
-    def _extract_users_from_output(self: RedTeamDispatcher, output: str) -> list[str]:
-        """Extract usernames from various tool output formats."""
+    def _extract_users_from_output(  # noqa: PLR0912
+        self: RedTeamDispatcher, output: str
+    ) -> list[tuple[str, str]]:
+        """Extract (username, domain) tuples from various tool output formats.
+
+        Returns:
+            List of (username, domain) tuples. Domain may be empty if not
+            extractable from output.
+        """
         if not output:
             return []
-        users: list[str] = []
+        users: list[tuple[str, str]] = []
         seen: set[str] = set()
+        # Track current domain context from output (e.g., from DOMAIN\user patterns)
+        current_domain = ""
+
         for line in output.splitlines():
             stripped = line.strip()
             if not stripped:
                 continue
+
+            # Extract domain from (domain:XXX) patterns in output (e.g., NetExec SMB)
+            domain_match = re.search(r"\(domain:([^)]+)\)", stripped, re.IGNORECASE)
+            if domain_match:
+                current_domain = domain_match.group(1).strip()
+
+            # Extract domain from DOMAIN\user patterns
+            domain_user_match = re.search(r"([A-Za-z0-9_.-]+)\\([A-Za-z0-9_.-]+)", stripped)
+            if domain_user_match:
+                extracted_domain = domain_user_match.group(1).strip()
+                extracted_user = domain_user_match.group(2).strip()
+                if extracted_user and extracted_user.lower() not in seen:
+                    users.append((extracted_user, extracted_domain))
+                    seen.add(extracted_user.lower())
+
+            # Extract domain from user@domain UPN patterns
+            upn_match = re.search(r"([A-Za-z0-9_.-]+)@([A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)", stripped)
+            if upn_match:
+                extracted_user = upn_match.group(1).strip()
+                extracted_domain = upn_match.group(2).strip()
+                if extracted_user and extracted_user.lower() not in seen:
+                    users.append((extracted_user, extracted_domain))
+                    seen.add(extracted_user.lower())
+
+            # user:[XXX] patterns (use current_domain as context)
             for match in re.findall(r"user:\[([^\]]+)\]", stripped, re.IGNORECASE):
                 user = match.strip()
-                if user and user not in seen:
-                    users.append(user)
-                    seen.add(user)
+                if user and user.lower() not in seen:
+                    users.append((user, current_domain))
+                    seen.add(user.lower())
+
+            # Account: XXX patterns
             account_match = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)
             if account_match:
                 user = account_match.group(1).strip()
-                if user and user not in seen:
-                    users.append(user)
-                    seen.add(user)
+                if user and user.lower() not in seen:
+                    users.append((user, current_domain))
+                    seen.add(user.lower())
+
+            # samaccountname: XXX patterns
             sam_match = re.search(r"samaccountname:\s*([A-Za-z0-9_.-]+)", stripped, re.IGNORECASE)
             if sam_match:
                 user = sam_match.group(1).strip()
-                if user and user not in seen:
-                    users.append(user)
-                    seen.add(user)
+                if user and user.lower() not in seen:
+                    users.append((user, current_domain))
+                    seen.add(user.lower())
+
+            # SMB output with timestamp (user enum)
             smb_match = re.search(
                 r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.-]+)\s+\d{4}-\d{2}-\d{2}",
                 stripped,
             )
             if smb_match:
                 user = smb_match.group(1).strip()
-                if user and user not in seen:
-                    users.append(user)
-                    seen.add(user)
+                if user and user.lower() not in seen:
+                    users.append((user, current_domain))
+                    seen.add(user.lower())
+
         return users
 
     def _extract_plaintext_passwords_from_output(  # noqa: PLR0912
@@ -1067,8 +1136,18 @@ class ResultProcessingMixin:
                 name = parts[0].strip()
                 if not name or name.lower() == "share":
                     continue
-                permissions = parts[1].strip() if len(parts) > 1 else ""
-                comment = parts[2].strip() if len(parts) > 2 else ""
+                # Validate permissions - netexec only outputs READ, WRITE, or READ,WRITE
+                # If parts[1] isn't a valid permission, it's actually the comment
+                # (happens when share has no permissions, e.g., "ADMIN$  Remote Admin")
+                valid_perms = {"read", "write", "read,write", "write,read"}
+                raw_perm = parts[1].strip().lower() if len(parts) > 1 else ""
+                if raw_perm in valid_perms:
+                    permissions = parts[1].strip().upper()
+                    comment = parts[2].strip() if len(parts) > 2 else ""
+                else:
+                    # No valid permission - parts[1:] is actually the comment
+                    permissions = ""
+                    comment = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
                 key = (current_host.lower(), name.lower())
                 if key in seen:
                     continue

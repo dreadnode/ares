@@ -21,6 +21,7 @@ The dispatcher functionality is split across mixin classes for maintainability:
 from __future__ import annotations
 
 import asyncio
+import threading
 from asyncio import Queue
 from typing import TYPE_CHECKING, Any
 
@@ -51,7 +52,6 @@ from ares.core.task_queue import RedisTaskQueue
 from ares.core.task_queue import TaskResult as QueueTaskResult
 
 if TYPE_CHECKING:
-    import threading
     from collections.abc import Callable
 
     from ares.core.messages import AgentMessage, MessageType
@@ -312,7 +312,16 @@ class RedTeamDispatcher(
         result: Any = None,
         error: str | None = None,
     ) -> None:
-        """Resolve a task future when task completes."""
+        """Resolve a task future when task completes.
+
+        NOTE: This method is skipped when called from non-main thread (e.g., threaded
+        result consumer) because asyncio.Future.set_result() is not thread-safe.
+        Futures will timeout naturally and be cleaned up by dispatch_and_wait.
+        """
+        # Skip when in non-main thread - futures are bound to main event loop
+        if threading.current_thread() is not threading.main_thread():
+            return
+
         if task_id in self._task_futures:
             future = self._task_futures[task_id]
             if not future.done():

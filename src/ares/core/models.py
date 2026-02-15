@@ -930,9 +930,19 @@ class SharedRedTeamState:
 
         Creates a background task and tracks it for proper cleanup.
         This prevents fire-and-forget tasks from being lost on shutdown.
+
+        NOTE: Skipped when called from non-main thread (threaded result consumer)
+        because the coroutine uses main-loop-bound Redis client.
         """
+        import threading
+
         if not self._dispatcher:
             return
+
+        # Skip when in non-main thread - coroutine uses main loop's Redis client
+        if threading.current_thread() is not threading.main_thread():
+            return
+
         try:
             import asyncio
 
@@ -1175,7 +1185,7 @@ class SharedRedTeamState:
 
         # User exists in multiple other domains - pick the most likely one
         # Prefer child domains over parent domains (more specific)
-        # E.g., prefer north.sevenkingdoms.local over sevenkingdoms.local
+        # E.g., prefer child.contoso.local over contoso.local
         sorted_domains = sorted(known_domains, key=len, reverse=True)
         best_match = sorted_domains[0]
         logger.warning(
@@ -1413,6 +1423,7 @@ class SharedRedTeamState:
             return False
 
         # Check for existing user entries
+        target_domain = (self.target.domain or "").lower() if self.target else ""
         for existing in self.all_users:
             existing_domain = (existing.domain or "").lower()
             if existing.username == normalized:
@@ -1438,6 +1449,32 @@ class SharedRedTeamState:
                         f"User rejected: {normalized} already in more specific domain {existing_domain}"
                     )
                     return False
+                # Sibling domain case: domains are unrelated (e.g., contoso.local vs fabrikam.local)
+                # If existing domain is the target domain (fallback) but new domain is more specific,
+                # update to the new domain (it's likely from actual tool output, not fallback)
+                if existing_domain == target_domain and normalized_domain != target_domain:
+                    old_domain = existing_domain
+                    existing.domain = normalized_domain
+                    logger.warning(
+                        f"User domain corrected: {normalized} from {old_domain} (target fallback) "
+                        f"to {normalized_domain} (specific discovery)"
+                    )
+                    self._update_credentials_domain(normalized, old_domain, normalized_domain)
+                    self.add_domain(normalized_domain)
+                    return True
+                # If new domain is target fallback but existing has specific domain, reject
+                if normalized_domain == target_domain and existing_domain != target_domain:
+                    logger.debug(
+                        f"User rejected: {normalized} already in {existing_domain}, "
+                        f"ignoring target fallback {normalized_domain}"
+                    )
+                    return False
+                # Both domains are non-target siblings - trust the first discovery
+                logger.warning(
+                    f"User domain conflict: {normalized} in both {existing_domain} and "
+                    f"{normalized_domain} (keeping {existing_domain})"
+                )
+                return False
 
         self.all_users.append(User(username=normalized, domain=normalized_domain, source=source))
         self.add_domain(normalized_domain)
@@ -1681,7 +1718,7 @@ class SharedRedTeamState:
             domain = self._resolve_netbios_to_fqdn(domain)
 
         # Cross-reference with known user domains to catch mislabeling
-        # E.g., if hash says ESSOS\samwell.tarly but we know samwell.tarly is in NORTH
+        # E.g., if hash says FABRIKAM\svc.backup but we know svc.backup is in CONTOSO
         domain = self._validate_hash_domain(username, domain, source_agent)
 
         hash_value = hash_obj.hash_value or ""
