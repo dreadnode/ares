@@ -1066,6 +1066,104 @@ class TestAddHashNetBIOSResolution:
         assert state.all_hashes[0].domain == "corp.contoso.local"
 
 
+class TestHashDomainValidation:
+    """Tests for hash domain validation against known user domains."""
+
+    def test_hash_domain_corrected_when_user_known_in_different_domain(self) -> None:
+        """Test that hash domain is corrected when user is known to exist elsewhere.
+
+        Scenario: kerberoast against essos.local returns hash with ESSOS realm,
+        but BloodHound already found samwell.tarly in north.sevenkingdoms.local.
+        The hash domain should be corrected to north.sevenkingdoms.local.
+        """
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Simulate BloodHound discovering user in north.sevenkingdoms.local
+        state.add_user("samwell.tarly", "north.sevenkingdoms.local", source="bloodhound")
+
+        # Now a hash comes in with wrong domain (ESSOS realm from kerberoast)
+        hash_obj = Hash(
+            username="samwell.tarly",
+            hash_value="$krb5tgs$23$*samwell.tarly$ESSOS$http/web01$abc123",
+            hash_type="Kerberoast",
+            domain="essos.local",  # Wrong domain from Kerberos realm
+        )
+        result = state.add_hash(hash_obj, "kerberoast")
+
+        assert result is True
+        assert len(state.all_hashes) == 1
+        # Domain should be corrected to the known domain
+        assert state.all_hashes[0].domain == "north.sevenkingdoms.local"
+
+    def test_hash_domain_not_changed_when_matches_known_domain(self) -> None:
+        """Test that hash domain is preserved when it matches known user domain."""
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # User known in essos.local
+        state.add_user("daenerys", "essos.local", source="bloodhound")
+
+        # Hash comes in with correct domain
+        hash_obj = Hash(
+            username="daenerys",
+            hash_value="$krb5tgs$23$*daenerys$ESSOS$http/web01$def456",
+            hash_type="Kerberoast",
+            domain="essos.local",
+        )
+        result = state.add_hash(hash_obj, "kerberoast")
+
+        assert result is True
+        assert state.all_hashes[0].domain == "essos.local"
+
+    def test_hash_domain_accepted_when_user_not_previously_seen(self) -> None:
+        """Test that hash domain is accepted as-is when user not previously discovered."""
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # No prior user discovery - hash domain should be accepted
+        hash_obj = Hash(
+            username="newuser",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            hash_type="NTLM",
+            domain="contoso.local",
+        )
+        result = state.add_hash(hash_obj, "secretsdump")
+
+        assert result is True
+        assert state.all_hashes[0].domain == "contoso.local"
+
+    def test_hash_domain_prefers_longer_fqdn_when_user_in_multiple_domains(self) -> None:
+        """Test that longer FQDN is preferred when user exists in multiple domains.
+
+        In AD forests, child domains are more specific. If a user exists in both
+        sevenkingdoms.local and north.sevenkingdoms.local, prefer the child.
+        """
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # User seen in multiple domains (parent and child)
+        state.add_user("testuser", "sevenkingdoms.local", source="ldap")
+        state.add_user("testuser", "north.sevenkingdoms.local", source="bloodhound")
+
+        # Hash comes in with wrong domain
+        hash_obj = Hash(
+            username="testuser",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890",
+            hash_type="NTLM",
+            domain="essos.local",  # Wrong domain
+        )
+        result = state.add_hash(hash_obj, "secretsdump")
+
+        assert result is True
+        # Should prefer the longer (more specific) FQDN
+        assert state.all_hashes[0].domain == "north.sevenkingdoms.local"
+
+
 class TestAddUserNetBIOSResolution:
     """Tests for add_user NetBIOS to FQDN resolution."""
 

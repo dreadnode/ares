@@ -335,6 +335,70 @@ class MonitoringMixin:
                 f"(threshold: {effective_timeout}s, at_hard_cap: {is_at_hard_cap})"
             )
 
+    def _threaded_stale_cleanup(self: RedTeamDispatcher) -> None:
+        """Remove stale tasks from pending_tasks dict.
+
+        This runs in the threaded consumer to ensure cleanup happens even when
+        the main event loop is blocked by LLM API timeouts. Uses the same 180s
+        timeout as the main loop since LLM API calls regularly take 60+ seconds.
+
+        NOTE: This only updates in-memory state, not Redis. The main loop's
+        _cleanup_stale_tasks handles Redis task ID cleanup when it's available.
+        """
+        if not self._shared_state:
+            return
+
+        now = datetime.now(timezone.utc)
+        stale_timeout = 180  # Match main loop timeout - LLM calls can take 60+ seconds
+        stale_task_ids: list[str] = []
+
+        # Count LLM tasks to determine if we're at hard cap
+        llm_count = sum(
+            1
+            for t in self._shared_state.pending_tasks.values()
+            if t.task_type not in ("crack", "command")
+            and t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
+        )
+        max_tasks = get_max_concurrent_tasks()
+        hard_cap = int(max_tasks * 1.5)
+
+        # Reduce timeout slightly when severely overloaded, but stay survivable
+        if llm_count >= hard_cap * 2:
+            stale_timeout = 120  # Still allows LLM calls to complete
+        elif llm_count >= hard_cap:
+            stale_timeout = 150
+
+        for task_id, task_info in list(self._shared_state.pending_tasks.items()):
+            if task_info.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+                continue
+
+            activity_time = getattr(task_info, "last_activity_at", None) or task_info.created_at
+            age_seconds = (now - activity_time).total_seconds()
+
+            if age_seconds > stale_timeout:
+                stale_task_ids.append(task_id)
+
+        if stale_task_ids:
+            for task_id in stale_task_ids:
+                stale_task: TaskInfo | None = self._shared_state.pending_tasks.pop(task_id, None)
+                self._redis_task_ids.discard(task_id)
+                MonitoringMixin._warned_tasks.discard(task_id)
+
+                if stale_task is not None:
+                    activity_time = (
+                        getattr(stale_task, "last_activity_at", None) or stale_task.created_at
+                    )
+                    logger.warning(
+                        f"Threaded cleanup: removed stale task {task_id} ({stale_task.task_type} -> "
+                        f"{stale_task.assigned_agent}) - no activity for "
+                        f"{(now - activity_time).total_seconds():.0f}s"
+                    )
+
+            logger.info(
+                f"Threaded stale cleanup: removed {len(stale_task_ids)} tasks "
+                f"(threshold: {stale_timeout}s, llm_count: {llm_count}, hard_cap: {hard_cap})"
+            )
+
     def _should_warn_slow_pickup(
         self: RedTeamDispatcher,
         task_id: str,
@@ -863,8 +927,13 @@ class MonitoringMixin:
                         )
                     consecutive_failures = 0
 
-                    # Log throttle health every 30 cycles (~30 seconds)
+                    # Run stale cleanup every 10 cycles (~10 seconds)
+                    # This ensures cleanup happens even when main loop is blocked
                     health_check_counter += 1
+                    if health_check_counter >= 10:
+                        self._threaded_stale_cleanup()
+
+                    # Log throttle health every 30 cycles (~30 seconds)
                     if health_check_counter >= 30:
                         health_check_counter = 0
                         loop.run_until_complete(self._log_throttle_health())

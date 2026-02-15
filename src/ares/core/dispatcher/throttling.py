@@ -45,6 +45,10 @@ class ThrottlingMixin:
     # Letting enumeration bypass hard cap starves lateral movement and credential access.
     CRITICAL_PATH_TASK_TYPES = frozenset({"exploit"})
 
+    # Maximum number of tasks that can bypass hard cap at once
+    # Prevents runaway task accumulation when workers can't keep up
+    MAX_BYPASS_TASKS = 3
+
     # High-value exploit subtypes that should bypass hard cap (checked via vuln_type in payload)
     # - constrained_delegation: S4U attack → impersonate Administrator → secretsdump → DA
     # - unconstrained_delegation: TGT capture → DCSync → DA
@@ -153,6 +157,7 @@ class ThrottlingMixin:
 
         # HARD CAP: If we're 1.5x over the limit, DEFER most tasks
         # Exception: High-value exploit subtypes bypass hard cap (not all exploits)
+        # BUT limit total bypass tasks to prevent runaway accumulation
         hard_cap = int(max_tasks * 1.5)
         if llm_count >= hard_cap:
             # Check if this is a critical path exploit (delegation, ADCS)
@@ -171,6 +176,21 @@ class ThrottlingMixin:
             )
 
             if is_critical_exploit or is_delegation_enum:
+                # Count how many tasks are already bypassing hard cap
+                bypass_count = llm_count - hard_cap
+                if bypass_count >= self.MAX_BYPASS_TASKS:
+                    # Already have MAX_BYPASS_TASKS above hard cap - defer this one too
+                    bypass_reason = (
+                        f"{task_type}/{vuln_type}"
+                        if is_critical_exploit
+                        else f"{task_type}/find_delegation"
+                    )
+                    logger.warning(
+                        f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
+                        f"DEFERRING {bypass_reason} (already {bypass_count} bypass tasks, max={self.MAX_BYPASS_TASKS})"
+                    )
+                    return True
+
                 bypass_reason = (
                     f"{task_type}/{vuln_type}"
                     if is_critical_exploit
@@ -178,7 +198,7 @@ class ThrottlingMixin:
                 )
                 logger.info(
                     f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
-                    f"ALLOWING {bypass_reason} (high-value DA path, bypasses hard cap)"
+                    f"ALLOWING {bypass_reason} (high-value DA path, bypass {bypass_count + 1}/{self.MAX_BYPASS_TASKS})"
                 )
                 return False
 
