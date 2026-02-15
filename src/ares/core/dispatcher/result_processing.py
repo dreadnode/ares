@@ -43,6 +43,7 @@ class ResultProcessingMixin:
         result: Any = None,
         error: str | None = None,
         source_agent: str = "",
+        skip_checkpoint: bool = False,
     ) -> None:
         """
         Mark a task as complete.
@@ -53,6 +54,8 @@ class ResultProcessingMixin:
             result: Task result (if successful).
             error: Error message (if failed).
             source_agent: Agent completing the task.
+            skip_checkpoint: If True, skip checkpointing (used when called from threaded consumer
+                where the Redis client is bound to a different event loop).
         """
         # Use atomic pop to avoid TOCTOU race with _cleanup_stale_tasks()
         task_info = self.shared_state.pending_tasks.pop(task_id, None)
@@ -187,7 +190,10 @@ class ResultProcessingMixin:
         # Resolve any waiting futures
         self._resolve_task_future(task_id, success, result, error)
 
-        await self._checkpoint()
+        # Skip checkpoint when called from threaded consumer (different event loop)
+        # The maintenance loop handles periodic checkpointing for this case
+        if not skip_checkpoint:
+            await self._checkpoint()
         logger.info(f"Task {task_id} completed: success={success}")
 
     async def _process_discovered_data(  # noqa: PLR0912

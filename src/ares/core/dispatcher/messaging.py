@@ -1,11 +1,15 @@
 """Message queue operations for inter-agent communication.
 
 This module provides methods to get messages, send to agents, and broadcast.
+
+NOTE: When called from the threaded result consumer (non-main thread), broadcast
+and send operations are skipped because asyncio.Queue is bound to the main event loop.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -60,6 +64,10 @@ class MessagingMixin:
         Returns:
             True if message was queued successfully.
         """
+        # Skip when in non-main thread (asyncio.Queue is bound to main event loop)
+        if threading.current_thread() is not threading.main_thread():
+            return False
+
         if agent_name not in self._message_queues:
             logger.warning(f"Cannot send to unknown agent: {agent_name}")
             return False
@@ -77,6 +85,10 @@ class MessagingMixin:
             message: Message to broadcast.
             exclude: Agent name to exclude from broadcast.
         """
+        # Skip when in non-main thread (asyncio.Queue is bound to main event loop)
+        if threading.current_thread() is not threading.main_thread():
+            return
+
         subscribers = self._subscribers.get(message.type, set())
 
         for agent_name in subscribers:

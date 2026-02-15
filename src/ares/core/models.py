@@ -324,6 +324,9 @@ class InvestigationState:
         recommendations: List of recommended actions.
         lateral_graph: Graph tracking lateral movement between hosts.
         correlation_context: Context from alert correlation (related alerts, common IOCs).
+        queued_pivot_queries: Auto-generated pivot queries for hosts discovered via lateral movement.
+        queued_chain_queries: Auto-generated follow-up detection methods based on evidence type.
+        executed_query_types: Set of query method names already executed to avoid duplicates.
     """
 
     investigation_id: str
@@ -359,6 +362,11 @@ class InvestigationState:
 
     # Alert correlation context
     correlation_context: dict[str, Any] | None = None
+
+    # Auto-pivot and detection chaining queues
+    queued_pivot_queries: list[dict] = field(default_factory=list)
+    queued_chain_queries: list[str] = field(default_factory=list)
+    executed_query_types: set[str] = field(default_factory=set)
 
     def __post_init__(self):
         """Initialize lateral graph if not provided."""
