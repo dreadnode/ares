@@ -17,7 +17,7 @@ repos:
       - id: trailing-whitespace
 
   - repo: https://github.com/rhysd/actionlint
-    rev: v1.7.10
+    rev: v1.7.11
     hooks:
       - id: actionlint
 
@@ -31,7 +31,7 @@ repos:
     rev: v2.4.1
     hooks:
       - id: codespell
-        entry: codespell -q 3 -f --skip=".git,.github,README.md" --ignore-words-list="astroid,braket,unstall,infinit"
+        entry: codespell -q 3 -f --skip=".git,.github,README.md" --ignore-words-list="astroid"
 
   - repo: https://github.com/RodrigoGonzalez/check-mkdocs
     rev: v1.2.0
@@ -83,7 +83,7 @@ repos:
         args: [--keep-id]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.0
+    rev: v0.15.1
     hooks:
       - id: ruff-check
         args: [--fix]
@@ -93,7 +93,6 @@ repos:
     rev: v1.19.1
     hooks:
       - id: mypy
-        exclude: ^tests/
         additional_dependencies:
           - "types-PyYAML"
           - "types-requests"
