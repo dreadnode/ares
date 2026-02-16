@@ -29,10 +29,12 @@ from ares.core.factories.blue_factory import (
     _record_query,
     create_investigation_agent,
     create_rate_limited_mcp_tool,
+    filter_mcp_tools,
     log_tool_result,
     log_tool_usage,
     max_queries_stop,
     max_tool_calls_stop,
+    query_limit_hit_stop,
     reset_query_tracking,
     set_investigation_state,
     wrap_mcp_query_tools,
@@ -286,6 +288,53 @@ class TestCheckDuplicateQuery:
         # Both should be treated as same query
         assert factory._seen_queries.get("select * from logs", 0) == 2
 
+    def test_bypass_for_resilience_parameter(self):
+        """Test bypass_for_resilience parameter skips duplicate check."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()
+        query = "SELECT * FROM logs"
+        factory._seen_queries[query.strip().lower()] = get_max_duplicate_queries()
+
+        # Without bypass - should be blocked
+        result = _check_duplicate_query(query, bypass_for_resilience=False)
+        assert result is not None
+        assert "DUPLICATE QUERY BLOCKED" in result
+
+        # With bypass - should be allowed
+        result = _check_duplicate_query(query, bypass_for_resilience=True)
+        assert result is None
+
+    def test_in_resilient_execution_flag_bypasses_check(self):
+        """Test _in_resilient_execution flag bypasses duplicate check."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()
+        query = "SELECT * FROM logs"
+        factory._seen_queries[query.strip().lower()] = get_max_duplicate_queries()
+
+        # Without flag - should be blocked
+        factory._in_resilient_execution = False
+        result = _check_duplicate_query(query)
+        assert result is not None
+        assert "DUPLICATE QUERY BLOCKED" in result
+
+        # With flag set - should be allowed even at max duplicates
+        factory._in_resilient_execution = True
+        result = _check_duplicate_query(query)
+        assert result is None
+
+        # Clean up
+        factory._in_resilient_execution = False
+
+    def test_reset_clears_in_resilient_execution_flag(self):
+        """Test reset_query_tracking clears _in_resilient_execution flag."""
+        import ares.core.factories.blue_factory as factory
+
+        factory._in_resilient_execution = True
+        reset_query_tracking()
+        assert factory._in_resilient_execution is False
+
 
 class TestIncrementQueryAttempt:
     """Tests for _increment_query_attempt function."""
@@ -451,6 +500,56 @@ class TestCreateRateLimitedMcpTool:
         # Should be wrapped (different function)
         assert wrapped != query_loki_logs or hasattr(wrapped, "__wrapped__")
 
+    def test_prevents_double_wrapping(self, investigation_state: InvestigationState):
+        """Test that tools are not wrapped twice (prevents recursive execution)."""
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        # Create a mock tool object that mimics MCP tool structure
+        mock_tool = MagicMock()
+        mock_tool.name = "query_loki_logs"
+        mock_tool.fn = MagicMock()
+        mock_tool._ares_rate_limited = False  # Not yet wrapped
+
+        # First wrap
+        wrapped_once = create_rate_limited_mcp_tool(mock_tool)
+        assert wrapped_once is mock_tool  # Same object, fn replaced
+        assert hasattr(wrapped_once, "_ares_rate_limited")
+        assert wrapped_once._ares_rate_limited is True
+
+        # Store the wrapped fn
+        first_wrapper = mock_tool.fn
+
+        # Second wrap attempt - should be a no-op
+        wrapped_twice = create_rate_limited_mcp_tool(mock_tool)
+        assert wrapped_twice is mock_tool
+        # fn should NOT have changed - same wrapper as before
+        assert mock_tool.fn is first_wrapper
+
+    def test_wrap_mcp_query_tools_prevents_double_wrap(
+        self, investigation_state: InvestigationState
+    ):
+        """Test wrap_mcp_query_tools handles tools that persist across investigations."""
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        # Simulate MCP tools that persist across investigations
+        mock_tool = MagicMock()
+        mock_tool.name = "query_loki_logs"
+        mock_tool.fn = MagicMock()
+
+        tools = [mock_tool]
+
+        # First investigation wraps the tools
+        _wrapped1 = wrap_mcp_query_tools(tools)
+        first_wrapper = mock_tool.fn
+
+        # Second investigation with same tool objects
+        _wrapped2 = wrap_mcp_query_tools(tools)
+
+        # The wrapper should be unchanged (no double wrapping)
+        assert mock_tool.fn is first_wrapper
+
 
 class TestWrapMcpQueryTools:
     """Tests for wrap_mcp_query_tools function."""
@@ -586,6 +685,43 @@ class TestMaxToolCallsStop:
         events = [MagicMock(), MagicMock(), MagicMock()]
         result = stop_condition.func(events)
         assert result is False
+
+
+class TestQueryLimitHitStop:
+    """Tests for query_limit_hit_stop stop condition."""
+
+    def test_returns_stop_condition(self):
+        """Test that a StopCondition is returned."""
+        from dreadnode.agent.stop import StopCondition
+
+        stop_condition = query_limit_hit_stop()
+        assert isinstance(stop_condition, StopCondition)
+        assert callable(stop_condition.func)
+
+    def test_does_not_stop_when_limit_not_hit(self):
+        """Test does not stop when query limit flag is not set."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()  # Ensure flag is cleared
+        assert factory._query_limit_hit is False
+
+        stop_condition = query_limit_hit_stop()
+        result = stop_condition.func([])
+        assert result is False
+
+    def test_stops_when_limit_hit(self):
+        """Test stops when query limit flag is set."""
+        import ares.core.factories.blue_factory as factory
+
+        reset_query_tracking()
+        factory._query_limit_hit = True  # Simulate limit being hit
+
+        stop_condition = query_limit_hit_stop()
+        result = stop_condition.func([])
+        assert result is True
+
+        # Cleanup
+        reset_query_tracking()
 
 
 class TestCreateInvestigationAgent:
@@ -1030,3 +1166,82 @@ class TestInvestigationStateQueueFields:
         assert len(investigation_state.queued_pivot_queries) == 0
         assert len(investigation_state.queued_chain_queries) == 0
         assert len(investigation_state.executed_query_types) == 0
+
+
+class TestFilterMcpTools:
+    """Tests for filter_mcp_tools function to prevent 128-tool limit."""
+
+    def test_keeps_query_loki_tools(self):
+        """Test that query_loki tools are kept."""
+
+        mock_tools = [
+            MagicMock(name="query_loki_logs"),
+            MagicMock(name="query_loki_stats"),
+            MagicMock(name="create_dashboard"),
+        ]
+        for t in mock_tools:
+            t.name = t._mock_name
+
+        filtered = filter_mcp_tools(mock_tools)
+        names = [t.name for t in filtered]
+
+        assert "query_loki_logs" in names
+        assert "query_loki_stats" in names
+        assert "create_dashboard" not in names
+
+    def test_keeps_query_prometheus_tools(self):
+        """Test that query_prometheus tools are kept."""
+
+        mock_tools = [
+            MagicMock(name="query_prometheus"),
+            MagicMock(name="create_alert"),
+        ]
+        for t in mock_tools:
+            t.name = t._mock_name
+
+        filtered = filter_mcp_tools(mock_tools)
+        names = [t.name for t in filtered]
+
+        assert "query_prometheus" in names
+        assert "create_alert" not in names
+
+    def test_keeps_list_datasources(self):
+        """Test that list_datasources tool is kept."""
+
+        mock_tools = [
+            MagicMock(name="list_datasources"),
+            MagicMock(name="list_folders"),
+        ]
+        for t in mock_tools:
+            t.name = t._mock_name
+
+        filtered = filter_mcp_tools(mock_tools)
+        names = [t.name for t in filtered]
+
+        assert "list_datasources" in names
+        assert "list_folders" not in names
+
+    def test_filters_non_essential_tools(self):
+        """Test that non-essential tools are filtered out."""
+
+        mock_tools = [
+            MagicMock(name="create_dashboard"),
+            MagicMock(name="update_dashboard"),
+            MagicMock(name="delete_dashboard"),
+            MagicMock(name="create_annotation"),
+            MagicMock(name="list_alerts"),
+            MagicMock(name="query_loki_logs"),  # This one should be kept
+        ]
+        for t in mock_tools:
+            t.name = t._mock_name
+
+        filtered = filter_mcp_tools(mock_tools)
+
+        assert len(filtered) == 1
+        assert filtered[0].name == "query_loki_logs"
+
+    def test_empty_input_returns_empty(self):
+        """Test that empty input returns empty list."""
+
+        filtered = filter_mcp_tools([])
+        assert filtered == []

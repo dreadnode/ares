@@ -221,6 +221,50 @@ class TestMainFunction:
             # Verify investigation was called
             mock_orchestrator.investigate.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_main_skips_infrastructure_alerts(self, tmp_path: Path):
+        """Test main skips infrastructure alerts like DatasourceNoData."""
+        with (
+            patch("ares.main.dn.configure"),
+            patch("ares.agents.blue.InvestigationOrchestrator") as mock_orchestrator_class,
+            patch("ares.tools.blue.GrafanaTools") as mock_grafana_class,
+            patch("ares.integrations.mitre.MITREAttackClient") as mock_mitre_class,
+            patch("ares.core.alert_correlation.AlertCorrelator") as mock_correlator_class,
+        ):
+            mock_mitre = MagicMock()
+            mock_mitre.load = AsyncMock()
+            mock_mitre._techniques = {}
+            mock_mitre._tactics = {}
+            mock_mitre_class.return_value = mock_mitre
+
+            # Infrastructure alert that should be skipped
+            infra_alert = {
+                "fingerprint": "infra-fp-001",
+                "labels": {"alertname": "DatasourceNoData", "severity": "high"},
+            }
+            mock_grafana = MagicMock()
+            mock_grafana.get_firing_alerts = AsyncMock(return_value=[infra_alert])
+            mock_grafana_class.return_value = mock_grafana
+
+            mock_orchestrator = MagicMock()
+            mock_orchestrator._shutdown_mcp = AsyncMock()
+            mock_orchestrator.investigate = AsyncMock()
+            mock_orchestrator_class.return_value = mock_orchestrator
+
+            mock_correlator = MagicMock()
+            mock_correlator_class.return_value = mock_correlator
+
+            args = Args(
+                model="test-model",
+                once=True,
+                report_dir=str(tmp_path),
+            )
+
+            await main(args=args)
+
+            # Verify investigation was NOT called for infrastructure alert
+            mock_orchestrator.investigate.assert_not_called()
+
 
 class TestInvestigateAlertCommand:
     """Tests for investigate_alert command."""

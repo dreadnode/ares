@@ -54,7 +54,9 @@ class MarkdownReportGenerator:
             Path to the generated markdown report file.
         """
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        alert_name = state.alert.get("labels", {}).get("alertname", "unknown")
+        # Defensive check for ContentText framework bug
+        alert = state.alert if isinstance(state.alert, dict) else {}
+        alert_name = alert.get("labels", {}).get("alertname", "unknown")
         # Sanitize filename
         safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in alert_name)
         filename = f"investigation_{safe_name}_{timestamp}.md"
@@ -89,7 +91,8 @@ class MarkdownReportGenerator:
         return "\n\n---\n\n".join(filter(None, sections))
 
     def _header(self, state: InvestigationState) -> str:
-        alert = state.alert
+        # Defensive check for ContentText framework bug
+        alert = state.alert if isinstance(state.alert, dict) else {}
         labels = alert.get("labels", {})
 
         return self.loader.render(

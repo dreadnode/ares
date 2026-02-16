@@ -217,6 +217,11 @@ async def main(  # noqa: PLR0912
                     alert_name = alert.get("labels", {}).get("alertname", "unknown")
                     severity = alert.get("labels", {}).get("severity", "unknown")
 
+                    # Skip infrastructure/health alerts - not security events
+                    if alert_name == "DatasourceNoData":
+                        logger.debug(f"Skipping infrastructure alert: {alert_name}")
+                        continue
+
                     logger.info("")
                     logger.info("=" * 60)
                     logger.info(f"NEW ALERT: {alert_name}")

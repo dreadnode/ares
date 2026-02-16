@@ -28,6 +28,7 @@ from ares.core.evidence_validation import (
 from ares.core.models import Evidence, InvestigationState, PyramidLevel
 from ares.core.query_resilience import QueryResilientExecutor, get_resilient_executor
 from ares.core.templates import get_template_loader
+from ares.core.tool_retrieval import filter_tools_for_alert
 from ares.integrations.mitre import MITREAttackClient
 from ares.tools.blue import (
     CompletionTools,
@@ -51,6 +52,7 @@ _executed_queries: list[dict] = []
 _seen_queries: dict[str, int] = {}  # Track query -> count to detect loops
 _current_state: "InvestigationState | None" = None
 _bonus_queries_granted = 0  # Track bonus queries granted
+_in_resilient_execution = False  # Flag to bypass duplicate check during retries/chunks
 
 # Evidence type to follow-up detection methods mapping for auto-chaining
 EVIDENCE_CHAIN_MAP: dict[str, list[str]] = {
@@ -255,7 +257,8 @@ def reset_query_tracking():
         _executed_queries, \
         _seen_queries, \
         _current_state, \
-        _bonus_queries_granted
+        _bonus_queries_granted, \
+        _in_resilient_execution
     _total_queries = 0
     _total_queries_attempted = 0
     _consecutive_queries = []
@@ -264,6 +267,7 @@ def reset_query_tracking():
     _seen_queries = {}
     _current_state = None
     _bonus_queries_granted = 0
+    _in_resilient_execution = False
     reset_resilient_executor()
     reset_evidence_validation()  # Reset evidence validation state
 
@@ -372,8 +376,23 @@ def _check_query_limit() -> str | None:
     return None
 
 
-def _check_duplicate_query(query: str) -> str | None:
-    """Check if query is a duplicate. Returns error message if duplicate limit hit."""
+def _check_duplicate_query(query: str, bypass_for_resilience: bool = False) -> str | None:
+    """Check if query is a duplicate. Returns error message if duplicate limit hit.
+
+    Args:
+        query: The query string to check
+        bypass_for_resilience: If True, skip the duplicate check (used during
+            resilient execution retries/chunks to avoid blocking internal retries)
+
+    Returns:
+        Error message if duplicate limit hit, None otherwise
+    """
+    # Skip duplicate check during resilient execution (retries, time range reduction, chunks)
+    # This prevents internal retry mechanisms from being blocked
+    if bypass_for_resilience or _in_resilient_execution:
+        logger.debug("Bypassing duplicate check during resilient execution")
+        return None
+
     # Normalize query for comparison (strip whitespace, lowercase)
     normalized = query.strip().lower()
 
@@ -540,6 +559,13 @@ def create_rate_limited_mcp_tool(
     if "query_loki" not in tool_name and "query_prometheus" not in tool_name:
         return original_tool
 
+    # Prevent double-wrapping: if already wrapped, return as-is
+    # This is critical because _mcp_tools persists across investigations,
+    # and double-wrapping causes recursive calls to execute_with_resilience
+    if getattr(original_tool, "_ares_rate_limited", False):
+        logger.debug(f"Tool {tool_name} already wrapped, skipping")
+        return original_tool
+
     logger.debug(f"Wrapping MCP tool with rate limiting and resilience: {tool_name}")
 
     original_fn = getattr(original_tool, "fn", None)
@@ -580,8 +606,13 @@ def create_rate_limited_mcp_tool(
 
         # If we have time parameters, use resilient executor
         if start_time and end_time and query_str:
+            global _in_resilient_execution
             logger.info(f"Using resilient executor for {tool_name}")
             try:
+                # Set flag to bypass duplicate detection during resilient execution
+                # This allows internal retries, time range reductions, and chunking
+                # to proceed without being blocked by duplicate detection
+                _in_resilient_execution = True
 
                 async def query_wrapper(logql: str, start_time: str, end_time: str, **kw):
                     updated_kwargs = {**kwargs}
@@ -634,6 +665,9 @@ def create_rate_limited_mcp_tool(
                     "error": str(e),
                     "suggestion": "Try a shorter time range or more specific filters.",
                 }
+            finally:
+                # Always reset the flag after resilient execution completes
+                _in_resilient_execution = False
 
         # Fallback to original execution without resilience (no time params)
         try:
@@ -661,9 +695,12 @@ def create_rate_limited_mcp_tool(
     if hasattr(original_tool, "fn"):
         # It's a Tool object with a .fn attribute
         original_tool.fn = rate_limited_wrapper
+        # Mark as wrapped to prevent double-wrapping on subsequent investigations
+        original_tool._ares_rate_limited = True
         return original_tool
     # It's a callable, just return the wrapper
     rate_limited_wrapper.__name__ = tool_name
+    rate_limited_wrapper._ares_rate_limited = True
     return rate_limited_wrapper
 
 
@@ -687,6 +724,52 @@ def _extract_result_count(result: Any) -> int | None:
     if isinstance(result, str):
         return result.count("\n") if result else 0
     return None
+
+
+# Essential MCP tool patterns to keep (query-related only)
+# Other tools (dashboards, alerts, annotations) are handled by internal GrafanaTools
+_ESSENTIAL_MCP_PATTERNS = [
+    "query_loki",
+    "query_prometheus",
+    "list_datasources",  # Needed to discover datasource UIDs
+]
+
+
+def filter_mcp_tools(mcp_tools: list) -> list:
+    """
+    Filter MCP tools to only include essential ones.
+
+    This prevents hitting the OpenAI 128-tool limit by excluding
+    tools that are either:
+    - Redundant with internal tools (GrafanaTools handles annotations, alerts)
+    - Not needed for investigation (dashboard management, etc.)
+
+    Args:
+        mcp_tools: Full list of MCP tools from Grafana MCPClient
+
+    Returns:
+        Filtered list containing only essential query tools
+    """
+    filtered = []
+    excluded = []
+
+    for tool in mcp_tools:
+        tool_name = getattr(tool, "name", "") or getattr(tool, "__name__", str(tool))
+
+        # Only keep tools matching essential patterns
+        if any(pattern in tool_name for pattern in _ESSENTIAL_MCP_PATTERNS):
+            filtered.append(tool)
+        else:
+            excluded.append(tool_name)
+
+    if excluded:
+        logger.info(
+            f"Filtered out {len(excluded)} non-essential MCP tools: "
+            f"{', '.join(excluded[:5])}{'...' if len(excluded) > 5 else ''}"
+        )
+
+    logger.info(f"Keeping {len(filtered)} essential MCP tools")
+    return filtered
 
 
 def wrap_mcp_query_tools(mcp_tools: list) -> list:
@@ -785,6 +868,27 @@ def max_queries_stop(max_queries: int = 5) -> StopCondition:
         return False
 
     return StopCondition(stop, name="stop_on_max_queries")
+
+
+def query_limit_hit_stop() -> StopCondition:
+    """Stop condition that fires when the query limit has been hit.
+
+    This is critical because when queries are blocked by the rate limiter,
+    the MCP tool never actually runs, so max_queries_stop doesn't count them.
+    This condition checks the global _query_limit_hit flag directly.
+    """
+    from collections.abc import Sequence
+
+    def stop(events: Sequence[AgentEvent]) -> bool:
+        if _query_limit_hit:
+            logger.critical(
+                "🛑 STOP CONDITION: Query limit hit flag is set. "
+                "All queries are being blocked - forcing agent to stop."
+            )
+            return True
+        return False
+
+    return StopCondition(stop, name="stop_on_query_limit_hit")
 
 
 def max_tool_calls_stop(max_calls: int = 20) -> StopCondition:
@@ -902,22 +1006,43 @@ def create_investigation_agent(
 
     learning_tools = LearningTools()
 
-    tools: list = [
+    # Core tools that are always needed
+    core_tools: list = [
         grafana_tools,
         investigation_tools,
         question_tools,
         mitre_tools,
         completion_tools,
-        query_template_tools,
         learning_tools,
         escalate_investigation,
     ]
 
+    # Filter query template tools based on alert context (42 -> ~10 tools)
+    # This significantly reduces LLM token overhead and improves response time
+    alert = state.alert if state else {}
+    filtered_query_tools = filter_tools_for_alert(
+        alert=alert,
+        all_tools=query_template_tools.tools() if hasattr(query_template_tools, "tools") else [],
+        use_semantic=True,
+        top_k=10,
+    )
+
+    if filtered_query_tools:
+        logger.info(f"Using {len(filtered_query_tools)} filtered query template tools")
+        tools: list = core_tools + filtered_query_tools
+    else:
+        # Fallback to all query templates if filtering fails
+        logger.warning("Tool filtering failed, using all query template tools")
+        tools = core_tools + [query_template_tools]
+
     if grafana_mcp_tools:
-        logger.info(f"Adding {len(grafana_mcp_tools)} Grafana MCP tools to agent")
+        logger.info(f"Received {len(grafana_mcp_tools)} Grafana MCP tools")
+        # Filter to essential tools only (prevents OpenAI 128-tool limit)
+        filtered_tools = filter_mcp_tools(grafana_mcp_tools)
         # Wrap query tools with rate limiting to prevent infinite query loops
-        wrapped_tools = wrap_mcp_query_tools(grafana_mcp_tools)
+        wrapped_tools = wrap_mcp_query_tools(filtered_tools)
         tools.extend(wrapped_tools)
+        logger.info(f"Final tool count: {len(tools)}")
     else:
         logger.warning(
             "No Grafana MCP tools available - agent will have limited query capabilities"
@@ -937,6 +1062,7 @@ def create_investigation_agent(
         stop_conditions=[
             tool_use("complete_investigation"),
             tool_use("escalate_investigation"),
+            query_limit_hit_stop(),  # Stop immediately when query limit is hit
             max_queries_stop(max_queries=12),  # Was 5 - force stop after 12 queries
             max_tool_calls_stop(max_calls=50),  # Was 20 - force stop after 50 total tool calls
         ],

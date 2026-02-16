@@ -1,6 +1,7 @@
 """Investigation state management and question engine tools."""
 
 import contextlib
+import time
 from datetime import datetime, timezone
 
 import dreadnode as dn
@@ -28,6 +29,31 @@ from ares.core.models import (
 from ares.core.templates import get_template_loader
 from ares.integrations.mitre import MITREAttackClient
 
+# Formatting constants for consistent UX
+STATUS_SUCCESS = "[+]"
+STATUS_WARNING = "[!]"
+STATUS_INFO = "[*]"
+SECTION_SEPARATOR = "=" * 40
+
+# Pyramid level emoji indicators
+PYRAMID_EMOJI = {
+    1: "🔵",  # Hash Values
+    2: "🟢",  # IP Addresses
+    3: "🟡",  # Domain Names
+    4: "🟠",  # Network/Host Artifacts
+    5: "🔴",  # Tools
+    6: "⭐",  # TTPs
+}
+
+PYRAMID_NAMES = {
+    1: "Hash Values",
+    2: "IP Addresses",
+    3: "Domain Names",
+    4: "Artifacts",
+    5: "Tools",
+    6: "TTPs",
+}
+
 
 class InvestigationTools(Toolset):  # type: ignore[misc]
     """Tools for managing investigation state.
@@ -42,6 +68,11 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
 
     state: InvestigationState | None = None
     mitre_client: MITREAttackClient | None = None
+
+    # Caching for formatted summary to prevent polling loops
+    _summary_last_check: float = 0.0
+    _summary_cache: str = ""
+    _SUMMARY_CACHE_TTL: float = 30.0
 
     def set_state(self, state: InvestigationState):
         """Set the investigation state (called by orchestrator)."""
@@ -153,7 +184,22 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
             f"(pyramid level {pyramid_level}, {validation_status})"
         )
 
-        return f"{evidence_id} ({validation_status})"
+        # Format enhanced output
+        level_emoji = PYRAMID_EMOJI.get(pyramid_level, "⚪")
+        status_icon = "✓" if validated else "⚠"
+        value_preview = value[:60] + "..." if len(value) > 60 else value
+
+        lines = [
+            f"{STATUS_SUCCESS} Recorded evidence: {evidence_id}",
+            f"  {level_emoji} Type: {evidence_type} | Level: {pyramid_level}/6",
+            f"  Value: {value_preview}",
+            f"  Status: {status_icon} {validation_status}",
+        ]
+
+        if mitre_techniques:
+            lines.append(f"  Techniques: {', '.join(mitre_techniques)}")
+
+        return "\n".join(lines)
 
     def _resolve_technique_metadata(self, technique_ids: list[str]) -> None:
         """Look up and cache technique names and tactics."""
@@ -279,6 +325,175 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
             return {"error": "No investigation state"}
 
         return self.state.to_summary()
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    def get_formatted_summary(self) -> str:
+        """Get formatted investigation summary with visual indicators.
+
+        Returns a human-readable summary with emoji indicators and
+        progress tracking. Use this to understand investigation progress
+        at a glance.
+
+        NOTE: This method is cached to prevent polling loops. If you see
+        a caching warning, take an action before calling again.
+
+        Returns:
+            Formatted string with investigation status and metrics.
+
+        Example:
+            >>> get_formatted_summary()
+            🔍 INVESTIGATION SUMMARY
+            ========================================
+            Investigation: inv-a1b2c3d4
+            Stage: TRIAGE
+            ...
+        """
+        if not self.state:
+            return f"{STATUS_WARNING} No investigation state"
+
+        # Check cache to prevent polling loops
+        now = time.time()
+        if now - self._summary_last_check < self._SUMMARY_CACHE_TTL and self._summary_cache:
+            return f"⚠️ [Cached result - take action before checking again]\n\n{self._summary_cache}"
+
+        self._summary_last_check = now
+
+        lines = [
+            "🔍 INVESTIGATION SUMMARY",
+            SECTION_SEPARATOR,
+            f"Investigation: {self.state.investigation_id}",
+            f"Stage: {self.state.stage.value.upper()}",
+            "",
+        ]
+
+        # Discovery metrics
+        evidence_count = len(self.state.evidence)
+        timeline_count = len(self.state.timeline)
+        technique_count = len(self.state.identified_techniques)
+
+        lines.extend(
+            [
+                "📈 Discovery Metrics:",
+                f"  • Evidence collected: {evidence_count}",
+                f"  • Timeline events: {timeline_count}",
+                f"  • Techniques identified: {technique_count}",
+                "",
+            ]
+        )
+
+        # Pyramid progress
+        highest_level = 0
+        ttp_count = 0
+        if self.state.evidence:
+            highest_level = max(e.pyramid_level.value for e in self.state.evidence)
+            ttp_count = sum(1 for e in self.state.evidence if e.pyramid_level.value == 6)
+
+        level_emoji = PYRAMID_EMOJI.get(highest_level, "⚪")
+        lines.extend(
+            [
+                "🔺 Pyramid Progress:",
+                f"  • Highest level reached: {level_emoji} {highest_level}/6",
+                f"  • TTPs identified: {ttp_count}",
+                "",
+            ]
+        )
+
+        # Milestones
+        lines.append("🏆 Milestones:")
+
+        # TTP milestone
+        if ttp_count > 0:
+            lines.append(f"  ✅ TTP LEVEL REACHED ({ttp_count} TTPs)")
+        else:
+            lines.append("  ⏳ TTP level: not yet reached")
+
+        # Tool identification milestone
+        tool_count = sum(1 for e in self.state.evidence if e.pyramid_level.value == 5)
+        if tool_count > 0:
+            lines.append(f"  ✅ TOOL IDENTIFICATION COMPLETE ({tool_count} tools)")
+
+        # Technique coverage milestone
+        if technique_count >= 3:
+            lines.append(f"  ✅ COMPREHENSIVE TECHNIQUE COVERAGE ({technique_count} techniques)")
+
+        # Validated evidence milestone
+        validated_count = sum(1 for e in self.state.evidence if e.validated)
+        if validated_count > 0:
+            lines.append(f"  ✅ VALIDATED EVIDENCE ({validated_count}/{evidence_count})")
+
+        self._summary_cache = "\n".join(lines)
+        return self._summary_cache
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    def list_evidence(self, pyramid_level: int | None = None) -> str:
+        """List all recorded evidence with formatting.
+
+        Groups evidence by pyramid level with visual indicators.
+        Optionally filter by a specific pyramid level.
+
+        Args:
+            pyramid_level: Optional level to filter (1-6). If None, shows all.
+
+        Returns:
+            Formatted list of evidence grouped by pyramid level.
+
+        Example:
+            >>> list_evidence()
+            📋 RECORDED EVIDENCE
+            ========================================
+
+            ⭐ TTPs (Level 6) (2 items):
+              • ev-0005: technique='DCSync' ✓
+                Techniques: T1003.006
+            ...
+        """
+        if not self.state:
+            return f"{STATUS_WARNING} No investigation state"
+
+        if not self.state.evidence:
+            return f"{STATUS_INFO} No evidence recorded yet"
+
+        # Filter if level specified
+        evidence_list = self.state.evidence
+        if pyramid_level is not None:
+            evidence_list = [e for e in evidence_list if e.pyramid_level.value == pyramid_level]
+            if not evidence_list:
+                level_name = PYRAMID_NAMES.get(pyramid_level, f"Level {pyramid_level}")
+                return f"{STATUS_INFO} No evidence at {level_name} level"
+
+        # Group by pyramid level
+        by_level: dict[int, list[Evidence]] = {}
+        for ev in evidence_list:
+            level = ev.pyramid_level.value
+            if level not in by_level:
+                by_level[level] = []
+            by_level[level].append(ev)
+
+        lines = [
+            "📋 RECORDED EVIDENCE",
+            SECTION_SEPARATOR,
+            "",
+        ]
+
+        # Display from highest to lowest level
+        for level in sorted(by_level.keys(), reverse=True):
+            items = by_level[level]
+            emoji = PYRAMID_EMOJI.get(level, "⚪")
+            level_name = PYRAMID_NAMES.get(level, f"Level {level}")
+
+            lines.append(f"{emoji} {level_name} (Level {level}) ({len(items)} items):")
+
+            for ev in items:
+                status_icon = "✓" if ev.validated else "⚠"
+                value_preview = ev.value[:40] + "..." if len(ev.value) > 40 else ev.value
+                lines.append(f"  • {ev.id}: {ev.type}='{value_preview}' {status_icon}")
+
+                if ev.mitre_techniques:
+                    lines.append(f"    Techniques: {', '.join(ev.mitre_techniques)}")
+
+            lines.append("")
+
+        return "\n".join(lines)
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     def track_host_investigation(self, hostname: str) -> str:
@@ -656,6 +871,54 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
         method = self.state.queued_chain_queries.pop(0)
         logger.info(f"Popped chain query method: {method}")
         return method
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    def pop_all_queued(self) -> dict:
+        """Pop ALL queued pivot and chain queries at once for batch processing.
+
+        Use this to get all queued queries in a single call, reducing the number
+        of tool calls needed. Queries are removed from the queue when popped.
+
+        This enables efficient batch execution - the agent can execute multiple
+        detection methods in a single LLM turn rather than one at a time.
+
+        Returns:
+            Dict with all pivot_queries and chain_queries to execute.
+
+        Example:
+            >>> pop_all_queued()
+            {
+                'pivot_queries': [
+                    {'host': 'dc01', 'suggested_methods': ['detect_lateral_movement']}
+                ],
+                'chain_queries': ['detect_golden_ticket', 'detect_pass_the_hash'],
+                'total': 3
+            }
+        """
+        if not self.state:
+            return {"error": "No investigation state", "total": 0}
+
+        # Pop all queued queries
+        pivot_queries = list(self.state.queued_pivot_queries)
+        chain_queries = list(self.state.queued_chain_queries)
+
+        # Clear the queues
+        self.state.queued_pivot_queries.clear()
+        self.state.queued_chain_queries.clear()
+
+        total = len(pivot_queries) + len(chain_queries)
+
+        if total > 0:
+            logger.info(
+                f"Popped all {total} queued queries ({len(pivot_queries)} pivot, {len(chain_queries)} chain)"
+            )
+
+        return {
+            "pivot_queries": pivot_queries,
+            "chain_queries": chain_queries,
+            "total": total,
+            "hint": "Execute these detection methods to expand investigation scope",
+        }
 
 
 class QuestionEngineTools(Toolset):  # type: ignore[misc]

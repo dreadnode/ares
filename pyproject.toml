@@ -24,6 +24,8 @@ dependencies = [
     "importlib_resources>=5.0.0; python_version < '3.11'",
     "redis (>=7.1.0,<8.0.0)",
     "kubernetes>=29.0.0",
+    "tenacity>=8.2.0",
+    "sentence-transformers>=2.2.0",
 ]
 
 [project.optional-dependencies]
