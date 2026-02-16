@@ -206,7 +206,7 @@ class StatusMixin:
             ],
         }
 
-    def get_throttle_status(self: RedTeamDispatcher) -> dict[str, Any]:
+    async def get_throttle_status(self: RedTeamDispatcher) -> dict[str, Any]:
         """Get throttling and deferred queue status for monitoring.
 
         Returns dict with:
@@ -217,7 +217,7 @@ class StatusMixin:
         """
         from ares.core.config import get_max_concurrent_tasks
 
-        deferred_status = self.get_deferred_queue_status()
+        deferred_status = await self.get_deferred_queue_status()
         phase = self._get_operation_phase()
 
         return {

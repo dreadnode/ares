@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from loguru import logger
 
@@ -1013,10 +1013,10 @@ class MonitoringMixin:
         max_tasks = get_max_concurrent_tasks()
         hard_cap = int(max_tasks * 1.5)
 
-        # Get deferred queue status
-        deferred_status = (
-            self.get_deferred_queue_status() if hasattr(self, "get_deferred_queue_status") else {}
-        )
+        # Get deferred queue status (async - Redis-backed)
+        deferred_status: dict[str, Any] = {}
+        if hasattr(self, "get_deferred_queue_status"):
+            deferred_status = await self.get_deferred_queue_status()
         deferred_total = deferred_status.get("total_queued", 0)
 
         # Log warning if at hard cap or tasks are very old
