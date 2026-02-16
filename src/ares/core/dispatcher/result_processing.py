@@ -230,7 +230,7 @@ class ResultProcessingMixin:
                     parent_id=parent_credential_id,  # Track attack chain
                     attack_step=parent_attack_step + 1 if parent_credential_id else 0,
                 )
-                await self.publish_credential(credential, source_agent)
+                await self.publish_credential(credential, source_agent, task_queue=task_queue)
 
         discovered_hashes = result.get("discovered_hashes")
         if isinstance(discovered_hashes, list) and discovered_hashes:
@@ -266,7 +266,9 @@ class ResultProcessingMixin:
                     )
                     try:
                         await asyncio.wait_for(
-                            self.publish_credential(cracked_cred, source_agent),
+                            self.publish_credential(
+                                cracked_cred, source_agent, task_queue=task_queue
+                            ),
                             timeout=30.0,
                         )
                     except asyncio.TimeoutError:
@@ -495,7 +497,7 @@ class ResultProcessingMixin:
                 parent_id=parent_credential_id,
                 attack_step=discovery_step,
             )
-            await self.publish_credential(credential, source_agent)
+            await self.publish_credential(credential, source_agent, task_queue=None)
 
         creds_data = result.get("credentials")
         if isinstance(creds_data, list):
@@ -512,7 +514,7 @@ class ResultProcessingMixin:
                     parent_id=parent_credential_id,
                     attack_step=discovery_step,
                 )
-                await self.publish_credential(credential, source_agent)
+                await self.publish_credential(credential, source_agent, task_queue=None)
 
         hash_data = result.get("hash")
         if isinstance(hash_data, dict):
@@ -536,7 +538,7 @@ class ResultProcessingMixin:
                     parent_id=hash_obj.id,
                     attack_step=hash_obj.attack_step + 1,
                 )
-                await self.publish_credential(cracked_cred, source_agent)
+                await self.publish_credential(cracked_cred, source_agent, task_queue=None)
 
         hashes_data = result.get("hashes")
         if isinstance(hashes_data, list):
@@ -563,7 +565,7 @@ class ResultProcessingMixin:
                         parent_id=hash_obj.id,
                         attack_step=hash_obj.attack_step + 1,
                     )
-                    await self.publish_credential(cracked_cred, source_agent)
+                    await self.publish_credential(cracked_cred, source_agent, task_queue=None)
 
         # NOTE: share/shares from JSON is NOT processed here.
         # LLM agents parse netexec output non-deterministically. Shares are
@@ -644,7 +646,7 @@ class ResultProcessingMixin:
                 parent_id=parent_credential_id,  # Track attack chain
                 attack_step=parent_attack_step + 1 if parent_credential_id else 0,
             )
-            await self.publish_credential(credential, source_agent)
+            await self.publish_credential(credential, source_agent, task_queue=task_queue)
 
         # Extract shares from netexec --shares output
         for share in self._extract_shares_from_output(output):

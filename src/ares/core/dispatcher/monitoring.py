@@ -598,7 +598,9 @@ class MonitoringMixin:
                 if discovery_type == "delegation":
                     await self._process_realtime_delegation_discovery(data, source_agent)
                 elif discovery_type == "credential":
-                    await self._process_realtime_credential_discovery(data, source_agent)
+                    await self._process_realtime_credential_discovery(
+                        data, source_agent, task_queue=None
+                    )
                 elif discovery_type == "hash":
                     await self._process_realtime_hash_discovery(data, source_agent)
                 elif discovery_type == "vulnerability":
@@ -650,7 +652,7 @@ class MonitoringMixin:
             )
 
     async def _process_realtime_credential_discovery(
-        self: RedTeamDispatcher, data: dict, source_agent: str
+        self: RedTeamDispatcher, data: dict, source_agent: str, task_queue: Any = None
     ) -> None:
         """Process a real-time credential discovery."""
         from ares.core.models import Credential
@@ -671,7 +673,7 @@ class MonitoringMixin:
         )
 
         # publish_credential handles deduplication and triggers auto-exploit
-        await self.publish_credential(cred, source_agent)
+        await self.publish_credential(cred, source_agent, task_queue=task_queue)
         logger.info(f"📡 Real-time credential: {domain}\\{username}")
 
     async def _process_realtime_hash_discovery(
@@ -783,15 +785,6 @@ class MonitoringMixin:
 
         while self._running:
             try:
-                # Process pending delegation dispatches from threaded consumer
-                # These were queued because the threaded consumer can't dispatch directly
-                await self._process_pending_delegation_queue()
-
-                # Process pending dispatches (S4U lateral, delegation exploits, etc.)
-                # These are queued by the threaded consumer when it discovers exploitable
-                # situations but can't dispatch directly (self._task_queue bound to main loop)
-                await self._process_pending_dispatch_queue()
-
                 # Clean up stale tasks to prevent throttle deadlock
                 await self._cleanup_stale_tasks()
 
@@ -827,155 +820,6 @@ class MonitoringMixin:
                 await asyncio.sleep(min(15, consecutive_failures * 5))
 
         logger.info("Maintenance loop stopped")
-
-    async def _process_pending_delegation_queue(self: RedTeamDispatcher) -> None:
-        """Process pending delegation dispatches queued by the threaded consumer.
-
-        When credentials are discovered in the threaded result consumer, we can't
-        dispatch delegation enumeration directly because it requires the main event
-        loop. The threaded consumer queues credentials here, and this method
-        (running on the main loop) processes them.
-
-        This eliminates the ~30s delay that would otherwise occur waiting for the
-        _auto_credential_expansion background task to pick up the credential.
-        """
-        import queue
-
-        processed = 0
-        while True:
-            try:
-                # Non-blocking get
-                domain, username, password, _source = self._pending_delegation_queue.get_nowait()
-            except queue.Empty:
-                break
-
-            cred_key = f"{domain.lower()}:{username.lower()}"
-            if cred_key in self.shared_state.processed_delegation_creds:
-                continue
-
-            try:
-                task_id = await asyncio.wait_for(
-                    self.request_privesc_enumeration(
-                        source_agent="orchestrator",
-                        domain=domain,
-                        username=username,
-                        password=password,
-                        techniques=["find_delegation"],
-                    ),
-                    timeout=10.0,
-                )
-                if task_id:
-                    logger.info(
-                        f"🚀 Deferred delegation task {task_id} dispatched for "
-                        f"{domain}\\{username} (queued from threaded consumer)"
-                    )
-                    processed += 1
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout dispatching delegation for {domain}\\{username}")
-            except Exception as e:
-                logger.warning(f"Failed to dispatch delegation for {domain}\\{username}: {e}")
-
-        if processed:
-            logger.info(f"Processed {processed} pending delegation dispatches from queue")
-
-    async def _process_pending_dispatch_queue(self: RedTeamDispatcher) -> None:
-        """Process pending dispatches queued by the threaded consumer.
-
-        When the threaded result consumer discovers exploitable situations (S4U chains,
-        delegation vulnerabilities with credentials, etc.), it can't dispatch directly
-        because self._task_queue is bound to the main event loop. It queues them here,
-        and this method (running on the main loop) processes them.
-
-        Dispatch types:
-        - "s4u_lateral": S4U chain lateral movement (secretsdump after successful S4U)
-        - "delegation_exploit": Constrained delegation exploit with discovered credentials
-        """
-        import queue
-
-        processed = 0
-        while True:
-            try:
-                # Non-blocking get
-                dispatch_type, params = self._pending_dispatch_queue.get_nowait()
-            except queue.Empty:
-                break
-
-            try:
-                if dispatch_type == "s4u_lateral":
-                    # S4U chain - dispatch secretsdump using the generated ticket
-                    domain = params.get("domain", "")
-                    target_ips = params.get("target_ips", [])
-                    ticket_path = params.get("ticket_path", "")
-                    dc_ip = params.get("dc_ip", "")
-
-                    task_id = await asyncio.wait_for(
-                        self.request_credential_access(
-                            domain=domain,
-                            source_agent="auto_s4u_chain",
-                            target_ips=target_ips,
-                            username="Administrator",
-                            techniques=["secretsdump"],
-                            reason="auto_s4u_chain",
-                            extra_params={
-                                "ticket_path": ticket_path,
-                                "no_pass": True,  # nosec B105 - not a password, it's a flag
-                                "dc_ip": dc_ip,
-                            },
-                        ),
-                        timeout=10.0,
-                    )
-                    if task_id:
-                        logger.info(
-                            f"🎫 Deferred S4U lateral movement task {task_id} dispatched for "
-                            f"{target_ips[0] if target_ips else 'unknown'} (queued from threaded consumer)"
-                        )
-                        processed += 1
-
-                elif dispatch_type == "delegation_exploit":
-                    # Constrained delegation exploit with discovered credentials
-                    vuln_id = params.get("vuln_id", "")
-                    account = params.get("account", "")
-                    target_spn = params.get("target_spn", "")
-                    domain = params.get("domain", "")
-                    username = params.get("username", "")
-                    password = params.get("password", "")
-                    dc_ip = params.get("dc_ip", "")
-
-                    task_id = await asyncio.wait_for(
-                        self.request_exploit(
-                            vuln_type="constrained_delegation",
-                            vuln_id=vuln_id,
-                            target=account,
-                            source_agent="auto_delegation",
-                            params={
-                                "account": account,
-                                "account_name": account,
-                                "target_spn": target_spn,
-                                "domain": domain,
-                                "username": username,
-                                "password": password,
-                                "dc_ip": dc_ip,
-                            },
-                        ),
-                        timeout=10.0,
-                    )
-                    if task_id:
-                        logger.info(
-                            f"🚀 Deferred delegation exploit task {task_id} dispatched for "
-                            f"{account} -> {target_spn} (queued from threaded consumer)"
-                        )
-                        processed += 1
-
-                else:
-                    logger.warning(f"Unknown dispatch type: {dispatch_type}")
-
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout processing deferred dispatch: {dispatch_type}")
-            except Exception as e:
-                logger.warning(f"Failed to process deferred dispatch {dispatch_type}: {e}")
-
-        if processed:
-            logger.info(f"Processed {processed} pending dispatches from queue")
 
     async def _log_throttle_health(self: RedTeamDispatcher) -> None:
         """
@@ -1305,195 +1149,6 @@ class MonitoringMixin:
         # Poll for real-time discoveries
         await self._poll_discoveries_threaded(task_queue)
 
-        # Process pending dispatches queued by complete_task() - DON'T wait for main loop!
-        # The main loop may be blocked by LLM timeouts, so we dispatch here using
-        # the thread's own task_queue
-        await self._process_pending_dispatch_queue_threaded(task_queue)
-        await self._process_pending_delegation_queue_threaded(task_queue)
-
-    async def _process_pending_dispatch_queue_threaded(
-        self: RedTeamDispatcher,
-        task_queue: RedisTaskQueue,
-    ) -> None:
-        """Process pending dispatches using the thread's task queue.
-
-        This runs in the threaded consumer, processing dispatches queued by
-        complete_task() → _auto_queue_delegation_vulnerabilities() etc.
-
-        CRITICAL: The maintenance loop on the main thread may be blocked by LLM
-        timeouts, so we MUST process these dispatches here using our own task_queue.
-        """
-        import queue
-
-        processed = 0
-        while True:
-            try:
-                dispatch_type, params = self._pending_dispatch_queue.get_nowait()
-            except queue.Empty:
-                break
-
-            try:
-                if dispatch_type == "s4u_lateral":
-                    domain = params.get("domain", "")
-                    target_ips = params.get("target_ips", [])
-                    ticket_path = params.get("ticket_path", "")
-                    dc_ip = params.get("dc_ip", "")
-
-                    # Submit directly using thread's task_queue
-                    payload = {
-                        "domain": domain,
-                        "target_ips": target_ips,
-                        "dc_ip": dc_ip,
-                        "username": "Administrator",
-                        "techniques": ["secretsdump"],
-                        "reason": "auto_s4u_chain",
-                        "ticket_path": ticket_path,
-                        "no_pass": True,  # nosec B105 - not a password, it's a Kerberos auth flag
-                    }
-                    task_id = await task_queue.submit_task(
-                        task_type="credential_access",
-                        target_role="credential_access",
-                        payload=payload,
-                        source_agent="auto_s4u_chain",
-                        priority=1,
-                    )
-                    if task_id:
-                        from ares.core.models import TaskInfo
-
-                        task_info = TaskInfo(
-                            task_id=task_id,
-                            task_type="credential_access",
-                            assigned_agent="credential_access",
-                            params=payload,
-                        )
-                        self.shared_state.pending_tasks[task_id] = task_info
-                        self._redis_task_ids.add(task_id)
-                        logger.info(
-                            f"🎫 Threaded dispatch: S4U lateral {task_id} for "
-                            f"{target_ips[0] if target_ips else 'unknown'}"
-                        )
-                        processed += 1
-
-                elif dispatch_type == "delegation_exploit":
-                    vuln_id = params.get("vuln_id", "")
-                    account = params.get("account", "")
-                    target_spn = params.get("target_spn", "")
-                    domain = params.get("domain", "")
-                    username = params.get("username", "")
-                    password = params.get("password", "")
-                    dc_ip = params.get("dc_ip", "")
-
-                    payload = {
-                        "vuln_type": "constrained_delegation",
-                        "vuln_id": vuln_id,
-                        "target": account,
-                        "account": account,
-                        "account_name": account,
-                        "target_spn": target_spn,
-                        "domain": domain,
-                        "username": username,
-                        "password": password,
-                        "dc_ip": dc_ip,
-                    }
-                    task_id = await task_queue.submit_task(
-                        task_type="exploit",
-                        target_role="privesc",
-                        payload=payload,
-                        source_agent="auto_delegation",
-                        priority=1,
-                    )
-                    if task_id:
-                        from ares.core.models import TaskInfo
-
-                        task_info = TaskInfo(
-                            task_id=task_id,
-                            task_type="exploit",
-                            assigned_agent="privesc",
-                            params=payload,
-                        )
-                        self.shared_state.pending_tasks[task_id] = task_info
-                        self._redis_task_ids.add(task_id)
-                        logger.warning(
-                            f"🚀 Threaded dispatch: delegation exploit {task_id} for "
-                            f"{account} -> {target_spn}"
-                        )
-                        processed += 1
-
-                else:
-                    logger.warning(f"Unknown dispatch type in threaded consumer: {dispatch_type}")
-
-            except Exception as e:
-                logger.warning(f"Failed threaded dispatch {dispatch_type}: {e}")
-
-        if processed > 0:
-            logger.info(f"Threaded consumer dispatched {processed} task(s) directly")
-
-    async def _process_pending_delegation_queue_threaded(
-        self: RedTeamDispatcher,
-        task_queue: RedisTaskQueue,
-    ) -> None:
-        """Process pending delegation enumeration requests using thread's task queue.
-
-        When credentials are discovered in complete_task(), delegation enumeration
-        is queued to _pending_delegation_queue. This processes those requests
-        directly from the threaded consumer, bypassing the blocked main loop.
-        """
-        import queue
-
-        processed = 0
-        while True:
-            try:
-                domain, username, password, _source = self._pending_delegation_queue.get_nowait()
-            except queue.Empty:
-                break
-
-            cred_key = f"{domain.lower()}:{username.lower()}"
-            if cred_key in self.shared_state.processed_delegation_creds:
-                continue
-
-            try:
-                # Resolve DC IP
-                dc_ip = self._find_domain_controller_ip(domain)
-                if not dc_ip and self.shared_state.target:
-                    dc_ip = self.shared_state.target.ip
-
-                payload = {
-                    "domain": domain,
-                    "dc_ip": dc_ip,
-                    "username": username,
-                    "password": password,
-                    "techniques": ["find_delegation"],
-                }
-
-                task_id = await task_queue.submit_task(
-                    task_type="privesc_enumeration",
-                    target_role="privesc",
-                    payload=payload,
-                    source_agent="orchestrator",
-                    priority=1,
-                )
-                if task_id:
-                    from ares.core.models import TaskInfo
-
-                    task_info = TaskInfo(
-                        task_id=task_id,
-                        task_type="privesc_enumeration",
-                        assigned_agent="privesc",
-                        params=payload,
-                    )
-                    self.shared_state.pending_tasks[task_id] = task_info
-                    self._redis_task_ids.add(task_id)
-                    logger.info(
-                        f"🚀 Threaded dispatch: delegation enum {task_id} for {domain}\\{username}"
-                    )
-                    processed += 1
-
-            except Exception as e:
-                logger.warning(f"Failed threaded delegation dispatch for {domain}\\{username}: {e}")
-
-        if processed > 0:
-            logger.info(f"Threaded consumer dispatched {processed} delegation enum task(s)")
-
     async def _poll_discoveries_threaded(
         self: RedTeamDispatcher,
         task_queue: RedisTaskQueue,
@@ -1516,7 +1171,9 @@ class MonitoringMixin:
                 if discovery_type == "delegation":
                     await self._process_realtime_delegation_discovery(data, source_agent)
                 elif discovery_type == "credential":
-                    await self._process_realtime_credential_discovery(data, source_agent)
+                    await self._process_realtime_credential_discovery(
+                        data, source_agent, task_queue=task_queue
+                    )
                 elif discovery_type == "hash":
                     await self._process_realtime_hash_discovery(data, source_agent)
                 elif discovery_type == "vulnerability":

@@ -1095,6 +1095,7 @@ class RoutingMixin:
         username: str,
         password: str,
         techniques: list[str] | None = None,
+        task_queue: Any = None,
     ) -> str:
         """
         Request PRIVESC agent to run enumeration tasks (e.g., find_delegation).
@@ -1168,7 +1169,9 @@ class RoutingMixin:
             "parent_attack_step": parent_step,
         }
 
-        if self._task_queue:
+        # Use provided task_queue (from threaded consumer) or fall back to self._task_queue
+        effective_task_queue = task_queue if task_queue is not None else self._task_queue
+        if effective_task_queue:
             # Use priority=1 (highest) for delegation enumeration - these are critical
             # for discovering constrained delegation paths to Domain Admin
             task_id = await self._throttled_submit_task(
@@ -1177,6 +1180,7 @@ class RoutingMixin:
                 payload=payload,
                 source_agent=source_agent,
                 priority=1,  # Highest priority - delegation discovery is critical path
+                task_queue=effective_task_queue,
             )
             if not task_id:
                 return ""

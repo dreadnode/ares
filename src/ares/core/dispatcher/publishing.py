@@ -38,6 +38,7 @@ class PublishingMixin:
         credential: Credential,
         source_agent: str,
         is_admin: bool = False,
+        task_queue: Any = None,
     ) -> bool:
         """
         Broadcast new credential to all agents.
@@ -89,8 +90,13 @@ class PublishingMixin:
             if is_cracked and credential.password and credential.domain:
                 cred_key = f"{credential.domain.lower()}:{credential.username.lower()}"
                 if cred_key not in self.shared_state.processed_delegation_creds:
-                    if is_main_thread:
-                        # Direct dispatch on main thread
+                    # Dispatch delegation check directly using effective task queue
+                    # When called from threaded consumer, task_queue is passed in
+                    # When called from main thread, task_queue is None and we use self._task_queue
+                    effective_task_queue = (
+                        task_queue if task_queue is not None else self._task_queue
+                    )
+                    if effective_task_queue:
                         logger.info(
                             f"🚀 Immediate delegation check for cracked credential: "
                             f"{credential.domain}\\{credential.username}"
@@ -103,6 +109,7 @@ class PublishingMixin:
                                     username=credential.username,
                                     password=credential.password,
                                     techniques=["find_delegation"],
+                                    task_queue=effective_task_queue,
                                 ),
                                 timeout=30.0,
                             )
@@ -121,7 +128,9 @@ class PublishingMixin:
                         # Check for pending constrained delegation vulnerabilities we can now exploit
                         try:
                             await asyncio.wait_for(
-                                self._exploit_delegation_with_credential(credential, source_agent),
+                                self._exploit_delegation_with_credential(
+                                    credential, source_agent, effective_task_queue
+                                ),
                                 timeout=30.0,
                             )
                         except asyncio.TimeoutError:
@@ -132,20 +141,9 @@ class PublishingMixin:
                         except Exception as e:
                             logger.warning(f"Error exploiting delegation with credential: {e}")
                     else:
-                        # Queue for main loop (threaded consumer can't dispatch directly)
-                        # Maintenance loop will process within 5s instead of waiting 30s
-                        # for _auto_credential_expansion
-                        logger.info(
-                            f"🚀 Queuing delegation check for cracked credential: "
-                            f"{credential.domain}\\{credential.username} (from threaded consumer)"
-                        )
-                        self._pending_delegation_queue.put(
-                            (
-                                credential.domain,
-                                credential.username,
-                                credential.password,
-                                source_agent,
-                            )
+                        logger.warning(
+                            f"Cannot dispatch delegation enum - no task_queue available: "
+                            f"{credential.domain}\\{credential.username}"
                         )
         else:
             logger.debug(
@@ -705,16 +703,18 @@ class PublishingMixin:
         self: RedTeamDispatcher,
         credential: Credential,
         source_agent: str,
+        task_queue: Any = None,
     ) -> None:
         """Check for pending delegation vulnerabilities matching this credential and exploit.
 
         When a credential is cracked, check if we have a pending constrained/unconstrained
         delegation vulnerability for this account and dispatch the actual exploit.
-        """
-        # Skip dispatch when in non-main thread (threaded consumer) - main loop handles it
-        if threading.current_thread() is not threading.main_thread():
-            return
 
+        Args:
+            credential: The credential to check for delegation vulnerabilities.
+            source_agent: Agent that discovered the credential.
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
+        """
         cred_user = credential.username.lower().rstrip("$")
 
         for vuln_id, vuln in list(self.shared_state.discovered_vulnerabilities.items()):
@@ -757,6 +757,7 @@ class PublishingMixin:
                                 "impersonate": "Administrator",
                                 "action": "s4u_attack",
                             },
+                            task_queue=task_queue,
                         ),
                         timeout=30.0,
                     )

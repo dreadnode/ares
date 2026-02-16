@@ -149,25 +149,6 @@ class RedTeamDispatcher(
         # Deferred queue for throttled tasks (queue instead of drop)
         self._init_deferred_queue()
 
-        # Thread-safe queue for delegation dispatches from threaded consumer
-        # When credentials are discovered in the threaded consumer, we can't dispatch
-        # delegation enumeration directly (requires main loop). Queue them here for
-        # the maintenance loop to process.
-        import queue
-
-        self._pending_delegation_queue: queue.Queue[tuple[str, str, str, str]] = queue.Queue()
-        # Tuple: (domain, username, password, source)
-
-        # Generic dispatch queue for operations that require the main event loop
-        # Used by threaded consumer when it needs to trigger dispatches (S4U chains,
-        # delegation exploits, etc.) but can't because self._task_queue is bound
-        # to the main event loop.
-        self._pending_dispatch_queue: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
-        # Tuple: (dispatch_type, params) where dispatch_type is:
-        # - "s4u_lateral": S4U chain lateral movement
-        # - "delegation_exploit": Constrained delegation exploit
-        # - "mark_exploited": Mark vulnerability as exploited
-
         # Signal for threaded consumer to request immediate checkpoint
         self._checkpoint_requested = threading.Event()
 
