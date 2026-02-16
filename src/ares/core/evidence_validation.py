@@ -4,17 +4,23 @@ This module provides:
 1. Storage for recent query results (for evidence provenance)
 2. Validation of evidence values against query results
 3. Auto-extraction of IOCs from query results
+4. Optional Redis persistence for crash recovery
 """
 
+import asyncio
+import json
 import re
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 from ares.core.config import get_max_stored_results, get_unvalidated_confidence_penalty
+
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
 
 
 @dataclass
@@ -33,6 +39,145 @@ class StoredQueryResult:
 # Global storage for recent query results
 _recent_results: deque[StoredQueryResult] = deque(maxlen=get_max_stored_results())
 _query_counter = 0
+
+# Redis backing for persistence
+# Automatically used when set via set_redis_client() - typically called by
+# the orchestrator/dispatcher during initialization for crash recovery.
+# Falls back to in-memory only when Redis is not configured (e.g., standalone CLI).
+_redis_client: "Redis | None" = None
+_operation_id: str = ""
+_background_tasks: set = set()
+
+# Redis key constants
+_REDIS_KEY_PREFIX = "ares:evidence"
+_REDIS_TTL = 86400  # 24 hours
+
+
+def set_redis_client(client: "Redis", operation_id: str) -> None:
+    """Set Redis client for evidence validation persistence.
+
+    Called by the orchestrator/dispatcher during initialization to enable
+    Redis-backed persistence for crash recovery. When set, all query results
+    are automatically persisted to Redis in addition to in-memory storage.
+
+    Args:
+        client: Async Redis client
+        operation_id: Current operation ID for namespacing
+    """
+    global _redis_client, _operation_id
+    _redis_client = client
+    _operation_id = operation_id
+    logger.info(f"Evidence validation Redis persistence enabled for {operation_id}")
+
+
+def _get_redis_key() -> str:
+    """Get Redis key for current operation."""
+    return f"{_REDIS_KEY_PREFIX}:{_operation_id}:results"
+
+
+def _serialize_query_result(result: StoredQueryResult) -> str:
+    """Serialize a StoredQueryResult to JSON string."""
+    return json.dumps(
+        {
+            "query_id": result.query_id,
+            "query_type": result.query_type,
+            "query_string": result.query_string,
+            "timestamp": result.timestamp.isoformat(),
+            "result_data": result.result_data,
+            "result_count": result.result_count,
+            "extracted_values": list(result.extracted_values),
+        },
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _deserialize_query_result(data: str | bytes) -> StoredQueryResult:
+    """Deserialize a StoredQueryResult from JSON string."""
+    if isinstance(data, bytes):
+        data = data.decode()
+    d = json.loads(data)
+    return StoredQueryResult(
+        query_id=d.get("query_id", ""),
+        query_type=d.get("query_type", ""),
+        query_string=d.get("query_string", ""),
+        timestamp=datetime.fromisoformat(d["timestamp"])
+        if d.get("timestamp")
+        else datetime.now(timezone.utc),
+        result_data=d.get("result_data"),
+        result_count=d.get("result_count", 0),
+        extracted_values=set(d.get("extracted_values", [])),
+    )
+
+
+async def _persist_to_redis(result: StoredQueryResult) -> None:
+    """Persist a query result to Redis (async background task)."""
+    if not _redis_client or not _operation_id:
+        return
+
+    try:
+        key = _get_redis_key()
+        data = _serialize_query_result(result)
+        # Use ZADD with timestamp as score for time-ordered storage
+        score = result.timestamp.timestamp()
+        await _redis_client.zadd(key, {data: score})
+        await _redis_client.expire(key, _REDIS_TTL)
+
+        # Trim to max size (keep most recent N entries)
+        max_size = get_max_stored_results()
+        count = await _redis_client.zcard(key)
+        if count > max_size:
+            # Remove oldest entries (lowest scores)
+            await _redis_client.zremrangebyrank(key, 0, count - max_size - 1)
+
+        logger.debug(f"Persisted query result {result.query_id} to Redis")
+    except Exception as e:
+        logger.warning(f"Failed to persist query result to Redis: {e}")
+
+
+async def load_from_redis() -> int:
+    """Load query results from Redis into memory.
+
+    Returns:
+        Number of results loaded
+    """
+    global _query_counter
+
+    if not _redis_client or not _operation_id:
+        return 0
+
+    try:
+        key = _get_redis_key()
+        # Get all entries ordered by timestamp (score)
+        items = await _redis_client.zrange(key, 0, -1)
+
+        loaded = 0
+        max_query_num = 0
+        for item in items:
+            try:
+                result = _deserialize_query_result(item)
+                _recent_results.append(result)
+                loaded += 1
+
+                # Track highest query number for counter
+                if result.query_id.startswith("q-"):
+                    try:
+                        num = int(result.query_id[2:])
+                        max_query_num = max(max_query_num, num)
+                    except ValueError:
+                        pass
+            except Exception as e:  # noqa: PERF203 - need per-item exception handling
+                logger.warning(f"Failed to deserialize query result: {e}")
+
+        # Restore query counter
+        _query_counter = max(_query_counter, max_query_num)
+
+        if loaded > 0:
+            logger.info(f"Loaded {loaded} query results from Redis (counter at {_query_counter})")
+        return loaded
+    except Exception as e:
+        logger.warning(f"Failed to load query results from Redis: {e}")
+        return 0
 
 
 def reset_evidence_validation():
@@ -77,6 +222,16 @@ def store_query_result(
 
     _recent_results.append(stored)
     logger.debug(f"Stored query result {query_id} with {len(extracted)} extracted values")
+
+    # Persist to Redis if available (async background task)
+    if _redis_client and _operation_id:
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(_persist_to_redis(stored))
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
+        except RuntimeError:
+            pass  # No event loop running
 
     return query_id
 

@@ -152,13 +152,10 @@ async def _load_or_initialize_state(
         try:
             state, requeued_task_ids = await recovery.recover_operation(operation_id)
             dispatcher._shared_state = state
-            # Add requeued task IDs to dispatcher so result consumer can track them
-            for task_id in requeued_task_ids:
-                dispatcher._redis_task_ids.add(task_id)
+            # Requeued tasks are already in pending_tasks (restored from checkpoint)
+            # which the result consumer polls automatically
             if requeued_task_ids:
-                logger.info(
-                    f"Added {len(requeued_task_ids)} requeued task IDs to result consumer tracking"
-                )
+                logger.info(f"Recovered {len(requeued_task_ids)} pending tasks from checkpoint")
             if state.all_credentials or state.all_hashes:
                 dispatcher.signal_credential_access()
             logger.info(f"Resumed operation {operation_id} from checkpoint")
@@ -2684,7 +2681,7 @@ async def _auto_golden_ticket(  # noqa: PLR0912
                 if not dc_ip:
                     logger.warning(f"🎫 Auto-golden-ticket: No DC IP found for {domain}, skipping")
                     # Add failed attempt to state so we don't retry forever
-                    state.golden_tickets.append(
+                    state.add_golden_ticket(
                         {
                             "domain": domain,
                             "ticket_path": None,
@@ -2711,7 +2708,7 @@ async def _auto_golden_ticket(  # noqa: PLR0912
                         logger.warning(
                             f"🎫 Auto-golden-ticket: Could not extract domain SID for {domain}"
                         )
-                        state.golden_tickets.append(
+                        state.add_golden_ticket(
                             {
                                 "domain": domain,
                                 "ticket_path": None,
@@ -2751,7 +2748,7 @@ async def _auto_golden_ticket(  # noqa: PLR0912
                         state.has_golden_ticket = True
 
                         # Store ticket details in state (persisted to Redis!)
-                        state.golden_tickets.append(
+                        state.add_golden_ticket(
                             {
                                 "domain": domain,
                                 "ticket_path": ticket_path,
@@ -2778,7 +2775,7 @@ async def _auto_golden_ticket(  # noqa: PLR0912
                         logger.warning(
                             f"🎫 Auto-golden-ticket: Failed to generate ticket for {domain}: {output}"
                         )
-                        state.golden_tickets.append(
+                        state.add_golden_ticket(
                             {
                                 "domain": domain,
                                 "ticket_path": None,
@@ -2790,7 +2787,7 @@ async def _auto_golden_ticket(  # noqa: PLR0912
 
                 except Exception as e:
                     logger.warning(f"🎫 Auto-golden-ticket: Error generating ticket: {e}")
-                    state.golden_tickets.append(
+                    state.add_golden_ticket(
                         {
                             "domain": domain,
                             "ticket_path": None,

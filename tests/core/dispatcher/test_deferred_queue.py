@@ -701,16 +701,12 @@ class TestStaleTaskCleanup:
 
         dispatcher._shared_state.pending_tasks["stale-task-1"] = stale_task
         dispatcher._shared_state.pending_tasks["fresh-task-1"] = fresh_task
-        dispatcher._redis_task_ids.add("stale-task-1")
-        dispatcher._redis_task_ids.add("fresh-task-1")
 
         # Run cleanup
         await dispatcher._cleanup_stale_tasks()
 
         # Stale task should be removed
         assert "stale-task-1" not in dispatcher._shared_state.pending_tasks
-        assert "stale-task-1" not in dispatcher._redis_task_ids
 
         # Fresh task should remain
         assert "fresh-task-1" in dispatcher._shared_state.pending_tasks
-        assert "fresh-task-1" in dispatcher._redis_task_ids

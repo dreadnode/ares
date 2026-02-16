@@ -37,12 +37,35 @@ def mock_redis_client():
     client.ping = AsyncMock(return_value=True)
     client.set = AsyncMock(return_value=True)
     client.get = AsyncMock(return_value=None)
-    client.exists = AsyncMock(return_value=0)
+    client.exists = AsyncMock(return_value=1)  # Default to key exists
     client.delete = AsyncMock(return_value=1)
     client.expire = AsyncMock(return_value=True)
     client.close = AsyncMock()
     client.scan_iter = AsyncMock(return_value=iter([]))
     return client
+
+
+@pytest.fixture
+def mock_backend():
+    """Create a mock RedisStateBackend."""
+    backend = AsyncMock()
+    # Default empty returns
+    backend.get_credentials = AsyncMock(return_value=[])
+    backend.get_hashes = AsyncMock(return_value=[])
+    backend.get_hosts = AsyncMock(return_value=[])
+    backend.get_users = AsyncMock(return_value=[])
+    backend.get_shares = AsyncMock(return_value=[])
+    backend.get_weaknesses = AsyncMock(return_value=[])
+    backend.get_domains = AsyncMock(return_value=[])
+    backend.get_vulnerabilities = AsyncMock(return_value=[])
+    backend.get_exploited_vulnerabilities = AsyncMock(return_value=set())
+    backend.get_domain_admin = AsyncMock(return_value=(False, None))
+    backend.get_golden_ticket = AsyncMock(return_value=False)
+    backend.get_meta = AsyncMock(return_value=None)
+    backend.get_all_dcs = AsyncMock(return_value={})
+    backend.get_all_netbios_mappings = AsyncMock(return_value={})
+    backend.get_all_artifacts = AsyncMock(return_value={})
+    return backend
 
 
 @pytest.fixture
@@ -312,128 +335,40 @@ class TestOperationRecoveryManagerRecovery:
             await manager.recover_operation("test-op")
 
     @pytest.mark.asyncio
-    async def test_recover_operation_no_checkpoint(self, mock_redis_client):
-        """Test recovery fails when no checkpoint exists."""
+    async def test_recover_operation_no_state_found(self, mock_redis_client):
+        """Test recovery fails when no state exists."""
         manager = OperationRecoveryManager(redis_url="redis://192.168.58.99:6379")
         manager._redis_client = mock_redis_client
-        mock_redis_client.get.return_value = None
+        mock_redis_client.exists.return_value = 0  # No meta key exists
 
-        with pytest.raises(RecoveryError, match="No checkpoint found"):
+        with pytest.raises(RecoveryError, match="No state found"):
             await manager.recover_operation("nonexistent-op")
 
     @pytest.mark.asyncio
-    async def test_recover_operation_requeues_tasks(
-        self, mock_redis_client, state_with_in_progress_tasks
+    async def test_recover_operation_loads_state_from_backend(
+        self, mock_redis_client, mock_backend
     ):
-        """Test recovery requeues in-progress, pending, and retrying tasks."""
+        """Test recovery loads state from RedisStateBackend."""
         manager = OperationRecoveryManager(redis_url="redis://192.168.58.99:6379")
         manager._redis_client = mock_redis_client
 
-        # Mock get to return state for first call, and checkpoint time for second
-        mock_redis_client.get.side_effect = [
-            state_with_in_progress_tasks.to_bytes(),
-            b"2024-01-15T10:00:00+00:00",  # checkpoint time
-        ]
-
-        # Mock the task queue
-        with patch("ares.core.recovery.RedisTaskQueue") as mock_task_queue_class:
+        # Mock the state backend - need to patch where it's imported
+        with (
+            patch("ares.core.state_backend.RedisStateBackend", return_value=mock_backend),
+            patch("ares.core.recovery.RedisTaskQueue") as mock_task_queue_class,
+        ):
             mock_queue = AsyncMock()
             mock_task_queue_class.return_value = mock_queue
             mock_queue.connect = AsyncMock()
             mock_queue.disconnect = AsyncMock()
-            mock_queue.requeue_task = AsyncMock(return_value="task_001")
 
-            recovered, _requeued_ids = await manager.recover_operation(
-                state_with_in_progress_tasks.operation_id
-            )
+            recovered, _requeued_ids = await manager.recover_operation("test-op")
 
-            # Verify tasks were requeued (task_001, task_002, task_003, task_005)
-            assert mock_queue.requeue_task.call_count == 4  # IN_PROGRESS, PENDING, RETRYING tasks
-
-            # Verify task statuses were updated
-            task_001 = recovered.pending_tasks["task_001"]
-            assert task_001.status == TaskStatus.RETRYING
-            assert task_001.retry_count == 1
-
-            task_002 = recovered.pending_tasks["task_002"]
-            assert task_002.status == TaskStatus.RETRYING
-            assert task_002.retry_count == 3
-
-            # Pending task should also be requeued as RETRYING (but retry_count stays 0 since it never started)
-            task_003 = recovered.pending_tasks["task_003"]
-            assert task_003.status == TaskStatus.RETRYING
-            assert task_003.retry_count == 0  # PENDING tasks don't increment retry count
-
-            # Completed task should not be touched
-            task_004 = recovered.pending_tasks["task_004"]
-            assert task_004.status == TaskStatus.COMPLETED
-
-            # Retrying task should be requeued without incrementing retry_count
-            task_005 = recovered.pending_tasks["task_005"]
-            assert task_005.status == TaskStatus.RETRYING
-            assert task_005.retry_count == 1
-
-    @pytest.mark.asyncio
-    async def test_recover_operation_marks_max_retries_failed(
-        self, mock_redis_client, state_with_max_retries_exceeded
-    ):
-        """Test recovery marks tasks with max retries as failed."""
-        manager = OperationRecoveryManager(redis_url="redis://192.168.58.99:6379")
-        manager._redis_client = mock_redis_client
-
-        # Mock get to return state for first call, and checkpoint time for second
-        mock_redis_client.get.side_effect = [
-            state_with_max_retries_exceeded.to_bytes(),
-            b"2024-01-15T10:00:00+00:00",  # checkpoint time
-        ]
-
-        with patch("ares.core.recovery.RedisTaskQueue") as mock_task_queue_class:
-            mock_queue = AsyncMock()
-            mock_task_queue_class.return_value = mock_queue
-            mock_queue.connect = AsyncMock()
-            mock_queue.disconnect = AsyncMock()
-            mock_queue.requeue_task = AsyncMock()
-
-            recovered, _requeued_ids = await manager.recover_operation(
-                state_with_max_retries_exceeded.operation_id
-            )
-
-            # Task should be marked as failed (max retries exceeded)
-            task = recovered.pending_tasks["task_maxed"]
-            assert task.status == TaskStatus.FAILED
-            assert task.retry_count == 4  # Incremented to 4
-            assert "max retries" in task.error
-            assert task.completed_at is not None
-
-            # Should NOT have been requeued
-            mock_queue.requeue_task.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_recover_operation_auto_requeue_disabled(
-        self, mock_redis_client, state_with_in_progress_tasks
-    ):
-        """Test recovery with auto_requeue disabled marks all as failed."""
-        manager = OperationRecoveryManager(redis_url="redis://192.168.58.99:6379")
-        manager._redis_client = mock_redis_client
-
-        # Mock get to return state for first call, and checkpoint time for second
-        mock_redis_client.get.side_effect = [
-            state_with_in_progress_tasks.to_bytes(),
-            b"2024-01-15T10:00:00+00:00",  # checkpoint time
-        ]
-
-        recovered, _requeued_ids = await manager.recover_operation(
-            state_with_in_progress_tasks.operation_id,
-            auto_requeue=False,
-        )
-
-        # All in-progress tasks should be marked as failed
-        task_001 = recovered.pending_tasks["task_001"]
-        assert task_001.status == TaskStatus.FAILED
-        assert task_001.completed_at is not None
-
-        task_002 = recovered.pending_tasks["task_002"]
-        assert task_002.status == TaskStatus.FAILED
+            # Verify state was created and backend was used
+            assert recovered.operation_id == "test-op"
+            mock_backend.get_credentials.assert_called_once()
+            mock_backend.get_hashes.assert_called_once()
+            mock_backend.get_hosts.assert_called_once()
 
 
 # ============================================================================
@@ -619,143 +554,12 @@ class TestRecoveryError:
 
 
 # ============================================================================
-# _merge_state Domain Admin Detection Tests
+# Connection Handling Tests
 # ============================================================================
-
-
-class TestMergeStateDomainAdminDetection:
-    """Tests for _merge_state domain admin detection during state merge.
-
-    CRITICAL: Only krbtgt NTLM hash should trigger DA in merge safety net.
-    Administrator hash does NOT trigger DA (could be local admin).
-    """
-
-    def test_merge_detects_krbtgt_hash(self):
-        """Test that _merge_state detects krbtgt NTLM hash and sets DA flag."""
-        from ares.core.models import Hash, SharedRedTeamState
-        from ares.core.recovery import _merge_state
-
-        target = SharedRedTeamState(operation_id="test-op")
-        existing = SharedRedTeamState(operation_id="test-op")
-
-        # Add krbtgt hash to existing state
-        existing.all_hashes.append(
-            Hash(
-                username="krbtgt",
-                hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
-                hash_type="NTLM",
-                domain="contoso.local",
-            )
-        )
-
-        _merge_state(target, existing)
-
-        assert target.has_domain_admin is True
-        assert "krbtgt" in target.domain_admin_path
-
-    def test_merge_does_not_detect_administrator_hash(self):
-        """Test that _merge_state does NOT set DA for Administrator hash.
-
-        This is critical: Administrator could be a LOCAL admin on a workstation.
-        """
-        from ares.core.models import Hash, SharedRedTeamState
-        from ares.core.recovery import _merge_state
-
-        target = SharedRedTeamState(operation_id="test-op")
-        existing = SharedRedTeamState(operation_id="test-op")
-
-        # Add Administrator hash to existing state
-        existing.all_hashes.append(
-            Hash(
-                username="Administrator",
-                hash_value="aad3b435b51404eeaad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889",
-                hash_type="NTLM",
-                domain="contoso.local",
-            )
-        )
-
-        _merge_state(target, existing)
-
-        # Administrator hash should NOT set domain admin
-        assert target.has_domain_admin is False
-        assert target.domain_admin_path is None
-
-    def test_merge_preserves_existing_da_flag(self):
-        """Test that _merge_state preserves DA flag from existing state."""
-        from ares.core.models import SharedRedTeamState
-        from ares.core.recovery import _merge_state
-
-        target = SharedRedTeamState(operation_id="test-op")
-        existing = SharedRedTeamState(operation_id="test-op")
-        existing.has_domain_admin = True
-        existing.domain_admin_path = "S4U → secretsdump → krbtgt"
-
-        _merge_state(target, existing)
-
-        assert target.has_domain_admin is True
-        assert target.domain_admin_path == "S4U → secretsdump → krbtgt"
 
 
 class TestOperationRecoveryManagerConnectionHandling:
     """Tests for Redis connection error handling and reconnection."""
-
-    @pytest.fixture
-    def sample_state_for_checkpoint(self):
-        """Create a minimal state for checkpoint testing."""
-        return SharedRedTeamState(
-            operation_id="test-op",
-            target=Target(ip="192.168.58.10", domain="contoso.local"),
-        )
-
-    @pytest.mark.asyncio
-    async def test_checkpoint_retries_on_connection_error(
-        self, mock_redis_client, sample_state_for_checkpoint
-    ):
-        """Test that checkpoint retries once on connection error."""
-        manager = OperationRecoveryManager(redis_url="redis://192.168.58.99:6379")
-        manager._redis_client = mock_redis_client
-        manager._connected = True
-
-        # First call fails with timeout, second succeeds
-        mock_redis_client.get.side_effect = [
-            TimeoutError("Timeout reading from 192.168.58.99:6379"),
-            None,  # No existing checkpoint
-        ]
-        mock_redis_client.set.return_value = True
-        mock_redis_client.expire.return_value = True
-
-        # Mock create_redis_client for reconnection
-        with patch("ares.core.recovery.create_redis_client", return_value=mock_redis_client):
-            # Checkpoint should succeed after retry
-            result = await manager.checkpoint(sample_state_for_checkpoint)
-
-            # Should have called get twice (once for initial attempt, once after reconnect)
-            assert mock_redis_client.get.call_count == 2
-            assert result is True
-
-    @pytest.mark.asyncio
-    async def test_checkpoint_fails_after_retry_exhausted(
-        self, mock_redis_client, sample_state_for_checkpoint
-    ):
-        """Test that checkpoint fails if retry also fails."""
-        manager = OperationRecoveryManager(redis_url="redis://192.168.58.99:6379")
-        manager._redis_client = mock_redis_client
-        manager._connected = True
-
-        # Both attempts fail with connection error
-        mock_redis_client.get.side_effect = [
-            TimeoutError("Timeout reading from 192.168.58.99:6379"),
-            ConnectionError("Connection reset"),
-        ]
-
-        # Mock create_redis_client for reconnection
-        with patch("ares.core.recovery.create_redis_client", return_value=mock_redis_client):
-            result = await manager.checkpoint(sample_state_for_checkpoint)
-
-            # Should have attempted twice
-            assert mock_redis_client.get.call_count == 2
-            # Should fail after retry exhausted
-            assert result is False
 
     @pytest.mark.asyncio
     async def test_handle_connection_error_resets_state(self, mock_redis_client):

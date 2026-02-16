@@ -14,17 +14,14 @@ Example usage for LLM output parsing:
 
 from __future__ import annotations
 
-import json
-import types
 import uuid
-from dataclasses import dataclass, field, is_dataclass
-from dataclasses import fields as dc_fields
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum, IntEnum
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any
 
 from loguru import logger
-from pydantic import BaseModel, Field, computed_field
+from pydantic import Field, computed_field
 from rigging import Model
 from rigging.model import element, wrapped
 
@@ -690,99 +687,27 @@ class AgentInfo:
     last_heartbeat: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-# =========================================================================
-# JSON serialization helpers for SharedRedTeamState
-# =========================================================================
-
-# Fields to exclude from JSON serialization (transient runtime references)
-# Fields excluded from JSON serialization (transient state, not persisted)
-_EXCLUDED_FIELDS = frozenset({"_dispatcher", "_background_tasks"})
-
-
-def _to_json(val: Any) -> Any:
-    """Recursively convert a value to JSON-safe types."""
-    if val is None or isinstance(val, (str, int, float, bool)):
-        return val
-    if isinstance(val, datetime):
-        return val.isoformat()
-    if isinstance(val, Enum):
-        return val.value
-    if isinstance(val, set):
-        return sorted(_to_json(v) for v in val)
-    if isinstance(val, BaseModel):
-        return val.model_dump(mode="json")
-    if is_dataclass(val) and not isinstance(val, type):
-        return {
-            f.name: _to_json(getattr(val, f.name))
-            for f in dc_fields(val)
-            if f.name not in _EXCLUDED_FIELDS
-        }
-    if isinstance(val, dict):
-        return {str(k): _to_json(v) for k, v in val.items()}
-    if isinstance(val, (list, tuple)):
-        return [_to_json(v) for v in val]
-    return str(val)
-
-
-def _from_json(val: Any, hint: type) -> Any:  # noqa: PLR0912
-    """Reconstruct a typed value from JSON using the type annotation."""
-    origin = get_origin(hint)
-    args = get_args(hint)
-
-    # Handle Optional[X] / X | None  (Union with NoneType)
-    if origin is Union or origin is types.UnionType:
-        if val is None:
-            return None
-        non_none = [a for a in args if a is not type(None)]
-        if non_none:
-            return _from_json(val, non_none[0])
-        return val
-
-    # Primitives / Any
-    if hint in (str, int, float, bool, type(None)) or hint is Any:
-        return val
-
-    # datetime
-    if hint is datetime:
-        if isinstance(val, str):
-            return datetime.fromisoformat(val)
-        return val
-
-    # Enum subclasses
-    if isinstance(hint, type) and issubclass(hint, Enum):
-        return hint(val)
-
-    # Pydantic BaseModel (rigging.Model inherits from this)
-    if isinstance(hint, type) and issubclass(hint, BaseModel):
-        return hint.model_validate(val)
-
-    # set[T]
-    if origin is set:
-        elem_type = args[0] if args else Any
-        return {_from_json(v, elem_type) for v in val}
-
-    # list[T]
-    if origin is list:
-        elem_type = args[0] if args else Any
-        return [_from_json(v, elem_type) for v in val]
-
-    # dict[K, V]
-    if origin is dict:
-        val_type = args[1] if len(args) > 1 else Any
-        return {k: _from_json(v, val_type) for k, v in val.items()}
-
-    # dataclass
-    if is_dataclass(hint):
-        hints = get_type_hints(hint)
-        kwargs = {}
-        for f in dc_fields(hint):
-            if f.name in _EXCLUDED_FIELDS:
-                continue
-            if f.name in val:
-                kwargs[f.name] = _from_json(val[f.name], hints[f.name])
-        return hint(**kwargs)
-
-    return val
+# Map in-memory processed set attribute names to Redis set names
+# Used by SharedRedTeamState.mark_processed() and is_processed() methods
+_PROCESSED_SET_MAP: dict[str, str] = {
+    "processed_cred_expansion": "cred_expansion",
+    "processed_hash_lateral": "hash_lateral",
+    "processed_crack_requests": "crack_requests",
+    "processed_asrep_domains": "asrep_domains",
+    "processed_username_spray": "username_spray",
+    "processed_password_spray": "password_spray",  # nosec B105 # pragma: allowlist secret
+    "processed_secretsdump": "secretsdump",  # pragma: allowlist secret
+    "processed_esc8_servers": "esc8_servers",
+    "processed_coerced_dcs": "coerced_dcs",
+    "processed_writable_shares": "writable_shares",
+    "processed_delegation_creds": "delegation_creds",
+    "processed_adcs_servers": "adcs_servers",
+    "processed_bloodhound_domains": "bloodhound_domains",
+    "processed_spidered_shares": "spidered_shares",
+    "processed_expansion_creds": "expansion_creds",
+    "dispatched_acl_steps": "acl_steps",
+    "scanned_targets": "scanned_targets",
+}
 
 
 @dataclass
@@ -921,44 +846,117 @@ class SharedRedTeamState:
     # Background task tracking for proper cleanup (NOT serialized)
     _background_tasks: set = field(default_factory=set, init=False, repr=False, compare=False)
 
+    # Redis-native state backend (NOT serialized)
+    # When set, all add_* methods persist directly to Redis instead of in-memory lists
+    _backend: Any = field(default=None, init=False, repr=False, compare=False)
+
     def set_dispatcher(self, dispatcher) -> None:
         """Set dispatcher for real-time publishing of discoveries."""
         object.__setattr__(self, "_dispatcher", dispatcher)
 
-    def _publish_async(self, coro) -> None:
-        """Publish to Redis with proper task tracking.
+    def set_backend(self, backend) -> None:
+        """Set Redis-native state backend for direct persistence.
 
-        Creates a background task and tracks it for proper cleanup.
-        This prevents fire-and-forget tasks from being lost on shutdown.
+        When a backend is set, all add_* methods will persist changes
+        directly to Redis instead of in-memory lists. This eliminates
+        the need for periodic checkpointing and merge logic.
 
-        NOTE: Skipped when called from non-main thread (threaded result consumer)
-        because the coroutine uses main-loop-bound Redis client.
+        Args:
+            backend: RedisStateBackend instance
         """
-        import threading
+        object.__setattr__(self, "_backend", backend)
 
-        if not self._dispatcher:
-            # Close coroutine to avoid "was never awaited" warning
-            coro.close()
+    # =========================================================================
+    # Processed Set Helpers (with Redis persistence)
+    # =========================================================================
+
+    def mark_processed(self, set_name: str, key: str) -> None:
+        """Mark a key as processed in both in-memory set and Redis backend.
+
+        This is a sync wrapper that updates the in-memory set immediately
+        and fires off an async task to persist to Redis backend if available.
+
+        Args:
+            set_name: Name of the processed set (e.g., "cred_expansion")
+            key: The key to mark as processed
+        """
+        # Get the corresponding in-memory set attribute
+        attr_name = f"processed_{set_name}" if not set_name.startswith("processed_") else set_name
+        if attr_name not in _PROCESSED_SET_MAP and set_name not in _PROCESSED_SET_MAP.values():
+            # Try direct attribute access for non-mapped sets
+            if hasattr(self, attr_name):
+                getattr(self, attr_name).add(key)
+            elif hasattr(self, set_name):
+                getattr(self, set_name).add(key)
             return
 
-        # Skip when in non-main thread - coroutine uses main loop's Redis client
-        if threading.current_thread() is not threading.main_thread():
-            # Close coroutine to avoid "was never awaited" warning
-            coro.close()
-            return
+        # Determine Redis set name and in-memory attribute
+        if attr_name in _PROCESSED_SET_MAP:
+            redis_set_name = _PROCESSED_SET_MAP[attr_name]
+            in_memory_attr: str | None = attr_name
+        else:
+            # set_name is already the Redis name
+            redis_set_name = set_name
+            # Find the in-memory attribute
+            in_memory_attr = next((k for k, v in _PROCESSED_SET_MAP.items() if v == set_name), None)
 
-        try:
+        # Update in-memory set
+        if in_memory_attr is not None and hasattr(self, in_memory_attr):
+            getattr(self, in_memory_attr).add(key)
+
+        # Persist to Redis backend if available
+        if self._backend:
             import asyncio
 
-            loop = asyncio.get_running_loop()
-            task = loop.create_task(coro)
-            # Track task for cleanup
-            self._background_tasks.add(task)
-            # Remove from tracking when done
-            task.add_done_callback(self._background_tasks.discard)
-        except RuntimeError:
-            # No event loop, skip real-time publish
-            pass
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.mark_processed(redis_set_name, key))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                pass  # No event loop
+
+    def is_processed(self, set_name: str, key: str) -> bool:
+        """Check if a key has been processed.
+
+        This checks the in-memory set for fast sync access.
+        For Redis-native mode, in-memory sets are kept in sync via mark_processed().
+
+        Args:
+            set_name: Name of the processed set (e.g., "cred_expansion")
+            key: The key to check
+
+        Returns:
+            True if the key has been processed
+        """
+        # Get the corresponding in-memory set attribute
+        attr_name = f"processed_{set_name}" if not set_name.startswith("processed_") else set_name
+        if hasattr(self, attr_name):
+            return key in getattr(self, attr_name)
+        # Try direct set_name
+        if hasattr(self, set_name):
+            return key in getattr(self, set_name)
+        return False
+
+    async def load_processed_sets_from_backend(self) -> None:
+        """Load all processed sets from Redis backend into memory.
+
+        This should be called after recovery to sync the in-memory sets
+        with the persisted Redis state. Only needed for Redis-native mode.
+        """
+        if not self._backend:
+            return
+
+        for attr_name, redis_set_name in _PROCESSED_SET_MAP.items():
+            if hasattr(self, attr_name):
+                try:
+                    items = await self._backend.get_processed_set(redis_set_name)
+                    # Update in-memory set with items from Redis
+                    getattr(self, attr_name).update(items)
+                except Exception as e:
+                    from loguru import logger
+
+                    logger.warning(f"Failed to load processed set {attr_name}: {e}")
 
     async def cleanup_background_tasks(self) -> None:
         """Cancel and await all pending background publish tasks.
@@ -984,6 +982,219 @@ class SharedRedTeamState:
 
         self._background_tasks.clear()
         logger.debug("Background tasks cleanup complete")
+
+    # =========================================================================
+    # Persistence Tracking Helpers (with Redis persistence)
+    # =========================================================================
+
+    def add_golden_ticket(self, ticket: dict) -> bool:
+        """Add a golden ticket to state and persist to Redis.
+
+        Args:
+            ticket: Golden ticket dict with domain, ticket_path, status, etc.
+
+        Returns:
+            True if added (always succeeds unless Redis persistence fails silently)
+        """
+        # Check for duplicate by domain (allow updates for same domain, e.g., failed -> success)
+        for existing in self.golden_tickets:
+            if (
+                existing.get("domain", "").lower() == ticket.get("domain", "").lower()
+                and existing.get("status") == "success"
+                and ticket.get("status") == "success"
+            ):
+                logger.debug(f"Golden ticket already exists for {ticket.get('domain')}")
+                return False
+
+        self.golden_tickets.append(ticket)
+        logger.info(f"Golden ticket added for {ticket.get('domain')}: {ticket.get('status')}")
+
+        # Persist to Redis backend if available
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.add_golden_ticket(ticket))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                pass  # No event loop
+
+        return True
+
+    def add_adminsd_backdoor(self, backdoor_key: str) -> bool:
+        """Add an AdminSD holder backdoor to state and persist to Redis.
+
+        Args:
+            backdoor_key: Backdoor identifier string
+
+        Returns:
+            True if added, False if duplicate
+        """
+        if backdoor_key in self.adminsd_holder_backdoors:
+            logger.debug(f"AdminSD backdoor already exists: {backdoor_key}")
+            return False
+
+        self.adminsd_holder_backdoors.append(backdoor_key)
+        logger.info(f"AdminSD backdoor added: {backdoor_key}")
+
+        # Persist to Redis backend if available
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.add_adminsd_backdoor(backdoor_key))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                pass  # No event loop
+
+        return True
+
+    def add_acl_chain(self, chain: dict) -> bool:
+        """Add an ACL chain to state and persist to Redis.
+
+        Args:
+            chain: ACL chain dict with chain_id, steps, goal, domain, etc.
+
+        Returns:
+            True if added, False if duplicate chain_id
+        """
+        chain_id = chain.get("chain_id", "")
+        for existing in self.acl_chains:
+            if existing.get("chain_id") == chain_id:
+                logger.debug(f"ACL chain already exists: {chain_id}")
+                return False
+
+        self.acl_chains.append(chain)
+        logger.info(f"ACL chain added: {chain_id}")
+
+        # Persist to Redis backend if available
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.add_acl_chain(chain))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                pass  # No event loop
+
+        return True
+
+    def update_acl_chain(self, chain_id: str, chain: dict) -> bool:
+        """Update an existing ACL chain in state and Redis.
+
+        Args:
+            chain_id: Chain ID to update
+            chain: Updated chain dict
+
+        Returns:
+            True if updated, False if not found
+        """
+        for i, existing in enumerate(self.acl_chains):
+            if existing.get("chain_id") == chain_id:
+                self.acl_chains[i] = chain
+                logger.info(f"ACL chain updated: {chain_id}")
+
+                # Persist to Redis backend if available
+                if self._backend:
+                    import asyncio
+
+                    try:
+                        loop = asyncio.get_running_loop()
+                        task = loop.create_task(self._backend.update_acl_chain(chain_id, chain))
+                        self._background_tasks.add(task)
+                        task.add_done_callback(self._background_tasks.discard)
+                    except RuntimeError:
+                        pass  # No event loop
+
+                return True
+
+        logger.debug(f"ACL chain not found for update: {chain_id}")
+        return False
+
+    def add_gmsa_account(self, gmsa: dict) -> bool:
+        """Add a gMSA account to state and persist to Redis.
+
+        Args:
+            gmsa: gMSA account dict with account, domain, principals_allowed, etc.
+
+        Returns:
+            True if added, False if duplicate
+        """
+        account = gmsa.get("account", "").lower()
+        for existing in self.gmsa_accounts:
+            if existing.get("account", "").lower() == account:
+                logger.debug(f"gMSA account already exists: {account}")
+                return False
+
+        self.gmsa_accounts.append(gmsa)
+        logger.info(f"gMSA account added: {gmsa.get('account')}")
+
+        # Persist to Redis backend if available
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.add_gmsa_account(gmsa))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                pass  # No event loop
+
+        return True
+
+    async def load_persistence_tracking_from_backend(self) -> None:
+        """Load all persistence tracking data from Redis backend into memory.
+
+        This should be called after recovery to sync the in-memory lists
+        with the persisted Redis state. Only needed for Redis-native mode.
+        """
+        if not self._backend:
+            return
+
+        try:
+            # Load golden tickets
+            tickets = await self._backend.get_golden_tickets()
+            for ticket in tickets:
+                # Add without triggering another Redis write
+                if ticket not in self.golden_tickets:
+                    self.golden_tickets.append(ticket)
+
+            # Load AdminSD backdoors
+            backdoors = await self._backend.get_adminsd_backdoors()
+            for backdoor in backdoors:
+                if backdoor not in self.adminsd_holder_backdoors:
+                    self.adminsd_holder_backdoors.append(backdoor)
+
+            # Load ACL chains
+            chains = await self._backend.get_acl_chains()
+            existing_chain_ids = {c.get("chain_id") for c in self.acl_chains}
+            for chain in chains:
+                if chain.get("chain_id") not in existing_chain_ids:
+                    self.acl_chains.append(chain)
+
+            # Load gMSA accounts
+            gmsas = await self._backend.get_gmsa_accounts()
+            existing_accounts = {g.get("account", "").lower() for g in self.gmsa_accounts}
+            for gmsa in gmsas:
+                if gmsa.get("account", "").lower() not in existing_accounts:
+                    self.gmsa_accounts.append(gmsa)
+
+            logger.info(
+                f"Loaded persistence tracking from Redis: "
+                f"{len(self.golden_tickets)} golden tickets, "
+                f"{len(self.adminsd_holder_backdoors)} backdoors, "
+                f"{len(self.acl_chains)} ACL chains, "
+                f"{len(self.gmsa_accounts)} gMSA accounts"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load persistence tracking from backend: {e}")
 
     def store_artifact(self, key: str, content: bytes | str, source_agent: str = "") -> bool:
         """Store a downloaded artifact in shared state.
@@ -1016,6 +1227,20 @@ class SharedRedTeamState:
         encoded = base64.b64encode(content_bytes).decode("ascii")
         self.downloaded_artifacts[key] = encoded
         logger.info(f"Artifact stored: {key} ({len(content_bytes)} bytes) from {source_agent}")
+
+        # Persist to Redis backend if available
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.store_artifact(key, encoded))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                # No event loop, skip Redis persist
+                pass
+
         return True
 
     def get_artifact(self, key: str) -> bytes | None:
@@ -1396,12 +1621,102 @@ class SharedRedTeamState:
         self.pending_credential_findings.discard(pending_key)
         logger.info(f"Credential added: {domain}\\{username} (source: {source_agent})")
 
-        # Real-time checkpoint to Redis (don't call publish_credential - that would re-add)
-        if self._dispatcher:
-            self._dispatcher.signal_credential_access()
-            self._publish_async(self._dispatcher._checkpoint())
+        # Persist to Redis backend if available (replaces checkpoint serialization)
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.add_credential(credential))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                # No event loop, skip Redis persist
+                pass
 
         return True
+
+    def _handle_existing_user_domain(
+        self,
+        existing: User,
+        normalized: str,
+        normalized_domain: str,
+        target_domain: str,
+    ) -> bool | None:
+        """Handle domain comparison for existing user.
+
+        Returns:
+            True if user was updated, False if should be rejected, None if not a match.
+        """
+        existing_domain = (existing.domain or "").lower()
+        if existing.username != normalized:
+            return None
+
+        if existing_domain == normalized_domain:
+            logger.debug(f"User rejected: duplicate {normalized_domain}\\{normalized}")
+            return False
+
+        # Check if this is a child->parent or parent->child relationship
+        if normalized_domain.endswith("." + existing_domain):
+            old_domain = existing_domain
+            existing.domain = normalized_domain
+            logger.info(
+                f"User domain upgraded: {normalized} from {old_domain} to {normalized_domain}"
+            )
+            self._update_credentials_domain(normalized, old_domain, normalized_domain)
+            self.add_domain(normalized_domain)
+            return True
+
+        if existing_domain.endswith("." + normalized_domain):
+            logger.debug(
+                f"User rejected: {normalized} already in more specific domain {existing_domain}"
+            )
+            return False
+
+        # Sibling domain handling
+        return self._handle_sibling_domain_user(
+            existing, normalized, normalized_domain, existing_domain, target_domain
+        )
+
+    def _handle_sibling_domain_user(
+        self,
+        existing: User,
+        normalized: str,
+        normalized_domain: str,
+        existing_domain: str,
+        target_domain: str,
+    ) -> bool:
+        """Handle sibling domain case for user deduplication."""
+        if existing_domain == target_domain and normalized_domain != target_domain:
+            user_in_new_domain = any(
+                u.username == normalized and (u.domain or "").lower() == normalized_domain
+                for u in self.all_users
+            )
+            if user_in_new_domain:
+                logger.debug(f"User rejected: {normalized} already exists in {normalized_domain}")
+                return False
+            old_domain = existing_domain
+            existing.domain = normalized_domain
+            logger.warning(
+                f"User domain corrected: {normalized} from {old_domain} (target fallback) "
+                f"to {normalized_domain} (specific discovery)"
+            )
+            self._update_credentials_domain(normalized, old_domain, normalized_domain)
+            self.add_domain(normalized_domain)
+            return True
+
+        if normalized_domain == target_domain and existing_domain != target_domain:
+            logger.debug(
+                f"User rejected: {normalized} already in {existing_domain}, "
+                f"ignoring target fallback {normalized_domain}"
+            )
+            return False
+
+        logger.warning(
+            f"User domain conflict: {normalized} in both {existing_domain} and "
+            f"{normalized_domain} (keeping {existing_domain})"
+        )
+        return False
 
     def add_user(self, username: str, domain: str, source: str = "") -> bool:
         """Add user if not duplicate. Returns True if added.
@@ -1419,9 +1734,7 @@ class SharedRedTeamState:
             logger.debug(f"User rejected: empty username for domain {domain}")
             return False
         normalized = username.strip()
-        # Normalize domain to lowercase for consistency
         normalized_domain = (domain or "").strip().lower()
-        # Resolve NetBIOS domain names to FQDN
         if normalized_domain and "." not in normalized_domain:
             normalized_domain = self._resolve_netbios_to_fqdn(normalized_domain)
         if not normalized or normalized.lower() in {"(none)", "none", "null", "(null)"}:
@@ -1435,65 +1748,34 @@ class SharedRedTeamState:
             )
             return False
 
-        # Check for existing user entries
         target_domain = (self.target.domain or "").lower() if self.target else ""
         for existing in self.all_users:
-            existing_domain = (existing.domain or "").lower()
-            if existing.username == normalized:
-                if existing_domain == normalized_domain:
-                    # Exact duplicate
-                    logger.debug(f"User rejected: duplicate {normalized_domain}\\{normalized}")
-                    return False
-                # Check if this is a child->parent or parent->child relationship
-                if normalized_domain.endswith("." + existing_domain):
-                    # New domain is a child of existing - update to more specific
-                    old_domain = existing_domain
-                    existing.domain = normalized_domain
-                    logger.info(
-                        f"User domain upgraded: {normalized} from {old_domain} to {normalized_domain}"
-                    )
-                    # Also update credentials with the old parent domain
-                    self._update_credentials_domain(normalized, old_domain, normalized_domain)
-                    self.add_domain(normalized_domain)
-                    return True
-                if existing_domain.endswith("." + normalized_domain):
-                    # Existing domain is more specific (child) - keep it
-                    logger.debug(
-                        f"User rejected: {normalized} already in more specific domain {existing_domain}"
-                    )
-                    return False
-                # Sibling domain case: domains are unrelated (e.g., contoso.local vs fabrikam.local)
-                # If existing domain is the target domain (fallback) but new domain is more specific,
-                # update to the new domain (it's likely from actual tool output, not fallback)
-                if existing_domain == target_domain and normalized_domain != target_domain:
-                    old_domain = existing_domain
-                    existing.domain = normalized_domain
-                    logger.warning(
-                        f"User domain corrected: {normalized} from {old_domain} (target fallback) "
-                        f"to {normalized_domain} (specific discovery)"
-                    )
-                    self._update_credentials_domain(normalized, old_domain, normalized_domain)
-                    self.add_domain(normalized_domain)
-                    return True
-                # If new domain is target fallback but existing has specific domain, reject
-                if normalized_domain == target_domain and existing_domain != target_domain:
-                    logger.debug(
-                        f"User rejected: {normalized} already in {existing_domain}, "
-                        f"ignoring target fallback {normalized_domain}"
-                    )
-                    return False
-                # Both domains are non-target siblings - trust the first discovery
-                logger.warning(
-                    f"User domain conflict: {normalized} in both {existing_domain} and "
-                    f"{normalized_domain} (keeping {existing_domain})"
-                )
-                return False
+            result = self._handle_existing_user_domain(
+                existing, normalized, normalized_domain, target_domain
+            )
+            if result is not None:
+                return result
 
-        self.all_users.append(User(username=normalized, domain=normalized_domain, source=source))
+        user = User(username=normalized, domain=normalized_domain, source=source)
+        self.all_users.append(user)
         self.add_domain(normalized_domain)
         logger.debug(
             f"User added: {normalized_domain}\\{normalized} (source: {source or 'unknown'})"
         )
+
+        # Persist to Redis backend if available
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.add_user(user))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                # No event loop, skip Redis persist
+                pass
+
         return True
 
     def _update_credentials_domain(self, username: str, old_domain: str, new_domain: str) -> None:
@@ -1533,6 +1815,19 @@ class SharedRedTeamState:
             return False
         self.all_domains.append(normalized)
 
+        # Persist to Redis backend if available
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.add_domain(normalized))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                # No event loop, skip Redis persist
+                pass
+
         # If this is an FQDN (has a dot), retroactively normalize any
         # credentials/users/hashes with matching NetBIOS domain
         if "." in normalized:
@@ -1571,6 +1866,21 @@ class SharedRedTeamState:
 
         self.netbios_to_fqdn[netbios_lower] = fqdn_lower
         logger.info(f"NetBIOS mapping added: {netbios_lower} -> {fqdn_lower}")
+
+        # Persist to Redis backend if available
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(
+                    self._backend.set_netbios_mapping(netbios_lower, fqdn_lower)
+                )
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                # No event loop, skip Redis persist
+                pass
 
         # Also add the FQDN to all_domains if not already present
         self.add_domain(fqdn_lower)
@@ -1866,10 +2176,25 @@ class SharedRedTeamState:
                 f"- **Impact:** Complete domain compromise. Golden Tickets grant indefinite DA access."
             )
 
-        # Real-time checkpoint to Redis (don't call publish_hash - that would re-add)
-        if self._dispatcher:
-            self._dispatcher.signal_credential_access()
-            self._publish_async(self._dispatcher._checkpoint())
+        # Persist to Redis backend if available (replaces checkpoint serialization)
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.add_hash(hash_obj))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+                # Also persist DA status if achieved
+                if hash_type == "ntlm" and username == "krbtgt":
+                    task2 = loop.create_task(
+                        self._backend.set_domain_admin(achieved=True, path=self.domain_admin_path)
+                    )
+                    self._background_tasks.add(task2)
+                    task2.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                # No event loop, skip Redis persist
+                pass
 
         return True
 
@@ -2053,9 +2378,26 @@ class SharedRedTeamState:
                     self.domain_controllers[domain] = host.ip
                     logger.info(f"DC registered: {domain} -> {host.ip} ({host.hostname})")
 
-        # Real-time checkpoint to Redis (don't call publish_host - that would re-add)
-        if self._dispatcher:
-            self._publish_async(self._dispatcher._checkpoint())
+        # Persist to Redis backend if available (replaces checkpoint serialization)
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.add_host(host))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+                # Also persist DC mapping if this is a DC
+                if host.is_dc and host.hostname and "." in host.hostname:
+                    parts = host.hostname.lower().split(".")
+                    if len(parts) > 1:
+                        dc_domain = ".".join(parts[1:])
+                        task2 = loop.create_task(self._backend.set_dc(dc_domain, host.ip))
+                        self._background_tasks.add(task2)
+                        task2.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                # No event loop, skip Redis persist
+                pass
 
         return True
 
@@ -2087,9 +2429,18 @@ class SharedRedTeamState:
         self.all_shares.append(share)
         logger.debug(f"Share added: {host}/{name}")
 
-        # Real-time checkpoint to Redis
-        if self._dispatcher:
-            self._publish_async(self._dispatcher._checkpoint())
+        # Persist to Redis backend if available (replaces checkpoint serialization)
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.add_share(share))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                # No event loop, skip Redis persist
+                pass
 
         return True
 
@@ -2100,9 +2451,18 @@ class SharedRedTeamState:
         self.all_weaknesses.append(block)
         logger.info(f"Weakness added: {block[:80]}...")
 
-        # Real-time checkpoint to Redis
-        if self._dispatcher:
-            self._publish_async(self._dispatcher._checkpoint())
+        # Persist to Redis backend if available (replaces checkpoint serialization)
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.add_weakness(block))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                # No event loop, skip Redis persist
+                pass
 
         return True
 
@@ -2119,11 +2479,38 @@ class SharedRedTeamState:
             if existing.vuln_type == vuln.vuln_type and existing.target == vuln.target:
                 return False
         self.discovered_vulnerabilities[vuln.vuln_id] = vuln
+
+        # Persist to Redis backend if available
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.add_vulnerability(vuln))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                # No event loop, skip Redis persist
+                pass
+
         return True
 
     def mark_exploited(self, vuln_id: str) -> None:
         """Mark a vulnerability as exploited."""
         self.exploited_vulnerabilities.add(vuln_id)
+
+        # Persist to Redis backend if available
+        if self._backend:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.mark_exploited(vuln_id))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                # No event loop, skip Redis persist
+                pass
 
     def get_unexploited_vulnerabilities(self) -> list[VulnerabilityInfo]:
         """Get vulnerabilities that haven't been exploited yet."""
@@ -2221,227 +2608,6 @@ class SharedRedTeamState:
             "processed_crack_requests": len(self.processed_crack_requests),
             "registered_agents": list(self.registered_agents.keys()),
         }
-
-    def to_bytes(self) -> bytes:
-        """Serialize state for Redis storage (JSON format)."""
-        for host in self.all_hosts:
-            hostname = (host.hostname or "").strip()
-            if not hostname:
-                continue
-            lowered = hostname.lower()
-            if lowered.startswith("ip-") and "compute.internal" in lowered:
-                host.hostname = ""
-
-        data = _to_json(self)
-        # Version 2: parsing bugs fixed, no cleanup needed on load
-        data["_v"] = 2
-        return json.dumps(data, separators=(",", ":")).encode("utf-8")
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> SharedRedTeamState:
-        """Deserialize state from Redis (JSON)."""
-        raw = json.loads(data)
-        version = raw.pop("_v", 1)  # Default to v1 for old checkpoints
-        state = _from_json(raw, cls)
-
-        state.all_credentials = cls._dedupe_credentials(state.all_credentials)
-        if not state.all_domains:
-            state.all_domains = cls._extract_domains(state)
-
-        # Version-gated cleanup: only run domain cleanup on old checkpoints (v1)
-        if version < 2:
-            logger.info(f"Migrating v{version} checkpoint - running domain data cleanup")
-            state._cleanup_domain_data()
-
-        # Always sanitize share permissions - agents can still return bad data
-        # even with v2, since LLM parsing is non-deterministic
-        state._sanitize_share_permissions()
-
-        return state
-
-    def _cleanup_domain_data(self) -> None:  # noqa: PLR0912
-        """Clean up domain data to fix historical issues.
-
-        This method fixes:
-        1. NetBIOS domains that should be FQDNs (e.g., "child" -> remove if "child.contoso.local" exists)
-        2. Users with parent domain when they only exist in child domain
-        3. Credentials with parent domain when user only exists in child domain
-        """
-        # 1. Remove NetBIOS entries when FQDN exists
-        fqdns = [d for d in self.all_domains if "." in d]
-        netbios_to_remove: set[str] = set()
-
-        for netbios in [d for d in self.all_domains if "." not in d]:
-            # Check if any FQDN starts with this NetBIOS name
-            for fqdn in fqdns:
-                if fqdn.startswith(netbios + "."):
-                    netbios_to_remove.add(netbios)
-                    break
-
-        if netbios_to_remove:
-            self.all_domains = [d for d in self.all_domains if d not in netbios_to_remove]
-            logger.info(
-                f"Cleaned up {len(netbios_to_remove)} NetBIOS domain(s): {netbios_to_remove}"
-            )
-
-        # 2. Build mapping of username -> domains (to find users in multiple domains)
-        user_domains: dict[str, set[str]] = {}
-        for user in self.all_users:
-            username_lower = user.username.lower()
-            domain_lower = (user.domain or "").lower()
-            if username_lower not in user_domains:
-                user_domains[username_lower] = set()
-            user_domains[username_lower].add(domain_lower)
-
-        # 3. For users in both parent and child domains, keep only the child domain
-        users_to_update: dict[str, str] = {}  # username -> correct child domain
-        for username, domains in user_domains.items():
-            if len(domains) <= 1:
-                continue
-            # Find parent-child relationships
-            for d1 in domains:
-                for d2 in domains:
-                    if d1 != d2 and d1.endswith("." + d2):
-                        # d1 is child of d2 - user should be in d1
-                        users_to_update[username] = d1
-
-        # 4. Update users and credentials
-        if users_to_update:
-            # Remove duplicate user entries with parent domain
-            updated_users: list[User] = []
-            seen_users: set[tuple[str, str]] = set()
-            for user in self.all_users:
-                username_lower = user.username.lower()
-                domain_lower = (user.domain or "").lower()
-                correct_domain = users_to_update.get(username_lower)
-
-                if correct_domain:
-                    # This user should be in the child domain
-                    if domain_lower != correct_domain:
-                        # Skip this entry (it's the parent domain duplicate)
-                        continue
-                    domain_lower = correct_domain
-                    user.domain = correct_domain
-
-                key = (username_lower, domain_lower)
-                if key not in seen_users:
-                    seen_users.add(key)
-                    updated_users.append(user)
-
-            if len(updated_users) < len(self.all_users):
-                logger.info(
-                    f"Cleaned up {len(self.all_users) - len(updated_users)} duplicate user(s) "
-                    f"with parent domain"
-                )
-                self.all_users = updated_users
-
-            # Update credentials with parent domain
-            creds_updated = 0
-            for cred in self.all_credentials:
-                username_lower = cred.username.lower()
-                correct_domain = users_to_update.get(username_lower)
-                if correct_domain and cred.domain.lower() != correct_domain:
-                    cred.domain = correct_domain
-                    creds_updated += 1
-
-            if creds_updated:
-                logger.info(f"Fixed {creds_updated} credential(s) with parent domain")
-                self.all_credentials = self._dedupe_credentials(self.all_credentials)
-
-            # Update hashes with parent domain
-            hashes_updated = 0
-            for hash_obj in self.all_hashes:
-                username_lower = hash_obj.username.lower()
-                correct_domain = users_to_update.get(username_lower)
-                if correct_domain and hash_obj.domain.lower() != correct_domain:
-                    hash_obj.domain = correct_domain
-                    hashes_updated += 1
-
-            if hashes_updated:
-                logger.info(f"Fixed {hashes_updated} hash(es) with parent domain")
-
-        # 5. Deduplicate Kerberoast/AS-REP hashes by user+SPN+etype
-        self.all_hashes = self._dedupe_hashes(self.all_hashes)
-
-    def _sanitize_share_permissions(self) -> None:
-        """Sanitize share permissions to fix historical parsing bugs.
-
-        Netexec output has columns: Share, Permissions, Remark
-        When shares have no permissions, the Remark column was incorrectly
-        parsed as permissions (e.g., "Remote" from "Remote Admin").
-
-        This fixes existing bad data by clearing invalid permissions.
-        """
-        valid_perms = {"read", "write", "read,write", "write,read", "full"}
-        fixed_count = 0
-
-        for share in self.all_shares:
-            if not share.permissions:
-                continue
-            perm_lower = share.permissions.strip().lower()
-            if perm_lower not in valid_perms:
-                # Invalid permission - was probably parsed from comment
-                # Move it to comment if comment is empty
-                if not share.comment:
-                    share.comment = share.permissions
-                share.permissions = ""
-                fixed_count += 1
-
-        if fixed_count:
-            logger.info(f"Fixed {fixed_count} share(s) with invalid permissions")
-
-    def _dedupe_hashes(self, hashes: list[Hash]) -> list[Hash]:
-        """Deduplicate hashes.
-
-        - NTLM hashes: dedupe by hash_value
-        - AS-REP hashes: dedupe by username+domain (same password)
-        - Kerberoast hashes: dedupe by username+domain+SPN+etype
-        """
-        deduped: list[Hash] = []
-        seen_values: set[str] = set()  # For NTLM
-        seen_asrep: set[str] = set()  # For AS-REP: domain:username
-        seen_kerberoast: set[str] = set()  # For Kerberoast: domain:username:spn_key
-
-        for hash_obj in hashes:
-            hash_value = hash_obj.hash_value or ""
-            hash_type = (hash_obj.hash_type or "").lower()
-            username = (hash_obj.username or "").lower()
-            domain = (hash_obj.domain or "").lower()
-
-            is_asrep = hash_type in {"as-rep", "asrep", "krb5asrep"} or hash_value.startswith(
-                "$krb5asrep$"
-            )
-            is_kerberoast = hash_type in {
-                "kerberoast",
-                "krb5tgs",
-                "tgs-rep",
-                "tgs",
-            } or hash_value.startswith("$krb5tgs$")
-
-            if is_asrep:
-                key = f"{domain}:{username}"
-                if key in seen_asrep:
-                    continue
-                seen_asrep.add(key)
-            elif is_kerberoast:
-                spn_key = self._extract_kerberoast_spn_key(hash_value)
-                key = f"{domain}:{username}:{spn_key}"
-                if key in seen_kerberoast:
-                    continue
-                seen_kerberoast.add(key)
-            else:
-                # NTLM and other hashes - dedupe by exact value
-                if hash_value in seen_values:
-                    continue
-                seen_values.add(hash_value)
-
-            deduped.append(hash_obj)
-
-        removed = len(hashes) - len(deduped)
-        if removed > 0:
-            logger.info(f"Deduplicated {removed} hash(es)")
-
-        return deduped
 
     @staticmethod
     def _dedupe_credentials(credentials: list[Credential]) -> list[Credential]:

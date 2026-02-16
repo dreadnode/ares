@@ -347,6 +347,7 @@ class PublishingMixin:
             return
 
         # Track which creds we've already dispatched enum for this host
+        # Use Redis-backed tracking if available, fallback to in-memory
         enum_key = f"mssql_enum:{host.ip}"
         if not hasattr(self, "_mssql_enum_dispatched"):
             self._mssql_enum_dispatched: set[str] = set()
@@ -355,10 +356,26 @@ class PublishingMixin:
         dispatched = 0
         for cred in sql_creds[:2]:
             cred_key = f"{enum_key}:{cred.get('domain', '')}\\{cred.get('username', '')}"
+
+            # Check Redis first if backend available, else check in-memory
+            backend = getattr(self.shared_state, "_backend", None)
+            if backend:
+                try:
+                    if await backend.is_mssql_enum_dispatched(cred_key):
+                        continue
+                except Exception:
+                    pass  # Fall through to in-memory check
+
             if cred_key in self._mssql_enum_dispatched:
                 continue
 
+            # Mark as dispatched in both in-memory and Redis
             self._mssql_enum_dispatched.add(cred_key)
+            if backend:
+                try:
+                    await backend.add_mssql_enum_dispatched(cred_key)
+                except Exception as e:
+                    logger.debug(f"Failed to persist MSSQL enum dispatch to Redis: {e}")
 
             payload = {
                 "target": host.ip,
@@ -386,7 +403,6 @@ class PublishingMixin:
                     params=payload,
                 )
                 self.shared_state.pending_tasks[task_id] = task_info
-                self._redis_task_ids.add(task_id)
                 dispatched += 1
                 logger.info(
                     f"🔍 Dispatched proactive MSSQL enum for {host.ip} "
@@ -664,7 +680,6 @@ class PublishingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             logger.info(f"ADCS enumeration task {task_id} submitted to Redis queue for {target_ip}")
             return task_id
@@ -767,6 +782,25 @@ class PublishingMixin:
                     )
                 except Exception as e:
                     logger.error(f"Failed to auto-exploit constrained delegation: {e}")
+
+    async def _load_mssql_enum_dispatched(self: RedTeamDispatcher) -> None:
+        """Load MSSQL enum dispatch tracking from Redis backend.
+
+        Called during dispatcher initialization to restore state after restart.
+        """
+        backend = getattr(self.shared_state, "_backend", None)
+        if not backend:
+            return
+
+        try:
+            dispatched = await backend.get_mssql_enum_dispatched()
+            if not hasattr(self, "_mssql_enum_dispatched"):
+                self._mssql_enum_dispatched = set()
+            self._mssql_enum_dispatched.update(dispatched)
+            if dispatched:
+                logger.info(f"Loaded {len(dispatched)} MSSQL enum dispatch entries from Redis")
+        except Exception as e:
+            logger.warning(f"Failed to load MSSQL enum dispatch tracking: {e}")
 
 
 __all__ = ["PublishingMixin"]

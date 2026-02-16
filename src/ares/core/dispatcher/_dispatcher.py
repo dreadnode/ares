@@ -25,7 +25,10 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from ares.core.config import get_agent_heartbeat_timeout, get_vulnerability_priorities
+from ares.core.config import (
+    get_agent_heartbeat_timeout,
+    get_vulnerability_priorities,
+)
 
 # Import all mixins
 from ares.core.dispatcher.agents import AgentMixin
@@ -124,8 +127,6 @@ class RedTeamDispatcher(
         # Task completion futures for wait_for_task
         self._task_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
-        # Track task IDs submitted via Redis for result consumption
-        self._redis_task_ids: set[str] = set()
         # Threaded result consumer (initialized in MonitoringMixin methods)
         self._result_consumer_thread: threading.Thread | None = None
         self._result_consumer_stop_event: threading.Event | None = None
@@ -158,18 +159,48 @@ class RedTeamDispatcher(
 
         Args:
             operation_id: Unique identifier for this operation.
+
+        Raises:
+            RuntimeError: If Redis URL is not configured or connection fails.
         """
+        if not self._redis_url:
+            raise RuntimeError("Redis URL required. Set ARES_REDIS_URL environment variable.")
+
         self._shared_state = SharedRedTeamState(operation_id=operation_id)
         self._running = True
 
-        # Connect to Redis if URL provided
-        if self._redis_url:
-            try:
-                self._redis_client = await create_redis_client(self._redis_url)
-                await self._redis_client.ping()
-                logger.info(f"Connected to Redis at {self._redis_url}")
-            except Exception as e:
-                logger.warning(f"Failed to connect to Redis: {e}, using in-memory state")
+        # Connect to Redis (mandatory)
+        try:
+            self._redis_client = await create_redis_client(self._redis_url)
+            await self._redis_client.ping()
+            logger.info(f"Connected to Redis at {self._redis_url}")
+        except Exception as e:
+            raise RuntimeError(f"Redis connection failed: {e}") from e
+
+        # Initialize Redis-native state backend (always enabled)
+        from ares.core.state_backend import RedisStateBackend
+
+        backend = RedisStateBackend(self._redis_client, operation_id)
+        self._shared_state.set_backend(backend)
+        logger.info("Redis-native state backend initialized")
+
+        # Load processed sets from Redis into memory for sync access
+        await self._shared_state.load_processed_sets_from_backend()
+
+        # Load persistence tracking (golden tickets, backdoors, ACL chains, gMSA accounts)
+        await self._shared_state.load_persistence_tracking_from_backend()
+
+        # Load MSSQL enum dispatch tracking from Redis
+        await self._load_mssql_enum_dispatched()
+
+        # Enable evidence validation Redis persistence
+        from ares.core.evidence_validation import load_from_redis, set_redis_client
+
+        set_redis_client(self._redis_client, operation_id)
+        await load_from_redis()
+
+        # Load in-progress vulnerability IDs for crash recovery
+        await self._load_in_progress_vulns()
 
         # Connect task queue for cross-pod communication
         if self._task_queue:

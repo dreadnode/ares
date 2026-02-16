@@ -391,7 +391,6 @@ class DeferredQueueMixin:
                     last_activity_at=now,
                 )
                 self._shared_state.pending_tasks[task_id] = task_info
-                self._redis_task_ids.add(task_id)
 
             self._deferred_queue_stats["processed"] += 1
             age = time.time() - task.enqueue_time

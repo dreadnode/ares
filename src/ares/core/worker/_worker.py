@@ -873,11 +873,22 @@ class RedisWorkerAgent:
                 self._state_refresh_client = await create_redis_client(
                     self.redis_url, decode_responses=False
                 )
-            key = f"ares:operation:{self.operation_id}:state"
-            data = await self._state_refresh_client.get(key)
-            if not data:
-                return
-            fresh = SharedRedTeamState.from_bytes(data)
+
+            from ares.core.state_backend import RedisStateBackend
+
+            backend = RedisStateBackend(self._state_refresh_client, self.operation_id)
+            fresh = SharedRedTeamState(operation_id=self.operation_id)
+
+            # Load collections from Redis backend
+            fresh.all_credentials.extend(await backend.get_credentials())
+            fresh.all_hashes.extend(await backend.get_hashes())
+            fresh.all_hosts.extend(await backend.get_hosts())
+            fresh.all_users.extend(await backend.get_users())
+            fresh.all_shares.extend(await backend.get_shares())
+            fresh.all_domains.extend(await backend.get_domains())
+            fresh.has_domain_admin, fresh.domain_admin_path = await backend.get_domain_admin()
+            fresh.has_golden_ticket = await backend.get_golden_ticket()
+
             self._merge_shared_state(fresh)
         except Exception as e:
             logger.debug(f"[{self.agent_name}] Failed to refresh shared state: {e}")
@@ -1691,11 +1702,21 @@ class RedisWorkerAgent:
         if not self.operation_id:
             return
         try:
-            key = f"ares:operation:{self.operation_id}:state"
-            data = await redis_client.get(key)
-            if not data:
-                return
-            fresh = SharedRedTeamState.from_bytes(data)
+            from ares.core.state_backend import RedisStateBackend
+
+            backend = RedisStateBackend(redis_client, self.operation_id)
+            fresh = SharedRedTeamState(operation_id=self.operation_id)
+
+            # Load collections from Redis backend
+            fresh.all_credentials.extend(await backend.get_credentials())
+            fresh.all_hashes.extend(await backend.get_hashes())
+            fresh.all_hosts.extend(await backend.get_hosts())
+            fresh.all_users.extend(await backend.get_users())
+            fresh.all_shares.extend(await backend.get_shares())
+            fresh.all_domains.extend(await backend.get_domains())
+            fresh.has_domain_admin, fresh.domain_admin_path = await backend.get_domain_admin()
+            fresh.has_golden_ticket = await backend.get_golden_ticket()
+
             self._merge_shared_state(fresh)
         except Exception as e:
             logger.debug(f"[{self.agent_name}] Failed to fetch/merge state: {e}")

@@ -257,9 +257,8 @@ class MonitoringMixin:
         - Tasks get lost in Redis
         - Network partitions cause result delivery failures
 
-        Tasks older than stale_task_timeout (from config) are removed from:
-        - pending_tasks (decreases LLM task count)
-        - _redis_task_ids (stops result polling)
+        Tasks older than stale_task_timeout (from config) are removed from
+        pending_tasks (decreases LLM task count and stops result polling).
 
         Also detects deadlock conditions (at hard cap with no progress) and
         applies aggressive cleanup to break the deadlock.
@@ -332,8 +331,7 @@ class MonitoringMixin:
                 stale_task: TaskInfo | None = self._shared_state.pending_tasks.get(task_id)
                 if stale_task is not None:
                     del self._shared_state.pending_tasks[task_id]
-                self._redis_task_ids.discard(task_id)
-                MonitoringMixin._warned_tasks.discard(task_id)  # Clean up warning tracking
+                    MonitoringMixin._warned_tasks.discard(task_id)  # Clean up warning tracking
 
                 if stale_task is not None:
                     activity_time = (
@@ -396,7 +394,6 @@ class MonitoringMixin:
         if stale_task_ids:
             for task_id in stale_task_ids:
                 stale_task: TaskInfo | None = self._shared_state.pending_tasks.pop(task_id, None)
-                self._redis_task_ids.discard(task_id)
                 MonitoringMixin._warned_tasks.discard(task_id)
 
                 if stale_task is not None:
@@ -512,13 +509,16 @@ class MonitoringMixin:
             logger.warning("Result consumer has no task queue; skipping result checks")
             return
 
+        if not self._shared_state:
+            return
+
         # Periodically clean up stale tasks to prevent throttle deadlock
         await self._cleanup_stale_tasks()
 
         # Reconcile tasks with workers every cycle to detect orphans
         await self._reconcile_tasks_with_workers()
 
-        task_ids_to_check = list(self._redis_task_ids)
+        task_ids_to_check = list(self._shared_state.pending_tasks.keys())
 
         for task_id in task_ids_to_check:
             try:
@@ -552,9 +552,6 @@ class MonitoringMixin:
                                 f"Task {task_id} failed with rate limit error - triggering backoff"
                             )
                             self.record_rate_limit_error()
-
-                    # Remove from tracking set
-                    self._redis_task_ids.discard(task_id)
 
                     # Call complete_task to update dispatcher state
                     await self.complete_task(
@@ -1077,10 +1074,13 @@ class MonitoringMixin:
         if not task_queue:
             return
 
+        if not self._shared_state:
+            return
+
         # Check results for all pending Redis tasks using batch pipeline
         # This is O(1) round-trips instead of O(N), critical for preventing
         # 787s blocking when checking 25+ tasks with 30s socket timeout
-        task_ids_to_check = list(self._redis_task_ids)
+        task_ids_to_check = list(self._shared_state.pending_tasks.keys())
 
         if not task_ids_to_check:
             # No tasks to check - still poll discoveries
@@ -1126,9 +1126,6 @@ class MonitoringMixin:
                             f"Task {task_id} failed with rate limit error - triggering backoff"
                         )
                         self.record_rate_limit_error()
-
-                # Remove from tracking set
-                self._redis_task_ids.discard(task_id)
 
                 # Complete the task (updates shared state)
                 # Skip checkpoint because we're in a different event loop (threaded consumer)

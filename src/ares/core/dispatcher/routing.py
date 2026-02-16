@@ -521,7 +521,6 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             logger.info(f"Crack task {task_id} submitted to Redis queue")
             return task_id
@@ -658,7 +657,6 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             logger.info(f"Lateral movement task {task_id} submitted to Redis queue")
             return task_id
@@ -763,7 +761,6 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             logger.info(f"ACL analysis task {task_id} submitted to Redis queue")
             return task_id
@@ -860,7 +857,6 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             cred_label = username or "unauthenticated"
             if hash_value and not password:
@@ -970,7 +966,6 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             cred_label = username or "no-cred"
             if hash_value and not password:
@@ -1076,7 +1071,6 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             logger.info(f"Exploit task {task_id} for {vuln_type} submitted to Redis queue")
 
@@ -1192,7 +1186,6 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             logger.info(
                 f"Privesc enumeration task {task_id} submitted to Redis queue "
@@ -1266,7 +1259,6 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             logger.info(f"Coercion task {task_id} submitted to Redis queue")
             return task_id

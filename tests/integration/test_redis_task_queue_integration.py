@@ -394,7 +394,6 @@ class TestDispatcherRedisIntegration:
 
         await dispatcher_with_redis._consume_pending_results()
 
-        assert task_id not in dispatcher_with_redis._redis_task_ids
         assert task_id not in dispatcher_with_redis.shared_state.pending_tasks
         assert task_id in dispatcher_with_redis.shared_state.completed_tasks
         assert dispatcher_with_redis.shared_state.completed_tasks[task_id].success is True

@@ -1117,156 +1117,6 @@ class TestCredentialDomainCrossReference:
         assert domains == {"contoso.local", "fabrikam.local"}
 
 
-class TestDomainCleanup:
-    """Tests for domain cleanup and normalization."""
-
-    def test_cleanup_removes_netbios_when_fqdn_exists(self):
-        """NetBIOS domains should be removed when corresponding FQDN exists."""
-        import json
-
-        state_dict = {
-            "operation_id": "op-test-cleanup-netbios",
-            "all_domains": ["child", "contoso.local", "child.contoso.local"],
-            "all_users": [],
-            "all_credentials": [],
-            "all_hashes": [],
-            "all_hosts": [],
-            "all_shares": [],
-            "all_weaknesses": [],
-        }
-        data = json.dumps(state_dict).encode("utf-8")
-        state = SharedRedTeamState.from_bytes(data)
-
-        # "child" should be removed since "child.contoso.local" exists
-        assert "child" not in state.all_domains
-        assert "contoso.local" in state.all_domains
-        assert "child.contoso.local" in state.all_domains
-        assert len(state.all_domains) == 2
-
-    def test_cleanup_dedupes_users_with_parent_child_domains(self):
-        """Users with both parent and child domain entries should be deduplicated."""
-        import json
-
-        state_dict = {
-            "operation_id": "op-test-cleanup-users",
-            "all_domains": ["contoso.local", "child.contoso.local"],
-            "all_users": [
-                {"username": "sql_svc", "domain": "contoso.local"},
-                {"username": "sql_svc", "domain": "child.contoso.local"},
-                {"username": "domain_admin", "domain": "contoso.local"},
-            ],
-            "all_credentials": [],
-            "all_hashes": [],
-            "all_hosts": [],
-            "all_shares": [],
-            "all_weaknesses": [],
-        }
-        data = json.dumps(state_dict).encode("utf-8")
-        state = SharedRedTeamState.from_bytes(data)
-
-        # sql_svc should only exist in child domain
-        assert len(state.all_users) == 2
-        user_domains = {(u.username, u.domain) for u in state.all_users}
-        assert ("sql_svc", "child.contoso.local") in user_domains
-        assert ("sql_svc", "contoso.local") not in user_domains
-        # domain_admin stays in parent domain (only exists there)
-        assert ("domain_admin", "contoso.local") in user_domains
-
-    def test_cleanup_fixes_credentials_with_parent_domain(self):
-        """Credentials with parent domain should be fixed when user only in child."""
-        import json
-
-        state_dict = {
-            "operation_id": "op-test-cleanup-creds",
-            "all_domains": ["contoso.local", "child.contoso.local"],
-            "all_users": [
-                {"username": "sql_svc", "domain": "contoso.local"},
-                {"username": "sql_svc", "domain": "child.contoso.local"},
-            ],
-            "all_credentials": [
-                {
-                    "username": "sql_svc",
-                    "password": "SqlP@ss123!",  # pragma: allowlist secret
-                    "domain": "contoso.local",
-                    "source": "test",
-                },
-            ],
-            "all_hashes": [],
-            "all_hosts": [],
-            "all_shares": [],
-            "all_weaknesses": [],
-        }
-        data = json.dumps(state_dict).encode("utf-8")
-        state = SharedRedTeamState.from_bytes(data)
-
-        # Credential should be fixed to child domain
-        assert len(state.all_credentials) == 1
-        assert state.all_credentials[0].domain == "child.contoso.local"
-
-    def test_cleanup_fixes_hashes_with_parent_domain(self):
-        """Hashes with parent domain should be fixed when user only in child."""
-        import json
-
-        state_dict = {
-            "operation_id": "op-test-cleanup-hashes",
-            "all_domains": ["contoso.local", "child.contoso.local"],
-            "all_users": [
-                {"username": "sql_svc", "domain": "contoso.local"},
-                {"username": "sql_svc", "domain": "child.contoso.local"},
-            ],
-            "all_credentials": [],
-            "all_hashes": [
-                {
-                    "username": "sql_svc",
-                    "hash_value": "aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
-                    "hash_type": "NTLM",
-                    "domain": "contoso.local",
-                },
-            ],
-            "all_hosts": [],
-            "all_shares": [],
-            "all_weaknesses": [],
-        }
-        data = json.dumps(state_dict).encode("utf-8")
-        state = SharedRedTeamState.from_bytes(data)
-
-        # Hash should be fixed to child domain
-        assert len(state.all_hashes) == 1
-        assert state.all_hashes[0].domain == "child.contoso.local"
-
-    def test_cleanup_preserves_legitimate_parent_domain_users(self):
-        """Users that only exist in parent domain should not be modified."""
-        import json
-
-        state_dict = {
-            "operation_id": "op-test-cleanup-preserve",
-            "all_domains": ["contoso.local", "child.contoso.local"],
-            "all_users": [
-                {"username": "domain_admin", "domain": "contoso.local"},
-            ],
-            "all_credentials": [
-                {
-                    "username": "domain_admin",
-                    "password": "AdminP@ss1!",  # pragma: allowlist secret
-                    "domain": "contoso.local",
-                    "source": "test",
-                },
-            ],
-            "all_hashes": [],
-            "all_hosts": [],
-            "all_shares": [],
-            "all_weaknesses": [],
-        }
-        data = json.dumps(state_dict).encode("utf-8")
-        state = SharedRedTeamState.from_bytes(data)
-
-        # domain_admin stays in parent domain
-        assert len(state.all_users) == 1
-        assert state.all_users[0].domain == "contoso.local"
-        assert len(state.all_credentials) == 1
-        assert state.all_credentials[0].domain == "contoso.local"
-
-
 class TestAddUserDomainUpgrade:
     """Tests for add_user parent-to-child domain upgrade."""
 
@@ -1415,177 +1265,6 @@ class TestRetroactiveDomainNormalize:
         assert state.all_credentials[0].domain == "child.contoso.local"
 
 
-class TestHashDeduplication:
-    """Tests for hash deduplication."""
-
-    def test_kerberoast_deduped_by_spn_and_etype(self):
-        """Kerberoast hashes with same user+SPN+etype should be deduplicated."""
-        import json
-
-        # Two Kerberoast hashes for same user, same SPN, same etype (23=RC4)
-        # but different hash values (different request timestamps)
-        state_dict = {
-            "operation_id": "op-test-kerberoast-dedupe",
-            "all_domains": ["contoso.local"],
-            "all_users": [],
-            "all_credentials": [],
-            "all_hashes": [
-                {
-                    "username": "sql_svc",
-                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$aaa$111",
-                    "hash_type": "Kerberoast",
-                    "domain": "contoso.local",
-                },
-                {
-                    "username": "sql_svc",
-                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$bbb$222",
-                    "hash_type": "Kerberoast",
-                    "domain": "contoso.local",
-                },
-            ],
-            "all_hosts": [],
-            "all_shares": [],
-            "all_weaknesses": [],
-        }
-        data = json.dumps(state_dict).encode("utf-8")
-        state = SharedRedTeamState.from_bytes(data)
-
-        # Should dedupe to 1 hash
-        assert len(state.all_hashes) == 1
-
-    def test_kerberoast_different_spn_kept(self):
-        """Kerberoast hashes with different SPNs should be kept."""
-        import json
-
-        state_dict = {
-            "operation_id": "op-test-kerberoast-diff-spn",
-            "all_domains": ["contoso.local"],
-            "all_users": [],
-            "all_credentials": [],
-            "all_hashes": [
-                {
-                    "username": "sql_svc",
-                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$aaa$111",
-                    "hash_type": "Kerberoast",
-                    "domain": "contoso.local",
-                },
-                {
-                    "username": "sql_svc",
-                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql02.contoso.local*$bbb$222",
-                    "hash_type": "Kerberoast",
-                    "domain": "contoso.local",
-                },
-            ],
-            "all_hosts": [],
-            "all_shares": [],
-            "all_weaknesses": [],
-        }
-        data = json.dumps(state_dict).encode("utf-8")
-        state = SharedRedTeamState.from_bytes(data)
-
-        # Should keep both (different SPNs)
-        assert len(state.all_hashes) == 2
-
-    def test_kerberoast_different_etype_kept(self):
-        """Kerberoast hashes with different encryption types should be kept."""
-        import json
-
-        state_dict = {
-            "operation_id": "op-test-kerberoast-diff-etype",
-            "all_domains": ["contoso.local"],
-            "all_users": [],
-            "all_credentials": [],
-            "all_hashes": [
-                {
-                    "username": "sql_svc",
-                    "hash_value": "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$aaa$111",
-                    "hash_type": "Kerberoast",
-                    "domain": "contoso.local",
-                },
-                {
-                    "username": "sql_svc",
-                    "hash_value": "$krb5tgs$18$*sql_svc$CONTOSO.LOCAL$MSSQLSvc/sql01.contoso.local*$bbb$222",
-                    "hash_type": "Kerberoast",
-                    "domain": "contoso.local",
-                },
-            ],
-            "all_hosts": [],
-            "all_shares": [],
-            "all_weaknesses": [],
-        }
-        data = json.dumps(state_dict).encode("utf-8")
-        state = SharedRedTeamState.from_bytes(data)
-
-        # Should keep both (RC4 vs AES256)
-        assert len(state.all_hashes) == 2
-
-    def test_asrep_deduped_by_user(self):
-        """AS-REP hashes with same user should be deduplicated."""
-        import json
-
-        state_dict = {
-            "operation_id": "op-test-asrep-dedupe",
-            "all_domains": ["contoso.local"],
-            "all_users": [],
-            "all_credentials": [],
-            "all_hashes": [
-                {
-                    "username": "nopreauth",
-                    "hash_value": "$krb5asrep$23$nopreauth@CONTOSO.LOCAL:aaa$111",
-                    "hash_type": "AS-REP",
-                    "domain": "contoso.local",
-                },
-                {
-                    "username": "nopreauth",
-                    "hash_value": "$krb5asrep$23$nopreauth@CONTOSO.LOCAL:bbb$222",
-                    "hash_type": "AS-REP",
-                    "domain": "contoso.local",
-                },
-            ],
-            "all_hosts": [],
-            "all_shares": [],
-            "all_weaknesses": [],
-        }
-        data = json.dumps(state_dict).encode("utf-8")
-        state = SharedRedTeamState.from_bytes(data)
-
-        # Should dedupe to 1 hash
-        assert len(state.all_hashes) == 1
-
-    def test_ntlm_deduped_by_value(self):
-        """NTLM hashes should be deduplicated by exact hash value."""
-        import json
-
-        state_dict = {
-            "operation_id": "op-test-ntlm-dedupe",
-            "all_domains": ["contoso.local"],
-            "all_users": [],
-            "all_credentials": [],
-            "all_hashes": [
-                {
-                    "username": "admin",
-                    "hash_value": "aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
-                    "hash_type": "NTLM",
-                    "domain": "contoso.local",
-                },
-                {
-                    "username": "admin",
-                    "hash_value": "aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
-                    "hash_type": "NTLM",
-                    "domain": "contoso.local",
-                },
-            ],
-            "all_hosts": [],
-            "all_shares": [],
-            "all_weaknesses": [],
-        }
-        data = json.dumps(state_dict).encode("utf-8")
-        state = SharedRedTeamState.from_bytes(data)
-
-        # Should dedupe to 1 hash
-        assert len(state.all_hashes) == 1
-
-
 class TestRequeueVulnerability:
     """Tests for requeue_vulnerability method in VulnerabilityMixin."""
 
@@ -1617,6 +1296,59 @@ class TestRequeueVulnerability:
 
         # Should not raise, and set should be empty
         assert len(dispatcher._dequeued_vuln_ids) == 0
+
+    @pytest.mark.asyncio
+    async def test_load_in_progress_vulns_recovers_state(self):
+        """_load_in_progress_vulns should recover dequeued state from Redis."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-recovery")
+
+        # Mock Redis client with pre-existing in-progress vulns
+        mock_redis = AsyncMock()
+        mock_redis.smembers.return_value = {"vuln_1", "vuln_2", "vuln_3"}
+        dispatcher._redis_client = mock_redis
+
+        # Should be empty initially
+        assert len(dispatcher._dequeued_vuln_ids) == 0
+
+        # Load from Redis
+        await dispatcher._load_in_progress_vulns()
+
+        # Should now contain the recovered IDs
+        assert dispatcher._dequeued_vuln_ids == {"vuln_1", "vuln_2", "vuln_3"}
+        mock_redis.smembers.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_mark_vuln_in_progress_adds_to_redis(self):
+        """_mark_vuln_in_progress should add vuln_id to Redis SET."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-mark-progress")
+
+        mock_redis = AsyncMock()
+        dispatcher._redis_client = mock_redis
+
+        await dispatcher._mark_vuln_in_progress("test_vuln_id")
+
+        mock_redis.sadd.assert_called_once()
+        call_args = mock_redis.sadd.call_args[0]
+        assert "vuln_in_progress" in call_args[0]
+        assert call_args[1] == "test_vuln_id"
+
+    @pytest.mark.asyncio
+    async def test_clear_vuln_in_progress_removes_from_redis(self):
+        """_clear_vuln_in_progress should remove vuln_id from Redis SET."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-clear-progress")
+
+        mock_redis = AsyncMock()
+        dispatcher._redis_client = mock_redis
+
+        await dispatcher._clear_vuln_in_progress("test_vuln_id")
+
+        mock_redis.srem.assert_called_once()
+        call_args = mock_redis.srem.call_args[0]
+        assert "vuln_in_progress" in call_args[0]
+        assert call_args[1] == "test_vuln_id"
 
 
 class TestAnnounceOperationComplete:

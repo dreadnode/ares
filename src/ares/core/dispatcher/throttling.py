@@ -87,7 +87,6 @@ class ThrottlingMixin:
             return 0
         # Clean up phantom empty-string task from throttle drops
         self._shared_state.pending_tasks.pop("", None)
-        self._redis_task_ids.discard("")
         pending = len(self._shared_state.pending_tasks)
         in_progress = sum(
             1
