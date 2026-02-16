@@ -276,6 +276,7 @@ class RedisWorkerAgent:
                     "os": h.os,
                     "roles": list(h.roles) if h.roles else [],
                     "services": list(h.services) if h.services else [],
+                    "is_dc": h.is_dc,
                 }
                 for h in self.shared_state.all_hosts
             ]
@@ -947,6 +948,9 @@ class RedisWorkerAgent:
             "operation_timeline",
             "identified_techniques",
             "pending_credential_findings",
+            # Reset scanned_targets to prevent false "already scanned" skips
+            # This set is not persisted to Redis, so we reset it on each refresh
+            "scanned_targets",
         ):
             setattr(current, attr, getattr(fresh, attr))
 

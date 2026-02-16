@@ -99,6 +99,9 @@ def clear_credential_context() -> None:
 # Shared placeholder passwords used across multiple toolsets
 PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = {"password", "changeme", "<password>"}
 
+# Well-known NTLM hash for empty/NULL password - skip these when extracting creds
+EMPTY_NT_HASH = "31d6cfe0d16ae931b73c59d7e0c089c0"  # pragma: allowlist secret
+
 # Characters that indicate Kali MOTD pollution (box-drawing characters)
 # These appear when bash outputs the Kali "minimal installation" message
 MOTD_GARBAGE_CHARS: frozenset[str] = frozenset("┏┃┗┓┛━─│┌┐└┘├┤┬┴┼╔╗╚╝║═")

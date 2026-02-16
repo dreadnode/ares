@@ -392,7 +392,7 @@ class NetworkEnumerationTools(Toolset):
         return message
 
     @dn.tool_method
-    def nmap_scan(self, target: str) -> str:  # noqa: PLR0912
+    def nmap_scan(self, target: str) -> dict[str, Any]:  # noqa: PLR0912
         """
         Scans target IPs to discover services, ports, and host information.
 
@@ -404,7 +404,7 @@ class NetworkEnumerationTools(Toolset):
             target: IP addresses to scan (space-separated for multiple targets)
 
         Returns:
-            Detailed nmap scan output showing discovered services and versions
+            Dict with 'output' (raw nmap output) and 'discovered_hosts' (parsed host data)
 
         Example:
             >>> result = nmap_scan("192.168.58.2")
@@ -468,6 +468,19 @@ class NetworkEnumerationTools(Toolset):
             _commit_current()
             return hosts
 
+        def _hosts_to_dicts(hosts: list[Host]) -> list[dict[str, Any]]:
+            """Serialize hosts for orchestrator processing."""
+            return [
+                {
+                    "ip": h.ip,
+                    "hostname": h.hostname,
+                    "os": h.os,
+                    "roles": h.roles,
+                    "services": h.services,
+                }
+                for h in hosts
+            ]
+
         targets = target.split()
 
         # Deduplication: skip targets that have already been scanned
@@ -477,7 +490,10 @@ class NetworkEnumerationTools(Toolset):
 
             if not targets_to_scan:
                 logger.info(f"[*] All {len(targets)} targets already scanned, skipping nmap")
-                return f"All targets already scanned: {', '.join(targets)}"
+                return {
+                    "output": f"All targets already scanned: {', '.join(targets)}",
+                    "discovered_hosts": [],
+                }
 
             if len(targets_to_scan) < len(targets):
                 skipped = len(targets) - len(targets_to_scan)
@@ -488,12 +504,23 @@ class NetworkEnumerationTools(Toolset):
             logger.info(f"[*] Phase 1: Fast port discovery on {len(targets)} target(s)")
 
             # Phase 1: Fast port scan without version detection
-            port_scan_cmd = ["nmap", "-Pn", "-sT", "-T4", "--open", "--top-ports", "100"] + targets
+            port_scan_cmd = [
+                "nmap",
+                "-Pn",
+                "-sT",
+                "-T4",
+                "--open",
+                "--top-ports",
+                "100",
+            ] + targets
             stdout, stderr, returncode = run_tool(port_scan_cmd, timeout_seconds=120)
 
             if returncode != 0:
                 logger.error(f"[!] Port scan failed: {stderr}")
-                return stderr or f"Port scan failed with code {returncode}"
+                return {
+                    "output": stderr or f"Port scan failed with code {returncode}",
+                    "discovered_hosts": [],
+                }
 
             # Parse open ports from output (format: "22/tcp open ssh")
             open_ports = set()
@@ -502,18 +529,20 @@ class NetworkEnumerationTools(Toolset):
 
             if not open_ports:
                 logger.info("[*] No open ports found")
+                parsed_hosts = _parse_nmap_hosts(stdout)
                 if self.state:
                     for ip in targets:
                         self.state.queried_hosts.add(ip)
                         self.state.scanned_targets.add(ip)
-                if self.state:
-                    parsed_hosts = _parse_nmap_hosts(stdout)
                     for host in parsed_hosts:
                         if hasattr(self.state, "add_host"):
                             self.state.add_host(host)
                         elif not any(h.ip == host.ip for h in self.state.hosts):
                             self.state.hosts.append(host)
-                return stdout
+                return {
+                    "output": stdout,
+                    "discovered_hosts": _hosts_to_dicts(parsed_hosts),
+                }
 
             ports_str = ",".join(sorted(open_ports, key=int))
             logger.info(f"[*] Phase 2: Service detection on {len(open_ports)} ports: {ports_str}")
@@ -525,38 +554,47 @@ class NetworkEnumerationTools(Toolset):
             if svc_returncode != 0:
                 logger.warning(f"[!] Service scan had issues: {svc_stderr}")
                 # Return port scan results if service scan fails
+                parsed_hosts = _parse_nmap_hosts(stdout)
                 if self.state:
                     for ip in targets:
                         self.state.queried_hosts.add(ip)
                         self.state.scanned_targets.add(ip)
-                    parsed_hosts = _parse_nmap_hosts(stdout)
                     for host in parsed_hosts:
                         if hasattr(self.state, "add_host"):
                             self.state.add_host(host)
                         elif not any(h.ip == host.ip for h in self.state.hosts):
                             self.state.hosts.append(host)
-                return stdout
+                return {
+                    "output": stdout,
+                    "discovered_hosts": _hosts_to_dicts(parsed_hosts),
+                }
 
             logger.info(f"[*] Nmap scan completed for {len(targets)} target(s)")
 
-            # Track the scanned hosts
+            # Parse and track the scanned hosts
+            parsed_hosts = _parse_nmap_hosts(svc_stdout)
             if self.state:
                 for ip in targets:
                     self.state.queried_hosts.add(ip)
                     self.state.scanned_targets.add(ip)
-
-                parsed_hosts = _parse_nmap_hosts(svc_stdout)
                 for host in parsed_hosts:
                     if hasattr(self.state, "add_host"):
                         self.state.add_host(host)
                     elif not any(h.ip == host.ip for h in self.state.hosts):
                         self.state.hosts.append(host)
 
-            return svc_stdout
+            # Return both raw output AND parsed hosts for orchestrator
+            return {
+                "output": svc_stdout,
+                "discovered_hosts": _hosts_to_dicts(parsed_hosts),
+            }
 
         except Exception as e:
             logger.error(f"Scan failed: {e!s}")
-            return f"Scan failed: {e!s}"
+            return {
+                "output": f"Scan failed: {e!s}",
+                "discovered_hosts": [],
+            }
 
     @dn.tool_method
     def smb_sweep(self, targets: str) -> str:

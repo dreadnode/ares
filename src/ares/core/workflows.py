@@ -211,11 +211,17 @@ async def credential_expansion_loop(  # noqa: PLR0912
                         domain=domain_override,
                     )
 
-                    if task_id:
+                    if task_id and task_id != "deferred":
                         tasks_dispatched.append(task_id)
                         new_tests += 1
                         logger.debug(
                             f"Dispatched lateral test: {domain_override}\\{cred.username} -> {host.ip}"
+                        )
+                    elif task_id == "deferred":
+                        # Task queued to deferred queue - count it but don't wait for it
+                        new_tests += 1
+                        logger.debug(
+                            f"Deferred lateral test: {domain_override}\\{cred.username} -> {host.ip}"
                         )
 
                     tracker.mark_tested(test_cred, host)
@@ -656,6 +662,12 @@ async def _exploit_vulnerability(
     if not task_id:
         logger.warning(f"Failed to dispatch exploitation for {vuln_type}")
         return {"success": False, "error": "Failed to dispatch task"}
+
+    # Task was queued to deferred queue - will be processed by background processor
+    # Return success so workflow moves on (don't wait for a non-existent task ID)
+    if task_id == "deferred":
+        logger.info(f"Exploit task for {vuln_type} deferred to background queue")
+        return {"success": True, "deferred": True}
 
     # Wait for task completion with periodic DA checks
     # Uses chunked waits to detect DA achievement and abandon stale tasks early

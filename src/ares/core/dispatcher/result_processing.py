@@ -211,6 +211,9 @@ class ResultProcessingMixin:
                     roles=h.get("roles", []),
                     services=h.get("services", []),
                 )
+                # Preserve is_dc flag from worker's detection
+                if h.get("is_dc"):
+                    host.is_dc = True
                 await self.publish_host(host, source_agent)
 
         discovered_credentials = result.get("discovered_credentials")
@@ -334,7 +337,9 @@ class ResultProcessingMixin:
             vuln_id = vuln_data.get("vuln_id", "")
             vuln_type = vuln_data.get("vuln_type", "")
             target = vuln_data.get("target", "")
-            details = vuln_data.get("details", {})
+            # Defensive: ensure details is always a dict (may be string from improper serialization)
+            raw_details = vuln_data.get("details", {})
+            details = raw_details if isinstance(raw_details, dict) else {}
 
             if not vuln_type or not target:
                 continue
@@ -354,8 +359,8 @@ class ResultProcessingMixin:
             # For delegation vulnerabilities, check if we have credentials
             # (worker might not know about creds orchestrator has discovered)
             if vuln_type in ("constrained_delegation", "unconstrained_delegation"):
-                account = details.get("account_name") or details.get("account", target)
-                account_lower = account.lower().rstrip("$")
+                account = details.get("account_name") or details.get("account") or target
+                account_lower = account.lower().rstrip("$") if account else target.lower()
                 for cred in self.shared_state.all_credentials:
                     if cred.username.lower() == account_lower and cred.password:
                         details["has_credentials"] = True
@@ -396,7 +401,7 @@ class ResultProcessingMixin:
         self: RedTeamDispatcher,
         vuln_type: str,
         target: str,
-        details: dict[str, Any],
+        details: dict[str, Any] | str,
         source_agent: str,
         vuln_id: str = "",
         task_queue: Any = None,
@@ -406,11 +411,15 @@ class ResultProcessingMixin:
         Args:
             vuln_type: Type of delegation vulnerability
             target: Target account for delegation
-            details: Vulnerability details including credentials
+            details: Vulnerability details including credentials (may be string if improperly serialized)
             source_agent: Agent that discovered the vulnerability
             vuln_id: Vulnerability ID from queue_vulnerability (for tracking exploitation)
             task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
         """
+        # Defensive: ensure details is a dict
+        if not isinstance(details, dict):
+            return
+
         if not details.get("has_credentials"):
             return
 
@@ -440,7 +449,9 @@ class ResultProcessingMixin:
             for vid, vuln in self.shared_state.discovered_vulnerabilities.items():
                 if vuln.vuln_type != "constrained_delegation":
                     continue
-                vuln_account = vuln.details.get("account_name", vuln.target).lower().rstrip("$")
+                # Defensive: ensure vuln.details is a dict before calling .get()
+                vuln_details = vuln.details if isinstance(vuln.details, dict) else {}
+                vuln_account = vuln_details.get("account_name", vuln.target).lower().rstrip("$")
                 if vuln_account == account_lower:
                     exploit_vuln_id = vid
                     break
@@ -780,7 +791,15 @@ class ResultProcessingMixin:
         return True
 
     def _extract_hosts_from_output(self: RedTeamDispatcher, output: str) -> list[Host]:
-        """Extract hosts from netexec SMB output."""
+        """Extract hosts from netexec SMB output.
+
+        Parses two types of SMB output lines:
+        1. Banner lines with [*]: "SMB 10.1.2.183 445 KINGSLANDING [*] Windows 10..."
+           - Extracts IP, hostname, and OS from the banner details
+        2. Non-banner lines: "SMB 10.1.2.240 445 WINTERFELL ADMIN$ Remote Admin"
+           - Extracts IP and hostname only (OS will be "Unknown")
+           - These appear in share enumeration, user enumeration, etc.
+        """
         if not output:
             return []
         hosts: list[Host] = []
@@ -789,35 +808,65 @@ class ResultProcessingMixin:
             stripped = line.strip()
             if not stripped:
                 continue
+
+            # Try banner line first (has OS info): "SMB IP PORT HOSTNAME [*] OS info..."
             smb_match = re.search(
                 r"SMB\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+([A-Za-z0-9_.-]+)\s+\[\*\]\s+(.+)",
                 stripped,
             )
-            if not smb_match:
-                continue
-            ip = smb_match.group(1)
-            host_col = smb_match.group(2)
-            details = smb_match.group(3)
-            name_match = re.search(r"\(name:([^)]+)\)", details)
-            domain_match = re.search(r"\(domain:([^)]+)\)", details)
-            domain = domain_match.group(1) if domain_match else ""
-            hostname = name_match.group(1) if name_match else host_col
-            if domain and hostname and not hostname.lower().endswith(domain.lower()):
-                hostname = f"{hostname.lower()}.{domain}"
-            os_match = re.search(r"^\s*([^(]+?)\s+\(name:", details)
-            os_name = os_match.group(1).strip() if os_match else "Unknown"
-            if ip in seen:
-                continue
-            seen.add(ip)
-            hosts.append(
-                Host(
-                    ip=ip,
-                    hostname=hostname,
-                    os=os_name,
-                    roles=[],
-                    services=[],
+            if smb_match:
+                ip = smb_match.group(1)
+                host_col = smb_match.group(2)
+                details = smb_match.group(3)
+                name_match = re.search(r"\(name:([^)]+)\)", details)
+                domain_match = re.search(r"\(domain:([^)]+)\)", details)
+                domain = domain_match.group(1) if domain_match else ""
+                hostname = name_match.group(1) if name_match else host_col
+                if domain and hostname and not hostname.lower().endswith(domain.lower()):
+                    hostname = f"{hostname.lower()}.{domain}"
+                os_match = re.search(r"^\s*([^(]+?)\s+\(name:", details)
+                os_name = os_match.group(1).strip() if os_match else "Unknown"
+                if ip in seen:
+                    continue
+                seen.add(ip)
+                hosts.append(
+                    Host(
+                        ip=ip,
+                        hostname=hostname,
+                        os=os_name,
+                        roles=[],
+                        services=[],
+                    )
                 )
+                continue
+
+            # Fallback: non-banner SMB lines (share table, user enum, etc.)
+            # Format: "SMB IP PORT HOSTNAME ..." where HOSTNAME is short name (no [*])
+            # This catches hosts from share enumeration output that don't have banner lines
+            simple_match = re.match(
+                r"^SMB\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+([A-Za-z0-9_-]+)\s+",
+                stripped,
             )
+            if simple_match:
+                ip = simple_match.group(1)
+                hostname_short = simple_match.group(2)
+                # Skip if we already have this IP (banner line takes precedence)
+                if ip in seen:
+                    continue
+                # Skip if hostname looks like a table header or separator
+                if hostname_short.lower() in ("share", "name", "permissions", "remark"):
+                    continue
+                seen.add(ip)
+                hosts.append(
+                    Host(
+                        ip=ip,
+                        hostname=hostname_short,  # Short name, will be upgraded later if FQDN found
+                        os="Unknown",  # No OS info in non-banner lines
+                        roles=[],
+                        services=[],
+                    )
+                )
+
         return hosts
 
     def _extract_users_from_output(  # noqa: PLR0912

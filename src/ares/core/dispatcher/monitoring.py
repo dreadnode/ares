@@ -727,7 +727,9 @@ class MonitoringMixin:
                 return
 
         # Create and store vulnerability
-        details = data.get("details", {})
+        # Defensive: ensure details is always a dict (may be string from improper serialization)
+        raw_details = data.get("details", {})
+        details = raw_details if isinstance(raw_details, dict) else {}
         priority = data.get("priority", 5)
 
         vuln = VulnerabilityInfo(

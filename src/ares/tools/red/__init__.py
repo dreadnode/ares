@@ -36,6 +36,9 @@ from ares.tools.red.orchestrator import (
     OrchestratorTools,
 )
 
+# Privilege escalation
+from ares.tools.red.privilege_escalation import PrivilegeEscalationTools
+
 # Reconnaissance
 from ares.tools.red.reconnaissance import (
     BloodHoundTools,
@@ -66,6 +69,7 @@ __all__ = [
     "NetworkEnumerationTools",
     "OrchestratorTools",
     "PostureValidationTools",
+    "PrivilegeEscalationTools",
     "RedTeamReportingTools",
     "SharePilferingTools",
     "TrustAttackTools",

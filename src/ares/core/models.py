@@ -2315,9 +2315,15 @@ class SharedRedTeamState:
                     existing.services = list({*existing.services, *host.services})
                     if len(existing.services) > old_services_count:
                         data_changed = True
-                # Update DC status after merge (new services/hostname may reveal it's a DC)
+                # Update DC status after merge using OR-logic:
+                # - Preserve existing is_dc=True (worker may have detected it)
+                # - Accept incoming is_dc=True (worker serialized it)
+                # - Re-detect from merged services/hostname
                 old_is_dc = existing.is_dc
                 existing.update_dc_status()
+                # OR-logic: if any source says DC, it's a DC
+                if host.is_dc and not existing.is_dc:
+                    existing.is_dc = True
                 if existing.is_dc and not old_is_dc:
                     data_changed = True
                 # Register DC IP if merge reveals it's a domain controller
@@ -2350,8 +2356,11 @@ class SharedRedTeamState:
                             task2.add_done_callback(self._background_tasks.discard)
                 # Return True if data changed so caller can trigger checkpoint
                 return data_changed
-        # Set DC status before adding
+        # Set DC status before adding (preserve incoming is_dc=True from worker)
+        incoming_is_dc = host.is_dc
         host.update_dc_status()
+        if incoming_is_dc and not host.is_dc:
+            host.is_dc = True
         self.all_hosts.append(host)
         logger.debug(
             f"Host added: {host.ip} ({host.hostname or 'no hostname'}, is_dc={host.is_dc})"
@@ -2416,6 +2425,19 @@ class SharedRedTeamState:
 
         self.all_shares.append(share)
         logger.debug(f"Share added: {host}/{name}")
+
+        # Ensure host has SMB service since share discovery proves 445 is open
+        share_host_ip = (share.host or "").strip()
+        if share_host_ip:
+            for existing_host in self.all_hosts:
+                if existing_host.ip == share_host_ip:
+                    has_smb = any(
+                        "445" in svc or "smb" in svc.lower() or "microsoft-ds" in svc.lower()
+                        for svc in existing_host.services
+                    )
+                    if not has_smb:
+                        existing_host.services.append("445/tcp smb")
+                    break
 
         # Persist to Redis backend if available and in the correct event loop
         if self._can_persist_to_backend():

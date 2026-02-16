@@ -577,7 +577,7 @@ class RoutingMixin:
         logger.warning("No task queue available, cannot route crack request")
         return ""
 
-    async def request_lateral_movement(
+    async def request_lateral_movement(  # noqa: PLR0912
         self: RedTeamDispatcher,
         target_host: str,
         username: str,
@@ -698,6 +698,11 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
+            # Task deferred to background queue - don't create TaskInfo here
+            if task_id == "deferred":
+                logger.info("Lateral movement task deferred to background queue")
+                return "deferred"
+
             task_info = TaskInfo(
                 task_id=task_id,
                 task_type="lateral_movement",
@@ -802,6 +807,11 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
+            # Task deferred to background queue - don't create TaskInfo here
+            if task_id == "deferred":
+                logger.info("ACL analysis task deferred to background queue")
+                return "deferred"
+
             task_info = TaskInfo(
                 task_id=task_id,
                 task_type="acl_analysis",
@@ -897,6 +907,11 @@ class RoutingMixin:
             )
             if not task_id:
                 return ""
+
+            # Task deferred to background queue - don't create TaskInfo here
+            if task_id == "deferred":
+                logger.info("Recon task deferred to background queue")
+                return "deferred"
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1007,6 +1022,11 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
+            # Task deferred to background queue - don't create TaskInfo here
+            if task_id == "deferred":
+                logger.info("Credential access task deferred to background queue")
+                return "deferred"
+
             task_info = TaskInfo(
                 task_id=task_id,
                 task_type="credential_access",
@@ -1111,6 +1131,13 @@ class RoutingMixin:
             )
             if not task_id:
                 return ""
+
+            # Task was deferred to background queue - don't create TaskInfo here
+            # The deferred queue processor will create TaskInfo when it submits
+            if task_id == "deferred":
+                logger.info(f"Exploit task for {vuln_type} deferred to background queue")
+                self._record_exploit_weakness(vuln_type, target, payload)
+                return "deferred"
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1227,6 +1254,11 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
+            # Task deferred to background queue - don't create TaskInfo here
+            if task_id == "deferred":
+                logger.info("Privesc enumeration task deferred to background queue")
+                return "deferred"
+
             task_info = TaskInfo(
                 task_id=task_id,
                 task_type="privesc_enumeration",
@@ -1299,6 +1331,11 @@ class RoutingMixin:
             )
             if not task_id:
                 return ""
+
+            # Task deferred to background queue - don't create TaskInfo here
+            if task_id == "deferred":
+                logger.info("Coercion task deferred to background queue")
+                return "deferred"
 
             task_info = TaskInfo(
                 task_id=task_id,

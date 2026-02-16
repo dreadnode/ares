@@ -1365,7 +1365,7 @@ async def _auto_share_spider(
                         username=cred.username,
                         password=cred.password,
                         reason=f"auto_share_spider_{share.name}",
-                        techniques=["share_spider"],
+                        techniques=["smbclient_spider"],
                     )
 
                     # Always mark as processed to prevent retry storm when throttled
@@ -1513,7 +1513,7 @@ async def _auto_bloodhound(  # noqa: PLR0912
                         username=cred.username,
                         password=cred.password,
                         reason="bloodhound",
-                        techniques=["bloodhound"],
+                        techniques=["run_bloodhound"],
                     )
 
                     # Always record attempt to prevent retry storm when throttled
@@ -1831,7 +1831,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                 non_dc_hosts = [h for h in domain_hosts if h not in dc_ips]
                 dc_hosts_in_domain = [h for h in domain_hosts if h in dc_ips]
 
-                # For non-DC hosts: always try secretsdump + lsassy (might have local admin)
+                # For non-DC hosts: always try secretsdump (might have local admin)
                 cred_task_id: str | None = None
                 if non_dc_hosts:
                     cred_task_id = await dispatcher.request_credential_access(
@@ -1842,7 +1842,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                         password=cred.password,
                         credential_source=cred.source,
                         reason="new_credential_non_dc",
-                        techniques=["kerberoast", "secretsdump", "lsassy"],
+                        techniques=["kerberoast", "secretsdump"],
                     )
 
                 # For DC hosts: only try secretsdump if credential is privileged OR
@@ -1937,7 +1937,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                                 hash_value=hash_obj.hash_value,
                                 hash_type=hash_obj.hash_type,
                                 reason="new_hash_non_dc",
-                                techniques=["kerberoast", "secretsdump", "lsassy"],
+                                techniques=["kerberoast", "secretsdump"],
                             )
 
                         # For DC hosts: only try if privileged or no S4U path
@@ -2397,18 +2397,24 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
                     techniques=["find_delegation"],
                 )
 
-                if task_id:
+                if task_id and task_id != "deferred":
                     # Track as dispatched - will be marked processed only on success
                     dispatched_tasks[task_id] = cred_key
                     logger.info(
                         f"Auto-delegation: dispatched find_delegation task {task_id} "
                         f"for {cred.domain}\\{cred.username}"
                     )
-                else:
-                    # Task was deferred or deduplicated - don't spam logs
+                elif task_id == "deferred":
+                    # Task queued to deferred queue - will run when capacity allows
                     logger.debug(
                         f"Auto-delegation: find_delegation for {cred.domain}\\{cred.username} "
-                        "was deferred or already pending"
+                        "deferred to background queue"
+                    )
+                else:
+                    # Task was deduplicated (already pending)
+                    logger.debug(
+                        f"Auto-delegation: find_delegation for {cred.domain}\\{cred.username} "
+                        "already pending"
                     )
 
         except asyncio.CancelledError:
@@ -2457,6 +2463,11 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
             # Check completed tasks to update tracking
             for key, task_id in list(secretsdump_attempts.items()):
                 host_ip, username, domain = key
+
+                # Skip deferred tasks - they're queued but not yet submitted
+                # The deferred queue processor will handle them
+                if task_id == "deferred":
+                    continue
 
                 # Check if task completed
                 if task_id not in state.pending_tasks:
@@ -2537,11 +2548,18 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
                         techniques=["secretsdump"],
                     )
 
-                    if task_id:
+                    if task_id and task_id != "deferred":
                         secretsdump_attempts[key] = task_id
                         logger.info(
                             f"Auto-secretsdump task {task_id} dispatched for "
                             f"{cred_domain}\\{cred.username} -> {host.ip}"
+                        )
+                    elif task_id == "deferred":
+                        # Task queued to deferred queue - mark as attempted to prevent retry storm
+                        secretsdump_attempts[key] = "deferred"
+                        logger.debug(
+                            f"Auto-secretsdump for {cred_domain}\\{cred.username} -> {host.ip} "
+                            "deferred to background queue"
                         )
 
             # Also check for BloodHound AdminTo relationships
@@ -2603,12 +2621,19 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
                     techniques=["secretsdump"],
                 )
 
-                if task_id:
+                if task_id and task_id != "deferred":
                     secretsdump_attempts[key] = task_id
                     # Mark vulnerability as exploited to avoid re-processing
                     state.mark_exploited(vuln_id)
                     logger.info(
                         f"Auto-secretsdump task {task_id} dispatched for BloodHound {vuln.vuln_type}"
+                    )
+                elif task_id == "deferred":
+                    # Task queued to deferred queue - mark as attempted to prevent retry storm
+                    secretsdump_attempts[key] = "deferred"
+                    state.mark_exploited(vuln_id)
+                    logger.debug(
+                        f"Auto-secretsdump for BloodHound {vuln.vuln_type} deferred to background queue"
                     )
 
         except asyncio.CancelledError:

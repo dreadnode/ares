@@ -106,6 +106,18 @@ class PersistenceMixin:
                 pipe.expire(weaknesses_key, ttl)
                 await pipe.execute()
 
+            # Persist exploited_vulnerabilities (SET of vuln_ids)
+            # Critical: This tracks which vulnerabilities have been exploited.
+            # Without this, threaded consumer updates are lost (event loop mismatch).
+            if self.shared_state.exploited_vulnerabilities:
+                exploited_key = f"ares:op:{op_id}:exploited"
+                pipe = self._redis_client.pipeline()
+                pipe.delete(exploited_key)
+                for vuln_id in self.shared_state.exploited_vulnerabilities:
+                    pipe.sadd(exploited_key, vuln_id)
+                pipe.expire(exploited_key, ttl)
+                await pipe.execute()
+
             # Persist DC map
             for domain, dc_ip in self.shared_state.domain_controllers.items():
                 await backend.set_dc(domain, dc_ip)
@@ -120,7 +132,8 @@ class PersistenceMixin:
                 f"Checkpoint complete: {len(self.shared_state.all_hosts)} hosts, "
                 f"{len(self.shared_state.all_shares)} shares, "
                 f"{len(self.shared_state.all_credentials)} creds, "
-                f"{len(self.shared_state.all_hashes)} hashes"
+                f"{len(self.shared_state.all_hashes)} hashes, "
+                f"{len(self.shared_state.exploited_vulnerabilities)} exploited"
             )
 
         except Exception as e:

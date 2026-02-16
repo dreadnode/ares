@@ -332,7 +332,7 @@ class PublishingMixin:
         # This discovers sa/sysadmin impersonation rights early, triggering priority boost
         await self._dispatch_mssql_enum(host, sql_creds, source_agent)
 
-    async def _dispatch_mssql_enum(
+    async def _dispatch_mssql_enum(  # noqa: PLR0912
         self: RedTeamDispatcher,
         host: Host,
         sql_creds: list[dict[str, str]],
@@ -395,7 +395,8 @@ class PublishingMixin:
                 priority=5,  # Medium-high priority
             )
 
-            if task_id:
+            # Skip if task was deferred or dropped
+            if task_id and task_id != "deferred":
                 task_info = TaskInfo(
                     task_id=task_id,
                     task_type="mssql_enum",
@@ -405,9 +406,12 @@ class PublishingMixin:
                 self.shared_state.pending_tasks[task_id] = task_info
                 dispatched += 1
                 logger.info(
-                    f"🔍 Dispatched proactive MSSQL enum for {host.ip} "
+                    f"Dispatched proactive MSSQL enum for {host.ip} "
                     f"with {cred.get('domain', '')}\\{cred.get('username', '')}"
                 )
+            elif task_id == "deferred":
+                dispatched += 1
+                logger.info(f"MSSQL enum for {host.ip} deferred to background queue")
 
         if dispatched > 0:
             logger.warning(
@@ -673,6 +677,11 @@ class PublishingMixin:
             if not task_id:
                 return ""
 
+            # Task deferred to background queue - don't create TaskInfo here
+            if task_id == "deferred":
+                logger.info(f"ADCS enumeration task deferred to background queue for {target_ip}")
+                return "deferred"
+
             task_info = TaskInfo(
                 task_id=task_id,
                 task_type="exploit",
@@ -736,8 +745,11 @@ class PublishingMixin:
             if vuln.vuln_type not in ("constrained_delegation", "unconstrained_delegation"):
                 continue
 
+            # Defensive: ensure vuln.details is a dict before calling .get()
+            vuln_details = vuln.details if isinstance(vuln.details, dict) else {}
+
             # Check if this vulnerability is for the same account
-            vuln_account = vuln.details.get("account_name", vuln.target).lower().rstrip("$")
+            vuln_account = vuln_details.get("account_name", vuln.target).lower().rstrip("$")
             if vuln_account != cred_user:
                 continue
 
@@ -746,9 +758,9 @@ class PublishingMixin:
                 continue
 
             # We have credentials for a delegation vulnerability - exploit it!
-            target_spn = vuln.details.get("target_spn", "")
-            domain = vuln.details.get("domain", credential.domain)
-            dc_ip = vuln.details.get("dc_ip", "")
+            target_spn = vuln_details.get("target_spn", "")
+            domain = vuln_details.get("domain", credential.domain)
+            dc_ip = vuln_details.get("dc_ip", "")
 
             if vuln.vuln_type == "constrained_delegation" and target_spn:
                 logger.warning(

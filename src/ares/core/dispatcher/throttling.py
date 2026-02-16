@@ -580,10 +580,10 @@ class ThrottlingMixin:
                         source_agent=source_agent,
                         priority=adjusted_priority,
                     )
-                    # Return empty string - caller sees it as "not immediately dispatched"
-                    # but the task is queued rather than lost
+                    # Return "deferred" marker so callers can distinguish from dropped tasks
+                    # The deferred queue processor will submit this task when slots open up
                     if queued:
-                        return ""  # Task queued, not lost
+                        return "deferred"  # Task queued, will be processed later
                     # Queue rejected the task (full with higher priority tasks)
                     logger.warning(
                         f"Task {task_type} for {target_role} dropped - "

@@ -344,8 +344,7 @@ class OrchestratorTools(Toolset):
             "secretsdump": ["secretsdump"],
             "kerberoast": ["kerberoast"],
             "asrep_roast": ["asrep_roast"],
-            "lsassy": ["lsassy"],
-            "share_spider": ["share_spider"],
+            "share_spider": ["smbclient_spider"],
         }
 
         techniques = technique_map.get(task_type, [task_type])

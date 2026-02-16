@@ -395,6 +395,15 @@ class RedTeamDispatcher(
             source_agent=source_agent,
         )
 
+        # Task was deferred to background queue - can't wait for it
+        if task_id == "deferred":
+            logger.info(f"Task {task_type} deferred to background queue, cannot wait for result")
+            return None
+
+        if not task_id:
+            logger.warning(f"Task {task_type} dispatch failed")
+            return None
+
         return await self._task_queue.wait_for_result(task_id, timeout=timeout)
 
     async def wait_for_redis_result(
