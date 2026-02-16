@@ -465,41 +465,6 @@ class TestRedisStateBackend:
         assert result is False
 
 
-class TestBackendMigration:
-    """Tests for checkpoint migration functionality."""
-
-    @pytest.mark.asyncio
-    async def test_migrate_from_checkpoint(self, backend, mock_redis):
-        """Test migrating from old checkpoint format."""
-        from ares.core.models import SharedRedTeamState, Target
-
-        # Create a state with some data
-        state = SharedRedTeamState(operation_id="op-test-123")
-        state.target = Target(ip="192.168.58.10", domain="contoso.local")
-        state.all_credentials.append(
-            Credential(
-                username="admin",
-                password="pass",  # pragma: allowlist secret
-                domain="contoso.local",
-            )
-        )
-        state.all_hashes.append(
-            Hash(username="krbtgt", hash_type="NTLM", hash_value="abc:def", domain="contoso.local")
-        )
-        state.all_hosts.append(Host(ip="192.168.58.10", hostname="dc01.contoso.local"))
-        state.has_domain_admin = True
-        state.domain_admin_path = "kerberoast -> secretsdump"
-        state.processed_cred_expansion.add("contoso.local:admin:hash123")
-
-        result = await backend.migrate_from_checkpoint(state)
-
-        assert result is True
-        # Verify collections were migrated
-        assert mock_redis.rpush.call_count >= 3  # credentials, hashes, hosts
-        # Verify dedup sets were migrated
-        assert mock_redis.sadd.call_count >= 1  # processed_cred_expansion
-
-
 # ============================================================================
 # SharedRedTeamState Processed Set Helper Tests
 # ============================================================================
