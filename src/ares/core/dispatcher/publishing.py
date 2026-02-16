@@ -16,16 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from ares.core.messages import (
-    CredentialDiscovered,
-    ExploitRequest,
-    HashDiscovered,
-    HostDiscovered,
-    VulnerabilityFound,
-    generate_task_id,
-)
 from ares.core.models import (
-    AgentRole,
     Credential,
     Hash,
     Host,
@@ -42,7 +33,7 @@ if TYPE_CHECKING:
 class PublishingMixin:
     """Discovery publishing for credentials, hosts, shares, and vulnerabilities."""
 
-    async def publish_credential(
+    async def publish_credential(  # noqa: PLR0912
         self: RedTeamDispatcher,
         credential: Credential,
         source_agent: str,
@@ -64,17 +55,6 @@ class PublishingMixin:
 
         if added:
             self.signal_credential_access()
-            await self._broadcast(
-                CredentialDiscovered(
-                    source_agent=source_agent,
-                    username=credential.username,
-                    password=credential.password,
-                    domain=credential.domain,
-                    is_admin=is_admin,
-                    discovery_method=credential.source,
-                ),
-                exclude=source_agent,
-            )
             # Add timeline event for credential discovery
             import uuid
             from datetime import datetime, timezone
@@ -88,62 +68,85 @@ class PublishingMixin:
                     mitre_techniques=["T1078"] if is_admin else ["T1552"],
                 )
             )
-            await self._checkpoint()
+            is_main_thread = threading.current_thread() is threading.main_thread()
+            if is_main_thread:
+                await self._checkpoint()
+            else:
+                self._checkpoint_requested.set()
+                logger.info(
+                    f"⚡ Checkpoint requested for credential: {credential.domain}\\{credential.username}"
+                )
             logger.info(f"Credential published: {credential.domain}\\{credential.username}")
 
             # Immediate delegation check for high-value credentials (cracked hashes)
             # Cracked Kerberoast/AS-REP hashes may have constrained delegation rights
-            # NOTE: Skip dispatch when in non-main thread (threaded consumer) - main loop handles it
-            is_main_thread = threading.current_thread() is threading.main_thread()
             is_cracked = credential.source and (
                 "cracker" in credential.source.lower()
                 or "cracked" in credential.source.lower()
                 or "kerberoast" in credential.source.lower()
                 or "asrep" in credential.source.lower()
             )
-            if is_cracked and credential.password and credential.domain and is_main_thread:
+            if is_cracked and credential.password and credential.domain:
                 cred_key = f"{credential.domain.lower()}:{credential.username.lower()}"
                 if cred_key not in self.shared_state.processed_delegation_creds:
-                    logger.info(
-                        f"🚀 Immediate delegation check for cracked credential: "
-                        f"{credential.domain}\\{credential.username}"
-                    )
-                    try:
-                        task_id = await asyncio.wait_for(
-                            self.request_privesc_enumeration(
-                                source_agent="orchestrator",
-                                domain=credential.domain,
-                                username=credential.username,
-                                password=credential.password,
-                                techniques=["find_delegation"],
-                            ),
-                            timeout=30.0,
-                        )
-                        if task_id:
-                            logger.info(
-                                f"🚀 Immediate delegation task {task_id} dispatched for "
-                                f"{credential.domain}\\{credential.username}"
-                            )
-                    except asyncio.TimeoutError:
-                        logger.error(
-                            f"Timeout dispatching delegation check for {credential.domain}\\{credential.username}"
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to dispatch immediate delegation check: {e}")
-
-                    # Check for pending constrained delegation vulnerabilities we can now exploit
-                    try:
-                        await asyncio.wait_for(
-                            self._exploit_delegation_with_credential(credential, source_agent),
-                            timeout=30.0,
-                        )
-                    except asyncio.TimeoutError:
-                        logger.error(
-                            f"Timeout in _exploit_delegation_with_credential for "
+                    if is_main_thread:
+                        # Direct dispatch on main thread
+                        logger.info(
+                            f"🚀 Immediate delegation check for cracked credential: "
                             f"{credential.domain}\\{credential.username}"
                         )
-                    except Exception as e:
-                        logger.warning(f"Error exploiting delegation with credential: {e}")
+                        try:
+                            task_id = await asyncio.wait_for(
+                                self.request_privesc_enumeration(
+                                    source_agent="orchestrator",
+                                    domain=credential.domain,
+                                    username=credential.username,
+                                    password=credential.password,
+                                    techniques=["find_delegation"],
+                                ),
+                                timeout=30.0,
+                            )
+                            if task_id:
+                                logger.info(
+                                    f"🚀 Immediate delegation task {task_id} dispatched for "
+                                    f"{credential.domain}\\{credential.username}"
+                                )
+                        except asyncio.TimeoutError:
+                            logger.error(
+                                f"Timeout dispatching delegation check for {credential.domain}\\{credential.username}"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to dispatch immediate delegation check: {e}")
+
+                        # Check for pending constrained delegation vulnerabilities we can now exploit
+                        try:
+                            await asyncio.wait_for(
+                                self._exploit_delegation_with_credential(credential, source_agent),
+                                timeout=30.0,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.error(
+                                f"Timeout in _exploit_delegation_with_credential for "
+                                f"{credential.domain}\\{credential.username}"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Error exploiting delegation with credential: {e}")
+                    else:
+                        # Queue for main loop (threaded consumer can't dispatch directly)
+                        # Maintenance loop will process within 5s instead of waiting 30s
+                        # for _auto_credential_expansion
+                        logger.info(
+                            f"🚀 Queuing delegation check for cracked credential: "
+                            f"{credential.domain}\\{credential.username} (from threaded consumer)"
+                        )
+                        self._pending_delegation_queue.put(
+                            (
+                                credential.domain,
+                                credential.username,
+                                credential.password,
+                                source_agent,
+                            )
+                        )
         else:
             logger.debug(
                 f"Credential not published (duplicate/invalid): {credential.domain}\\{credential.username}"
@@ -172,17 +175,6 @@ class PublishingMixin:
 
         if added:
             self.signal_credential_access()
-            await self._broadcast(
-                HashDiscovered(
-                    source_agent=source_agent,
-                    username=hash_obj.username,
-                    hash_value=hash_obj.hash_value,
-                    hash_type=hash_obj.hash_type,
-                    domain=hash_obj.domain,
-                    priority=priority,
-                ),
-                exclude=source_agent,
-            )
             # Add timeline event for hash discovery
             import uuid
             from datetime import datetime, timezone
@@ -202,7 +194,10 @@ class PublishingMixin:
                     mitre_techniques=["T1003"],  # OS Credential Dumping
                 )
             )
-            await self._checkpoint()
+            if threading.current_thread() is threading.main_thread():
+                await self._checkpoint()
+            else:
+                self._checkpoint_requested.set()
             logger.info(
                 f"Hash published: {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type})"
             )
@@ -226,7 +221,10 @@ class PublishingMixin:
         """
         added = self.shared_state.add_share(share)
         if added:
-            await self._checkpoint()
+            if threading.current_thread() is threading.main_thread():
+                await self._checkpoint()
+            else:
+                self._checkpoint_requested.set()
             logger.info(f"Share recorded: {share.host}/{share.name}")
         else:
             logger.debug(f"Share not published (duplicate/invalid): {share.host}/{share.name}")
@@ -262,18 +260,10 @@ class PublishingMixin:
         added = self.shared_state.add_host(host)
 
         if added:
-            await self._broadcast(
-                HostDiscovered(
-                    source_agent=source_agent,
-                    ip=host.ip,
-                    hostname=host.hostname,
-                    os=host.os,
-                    roles=list(host.roles) if hasattr(host.roles, "__iter__") else [],
-                    services=list(host.services) if hasattr(host.services, "__iter__") else [],
-                ),
-                exclude=source_agent,
-            )
-            await self._checkpoint()
+            if threading.current_thread() is threading.main_thread():
+                await self._checkpoint()
+            else:
+                self._checkpoint_requested.set()
             logger.info(f"Host published: {host.ip} ({host.hostname})")
 
             # Auto-detect MSSQL and queue vulnerability for exploitation
@@ -681,36 +671,9 @@ class PublishingMixin:
             logger.info(f"ADCS enumeration task {task_id} submitted to Redis queue for {target_ip}")
             return task_id
 
-        # Fallback to in-memory queue (single-process mode)
-        task_id = generate_task_id()
-        privesc_agent = self._role_queues.get(AgentRole.PRIVESC)
-
-        if not privesc_agent:
-            logger.warning("No privesc agent registered, cannot route ADCS enumeration")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="exploit",
-            assigned_agent=privesc_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[privesc_agent].put(
-            ExploitRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                vuln_type="adcs_enumerate",
-                vuln_id=payload["vuln_id"],
-                target=target_ip,
-                params=payload,
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"ADCS enumeration request {task_id} sent to {privesc_agent}")
-        return task_id
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route ADCS enumeration")
+        return ""
 
     async def publish_vulnerability(
         self: RedTeamDispatcher,
@@ -718,7 +681,7 @@ class PublishingMixin:
         source_agent: str,
     ) -> bool:
         """
-        Broadcast new vulnerability to all agents.
+        Record new vulnerability in shared state.
 
         Args:
             vuln: The discovered vulnerability.
@@ -730,19 +693,10 @@ class PublishingMixin:
         added = self.shared_state.add_vulnerability(vuln)
 
         if added:
-            await self._broadcast(
-                VulnerabilityFound(
-                    source_agent=source_agent,
-                    vuln_type=vuln.vuln_type,
-                    vuln_id=vuln.vuln_id,
-                    target=vuln.target,
-                    details=vuln.details,
-                    recommended_agent=vuln.recommended_agent,
-                    priority=vuln.priority,
-                ),
-                exclude=source_agent,
-            )
-            await self._checkpoint()
+            if threading.current_thread() is threading.main_thread():
+                await self._checkpoint()
+            else:
+                self._checkpoint_requested.set()
             logger.info(f"Vulnerability published: {vuln.vuln_type} on {vuln.target}")
 
         return added

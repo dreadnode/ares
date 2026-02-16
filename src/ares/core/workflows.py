@@ -276,10 +276,6 @@ async def exploitation_workflow(  # noqa: PLR0912
     Returns:
         Summary of exploitation results
     """
-    from ares.core.messages import (
-        DomainAdminAchieved,
-    )
-
     start_time = asyncio.get_event_loop().time()
     exploited_count = 0
     credentials_gained = 0
@@ -424,19 +420,7 @@ async def exploitation_workflow(  # noqa: PLR0912
                 await asyncio.gather(*active_tasks, return_exceptions=True)
                 active_tasks.clear()
 
-            # Broadcast DA achieved (in-memory broadcast to local agents)
-            await dispatcher._broadcast(
-                DomainAdminAchieved(
-                    source_agent="exploitation_workflow",
-                    username="",  # Will be filled from state
-                    domain=state.target.domain if state.target else "",
-                    attack_path=state.domain_admin_path or "Unknown path",
-                    credential_type="credential",
-                )
-            )
-
-            # Announce operation complete - this broadcasts to local agents AND
-            # sets Redis status key so remote workers detect completion
+            # Announce operation complete - sets Redis status key so workers detect completion
             await dispatcher.announce_operation_complete(
                 source_agent="exploitation_workflow",
                 success=True,

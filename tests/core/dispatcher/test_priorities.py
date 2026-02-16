@@ -565,3 +565,56 @@ class TestThrottleBypass:
             "delegation" in t.lower() for t in techniques
         )
         assert is_delegation_enum is False
+
+    def test_esc8_relay_coercion_bypasses_hard_cap(self):
+        """ESC8 relay (ntlmrelayx_to_adcs) coercion tasks should bypass hard cap.
+
+        ESC8 is a critical path to DA via ADCS web enrollment relay.
+        The ntlmrelayx_to_adcs technique is dispatched as a coercion task.
+        """
+        dispatcher = RedTeamDispatcher()
+
+        # Verify ESC8_COERCION_TECHNIQUES exists and contains ntlmrelayx_to_adcs
+        assert hasattr(dispatcher, "ESC8_COERCION_TECHNIQUES")
+        assert "ntlmrelayx_to_adcs" in dispatcher.ESC8_COERCION_TECHNIQUES
+
+        # Test detection logic
+        task_type = "coercion"
+        payload = {"techniques": ["ntlmrelayx_to_adcs"]}
+        techniques = payload.get("techniques", [])
+        is_esc8_coercion = task_type == "coercion" and any(
+            t.lower() in dispatcher.ESC8_COERCION_TECHNIQUES for t in techniques
+        )
+        assert is_esc8_coercion is True
+
+    def test_esc8_petitpotam_coercion_bypasses_hard_cap(self):
+        """ESC8 petitpotam coercion tasks should bypass hard cap.
+
+        ESC8 attack coordinates ntlmrelayx listener with petitpotam coercion.
+        Both are critical path tasks that should bypass throttling.
+        """
+        dispatcher = RedTeamDispatcher()
+
+        # Verify ESC8_COERCION_TECHNIQUES contains petitpotam
+        assert "petitpotam" in dispatcher.ESC8_COERCION_TECHNIQUES
+
+        # Test detection logic
+        task_type = "coercion"
+        payload = {"techniques": ["petitpotam"]}
+        techniques = payload.get("techniques", [])
+        is_esc8_coercion = task_type == "coercion" and any(
+            t.lower() in dispatcher.ESC8_COERCION_TECHNIQUES for t in techniques
+        )
+        assert is_esc8_coercion is True
+
+    def test_non_esc8_coercion_does_not_bypass(self):
+        """Regular coercion tasks (responder, LLMNR) should NOT bypass hard cap."""
+        dispatcher = RedTeamDispatcher()
+
+        task_type = "coercion"
+        payload = {"techniques": ["LLMNR", "NBT-NS", "mDNS"]}
+        techniques = payload.get("techniques", [])
+        is_esc8_coercion = task_type == "coercion" and any(
+            t.lower() in dispatcher.ESC8_COERCION_TECHNIQUES for t in techniques
+        )
+        assert is_esc8_coercion is False

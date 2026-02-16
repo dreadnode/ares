@@ -817,35 +817,60 @@ tasks:
         if [ -n "$REDIS_PASS" ]; then
           REDIS_ENV=(env REDISCLI_AUTH="$REDIS_PASS")
         fi
-        REDIS_CLIENT_POD="$REDIS_POD"
+        # Always use Sentinel pod as client (it can reach master)
+        REDIS_CLIENT_POD="${SENTINEL_POD:-$REDIS_POD}"
         REDIS_HOST=""
-        if [ -n "$SENTINEL_POD" ]; then
-          REDIS_CLIENT_POD="$SENTINEL_POD"
-          REDIS_HOST=$(kubectl exec -n {{.K8S_NAMESPACE}} "$SENTINEL_POD" -- "${REDIS_ENV[@]}" redis-cli -p 26379 sentinel get-master-addr-by-name aresmaster 2>/dev/null | head -1 || true)
-          if [ -z "$REDIS_HOST" ]; then
-            echo "Sentinel did not return master, falling back to redis pod"
-            REDIS_CLIENT_POD="$REDIS_POD"
-          fi
-        fi
         REDIS_HOST_ARG=()
-        if [ -n "$REDIS_HOST" ]; then
+        CONTAINER_ARG=()
+
+        if [ -n "$SENTINEL_POD" ]; then
+          CONTAINER_ARG=(-c sentinel)
+          # Get master IP from Sentinel (returns IP on first line, port on second)
+          REDIS_HOST=$(kubectl exec -n {{.K8S_NAMESPACE}} "$SENTINEL_POD" "${CONTAINER_ARG[@]}" -- "${REDIS_ENV[@]}" redis-cli -p 26379 sentinel get-master-addr-by-name aresmaster 2>/dev/null | head -1 || true)
+          if [ -z "$REDIS_HOST" ]; then
+            echo "ERROR: Sentinel did not return master IP. Cannot proceed with clear."
+            echo "Check Sentinel health: kubectl exec -n {{.K8S_NAMESPACE}} $SENTINEL_POD -c sentinel -- redis-cli -p 26379 info sentinel"
+            exit 1
+          fi
+          echo "Using Redis master at $REDIS_HOST (via Sentinel)"
           REDIS_HOST_ARG=(-h "$REDIS_HOST" -p 6379)
+        else
+          echo "WARNING: No Sentinel found, using Redis pod directly (may hit replica)"
         fi
+
+        # Helper function to run redis-cli commands
+        redis_cmd() {
+          kubectl exec -n {{.K8S_NAMESPACE}} "$REDIS_CLIENT_POD" "${CONTAINER_ARG[@]}" -- "${REDIS_ENV[@]}" redis-cli "${REDIS_HOST_ARG[@]}" "$@"
+        }
+
+        # Verify we can write to Redis before proceeding
+        TEST_KEY="ares:clear:test:$$"
+        if ! redis_cmd set "$TEST_KEY" "test" EX 5 >/dev/null 2>&1; then
+          echo "ERROR: Cannot write to Redis. Are we connected to a read-only replica?"
+          echo "Master host: ${REDIS_HOST:-direct}"
+          exit 1
+        fi
+        redis_cmd del "$TEST_KEY" >/dev/null 2>&1 || true
 
         for pattern in "ares:operation:*:state" "ares:operation:*:checkpoint_time" "ares:operations:*:status" "ares:lock:*" "ares:tasks:*" "ares:results:*"; do
-          keys=$(kubectl exec -n {{.K8S_NAMESPACE}} "$REDIS_CLIENT_POD" -- "${REDIS_ENV[@]}" redis-cli "${REDIS_HOST_ARG[@]}" --scan --pattern "$pattern")
+          keys=$(redis_cmd --scan --pattern "$pattern")
+          count=0
           if [ -n "$keys" ]; then
             for key in $keys; do
-              kubectl exec -n {{.K8S_NAMESPACE}} "$REDIS_CLIENT_POD" -- "${REDIS_ENV[@]}" redis-cli "${REDIS_HOST_ARG[@]}" del "$key" >/dev/null
+              if ! redis_cmd del "$key" >/dev/null; then
+                echo "ERROR: Failed to delete key: $key"
+                exit 1
+              fi
+              count=$((count + 1))
             done
           fi
-          echo "Cleared $pattern"
+          echo "Cleared $pattern ($count keys)"
         done
 
-        kubectl exec -n {{.K8S_NAMESPACE}} "$REDIS_CLIENT_POD" -- "${REDIS_ENV[@]}" redis-cli "${REDIS_HOST_ARG[@]}" del ares:operations >/dev/null
+        redis_cmd del ares:operations >/dev/null 2>&1 || true
         echo "Cleared ares:operations queue"
 
-        kubectl exec -n {{.K8S_NAMESPACE}} "$REDIS_CLIENT_POD" -- "${REDIS_ENV[@]}" redis-cli "${REDIS_HOST_ARG[@]}" del ares:operation:active >/dev/null
+        redis_cmd del ares:operation:active >/dev/null 2>&1 || true
         echo "Cleared ares:operation:active pointer"
 
         echo "Scaling $ORCH_DEPLOY back to $CURRENT_REPLICAS replicas"

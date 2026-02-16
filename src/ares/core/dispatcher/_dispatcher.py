@@ -7,7 +7,6 @@ running in Kubernetes pods.
 The dispatcher functionality is split across mixin classes for maintainability:
 - ThrottlingMixin: Rate limiting and phase detection
 - AgentMixin: Agent registration and management
-- MessagingMixin: Message queue operations
 - PublishingMixin: Discovery publishing (credentials, hosts, shares, vulnerabilities)
 - RoutingMixin: Task routing to specialized agents
 - ResultProcessingMixin: Task completion and data extraction
@@ -22,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from asyncio import Queue
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -33,7 +31,6 @@ from ares.core.config import get_agent_heartbeat_timeout, get_vulnerability_prio
 from ares.core.dispatcher.agents import AgentMixin
 from ares.core.dispatcher.announcements import AnnouncementMixin
 from ares.core.dispatcher.deferred_queue import DeferredQueueMixin
-from ares.core.dispatcher.messaging import MessagingMixin
 from ares.core.dispatcher.monitoring import MonitoringMixin
 from ares.core.dispatcher.persistence import PersistenceMixin
 from ares.core.dispatcher.publishing import PublishingMixin
@@ -54,14 +51,11 @@ from ares.core.task_queue import TaskResult as QueueTaskResult
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ares.core.messages import AgentMessage, MessageType
-
 
 class RedTeamDispatcher(
     ThrottlingMixin,
     DeferredQueueMixin,
     AgentMixin,
-    MessagingMixin,
     PublishingMixin,
     RoutingMixin,
     ResultProcessingMixin,
@@ -76,8 +70,7 @@ class RedTeamDispatcher(
 
     Responsibilities:
     - Agent registration and health monitoring
-    - Task routing based on agent capabilities
-    - Credential/discovery broadcasting
+    - Task routing based on agent capabilities via Redis task queues
     - State aggregation across agents
 
     Usage:
@@ -87,10 +80,10 @@ class RedTeamDispatcher(
         # Register agents as they come online
         await dispatcher.register(agent_info)
 
-        # Publish discoveries to all agents
+        # Publish discoveries (updates shared state)
         await dispatcher.publish_credential(credential, "ares-recon")
 
-        # Route tasks to specialized agents
+        # Route tasks to specialized agents via Redis
         task_id = await dispatcher.request_crack(hash_data, "orchestrator")
     """
 
@@ -107,15 +100,12 @@ class RedTeamDispatcher(
         """
         self._is_orchestrator = is_orchestrator
         self._agents: dict[str, AgentInfo] = {}
-        self._message_queues: dict[str, Queue[AgentMessage]] = {}
         self._shared_state: SharedRedTeamState | None = None
-        self._subscribers: dict[MessageType, set[str]] = {}
         self._task_callbacks: dict[str, Callable] = {}
         self._running = False
         self._redis_url = redis_url
         self._redis_client = None
         self._heartbeat_task: asyncio.Task | None = None
-        self._message_processor_task: asyncio.Task | None = None
         self._agent_heartbeat_timeout = get_agent_heartbeat_timeout()
         self._credential_access_event = asyncio.Event()
 
@@ -158,6 +148,28 @@ class RedTeamDispatcher(
 
         # Deferred queue for throttled tasks (queue instead of drop)
         self._init_deferred_queue()
+
+        # Thread-safe queue for delegation dispatches from threaded consumer
+        # When credentials are discovered in the threaded consumer, we can't dispatch
+        # delegation enumeration directly (requires main loop). Queue them here for
+        # the maintenance loop to process.
+        import queue
+
+        self._pending_delegation_queue: queue.Queue[tuple[str, str, str, str]] = queue.Queue()
+        # Tuple: (domain, username, password, source)
+
+        # Generic dispatch queue for operations that require the main event loop
+        # Used by threaded consumer when it needs to trigger dispatches (S4U chains,
+        # delegation exploits, etc.) but can't because self._task_queue is bound
+        # to the main event loop.
+        self._pending_dispatch_queue: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
+        # Tuple: (dispatch_type, params) where dispatch_type is:
+        # - "s4u_lateral": S4U chain lateral movement
+        # - "delegation_exploit": Constrained delegation exploit
+        # - "mark_exploited": Mark vulnerability as exploited
+
+        # Signal for threaded consumer to request immediate checkpoint
+        self._checkpoint_requested = threading.Event()
 
     async def start(self, operation_id: str) -> None:
         """

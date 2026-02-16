@@ -1804,12 +1804,6 @@ class WorkerAgent:
                     if await self._check_for_pointer_switch():
                         return
 
-                # Poll for messages
-                messages = await self.dispatcher.get_messages(self.agent_name, timeout=1.0)
-
-                for msg in messages:
-                    await self._handle_message(msg)
-
                 # Small sleep to prevent busy-waiting
                 await asyncio.sleep(0.5)
 

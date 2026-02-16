@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, ClassVar
 
@@ -56,6 +57,26 @@ class MonitoringMixin:
     _result_consumer_stop_event: threading.Event | None = None
     _last_result_consumer_iteration: float = 0.0  # For watchdog logging
 
+    def _update_task_activity(
+        self: RedTeamDispatcher,
+        current_task: str | None,
+        now: datetime,
+    ) -> None:
+        """Update task activity when a worker reports working on it.
+
+        This keeps the task "alive" in stale detection and transitions
+        PENDING tasks to IN_PROGRESS when a worker picks them up.
+        """
+        if not current_task or not self._shared_state:
+            return
+        task_info = self._shared_state.pending_tasks.get(current_task)
+        if not task_info:
+            return
+        task_info.last_activity_at = now
+        if task_info.status == TaskStatus.PENDING:
+            task_info.status = TaskStatus.IN_PROGRESS
+            task_info.started_at = now
+
     async def heartbeat(
         self: RedTeamDispatcher,
         agent_name: str,
@@ -77,15 +98,7 @@ class MonitoringMixin:
             self._agents[agent_name].last_heartbeat = now
 
         # Update task activity when worker reports working on it
-        # This keeps the task "alive" in stale detection
-        if current_task and self._shared_state:
-            task_info = self._shared_state.pending_tasks.get(current_task)
-            if task_info:
-                task_info.last_activity_at = now
-                # Also mark as in_progress if still pending
-                if task_info.status == TaskStatus.PENDING:
-                    task_info.status = TaskStatus.IN_PROGRESS
-                    task_info.started_at = now
+        self._update_task_activity(current_task, now)
 
     async def _heartbeat_monitor(self: RedTeamDispatcher) -> None:
         """Background task to monitor agent heartbeats.
@@ -113,9 +126,11 @@ class MonitoringMixin:
                                     self._agents[agent_name].status = heartbeat_data.get(
                                         "status", "idle"
                                     )
-                                    self._agents[agent_name].current_task = heartbeat_data.get(
-                                        "current_task"
-                                    )
+                                    current_task = heartbeat_data.get("current_task")
+                                    self._agents[agent_name].current_task = current_task
+
+                                    # Update task activity when worker reports working on it
+                                    self._update_task_activity(current_task, now)
                         except Exception as e:  # noqa: PERF203
                             # Heartbeat failures could indicate auth issues - log at ERROR level
                             logger.error(
@@ -698,14 +713,19 @@ class MonitoringMixin:
         if not vuln_type or not target:
             return
 
-        # Generate vuln_id if not provided
+        # Generate vuln_id if not provided (must match queue_vulnerability format)
+        normalized_type = vuln_type.lower()
         if not vuln_id:
-            vuln_id = f"{vuln_type}_{target}".replace(".", "_").replace(":", "_")
+            vuln_id = f"{normalized_type}_{target}_{uuid.uuid4().hex[:8]}"
 
-        # Check for duplicates
-        if vuln_id in self.shared_state.discovered_vulnerabilities:
-            logger.debug(f"Skipping duplicate vulnerability: {vuln_id}")
-            return
+        # Check for duplicates by type+target (same logic as queue_vulnerability)
+        for existing in self.shared_state.discovered_vulnerabilities.values():
+            if existing.vuln_type.lower() == normalized_type and existing.target == target:
+                logger.debug(
+                    f"Skipping duplicate vulnerability: {existing.vuln_id} "
+                    f"(type={normalized_type}, target={target})"
+                )
+                return
 
         # Create and store vulnerability
         details = data.get("details", {})
@@ -763,23 +783,38 @@ class MonitoringMixin:
 
         while self._running:
             try:
+                # Process pending delegation dispatches from threaded consumer
+                # These were queued because the threaded consumer can't dispatch directly
+                await self._process_pending_delegation_queue()
+
+                # Process pending dispatches (S4U lateral, delegation exploits, etc.)
+                # These are queued by the threaded consumer when it discovers exploitable
+                # situations but can't dispatch directly (self._task_queue bound to main loop)
+                await self._process_pending_dispatch_queue()
+
                 # Clean up stale tasks to prevent throttle deadlock
                 await self._cleanup_stale_tasks()
 
                 # Reconcile tasks with workers to detect orphans
                 await self._reconcile_tasks_with_workers()
 
-                # Periodic checkpoint (handles results processed by threaded consumer)
+                # Checkpoint if requested by threaded consumer or on periodic interval
                 now = time.monotonic()
-                if now - last_checkpoint >= checkpoint_interval:
+                checkpoint_requested = self._checkpoint_requested.is_set()
+                if checkpoint_requested or now - last_checkpoint >= checkpoint_interval:
+                    if checkpoint_requested:
+                        self._checkpoint_requested.clear()
+                        logger.info(
+                            f"⚡ Immediate checkpoint triggered by threaded consumer (creds={len(self.shared_state.all_credentials)})"
+                        )
                     await self._checkpoint()
                     last_checkpoint = now
 
                 # Reset failure counter on success
                 consecutive_failures = 0
 
-                # Run maintenance every 5 seconds (less frequent than result polling)
-                await asyncio.sleep(5)
+                # Run maintenance every 2 seconds to respond quickly to checkpoint requests
+                await asyncio.sleep(2)
 
             except asyncio.CancelledError:  # noqa: PERF203
                 logger.info("Maintenance loop cancelled")
@@ -792,6 +827,155 @@ class MonitoringMixin:
                 await asyncio.sleep(min(15, consecutive_failures * 5))
 
         logger.info("Maintenance loop stopped")
+
+    async def _process_pending_delegation_queue(self: RedTeamDispatcher) -> None:
+        """Process pending delegation dispatches queued by the threaded consumer.
+
+        When credentials are discovered in the threaded result consumer, we can't
+        dispatch delegation enumeration directly because it requires the main event
+        loop. The threaded consumer queues credentials here, and this method
+        (running on the main loop) processes them.
+
+        This eliminates the ~30s delay that would otherwise occur waiting for the
+        _auto_credential_expansion background task to pick up the credential.
+        """
+        import queue
+
+        processed = 0
+        while True:
+            try:
+                # Non-blocking get
+                domain, username, password, _source = self._pending_delegation_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            cred_key = f"{domain.lower()}:{username.lower()}"
+            if cred_key in self.shared_state.processed_delegation_creds:
+                continue
+
+            try:
+                task_id = await asyncio.wait_for(
+                    self.request_privesc_enumeration(
+                        source_agent="orchestrator",
+                        domain=domain,
+                        username=username,
+                        password=password,
+                        techniques=["find_delegation"],
+                    ),
+                    timeout=10.0,
+                )
+                if task_id:
+                    logger.info(
+                        f"🚀 Deferred delegation task {task_id} dispatched for "
+                        f"{domain}\\{username} (queued from threaded consumer)"
+                    )
+                    processed += 1
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout dispatching delegation for {domain}\\{username}")
+            except Exception as e:
+                logger.warning(f"Failed to dispatch delegation for {domain}\\{username}: {e}")
+
+        if processed:
+            logger.info(f"Processed {processed} pending delegation dispatches from queue")
+
+    async def _process_pending_dispatch_queue(self: RedTeamDispatcher) -> None:
+        """Process pending dispatches queued by the threaded consumer.
+
+        When the threaded result consumer discovers exploitable situations (S4U chains,
+        delegation vulnerabilities with credentials, etc.), it can't dispatch directly
+        because self._task_queue is bound to the main event loop. It queues them here,
+        and this method (running on the main loop) processes them.
+
+        Dispatch types:
+        - "s4u_lateral": S4U chain lateral movement (secretsdump after successful S4U)
+        - "delegation_exploit": Constrained delegation exploit with discovered credentials
+        """
+        import queue
+
+        processed = 0
+        while True:
+            try:
+                # Non-blocking get
+                dispatch_type, params = self._pending_dispatch_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            try:
+                if dispatch_type == "s4u_lateral":
+                    # S4U chain - dispatch secretsdump using the generated ticket
+                    domain = params.get("domain", "")
+                    target_ips = params.get("target_ips", [])
+                    ticket_path = params.get("ticket_path", "")
+                    dc_ip = params.get("dc_ip", "")
+
+                    task_id = await asyncio.wait_for(
+                        self.request_credential_access(
+                            domain=domain,
+                            source_agent="auto_s4u_chain",
+                            target_ips=target_ips,
+                            username="Administrator",
+                            techniques=["secretsdump"],
+                            reason="auto_s4u_chain",
+                            extra_params={
+                                "ticket_path": ticket_path,
+                                "no_pass": True,  # nosec B105 - not a password, it's a flag
+                                "dc_ip": dc_ip,
+                            },
+                        ),
+                        timeout=10.0,
+                    )
+                    if task_id:
+                        logger.info(
+                            f"🎫 Deferred S4U lateral movement task {task_id} dispatched for "
+                            f"{target_ips[0] if target_ips else 'unknown'} (queued from threaded consumer)"
+                        )
+                        processed += 1
+
+                elif dispatch_type == "delegation_exploit":
+                    # Constrained delegation exploit with discovered credentials
+                    vuln_id = params.get("vuln_id", "")
+                    account = params.get("account", "")
+                    target_spn = params.get("target_spn", "")
+                    domain = params.get("domain", "")
+                    username = params.get("username", "")
+                    password = params.get("password", "")
+                    dc_ip = params.get("dc_ip", "")
+
+                    task_id = await asyncio.wait_for(
+                        self.request_exploit(
+                            vuln_type="constrained_delegation",
+                            vuln_id=vuln_id,
+                            target=account,
+                            source_agent="auto_delegation",
+                            params={
+                                "account": account,
+                                "account_name": account,
+                                "target_spn": target_spn,
+                                "domain": domain,
+                                "username": username,
+                                "password": password,
+                                "dc_ip": dc_ip,
+                            },
+                        ),
+                        timeout=10.0,
+                    )
+                    if task_id:
+                        logger.info(
+                            f"🚀 Deferred delegation exploit task {task_id} dispatched for "
+                            f"{account} -> {target_spn} (queued from threaded consumer)"
+                        )
+                        processed += 1
+
+                else:
+                    logger.warning(f"Unknown dispatch type: {dispatch_type}")
+
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout processing deferred dispatch: {dispatch_type}")
+            except Exception as e:
+                logger.warning(f"Failed to process deferred dispatch {dispatch_type}: {e}")
+
+        if processed:
+            logger.info(f"Processed {processed} pending dispatches from queue")
 
     async def _log_throttle_health(self: RedTeamDispatcher) -> None:
         """
@@ -883,7 +1067,7 @@ class MonitoringMixin:
         self._result_consumer_thread = None
         self._result_consumer_stop_event = None
 
-    def _threaded_result_consumer_loop(self: RedTeamDispatcher) -> None:
+    def _threaded_result_consumer_loop(self: RedTeamDispatcher) -> None:  # noqa: PLR0912
         """Run result consumer in a dedicated thread with its own event loop.
 
         This mirrors the worker's threaded heartbeat pattern. By running in a
@@ -903,10 +1087,29 @@ class MonitoringMixin:
         task_queue: RedisTaskQueue | None = None
 
         try:
+            # Connect to Redis with retries (Sentinel may not be ready immediately)
             if redis_url:
-                task_queue = RedisTaskQueue(redis_url)
-                loop.run_until_complete(task_queue.connect())
-                logger.debug("Threaded result consumer connected to Redis")
+                max_connect_retries = 10
+                for attempt in range(max_connect_retries):
+                    try:
+                        task_queue = RedisTaskQueue(redis_url)
+                        loop.run_until_complete(task_queue.connect())
+                        logger.info("Threaded result consumer connected to Redis")
+                        break
+                    except Exception as e:
+                        if attempt < max_connect_retries - 1:
+                            wait_time = min(2**attempt, 30)  # Exponential backoff, max 30s
+                            logger.warning(
+                                f"Threaded consumer Redis connect failed (attempt {attempt + 1}/"
+                                f"{max_connect_retries}): {e}. Retrying in {wait_time}s..."
+                            )
+                            time.sleep(wait_time)
+                        else:
+                            logger.error(
+                                f"Threaded consumer failed to connect to Redis after "
+                                f"{max_connect_retries} attempts. Result processing disabled."
+                            )
+                            return  # Exit thread - can't function without Redis
 
             consecutive_failures = 0
             health_check_counter = 0
@@ -953,7 +1156,8 @@ class MonitoringMixin:
                         break
 
                 # Sleep between iterations (use threading.Event for interruptibility)
-                stop_event.wait(timeout=1.0)
+                # Reduced from 1.0s to 0.5s since batch checking is now O(1) round-trips
+                stop_event.wait(timeout=0.5)
 
         finally:
             if task_queue:
@@ -1015,6 +1219,11 @@ class MonitoringMixin:
         thread-local task queue for Redis operations but updates the shared
         dispatcher state (which is thread-safe for the operations we perform).
 
+        Uses batched pipeline checking for efficiency - with N tasks and 30s
+        socket timeout, sequential checking can block for N * 30s during
+        connectivity issues. Pipeline batching reduces this to a single
+        timeout window regardless of N.
+
         NOTE: Stale cleanup and task reconciliation are NOT done here because
         they use self._task_queue which is bound to the main event loop.
         Those operations continue to run on the main loop when it's not blocked.
@@ -1024,60 +1233,266 @@ class MonitoringMixin:
         if not task_queue:
             return
 
-        # Check results for all pending Redis tasks
+        # Check results for all pending Redis tasks using batch pipeline
+        # This is O(1) round-trips instead of O(N), critical for preventing
+        # 787s blocking when checking 25+ tasks with 30s socket timeout
         task_ids_to_check = list(self._redis_task_ids)
 
-        for task_id in task_ids_to_check:
+        if not task_ids_to_check:
+            # No tasks to check - still poll discoveries
+            await self._poll_discoveries_threaded(task_queue)
+            return
+
+        try:
+            batch_results = await task_queue.check_results_batch(task_ids_to_check)
+        except Exception as e:
+            logger.warning(f"Batch result check failed: {e}")
+            batch_results = {}
+
+        # Process results
+        for task_id, result in batch_results.items():
+            if result is None:
+                continue
+
             try:
-                result = await task_queue.check_result(task_id)
-                if result:
-                    logger.info(
-                        f"Threaded result consumer received result for task {task_id}: "
-                        f"success={result.success}"
-                    )
+                logger.info(
+                    f"Threaded result consumer received result for task {task_id}: "
+                    f"success={result.success}"
+                )
 
-                    # Track rate limit status
-                    if result.success:
-                        self.clear_rate_limit_backoff()
-                    elif result.error:
-                        error_str = str(result.error).lower()
-                        rate_limit_indicators = [
-                            "rate limit",
-                            "rate_limit",
-                            "ratelimit",
-                            "too many requests",
-                            "429",
-                            "quota exceeded",
-                            "tokens per min",
-                            "requests per min",
-                            "tpm limit",
-                            "rpm limit",
-                        ]
-                        if any(ind in error_str for ind in rate_limit_indicators):
-                            logger.warning(
-                                f"Task {task_id} failed with rate limit error - triggering backoff"
-                            )
-                            self.record_rate_limit_error()
+                # Track rate limit status
+                if result.success:
+                    self.clear_rate_limit_backoff()
+                elif result.error:
+                    error_str = str(result.error).lower()
+                    rate_limit_indicators = [
+                        "rate limit",
+                        "rate_limit",
+                        "ratelimit",
+                        "too many requests",
+                        "429",
+                        "quota exceeded",
+                        "tokens per min",
+                        "requests per min",
+                        "tpm limit",
+                        "rpm limit",
+                    ]
+                    if any(ind in error_str for ind in rate_limit_indicators):
+                        logger.warning(
+                            f"Task {task_id} failed with rate limit error - triggering backoff"
+                        )
+                        self.record_rate_limit_error()
 
-                    # Remove from tracking set
-                    self._redis_task_ids.discard(task_id)
+                # Remove from tracking set
+                self._redis_task_ids.discard(task_id)
 
-                    # Complete the task (updates shared state)
-                    # Skip checkpoint because we're in a different event loop (threaded consumer)
-                    # Checkpointing is handled by the maintenance loop on the main loop
-                    await self.complete_task(
-                        task_id=task_id,
-                        success=result.success,
-                        result=result.result,
-                        error=result.error,
-                        source_agent=result.agent_name or result.worker_pod or "unknown",
-                        skip_checkpoint=True,
-                    )
-            except Exception as e:  # noqa: PERF203
-                logger.warning(f"Error checking result for task {task_id}: {e}")
+                # Complete the task (updates shared state)
+                # Skip checkpoint because we're in a different event loop (threaded consumer)
+                # Checkpointing is handled by the maintenance loop on the main loop
+                # Pass task_queue so dispatches happen directly (don't wait for blocked main loop)
+                await self.complete_task(
+                    task_id=task_id,
+                    success=result.success,
+                    result=result.result,
+                    error=result.error,
+                    source_agent=result.agent_name or result.worker_pod or "unknown",
+                    skip_checkpoint=True,
+                    task_queue=task_queue,
+                )
+            except Exception as e:
+                logger.warning(f"Error processing result for task {task_id}: {e}")
 
         # Poll for real-time discoveries
         await self._poll_discoveries_threaded(task_queue)
+
+        # Process pending dispatches queued by complete_task() - DON'T wait for main loop!
+        # The main loop may be blocked by LLM timeouts, so we dispatch here using
+        # the thread's own task_queue
+        await self._process_pending_dispatch_queue_threaded(task_queue)
+        await self._process_pending_delegation_queue_threaded(task_queue)
+
+    async def _process_pending_dispatch_queue_threaded(
+        self: RedTeamDispatcher,
+        task_queue: RedisTaskQueue,
+    ) -> None:
+        """Process pending dispatches using the thread's task queue.
+
+        This runs in the threaded consumer, processing dispatches queued by
+        complete_task() → _auto_queue_delegation_vulnerabilities() etc.
+
+        CRITICAL: The maintenance loop on the main thread may be blocked by LLM
+        timeouts, so we MUST process these dispatches here using our own task_queue.
+        """
+        import queue
+
+        processed = 0
+        while True:
+            try:
+                dispatch_type, params = self._pending_dispatch_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            try:
+                if dispatch_type == "s4u_lateral":
+                    domain = params.get("domain", "")
+                    target_ips = params.get("target_ips", [])
+                    ticket_path = params.get("ticket_path", "")
+                    dc_ip = params.get("dc_ip", "")
+
+                    # Submit directly using thread's task_queue
+                    payload = {
+                        "domain": domain,
+                        "target_ips": target_ips,
+                        "dc_ip": dc_ip,
+                        "username": "Administrator",
+                        "techniques": ["secretsdump"],
+                        "reason": "auto_s4u_chain",
+                        "ticket_path": ticket_path,
+                        "no_pass": True,  # nosec B105 - not a password, it's a Kerberos auth flag
+                    }
+                    task_id = await task_queue.submit_task(
+                        task_type="credential_access",
+                        target_role="credential_access",
+                        payload=payload,
+                        source_agent="auto_s4u_chain",
+                        priority=1,
+                    )
+                    if task_id:
+                        from ares.core.models import TaskInfo
+
+                        task_info = TaskInfo(
+                            task_id=task_id,
+                            task_type="credential_access",
+                            assigned_agent="credential_access",
+                            params=payload,
+                        )
+                        self.shared_state.pending_tasks[task_id] = task_info
+                        self._redis_task_ids.add(task_id)
+                        logger.info(
+                            f"🎫 Threaded dispatch: S4U lateral {task_id} for "
+                            f"{target_ips[0] if target_ips else 'unknown'}"
+                        )
+                        processed += 1
+
+                elif dispatch_type == "delegation_exploit":
+                    vuln_id = params.get("vuln_id", "")
+                    account = params.get("account", "")
+                    target_spn = params.get("target_spn", "")
+                    domain = params.get("domain", "")
+                    username = params.get("username", "")
+                    password = params.get("password", "")
+                    dc_ip = params.get("dc_ip", "")
+
+                    payload = {
+                        "vuln_type": "constrained_delegation",
+                        "vuln_id": vuln_id,
+                        "target": account,
+                        "account": account,
+                        "account_name": account,
+                        "target_spn": target_spn,
+                        "domain": domain,
+                        "username": username,
+                        "password": password,
+                        "dc_ip": dc_ip,
+                    }
+                    task_id = await task_queue.submit_task(
+                        task_type="exploit",
+                        target_role="privesc",
+                        payload=payload,
+                        source_agent="auto_delegation",
+                        priority=1,
+                    )
+                    if task_id:
+                        from ares.core.models import TaskInfo
+
+                        task_info = TaskInfo(
+                            task_id=task_id,
+                            task_type="exploit",
+                            assigned_agent="privesc",
+                            params=payload,
+                        )
+                        self.shared_state.pending_tasks[task_id] = task_info
+                        self._redis_task_ids.add(task_id)
+                        logger.warning(
+                            f"🚀 Threaded dispatch: delegation exploit {task_id} for "
+                            f"{account} -> {target_spn}"
+                        )
+                        processed += 1
+
+                else:
+                    logger.warning(f"Unknown dispatch type in threaded consumer: {dispatch_type}")
+
+            except Exception as e:
+                logger.warning(f"Failed threaded dispatch {dispatch_type}: {e}")
+
+        if processed > 0:
+            logger.info(f"Threaded consumer dispatched {processed} task(s) directly")
+
+    async def _process_pending_delegation_queue_threaded(
+        self: RedTeamDispatcher,
+        task_queue: RedisTaskQueue,
+    ) -> None:
+        """Process pending delegation enumeration requests using thread's task queue.
+
+        When credentials are discovered in complete_task(), delegation enumeration
+        is queued to _pending_delegation_queue. This processes those requests
+        directly from the threaded consumer, bypassing the blocked main loop.
+        """
+        import queue
+
+        processed = 0
+        while True:
+            try:
+                domain, username, password, _source = self._pending_delegation_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            cred_key = f"{domain.lower()}:{username.lower()}"
+            if cred_key in self.shared_state.processed_delegation_creds:
+                continue
+
+            try:
+                # Resolve DC IP
+                dc_ip = self._find_domain_controller_ip(domain)
+                if not dc_ip and self.shared_state.target:
+                    dc_ip = self.shared_state.target.ip
+
+                payload = {
+                    "domain": domain,
+                    "dc_ip": dc_ip,
+                    "username": username,
+                    "password": password,
+                    "techniques": ["find_delegation"],
+                }
+
+                task_id = await task_queue.submit_task(
+                    task_type="privesc_enumeration",
+                    target_role="privesc",
+                    payload=payload,
+                    source_agent="orchestrator",
+                    priority=1,
+                )
+                if task_id:
+                    from ares.core.models import TaskInfo
+
+                    task_info = TaskInfo(
+                        task_id=task_id,
+                        task_type="privesc_enumeration",
+                        assigned_agent="privesc",
+                        params=payload,
+                    )
+                    self.shared_state.pending_tasks[task_id] = task_info
+                    self._redis_task_ids.add(task_id)
+                    logger.info(
+                        f"🚀 Threaded dispatch: delegation enum {task_id} for {domain}\\{username}"
+                    )
+                    processed += 1
+
+            except Exception as e:
+                logger.warning(f"Failed threaded delegation dispatch for {domain}\\{username}: {e}")
+
+        if processed > 0:
+            logger.info(f"Threaded consumer dispatched {processed} delegation enum task(s)")
 
     async def _poll_discoveries_threaded(
         self: RedTeamDispatcher,

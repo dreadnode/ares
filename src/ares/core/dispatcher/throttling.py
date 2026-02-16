@@ -69,6 +69,10 @@ class ThrottlingMixin:
         }
     )
 
+    # ESC8-related techniques that should bypass hard cap when dispatched as coercion tasks
+    # ESC8 is a critical path to DA via ADCS web enrollment relay
+    ESC8_COERCION_TECHNIQUES = frozenset({"ntlmrelayx_to_adcs", "petitpotam"})
+
     def _get_throttle_lock(self: RedTeamDispatcher) -> asyncio.Lock:
         """Get or create the throttle lock (lazy init for event loop safety)."""
         lock = self._throttle_lock
@@ -124,7 +128,7 @@ class ThrottlingMixin:
             and t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
         )
 
-    async def _check_llm_throttle_drop(
+    async def _check_llm_throttle_drop(  # noqa: PLR0912
         self: RedTeamDispatcher,
         task_type: str,
         target_role: str,
@@ -175,27 +179,36 @@ class ThrottlingMixin:
                 "delegation" in t.lower() for t in techniques
             )
 
-            if is_critical_exploit or is_delegation_enum:
+            # Check for ESC8-related coercion tasks (ntlmrelayx_to_adcs, petitpotam)
+            # ESC8 is a critical path to DA via ADCS web enrollment relay, but is
+            # dispatched as coercion tasks rather than exploit tasks
+            is_esc8_coercion = task_type == "coercion" and any(
+                t.lower() in self.ESC8_COERCION_TECHNIQUES for t in techniques
+            )
+
+            if is_critical_exploit or is_delegation_enum or is_esc8_coercion:
                 # Count how many tasks are already bypassing hard cap
                 bypass_count = llm_count - hard_cap
                 if bypass_count >= self.MAX_BYPASS_TASKS:
                     # Already have MAX_BYPASS_TASKS above hard cap - defer this one too
-                    bypass_reason = (
-                        f"{task_type}/{vuln_type}"
-                        if is_critical_exploit
-                        else f"{task_type}/find_delegation"
-                    )
+                    if is_critical_exploit:
+                        bypass_reason = f"{task_type}/{vuln_type}"
+                    elif is_esc8_coercion:
+                        bypass_reason = f"{task_type}/esc8_relay"
+                    else:
+                        bypass_reason = f"{task_type}/find_delegation"
                     logger.warning(
                         f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
                         f"DEFERRING {bypass_reason} (already {bypass_count} bypass tasks, max={self.MAX_BYPASS_TASKS})"
                     )
                     return True
 
-                bypass_reason = (
-                    f"{task_type}/{vuln_type}"
-                    if is_critical_exploit
-                    else f"{task_type}/find_delegation"
-                )
+                if is_critical_exploit:
+                    bypass_reason = f"{task_type}/{vuln_type}"
+                elif is_esc8_coercion:
+                    bypass_reason = f"{task_type}/esc8_relay"
+                else:
+                    bypass_reason = f"{task_type}/find_delegation"
                 logger.info(
                     f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
                     f"ALLOWING {bypass_reason} (high-value DA path, bypass {bypass_count + 1}/{self.MAX_BYPASS_TASKS})"
@@ -462,6 +475,7 @@ class ThrottlingMixin:
         source_agent: str,
         priority: int = 5,
         max_wait: float = 60.0,
+        task_queue: Any = None,
     ) -> str:
         """
         Submit a task with throttling to prevent overwhelming the LLM API.
@@ -473,6 +487,7 @@ class ThrottlingMixin:
             source_agent: Agent requesting the task
             priority: Task priority (lower = higher priority)
             max_wait: Maximum time to wait for throttle to clear
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
 
         Returns:
             Task ID if submitted, empty string on failure
@@ -482,7 +497,9 @@ class ThrottlingMixin:
             logger.debug(f"Rejecting {task_type} task - Domain Admin achieved, halting new tasks")
             return ""
 
-        if not self._task_queue:
+        # Use provided task_queue (from threaded consumer) or fall back to self._task_queue
+        effective_task_queue = task_queue if task_queue is not None else self._task_queue
+        if not effective_task_queue:
             logger.warning("No task queue available for throttled submit")
             return ""
 
@@ -505,7 +522,11 @@ class ThrottlingMixin:
             task_type in self.CRITICAL_PATH_TASK_TYPES
             and vuln_type in self.CRITICAL_PATH_VULN_TYPES
         )
-        skip_wait_loop = is_delegation_enum or is_critical_exploit
+        # ESC8-related coercion tasks (ntlmrelayx_to_adcs, petitpotam) are critical path
+        is_esc8_coercion = task_type == "coercion" and any(
+            t.lower() in self.ESC8_COERCION_TECHNIQUES for t in techniques
+        )
+        skip_wait_loop = is_delegation_enum or is_critical_exploit or is_esc8_coercion
 
         if role_queue_len == 0 and role_pending == 0:
             logger.debug(
@@ -516,7 +537,8 @@ class ThrottlingMixin:
         elif skip_wait_loop:
             logger.debug(
                 f"Bypassing throttle wait for {task_type} - critical path task "
-                f"(delegation_enum={is_delegation_enum}, critical_exploit={is_critical_exploit})"
+                f"(delegation_enum={is_delegation_enum}, critical_exploit={is_critical_exploit}, "
+                f"esc8_coercion={is_esc8_coercion})"
             )
             # Skip directly to submit - critical path tasks bypass 60s wait loop
         else:
@@ -581,7 +603,7 @@ class ThrottlingMixin:
             self._last_dispatch_time = asyncio.get_event_loop().time()
 
             # Submit the task (call underlying queue directly, not recursively)
-            return await self._task_queue.submit_task(
+            return await effective_task_queue.submit_task(
                 task_type=task_type,
                 target_role=target_role,
                 payload=payload,

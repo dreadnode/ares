@@ -314,6 +314,53 @@ class RedisTaskQueue:
 
         return TaskResult.model_validate_json(data)
 
+    async def check_results_batch(self, task_ids: list[str]) -> dict[str, TaskResult | None]:
+        """
+        Batch check for task results using Redis pipeline.
+
+        This is significantly faster than sequential check_result calls when
+        checking many tasks, as it performs all operations in a single round-trip.
+        With N tasks and 30s socket timeout, sequential checking can take up to
+        N * 30s during connectivity issues. Pipeline batching reduces this to
+        a single timeout window regardless of N.
+
+        Args:
+            task_ids: List of task IDs to check
+
+        Returns:
+            Dict mapping task_id -> TaskResult (or None if not ready)
+        """
+        if not task_ids:
+            return {}
+
+        if not self._connected:
+            await self.connect()
+
+        # Use pipeline for single round-trip
+        pipe = self._client.pipeline()
+        for task_id in task_ids:
+            result_key = self._result_queue_key(task_id)
+            pipe.rpop(result_key)
+
+        results: dict[str, TaskResult | None] = {}
+        try:
+            raw_results = await pipe.execute()
+            for task_id, data in zip(task_ids, raw_results, strict=False):
+                if data is None:
+                    results[task_id] = None
+                else:
+                    try:
+                        results[task_id] = TaskResult.model_validate_json(data)
+                    except Exception as e:
+                        logger.warning(f"Failed to parse result for {task_id}: {e}")
+                        results[task_id] = None
+        except Exception as e:
+            # On pipeline failure, return empty results (caller will retry)
+            logger.warning(f"Pipeline check_results_batch failed: {e}")
+            return dict.fromkeys(task_ids)
+
+        return results
+
     # === Worker Methods ===
 
     async def poll_task(

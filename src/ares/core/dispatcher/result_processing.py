@@ -15,9 +15,6 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from ares.core.config import get_max_output_chars
-from ares.core.context_manager import summarize_task_result
-from ares.core.messages import TaskComplete, TaskFailed
 from ares.core.models import (
     Credential,
     Hash,
@@ -33,31 +30,6 @@ if TYPE_CHECKING:
     from ares.core.dispatcher._dispatcher import RedTeamDispatcher
 
 
-# Valid SMB share permissions from netexec
-_VALID_SHARE_PERMISSIONS = {"read", "write", "read,write", "write,read", "full"}
-
-
-def _sanitize_share_permissions(raw_permissions: str) -> str:
-    """Validate and sanitize share permissions from agent results.
-
-    Agents may incorrectly parse netexec output and return comment text
-    (e.g., "Remote", "Default", "Basic") as permissions. This validates
-    that permissions are actually valid SMB permissions.
-
-    Args:
-        raw_permissions: The permissions string from agent result.
-
-    Returns:
-        Uppercased permissions if valid, empty string otherwise.
-    """
-    if not raw_permissions:
-        return ""
-    normalized = raw_permissions.strip().lower()
-    if normalized in _VALID_SHARE_PERMISSIONS:
-        return raw_permissions.strip().upper()
-    return ""
-
-
 class ResultProcessingMixin:
     """Task result processing and data extraction."""
 
@@ -69,6 +41,7 @@ class ResultProcessingMixin:
         error: str | None = None,
         source_agent: str = "",
         skip_checkpoint: bool = False,
+        task_queue: Any = None,
     ) -> None:
         """
         Mark a task as complete.
@@ -81,6 +54,7 @@ class ResultProcessingMixin:
             source_agent: Agent completing the task.
             skip_checkpoint: If True, skip checkpointing (used when called from threaded consumer
                 where the Redis client is bound to a different event loop).
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
         """
         # Use atomic pop to avoid TOCTOU race with _cleanup_stale_tasks()
         task_info = self.shared_state.pending_tasks.pop(task_id, None)
@@ -149,7 +123,12 @@ class ResultProcessingMixin:
         # Workers serialize discoveries and send them regardless of success/failure
         if isinstance(result, dict):
             await self._process_discovered_data(
-                result, source_agent, target_label, parent_credential_id, parent_attack_step
+                result,
+                source_agent,
+                target_label,
+                parent_credential_id,
+                parent_attack_step,
+                task_queue=task_queue,
             )
 
         # Process additional result fields only on success
@@ -163,7 +142,11 @@ class ResultProcessingMixin:
 
         if output:
             await self._process_output_text(
-                output, source_agent, parent_credential_id, parent_attack_step
+                output,
+                source_agent,
+                parent_credential_id,
+                parent_attack_step,
+                task_queue=task_queue,
             )
 
         # Auto-chain lateral movement after successful S4U attack
@@ -173,6 +156,7 @@ class ResultProcessingMixin:
                 task_info=task_info,
                 result=result if isinstance(result, dict) else {"output": str(result)},
                 source_agent=source_agent,
+                task_queue=task_queue,
             )
             if chained > 0:
                 logger.info(f"🎫 Auto-S4U-chain: dispatched {chained} lateral movement task(s)")
@@ -185,32 +169,6 @@ class ResultProcessingMixin:
                 await self.mark_vulnerability_exploited(vuln_id, success, result_dict)
                 if success:
                     logger.info(f"✅ Marked vulnerability {vuln_id} as exploited")
-
-        # Broadcast completion with summarized result to save orchestrator context
-        # Full structured discoveries are already extracted above into shared state
-        if success:
-            # Summarize result to prevent context bloat in orchestrator
-            # Keeps structured discoveries, truncates large raw outputs
-            broadcast_result = result
-            if isinstance(result, dict):
-                broadcast_result = summarize_task_result(
-                    result, task_info.task_type, max_output_chars=get_max_output_chars()
-                )
-            await self._broadcast(
-                TaskComplete(
-                    source_agent=source_agent,
-                    task_id=task_id,
-                    result={"task_type": task_info.task_type, "data": broadcast_result},
-                )
-            )
-        else:
-            await self._broadcast(
-                TaskFailed(
-                    source_agent=source_agent,
-                    task_id=task_id,
-                    error=error or "Unknown error",
-                )
-            )
 
         # Resolve any waiting futures
         self._resolve_task_future(task_id, success, result, error)
@@ -228,6 +186,7 @@ class ResultProcessingMixin:
         target_label: str,
         parent_credential_id: str | None = None,
         parent_attack_step: int = 0,
+        task_queue: Any = None,
     ) -> None:
         """Process discovered_* fields from worker result.
 
@@ -237,6 +196,7 @@ class ResultProcessingMixin:
             target_label: Label for logging.
             parent_credential_id: ID of credential used to discover these items (for attack chain).
             parent_attack_step: Attack step of parent credential.
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
         """
         discovered_hosts = result.get("discovered_hosts")
         if isinstance(discovered_hosts, list) and discovered_hosts:
@@ -319,18 +279,11 @@ class ResultProcessingMixin:
                             f"Error publishing cracked credential {hash_obj.domain}\\{hash_obj.username}: {e}"
                         )
 
-        discovered_shares = result.get("discovered_shares")
-        if isinstance(discovered_shares, list):
-            for s in discovered_shares:
-                if not isinstance(s, dict):
-                    continue
-                share = Share(
-                    host=s.get("host", ""),
-                    name=s.get("name", ""),
-                    permissions=_sanitize_share_permissions(s.get("permissions", "")),
-                    comment=s.get("comment", ""),
-                )
-                await self.publish_share(share, source_agent)
+        # NOTE: discovered_shares from JSON is NOT processed here.
+        # LLM agents parse netexec output non-deterministically, often returning
+        # invalid permissions (e.g., "Basic", "Remote" from comment text).
+        # Instead, shares are extracted deterministically from raw output via
+        # _extract_shares_from_output() in _process_output_text().
 
         discovered_users = result.get("discovered_users")
         if isinstance(discovered_users, list):
@@ -354,18 +307,22 @@ class ResultProcessingMixin:
         # Process discovered vulnerabilities (delegation, ADCS, etc.)
         discovered_vulns = result.get("discovered_vulnerabilities")
         if isinstance(discovered_vulns, list) and discovered_vulns:
-            await self._process_discovered_vulnerabilities(discovered_vulns, source_agent)
+            await self._process_discovered_vulnerabilities(
+                discovered_vulns, source_agent, task_queue=task_queue
+            )
 
     async def _process_discovered_vulnerabilities(
         self: RedTeamDispatcher,
         vulnerabilities: list[dict[str, Any]],
         source_agent: str,
+        task_queue: Any = None,
     ) -> None:
         """Process vulnerabilities discovered by workers and queue for exploitation.
 
         Args:
             vulnerabilities: List of vulnerability dicts from worker serialization
             source_agent: Agent that discovered the vulnerabilities
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
         """
         queued = 0
         for vuln_data in vulnerabilities:
@@ -420,7 +377,12 @@ class ResultProcessingMixin:
             # For delegation vulnerabilities with credentials, auto-dispatch exploit
             if vuln_type in ("constrained_delegation", "unconstrained_delegation") and vuln_id:
                 await self._auto_dispatch_delegation_exploit(
-                    vuln_type, target, details, source_agent, vuln_id
+                    vuln_type,
+                    target,
+                    details,
+                    source_agent,
+                    vuln_id,
+                    task_queue=task_queue,
                 )
 
         if queued > 0:
@@ -435,6 +397,7 @@ class ResultProcessingMixin:
         details: dict[str, Any],
         source_agent: str,
         vuln_id: str = "",
+        task_queue: Any = None,
     ) -> None:
         """Auto-dispatch exploitation for delegation vulnerabilities with credentials.
 
@@ -444,6 +407,7 @@ class ResultProcessingMixin:
             details: Vulnerability details including credentials
             source_agent: Agent that discovered the vulnerability
             vuln_id: Vulnerability ID from queue_vulnerability (for tracking exploitation)
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
         """
         if not details.get("has_credentials"):
             return
@@ -467,13 +431,29 @@ class ResultProcessingMixin:
         if not account_cred:
             return
 
-        # Use provided vuln_id or generate fallback
-        exploit_vuln_id = vuln_id or f"cd_{account.lower()}"
+        # Use provided vuln_id or lookup from discovered_vulnerabilities
+        exploit_vuln_id = vuln_id
+        if not exploit_vuln_id:
+            # Find matching vulnerability in discovered_vulnerabilities
+            for vid, vuln in self.shared_state.discovered_vulnerabilities.items():
+                if vuln.vuln_type != "constrained_delegation":
+                    continue
+                vuln_account = vuln.details.get("account_name", vuln.target).lower().rstrip("$")
+                if vuln_account == account_lower:
+                    exploit_vuln_id = vid
+                    break
+
+        if not exploit_vuln_id:
+            logger.warning(
+                f"Cannot dispatch S4U attack for {account}: no matching vulnerability found"
+            )
+            return
 
         logger.warning(
             f"🚀 Auto-dispatching S4U attack for {account} -> {target_spn} "
             f"(have credentials, DC: {dc_ip}, vuln_id: {exploit_vuln_id})"
         )
+
         await self.request_exploit(
             vuln_type="constrained_delegation",
             vuln_id=exploit_vuln_id,
@@ -488,9 +468,10 @@ class ResultProcessingMixin:
                 "password": account_cred.password,
                 "dc_ip": dc_ip,
             },
+            task_queue=task_queue,
         )
 
-    async def _process_success_result_data(  # noqa: PLR0912
+    async def _process_success_result_data(
         self: RedTeamDispatcher,
         result: dict[str, Any],
         task_id: str,
@@ -584,28 +565,9 @@ class ResultProcessingMixin:
                     )
                     await self.publish_credential(cracked_cred, source_agent)
 
-        share_data = result.get("share")
-        if isinstance(share_data, dict):
-            share = Share(
-                host=share_data.get("host", share_data.get("host_ip", "")),
-                name=share_data.get("name", share_data.get("share_name", "")),
-                permissions=_sanitize_share_permissions(share_data.get("permissions", "")),
-                comment=share_data.get("comment", share_data.get("description", "")),
-            )
-            await self.publish_share(share, source_agent)
-
-        shares_data = result.get("shares")
-        if isinstance(shares_data, list):
-            for s in shares_data:
-                if not isinstance(s, dict):
-                    continue
-                share = Share(
-                    host=s.get("host", s.get("host_ip", "")),
-                    name=s.get("name", s.get("share_name", "")),
-                    permissions=_sanitize_share_permissions(s.get("permissions", "")),
-                    comment=s.get("comment", s.get("description", "")),
-                )
-                await self.publish_share(share, source_agent)
+        # NOTE: share/shares from JSON is NOT processed here.
+        # LLM agents parse netexec output non-deterministically. Shares are
+        # extracted deterministically from raw output via _extract_shares_from_output().
 
     def _extract_output_from_result(self: RedTeamDispatcher, result: dict[str, Any]) -> str:
         """Extract combined output text from result dict."""
@@ -624,6 +586,7 @@ class ResultProcessingMixin:
         source_agent: str,
         parent_credential_id: str | None = None,
         parent_attack_step: int = 0,
+        task_queue: Any = None,
     ) -> None:
         """Process raw output text to extract discoveries.
 
@@ -632,6 +595,7 @@ class ResultProcessingMixin:
             source_agent: Agent that produced the output.
             parent_credential_id: ID of credential used to run the command (for attack chain).
             parent_attack_step: Attack step of parent credential.
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
         """
         domain = ""
         if self.shared_state.target and self.shared_state.target.domain:
@@ -716,7 +680,7 @@ class ResultProcessingMixin:
             delegations = self._extract_delegation_from_output(output)
             if delegations:
                 queued = await self._auto_queue_delegation_vulnerabilities(
-                    delegations, source_agent
+                    delegations, source_agent, task_queue=task_queue
                 )
                 if queued > 0:
                     logger.warning(
@@ -1518,7 +1482,10 @@ class ResultProcessingMixin:
         return delegations
 
     async def _auto_queue_delegation_vulnerabilities(  # noqa: PLR0912
-        self: RedTeamDispatcher, delegations: list[dict[str, str]], source_agent: str
+        self: RedTeamDispatcher,
+        delegations: list[dict[str, str]],
+        source_agent: str,
+        task_queue: Any = None,
     ) -> int:
         """
         Auto-queue delegation vulnerabilities for exploitation.
@@ -1526,6 +1493,7 @@ class ResultProcessingMixin:
         Args:
             delegations: List of delegation findings from _extract_delegation_from_output
             source_agent: Agent that discovered the delegation
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
 
         Returns:
             Number of vulnerabilities queued
@@ -1574,7 +1542,7 @@ class ResultProcessingMixin:
                 details["password"] = account_cred.password
                 details["domain"] = account_cred.domain
 
-            await self.queue_vulnerability(
+            queued_vuln_id = await self.queue_vulnerability(
                 vuln_type=vuln_type,
                 target=account,
                 details=details,
@@ -1584,10 +1552,11 @@ class ResultProcessingMixin:
             logger.warning(
                 f"🎫 Auto-queued {vuln_type} for {account} (target: {target_spn or 'any'})"
             )
-            queued += 1
+            if queued_vuln_id:
+                queued += 1
 
             # Auto-dispatch S4U attack if we have credentials for constrained delegation
-            if account_cred and delegation_type == "constrained" and target_spn:
+            if account_cred and delegation_type == "constrained" and target_spn and queued_vuln_id:
                 dc_ip = self._find_domain_controller_ip(account_cred.domain)
                 # Fallback: extract DC IP from target SPN hostname or vulnerability details
                 if not dc_ip:
@@ -1604,11 +1573,12 @@ class ResultProcessingMixin:
                     dc_ip = details.get("target_ip", "")
                 logger.warning(
                     f"🚀 Auto-dispatching S4U attack for {account} -> {target_spn} "
-                    f"(have credentials, DC: {dc_ip})"
+                    f"(have credentials, DC: {dc_ip}, vuln_id: {queued_vuln_id})"
                 )
+
                 await self.request_exploit(
                     vuln_type="constrained_delegation",
-                    vuln_id=f"cd_{account.lower()}",
+                    vuln_id=queued_vuln_id,
                     target=account,
                     source_agent="auto_delegation",
                     params={
@@ -1619,6 +1589,7 @@ class ResultProcessingMixin:
                         "password": account_cred.password,
                         "dc_ip": dc_ip,
                     },
+                    task_queue=task_queue,
                 )
 
         return queued

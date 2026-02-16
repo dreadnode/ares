@@ -937,10 +937,14 @@ class SharedRedTeamState:
         import threading
 
         if not self._dispatcher:
+            # Close coroutine to avoid "was never awaited" warning
+            coro.close()
             return
 
         # Skip when in non-main thread - coroutine uses main loop's Redis client
         if threading.current_thread() is not threading.main_thread():
+            # Close coroutine to avoid "was never awaited" warning
+            coro.close()
             return
 
         try:
@@ -1307,7 +1311,7 @@ class SharedRedTeamState:
             )
         return resolved
 
-    def add_credential(self, credential: Credential, source_agent: str) -> bool:
+    def add_credential(self, credential: Credential, source_agent: str) -> bool:  # noqa: PLR0912
         """Add credential if not duplicate. Returns True if added."""
         username = credential.username.strip()
         # Normalize domain to lowercase for consistency
@@ -1337,6 +1341,15 @@ class SharedRedTeamState:
         if "/" in username or "\\" in username or username.endswith(".txt"):
             logger.debug(f"Credential rejected: path artifact '{username}' from {source_agent}")
             return False
+        # Filter out attack tool artifacts (e.g., EVIL625686$ created by impacket addcomputer.py for RBCD)
+        username_upper = username.upper()
+        if username_upper.startswith("EVIL") and username_upper.endswith("$"):
+            middle = username_upper[4:-1]  # Extract part between EVIL and $
+            if middle.isdigit():
+                logger.debug(
+                    f"Credential rejected: attack tool artifact '{username}' from {source_agent}"
+                )
+                return False
         self.add_user(username, domain, source_agent)
         self.add_domain(domain)
         key = f"{domain}:{username}:{password}".lower()
@@ -2059,6 +2072,18 @@ class SharedRedTeamState:
             ).strip().lower() == name:
                 logger.debug(f"Share rejected: duplicate {host}/{name}")
                 return False
+
+        # Validate permissions before storing - agents may return comment text
+        # (e.g., "Remote" from "Remote Admin") as permissions
+        valid_perms = {"read", "write", "read,write", "write,read", "full"}
+        if share.permissions:
+            perm_lower = share.permissions.strip().lower()
+            if perm_lower not in valid_perms:
+                # Invalid permission - move to comment if empty, then clear
+                if not share.comment:
+                    share.comment = share.permissions
+                share.permissions = ""
+
         self.all_shares.append(share)
         logger.debug(f"Share added: {host}/{name}")
 
@@ -2208,22 +2233,30 @@ class SharedRedTeamState:
                 host.hostname = ""
 
         data = _to_json(self)
-        data["_v"] = 1
+        # Version 2: parsing bugs fixed, no cleanup needed on load
+        data["_v"] = 2
         return json.dumps(data, separators=(",", ":")).encode("utf-8")
 
     @classmethod
     def from_bytes(cls, data: bytes) -> SharedRedTeamState:
         """Deserialize state from Redis (JSON)."""
         raw = json.loads(data)
-        raw.pop("_v", None)
+        version = raw.pop("_v", 1)  # Default to v1 for old checkpoints
         state = _from_json(raw, cls)
 
         state.all_credentials = cls._dedupe_credentials(state.all_credentials)
         if not state.all_domains:
             state.all_domains = cls._extract_domains(state)
 
-        # Clean up domain data to fix historical issues
-        state._cleanup_domain_data()
+        # Version-gated cleanup: only run domain cleanup on old checkpoints (v1)
+        if version < 2:
+            logger.info(f"Migrating v{version} checkpoint - running domain data cleanup")
+            state._cleanup_domain_data()
+
+        # Always sanitize share permissions - agents can still return bad data
+        # even with v2, since LLM parsing is non-deterministic
+        state._sanitize_share_permissions()
+
         return state
 
     def _cleanup_domain_data(self) -> None:  # noqa: PLR0912
@@ -2329,6 +2362,33 @@ class SharedRedTeamState:
 
         # 5. Deduplicate Kerberoast/AS-REP hashes by user+SPN+etype
         self.all_hashes = self._dedupe_hashes(self.all_hashes)
+
+    def _sanitize_share_permissions(self) -> None:
+        """Sanitize share permissions to fix historical parsing bugs.
+
+        Netexec output has columns: Share, Permissions, Remark
+        When shares have no permissions, the Remark column was incorrectly
+        parsed as permissions (e.g., "Remote" from "Remote Admin").
+
+        This fixes existing bad data by clearing invalid permissions.
+        """
+        valid_perms = {"read", "write", "read,write", "write,read", "full"}
+        fixed_count = 0
+
+        for share in self.all_shares:
+            if not share.permissions:
+                continue
+            perm_lower = share.permissions.strip().lower()
+            if perm_lower not in valid_perms:
+                # Invalid permission - was probably parsed from comment
+                # Move it to comment if comment is empty
+                if not share.comment:
+                    share.comment = share.permissions
+                share.permissions = ""
+                fixed_count += 1
+
+        if fixed_count:
+            logger.info(f"Fixed {fixed_count} share(s) with invalid permissions")
 
     def _dedupe_hashes(self, hashes: list[Hash]) -> list[Hash]:
         """Deduplicate hashes.

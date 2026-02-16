@@ -9,7 +9,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ares.core.redis_client import create_redis_client, get_redis_sentinel_config
+from ares.core.redis_client import (
+    _resolve_sentinel_hosts,
+    create_redis_client,
+    get_redis_sentinel_config,
+)
 
 
 class DummySentinel:
@@ -22,11 +26,18 @@ class DummySentinel:
         self.kwargs = kwargs
         self.master = None
         self.master_kwargs: dict[str, Any] | None = None
+        self.slave = None
+        self.slave_kwargs: dict[str, Any] | None = None
 
     def master_for(self, master: str, **kwargs: Any):
         self.master = master
         self.master_kwargs = kwargs
         return "sentinel-client"
+
+    def slave_for(self, master: str, **kwargs: Any):
+        self.slave = master
+        self.slave_kwargs = kwargs
+        return "replica-client"
 
 
 def install_dummy_redis(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
@@ -53,8 +64,7 @@ def test_get_redis_sentinel_config_defaults(monkeypatch: pytest.MonkeyPatch) -> 
     config = get_redis_sentinel_config()
 
     assert config == {
-        "host": "sentinel",
-        "port": 26379,
+        "sentinels": [("sentinel", 26379)],
         "master": "mymaster",
         "sentinel_password": "redis-pass",  # pragma: allowlist secret
         "redis_password": "redis-pass",  # pragma: allowlist secret
@@ -73,13 +83,46 @@ def test_get_redis_sentinel_config_passwords(monkeypatch: pytest.MonkeyPatch) ->
     config = get_redis_sentinel_config()
 
     assert config == {
-        "host": "sentinel",
-        "port": 6380,
+        "sentinels": [("sentinel", 6380)],
         "master": "mymaster",
         "sentinel_password": "sentinel-pass",  # pragma: allowlist secret
         "redis_password": "redis-pass",  # pragma: allowlist secret
         "db": 2,
     }
+
+
+def test_get_redis_sentinel_config_multiple_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that comma-separated sentinel hosts are parsed correctly."""
+    monkeypatch.setenv("REDIS_SENTINEL_HOST", "sentinel-0:26379,sentinel-1:26379,sentinel-2:26379")
+    monkeypatch.setenv("REDIS_SENTINEL_MASTER", "mymaster")
+    monkeypatch.setenv("REDIS_PASSWORD", "redis-pass")  # pragma: allowlist secret
+
+    config = get_redis_sentinel_config()
+
+    assert config["sentinels"] == [
+        ("sentinel-0", 26379),
+        ("sentinel-1", 26379),
+        ("sentinel-2", 26379),
+    ]
+    assert config["master"] == "mymaster"
+
+
+def test_resolve_sentinel_hosts_comma_separated() -> None:
+    """Test comma-separated host parsing."""
+    result = _resolve_sentinel_hosts("host1:26379,host2:26380,host3", 26379)
+    assert result == [("host1", 26379), ("host2", 26380), ("host3", 26379)]
+
+
+def test_resolve_sentinel_hosts_single_with_port() -> None:
+    """Test single host with port."""
+    result = _resolve_sentinel_hosts("sentinel:26380", 26379)
+    assert result == [("sentinel", 26380)]
+
+
+def test_resolve_sentinel_hosts_single_without_port() -> None:
+    """Test single host without port uses default."""
+    result = _resolve_sentinel_hosts("sentinel", 26379)
+    assert result == [("sentinel", 26379)]
 
 
 @pytest.mark.asyncio

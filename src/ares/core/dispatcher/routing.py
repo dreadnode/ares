@@ -11,18 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from ares.core.messages import (
-    ACLAnalysisRequest,
-    CoercionRequest,
-    CrackRequest,
-    CredentialAccessRequest,
-    ExploitRequest,
-    LateralMovementRequest,
-    ReconRequest,
-    generate_task_id,
-)
 from ares.core.models import (
-    AgentRole,
     Credential,
     Host,
     TaskInfo,
@@ -347,6 +336,7 @@ class RoutingMixin:
         task_info: TaskInfo,
         result: dict[str, Any],
         source_agent: str,
+        task_queue: Any = None,
     ) -> int:
         """Auto-chain lateral movement after successful S4U attack.
 
@@ -359,6 +349,7 @@ class RoutingMixin:
             task_info: Information about the completed task
             result: Task result containing output
             source_agent: Agent that completed the task
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
 
         Returns:
             Number of lateral movement tasks dispatched
@@ -408,6 +399,7 @@ class RoutingMixin:
                 "no_pass": True,  # nosec B105 - not a password, it's a flag
                 "dc_ip": dc_ip,
             },
+            task_queue=task_queue,
         )
         return 1
 
@@ -534,39 +526,11 @@ class RoutingMixin:
             logger.info(f"Crack task {task_id} submitted to Redis queue")
             return task_id
 
-        task_id = generate_task_id()
-        cracker_agent = self._role_queues.get(AgentRole.CRACKER)
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route crack request")
+        return ""
 
-        if not cracker_agent:
-            logger.warning("No cracker agent registered, cannot route crack request")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="crack",
-            assigned_agent=cracker_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[cracker_agent].put(
-            CrackRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                hash_value=hash_value,
-                hash_type=hash_type,
-                username=username,
-                domain=domain,
-                callback_agent=source_agent,
-                wordlist=wordlist,
-                priority=priority,
-            )
-        )
-
-        logger.info(f"Crack request {task_id} sent to {cracker_agent}")
-        return task_id
-
-    async def request_lateral_movement(  # noqa: PLR0912
+    async def request_lateral_movement(
         self: RedTeamDispatcher,
         target_host: str,
         username: str,
@@ -699,37 +663,9 @@ class RoutingMixin:
             logger.info(f"Lateral movement task {task_id} submitted to Redis queue")
             return task_id
 
-        task_id = generate_task_id()
-        lateral_agent = self._role_queues.get(AgentRole.LATERAL)
-
-        if not lateral_agent:
-            logger.warning("No lateral agent registered, cannot route lateral request")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="lateral_movement",
-            assigned_agent=lateral_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[lateral_agent].put(
-            LateralMovementRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                target_host=target_host,
-                username=username,
-                password=password,
-                hash_value=hash_value,
-                domain=domain,
-                method=method,
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"Lateral movement request {task_id} sent to {lateral_agent}")
-        return task_id
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route lateral movement request")
+        return ""
 
     async def request_acl_analysis(
         self: RedTeamDispatcher,
@@ -832,34 +768,9 @@ class RoutingMixin:
             logger.info(f"ACL analysis task {task_id} submitted to Redis queue")
             return task_id
 
-        task_id = generate_task_id()
-        acl_agent = self._role_queues.get(AgentRole.ACL)
-
-        if not acl_agent:
-            logger.warning("No ACL agent registered, cannot route ACL request")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="acl_analysis",
-            assigned_agent=acl_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[acl_agent].put(
-            ACLAnalysisRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                target_user=target_user,
-                domain=domain,
-                find_path_to=find_path_to,
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"ACL analysis request {task_id} sent to {acl_agent}")
-        return task_id
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route ACL analysis request")
+        return ""
 
     async def request_recon(
         self: RedTeamDispatcher,
@@ -962,39 +873,9 @@ class RoutingMixin:
             )
             return task_id
 
-        task_id = generate_task_id()
-        recon_agent = self._role_queues.get(AgentRole.RECON)
-
-        if not recon_agent:
-            logger.warning("No recon agent registered, cannot route request")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="recon",
-            assigned_agent=recon_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[recon_agent].put(
-            ReconRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                domain=domain,
-                target_ips=payload["target_ips"],
-                dc_ip=dc_ip,
-                username=username,
-                password=password,
-                hash_value=hash_value,
-                reason=reason,
-                techniques=payload["techniques"],
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"Recon request {task_id} sent to {recon_agent}")
-        return task_id
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route recon request")
+        return ""
 
     async def request_credential_access(
         self: RedTeamDispatcher,
@@ -1009,6 +890,7 @@ class RoutingMixin:
         reason: str | None = None,
         techniques: list[str] | None = None,
         extra_params: dict[str, Any] | None = None,
+        task_queue: Any = None,
     ) -> str:
         """
         Request credential access actions (AS-REP roast, Kerberoast, secretsdump, LSASS).
@@ -1024,6 +906,7 @@ class RoutingMixin:
             hash_value: Optional NTLM hash for pass-the-hash actions.
             techniques: Optional list of techniques to prioritize.
             extra_params: Optional additional parameters to pass (e.g., ticket_path, no_pass).
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
 
         Returns:
             Task ID for tracking.
@@ -1067,12 +950,15 @@ class RoutingMixin:
         if extra_params:
             payload.update(extra_params)
 
-        if self._task_queue:
+        # Use provided task_queue (from threaded consumer) or fall back to self._task_queue
+        effective_task_queue = task_queue if task_queue is not None else self._task_queue
+        if effective_task_queue:
             task_id = await self._throttled_submit_task(
                 task_type="credential_access",
                 target_role="credential_access",
                 payload=payload,
                 source_agent=source_agent,
+                task_queue=effective_task_queue,
             )
             if not task_id:
                 return ""
@@ -1099,38 +985,9 @@ class RoutingMixin:
             )
             return task_id
 
-        task_id = generate_task_id()
-        credential_agent = self._role_queues.get(AgentRole.CREDENTIAL_ACCESS)
-
-        if not credential_agent:
-            logger.warning("No credential access agent registered, cannot route request")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="credential_access",
-            assigned_agent=credential_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[credential_agent].put(
-            CredentialAccessRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                domain=domain,
-                target_ips=payload["target_ips"],
-                dc_ip=dc_ip,
-                username=username,
-                password=password,
-                hash_value=hash_value,
-                techniques=payload["techniques"],
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"Credential access request {task_id} sent to {credential_agent}")
-        return task_id
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route credential access request")
+        return ""
 
     async def request_exploit(
         self: RedTeamDispatcher,
@@ -1139,6 +996,7 @@ class RoutingMixin:
         target: str,
         source_agent: str,
         params: dict[str, Any] | None = None,
+        task_queue: Any = None,
     ) -> str:
         """
         Request PrivEscAgent to exploit vulnerability.
@@ -1151,6 +1009,7 @@ class RoutingMixin:
             target: Target to exploit.
             source_agent: Agent making the request.
             params: Vulnerability-specific parameters.
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
 
         Returns:
             Task ID for tracking.
@@ -1192,7 +1051,9 @@ class RoutingMixin:
                 payload["dc_ip"] = dc_ip
                 logger.info(f"Resolved dc_ip={dc_ip} for exploit {vuln_type}")
 
-        if self._task_queue:
+        # Use provided task_queue (from threaded consumer) or fall back to self._task_queue
+        effective_task_queue = task_queue if task_queue is not None else self._task_queue
+        if effective_task_queue:
             # Use priority=1 (highest) - exploit tasks are the actual DA path.
             # Combined with phase adjustment (-2 in privilege_escalation),
             # exploits will have effective priority -1 → clamped to 1,
@@ -1203,6 +1064,7 @@ class RoutingMixin:
                 payload=payload,
                 source_agent=source_agent,
                 priority=1,
+                task_queue=effective_task_queue,
             )
             if not task_id:
                 return ""
@@ -1222,35 +1084,9 @@ class RoutingMixin:
 
             return task_id
 
-        task_id = generate_task_id()
-        privesc_agent = self._role_queues.get(AgentRole.PRIVESC)
-
-        if not privesc_agent:
-            logger.warning("No privesc agent registered, cannot route exploit request")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="exploit",
-            assigned_agent=privesc_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[privesc_agent].put(
-            ExploitRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                vuln_type=vuln_type,
-                vuln_id=vuln_id,
-                target=target,
-                params=params or {},
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"Exploit request {task_id} for {vuln_type} sent to {privesc_agent}")
-        return task_id
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route exploit request")
+        return ""
 
     async def request_privesc_enumeration(
         self: RedTeamDispatcher,
@@ -1360,40 +1196,9 @@ class RoutingMixin:
             )
             return task_id
 
-        task_id = generate_task_id()
-        privesc_agent = self._role_queues.get(AgentRole.PRIVESC)
-
-        if not privesc_agent:
-            logger.warning("No privesc agent registered, cannot route enumeration request")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="privesc_enumeration",
-            assigned_agent=privesc_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[privesc_agent].put(
-            ExploitRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                vuln_type="PRIVESC_ENUMERATION",
-                vuln_id=f"enum-{task_id}",
-                target=dc_ip or domain,
-                params={
-                    "domain": domain,
-                    "username": username,
-                    "password": password,
-                    "techniques": techniques or [],
-                },
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"Privesc enumeration request {task_id} sent to {privesc_agent}")
-        return task_id
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route privesc enumeration request")
+        return ""
 
     async def request_coercion(
         self: RedTeamDispatcher,
@@ -1462,34 +1267,9 @@ class RoutingMixin:
             logger.info(f"Coercion task {task_id} submitted to Redis queue")
             return task_id
 
-        task_id = generate_task_id()
-        coercion_agent = self._role_queues.get(AgentRole.COERCION)
-
-        if not coercion_agent:
-            logger.warning("No coercion agent registered, cannot route coercion request")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="coercion",
-            assigned_agent=coercion_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[coercion_agent].put(
-            CoercionRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                interface=interface,
-                techniques=techniques,
-                duration=duration,
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"Coercion request {task_id} sent to {coercion_agent}")
-        return task_id
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route coercion request")
+        return ""
 
 
 __all__ = ["RoutingMixin"]

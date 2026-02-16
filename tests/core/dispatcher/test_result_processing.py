@@ -383,37 +383,5 @@ SMB         192.168.58.20   445    WS01      public                          Bas
         assert public.comment == "Basic share"
 
 
-class TestSharePermissionSanitization:
-    """Tests for _sanitize_share_permissions validating agent results."""
-
-    def test_valid_permissions_are_uppercased(self):
-        """Valid permissions should be uppercased."""
-        from ares.core.dispatcher.result_processing import _sanitize_share_permissions
-
-        assert _sanitize_share_permissions("read") == "READ"
-        assert _sanitize_share_permissions("write") == "WRITE"
-        assert _sanitize_share_permissions("read,write") == "READ,WRITE"
-        assert _sanitize_share_permissions("READ,WRITE") == "READ,WRITE"
-
-    def test_invalid_permissions_rejected(self):
-        """Invalid permissions (comment text) should be rejected."""
-        from ares.core.dispatcher.result_processing import _sanitize_share_permissions
-
-        # These are all first words of share comments, not permissions
-        assert _sanitize_share_permissions("Remote") == ""
-        assert _sanitize_share_permissions("Default") == ""
-        assert _sanitize_share_permissions("Basic") == ""
-        assert _sanitize_share_permissions("Active") == ""
-        assert _sanitize_share_permissions("Logon") == ""
-
-    def test_empty_and_whitespace_handled(self):
-        """Empty and whitespace-only strings handled gracefully."""
-        from ares.core.dispatcher.result_processing import _sanitize_share_permissions
-
-        assert _sanitize_share_permissions("") == ""
-        assert _sanitize_share_permissions("   ") == ""
-        assert _sanitize_share_permissions(None) == ""
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -764,7 +764,7 @@ tasks:
       ROLE: '{{.ROLE | default ""}}'
       FOLLOW: '{{.FOLLOW | default "true"}}'
       LINES: '{{.LINES | default "100"}}'
-      MAX_LOG_REQUESTS: '{{.MAX_LOG_REQUESTS | default "20"}}'
+      MAX_LOG_REQUESTS: '{{.MAX_LOG_REQUESTS | default "50"}}'
     cmds:
       - |
         CONTAINER_ARGS=""
@@ -814,7 +814,7 @@ tasks:
       LINES: '{{.LINES | default "5000"}}'
       SINCE: '{{.SINCE | default ""}}'
       OUTPUT_DIR: '{{.OUTPUT_DIR | default "/tmp"}}'
-      MAX_LOG_REQUESTS: '{{.MAX_LOG_REQUESTS | default "20"}}'
+      MAX_LOG_REQUESTS: '{{.MAX_LOG_REQUESTS | default "50"}}'
     cmds:
       - |
         CONTAINER_ARGS=""
