@@ -109,7 +109,7 @@ class StatusMixin:
             try:
                 import json
 
-                vuln_prefix = f"ares:operation:{self.shared_state.operation_id}:vulns:"
+                vuln_prefix = f"ares:op:{self.shared_state.operation_id}:vulns:"
                 async for key in self._redis_client.scan_iter(f"{vuln_prefix}*"):
                     key_str = key.decode() if isinstance(key, bytes) else str(key)
                     if not key_str.startswith(vuln_prefix):
@@ -156,7 +156,7 @@ class StatusMixin:
                         priority=priority,
                     )
 
-                key_prefix = f"ares:operation:{self.shared_state.operation_id}:exploited:"
+                key_prefix = f"ares:op:{self.shared_state.operation_id}:exploited:"
                 async for key in self._redis_client.scan_iter(f"{key_prefix}*"):
                     key_str = key.decode() if isinstance(key, bytes) else str(key)
                     if not key_str.startswith(key_prefix):

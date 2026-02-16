@@ -20,7 +20,6 @@ from loguru import logger
 from ares.core.models import Hash, SharedRedTeamState, TimelineEvent, VulnerabilityInfo
 from ares.tools.red.common import (
     PLACEHOLDER_PASSWORDS,
-    AnyRedTeamState,
     format_weakness_block,
     get_credential_context,
     resolve_password,
@@ -32,9 +31,9 @@ from ares.tools.red.common import (
 class GoldenTicketTools(Toolset):
     """Tools for Kerberos golden ticket generation and domain escalation."""
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -155,10 +154,10 @@ class GoldenTicketTools(Toolset):
 class DelegationTools(Toolset):
     """Tools for discovering and exploiting Kerberos delegation vulnerabilities."""
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
     _PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = PLACEHOLDER_PASSWORDS
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -983,10 +982,10 @@ class CertipyTools(Toolset):
     domain admin privileges.
     """
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
     _PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = PLACEHOLDER_PASSWORDS
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -1634,9 +1633,9 @@ class TrustAttackTools(Toolset):
     and cross-forest attacks.
     """
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -1897,9 +1896,9 @@ class TrustAttackTools(Toolset):
 class GMSATools(Toolset):
     """Tools for Group Managed Service Account (gMSA) password retrieval."""
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 

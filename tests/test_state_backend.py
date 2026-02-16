@@ -448,11 +448,23 @@ class TestRedisStateBackend:
 
     @pytest.mark.asyncio
     async def test_add_weakness(self, backend, mock_redis):
-        """Test adding a weakness."""
+        """Test adding a weakness (uses SET for deduplication)."""
+        mock_redis.sadd.return_value = 1  # 1 = added (new item)
         result = await backend.add_weakness("SMB signing disabled on 192.168.58.10")
 
         assert result is True
-        mock_redis.rpush.assert_called_once()
+        mock_redis.sadd.assert_called()
+        call_args = mock_redis.sadd.call_args
+        assert call_args[0][0] == "ares:op:op-test-123:weaknesses"
+        assert call_args[0][1] == "SMB signing disabled on 192.168.58.10"
+
+    @pytest.mark.asyncio
+    async def test_add_weakness_duplicate(self, backend, mock_redis):
+        """Test adding a duplicate weakness returns False."""
+        mock_redis.sadd.return_value = 0  # 0 = already existed
+        result = await backend.add_weakness("SMB signing disabled on 192.168.58.10")
+
+        assert result is False
 
     @pytest.mark.asyncio
     async def test_error_handling(self, backend, mock_redis):

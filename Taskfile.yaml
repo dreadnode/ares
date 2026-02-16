@@ -39,7 +39,6 @@ includes:
       K8S_NAMESPACE: '{{.K8S_NAMESPACE}}'
       TARGET_PROFILE: '{{.TARGET_PROFILE}}'
       TARGET_REGION: '{{.TARGET_REGION}}'
-      REDTEAM_PROJECT: '{{.REDTEAM_PROJECT}}'
       TARGET: '{{.TARGET}}'
       DOMAIN: '{{.DOMAIN}}'
   blue:
@@ -90,7 +89,6 @@ vars:
   TARGET_PROFILE: '{{.TARGET_PROFILE | default "lab"}}'
   TARGET_REGION: '{{.TARGET_REGION | default "us-west-1"}}'
   # Red team defaults
-  REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
   TARGET: '{{.TARGET | default "dreadgoad"}}'
   DOMAIN: '{{.DOMAIN | default "sevenkingdoms.local"}}'
 

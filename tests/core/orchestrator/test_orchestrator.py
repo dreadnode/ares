@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ares.core.models import SharedRedTeamState, Target, TaskInfo, VulnerabilityInfo
+from ares.core.models import SharedRedTeamState, Target, TaskInfo
 from ares.core.orchestrator import run_multi_agent_operation
 
 
@@ -108,39 +108,13 @@ async def test_run_multi_agent_operation_skips_wait_when_completed(monkeypatch):
     wait_mock.assert_not_awaited()
 
 
-def test_build_redteam_report_state_uses_exploitation_status_counts():
-    """Report state should honor exploitation_status counts when provided."""
-    from ares.core.orchestrator import _build_redteam_report_state
-
-    state = SharedRedTeamState(
-        operation_id="op-3",
-        target=Target(ip="192.168.58.3", domain="contoso.local"),
-    )
-    vuln = VulnerabilityInfo(
-        vuln_id="ADCS_ESC1_dc01",
-        vuln_type="ADCS_ESC1",
-        target="dc01",
-        discovered_by="recon",
-    )
-    state.discovered_vulnerabilities[vuln.vuln_id] = vuln
-    state.exploited_vulnerabilities.add(vuln.vuln_id)
-
-    report_state = _build_redteam_report_state(
-        state,
-        {"total_discovered": 4, "total_succeeded": 2},
-    )
-
-    assert report_state.vulnerability_count == 4
-    assert report_state.exploited_count == 2
-
-
 class TestAutoBloodHound:
     """Tests for automatic BloodHound collection."""
 
     @pytest.mark.asyncio
     async def test_auto_bloodhound_dispatches_on_credentials(self, monkeypatch):
         """Test that BloodHound collection is dispatched when credentials are discovered."""
-        from ares.core.models import Credential, Target
+        from ares.core.models import Credential
         from ares.core.orchestrator import _auto_bloodhound
 
         # Setup mock dispatcher
@@ -182,7 +156,6 @@ class TestAutoBloodHound:
     @pytest.mark.asyncio
     async def test_auto_bloodhound_skips_when_no_credentials(self, monkeypatch):
         """Test that BloodHound is not dispatched without credentials."""
-        from ares.core.models import Target
         from ares.core.orchestrator import _auto_bloodhound
 
         state = SharedRedTeamState(
@@ -210,7 +183,7 @@ class TestAutoBloodHound:
     @pytest.mark.asyncio
     async def test_auto_bloodhound_stops_when_complete(self):
         """Test that BloodHound automation stops when operation is complete."""
-        from ares.core.models import Credential, Target
+        from ares.core.models import Credential
         from ares.core.orchestrator import _auto_bloodhound
 
         state = SharedRedTeamState(
@@ -243,7 +216,7 @@ class TestAutoCoercion:
     @pytest.mark.asyncio
     async def test_auto_coercion_esc8_when_adcs_found(self):
         """Test that ESC8 coercion is dispatched when ADCS server is detected."""
-        from ares.core.models import Credential, Host, Target
+        from ares.core.models import Credential, Host
         from ares.core.orchestrator import _auto_coercion
 
         state = SharedRedTeamState(
@@ -289,7 +262,7 @@ class TestAutoCoercion:
     @pytest.mark.asyncio
     async def test_auto_coercion_ldaps_relay_to_dc(self):
         """Test that LDAPS relay coercion is dispatched to DCs."""
-        from ares.core.models import Credential, Host, Target
+        from ares.core.models import Credential, Host
         from ares.core.orchestrator import _auto_coercion
 
         state = SharedRedTeamState(
@@ -332,7 +305,7 @@ class TestAutoCoercion:
     @pytest.mark.asyncio
     async def test_auto_coercion_waits_for_credentials(self):
         """Test that coercion waits for credentials before starting."""
-        from ares.core.models import Host, Target
+        from ares.core.models import Host
         from ares.core.orchestrator import _auto_coercion
 
         state = SharedRedTeamState(
@@ -434,7 +407,7 @@ class TestAutoDelegationEnumeration:
     @pytest.mark.asyncio
     async def test_auto_delegation_dispatches_on_credentials(self):
         """_auto_delegation_enumeration should dispatch find_delegation when credentials discovered."""
-        from ares.core.models import Credential, Target
+        from ares.core.models import Credential
         from ares.core.orchestrator import _auto_delegation_enumeration
 
         dispatcher = SimpleNamespace()
@@ -508,7 +481,7 @@ class TestAutoDelegationEnumeration:
     @pytest.mark.asyncio
     async def test_auto_delegation_processes_credential_only_once(self):
         """_auto_delegation_enumeration should not re-process same credential."""
-        from ares.core.models import Credential, Target
+        from ares.core.models import Credential
         from ares.core.orchestrator import _auto_delegation_enumeration
 
         dispatcher = SimpleNamespace()
@@ -572,7 +545,7 @@ class TestHashCrackingPriority:
     async def test_kerberoast_hash_gets_high_priority(self):
         """Kerberoast hashes should get priority 2 (high)."""
         from ares.core.dispatcher import RedTeamDispatcher
-        from ares.core.models import Hash, Host, Target
+        from ares.core.models import Hash, Host
         from ares.core.orchestrator import _auto_credential_access
 
         dispatcher = RedTeamDispatcher()
@@ -617,7 +590,7 @@ class TestHashCrackingPriority:
     async def test_asrep_hash_gets_medium_priority(self):
         """AS-REP hashes should get priority 3 (medium-high)."""
         from ares.core.dispatcher import RedTeamDispatcher
-        from ares.core.models import Hash, Host, Target
+        from ares.core.models import Hash, Host
         from ares.core.orchestrator import _auto_credential_access
 
         dispatcher = RedTeamDispatcher()
@@ -661,7 +634,7 @@ class TestHashCrackingPriority:
     async def test_normal_hash_gets_default_priority(self):
         """Normal hashes (NTLM, etc.) should get default priority 5."""
         from ares.core.dispatcher import RedTeamDispatcher
-        from ares.core.models import Hash, Host, Target
+        from ares.core.models import Hash, Host
         from ares.core.orchestrator import _auto_credential_access
 
         dispatcher = RedTeamDispatcher()

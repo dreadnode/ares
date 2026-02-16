@@ -16,7 +16,7 @@ Redis key structure:
     ares:op:{op_id}:hosts             LIST
     ares:op:{op_id}:users             LIST
     ares:op:{op_id}:shares            LIST
-    ares:op:{op_id}:weaknesses        LIST
+    ares:op:{op_id}:weaknesses        SET
     ares:op:{op_id}:vulns             HASH
     ares:op:{op_id}:dedup:{set_name}  SET
     ares:op:{op_id}:meta              HASH
@@ -168,18 +168,64 @@ class RedisStateBackend:
     # =========================================================================
 
     async def add_hash(self, hash_obj: Hash) -> bool:
-        """Add a hash to Redis LIST.
+        """Add a hash to Redis LIST with AS-REP/Kerberoast deduplication.
 
-        Note: Deduplication should be done by the caller before calling this method.
+        For AS-REP hashes, only one hash per user+domain is stored since each
+        AS-REP request generates a different hash but cracks to the same password.
+
+        For Kerberoast hashes, only one hash per user+domain+SPN+etype is stored.
 
         Args:
             hash_obj: Hash to add
 
         Returns:
-            True if added successfully
+            True if added, False if duplicate
         """
-        key = self._key(self.KEY_HASHES)
+        hash_type = (hash_obj.hash_type or "").strip().lower()
+        hash_value = hash_obj.hash_value or ""
+        username = (hash_obj.username or "").strip().lower()
+        domain = (hash_obj.domain or "").strip().lower()
+
+        # Detect AS-REP hashes
+        is_asrep = hash_type in {"as-rep", "asrep", "krb5asrep"} or hash_value.startswith(
+            "$krb5asrep$"
+        )
+
+        # Detect Kerberoast hashes
+        is_kerberoast = hash_type in {
+            "kerberoast",
+            "krb5tgs",
+            "tgs-rep",
+            "tgs",
+        } or hash_value.startswith("$krb5tgs$")
+
         try:
+            # AS-REP deduplication: one hash per user+domain
+            if is_asrep:
+                dedup_key = self._dedup_key("asrep_hashes")
+                member = f"{domain}:{username}"
+                added = await self._redis.sadd(dedup_key, member)
+                if not added:
+                    logger.debug(f"AS-REP hash rejected (duplicate): {domain}\\{username}")
+                    return False
+                await self._set_ttl(dedup_key)
+
+            # Kerberoast deduplication: one hash per user+domain+SPN+etype
+            elif is_kerberoast:
+                # Extract SPN and etype from hash format: $krb5tgs$ETYPE$*user$realm$spn*$...
+                spn_key = self._extract_kerberoast_spn_key(hash_value)
+                if spn_key:
+                    dedup_key = self._dedup_key("kerberoast_hashes")
+                    member = f"{domain}:{username}:{spn_key}"
+                    added = await self._redis.sadd(dedup_key, member)
+                    if not added:
+                        logger.debug(
+                            f"Kerberoast hash rejected (duplicate): {domain}\\{username} ({spn_key})"
+                        )
+                        return False
+                    await self._set_ttl(dedup_key)
+
+            key = self._key(self.KEY_HASHES)
             data = _serialize_hash(hash_obj)
             await self._redis.rpush(key, data)
             await self._set_ttl(key)
@@ -187,6 +233,34 @@ class RedisStateBackend:
         except Exception as e:
             logger.warning(f"Failed to add hash to Redis: {e}")
             return False
+
+    def _extract_kerberoast_spn_key(self, hash_value: str) -> str | None:
+        """Extract SPN and encryption type from Kerberoast hash for deduplication.
+
+        Hash format: $krb5tgs$ETYPE$*user$realm$spn*$checksum$encrypted
+
+        Returns:
+            String like "23:MSSQLSvc/sql.contoso.local:1433" or None if parsing fails
+        """
+        if not hash_value.startswith("$krb5tgs$"):
+            return None
+        try:
+            parts = hash_value.split("$")
+            if len(parts) < 4:
+                return None
+            etype = parts[2]  # e.g., "23" for RC4
+            # Extract SPN from *user$realm$spn* section
+            asterisk_parts = hash_value.split("*")
+            if len(asterisk_parts) < 2:
+                return None
+            inner = asterisk_parts[1]  # user$realm$spn
+            inner_parts = inner.split("$")
+            if len(inner_parts) < 3:
+                return None
+            spn = inner_parts[2]  # The SPN
+            return f"{etype}:{spn}"
+        except Exception:
+            return None
 
     async def get_hashes(self) -> list[Hash]:
         """Get all hashes from Redis LIST.
@@ -366,32 +440,32 @@ class RedisStateBackend:
     # =========================================================================
 
     async def add_weakness(self, weakness: str) -> bool:
-        """Add a weakness string to Redis LIST.
+        """Add a weakness string to Redis SET (auto-deduplicates).
 
         Args:
             weakness: Weakness description
 
         Returns:
-            True if added successfully
+            True if added (was new), False if already existed
         """
         key = self._key(self.KEY_WEAKNESSES)
         try:
-            await self._redis.rpush(key, weakness)
+            added = await self._redis.sadd(key, weakness)
             await self._set_ttl(key)
-            return True
+            return added > 0
         except Exception as e:
             logger.warning(f"Failed to add weakness to Redis: {e}")
             return False
 
     async def get_weaknesses(self) -> list[str]:
-        """Get all weaknesses from Redis LIST.
+        """Get all weaknesses from Redis SET.
 
         Returns:
             List of weakness strings
         """
         key = self._key(self.KEY_WEAKNESSES)
         try:
-            items = await self._redis.lrange(key, 0, -1)
+            items = await self._redis.smembers(key)
             # Items may be bytes or str depending on decode_responses
             return [item if isinstance(item, str) else item.decode() for item in items]
         except Exception as e:
@@ -614,7 +688,10 @@ class RedisStateBackend:
         try:
             items = await self._redis.hgetall(key)
             return {
-                k: json.loads(v if isinstance(v, str) else v.decode()) for k, v in items.items()
+                (k if isinstance(k, str) else k.decode()): json.loads(
+                    v if isinstance(v, str) else v.decode()
+                )
+                for k, v in items.items()
             }
         except Exception as e:
             logger.warning(f"Failed to get all meta fields: {e}")

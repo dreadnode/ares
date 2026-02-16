@@ -107,7 +107,7 @@ class TestOffloadLargeOutput:
         # Check Redis key format
         call_args = redis.set.call_args
         key = call_args[0][0]
-        assert key.startswith("ares:operation:op-123:output:task-456:")
+        assert key.startswith("ares:op:op-123:output:task-456:")
 
         # Check stored content
         stored_content = call_args[0][1]
@@ -176,7 +176,7 @@ class TestRetrieveOffloadedOutput:
     async def test_retrieve_returns_content_from_redis(self):
         """Returns stored content from Redis."""
         redis = AsyncMock()
-        keys = ["ares:operation:op-123:output:task-456:abc123"]
+        keys = ["ares:op:op-123:output:task-456:abc123"]
         redis.scan_iter = MagicMock(return_value=AsyncIterator(keys))
         redis.get = AsyncMock(return_value=b"full output content")
 
@@ -192,7 +192,7 @@ class TestRetrieveOffloadedOutput:
     async def test_retrieve_handles_string_response(self):
         """Handles Redis returning string instead of bytes."""
         redis = AsyncMock()
-        keys = ["ares:operation:op-123:output:task-456:abc123"]
+        keys = ["ares:op:op-123:output:task-456:abc123"]
         redis.scan_iter = MagicMock(return_value=AsyncIterator(keys))
         redis.get = AsyncMock(return_value="full output content")
 
@@ -209,9 +209,9 @@ class TestRetrieveOffloadedOutput:
         """When multiple keys exist, uses the last one alphabetically."""
         redis = AsyncMock()
         keys = [
-            "ares:operation:op-123:output:task-456:aaa",
-            "ares:operation:op-123:output:task-456:zzz",
-            "ares:operation:op-123:output:task-456:mmm",
+            "ares:op:op-123:output:task-456:aaa",
+            "ares:op:op-123:output:task-456:zzz",
+            "ares:op:op-123:output:task-456:mmm",
         ]
         redis.scan_iter = MagicMock(return_value=AsyncIterator(keys))
         redis.get = AsyncMock(return_value=b"latest content")
@@ -223,7 +223,7 @@ class TestRetrieveOffloadedOutput:
         )
 
         # Should fetch the last key when sorted
-        redis.get.assert_called_once_with("ares:operation:op-123:output:task-456:zzz")
+        redis.get.assert_called_once_with("ares:op:op-123:output:task-456:zzz")
 
 
 class TestSummarizeTaskResult:
@@ -412,7 +412,7 @@ class TestContextOffloader:
     async def test_retrieve_output(self, offloader, mock_redis):
         """retrieve_output calls retrieve_offloaded_output."""
         mock_redis.scan_iter = MagicMock(
-            return_value=AsyncIterator(["ares:operation:test-op:output:task-1:abc"])
+            return_value=AsyncIterator(["ares:op:test-op:output:task-1:abc"])
         )
         mock_redis.get = AsyncMock(return_value=b"full content")
 

@@ -253,23 +253,23 @@ class PublishingMixin:
             source_agent: Agent that discovered it.
 
         Returns:
-            True if host was new and added.
+            True if host was new or had meaningful data merged (services, roles, etc).
         """
-        added = self.shared_state.add_host(host)
+        updated = self.shared_state.add_host(host)
 
-        if added:
+        if updated:
             if threading.current_thread() is threading.main_thread():
                 await self._checkpoint()
             else:
                 self._checkpoint_requested.set()
-            logger.info(f"Host published: {host.ip} ({host.hostname})")
+            logger.info(f"Host updated: {host.ip} ({host.hostname})")
 
             # Auto-detect MSSQL and queue vulnerability for exploitation
             await self._auto_detect_mssql(host, source_agent)
         else:
-            logger.debug(f"Host not published (duplicate/merged): {host.ip} ({host.hostname})")
+            logger.debug(f"Host unchanged (exact duplicate): {host.ip} ({host.hostname})")
 
-        return added
+        return updated
 
     async def _auto_detect_mssql(self: RedTeamDispatcher, host: Host, source_agent: str) -> None:
         """

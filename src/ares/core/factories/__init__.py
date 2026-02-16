@@ -9,10 +9,8 @@ __all__ = [
     "ROLE_CALLBACK_TOOLS",
     "UNIVERSAL_TOOLSETS",
     "create_agent_info",
-    # Single-agent factories
     "create_investigation_agent",
     "create_multi_agent_ensemble",
-    "create_redteam_agent",
     "create_role_hooks",
     "create_specialized_agent",
     "load_agent_instructions",
@@ -25,12 +23,6 @@ def __getattr__(name: str):
         from ares.core.factories.blue_factory import create_investigation_agent
 
         return create_investigation_agent
-
-    # Red team factory (single-agent)
-    if name == "create_redteam_agent":
-        from ares.core.factories.red_factory import create_redteam_agent
-
-        return create_redteam_agent
 
     # Red team multi-agent factories
     if name in (

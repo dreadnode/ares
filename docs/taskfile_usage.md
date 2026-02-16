@@ -42,16 +42,6 @@ Start the Blue Team agent in poll mode (automatically polls Grafana for alerts):
 task ares:blue:
 ```
 
-Or run the Red Team agent against a target:
-
-```bash
-# Discover target via AWS EC2 Name tag filter
-task -y ares:red TARGET=dreadgoad
-
-# Or use a direct IP address
-task ares:red: TARGET=192.168.56.100
-```
-
 This will:
 
 1. Retrieve API keys from 1Password:
@@ -108,60 +98,9 @@ cp .env.example .env
 task ares:blue:local:
 ```
 
-### Red Team Tasks
+### Red Team Tasks (Multi-Agent)
 
-#### `task ares:red TARGET=<filter>`
-
-Run Red Team agent with automatic EC2 target discovery.
-
-**How Target Discovery Works:**
-
-When you provide a non-IP target (like `dreadgoad`), the task queries AWS EC2 to
-find running instances where the Name tag contains your filter string:
-
-```bash
-aws ec2 describe-instances \
-  --filters "Name=instance-state-name,Values=running" \
-  --query "Reservations[*].Instances[?contains(Tags[?Key=='Name'].Value|[0], 'TARGET')].PrivateIpAddress"
-```
-
-The first matching instance's private IP is used as the target.
-
-**Example:**
-
-```bash
-# EC2 target discovery - finds instances with "dreadgoad" in Name tag
-task -y ares:red TARGET=dreadgoad
-
-# Custom model and max steps
-task -y ares:red TARGET=dreadgoad MODEL=claude-sonnet-4-20250514 MAX_STEPS=300
-
-# Override all agents with one value
-task -y ares:red TARGET=dreadgoad MODEL_ALL=gpt-5.2 MAX_STEPS=300
-
-# Custom AWS profile and region
-task -y ares:red TARGET=dreadgoad PROFILE=production REGION=us-east-1
-```
-
-#### `task ares:red: TARGET=<ip>`
-
-Run Red Team agent against a direct IP address (bypasses EC2 discovery).
-
-```bash
-task ares:red: TARGET=192.168.56.100
-```
-
-#### `task ares:red:local: TARGET=<ip>`
-
-Run Red Team using `.env` file instead of 1Password.
-
-```bash
-task ares:red:local: TARGET=192.168.56.100
-```
-
-#### Multi-Agent Operations
-
-##### `task ares:red:multi TARGET=<target>`
+#### `task ares:red:multi TARGET=<target>`
 
 Run multi-agent red team operation with clean, sequential output.
 
@@ -589,19 +528,6 @@ EOF
 task ares:investigate ALERT=suspicious-activity.json
 
 # 3. View report
-task ares:reports:latest
-```
-
-### Red Team Workflow
-
-```bash
-# 1. Run red team agent (discovers target via EC2 Name tag)
-task -y ares:red TARGET=dreadgoad
-
-# Or target a specific IP directly
-task ares:red: TARGET=192.168.56.100
-
-# 2. Monitor progress (reports generated on completion)
 task ares:reports:latest
 ```
 

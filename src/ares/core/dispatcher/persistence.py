@@ -1,29 +1,130 @@
 """State persistence via RedisStateBackend.
 
-State now persists directly on each mutation via RedisStateBackend.
-This mixin provides legacy checkpoint compatibility (no-op) and recovery.
+State persists directly on each mutation via RedisStateBackend when called from
+the main event loop. When mutations happen in the threaded result consumer
+(different event loop), direct persistence fails and _checkpoint() is called
+to persist all in-memory state to Redis.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 from ares.core.models import SharedRedTeamState
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ares.core.dispatcher._dispatcher import RedTeamDispatcher
 
 
 class PersistenceMixin:
     """State persistence via RedisStateBackend.
 
-    Legacy checkpoint methods are no-ops since state persists on each mutation.
+    Direct persistence on mutation when in main event loop.
+    Checkpoint fallback for threaded consumer mutations.
     """
 
+    async def _persist_collection(
+        self: RedTeamDispatcher,
+        key: str,
+        items: list[Any],
+        serializer: Callable[[Any], str],
+        ttl: int,
+    ) -> None:
+        """Persist a collection to Redis using clear-and-rewrite."""
+        if not items:
+            return
+        pipe = self._redis_client.pipeline()
+        pipe.delete(key)
+        for item in items:
+            pipe.rpush(key, serializer(item))
+        pipe.expire(key, ttl)
+        await pipe.execute()
+
     async def _checkpoint(self: RedTeamDispatcher) -> None:
-        """No-op: State persists directly via RedisStateBackend on mutation."""
+        """Persist all in-memory state to Redis.
+
+        This is called when:
+        1. Threaded result consumer adds new data (event loop mismatch prevents direct persist)
+        2. Periodic checkpoint interval (safety net)
+
+        Persists all collections: hosts, credentials, hashes, shares, users, etc.
+        Uses clear-and-rewrite for simplicity and correctness.
+        """
+        if not self.shared_state or not self.shared_state._backend:
+            return
+
+        backend = self.shared_state._backend
+        op_id = self.shared_state.operation_id
+
+        try:
+            from ares.core.state_backend import (
+                _serialize_credential,
+                _serialize_hash,
+                _serialize_host,
+                _serialize_share,
+            )
+
+            ttl = backend.DEFAULT_TTL
+
+            # Persist all collections
+            await self._persist_collection(
+                f"ares:op:{op_id}:hosts",
+                self.shared_state.all_hosts,
+                _serialize_host,
+                ttl,
+            )
+            await self._persist_collection(
+                f"ares:op:{op_id}:shares",
+                self.shared_state.all_shares,
+                _serialize_share,
+                ttl,
+            )
+            await self._persist_collection(
+                f"ares:op:{op_id}:credentials",
+                self.shared_state.all_credentials,
+                _serialize_credential,
+                ttl,
+            )
+            await self._persist_collection(
+                f"ares:op:{op_id}:hashes",
+                self.shared_state.all_hashes,
+                _serialize_hash,
+                ttl,
+            )
+
+            # Persist weaknesses (SET, not LIST)
+            if self.shared_state.all_weaknesses:
+                weaknesses_key = f"ares:op:{op_id}:weaknesses"
+                pipe = self._redis_client.pipeline()
+                pipe.delete(weaknesses_key)
+                for w in self.shared_state.all_weaknesses:
+                    pipe.sadd(weaknesses_key, w)
+                pipe.expire(weaknesses_key, ttl)
+                await pipe.execute()
+
+            # Persist DC map
+            for domain, dc_ip in self.shared_state.domain_controllers.items():
+                await backend.set_dc(domain, dc_ip)
+
+            # Meta flags - always persist current values
+            await backend.set_meta("has_domain_admin", value=self.shared_state.has_domain_admin)
+            await backend.set_meta("has_golden_ticket", value=self.shared_state.has_golden_ticket)
+            if self.shared_state.domain_admin_path:
+                await backend.set_meta("domain_admin_path", self.shared_state.domain_admin_path)
+
+            logger.debug(
+                f"Checkpoint complete: {len(self.shared_state.all_hosts)} hosts, "
+                f"{len(self.shared_state.all_shares)} shares, "
+                f"{len(self.shared_state.all_credentials)} creds, "
+                f"{len(self.shared_state.all_hashes)} hashes"
+            )
+
+        except Exception as e:
+            logger.error(f"Checkpoint failed: {e}")
 
     async def recover_state(
         self: RedTeamDispatcher, operation_id: str

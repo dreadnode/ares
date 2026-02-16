@@ -684,13 +684,26 @@ class RedisTaskQueue:
         return False
 
     async def release_operation_lock(self, operation_id: str) -> None:
-        """Release the operation lock."""
+        """Release the operation lock and clear active pointer if it matches."""
         if not self._connected:
             await self.connect()
 
         key = f"{self.LOCK_PREFIX}:{operation_id}"
         await self._client.delete(key)
         logger.info(f"Released operation lock for {operation_id}")
+
+        # Clear the active operation pointer if it points to this operation
+        try:
+            active_op = await self._client.get("ares:op:active")
+            if active_op:
+                active_op_str = (
+                    active_op.decode() if isinstance(active_op, bytes) else str(active_op)
+                )
+                if active_op_str == operation_id:
+                    await self._client.delete("ares:op:active")
+                    logger.info(f"Cleared active operation pointer for {operation_id}")
+        except Exception as e:
+            logger.warning(f"Failed to clear active operation pointer: {e}")
 
     async def extend_operation_lock(
         self,

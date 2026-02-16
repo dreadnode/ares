@@ -10,11 +10,8 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
-from ares.core.models import Hash
-from ares.tools.red.common import (
-    AnyRedTeamState,
-    run_tool,
-)
+from ares.core.models import Hash, SharedRedTeamState
+from ares.tools.red.common import run_tool
 
 
 class ACLExploitTools(Toolset):
@@ -24,9 +21,9 @@ class ACLExploitTools(Toolset):
     permissions, use these tools to exploit them.
     """
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 

@@ -612,61 +612,55 @@ class TestTaskStatusAndTaskInfo:
         assert "Pod restart" in task.error
 
 
-class TestRedTeamStateHelpers:
-    """Tests for RedTeamState helper methods."""
+class TestSharedRedTeamStateHelpers:
+    """Tests for SharedRedTeamState helper methods."""
 
     def test_get_credential_key(self) -> None:
         """Test generating credential key."""
-        from ares.core.models import RedTeamState, Target
+        from ares.core.models import SharedRedTeamState, Target
 
-        state = RedTeamState(
-            operation_id="test-op",
-            target=Target(ip="192.168.58.1"),
-        )
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="192.168.58.1")
 
         key = state.get_credential_key("danj", "P@ssword123", "CONTOSO")
         assert key == "contoso:danj:p@ssword123"
 
     def test_get_credential_key_no_domain(self) -> None:
         """Test generating credential key without domain."""
-        from ares.core.models import RedTeamState, Target
+        from ares.core.models import SharedRedTeamState, Target
 
-        state = RedTeamState(
-            operation_id="test-op",
-            target=Target(ip="192.168.58.1"),
-        )
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="192.168.58.1")
 
         key = state.get_credential_key("adamb", "pass")
         assert key == ":adamb:pass"
 
     def test_admin_count(self) -> None:
         """Test counting admin credentials."""
-        from ares.core.models import Credential, RedTeamState, Target
+        from ares.core.models import Credential, SharedRedTeamState, Target
 
-        state = RedTeamState(
-            operation_id="test-op",
-            target=Target(ip="192.168.58.1"),
-            credentials=[
-                Credential(
-                    username="danj",
-                    password="pass",  # pragma: allowlist secret
-                    domain="CONTOSO",
-                    is_admin=True,
-                ),
-                Credential(
-                    username="adamb",
-                    password="pass",  # pragma: allowlist secret
-                    domain="CONTOSO",
-                    is_admin=False,
-                ),
-                Credential(
-                    username="karimm",
-                    password="pass",  # pragma: allowlist secret
-                    domain="CONTOSO",
-                    is_admin=True,
-                ),
-            ],
-        )
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="192.168.58.1")
+        state.all_credentials = [
+            Credential(
+                username="danj",
+                password="pass",  # pragma: allowlist secret
+                domain="CONTOSO",
+                is_admin=True,
+            ),
+            Credential(
+                username="adamb",
+                password="pass",  # pragma: allowlist secret
+                domain="CONTOSO",
+                is_admin=False,
+            ),
+            Credential(
+                username="karimm",
+                password="pass",  # pragma: allowlist secret
+                domain="CONTOSO",
+                is_admin=True,
+            ),
+        ]
 
         assert state.admin_count == 2
 

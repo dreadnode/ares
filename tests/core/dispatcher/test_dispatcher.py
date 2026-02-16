@@ -42,7 +42,7 @@ async def test_get_exploitation_status_loads_redis_vulns():
     dispatcher = RedTeamDispatcher()
     dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-1")
 
-    vuln_key = b"ares:operation:op-test-1:vulns:ADCS_ESC1_dc01"
+    vuln_key = b"ares:op:op-test-1:vulns:ADCS_ESC1_dc01"
     vuln_payload = json.dumps(
         {
             "type": "ADCS_ESC1",
@@ -52,7 +52,7 @@ async def test_get_exploitation_status_loads_redis_vulns():
             "queued_at": "2024-01-01T00:00:00+00:00",
         }
     )
-    exploit_key = b"ares:operation:op-test-1:exploited:ADCS_ESC1_dc01"
+    exploit_key = b"ares:op:op-test-1:exploited:ADCS_ESC1_dc01"
     exploit_payload = json.dumps({"success": True})
 
     dispatcher._redis_client = FakeRedis(
@@ -1374,7 +1374,7 @@ class TestAnnounceOperationComplete:
         # Verify Redis setex was called with correct key and data
         mock_redis.setex.assert_called_once()
         call_args = mock_redis.setex.call_args
-        assert call_args[0][0] == "ares:operations:op-test-announce:status"
+        assert call_args[0][0] == "ares:op:op-test-announce:status"
         assert call_args[0][1] == 86400  # 24 hour TTL
 
         # Parse the JSON to verify content

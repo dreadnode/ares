@@ -12,9 +12,7 @@ from typing import TYPE_CHECKING
 
 from ares.core.models import (
     PyramidLevel,
-    RedTeamState,
     SharedRedTeamState,
-    VulnerabilityInfo,
 )
 
 if TYPE_CHECKING:
@@ -189,7 +187,7 @@ class EvaluationGroundTruth:
 
 
 def create_ground_truth_from_red_state(
-    state: RedTeamState | SharedRedTeamState,
+    state: SharedRedTeamState,
 ) -> EvaluationGroundTruth:
     """Transform red team operation state into evaluation ground truth.
 
@@ -197,7 +195,7 @@ def create_ground_truth_from_red_state(
     state to create expected findings for blue team evaluation.
 
     Args:
-        state: Red team operation state (single-agent or multi-agent).
+        state: Red team operation state.
 
     Returns:
         EvaluationGroundTruth with expected findings.
@@ -206,29 +204,16 @@ def create_ground_truth_from_red_state(
     expected_techniques: list[ExpectedTechnique] = []
     expected_timeline: list[ExpectedTimelineEvent] = []
 
-    # Determine target IP and extract data based on state type
-    if isinstance(state, SharedRedTeamState):
-        target_ip = state.target.ip if state.target else ""
-        hosts = state.all_hosts
-        users = state.all_users
-        credentials = state.all_credentials
-        hashes = state.all_hashes
-        timeline = state.operation_timeline
-        techniques = state.identified_techniques
-        shares = state.all_shares
-        discovered_vulns = state.discovered_vulnerabilities
-        exploited_vulns = state.exploited_vulnerabilities
-    else:
-        target_ip = state.target.ip if state.target else ""
-        hosts = state.hosts
-        users = state.users
-        credentials = state.credentials
-        hashes = state.hashes
-        timeline = state.timeline
-        techniques = state.identified_techniques
-        shares = state.shares
-        discovered_vulns = dict[str, VulnerabilityInfo]()
-        exploited_vulns = set[str]()
+    target_ip = state.target.ip if state.target else ""
+    hosts = state.all_hosts
+    users = state.all_users
+    credentials = state.all_credentials
+    hashes = state.all_hashes
+    timeline = state.operation_timeline
+    techniques = state.identified_techniques
+    shares = state.all_shares
+    discovered_vulns = state.discovered_vulnerabilities
+    exploited_vulns = state.exploited_vulnerabilities
 
     # Extract IOCs from hosts
     for host in hosts:

@@ -59,7 +59,6 @@ __all__ = [
     "PyramidLevel",
     "QuestionSource",
     "QuestionState",
-    "RedTeamState",
     "Share",
     "SharedRedTeamState",
     "Target",
@@ -549,57 +548,6 @@ class Share(Model):
     comment: str = ""
 
 
-@dataclass
-class RedTeamState:
-    """Tracks state for red team operations."""
-
-    operation_id: str
-    target: Target
-    completed: bool = False
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    stage: InvestigationStage = InvestigationStage.TRIAGE
-    report_summary: str = ""
-
-    # Discovery tracking
-    hosts: list[Host] = field(default_factory=list)
-    users: list[User] = field(default_factory=list)
-    credentials: list[Credential] = field(default_factory=list)
-    hashes: list[Hash] = field(default_factory=list)
-    shares: list[Share] = field(default_factory=list)
-    weaknesses: list[str] = field(default_factory=list)
-
-    # Operation tracking
-    queried_hosts: set[str] = field(default_factory=set)
-    scanned_targets: set[str] = field(default_factory=set)
-    tested_credentials: set[str] = field(default_factory=set)
-    timeline: list[TimelineEvent] = field(default_factory=list)
-    identified_techniques: set[str] = field(default_factory=set)
-    pending_credential_findings: set[str] = field(default_factory=set)
-
-    # Success flags
-    has_domain_admin: bool = False
-    has_golden_ticket: bool = False
-
-    @property
-    def host_count(self) -> int:
-        """Count of discovered hosts."""
-        return len(self.hosts)
-
-    @property
-    def credential_count(self) -> int:
-        """Count of discovered credentials."""
-        return len(self.credentials)
-
-    @property
-    def admin_count(self) -> int:
-        """Count of admin credentials."""
-        return sum(1 for c in self.credentials if c.is_admin)
-
-    def get_credential_key(self, username: str, password: str, domain: str = "") -> str:
-        """Generate unique key for credential tracking."""
-        return f"{domain}:{username}:{password}".lower()
-
-
 # Multi-Agent Shared State Models
 
 
@@ -715,8 +663,7 @@ class SharedRedTeamState:
     """
     Cluster-wide state shared across all agents.
 
-    Stored in Redis/etcd for pod crash recovery. This extends the
-    single-agent RedTeamState with multi-agent coordination features.
+    Stored in Redis for pod crash recovery and multi-agent coordination.
 
     Attributes:
         operation_id: Unique identifier for this operation.
@@ -840,15 +787,27 @@ class SharedRedTeamState:
     # Example: "sysvol/login.bat" -> "QmF0Y2ggZmlsZSBjb250ZW50..."
     downloaded_artifacts: dict[str, str] = field(default_factory=dict)
 
+    # Report-time fields (set during report generation, NOT serialized)
+    vulnerability_count: int | None = field(default=None, init=False, repr=False, compare=False)
+    exploited_count: int | None = field(default=None, init=False, repr=False, compare=False)
+
     # Transient dispatcher reference for real-time publishing (NOT serialized)
     _dispatcher: Any = field(default=None, init=False, repr=False, compare=False)
 
     # Background task tracking for proper cleanup (NOT serialized)
     _background_tasks: set = field(default_factory=set, init=False, repr=False, compare=False)
 
+    # Tracking sets exposed via properties (NOT serialized)
+    _queried_hosts: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
+    _tested_credentials: set[str] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+
     # Redis-native state backend (NOT serialized)
     # When set, all add_* methods persist directly to Redis instead of in-memory lists
     _backend: Any = field(default=None, init=False, repr=False, compare=False)
+    # Event loop where backend was created (for cross-loop detection)
+    _backend_loop: Any = field(default=None, init=False, repr=False, compare=False)
 
     def set_dispatcher(self, dispatcher) -> None:
         """Set dispatcher for real-time publishing of discoveries."""
@@ -861,10 +820,55 @@ class SharedRedTeamState:
         directly to Redis instead of in-memory lists. This eliminates
         the need for periodic checkpointing and merge logic.
 
+        Also captures the current event loop to detect cross-loop calls
+        from threaded consumers, which would cause "Future attached to
+        a different loop" errors.
+
         Args:
             backend: RedisStateBackend instance
         """
+        import asyncio
+
         object.__setattr__(self, "_backend", backend)
+        # Capture the event loop where backend was created
+        try:
+            loop = asyncio.get_running_loop()
+            object.__setattr__(self, "_backend_loop", loop)
+        except RuntimeError:
+            # No event loop running, will be set later
+            pass
+
+    def _can_persist_to_backend(self) -> bool:
+        """Check if we can safely persist to the Redis backend.
+
+        Returns False if:
+        - No backend is set
+        - No event loop is running
+        - Current loop differs from backend loop (threaded consumer case)
+
+        When called from the threaded result consumer, the current loop
+        is different from where the backend was created. Attempting to
+        use the backend's Redis client from a different loop causes
+        "Future attached to a different loop" errors. In this case,
+        we skip persistence - the worker already published the data
+        via pub/sub, so it's not lost.
+        """
+        if not self._backend:
+            return False
+
+        import asyncio
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+
+        # If backend loop wasn't captured (shouldn't happen), allow persist
+        if self._backend_loop is None:
+            return True
+
+        # Only persist if we're in the same loop where backend was created
+        return current_loop is self._backend_loop
 
     # =========================================================================
     # Processed Set Helpers (with Redis persistence)
@@ -904,17 +908,14 @@ class SharedRedTeamState:
         if in_memory_attr is not None and hasattr(self, in_memory_attr):
             getattr(self, in_memory_attr).add(key)
 
-        # Persist to Redis backend if available
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.mark_processed(redis_set_name, key))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                pass  # No event loop
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.mark_processed(redis_set_name, key))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
     def is_processed(self, set_name: str, key: str) -> bool:
         """Check if a key has been processed.
@@ -1009,17 +1010,14 @@ class SharedRedTeamState:
         self.golden_tickets.append(ticket)
         logger.info(f"Golden ticket added for {ticket.get('domain')}: {ticket.get('status')}")
 
-        # Persist to Redis backend if available
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.add_golden_ticket(ticket))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                pass  # No event loop
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.add_golden_ticket(ticket))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         return True
 
@@ -1039,17 +1037,14 @@ class SharedRedTeamState:
         self.adminsd_holder_backdoors.append(backdoor_key)
         logger.info(f"AdminSD backdoor added: {backdoor_key}")
 
-        # Persist to Redis backend if available
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.add_adminsd_backdoor(backdoor_key))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                pass  # No event loop
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.add_adminsd_backdoor(backdoor_key))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         return True
 
@@ -1071,17 +1066,14 @@ class SharedRedTeamState:
         self.acl_chains.append(chain)
         logger.info(f"ACL chain added: {chain_id}")
 
-        # Persist to Redis backend if available
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.add_acl_chain(chain))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                pass  # No event loop
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.add_acl_chain(chain))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         return True
 
@@ -1100,17 +1092,14 @@ class SharedRedTeamState:
                 self.acl_chains[i] = chain
                 logger.info(f"ACL chain updated: {chain_id}")
 
-                # Persist to Redis backend if available
-                if self._backend:
+                # Persist to Redis backend if available and in the correct event loop
+                if self._can_persist_to_backend():
                     import asyncio
 
-                    try:
-                        loop = asyncio.get_running_loop()
-                        task = loop.create_task(self._backend.update_acl_chain(chain_id, chain))
-                        self._background_tasks.add(task)
-                        task.add_done_callback(self._background_tasks.discard)
-                    except RuntimeError:
-                        pass  # No event loop
+                    loop = asyncio.get_running_loop()
+                    task = loop.create_task(self._backend.update_acl_chain(chain_id, chain))
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
 
                 return True
 
@@ -1135,17 +1124,14 @@ class SharedRedTeamState:
         self.gmsa_accounts.append(gmsa)
         logger.info(f"gMSA account added: {gmsa.get('account')}")
 
-        # Persist to Redis backend if available
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.add_gmsa_account(gmsa))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                pass  # No event loop
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.add_gmsa_account(gmsa))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         return True
 
@@ -1228,18 +1214,14 @@ class SharedRedTeamState:
         self.downloaded_artifacts[key] = encoded
         logger.info(f"Artifact stored: {key} ({len(content_bytes)} bytes) from {source_agent}")
 
-        # Persist to Redis backend if available
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.store_artifact(key, encoded))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                # No event loop, skip Redis persist
-                pass
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.store_artifact(key, encoded))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         return True
 
@@ -1621,18 +1603,14 @@ class SharedRedTeamState:
         self.pending_credential_findings.discard(pending_key)
         logger.info(f"Credential added: {domain}\\{username} (source: {source_agent})")
 
-        # Persist to Redis backend if available (replaces checkpoint serialization)
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.add_credential(credential))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                # No event loop, skip Redis persist
-                pass
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.add_credential(credential))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         return True
 
@@ -1763,18 +1741,14 @@ class SharedRedTeamState:
             f"User added: {normalized_domain}\\{normalized} (source: {source or 'unknown'})"
         )
 
-        # Persist to Redis backend if available
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.add_user(user))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                # No event loop, skip Redis persist
-                pass
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.add_user(user))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         return True
 
@@ -1815,18 +1789,14 @@ class SharedRedTeamState:
             return False
         self.all_domains.append(normalized)
 
-        # Persist to Redis backend if available
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.add_domain(normalized))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                # No event loop, skip Redis persist
-                pass
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.add_domain(normalized))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         # If this is an FQDN (has a dot), retroactively normalize any
         # credentials/users/hashes with matching NetBIOS domain
@@ -1867,20 +1837,14 @@ class SharedRedTeamState:
         self.netbios_to_fqdn[netbios_lower] = fqdn_lower
         logger.info(f"NetBIOS mapping added: {netbios_lower} -> {fqdn_lower}")
 
-        # Persist to Redis backend if available
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(
-                    self._backend.set_netbios_mapping(netbios_lower, fqdn_lower)
-                )
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                # No event loop, skip Redis persist
-                pass
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.set_netbios_mapping(netbios_lower, fqdn_lower))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         # Also add the FQDN to all_domains if not already present
         self.add_domain(fqdn_lower)
@@ -2176,25 +2140,21 @@ class SharedRedTeamState:
                 f"- **Impact:** Complete domain compromise. Golden Tickets grant indefinite DA access."
             )
 
-        # Persist to Redis backend if available (replaces checkpoint serialization)
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.add_hash(hash_obj))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-                # Also persist DA status if achieved
-                if hash_type == "ntlm" and username == "krbtgt":
-                    task2 = loop.create_task(
-                        self._backend.set_domain_admin(achieved=True, path=self.domain_admin_path)
-                    )
-                    self._background_tasks.add(task2)
-                    task2.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                # No event loop, skip Redis persist
-                pass
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.add_hash(hash_obj))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+            # Also persist DA status if achieved
+            if hash_type == "ntlm" and username == "krbtgt":
+                task2 = loop.create_task(
+                    self._backend.set_domain_admin(achieved=True, path=self.domain_admin_path)
+                )
+                self._background_tasks.add(task2)
+                task2.add_done_callback(self._background_tasks.discard)
 
         return True
 
@@ -2298,7 +2258,7 @@ class SharedRedTeamState:
         return " → ".join(parts) if parts else "Unknown path"
 
     def add_host(self, host: Host) -> bool:  # noqa: PLR0912
-        """Add host if not duplicate. Returns True if added."""
+        """Add host if not duplicate. Returns True if added or meaningfully merged."""
         if not host.ip or not host.ip.strip():
             logger.debug("Host rejected: empty IP address")
             return False
@@ -2311,6 +2271,9 @@ class SharedRedTeamState:
                 host.hostname = ""
         for existing in self.all_hosts:
             if existing.ip == host.ip:
+                # Track if we're making meaningful changes (for checkpoint triggering)
+                data_changed = False
+
                 # Merge stronger hostname/OS details instead of dropping updates.
                 existing_hostname = (existing.hostname or "").strip()
                 if existing_hostname:
@@ -2332,6 +2295,7 @@ class SharedRedTeamState:
                         or (existing_is_short and new_is_fqdn)
                     ):
                         existing.hostname = new_hostname
+                        data_changed = True
                         # Extract domain from new FQDN hostname
                         if new_is_fqdn:
                             parts = new_hostname.lower().split(".")
@@ -2340,12 +2304,22 @@ class SharedRedTeamState:
                                 self.add_domain(domain)
                 if host.os and (not existing.os or existing.os.lower() == "unknown"):
                     existing.os = host.os
+                    data_changed = True
                 if host.roles:
+                    old_roles_count = len(existing.roles)
                     existing.roles = list({*existing.roles, *host.roles})
+                    if len(existing.roles) > old_roles_count:
+                        data_changed = True
                 if host.services:
+                    old_services_count = len(existing.services)
                     existing.services = list({*existing.services, *host.services})
+                    if len(existing.services) > old_services_count:
+                        data_changed = True
                 # Update DC status after merge (new services/hostname may reveal it's a DC)
+                old_is_dc = existing.is_dc
                 existing.update_dc_status()
+                if existing.is_dc and not old_is_dc:
+                    data_changed = True
                 # Register DC IP if merge reveals it's a domain controller
                 if existing.is_dc and existing.hostname and "." in existing.hostname:
                     parts = existing.hostname.lower().split(".")
@@ -2355,9 +2329,27 @@ class SharedRedTeamState:
                             self.domain_controllers[domain] = existing.ip
                             logger.info(f"DC registered (merge): {domain} -> {existing.ip}")
                 logger.debug(
-                    f"Host merged: {host.ip} (existing, updated details, is_dc={existing.is_dc})"
+                    f"Host merged: {host.ip} (existing, updated details, is_dc={existing.is_dc}, "
+                    f"data_changed={data_changed})"
                 )
-                return False
+                # Persist merged host to Redis backend
+                if self._can_persist_to_backend():
+                    import asyncio
+
+                    loop = asyncio.get_running_loop()
+                    task = loop.create_task(self._backend.update_host(existing.ip, existing))
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
+                    # Also persist DC mapping if merge revealed it's a DC
+                    if existing.is_dc and existing.hostname and "." in existing.hostname:
+                        parts = existing.hostname.lower().split(".")
+                        if len(parts) > 1:
+                            dc_domain = ".".join(parts[1:])
+                            task2 = loop.create_task(self._backend.set_dc(dc_domain, existing.ip))
+                            self._background_tasks.add(task2)
+                            task2.add_done_callback(self._background_tasks.discard)
+                # Return True if data changed so caller can trigger checkpoint
+                return data_changed
         # Set DC status before adding
         host.update_dc_status()
         self.all_hosts.append(host)
@@ -2378,26 +2370,22 @@ class SharedRedTeamState:
                     self.domain_controllers[domain] = host.ip
                     logger.info(f"DC registered: {domain} -> {host.ip} ({host.hostname})")
 
-        # Persist to Redis backend if available (replaces checkpoint serialization)
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.add_host(host))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-                # Also persist DC mapping if this is a DC
-                if host.is_dc and host.hostname and "." in host.hostname:
-                    parts = host.hostname.lower().split(".")
-                    if len(parts) > 1:
-                        dc_domain = ".".join(parts[1:])
-                        task2 = loop.create_task(self._backend.set_dc(dc_domain, host.ip))
-                        self._background_tasks.add(task2)
-                        task2.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                # No event loop, skip Redis persist
-                pass
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.add_host(host))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+            # Also persist DC mapping if this is a DC
+            if host.is_dc and host.hostname and "." in host.hostname:
+                parts = host.hostname.lower().split(".")
+                if len(parts) > 1:
+                    dc_domain = ".".join(parts[1:])
+                    task2 = loop.create_task(self._backend.set_dc(dc_domain, host.ip))
+                    self._background_tasks.add(task2)
+                    task2.add_done_callback(self._background_tasks.discard)
 
         return True
 
@@ -2429,18 +2417,14 @@ class SharedRedTeamState:
         self.all_shares.append(share)
         logger.debug(f"Share added: {host}/{name}")
 
-        # Persist to Redis backend if available (replaces checkpoint serialization)
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.add_share(share))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                # No event loop, skip Redis persist
-                pass
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.add_share(share))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         return True
 
@@ -2451,18 +2435,14 @@ class SharedRedTeamState:
         self.all_weaknesses.append(block)
         logger.info(f"Weakness added: {block[:80]}...")
 
-        # Persist to Redis backend if available (replaces checkpoint serialization)
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.add_weakness(block))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                # No event loop, skip Redis persist
-                pass
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.add_weakness(block))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         return True
 
@@ -2480,18 +2460,14 @@ class SharedRedTeamState:
                 return False
         self.discovered_vulnerabilities[vuln.vuln_id] = vuln
 
-        # Persist to Redis backend if available
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.add_vulnerability(vuln))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                # No event loop, skip Redis persist
-                pass
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.add_vulnerability(vuln))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         return True
 
@@ -2499,18 +2475,14 @@ class SharedRedTeamState:
         """Mark a vulnerability as exploited."""
         self.exploited_vulnerabilities.add(vuln_id)
 
-        # Persist to Redis backend if available
-        if self._backend:
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
             import asyncio
 
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._backend.mark_exploited(vuln_id))
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                # No event loop, skip Redis persist
-                pass
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.mark_exploited(vuln_id))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
     def get_unexploited_vulnerabilities(self) -> list[VulnerabilityInfo]:
         """Get vulnerabilities that haven't been exploited yet."""
@@ -2525,44 +2497,76 @@ class SharedRedTeamState:
         return [c for c in self.all_credentials if c.source.startswith(f"{agent_name}:")]
 
     # =========================================================================
-    # Compatibility aliases for RedTeamState interface
-    # These allow tools expecting RedTeamState to work with SharedRedTeamState
+    # Convenience aliases
     # =========================================================================
 
     @property
     def hosts(self) -> list[Host]:
-        """Alias for all_hosts (RedTeamState compatibility)."""
+        """Alias for all_hosts."""
         return self.all_hosts
 
     @property
     def users(self) -> list[User]:
-        """Alias for all_users (RedTeamState compatibility)."""
+        """Alias for all_users."""
         return self.all_users
 
     @property
     def credentials(self) -> list[Credential]:
-        """Alias for all_credentials (RedTeamState compatibility)."""
+        """Alias for all_credentials."""
         return self.all_credentials
 
     @property
     def hashes(self) -> list[Hash]:
-        """Alias for all_hashes (RedTeamState compatibility)."""
+        """Alias for all_hashes."""
         return self.all_hashes
 
     @property
     def shares(self) -> list[Share]:
-        """Alias for all_shares (RedTeamState compatibility)."""
+        """Alias for all_shares."""
         return self.all_shares
 
     @property
     def weaknesses(self) -> list[str]:
-        """Alias for all_weaknesses (RedTeamState compatibility)."""
-        return self.all_weaknesses
+        """Return combined weaknesses and vulnerability descriptions for reporting."""
+        vuln_descriptions = [
+            f"{v.vuln_type} on {v.target} ({v.vuln_id})"
+            for v in self.discovered_vulnerabilities.values()
+        ]
+        return self.all_weaknesses + vuln_descriptions
+
+    @property
+    def timeline(self) -> list[TimelineEvent]:
+        """Alias for operation_timeline."""
+        return self.operation_timeline
+
+    @property
+    def stage(self) -> InvestigationStage:
+        """Return operation stage for reporting."""
+        return InvestigationStage.SYNTHESIS
+
+    @property
+    def report_summary(self) -> str:
+        """Return empty report summary (generated dynamically)."""
+        return ""
+
+    @property
+    def admin_count(self) -> int:
+        """Count of admin credentials."""
+        return sum(1 for c in self.all_credentials if c.is_admin)
+
+    @property
+    def credential_count(self) -> int:
+        """Count of all credentials."""
+        return len(self.all_credentials)
+
+    @property
+    def host_count(self) -> int:
+        """Count of all hosts."""
+        return len(self.all_hosts)
 
     @property
     def queried_hosts(self) -> set[str]:
-        """Compatibility property - tracks queried hosts."""
-        # SharedRedTeamState tracks this via pending_tasks, but provide empty set for compatibility
+        """Tracks queried hosts."""
         return getattr(self, "_queried_hosts", set())
 
     @queried_hosts.setter
@@ -2572,7 +2576,7 @@ class SharedRedTeamState:
 
     @property
     def tested_credentials(self) -> set[str]:
-        """Compatibility property - tracks tested credentials."""
+        """Tracks tested credentials."""
         return getattr(self, "_tested_credentials", set())
 
     @tested_credentials.setter
@@ -2581,7 +2585,7 @@ class SharedRedTeamState:
         object.__setattr__(self, "_tested_credentials", value)
 
     def get_credential_key(self, username: str, password: str, domain: str = "") -> str:
-        """Generate unique key for credential tracking (RedTeamState compatibility)."""
+        """Generate unique key for credential tracking."""
         return f"{domain}:{username}:{password}".lower()
 
     def to_summary(self) -> dict[str, Any]:

@@ -13,8 +13,6 @@ import dreadnode as dn
 from dreadnode.agent.tools import Toolset
 from loguru import logger
 
-from ares.core.config import get_default_network_interface
-
 
 def _ip_in_targets(ip: str, targets: list[str]) -> bool:
     """Check if IP falls within any target range (individual IP or CIDR)."""
@@ -789,16 +787,16 @@ class OrchestratorTools(Toolset):
             ...     duration=600
             ... )
         """
-        # Auto-detect interface if not specified (handles AWS ens5 vs eth0)
-        if interface is None:
-            interface = get_default_network_interface()
-            logger.debug(f"Auto-detected network interface: {interface}")
+        # NOTE: Do NOT detect interface here on the orchestrator side.
+        # Pass empty string and let the coercion worker detect the interface locally,
+        # since the orchestrator pod doesn't have hostNetwork and would fall back to eth0.
+        # The worker pod has hostNetwork: true and can detect the correct interface (ens5).
 
         tech_list = [t.strip() for t in techniques.split(",")]
 
         task_id = await self.dispatcher.request_coercion(
             source_agent=self._agent_name,
-            interface=interface,
+            interface=interface or "",  # Let worker auto-detect
             techniques=tech_list,
             duration=duration,
         )

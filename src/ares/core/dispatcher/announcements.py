@@ -90,7 +90,7 @@ class AnnouncementMixin:
         # Workers check is_operation_completed() which reads this key
         if self._redis_client is not None:
             try:
-                status_key = f"ares:operations:{self.shared_state.operation_id}:status"
+                status_key = f"ares:op:{self.shared_state.operation_id}:status"
                 status_data = {
                     "status": "completed",
                     "success": success,

@@ -20,14 +20,18 @@ from __future__ import annotations
 
 import os
 import socket
+import threading
 from typing import Any
 
 from loguru import logger
 
 from ares.core.config import get_redis_url
 
-# Module-level Sentinel client for reuse (avoids creating multiple connections)
-_sentinel_client = None
+# Thread-local Sentinel client storage
+# Each thread needs its own Sentinel client because asyncio futures are bound to
+# the event loop that created them. The threaded result consumer creates a new
+# event loop, so it needs its own Sentinel client.
+_thread_local = threading.local()
 
 
 def _parse_int(value: str | None, default: int) -> int:
@@ -161,11 +165,17 @@ def _get_redis_timeouts() -> tuple[float | None, float | None, float | None]:
 
 
 def _get_or_create_sentinel():
-    """Get or create a shared Sentinel client."""
-    global _sentinel_client
+    """Get or create a thread-local Sentinel client.
 
-    if _sentinel_client is not None:
-        return _sentinel_client
+    Each thread needs its own Sentinel client because the underlying asyncio
+    futures are bound to the event loop that created them. When the threaded
+    result consumer creates a new event loop, reusing a Sentinel client from
+    the main thread causes "Future attached to a different loop" errors.
+    """
+    # Check thread-local storage for existing client
+    sentinel_client = getattr(_thread_local, "sentinel_client", None)
+    if sentinel_client is not None:
+        return sentinel_client
 
     try:
         import redis.asyncio as redis_async
@@ -179,12 +189,13 @@ def _get_or_create_sentinel():
     socket_timeout, socket_connect_timeout, health_check_interval = _get_redis_timeouts()
 
     sentinels = sentinel_config["sentinels"]
+    thread_name = threading.current_thread().name
     logger.info(
-        f"Creating Sentinel client with {len(sentinels)} sentinel(s): "
+        f"Creating Sentinel client for thread '{thread_name}' with {len(sentinels)} sentinel(s): "
         f"{[f'{h}:{p}' for h, p in sentinels]} (master: {sentinel_config['master']})"
     )
 
-    _sentinel_client = redis_async.Sentinel(
+    sentinel_client = redis_async.Sentinel(
         sentinels,
         password=sentinel_config["sentinel_password"],
         socket_timeout=socket_timeout,
@@ -193,7 +204,10 @@ def _get_or_create_sentinel():
         # Note: decode_responses is set per-client, not on Sentinel
     )
 
-    return _sentinel_client
+    # Store in thread-local storage
+    _thread_local.sentinel_client = sentinel_client
+
+    return sentinel_client
 
 
 async def create_redis_client(redis_url: str | None = None, *, decode_responses: bool = False):

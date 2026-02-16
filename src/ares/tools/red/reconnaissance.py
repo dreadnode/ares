@@ -14,9 +14,8 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
-from ares.core.models import Credential, Host, Share
+from ares.core.models import Credential, Host, Share, SharedRedTeamState
 from ares.tools.red.common import (
-    AnyRedTeamState,
     add_credential_to_state,
     add_user_to_state,
     format_weakness_block,
@@ -30,10 +29,10 @@ from ares.tools.red.common import (
 class NetworkEnumerationTools(Toolset):
     """Tools for network scanning and recon."""
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
     dispatcher: Any | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -263,7 +262,7 @@ class NetworkEnumerationTools(Toolset):
             source=source,
             is_admin=is_admin,
         )
-        add_credential_to_state(self.state, cred, "recon", self.dispatcher)
+        add_credential_to_state(self.state, cred, "recon")
 
     def _run_user_enum_commands(
         self, target: str, username: str, password: str, domain: str
@@ -1288,9 +1287,9 @@ class NetworkEnumerationTools(Toolset):
 class PostureValidationTools(Toolset):
     """Tools for validating AD security posture on compromised hosts."""
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -1672,9 +1671,9 @@ class PostureValidationTools(Toolset):
 class BloodHoundTools(Toolset):
     """Tools for ACL recon and privilege escalation path discovery."""
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -2013,12 +2012,7 @@ class BloodHoundTools(Toolset):
                         roles=["DC"] if "DC" in short_hostname.upper() else [],
                         services=[],
                     )
-                    # Use add_host if available (SharedRedTeamState), else append
-                    if hasattr(self.state, "add_host"):
-                        self.state.add_host(host)
-                    # RedTeamState uses hosts list directly
-                    elif not any(h.hostname == short_hostname for h in self.state.hosts):
-                        self.state.hosts.append(host)
+                    self.state.add_host(host)
                     logger.debug(f"Registered host from BloodHound: {short_hostname}")
 
                 logger.info(

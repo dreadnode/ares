@@ -166,6 +166,7 @@ class RedTeamDispatcher(
         if not self._redis_url:
             raise RuntimeError("Redis URL required. Set ARES_REDIS_URL environment variable.")
 
+        self._operation_id = operation_id
         self._shared_state = SharedRedTeamState(operation_id=operation_id)
         self._running = True
 

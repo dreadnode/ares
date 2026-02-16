@@ -38,8 +38,6 @@ from ares.core.models import (
     AgentRole,
     Credential,
     Host,
-    InvestigationStage,
-    RedTeamState,
     SharedRedTeamState,
     Target,
     TaskStatus,
@@ -212,11 +210,38 @@ async def _prime_operation(
     target_ips: list[str],
     target_domain: str,
 ) -> None:
-    success = await recovery.checkpoint(dispatcher.shared_state)
-    if success:
-        logger.info("Initial checkpoint saved - workers can now discover operation")
+    """Initialize operation state in Redis so workers can discover it.
+
+    With Redis-native state backend, state persists immediately on mutation.
+    This function writes initial metadata to mark the operation as active,
+    including setting the active operation pointer for worker discovery.
+    """
+    state = dispatcher.shared_state
+    operation_id = state.operation_id
+    if state._backend:
+        # Set started_at timestamp so workers can determine operation freshness
+        now = datetime.now(timezone.utc)
+        await state._backend.set_meta("started_at", now.isoformat())
+        await state._backend.set_meta("initialized", value=True)
+
+        # Store target info so CLI can reconstruct state
+        if target_ips:
+            await state._backend.set_meta("target_ip", target_ips[0])
+        if target_domain:
+            await state._backend.set_meta("target_domain", target_domain)
+
+        # Set the active operation pointer for worker discovery
+        # This allows workers to find the operation immediately via the pointer
+        # instead of scanning and potentially rejecting based on stale timestamps
+        try:
+            await state._backend._redis.set("ares:op:active", operation_id)
+            logger.info(f"Set active operation pointer: {operation_id}")
+        except Exception as e:
+            logger.warning(f"Failed to set active operation pointer: {e}")
+
+        logger.info("Operation state initialized in Redis - workers can discover operation")
     else:
-        logger.warning("Failed to save initial checkpoint - workers may not discover operation")
+        logger.warning("No state backend configured - operation may not be discoverable")
 
 
 def _is_rate_limit_error(error: Exception | str) -> bool:
@@ -444,8 +469,8 @@ async def run_multi_agent_operation(  # noqa: PLR0912
     await _ensure_required_workers(dispatcher, ["recon"], timeout=120.0)
 
     # Start background tasks
+    # Note: No periodic checkpoint task needed - state persists directly to Redis via RedisStateBackend
     tasks = [
-        asyncio.create_task(recovery.start_periodic_checkpoint(dispatcher), name="checkpoint"),
         asyncio.create_task(_monitor_agent_health(dispatcher), name="health_monitor"),
         asyncio.create_task(exploitation_workflow(dispatcher), name="exploitation_workflow"),
         asyncio.create_task(_extend_operation_lock(task_queue, operation_id), name="lock_extender"),
@@ -501,6 +526,8 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         rate_limit_count = 0
         rate_limit_max_retries = get_rate_limit_max_retries()
         rate_limit_delays = get_rate_limit_backoff_delays()
+        redis_retry_count = 0
+        max_redis_retries = 5
         result = None
 
         with dn.run(tags=["multi-agent-operation", target_domain]):
@@ -569,6 +596,36 @@ async def run_multi_agent_operation(  # noqa: PLR0912
                         # Exhausted rate limit retries - treat as crash
                         logger.error(
                             f"Rate limit retries exhausted ({rate_limit_count} attempts), "
+                            "treating as crash"
+                        )
+                        # Fall through to crash handling
+
+                    # Redis connection errors get special treatment - retry with backoff
+                    # These are transient and should be retried even without progress
+                    redis_error_keywords = [
+                        "timeout",
+                        "connection",
+                        "connect",
+                        "closed",
+                        "broken pipe",
+                        "reset",
+                        "refused",
+                        "sentinel",
+                    ]
+                    if any(kw in error_str.lower() for kw in redis_error_keywords):
+                        redis_retry_count += 1
+                        if redis_retry_count <= max_redis_retries:
+                            # Exponential backoff: 2, 4, 8, 16, 32 seconds
+                            delay = min(2**redis_retry_count, 32)
+                            logger.warning(
+                                f"⏳ Redis connection error (attempt {redis_retry_count}/{max_redis_retries}), "
+                                f"backing off {delay}s: {e}"
+                            )
+                            await asyncio.sleep(delay)
+                            continue  # Retry without incrementing crash count
+                        # Exhausted Redis retries - treat as crash
+                        logger.error(
+                            f"Redis retries exhausted ({redis_retry_count} attempts), "
                             "treating as crash"
                         )
                         # Fall through to crash handling
@@ -792,52 +849,28 @@ def _generate_multi_agent_report(
     report_dir: str | Path | None,
     exploitation_status: dict[str, Any] | None = None,
 ) -> tuple[Path, str]:
-    report_state = _build_redteam_report_state(state, exploitation_status)
     resolved_report_dir = Path(report_dir or "./reports").resolve()
     resolved_report_dir.mkdir(parents=True, exist_ok=True)
 
+    # Set vulnerability/exploitation counts from status if provided
+    if exploitation_status:
+        state.vulnerability_count = exploitation_status.get(
+            "total_discovered",
+            len(state.discovered_vulnerabilities),
+        )
+        state.exploited_count = exploitation_status.get(
+            "total_succeeded",
+            len(state.exploited_vulnerabilities),
+        )
+
     report_generator = RedTeamReportGenerator()
-    report_content = report_generator.generate(report_state)
+    report_content = report_generator.generate(state)
 
     report_filename = f"{state.operation_id}_report.md"
     report_path = resolved_report_dir / report_filename
     report_path.write_text(report_content)
     logger.success(f"Red team report generated: {report_path}")
     return report_path, report_content
-
-
-def _build_redteam_report_state(
-    state: SharedRedTeamState,
-    exploitation_status: dict[str, Any] | None = None,
-) -> RedTeamState:
-    target = state.target or Target(ip="", domain="")
-    report_state = RedTeamState(operation_id=state.operation_id, target=target)
-    report_state.completed = state.completed
-    report_state.started_at = state.started_at
-    report_state.stage = InvestigationStage.SYNTHESIS
-    report_state.hosts = list(state.all_hosts)
-    report_state.users = list(state.all_users)
-    report_state.credentials = list(state.all_credentials)
-    report_state.hashes = list(state.all_hashes)
-    report_state.shares = list(state.all_shares)
-    report_state.has_domain_admin = state.has_domain_admin
-    report_state.has_golden_ticket = state.has_golden_ticket
-    report_state.timeline = list(state.operation_timeline)
-    report_state.identified_techniques = set(state.identified_techniques)
-    report_state.weaknesses = [
-        f"{v.vuln_type} on {v.target} ({v.vuln_id})"
-        for v in state.discovered_vulnerabilities.values()
-    ]
-    if exploitation_status:
-        report_state.vulnerability_count = exploitation_status.get(
-            "total_discovered",
-            len(state.discovered_vulnerabilities),
-        )
-        report_state.exploited_count = exploitation_status.get(
-            "total_succeeded",
-            len(state.exploited_vulnerabilities),
-        )
-    return report_state
 
 
 async def _create_agent_ensemble(

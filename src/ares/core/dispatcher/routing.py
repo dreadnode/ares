@@ -330,6 +330,48 @@ class RoutingMixin:
             return parts[1]
         return None
 
+    def _extract_target_from_ccache_path(
+        self: RedTeamDispatcher, ccache_path: str
+    ) -> tuple[str | None, str]:
+        """Extract target host and domain from ccache ticket path.
+
+        Ticket paths follow format:
+        - Administrator@cifs_dc01.contoso.local@CONTOSO.LOCAL.ccache
+        - user@service_host.contoso.local@CONTOSO.LOCAL.ccache
+
+        Args:
+            ccache_path: Path to the .ccache ticket file
+
+        Returns:
+            Tuple of (target_host, domain). Either may be empty if extraction fails.
+        """
+        if not ccache_path:
+            return None, ""
+
+        # Remove .ccache extension and path prefix
+        ticket_name = ccache_path.rsplit("/", 1)[-1]
+        ticket_name = ticket_name.replace(".ccache", "")
+
+        # Format: user@service_host.domain@REALM
+        # Split by @ - last part is realm (domain), middle has service_host
+        parts = ticket_name.split("@")
+        if len(parts) < 2:
+            return None, ""
+
+        domain = parts[-1].lower() if len(parts) >= 2 else ""
+
+        # Middle part has service_host like: cifs_dc01.contoso.local
+        if len(parts) >= 2:
+            service_host = parts[1] if len(parts) >= 3 else parts[0]
+            # Remove service prefix (cifs_, http_, ldap_, host_)
+            for prefix in ["cifs_", "http_", "ldap_", "host_", "gc_"]:
+                if service_host.lower().startswith(prefix):
+                    service_host = service_host[len(prefix) :]
+                    break
+            return service_host, domain
+
+        return None, domain
+
     async def _auto_chain_s4u_lateral_movement(
         self: RedTeamDispatcher,
         task_id: str,
@@ -344,6 +386,10 @@ class RoutingMixin:
         automatically dispatches secretsdump to harvest credentials using
         the generated ticket.
 
+        This function now works for ANY task type (exploit, privesc_enumeration, etc.)
+        as long as the output contains a .ccache file. It extracts target info from
+        the ticket path itself when task params aren't available.
+
         Args:
             task_id: ID of the completed task
             task_info: Information about the completed task
@@ -354,25 +400,27 @@ class RoutingMixin:
         Returns:
             Number of lateral movement tasks dispatched
         """
-        if task_info.task_type != "exploit":
-            return 0
-
-        params = task_info.params or {}
-        if params.get("vuln_type") != "constrained_delegation":
-            return 0
-
         output = result.get("output", "") or result.get("stdout", "") or str(result)
         if ".ccache" not in output:
-            logger.debug(f"No .ccache found in S4U output for task {task_id}")
             return 0
 
         ticket_path = self._extract_ticket_path_from_output(output)
+
+        # Try to get target info from task params first
+        params = task_info.params or {}
         target_spn = params.get("target_spn", "")
-        target_host = self._extract_host_from_spn(target_spn)
+        target_host = self._extract_host_from_spn(target_spn) if target_spn else None
         domain = params.get("domain", "")
 
+        # If params missing, extract from ccache ticket path
+        # Format: Administrator@cifs_dc01.contoso.local@CONTOSO.LOCAL.ccache
+        if not target_host or not domain:
+            target_host, domain = self._extract_target_from_ccache_path(ticket_path)
+
         if not target_host:
-            logger.warning(f"Could not extract host from SPN: {target_spn}")
+            logger.warning(
+                f"Could not extract target host from output or ccache path: {ticket_path}"
+            )
             return 0
 
         target_ip: str | None = None

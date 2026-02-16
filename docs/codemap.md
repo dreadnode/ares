@@ -138,7 +138,6 @@ The central framework for both blue and red team operations.
 
 ### Red Team Models
 
-- `RedTeamState` - Single-agent red team state
 - `SharedRedTeamState` - Multi-agent shared state
 - `Target` - Target system configuration
 - `Host` - Discovered host with services

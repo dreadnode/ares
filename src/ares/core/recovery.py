@@ -216,6 +216,8 @@ class OperationRecoveryManager:
         # Load collections
         state.all_credentials.extend(await backend.get_credentials())
         state.all_hashes.extend(await backend.get_hashes())
+        # Deduplicate hashes after loading (handles pre-existing duplicates in Redis)
+        state.all_hashes = self._dedupe_hashes(state.all_hashes)
         state.all_hosts.extend(await backend.get_hosts())
         state.all_users.extend(await backend.get_users())
         state.all_shares.extend(await backend.get_shares())
@@ -257,6 +259,87 @@ class OperationRecoveryManager:
         # Load artifacts
         artifacts = await backend.get_all_artifacts()
         state.downloaded_artifacts.update(artifacts)
+
+    def _dedupe_hashes(self, hashes: list) -> list:
+        """Deduplicate hashes, keeping first occurrence.
+
+        For AS-REP hashes: dedupe by (domain, username) since each AS-REP request
+        generates a different hash but cracks to the same password.
+
+        For Kerberoast hashes: dedupe by (domain, username, spn, etype).
+
+        For other hashes: dedupe by exact hash value.
+
+        Args:
+            hashes: List of Hash objects
+
+        Returns:
+            Deduplicated list of Hash objects
+        """
+        seen_asrep: set[tuple[str, str]] = set()  # (domain, username)
+        seen_kerberoast: set[tuple[str, str, str]] = set()  # (domain, username, spn_key)
+        seen_other: set[str] = set()  # hash_value
+        result = []
+
+        for h in hashes:
+            hash_type = (h.hash_type or "").strip().lower()
+            hash_value = h.hash_value or ""
+            username = (h.username or "").strip().lower()
+            domain = (h.domain or "").strip().lower()
+
+            is_asrep = hash_type in {"as-rep", "asrep", "krb5asrep"} or hash_value.startswith(
+                "$krb5asrep$"
+            )
+            is_kerberoast = hash_type in {
+                "kerberoast",
+                "krb5tgs",
+                "tgs-rep",
+                "tgs",
+            } or hash_value.startswith("$krb5tgs$")
+
+            if is_asrep:
+                asrep_key = (domain, username)
+                if asrep_key in seen_asrep:
+                    continue
+                seen_asrep.add(asrep_key)
+            elif is_kerberoast:
+                spn_key = self._extract_kerberoast_spn_key(hash_value) or ""
+                kerb_key = (domain, username, spn_key)
+                if kerb_key in seen_kerberoast:
+                    continue
+                seen_kerberoast.add(kerb_key)
+            else:
+                if hash_value in seen_other:
+                    continue
+                seen_other.add(hash_value)
+
+            result.append(h)
+
+        if len(result) < len(hashes):
+            logger.info(f"Deduplicated {len(hashes) - len(result)} duplicate hashes")
+
+        return result
+
+    def _extract_kerberoast_spn_key(self, hash_value: str) -> str | None:
+        """Extract SPN and encryption type from Kerberoast hash for deduplication."""
+        if not hash_value.startswith("$krb5tgs$"):
+            return None
+        try:
+            parts = hash_value.split("$")
+            if len(parts) < 4:
+                return None
+            etype = parts[2]
+            asterisk_parts = hash_value.split("*")
+            if len(asterisk_parts) < 2:
+                return None
+            inner = asterisk_parts[1]
+            inner_parts = inner.split("$")
+            if len(inner_parts) < 3:
+                return None
+            spn = inner_parts[2]
+            return f"{etype}:{spn}"
+        except Exception:
+            return None
 
     async def _requeue_interrupted_tasks(
         self,
@@ -429,6 +512,57 @@ class OperationRecoveryManager:
                 self._handle_connection_error(e)
             logger.error(f"Failed to list operations: {e}")
             return []
+
+    async def cleanup_old_checkpoints(self, max_age_hours: int = 24) -> int:
+        """
+        Clean up old operation state from Redis.
+
+        With Redis-native state backend, keys have TTL and auto-expire.
+        This method provides explicit cleanup for operations older than max_age_hours.
+
+        Args:
+            max_age_hours: Delete operations older than this many hours.
+
+        Returns:
+            Number of operations cleaned up.
+        """
+        if not await self._ensure_connected():
+            return 0
+
+        cleaned = 0
+        cutoff = datetime.now(timezone.utc) - __import__("datetime").timedelta(hours=max_age_hours)
+
+        try:
+            # Scan for operation meta keys
+            async for key in self._redis_client.scan_iter("ares:op:*:meta"):
+                key_str = key.decode() if isinstance(key, bytes) else key
+                parts = key_str.split(":")
+                if len(parts) >= 3:
+                    op_id = parts[2]
+
+                    # Check operation timestamp from ID (format: op-YYYYMMDD-HHMMSS)
+                    try:
+                        if op_id.startswith("op-") and len(op_id) >= 18:
+                            date_str = op_id[3:11]  # YYYYMMDD
+                            time_str = op_id[12:18]  # HHMMSS
+                            op_time = datetime.strptime(
+                                f"{date_str}{time_str}", "%Y%m%d%H%M%S"
+                            ).replace(tzinfo=timezone.utc)
+
+                            if op_time < cutoff and await self.delete_checkpoint(op_id):
+                                cleaned += 1
+                                logger.info(f"Cleaned up old operation: {op_id}")
+                    except (ValueError, IndexError):
+                        # Can't parse timestamp, skip
+                        continue
+
+            return cleaned
+
+        except Exception as e:
+            if self._is_connection_error(e):
+                self._handle_connection_error(e)
+            logger.error(f"Failed to cleanup old checkpoints: {e}")
+            return cleaned
 
 
 class OperationResumeHelper:

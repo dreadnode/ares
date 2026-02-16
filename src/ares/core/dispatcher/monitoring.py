@@ -778,7 +778,9 @@ class MonitoringMixin:
         logger.info("Maintenance loop started")
         consecutive_failures = 0
         checkpoint_interval = 10  # seconds
+        health_log_interval = 30  # seconds
         last_checkpoint = 0.0
+        last_health_log = 0.0
 
         while self._running:
             try:
@@ -788,8 +790,14 @@ class MonitoringMixin:
                 # Reconcile tasks with workers to detect orphans
                 await self._reconcile_tasks_with_workers()
 
-                # Checkpoint if requested by threaded consumer or on periodic interval
                 now = time.monotonic()
+
+                # Log throttle health periodically (uses Redis, must run on main loop)
+                if now - last_health_log >= health_log_interval:
+                    await self._log_throttle_health()
+                    last_health_log = now
+
+                # Checkpoint if requested by threaded consumer or on periodic interval
                 checkpoint_requested = self._checkpoint_requested.is_set()
                 if checkpoint_requested or now - last_checkpoint >= checkpoint_interval:
                     if checkpoint_requested:
@@ -976,11 +984,11 @@ class MonitoringMixin:
                     health_check_counter += 1
                     if health_check_counter >= 10:
                         self._threaded_stale_cleanup()
-
-                    # Log throttle health every 30 cycles (~30 seconds)
-                    if health_check_counter >= 30:
                         health_check_counter = 0
-                        loop.run_until_complete(self._log_throttle_health())
+
+                    # NOTE: _log_throttle_health() is NOT called here because it uses
+                    # the main loop's Redis client (self._task_queue.redis). Health
+                    # logging is handled by the maintenance loop on the main event loop.
 
                     # Watchdog: log if iteration took too long (indicates blocking)
                     iteration_duration = time.monotonic() - iteration_start

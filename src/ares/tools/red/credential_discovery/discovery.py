@@ -14,10 +14,9 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
-from ares.core.models import Credential
+from ares.core.models import Credential, SharedRedTeamState
 from ares.tools.red.common import (
     PLACEHOLDER_PASSWORDS,
-    AnyRedTeamState,
     add_credential_to_state,
     filter_users_file_remote,
     format_weakness_block,
@@ -38,11 +37,11 @@ class CredentialDiscoveryTools(Toolset):
     - Password spraying with common passwords
     """
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
     dispatcher: Any | None = None
     _PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = PLACEHOLDER_PASSWORDS
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -99,7 +98,7 @@ class CredentialDiscoveryTools(Toolset):
             source=source,
             is_admin=is_admin,
         )
-        add_credential_to_state(self.state, cred, "recon", self.dispatcher)
+        add_credential_to_state(self.state, cred, "recon")
 
     def _parse_netexec_credentials(self, result: str) -> list[tuple[str, str, str, bool]]:
         creds: list[tuple[str, str, str, bool]] = []

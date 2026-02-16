@@ -983,7 +983,7 @@ def create_specialized_agent(  # noqa: PLR0912
     for cls in ALL_TOOLSETS:
         try:
             toolset = cls()
-            # Set shared state on toolset (all toolsets accept AnyRedTeamState)
+            # Set shared state on toolset
             if hasattr(toolset, "set_state"):
                 toolset.set_state(shared_state)
             if hasattr(toolset, "set_dispatcher"):

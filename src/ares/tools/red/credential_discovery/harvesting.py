@@ -17,11 +17,10 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
-from ares.core.models import Hash
+from ares.core.models import Hash, SharedRedTeamState
 from ares.core.remote import run_remote
 from ares.tools.red.common import (
     PLACEHOLDER_PASSWORDS,
-    AnyRedTeamState,
     add_user_to_state,
     is_ntlm_hash,
     resolve_password,
@@ -33,11 +32,11 @@ from ares.tools.red.common import (
 class CredentialHarvestingTools(Toolset):
     """Tools for harvesting credentials via Active Directory attacks."""
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
     dispatcher: Any | None = None
     _PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = PLACEHOLDER_PASSWORDS
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 

@@ -9,11 +9,8 @@ from datetime import datetime, timezone
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 
-from ares.core.models import Credential, Hash, Host, TimelineEvent
-from ares.tools.red.common import (
-    AnyRedTeamState,
-    format_weakness_block,
-)
+from ares.core.models import Credential, Hash, Host, SharedRedTeamState, TimelineEvent
+from ares.tools.red.common import format_weakness_block
 
 
 class RedTeamReportingTools(Toolset):
@@ -23,9 +20,9 @@ class RedTeamReportingTools(Toolset):
     events throughout the operation.
     """
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -147,8 +144,8 @@ class RedTeamReportingTools(Toolset):
             discovery_method,
         )
 
-        if block not in self.state.weaknesses:
-            self.state.weaknesses.append(block)
+        if block not in self.state.all_weaknesses:
+            self.state.all_weaknesses.append(block)
             return f"[+] Recorded weakness: {title}"
         return f"[*] Weakness already recorded: {title}"
 
@@ -227,28 +224,17 @@ class RedTeamReportingTools(Toolset):
         if not self.state:
             return "[!] No operation state available"
 
-        # Support both RedTeamState (timeline) and SharedRedTeamState (operation_timeline)
-        timeline_attr = None
-        if hasattr(self.state, "timeline"):
-            timeline_attr = "timeline"
-        elif hasattr(self.state, "operation_timeline"):
-            timeline_attr = "operation_timeline"
-
-        if not timeline_attr:
-            return "[!] Timeline not available in operation state"
-
-        timeline = getattr(self.state, timeline_attr)
         techniques = [t.strip() for t in mitre_techniques.split(",") if t.strip()]
 
         event = TimelineEvent(
-            id=f"evt-{len(timeline):04d}",
+            id=f"evt-{len(self.state.operation_timeline):04d}",
             timestamp=datetime.now(timezone.utc),
             description=description,
             mitre_techniques=techniques,
             confidence=confidence,
             source="manual_recording",
         )
-        timeline.append(event)
+        self.state.operation_timeline.append(event)
 
         return f"[+] Recorded timeline event: {description}"
 

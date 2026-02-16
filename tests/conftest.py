@@ -20,8 +20,8 @@ from ares.core.models import (
     InvestigativeQuestion,
     PyramidLevel,
     QuestionSource,
-    RedTeamState,
     Share,
+    SharedRedTeamState,
     Target,
     TimelineEvent,
     User,
@@ -293,83 +293,63 @@ def sample_target() -> Target:
 
 
 @pytest.fixture
-def red_team_state(sample_target: Target) -> RedTeamState:
+def red_team_state(sample_target: Target) -> SharedRedTeamState:
     """Create a sample red team state."""
-    return RedTeamState(
-        operation_id=f"op-{uuid.uuid4().hex[:8]}",
-        target=sample_target,
-        started_at=datetime.now(timezone.utc),
-        stage=InvestigationStage.TRIAGE,
-        hosts=[],
-        users=[],
-        credentials=[],
-        hashes=[],
-        shares=[],
-        weaknesses=[],
-        timeline=[],
-        identified_techniques=set(),
-        has_domain_admin=False,
-        has_golden_ticket=False,
-        report_summary=None,
-    )
+    state = SharedRedTeamState(operation_id=f"op-{uuid.uuid4().hex[:8]}")
+    state.target = sample_target
+    return state
 
 
 @pytest.fixture
-def populated_red_team_state(sample_target: Target) -> RedTeamState:
+def populated_red_team_state(sample_target: Target) -> SharedRedTeamState:
     """Create a fully populated red team state."""
-    return RedTeamState(
-        operation_id=f"op-{uuid.uuid4().hex[:8]}",
-        target=sample_target,
-        started_at=datetime.now(timezone.utc),
-        stage=InvestigationStage.CAUSATION,
-        hosts=[
-            Host(ip="192.168.58.100", hostname="dc01", os="Windows Server 2019"),
-            Host(ip="192.168.58.101", hostname="dc01", os="Windows 10"),
-        ],
-        users=[
-            User(username="danj", domain="CONTOSO", is_admin=True),
-            User(username="adamb", domain="CONTOSO", is_admin=False),
-        ],
-        credentials=[
-            Credential(
-                username="danj",
-                password="",
-                domain="CONTOSO",
-                source="mimikatz",
-                is_admin=True,
-            ),
-        ],
-        hashes=[
-            Hash(
-                username="danj",
-                hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
-                hash_type="NTLM",
-                domain="CONTOSO",
-            ),
-        ],
-        shares=[
-            Share(host="dc01", name="SYSVOL", permissions="READ"),
-            Share(host="dc01", name="C$", permissions=""),
-        ],
-        weaknesses=[
-            "SMB Signing Disabled",
-            "Kerberoastable Accounts",
-        ],
-        timeline=[
-            TimelineEvent(
-                id=f"te-{uuid.uuid4().hex[:8]}",
-                timestamp=datetime.now(timezone.utc),
-                description="Initial enumeration started",
-                mitre_techniques=["T1046"],
-                confidence=1.0,
-                source="nmap",
-            ),
-        ],
-        identified_techniques={"T1046", "T1003", "T1558.003"},
-        has_domain_admin=False,
-        has_golden_ticket=False,
-        report_summary=None,
-    )
+    state = SharedRedTeamState(operation_id=f"op-{uuid.uuid4().hex[:8]}")
+    state.target = sample_target
+    state.all_hosts = [
+        Host(ip="192.168.58.100", hostname="dc01", os="Windows Server 2019"),
+        Host(ip="192.168.58.101", hostname="dc01", os="Windows 10"),
+    ]
+    state.all_users = [
+        User(username="danj", domain="CONTOSO", is_admin=True),
+        User(username="adamb", domain="CONTOSO", is_admin=False),
+    ]
+    state.all_credentials = [
+        Credential(
+            username="danj",
+            password="",
+            domain="CONTOSO",
+            source="mimikatz",
+            is_admin=True,
+        ),
+    ]
+    state.all_hashes = [
+        Hash(
+            username="danj",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            hash_type="NTLM",
+            domain="CONTOSO",
+        ),
+    ]
+    state.all_shares = [
+        Share(host="dc01", name="SYSVOL", permissions="READ"),
+        Share(host="dc01", name="C$", permissions=""),
+    ]
+    state.all_weaknesses = [
+        "SMB Signing Disabled",
+        "Kerberoastable Accounts",
+    ]
+    state.operation_timeline = [
+        TimelineEvent(
+            id=f"te-{uuid.uuid4().hex[:8]}",
+            timestamp=datetime.now(timezone.utc),
+            description="Initial enumeration started",
+            mitre_techniques=["T1046"],
+            confidence=1.0,
+            source="nmap",
+        ),
+    ]
+    state.identified_techniques = {"T1046", "T1003", "T1558.003"}
+    return state
 
 
 # ============================================================================

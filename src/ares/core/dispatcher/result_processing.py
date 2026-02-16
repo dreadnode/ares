@@ -149,8 +149,8 @@ class ResultProcessingMixin:
                 task_queue=task_queue,
             )
 
-        # Auto-chain lateral movement after successful S4U attack
-        if success and task_info.task_type == "exploit":
+        # Auto-chain secretsdump after successful S4U attack (any task type with ccache output)
+        if success:
             chained = await self._auto_chain_s4u_lateral_movement(
                 task_id=task_id,
                 task_info=task_info,
@@ -159,7 +159,7 @@ class ResultProcessingMixin:
                 task_queue=task_queue,
             )
             if chained > 0:
-                logger.info(f"🎫 Auto-S4U-chain: dispatched {chained} lateral movement task(s)")
+                logger.info(f"🎫 Auto-S4U-chain: dispatched {chained} secretsdump task(s)")
 
         # Mark vulnerability as exploited when exploit task completes
         if task_info.task_type == "exploit":

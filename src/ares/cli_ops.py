@@ -8,7 +8,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import cyclopts
 from loguru import logger
@@ -76,17 +76,15 @@ async def _generate_local_report(
     Returns:
         Path to the generated report, or None if state not found.
     """
-    from ares.core.models import SharedRedTeamState
     from ares.reports import generate_comprehensive_report
 
     client = await create_redis_client(redis_url, decode_responses=False)
     try:
-        data = await client.get(f"ares:operation:{operation_id}:state")
-        if not data:
+        state = await _load_state_from_redis(client, operation_id)
+        if not state:
             logger.warning(f"No state found for operation {operation_id}")
             return None
 
-        state = SharedRedTeamState.from_bytes(data)
         report_content = generate_comprehensive_report(state)
 
         resolved_dir = Path(report_dir or "./reports").resolve()
@@ -906,20 +904,29 @@ async def _resolve_latest_operation(redis_url: str) -> str | None:
         if len(parts) >= 3:
             running_ops.add(parts[2])
 
-    # Get all operations with state
-    state_keys = await client.keys("ares:operation:*:state")
-    for key in state_keys:
+    # Track seen operation IDs to avoid duplicates
+    seen_ops: set[str] = set()
+
+    # Get operations with redis-native state format (ares:op:*:meta)
+    meta_keys = await client.keys("ares:op:*:meta")
+    for key in meta_keys:
         parts = key.split(":")
         if len(parts) < 3:
             continue
         op_id = parts[2]
-        checkpoint = await client.get(f"ares:operation:{op_id}:checkpoint_time")
+        if op_id in seen_ops:
+            continue
+        seen_ops.add(op_id)
+        # Try to get started_at from meta or checkpoint_time
         checkpoint_time = None
-        if checkpoint:
-            try:
-                checkpoint_time = datetime.fromisoformat(checkpoint)
-            except Exception:
-                pass
+        meta_data = await client.hgetall(f"ares:op:{op_id}:meta")
+        if meta_data:
+            started_raw = meta_data.get("started_at")
+            if started_raw:
+                try:
+                    checkpoint_time = datetime.fromisoformat(started_raw)
+                except Exception:
+                    pass
         is_running = op_id in running_ops
         all_ops.append((checkpoint_time, op_id, is_running))
 
@@ -933,7 +940,8 @@ async def _resolve_latest_operation(redis_url: str) -> str | None:
         if with_time:
             with_time.sort(key=lambda x: x[0], reverse=True)  # type: ignore[arg-type]
             return with_time[0][1]
-        items.sort(key=lambda x: x[1])
+        # Sort by operation ID descending (IDs contain timestamps: op-YYYYMMDD-HHMMSS)
+        items.sort(key=lambda x: x[1], reverse=True)
         return items[0][1]
 
     # Prefer running operations, then fall back to latest by checkpoint time
@@ -998,20 +1006,98 @@ async def loot(
         sys.exit(1)
 
 
+async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
+    """Load SharedRedTeamState from Redis using redis-native format.
+
+    Args:
+        client: Redis client (decode_responses=False)
+        operation_id: Operation ID
+
+    Returns:
+        SharedRedTeamState or None if not found
+    """
+    from ares.core.models import SharedRedTeamState, Target
+    from ares.core.state_backend import RedisStateBackend
+
+    # Check if operation exists by looking for meta key
+    meta_exists = await client.exists(f"ares:op:{operation_id}:meta")
+    if not meta_exists:
+        return None
+
+    # Create backend and load state
+    backend = RedisStateBackend(client, operation_id)
+
+    # Load all collections
+    credentials = await backend.get_credentials()
+    hashes = await backend.get_hashes()
+    hosts = await backend.get_hosts()
+    users = await backend.get_users()
+    domains = await backend.get_domains()
+    shares = await backend.get_shares()
+    weaknesses = await backend.get_weaknesses()
+    vulnerabilities = await backend.get_vulnerabilities()
+    exploited_vulns = await backend.get_exploited_vulnerabilities()
+
+    # Load meta
+    meta = await backend.get_all_meta()
+    has_domain_admin = meta.get("has_domain_admin", False)
+    has_golden_ticket = meta.get("has_golden_ticket", False)
+    domain_admin_path = meta.get("domain_admin_path")
+    started_at_str = meta.get("started_at")
+    started_at = None
+    if started_at_str:
+        try:
+            started_at = datetime.fromisoformat(started_at_str)
+        except Exception:
+            pass
+
+    # Load target from meta if present
+    target = None
+    target_ip = meta.get("target_ip")
+    target_domain = meta.get("target_domain")
+    if target_ip:
+        target = Target(ip=target_ip, domain=target_domain)
+
+    # Load DC map and NetBIOS map
+    dc_map = await backend.get_all_dcs()
+    netbios_map = await backend.get_all_netbios_mappings()
+
+    # Create state object with correct field names
+    kwargs: dict = {
+        "operation_id": operation_id,
+        "target": target,
+        "all_credentials": credentials,
+        "all_hashes": hashes,
+        "all_hosts": hosts,
+        "all_users": users,
+        "all_shares": shares,
+        "all_domains": list(domains),
+        "all_weaknesses": weaknesses,
+        "discovered_vulnerabilities": vulnerabilities,
+        "exploited_vulnerabilities": exploited_vulns,
+        "has_domain_admin": has_domain_admin,
+        "has_golden_ticket": has_golden_ticket,
+        "domain_admin_path": domain_admin_path,
+        "domain_controllers": dc_map,
+        "netbios_to_fqdn": netbios_map,
+    }
+    if started_at is not None:
+        kwargs["started_at"] = started_at
+    return SharedRedTeamState(**kwargs)
+
+
 async def _loot_once(operation_id: str, redis_url: str, json_output: bool) -> None:
     """Single-shot loot dump."""
-    from ares.core.models import SharedRedTeamState
     from ares.core.redis_client import create_redis_client
 
     client = await create_redis_client(redis_url, decode_responses=False)
-    data = await client.get(f"ares:operation:{operation_id}:state")
+    state = await _load_state_from_redis(client, operation_id)
     await client.aclose()
 
-    if not data:
+    if not state:
         logger.error(f"No state found for operation: {operation_id}")
         sys.exit(1)
 
-    state = SharedRedTeamState.from_bytes(data)
     _print_loot(state, json_output=json_output)
 
 
@@ -1023,7 +1109,6 @@ async def _loot_watch(
     json_output: bool,
 ) -> None:
     """Watch mode: continuously poll Redis and display loot."""
-    from ares.core.models import SharedRedTeamState
     from ares.core.redis_client import create_redis_client
 
     prev_snapshot: dict | None = None
@@ -1032,7 +1117,7 @@ async def _loot_watch(
     try:
         while True:
             try:
-                data = await client.get(f"ares:operation:{operation_id}:state")
+                state = await _load_state_from_redis(client, operation_id)
             except Exception as e:
                 logger.warning(f"Redis fetch failed, reconnecting in {interval}s: {e}")
                 try:
@@ -1043,13 +1128,11 @@ async def _loot_watch(
                 client = await create_redis_client(redis_url, decode_responses=False)
                 continue
 
-            if not data:
+            if not state:
                 logger.warning(f"No state found for {operation_id}, retrying in {interval}s...")
                 sys.stdout.flush()
                 await asyncio.sleep(interval)
                 continue
-
-            state = SharedRedTeamState.from_bytes(data)
             curr_snapshot = _loot_snapshot(state)
 
             if diff_mode:
@@ -1244,7 +1327,6 @@ async def list_operations(
         ares-ops list              # List all operations
         ares-ops list --latest     # Print only the latest/running operation ID
     """
-    from ares.core.models import SharedRedTeamState
     from ares.core.task_queue import RedisTaskQueue
 
     resolved_redis_url = redis_url or get_redis_url()
@@ -1254,7 +1336,8 @@ async def list_operations(
         if with_time:
             with_time.sort(key=lambda x: x[0], reverse=True)  # type: ignore[arg-type]
             return with_time[0][1]
-        items.sort(key=lambda x: x[1])
+        # Sort by operation ID descending (IDs contain timestamps: op-YYYYMMDD-HHMMSS)
+        items.sort(key=lambda x: x[1], reverse=True)
         return items[0][1]
 
     try:
@@ -1276,37 +1359,37 @@ async def list_operations(
             if len(parts) >= 3:
                 running_ops.add(parts[2])
 
-        # Get all operations with state
-        # Use KEYS instead of SCAN for reliability - SCAN can miss keys
-        state_keys = await client.keys("ares:operation:*:state")
-        for key in state_keys:
+        # Track seen operation IDs to avoid duplicates
+        seen_ops: set[str] = set()
+
+        # Get operations from redis-native state format (ares:op:*:meta)
+        meta_keys = await client.keys("ares:op:*:meta")
+        for key in meta_keys:
             key_str = key.decode() if isinstance(key, bytes) else key
             parts = key_str.split(":")
             if len(parts) < 3:
                 continue
             op_id = parts[2]
+            if op_id in seen_ops:
+                continue
+            seen_ops.add(op_id)
 
-            # Get checkpoint time
-            checkpoint_raw = await client.get(f"ares:operation:{op_id}:checkpoint_time")
-            checkpoint_time = None
-            if checkpoint_raw:
-                checkpoint_str = (
-                    checkpoint_raw.decode() if isinstance(checkpoint_raw, bytes) else checkpoint_raw
-                )
-                try:
-                    checkpoint_time = datetime.fromisoformat(checkpoint_str)
-                except Exception:
-                    pass
-
-            # Get started_at from state
+            # For redis-native format, get started_at from meta hash
             started_at = None
-            state_data = await client.get(f"ares:operation:{op_id}:state")
-            if state_data:
-                try:
-                    state = SharedRedTeamState.from_bytes(state_data)
-                    started_at = state.started_at
-                except Exception:
-                    pass
+            checkpoint_time = None
+            meta_data = await client.hgetall(f"ares:op:{op_id}:meta")
+            if meta_data:
+                started_raw = meta_data.get(b"started_at") or meta_data.get("started_at")
+                if started_raw:
+                    started_str = (
+                        started_raw.decode() if isinstance(started_raw, bytes) else started_raw
+                    )
+                    try:
+                        started_at = datetime.fromisoformat(started_str)
+                        # Use started_at as checkpoint_time if no explicit checkpoint
+                        checkpoint_time = started_at
+                    except Exception:
+                        pass
 
             is_running = op_id in running_ops
             all_ops.append((checkpoint_time, op_id, is_running, started_at))
@@ -1368,7 +1451,6 @@ async def runtime(
         ares-ops runtime --latest
         ares-ops runtime op-20250128-123456
     """
-    from ares.core.models import SharedRedTeamState
     from ares.core.task_queue import RedisTaskQueue
 
     resolved_redis_url = redis_url or get_redis_url()
@@ -1386,14 +1468,12 @@ async def runtime(
     try:
         client = await create_redis_client(resolved_redis_url, decode_responses=False)
 
-        # Get state
-        state_data = await client.get(f"ares:operation:{operation_id}:state")
-        if not state_data:
+        # Get state using redis-native format
+        state = await _load_state_from_redis(client, operation_id)
+        if not state:
             logger.error(f"No state found for operation: {operation_id}")
             await client.aclose()
             sys.exit(1)
-
-        state = SharedRedTeamState.from_bytes(state_data)
 
         # Check if running
         lock_key = f"{RedisTaskQueue.LOCK_PREFIX}:{operation_id}"
@@ -1413,20 +1493,8 @@ async def runtime(
             runtime_seconds = (now - started_at).total_seconds()
             status = "running"
         else:
-            # Not running, no completed_at - use checkpoint time or now
-            checkpoint_raw = await create_redis_client(resolved_redis_url, decode_responses=True)
-            checkpoint_str = await checkpoint_raw.get(
-                f"ares:operation:{operation_id}:checkpoint_time"
-            )
-            await checkpoint_raw.aclose()
-            if checkpoint_str:
-                try:
-                    checkpoint_time = datetime.fromisoformat(checkpoint_str)
-                    runtime_seconds = (checkpoint_time - started_at).total_seconds()
-                except Exception:
-                    runtime_seconds = (now - started_at).total_seconds()
-            else:
-                runtime_seconds = (now - started_at).total_seconds()
+            # Not running, no completed_at - use now as fallback
+            runtime_seconds = (now - started_at).total_seconds()
             status = "stopped"
 
         # Output
@@ -1468,7 +1536,6 @@ async def queue(
     """
     from collections import Counter
 
-    from ares.core.models import SharedRedTeamState
     from ares.core.task_queue import RedisTaskQueue
 
     resolved_redis_url = redis_url or get_redis_url()
@@ -1479,20 +1546,22 @@ async def queue(
 
         operations = []
         # Use KEYS instead of SCAN for reliability - SCAN can miss keys
-        state_keys = await client.keys("ares:operation:*:state")
-        for key in state_keys:
+        # Scan redis-native format (ares:op:*:meta)
+        meta_keys = await client.keys("ares:op:*:meta")
+        for key in meta_keys:
             key_str = key.decode() if isinstance(key, bytes) else key
             parts = key_str.split(":")
             if len(parts) < 3:
                 continue
             op_id = parts[2]
-            data = await client.get(key)
-            if not data:
+
+            state = await _load_state_from_redis(client, op_id)
+            if not state:
                 continue
 
-            state = SharedRedTeamState.from_bytes(data)
-            checkpoint_raw = await client.get(f"ares:operation:{op_id}:checkpoint_time")
-            checkpoint_time = checkpoint_raw.decode() if checkpoint_raw else "unknown"
+            # Get started_at from meta hash as checkpoint reference
+            meta_data = await client.hgetall(f"ares:op:{op_id}:meta")
+            checkpoint_time = meta_data.get("started_at", "unknown") if meta_data else "unknown"
             lock_key = f"{RedisTaskQueue.LOCK_PREFIX}:{op_id}"
             is_running = await client.exists(lock_key) > 0
             status_counts = Counter(task.status.value for task in state.pending_tasks.values())
@@ -1589,9 +1658,9 @@ async def delete(
     try:
         client = await create_redis_client(resolved_redis_url, decode_responses=True)
 
-        # Check if operation exists
-        state_key = f"ares:operation:{operation_id}:state"
-        exists = await client.exists(state_key)
+        # Check if operation exists (redis-native format)
+        meta_key = f"ares:op:{operation_id}:meta"
+        exists = await client.exists(meta_key)
 
         if not exists:
             logger.warning(f"Operation {operation_id} not found")
@@ -1605,12 +1674,18 @@ async def delete(
                 await client.aclose()
                 return
 
-        # Find all keys to delete
-        keys_to_delete = [
-            f"ares:operation:{operation_id}:state",
-            f"ares:operation:{operation_id}:checkpoint_time",
-            f"ares:operation:{operation_id}:lock",
-        ]
+        # Find all keys to delete (redis-native format)
+        keys_to_delete: list[str] = []
+
+        # Scan for all redis-native keys: ares:op:{op_id}:*
+        native_keys = await client.keys(f"ares:op:{operation_id}:*")
+        keys_to_delete.extend(native_keys)
+
+        # Also clean up lock and active pointer if they reference this operation
+        keys_to_delete.append(f"ares:lock:{operation_id}")
+        active_op = await client.get("ares:op:active")
+        if active_op == operation_id:
+            keys_to_delete.append("ares:op:active")
 
         # Find task status keys for this operation
         import json as json_module
@@ -1654,6 +1729,7 @@ async def backfill_domains(
     """
     from ares.core.models import SharedRedTeamState
     from ares.core.redis_client import create_redis_client
+    from ares.core.state_backend import RedisStateBackend
 
     resolved_redis_url = redis_url or get_redis_url()
 
@@ -1690,14 +1766,13 @@ async def backfill_domains(
 
     try:
         client = await create_redis_client(resolved_redis_url, decode_responses=False)
-        key = f"ares:operation:{operation_id}:state"
-        data = await client.get(key)
+        state = await _load_state_from_redis(client, operation_id)
 
-        if not data:
+        if not state:
             logger.error(f"No state found for operation: {operation_id}")
+            await client.aclose()
             sys.exit(1)
 
-        state = SharedRedTeamState.from_bytes(data)
         domains = extract_domains(state)
 
         if not domains:
@@ -1706,16 +1781,17 @@ async def backfill_domains(
             return
 
         before = set(getattr(state, "all_domains", []))
+        added = []
+        backend = RedisStateBackend(client, operation_id)
         for domain in domains:
-            if hasattr(state, "add_domain"):
-                state.add_domain(domain)
-            elif domain not in before:
+            if domain not in before:
+                # Add to in-memory state and persist via backend
                 state.all_domains.append(domain)
+                await backend.add_domain(domain)
+                added.append(domain)
 
-        await client.set(key, state.to_bytes())
         await client.aclose()
 
-        added = [d for d in domains if d not in before]
         if added:
             # Notify subscribers so orchestrator/workers pick it up instantly
             from ares.core.task_queue import RedisTaskQueue
@@ -1751,22 +1827,21 @@ async def inject_credential(
     Example:
         ares-ops inject-credential op-20250128-123456 svc_sql Password123 --domain corp.contoso.local
     """
-    from ares.core.models import Credential, SharedRedTeamState
+    from ares.core.models import Credential
+    from ares.core.state_backend import RedisStateBackend
 
     resolved_redis_url = redis_url or get_redis_url()
 
     try:
         client = await create_redis_client(resolved_redis_url, decode_responses=False)
-        key = f"ares:operation:{operation_id}:state"
-        data = await client.get(key)
+        state = await _load_state_from_redis(client, operation_id)
 
-        if not data:
+        if not state:
             logger.error(f"No state found for operation: {operation_id}")
+            await client.aclose()
             sys.exit(1)
 
-        state = SharedRedTeamState.from_bytes(data)
-
-        # Create and add the credential
+        # Create and add the credential to in-memory state
         cred = Credential(
             username=username,
             password=password,
@@ -1778,8 +1853,9 @@ async def inject_credential(
         added = state.add_credential(cred, source_agent=source)
 
         if added:
-            # Save updated state
-            await client.set(key, state.to_bytes())
+            # Persist to Redis via backend
+            backend = RedisStateBackend(client, operation_id)
+            await backend.add_credential(cred)
             await client.aclose()
 
             # Notify subscribers so orchestrator/workers pick it up instantly
@@ -1827,20 +1903,19 @@ async def inject_vulnerability(
     """
     import json as json_module
 
-    from ares.core.models import SharedRedTeamState, VulnerabilityInfo
+    from ares.core.models import VulnerabilityInfo
+    from ares.core.state_backend import RedisStateBackend
 
     resolved_redis_url = redis_url or get_redis_url()
 
     try:
         client = await create_redis_client(resolved_redis_url, decode_responses=False)
-        key = f"ares:operation:{operation_id}:state"
-        data = await client.get(key)
+        state = await _load_state_from_redis(client, operation_id)
 
-        if not data:
+        if not state:
             logger.error(f"No state found for operation: {operation_id}")
+            await client.aclose()
             sys.exit(1)
-
-        state = SharedRedTeamState.from_bytes(data)
 
         # Parse additional details
         try:
@@ -1877,10 +1952,9 @@ async def inject_vulnerability(
             priority=priority,
         )
 
-        state.discovered_vulnerabilities[vuln.vuln_id] = vuln
-
-        # Save updated state
-        await client.set(key, state.to_bytes())
+        # Persist to Redis via backend
+        backend = RedisStateBackend(client, operation_id)
+        await backend.add_vulnerability(vuln)
         await client.aclose()
 
         # Notify subscribers so orchestrator/workers pick it up instantly

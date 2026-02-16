@@ -74,66 +74,136 @@ async def discover_active_operation(  # noqa: PLR0912
                 now = datetime.now(timezone.utc)
 
                 # Honor explicit operation pointer before scanning checkpoints.
-                active_key = await client.get("ares:operation:active")
+                active_key = await client.get("ares:op:active")
                 if active_key:
                     active_op_id = str(active_key)
-                    state_key = f"ares:operation:{active_op_id}:state"
-                    if await client.exists(state_key):
-                        time_key = f"ares:operation:{active_op_id}:checkpoint_time"
-                        checkpoint_data = await client.get(time_key)
-                        if checkpoint_data:
-                            checkpoint_time = datetime.fromisoformat(str(checkpoint_data))
-                            if checkpoint_time.tzinfo is None:
-                                checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
-                            age_seconds = (now - checkpoint_time).total_seconds()
-                            if age_seconds <= max_operation_age:
-                                logger.info(
-                                    f"Discovered active operation via pointer: {active_op_id}"
-                                )
-                                await _cleanup_client()
-                                return active_op_id
-                            logger.debug(
-                                f"Ignoring stale pointed operation {active_op_id} "
-                                f"(checkpoint age: {age_seconds:.0f}s > "
-                                f"{max_operation_age}s)"
-                            )
-                        else:
-                            logger.debug(
-                                f"Active operation pointer has no checkpoint yet: {active_op_id}"
-                            )
-                    else:
-                        logger.debug(
-                            f"Active operation pointer references missing state: {active_op_id}"
-                        )
+                    # Check redis-native state format
+                    native_meta_key = f"ares:op:{active_op_id}:meta"
+                    has_native_state = await client.exists(native_meta_key)
 
-                # Scan for operation state keys
+                    if has_native_state:
+                        # Check if operation has a lock (actively running)
+                        lock_key = f"ares:lock:{active_op_id}"
+                        has_lock = await client.exists(lock_key)
+
+                        # If operation has a lock, it's actively running - accept immediately
+                        if has_lock:
+                            logger.info(
+                                f"Discovered active operation via pointer (has lock): {active_op_id}"
+                            )
+                            await _cleanup_client()
+                            return active_op_id
+
+                        # No lock - check age to avoid joining abandoned operations
+                        checkpoint_time = None
+                        # Read started_at from meta hash
+                        meta_data = await client.hgetall(native_meta_key)
+                        if meta_data:
+                            started_raw = meta_data.get("started_at")
+                            if started_raw:
+                                try:
+                                    checkpoint_time = datetime.fromisoformat(str(started_raw))
+                                    if checkpoint_time.tzinfo is None:
+                                        checkpoint_time = checkpoint_time.replace(
+                                            tzinfo=timezone.utc
+                                        )
+                                except Exception:
+                                    pass
+
+                        # Fall back to parsing timestamp from operation ID
+                        if not checkpoint_time:
+                            try:
+                                parts = active_op_id.split("-")
+                                if len(parts) >= 3:
+                                    date_str = parts[1]
+                                    time_str = parts[2]
+                                    checkpoint_time = datetime.strptime(
+                                        f"{date_str}{time_str}", "%Y%m%d%H%M%S"
+                                    ).replace(tzinfo=timezone.utc)
+                            except Exception:
+                                pass
+                            # Default to now if all parsing failed
+                            if not checkpoint_time:
+                                checkpoint_time = now
+
+                        age_seconds = (now - checkpoint_time).total_seconds()
+                        if age_seconds <= max_operation_age:
+                            logger.info(f"Discovered active operation via pointer: {active_op_id}")
+                            await _cleanup_client()
+                            return active_op_id
+                        logger.debug(
+                            f"Ignoring stale pointed operation {active_op_id} "
+                            f"(age: {age_seconds:.0f}s, no lock)"
+                        )
+                    else:
+                        # Stale pointer - state was cleared but pointer wasn't.
+                        # Delete the invalid pointer so we can discover new operations.
+                        logger.warning(
+                            f"Deleting stale operation pointer to missing state: {active_op_id}"
+                        )
+                        await client.delete("ares:op:active")
+
+                # Scan for operation state keys (redis-native format)
                 operations: list[tuple[str, datetime]] = []
-                async for key in client.scan_iter("ares:operation:*:state"):
-                    # Extract operation ID from key: ares:operation:<op_id>:state
+                seen_ops: set[str] = set()
+
+                # Scan redis-native state format: ares:op:*:meta
+                async for key in client.scan_iter("ares:op:*:meta"):
                     parts = str(key).split(":")
                     if len(parts) >= 3:
                         op_id = parts[2]
+                        if op_id in seen_ops:
+                            continue
+                        seen_ops.add(op_id)
 
-                        # Get checkpoint time to find most recent operation
-                        time_key = f"ares:operation:{op_id}:checkpoint_time"
-                        checkpoint_data = await client.get(time_key)
+                        # Check if operation has a lock (actively running orchestrator)
+                        # If locked, accept immediately regardless of timestamps
+                        lock_key = f"ares:lock:{op_id}"
+                        has_lock = await client.exists(lock_key)
+                        if has_lock:
+                            logger.info(f"Discovered active operation via lock (scan): {op_id}")
+                            operations.append((op_id, now))  # Use now for sorting
+                            continue
 
-                        if checkpoint_data:
-                            checkpoint_time = datetime.fromisoformat(str(checkpoint_data))
-                            # Ensure checkpoint_time is timezone-aware for comparison
-                            if checkpoint_time.tzinfo is None:
-                                checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
+                        # Get started_at from meta hash (JSON-encoded by set_meta)
+                        checkpoint_time = None
+                        meta_key = f"ares:op:{op_id}:meta"
+                        started_at_raw = await client.hget(meta_key, "started_at")
+                        if started_at_raw:
+                            try:
+                                # Decode JSON since set_meta uses json.dumps()
+                                started_at = json.loads(str(started_at_raw))
+                                checkpoint_time = datetime.fromisoformat(started_at)
+                                if checkpoint_time.tzinfo is None:
+                                    checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
+                            except Exception:
+                                pass
 
-                            # Only consider operations checkpointed within max_operation_age
-                            age_seconds = (now - checkpoint_time).total_seconds()
-                            if age_seconds <= max_operation_age:
-                                operations.append((op_id, checkpoint_time))
-                            else:
-                                logger.debug(
-                                    f"Ignoring stale operation {op_id} "
-                                    f"(checkpoint age: {age_seconds:.0f}s > "
-                                    f"{max_operation_age}s)"
-                                )
+                        # Parse timestamp from operation ID (op-YYYYMMDD-HHMMSS)
+                        if not checkpoint_time:
+                            try:
+                                # Extract YYYYMMDD-HHMMSS from op_id
+                                parts = op_id.split("-")
+                                if len(parts) >= 3:
+                                    date_str = parts[1]  # YYYYMMDD
+                                    time_str = parts[2]  # HHMMSS
+                                    checkpoint_time = datetime.strptime(
+                                        f"{date_str}{time_str}", "%Y%m%d%H%M%S"
+                                    ).replace(tzinfo=timezone.utc)
+                            except Exception:
+                                pass
+                            # Default to now if all parsing failed
+                            if not checkpoint_time:
+                                checkpoint_time = now
+
+                        age_seconds = (now - checkpoint_time).total_seconds()
+                        if age_seconds <= max_operation_age:
+                            operations.append((op_id, checkpoint_time))
+                        else:
+                            logger.debug(
+                                f"Ignoring stale operation {op_id} "
+                                f"(age: {age_seconds:.0f}s > {max_operation_age}s)"
+                            )
 
                 if operations:
                     # Return the most recently checkpointed operation
@@ -161,7 +231,7 @@ async def discover_active_operation(  # noqa: PLR0912
                     last_log_time = time.monotonic()
                 await asyncio.sleep(10)
 
-            except asyncio.CancelledError:  # noqa: PERF203
+            except asyncio.CancelledError:
                 # Graceful shutdown - clean up and re-raise
                 logger.info("Operation discovery cancelled, cleaning up")
                 raise
@@ -197,7 +267,7 @@ async def get_operation_model(redis_url: str, operation_id: str) -> str | None:
     """Fetch the model configured for a specific operation from Redis."""
     client = await create_redis_client(redis_url, decode_responses=True)
     try:
-        return await client.get(f"ares:operation:{operation_id}:model")
+        return await client.get(f"ares:op:{operation_id}:model")
     except Exception as e:
         logger.warning(f"Failed to read operation model for {operation_id}: {e}")
         return None
@@ -212,7 +282,7 @@ async def get_operation_model_overrides(redis_url: str, operation_id: str) -> di
     """Fetch model override env vars for a specific operation from Redis."""
     client = await create_redis_client(redis_url, decode_responses=True)
     try:
-        raw = await client.get(f"ares:operation:{operation_id}:model_overrides")
+        raw = await client.get(f"ares:op:{operation_id}:model_overrides")
         if not raw:
             return None
         data = json.loads(raw)
@@ -242,7 +312,7 @@ async def is_operation_completed(redis_url: str, operation_id: str) -> bool:
     """
     client = await create_redis_client(redis_url, decode_responses=True)
     try:
-        status_key = f"ares:operations:{operation_id}:status"
+        status_key = f"ares:op:{operation_id}:status"
         status_data = await client.get(status_key)
         if not status_data:
             return False
@@ -263,18 +333,24 @@ async def get_active_operation_pointer(redis_url: str, max_operation_age: int = 
     """Fetch a valid active operation pointer from Redis, if present."""
     client = await create_redis_client(redis_url, decode_responses=True)
     try:
-        active_key = await client.get("ares:operation:active")
+        active_key = await client.get("ares:op:active")
         if not active_key:
             return None
         op_id = str(active_key)
-        state_key = f"ares:operation:{op_id}:state"
-        if not await client.exists(state_key):
+        # Check redis-native state format
+        meta_key = f"ares:op:{op_id}:meta"
+        if not await client.exists(meta_key):
             return None
-        time_key = f"ares:operation:{op_id}:checkpoint_time"
-        checkpoint_data = await client.get(time_key)
-        if not checkpoint_data:
+        # Get started_at from meta hash (JSON-encoded by set_meta)
+        started_at_raw = await client.hget(meta_key, "started_at")
+        if not started_at_raw:
             return op_id
-        checkpoint_time = datetime.fromisoformat(str(checkpoint_data))
+        # Decode JSON since set_meta uses json.dumps()
+        try:
+            started_at = json.loads(str(started_at_raw))
+        except json.JSONDecodeError:
+            started_at = str(started_at_raw)
+        checkpoint_time = datetime.fromisoformat(started_at)
         if checkpoint_time.tzinfo is None:
             checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
         age_seconds = (datetime.now(timezone.utc) - checkpoint_time).total_seconds()

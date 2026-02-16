@@ -13,18 +13,16 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
-from ares.tools.red.common import (
-    AnyRedTeamState,
-    run_tool,
-)
+from ares.core.models import SharedRedTeamState
+from ares.tools.red.common import run_tool
 
 
 class CrackingTools(Toolset):
     """Tools for password hash cracking."""
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
