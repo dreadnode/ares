@@ -7,6 +7,7 @@ and phase-aware priority adjustments based on operation progress.
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -473,7 +474,7 @@ class ThrottlingMixin:
 
         return (False, 0.0, "")
 
-    async def _throttled_submit_task(
+    async def _throttled_submit_task(  # noqa: PLR0912
         self: RedTeamDispatcher,
         task_type: str,
         target_role: str,
@@ -503,6 +504,54 @@ class ThrottlingMixin:
             logger.debug(f"Rejecting {task_type} task - Domain Admin achieved, halting new tasks")
             return ""
 
+        # Check if this is a critical path task BEFORE the threading check
+        # Critical path tasks can be dispatched directly from threaded consumer
+        techniques = payload.get("techniques", []) if payload else []
+        is_delegation_enum = task_type == "privesc_enumeration" and any(
+            "delegation" in t.lower() for t in techniques
+        )
+        vuln_type = (payload.get("vuln_type") or "").lower() if payload else ""
+        is_critical_exploit = (
+            task_type in self.CRITICAL_PATH_TASK_TYPES
+            and vuln_type in self.CRITICAL_PATH_VULN_TYPES
+        )
+        is_esc8_coercion = task_type == "coercion" and any(
+            t.lower() in self.ESC8_COERCION_TECHNIQUES for t in techniques
+        )
+        is_critical_path = is_delegation_enum or is_critical_exploit or is_esc8_coercion
+
+        # When called from non-main thread (threaded consumer):
+        # - If task_queue is provided AND task is critical path, dispatch directly
+        #   This prevents freezes when main loop is blocked on LLM calls
+        # - Otherwise queue for main loop to avoid asyncio cross-loop errors
+        if threading.current_thread() is not threading.main_thread():
+            if task_queue is not None and is_critical_path:
+                # CRITICAL PATH: Bypass throttling and dispatch directly from threaded consumer
+                # These tasks (delegation checks, S4U exploits) are DA-critical and shouldn't
+                # wait for the main loop which may be blocked on slow LLM API calls
+                logger.info(
+                    f"🚀 Direct dispatch from threaded consumer: {task_type} -> {target_role} "
+                    f"(delegation_enum={is_delegation_enum}, critical_exploit={is_critical_exploit})"
+                )
+                return await task_queue.submit_task(
+                    task_type=task_type,
+                    target_role=target_role,
+                    payload=payload,
+                    source_agent=source_agent,
+                    priority=priority,
+                )
+            # Non-critical: queue for main loop to use proper throttling
+            with self._pending_dispatch_lock:
+                self._pending_dispatches.append(
+                    (task_type, target_role, payload.copy(), source_agent, priority, max_wait)
+                )
+            self._dispatch_requested.set()
+            logger.debug(
+                f"Queued task dispatch for main loop: {task_type} -> {target_role} "
+                f"(priority {priority})"
+            )
+            return "queued"  # Task accepted for dispatch on main loop
+
         # Use provided task_queue (from threaded consumer) or fall back to self._task_queue
         effective_task_queue = task_queue if task_queue is not None else self._task_queue
         if not effective_task_queue:
@@ -519,21 +568,7 @@ class ThrottlingMixin:
         role_queue_len = await self._get_queue_length(target_role, effective_task_queue)
         role_pending = await self._get_pending_count_by_role(target_role)
 
-        # Check if this is a critical path task that should skip the wait loop
-        techniques = payload.get("techniques", []) if payload else []
-        is_delegation_enum = task_type == "privesc_enumeration" and any(
-            "delegation" in t.lower() for t in techniques
-        )
-        vuln_type = (payload.get("vuln_type") or "").lower() if payload else ""
-        is_critical_exploit = (
-            task_type in self.CRITICAL_PATH_TASK_TYPES
-            and vuln_type in self.CRITICAL_PATH_VULN_TYPES
-        )
-        # ESC8-related coercion tasks (ntlmrelayx_to_adcs, petitpotam) are critical path
-        is_esc8_coercion = task_type == "coercion" and any(
-            t.lower() in self.ESC8_COERCION_TECHNIQUES for t in techniques
-        )
-        skip_wait_loop = is_delegation_enum or is_critical_exploit or is_esc8_coercion
+        # Skip wait loop for critical path tasks (already computed above)
 
         if role_queue_len == 0 and role_pending == 0:
             logger.debug(
@@ -541,12 +576,8 @@ class ThrottlingMixin:
                 f"(queue={role_queue_len}, pending={role_pending})"
             )
             # Skip directly to submit (acquire lock below)
-        elif skip_wait_loop:
-            logger.debug(
-                f"Bypassing throttle wait for {task_type} - critical path task "
-                f"(delegation_enum={is_delegation_enum}, critical_exploit={is_critical_exploit}, "
-                f"esc8_coercion={is_esc8_coercion})"
-            )
+        elif is_critical_path:
+            logger.debug(f"Bypassing throttle wait for {task_type} - critical path task")
             # Skip directly to submit - critical path tasks bypass 60s wait loop
         else:
             # Wait loop - DO NOT hold the lock during sleep to avoid deadlock.

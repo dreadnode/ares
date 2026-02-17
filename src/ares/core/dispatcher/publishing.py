@@ -55,7 +55,9 @@ class PublishingMixin:
         added = self.shared_state.add_credential(credential, source_agent)
 
         if added:
-            self.signal_credential_access()
+            # Only signal credential access from main thread - asyncio.Event is not thread-safe
+            if threading.current_thread() is threading.main_thread():
+                self.signal_credential_access()
             # Add timeline event for credential discovery
             import uuid
             from datetime import datetime, timezone
@@ -102,17 +104,32 @@ class PublishingMixin:
                             f"{credential.domain}\\{credential.username}"
                         )
                         try:
-                            task_id = await asyncio.wait_for(
-                                self.request_privesc_enumeration(
+                            # Skip asyncio.wait_for when in threaded consumer to avoid
+                            # "Future attached to different loop" errors. The threaded
+                            # consumer has its own event loop and the timeout wrapper
+                            # can cause cross-loop Future issues.
+                            is_threaded = threading.current_thread() is not threading.main_thread()
+                            if is_threaded:
+                                task_id = await self.request_privesc_enumeration(
                                     source_agent="orchestrator",
                                     domain=credential.domain,
                                     username=credential.username,
                                     password=credential.password,
                                     techniques=["find_delegation"],
                                     task_queue=effective_task_queue,
-                                ),
-                                timeout=30.0,
-                            )
+                                )
+                            else:
+                                task_id = await asyncio.wait_for(
+                                    self.request_privesc_enumeration(
+                                        source_agent="orchestrator",
+                                        domain=credential.domain,
+                                        username=credential.username,
+                                        password=credential.password,
+                                        techniques=["find_delegation"],
+                                        task_queue=effective_task_queue,
+                                    ),
+                                    timeout=30.0,
+                                )
                             if task_id:
                                 logger.info(
                                     f"🚀 Immediate delegation task {task_id} dispatched for "
@@ -127,12 +144,17 @@ class PublishingMixin:
 
                         # Check for pending constrained delegation vulnerabilities we can now exploit
                         try:
-                            await asyncio.wait_for(
-                                self._exploit_delegation_with_credential(
+                            if is_threaded:
+                                await self._exploit_delegation_with_credential(
                                     credential, source_agent, effective_task_queue
-                                ),
-                                timeout=30.0,
-                            )
+                                )
+                            else:
+                                await asyncio.wait_for(
+                                    self._exploit_delegation_with_credential(
+                                        credential, source_agent, effective_task_queue
+                                    ),
+                                    timeout=30.0,
+                                )
                         except asyncio.TimeoutError:
                             logger.error(
                                 f"Timeout in _exploit_delegation_with_credential for "
@@ -172,7 +194,9 @@ class PublishingMixin:
         added = self.shared_state.add_hash(hash_obj, source_agent)
 
         if added:
-            self.signal_credential_access()
+            # Only signal credential access from main thread - asyncio.Event is not thread-safe
+            if threading.current_thread() is threading.main_thread():
+                self.signal_credential_access()
             # Add timeline event for hash discovery
             import uuid
             from datetime import datetime, timezone
@@ -395,8 +419,8 @@ class PublishingMixin:
                 priority=5,  # Medium-high priority
             )
 
-            # Skip if task was deferred or dropped
-            if task_id and task_id != "deferred":
+            # Skip if task was queued for main loop or deferred - don't create TaskInfo here
+            if task_id and task_id not in ("deferred", "queued"):
                 task_info = TaskInfo(
                     task_id=task_id,
                     task_type="mssql_enum",
@@ -409,9 +433,9 @@ class PublishingMixin:
                     f"Dispatched proactive MSSQL enum for {host.ip} "
                     f"with {cred.get('domain', '')}\\{cred.get('username', '')}"
                 )
-            elif task_id == "deferred":
+            elif task_id in ("deferred", "queued"):
                 dispatched += 1
-                logger.info(f"MSSQL enum for {host.ip} deferred to background queue")
+                logger.info(f"MSSQL enum for {host.ip} {task_id} to background/main loop queue")
 
         if dispatched > 0:
             logger.warning(
@@ -677,10 +701,12 @@ class PublishingMixin:
             if not task_id:
                 return ""
 
-            # Task deferred to background queue - don't create TaskInfo here
-            if task_id == "deferred":
-                logger.info(f"ADCS enumeration task deferred to background queue for {target_ip}")
-                return "deferred"
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            if task_id in ("deferred", "queued"):
+                logger.info(
+                    f"ADCS enumeration task {task_id} to background/main loop queue for {target_ip}"
+                )
+                return task_id
 
             task_info = TaskInfo(
                 task_id=task_id,

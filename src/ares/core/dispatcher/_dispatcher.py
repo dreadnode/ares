@@ -159,6 +159,13 @@ class RedTeamDispatcher(
         self._deferred_task_requested = threading.Event()
         self._pending_deferred_lock = threading.Lock()
 
+        # Pending task dispatches from threaded consumer (processed by main loop)
+        # When _throttled_submit_task is called from non-main thread, it can't use
+        # asyncio primitives (locks, event loop time) so we queue for main loop
+        self._pending_dispatches: list[tuple[str, str, dict, str, int, float]] = []
+        self._dispatch_requested = threading.Event()
+        self._pending_dispatch_lock = threading.Lock()
+
     async def start(self, operation_id: str) -> None:
         """
         Start the dispatcher for an operation.
@@ -401,9 +408,11 @@ class RedTeamDispatcher(
             source_agent=source_agent,
         )
 
-        # Task was deferred to background queue - can't wait for it
-        if task_id == "deferred":
-            logger.info(f"Task {task_type} deferred to background queue, cannot wait for result")
+        # Task was queued for main loop dispatch or deferred - can't wait for it
+        if task_id in ("deferred", "queued"):
+            logger.info(
+                f"Task {task_type} {task_id} to background/main loop queue, cannot wait for result"
+            )
             return None
 
         if not task_id:

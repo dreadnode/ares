@@ -814,6 +814,11 @@ class MonitoringMixin:
                 # These were queued because the threaded consumer can't access Redis directly
                 await self._process_pending_deferred_tasks()
 
+                # Process pending task dispatches from threaded consumer
+                # These were queued because _throttled_submit_task can't use asyncio primitives
+                # from a non-main thread (locks, event loop time, etc.)
+                await self._process_pending_dispatches()
+
                 # Reset failure counter on success
                 consecutive_failures = 0
 
@@ -874,6 +879,82 @@ class MonitoringMixin:
                     )
             except Exception as e:  # noqa: PERF203
                 logger.error(f"Error processing pending deferred task: {e}")
+
+    async def _process_pending_dispatches(self: RedTeamDispatcher) -> None:
+        """Process task dispatches queued by the threaded consumer.
+
+        The threaded result consumer can't call _throttled_submit_task directly
+        because it uses asyncio primitives bound to the main event loop (locks,
+        event loop time). Instead, it queues dispatch requests in _pending_dispatches
+        and sets _dispatch_requested. This method processes those requests on the
+        main event loop where the asyncio primitives work correctly.
+        """
+        if not self._dispatch_requested.is_set():
+            return
+
+        self._dispatch_requested.clear()
+
+        # Atomically get and clear pending dispatches
+        with self._pending_dispatch_lock:
+            dispatches_to_process = self._pending_dispatches.copy()
+            self._pending_dispatches.clear()
+
+        if not dispatches_to_process:
+            return
+
+        logger.info(
+            f"Processing {len(dispatches_to_process)} pending task dispatches from threaded consumer"
+        )
+
+        for (
+            task_type,
+            target_role,
+            payload,
+            source_agent,
+            priority,
+            max_wait,
+        ) in dispatches_to_process:
+            try:
+                # Now we're on the main thread, so asyncio operations will work
+                task_id = await self._throttled_submit_task(
+                    task_type=task_type,
+                    target_role=target_role,
+                    payload=payload,
+                    source_agent=source_agent,
+                    priority=priority,
+                    max_wait=max_wait,
+                )
+                if not task_id:
+                    logger.debug(
+                        f"Task dispatch from threaded consumer returned no ID: "
+                        f"{task_type} -> {target_role}"
+                    )
+                elif task_id in ("deferred", "queued"):
+                    # Task was deferred again (rare) - skip TaskInfo creation
+                    logger.debug(
+                        f"Task dispatch from threaded consumer {task_id}: "
+                        f"{task_type} -> {target_role}"
+                    )
+                else:
+                    # Task was successfully submitted - create TaskInfo for tracking
+                    # This is critical: without this, results for tasks dispatched from
+                    # the threaded consumer would never be processed (no entry in pending_tasks)
+                    from ares.core.models import TaskInfo
+
+                    task_info = TaskInfo(
+                        task_id=task_id,
+                        task_type=task_type,
+                        assigned_agent=target_role,
+                        params=payload,
+                    )
+                    if self._shared_state:
+                        self._shared_state.pending_tasks[task_id] = task_info
+                        logger.info(
+                            f"Task {task_id} ({task_type}) submitted from pending dispatch, "
+                            f"added to pending_tasks for result tracking"
+                        )
+            except Exception as e:  # noqa: PERF203
+                logger.error(f"Error processing pending task dispatch: {e}")
 
     async def _log_throttle_health(self: RedTeamDispatcher) -> None:
         """

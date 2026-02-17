@@ -700,29 +700,13 @@ def reset_executor() -> None:
     logger.info("Executor reset - will re-detect mode on next use")
 
 
-def run_remote(
+def _run_remote_impl(
     command: str | list[str],
     timeout_seconds: int = 300,
     working_directory: str = "/tmp",  # noqa: S108  # nosec B108
     target_role: str | None = None,
 ) -> CommandResult:
-    """Execute a command on the remote Kali instance.
-
-    This is a convenience function that uses the global executor.
-
-    Args:
-        command: Command string or list of command parts
-        timeout_seconds: Maximum time to wait
-        working_directory: Directory to execute in
-        target_role: Worker role to execute on when using the K8s executor
-
-    Returns:
-        CommandResult with stdout, stderr, and return code
-
-    Example:
-        >>> result = run_remote("netexec smb 192.168.58.219 --shares")
-        >>> print(result.stdout)
-    """
+    """Internal implementation of run_remote without replay interception."""
     executor = get_executor()
     if target_role:
         local_role = os.environ.get("ARES_ROLE", "").strip().lower()
@@ -740,3 +724,48 @@ def run_remote(
         working_directory,
         target_role=target_role,
     )
+
+
+def run_remote(
+    command: str | list[str],
+    timeout_seconds: int = 300,
+    working_directory: str = "/tmp",  # noqa: S108  # nosec B108
+    target_role: str | None = None,
+) -> CommandResult:
+    """Execute a command on the remote Kali instance.
+
+    This is a convenience function that uses the global executor.
+    When replay mode is active, commands may be recorded or replayed.
+
+    Args:
+        command: Command string or list of command parts
+        timeout_seconds: Maximum time to wait
+        working_directory: Directory to execute in
+        target_role: Worker role to execute on when using the K8s executor
+
+    Returns:
+        CommandResult with stdout, stderr, and return code
+
+    Example:
+        >>> result = run_remote("netexec smb 192.168.58.219 --shares")
+        >>> print(result.stdout)
+    """
+    # Check if replay is active and intercept if so
+    try:
+        from ares.core.replay import get_replay_store
+        from ares.core.replay.wrappers import intercept_run_remote
+
+        store = get_replay_store()
+        if store and store.mode in ("record", "replay"):
+            return intercept_run_remote(
+                _run_remote_impl,
+                command,
+                timeout_seconds,
+                working_directory,
+                target_role,
+            )
+    except ImportError:
+        # Replay module not available, fall through
+        pass
+
+    return _run_remote_impl(command, timeout_seconds, working_directory, target_role)

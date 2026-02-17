@@ -216,7 +216,7 @@ class OperationRecoveryManager:
         # Load collections
         state.all_credentials.extend(await backend.get_credentials())
         state.all_hashes.extend(await backend.get_hashes())
-        # Deduplicate hashes after loading (handles pre-existing duplicates in Redis)
+        # Safety net dedup (HASH storage with HSETNX prevents dupes, but handles legacy data)
         state.all_hashes = self._dedupe_hashes(state.all_hashes)
         state.all_hosts.extend(await backend.get_hosts())
         state.all_users.extend(await backend.get_users())

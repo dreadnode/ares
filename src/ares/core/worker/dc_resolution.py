@@ -69,6 +69,17 @@ def resolve_dc_ip_for_domain(  # noqa: PLR0912
 
     domain_lower = domain.lower()
 
+    # Priority 0: Check cached domain_controllers (populated by orchestrator)
+    # This handles child domains where hostname doesn't match domain FQDN
+    # e.g., north.sevenkingdoms.local DC is winterfell.sevenkingdoms.local
+    cached_dc = getattr(state, "domain_controllers", {}).get(domain_lower)
+    if cached_dc:
+        if provided_dc_ip and provided_dc_ip != cached_dc:
+            logger.info(f"DC IP from cache: {cached_dc} (overriding {provided_dc_ip}) for {domain}")
+        else:
+            logger.debug(f"DC IP from cache: {cached_dc} for {domain}")
+        return cached_dc, None
+
     # Check if provided DC IP belongs to a host matching this domain
     provided_host = None
     if provided_dc_ip:

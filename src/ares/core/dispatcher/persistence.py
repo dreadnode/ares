@@ -34,13 +34,41 @@ class PersistenceMixin:
         serializer: Callable[[Any], str],
         ttl: int,
     ) -> None:
-        """Persist a collection to Redis using clear-and-rewrite."""
+        """Persist a collection to Redis LIST using clear-and-rewrite."""
         if not items:
             return
         pipe = self._redis_client.pipeline()
         pipe.delete(key)
         for item in items:
             pipe.rpush(key, serializer(item))
+        pipe.expire(key, ttl)
+        await pipe.execute()
+
+    async def _persist_hashes(
+        self: RedTeamDispatcher,
+        key: str,
+        hashes: list[Any],
+        serializer: Callable[[Any], str],
+        ttl: int,
+    ) -> None:
+        """Persist hashes to Redis HASH using clear-and-rewrite with dedup keys."""
+        if not hashes:
+            return
+
+        from ares.core.state_backend import RedisStateBackend
+
+        # Create a temporary backend instance just for building dedup keys
+        backend = RedisStateBackend(self._redis_client, self.shared_state.operation_id)
+
+        pipe = self._redis_client.pipeline()
+        pipe.delete(key)
+        for h in hashes:
+            hash_type = (h.hash_type or "").strip().lower()
+            hash_value = h.hash_value or ""
+            username = (h.username or "").strip().lower()
+            domain = (h.domain or "").strip().lower()
+            dedup_key = backend._build_hash_dedup_key(hash_type, hash_value, domain, username)
+            pipe.hset(key, dedup_key, serializer(h))
         pipe.expire(key, ttl)
         await pipe.execute()
 
@@ -89,7 +117,8 @@ class PersistenceMixin:
                 _serialize_credential,
                 ttl,
             )
-            await self._persist_collection(
+            # Hashes use Redis HASH (not LIST) for O(1) deduplication
+            await self._persist_hashes(
                 f"ares:op:{op_id}:hashes",
                 self.shared_state.all_hashes,
                 _serialize_hash,

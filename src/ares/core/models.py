@@ -14,6 +14,7 @@ Example usage for LLM output parsing:
 
 from __future__ import annotations
 
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -36,6 +37,17 @@ from rigging.parsing import (
 )
 
 from ares.core.config import get_default_max_retries
+
+
+def _get_uuid() -> str:
+    """Get a UUID, deterministic if replay context is active."""
+    try:
+        from ares.core.replay.determinism import get_deterministic_uuid
+
+        return get_deterministic_uuid()
+    except ImportError:
+        return str(uuid.uuid4())
+
 
 # Default retry count for tasks - exported for test compatibility
 DEFAULT_MAX_RETRIES = 3
@@ -501,7 +513,7 @@ class Credential(Model):
         attack_step: Position in the attack chain (0 = initial access).
     """
 
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = Field(default_factory=_get_uuid)
     username: str
     password: str
     domain: str = ""
@@ -527,7 +539,7 @@ class Hash(Model):
         attack_step: Position in the attack chain (0 = initial access).
     """
 
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = Field(default_factory=_get_uuid)
     username: str
     hash_value: str
     hash_type: str = "NTLM"
@@ -1731,6 +1743,24 @@ class SharedRedTeamState:
                 f"User rejected: machine account '{normalized}' for domain {normalized_domain}"
             )
             return False
+        # Filter out tool output artifacts that look like usernames but are actually
+        # status messages or descriptions (e.g., "gpp_passwords_found" from netexec)
+        artifact_patterns = (
+            "_found",
+            "_failed",
+            "_success",
+            "_error",
+            "_status",
+            "passwords_",
+            "credentials_",
+            "hashes_",
+        )
+        normalized_lower = normalized.lower()
+        if any(pattern in normalized_lower for pattern in artifact_patterns):
+            logger.debug(
+                f"User rejected: tool artifact '{normalized}' for domain {normalized_domain}"
+            )
+            return False
 
         target_domain = (self.target.domain or "").lower() if self.target else ""
         for existing in self.all_users:
@@ -2054,11 +2084,13 @@ class SharedRedTeamState:
                     )
                     self.add_credential(cracked_cred, source_agent)
                     # Signal credential access if dispatcher available
-                    if self._dispatcher:
+                    # Only call from main thread - asyncio.Event is not thread-safe
+                    if self._dispatcher and threading.current_thread() is threading.main_thread():
                         self._dispatcher.signal_credential_access()
-                        # Request checkpoint from dispatcher's maintenance loop
-                        if hasattr(self._dispatcher, "_checkpoint_requested"):
-                            self._dispatcher._checkpoint_requested.set()
+                    # Request checkpoint from dispatcher's maintenance loop
+                    # _checkpoint_requested is a threading.Event, safe from any thread
+                    if self._dispatcher and hasattr(self._dispatcher, "_checkpoint_requested"):
+                        self._dispatcher._checkpoint_requested.set()
                     return True  # Return True since we updated it
                 logger.debug(
                     f"Hash rejected: duplicate hash for {domain}\\{username} ({hash_type}) from {source_agent}"

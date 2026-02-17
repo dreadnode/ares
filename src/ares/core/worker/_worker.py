@@ -904,6 +904,8 @@ class RedisWorkerAgent:
             fresh.all_domains.extend(await backend.get_domains())
             fresh.has_domain_admin, fresh.domain_admin_path = await backend.get_domain_admin()
             fresh.has_golden_ticket = await backend.get_golden_ticket()
+            # Load DC map for child domain resolution
+            fresh.domain_controllers.update(await backend.get_all_dcs())
 
             self._merge_shared_state(fresh)
         except Exception as e:
@@ -945,6 +947,7 @@ class RedisWorkerAgent:
             "target",
             "started_at",
             "all_domains",
+            "domain_controllers",
             "all_credentials",
             "all_hashes",
             "all_hosts",
@@ -1735,6 +1738,8 @@ class RedisWorkerAgent:
             fresh.all_domains.extend(await backend.get_domains())
             fresh.has_domain_admin, fresh.domain_admin_path = await backend.get_domain_admin()
             fresh.has_golden_ticket = await backend.get_golden_ticket()
+            # Load DC map for child domain resolution
+            fresh.domain_controllers.update(await backend.get_all_dcs())
 
             self._merge_shared_state(fresh)
         except Exception as e:

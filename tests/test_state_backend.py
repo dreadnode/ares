@@ -280,7 +280,7 @@ class TestRedisStateBackend:
 
     @pytest.mark.asyncio
     async def test_add_hash(self, backend, mock_redis):
-        """Test adding a hash to Redis."""
+        """Test adding a hash to Redis HASH with HSETNX for deduplication."""
         hash_obj = Hash(
             username="krbtgt",
             hash_type="NTLM",
@@ -291,7 +291,8 @@ class TestRedisStateBackend:
         result = await backend.add_hash(hash_obj)
 
         assert result is True
-        mock_redis.rpush.assert_called_once()
+        # Hashes now use HSETNX for O(1) deduplication
+        mock_redis.hsetnx.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_add_host(self, backend, mock_redis):

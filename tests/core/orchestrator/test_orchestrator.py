@@ -151,7 +151,9 @@ class TestAutoBloodHound:
         dispatcher.request_recon.assert_called_once()
         call_kwargs = dispatcher.request_recon.call_args.kwargs
         assert "bloodhound" in call_kwargs.get("reason", "")
-        assert "bloodhound" in call_kwargs.get("techniques", [])
+        # Check that a bloodhound-related technique was dispatched
+        techniques = call_kwargs.get("techniques", [])
+        assert any("bloodhound" in t.lower() for t in techniques)
 
     @pytest.mark.asyncio
     async def test_auto_bloodhound_skips_when_no_credentials(self, monkeypatch):

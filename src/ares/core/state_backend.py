@@ -4,7 +4,8 @@ This module provides Redis-native storage for SharedRedTeamState collections,
 eliminating the need for full JSON serialization/deserialization on every mutation.
 
 Key design decisions:
-- Collections (credentials, hashes, hosts, etc.) use Redis LIST
+- Most collections (credentials, hosts, etc.) use Redis LIST
+- Hashes use Redis HASH (dedup_key -> JSON) for O(1) deduplication via HSETNX
 - Vulnerabilities use Redis HASH (vuln_id -> JSON)
 - Dedup tracking uses Redis SET
 - Scalars (flags, paths) use Redis HASH (meta)
@@ -12,7 +13,7 @@ Key design decisions:
 
 Redis key structure:
     ares:op:{op_id}:credentials       LIST
-    ares:op:{op_id}:hashes            LIST
+    ares:op:{op_id}:hashes            HASH (dedup_key -> JSON)
     ares:op:{op_id}:hosts             LIST
     ares:op:{op_id}:users             LIST
     ares:op:{op_id}:shares            LIST
@@ -164,16 +165,16 @@ class RedisStateBackend:
             return []
 
     # =========================================================================
-    # Hashes
+    # Hashes (Redis HASH with HSETNX for O(1) deduplication)
     # =========================================================================
 
     async def add_hash(self, hash_obj: Hash) -> bool:
-        """Add a hash to Redis LIST with AS-REP/Kerberoast deduplication.
+        """Add a hash to Redis HASH with O(1) deduplication via HSETNX.
 
-        For AS-REP hashes, only one hash per user+domain is stored since each
-        AS-REP request generates a different hash but cracks to the same password.
-
-        For Kerberoast hashes, only one hash per user+domain+SPN+etype is stored.
+        Deduplication keys by hash type:
+        - AS-REP: {domain}:{username} (same user = same password)
+        - Kerberoast: {domain}:{username}:{etype}:{spn}
+        - NTLM/other: {domain}:{username}:{hash_value[:32]}
 
         Args:
             hash_obj: Hash to add
@@ -186,10 +187,44 @@ class RedisStateBackend:
         username = (hash_obj.username or "").strip().lower()
         domain = (hash_obj.domain or "").strip().lower()
 
+        # Build dedup key based on hash type
+        dedup_field = self._build_hash_dedup_key(hash_type, hash_value, domain, username)
+
+        key = self._key(self.KEY_HASHES)
+        try:
+            data = _serialize_hash(hash_obj)
+            # HSETNX returns 1 if field was set (new), 0 if already existed
+            added = await self._redis.hsetnx(key, dedup_field, data)
+            if not added:
+                logger.debug(f"Hash rejected (duplicate): {dedup_field}")
+                return False
+            await self._set_ttl(key)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to add hash to Redis: {e}")
+            return False
+
+    def _build_hash_dedup_key(
+        self, hash_type: str, hash_value: str, domain: str, username: str
+    ) -> str:
+        """Build deduplication key for a hash based on its type.
+
+        Args:
+            hash_type: Normalized hash type (lowercase)
+            hash_value: The hash value
+            domain: Domain (lowercase)
+            username: Username (lowercase)
+
+        Returns:
+            Deduplication key string
+        """
         # Detect AS-REP hashes
         is_asrep = hash_type in {"as-rep", "asrep", "krb5asrep"} or hash_value.startswith(
             "$krb5asrep$"
         )
+        if is_asrep:
+            # AS-REP: one hash per user+domain (each request generates different hash)
+            return f"asrep:{domain}:{username}"
 
         # Detect Kerberoast hashes
         is_kerberoast = hash_type in {
@@ -198,41 +233,17 @@ class RedisStateBackend:
             "tgs-rep",
             "tgs",
         } or hash_value.startswith("$krb5tgs$")
+        if is_kerberoast:
+            # Kerberoast: one hash per user+domain+SPN+etype
+            spn_key = self._extract_kerberoast_spn_key(hash_value)
+            if spn_key:
+                return f"krb:{domain}:{username}:{spn_key}"
+            # Fallback if SPN extraction fails
+            return f"krb:{domain}:{username}:{hash_value[:32]}"
 
-        try:
-            # AS-REP deduplication: one hash per user+domain
-            if is_asrep:
-                dedup_key = self._dedup_key("asrep_hashes")
-                member = f"{domain}:{username}"
-                added = await self._redis.sadd(dedup_key, member)
-                if not added:
-                    logger.debug(f"AS-REP hash rejected (duplicate): {domain}\\{username}")
-                    return False
-                await self._set_ttl(dedup_key)
-
-            # Kerberoast deduplication: one hash per user+domain+SPN+etype
-            elif is_kerberoast:
-                # Extract SPN and etype from hash format: $krb5tgs$ETYPE$*user$realm$spn*$...
-                spn_key = self._extract_kerberoast_spn_key(hash_value)
-                if spn_key:
-                    dedup_key = self._dedup_key("kerberoast_hashes")
-                    member = f"{domain}:{username}:{spn_key}"
-                    added = await self._redis.sadd(dedup_key, member)
-                    if not added:
-                        logger.debug(
-                            f"Kerberoast hash rejected (duplicate): {domain}\\{username} ({spn_key})"
-                        )
-                        return False
-                    await self._set_ttl(dedup_key)
-
-            key = self._key(self.KEY_HASHES)
-            data = _serialize_hash(hash_obj)
-            await self._redis.rpush(key, data)
-            await self._set_ttl(key)
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to add hash to Redis: {e}")
-            return False
+        # NTLM and other hashes: dedupe by domain+username+hash prefix
+        # Using first 32 chars of hash to handle slight variations
+        return f"ntlm:{domain}:{username}:{hash_value[:32]}"
 
     def _extract_kerberoast_spn_key(self, hash_value: str) -> str | None:
         """Extract SPN and encryption type from Kerberoast hash for deduplication.
@@ -263,15 +274,16 @@ class RedisStateBackend:
             return None
 
     async def get_hashes(self) -> list[Hash]:
-        """Get all hashes from Redis LIST.
+        """Get all hashes from Redis HASH.
 
         Returns:
             List of Hash objects
         """
         key = self._key(self.KEY_HASHES)
         try:
-            items = await self._redis.lrange(key, 0, -1)
-            return [_deserialize_hash(item) for item in items]
+            items = await self._redis.hgetall(key)
+            # Values are the serialized Hash objects, keys are dedup keys (ignored)
+            return [_deserialize_hash(v) for v in items.values()]
         except Exception as e:
             logger.warning(f"Failed to get hashes from Redis: {e}")
             return []

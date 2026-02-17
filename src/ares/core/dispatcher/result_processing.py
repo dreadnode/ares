@@ -785,6 +785,21 @@ class ResultProcessingMixin:
         # Skip machine accounts (ending in $) - these are computer accounts, not users
         if normalized.endswith("$"):
             return False
+        # Filter out tool output artifacts that look like usernames but are actually
+        # status messages or descriptions (e.g., "gpp_passwords_found" from netexec)
+        artifact_patterns = (
+            "_found",
+            "_failed",
+            "_success",
+            "_error",
+            "_status",
+            "passwords_",
+            "credentials_",
+            "hashes_",
+        )
+        normalized_lower = normalized.lower()
+        if any(pattern in normalized_lower for pattern in artifact_patterns):
+            return False
         for existing in self.shared_state.all_users:
             if existing.username == normalized and existing.domain == domain:
                 return False

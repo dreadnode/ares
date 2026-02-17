@@ -186,23 +186,47 @@ class RoutingMixin:
                     logger.debug(f"DC IP found via services: {host.ip} ({hostname})")
                     return host.ip
 
-        # Priority 4: Fallback - hosts with DC roles (any domain) - log warning
-        for host in self.shared_state.all_hosts:
-            if _has_dc_role(host):
-                logger.warning(
-                    f"DC IP fallback (no domain match): {host.ip} ({host.hostname}) for domain {domain}"
-                )
-                return host.ip
+        # Priority 3.5: For child domains, find a DC in the same forest
+        # e.g., north.sevenkingdoms.local -> find a DC with hostname *.sevenkingdoms.local
+        # that is NOT the parent domain's registered DC (prefer child domain's own DC)
+        if domain_lower and "." in domain_lower:
+            parts = domain_lower.split(".")
+            if len(parts) >= 3:  # child.parent.tld has 3+ parts
+                parent_domain = ".".join(
+                    parts[1:]
+                )  # north.sevenkingdoms.local -> sevenkingdoms.local
+                parent_dc_ip = self.shared_state.domain_controllers.get(parent_domain)
 
-        # Priority 5: Any host with DC-like services (risky, may be wrong) - log warning
-        for host in self.shared_state.all_hosts:
-            if _has_dc_services(host):
-                logger.warning(
-                    f"DC IP last resort (services only): {host.ip} ({host.hostname}) for domain {domain}"
-                )
-                return host.ip
+                # Find all DCs in the same forest (hostname ends with parent domain)
+                forest_dcs = [
+                    host
+                    for host in self.shared_state.all_hosts
+                    if _has_dc_role(host)
+                    and host.hostname
+                    and host.hostname.lower().endswith(f".{parent_domain}")
+                ]
 
-        # Priority 6: DNS SRV lookup (last resort, requires network access)
+                # Prefer a DC that is NOT the parent domain's DC (likely child domain's DC)
+                for dc in forest_dcs:
+                    if dc.ip != parent_dc_ip:
+                        self.shared_state.domain_controllers[domain_lower] = dc.ip
+                        logger.info(
+                            f"DC IP from forest (not parent): {dc.ip} ({dc.hostname}) -> {domain}"
+                        )
+                        return dc.ip
+
+                # If only parent DC found, use it as fallback BUT DON'T CACHE
+                # Caching the parent DC prevents finding the correct child DC later
+                # when host enumeration completes and identifies the real DC
+                if parent_dc_ip:
+                    logger.info(
+                        f"DC IP from parent domain (uncached fallback): {parent_dc_ip} ({parent_domain}) -> {domain}"
+                    )
+                    return parent_dc_ip
+
+        # Priority 4: DNS SRV lookup (try before generic fallback - more accurate)
+        # This correctly finds DCs for child domains like north.sevenkingdoms.local
+        # when hostname data is incomplete or missing
         if domain_lower:
             dc_ip = self._dns_lookup_dc(domain_lower)
             if dc_ip:
@@ -210,6 +234,33 @@ class RoutingMixin:
                 self.shared_state.domain_controllers[domain_lower] = dc_ip
                 logger.info(f"DC IP found via DNS SRV: {dc_ip} for {domain}")
                 return dc_ip
+
+        # Priority 4.5: LDAP rootDSE query to determine which DC serves the domain
+        # When hostnames are missing, try LDAP against each DC candidate
+        candidate_dcs = [h for h in self.shared_state.all_hosts if _has_dc_role(h)]
+        if candidate_dcs and domain_lower:
+            for dc_candidate in candidate_dcs:
+                dc_domain = self._ldap_get_domain(dc_candidate.ip)
+                if dc_domain and dc_domain.lower() == domain_lower:
+                    self.shared_state.domain_controllers[domain_lower] = dc_candidate.ip
+                    logger.info(f"DC IP found via LDAP: {dc_candidate.ip} serves {dc_domain}")
+                    return dc_candidate.ip
+
+        # Priority 5: Fallback - hosts with DC roles (any domain) - log warning
+        for host in self.shared_state.all_hosts:
+            if _has_dc_role(host):
+                logger.warning(
+                    f"DC IP fallback (no domain match): {host.ip} ({host.hostname}) for domain {domain}"
+                )
+                return host.ip
+
+        # Priority 6: Any host with DC-like services (risky, may be wrong) - log warning
+        for host in self.shared_state.all_hosts:
+            if _has_dc_services(host):
+                logger.warning(
+                    f"DC IP last resort (services only): {host.ip} ({host.hostname}) for domain {domain}"
+                )
+                return host.ip
 
         logger.warning(f"No DC IP found for domain {domain}")
         return ""
@@ -288,6 +339,114 @@ class RoutingMixin:
                             return ip
         except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
             logger.debug(f"DNS SRV lookup failed for {domain}: {e}")
+
+        return ""
+
+    def _ldap_get_domain(self: RedTeamDispatcher, dc_ip: str) -> str:
+        """Query LDAP rootDSE to get the domain name a DC serves.
+
+        Uses raw socket LDAP to query the defaultNamingContext attribute which
+        contains the domain DN (e.g., DC=north,DC=sevenkingdoms,DC=local).
+
+        Args:
+            dc_ip: IP address of the DC to query
+
+        Returns:
+            Domain name (e.g., "north.sevenkingdoms.local") or empty string on failure
+        """
+        import socket
+
+        try:
+            # LDAP rootDSE search request (precomputed BER encoding)
+            # This requests defaultNamingContext from the rootDSE
+            ldap_rootdse_request = bytes(
+                [
+                    0x30,
+                    0x25,  # SEQUENCE, length 37
+                    0x02,
+                    0x01,
+                    0x01,  # messageID: 1
+                    0x63,
+                    0x20,  # SearchRequest, length 32
+                    0x04,
+                    0x00,  # baseObject: ""
+                    0x0A,
+                    0x01,
+                    0x00,  # scope: baseObject
+                    0x0A,
+                    0x01,
+                    0x00,  # derefAliases: neverDerefAliases
+                    0x02,
+                    0x01,
+                    0x00,  # sizeLimit: 0
+                    0x02,
+                    0x01,
+                    0x00,  # timeLimit: 0
+                    0x01,
+                    0x01,
+                    0x00,  # typesOnly: false
+                    0x87,
+                    0x0B,
+                    0x6F,
+                    0x62,
+                    0x6A,
+                    0x65,
+                    0x63,
+                    0x74,  # filter: present "objectclass"
+                    0x63,
+                    0x6C,
+                    0x61,
+                    0x73,
+                    0x73,
+                    0x30,
+                    0x00,  # attributes: empty (return all)
+                ]
+            )
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3)
+            sock.connect((dc_ip, 389))
+            sock.sendall(ldap_rootdse_request)
+
+            # Read all response data (LDAP responses may be fragmented)
+            response = b""
+            try:
+                while True:
+                    chunk = sock.recv(8192)
+                    if not chunk:
+                        break
+                    response += chunk
+            except TimeoutError:
+                pass  # Expected when all data is read
+            sock.close()
+
+            # Parse response - look for defaultNamingContext in the raw bytes
+            response_str = response.decode("utf-8", errors="replace")
+
+            # Find defaultNamingContext - look for the attribute name followed by DC= pattern
+            # The BER encoding puts length bytes between attribute and value, so we use .*? to skip them
+            # Use [A-Za-z]+ for the last DC component to avoid capturing BER length bytes (e.g., '0')
+            # Pattern handles both "DC=x,DC=local" and "DC=x,DC=y,DC=local" formats
+            match = re.search(
+                r"defaultNamingContext.*?(DC=[A-Za-z0-9_-]+(?:,DC=[A-Za-z]+)+)",
+                response_str,
+                re.IGNORECASE | re.DOTALL,
+            )
+            if match:
+                dn = match.group(1)
+                # Convert DN to domain name: DC=north,DC=sevenkingdoms,DC=local -> north.sevenkingdoms.local
+                parts = []
+                for component in dn.split(","):
+                    stripped = component.strip()
+                    if stripped.upper().startswith("DC="):
+                        parts.append(stripped[3:])
+                if parts:
+                    domain = ".".join(parts)
+                    logger.info(f"LDAP rootDSE: {dc_ip} serves domain {domain}")
+                    return domain
+
+        except (OSError, TimeoutError, Exception) as e:
+            logger.debug(f"LDAP domain lookup failed for {dc_ip}: {e}")
 
         return ""
 
@@ -562,6 +721,12 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            # The main loop's _process_pending_dispatches will create TaskInfo when it submits
+            if task_id in ("deferred", "queued"):
+                logger.info(f"Crack task {task_id} to background/main loop queue")
+                return task_id
+
             task_info = TaskInfo(
                 task_id=task_id,
                 task_type="crack",
@@ -698,10 +863,10 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
-            # Task deferred to background queue - don't create TaskInfo here
-            if task_id == "deferred":
-                logger.info("Lateral movement task deferred to background queue")
-                return "deferred"
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            if task_id in ("deferred", "queued"):
+                logger.info(f"Lateral movement task {task_id} to background/main loop queue")
+                return task_id
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -807,10 +972,10 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
-            # Task deferred to background queue - don't create TaskInfo here
-            if task_id == "deferred":
-                logger.info("ACL analysis task deferred to background queue")
-                return "deferred"
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            if task_id in ("deferred", "queued"):
+                logger.info(f"ACL analysis task {task_id} to background/main loop queue")
+                return task_id
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -908,10 +1073,10 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
-            # Task deferred to background queue - don't create TaskInfo here
-            if task_id == "deferred":
-                logger.info("Recon task deferred to background queue")
-                return "deferred"
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            if task_id in ("deferred", "queued"):
+                logger.info(f"Recon task {task_id} to background/main loop queue")
+                return task_id
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1022,10 +1187,10 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
-            # Task deferred to background queue - don't create TaskInfo here
-            if task_id == "deferred":
-                logger.info("Credential access task deferred to background queue")
-                return "deferred"
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            if task_id in ("deferred", "queued"):
+                logger.info(f"Credential access task {task_id} to background/main loop queue")
+                return task_id
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1132,10 +1297,10 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
-            # Task was deferred to background queue - don't create TaskInfo here
-            # The deferred queue processor will create TaskInfo when it submits
-            if task_id == "deferred":
-                logger.info(f"Exploit task for {vuln_type} deferred to background queue")
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            # The main loop's _process_pending_dispatches will create TaskInfo when it submits
+            if task_id in ("deferred", "queued"):
+                logger.info(f"Exploit task for {vuln_type} {task_id} to background/main loop queue")
                 self._record_exploit_weakness(vuln_type, target, payload)
                 return "deferred"
 
@@ -1254,10 +1419,10 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
-            # Task deferred to background queue - don't create TaskInfo here
-            if task_id == "deferred":
-                logger.info("Privesc enumeration task deferred to background queue")
-                return "deferred"
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            if task_id in ("deferred", "queued"):
+                logger.info(f"Privesc enumeration task {task_id} to background/main loop queue")
+                return task_id
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1332,10 +1497,10 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
-            # Task deferred to background queue - don't create TaskInfo here
-            if task_id == "deferred":
-                logger.info("Coercion task deferred to background queue")
-                return "deferred"
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            if task_id in ("deferred", "queued"):
+                logger.info(f"Coercion task {task_id} to background/main loop queue")
+                return task_id
 
             task_info = TaskInfo(
                 task_id=task_id,

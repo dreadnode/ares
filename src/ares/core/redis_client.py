@@ -241,6 +241,17 @@ async def create_redis_client(redis_url: str | None = None, *, decode_responses:
     if sentinel_config:
         sentinel_client = _get_or_create_sentinel()
         if sentinel_client:
+            # Force Sentinel to discover master NOW in this async context.
+            # This ensures all async resources (Futures, connections) are bound to
+            # the current event loop, avoiding "Future attached to different loop"
+            # errors when the threaded result consumer uses this client.
+            master_addr = await sentinel_client.discover_master(sentinel_config["master"])
+            thread_name = threading.current_thread().name
+            logger.debug(
+                f"Sentinel discovered master for thread '{thread_name}': "
+                f"{master_addr[0]}:{master_addr[1]}"
+            )
+
             return sentinel_client.master_for(
                 sentinel_config["master"],
                 password=sentinel_config["redis_password"],

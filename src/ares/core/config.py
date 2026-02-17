@@ -236,6 +236,16 @@ class OperationConfig:
     grafana_url: str = ""
     grafana_api_key: str = ""
 
+    # Replay settings (for deterministic runs)
+    # Mode: "record" to capture, "replay" to use cached, "" for off
+    replay_mode: str = ""
+    # Path to JSONL file for recording/replay
+    replay_file: str = ""
+    # Seed for deterministic value generation (UUIDs, timestamps)
+    replay_seed: int = 42
+    # Behavior on cache miss in replay: "error", "live", "skip"
+    replay_fallback: str = "error"
+
 
 # Default config file locations (searched in order)
 CONFIG_PATHS = [
@@ -602,6 +612,23 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:  # noqa: P
         except ValueError:
             pass
 
+    # Replay overrides
+    if replay_mode := os.environ.get("ARES_REPLAY_MODE"):
+        config.replay_mode = replay_mode.lower()
+    if replay_file := os.environ.get("ARES_REPLAY_FILE"):
+        config.replay_file = replay_file
+    if replay_seed := os.environ.get("ARES_REPLAY_SEED"):
+        try:
+            config.replay_seed = int(replay_seed)
+        except ValueError:
+            pass
+    if (replay_fallback := os.environ.get("ARES_REPLAY_FALLBACK")) and replay_fallback.lower() in (
+        "error",
+        "live",
+        "skip",
+    ):
+        config.replay_fallback = replay_fallback.lower()
+
     # Model overrides (Viper-style precedence: role-specific > orchestrator/worker > global)
     global_model = os.environ.get("ARES_MODEL")
     orchestrator_model = os.environ.get("ARES_ORCHESTRATOR_MODEL")
@@ -914,6 +941,26 @@ def get_query_limits_by_stage() -> dict[str, int]:
     return load_config().query_limits_by_stage
 
 
+def get_replay_mode() -> str:
+    """Get replay mode (record/replay/empty for off)."""
+    return load_config().replay_mode
+
+
+def get_replay_file() -> str:
+    """Get replay file path."""
+    return load_config().replay_file
+
+
+def get_replay_seed() -> int:
+    """Get seed for deterministic value generation."""
+    return load_config().replay_seed
+
+
+def get_replay_fallback() -> str:
+    """Get replay fallback behavior (error/live/skip)."""
+    return load_config().replay_fallback
+
+
 def clear_config_cache() -> None:
     """Clear the cached configuration (useful for testing)."""
     global _cached_config
@@ -965,6 +1012,10 @@ __all__ = [
     "get_redis_retry_base_delay",
     "get_redis_retry_max_delay",
     "get_redis_url",
+    "get_replay_fallback",
+    "get_replay_file",
+    "get_replay_mode",
+    "get_replay_seed",
     "get_stale_task_timeout",
     "get_task_dispatch_delay",
     "get_unvalidated_confidence_penalty",
