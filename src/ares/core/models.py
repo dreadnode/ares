@@ -324,6 +324,9 @@ class InvestigationState:
         recommendations: List of recommended actions.
         lateral_graph: Graph tracking lateral movement between hosts.
         correlation_context: Context from alert correlation (related alerts, common IOCs).
+        queued_pivot_queries: Auto-generated pivot queries for hosts discovered via lateral movement.
+        queued_chain_queries: Auto-generated follow-up detection methods based on evidence type.
+        executed_query_types: Set of query method names already executed to avoid duplicates.
     """
 
     investigation_id: str
@@ -359,6 +362,11 @@ class InvestigationState:
 
     # Alert correlation context
     correlation_context: dict[str, Any] | None = None
+
+    # Auto-pivot and detection chaining queues
+    queued_pivot_queries: list[dict] = field(default_factory=list)
+    queued_chain_queries: list[str] = field(default_factory=list)
+    executed_query_types: set[str] = field(default_factory=set)
 
     def __post_init__(self):
         """Initialize lateral graph if not provided."""
@@ -1114,6 +1122,69 @@ class SharedRedTeamState:
         # No FQDN found, return original
         return netbios_lower
 
+    def _validate_hash_domain(self, username: str, domain: str, source_agent: str) -> str:
+        """Validate and correct hash domain by cross-referencing with known user domains.
+
+        When a hash is extracted from tool output (e.g., kerberoast, secretsdump), the domain
+        may be incorrect due to:
+        - Cross-forest trust causing wrong realm in Kerberos tickets
+        - Tool running against wrong DC
+        - LLM hallucinating domain when parsing output
+
+        This method checks if we've seen this user in a DIFFERENT domain via BloodHound,
+        LDAP enumeration, or other recon, and corrects the domain if so.
+
+        Args:
+            username: The username from the hash (lowercase)
+            domain: The domain extracted from the hash (may be wrong)
+            source_agent: For logging purposes
+
+        Returns:
+            Corrected domain if user is known to exist elsewhere, otherwise original domain
+        """
+        if not username or not domain:
+            return domain
+
+        username_lower = username.lower()
+        domain_lower = domain.lower()
+
+        # Find all domains where this user has been seen
+        known_domains: set[str] = set()
+        for user in self.all_users:
+            if user.username.lower() == username_lower and user.domain:
+                known_domains.add(user.domain.lower())
+
+        if not known_domains:
+            # User not seen before - accept the domain from hash
+            return domain_lower
+
+        if domain_lower in known_domains:
+            # Domain matches a known domain for this user - all good
+            return domain_lower
+
+        # Domain doesn't match any known domain for this user!
+        if len(known_domains) == 1:
+            # User exists in exactly one other domain - use that
+            correct_domain = next(iter(known_domains))
+            logger.warning(
+                f"Domain correction: {domain_lower}\\{username_lower} -> "
+                f"{correct_domain}\\{username_lower} (user known from prior recon, "
+                f"source: {source_agent})"
+            )
+            return correct_domain
+
+        # User exists in multiple other domains - pick the most likely one
+        # Prefer child domains over parent domains (more specific)
+        # E.g., prefer north.sevenkingdoms.local over sevenkingdoms.local
+        sorted_domains = sorted(known_domains, key=len, reverse=True)
+        best_match = sorted_domains[0]
+        logger.warning(
+            f"Domain correction (ambiguous): {domain_lower}\\{username_lower} -> "
+            f"{best_match}\\{username_lower} (user known in {known_domains}, "
+            f"picked longest FQDN, source: {source_agent})"
+        )
+        return best_match
+
     @staticmethod
     def _extract_kerberoast_spn_key(hash_value: str) -> str:
         """Extract a deduplication key from a Kerberoast hash.
@@ -1608,6 +1679,11 @@ class SharedRedTeamState:
         # Resolve NetBIOS domain names to FQDN
         if domain and "." not in domain:
             domain = self._resolve_netbios_to_fqdn(domain)
+
+        # Cross-reference with known user domains to catch mislabeling
+        # E.g., if hash says ESSOS\samwell.tarly but we know samwell.tarly is in NORTH
+        domain = self._validate_hash_domain(username, domain, source_agent)
+
         hash_value = hash_obj.hash_value or ""
 
         # Detect hash type from value if type is unknown/missing

@@ -2,11 +2,16 @@
 
 This module provides methods to publish discoveries to all agents and update
 shared state. Includes MSSQL auto-detection and ADCS enumeration support.
+
+NOTE: When called from the threaded result consumer (non-main thread), dispatch
+operations are skipped because the task queue is bound to the main event loop.
+The main orchestrator loop handles dispatches through normal processing.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -88,13 +93,15 @@ class PublishingMixin:
 
             # Immediate delegation check for high-value credentials (cracked hashes)
             # Cracked Kerberoast/AS-REP hashes may have constrained delegation rights
+            # NOTE: Skip dispatch when in non-main thread (threaded consumer) - main loop handles it
+            is_main_thread = threading.current_thread() is threading.main_thread()
             is_cracked = credential.source and (
                 "cracker" in credential.source.lower()
                 or "cracked" in credential.source.lower()
                 or "kerberoast" in credential.source.lower()
                 or "asrep" in credential.source.lower()
             )
-            if is_cracked and credential.password and credential.domain:
+            if is_cracked and credential.password and credential.domain and is_main_thread:
                 cred_key = f"{credential.domain.lower()}:{credential.username.lower()}"
                 if cred_key not in self.shared_state.processed_delegation_creds:
                     logger.info(
@@ -345,6 +352,10 @@ class PublishingMixin:
     ) -> None:
         """Proactively dispatch MSSQL impersonation enumeration for discovered MSSQL host."""
         if not self._task_queue:
+            return
+
+        # Skip dispatch when in non-main thread (threaded consumer) - main loop handles it
+        if threading.current_thread() is not threading.main_thread():
             return
 
         # Track which creds we've already dispatched enum for this host
@@ -746,6 +757,10 @@ class PublishingMixin:
         When a credential is cracked, check if we have a pending constrained/unconstrained
         delegation vulnerability for this account and dispatch the actual exploit.
         """
+        # Skip dispatch when in non-main thread (threaded consumer) - main loop handles it
+        if threading.current_thread() is not threading.main_thread():
+            return
+
         cred_user = credential.username.lower().rstrip("$")
 
         for vuln_id, vuln in list(self.shared_state.discovered_vulnerabilities.items()):

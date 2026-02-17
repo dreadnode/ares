@@ -5,6 +5,7 @@ This module provides methods to checkpoint state to Redis and recover from check
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -26,8 +27,19 @@ class PersistenceMixin:
         to prevent race conditions where multiple workers/orchestrator overwrite
         each other's discoveries. All state is additive (credentials, hosts, etc.)
         so merging is safe and ensures no discoveries are lost.
+
+        NOTE: This method is a no-op when called from a non-main thread (e.g., the
+        threaded result consumer). The Redis client is bound to the main event loop
+        and will fail with "Future attached to a different loop" if used from a
+        different thread. The maintenance loop handles periodic checkpointing for
+        state changes made in background threads.
         """
         if self._redis_client is None:
+            return
+
+        # Skip if called from a non-main thread (e.g., threaded result consumer)
+        # The maintenance loop will checkpoint periodically on the main thread
+        if threading.current_thread() is not threading.main_thread():
             return
 
         try:

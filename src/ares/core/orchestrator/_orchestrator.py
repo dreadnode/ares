@@ -24,6 +24,8 @@ from ares.core.config import (
     get_crack_task_grace_period,
     get_max_runtime,
     get_namespace,
+    get_rate_limit_backoff_delays,
+    get_rate_limit_max_retries,
     get_redis_url,
 )
 from ares.core.dispatcher import RedTeamDispatcher
@@ -218,6 +220,25 @@ async def _prime_operation(
         logger.info("Initial checkpoint saved - workers can now discover operation")
     else:
         logger.warning("Failed to save initial checkpoint - workers may not discover operation")
+
+
+def _is_rate_limit_error(error: Exception | str) -> bool:
+    """Check if error is a rate limit error that should be retried quickly."""
+    error_str = str(error).lower()
+    return any(
+        pattern in error_str
+        for pattern in [
+            "rate limit",
+            "ratelimit",
+            "rate_limit",
+            "too many requests",
+            "429",
+            "tokens per min",
+            "tpm",
+            "requests per min",
+            "rpm",
+        ]
+    )
 
 
 def _log_orchestrator_result(result: rg.RunResult, model: str) -> None:
@@ -477,9 +498,12 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         # coordinates all work through dispatch tools, not direct execution.
 
         # Run the orchestrator agent - this drives the entire operation
-        # Track crash attempts to prevent infinite loops
+        # Track crash and rate limit attempts to prevent infinite loops
         orchestrator_crash_count = 0
         max_orchestrator_crashes = 3
+        rate_limit_count = 0
+        rate_limit_max_retries = get_rate_limit_max_retries()
+        rate_limit_delays = get_rate_limit_backoff_delays()
         result = None
 
         with dn.run(tags=["multi-agent-operation", target_domain]):
@@ -491,7 +515,7 @@ async def run_multi_agent_operation(  # noqa: PLR0912
                 max_steps=max_steps,
             )
 
-            # Run the orchestrator agent with crash recovery
+            # Run the orchestrator agent with crash and rate limit recovery
             while orchestrator_crash_count < max_orchestrator_crashes:
                 try:
                     logger.info(f"🤖 Connecting to {model}...")
@@ -504,6 +528,18 @@ async def run_multi_agent_operation(  # noqa: PLR0912
                         # Auth errors are fatal - no point retrying with bad credentials
                         if "AuthenticationError" in error_msg or "invalid" in error_msg.lower():
                             raise RuntimeError(f"Fatal authentication error: {error_msg}")
+                        # Rate limit errors in result - handle inline to avoid extra exception
+                        if _is_rate_limit_error(error_msg):
+                            rate_limit_count += 1
+                            if rate_limit_count <= rate_limit_max_retries:
+                                delay_idx = min(rate_limit_count - 1, len(rate_limit_delays) - 1)
+                                delay = rate_limit_delays[delay_idx]
+                                logger.warning(
+                                    f"⏳ Rate limit in result (attempt {rate_limit_count}/{rate_limit_max_retries}), "
+                                    f"backing off {delay}s: {error_msg}"
+                                )
+                                await asyncio.sleep(delay)
+                                continue  # Retry without incrementing crash count
                         # Other errors - treat as crash and let retry logic handle
                         raise RuntimeError(f"Orchestrator returned error: {error_msg}")
 
@@ -518,6 +554,27 @@ async def run_multi_agent_operation(  # noqa: PLR0912
                     ):
                         logger.error(f"Authentication failed - cannot continue: {e}")
                         raise
+
+                    # Rate limit errors get special treatment with fast retry
+                    # They should be retried even without progress since they're transient
+                    if _is_rate_limit_error(e):
+                        rate_limit_count += 1
+                        if rate_limit_count <= rate_limit_max_retries:
+                            # Use shorter backoff for rate limits (default: 1, 2, 4 seconds)
+                            delay_idx = min(rate_limit_count - 1, len(rate_limit_delays) - 1)
+                            delay = rate_limit_delays[delay_idx]
+                            logger.warning(
+                                f"⏳ Rate limit hit (attempt {rate_limit_count}/{rate_limit_max_retries}), "
+                                f"backing off {delay}s: {e}"
+                            )
+                            await asyncio.sleep(delay)
+                            continue  # Retry without incrementing crash count
+                        # Exhausted rate limit retries - treat as crash
+                        logger.error(
+                            f"Rate limit retries exhausted ({rate_limit_count} attempts), "
+                            "treating as crash"
+                        )
+                        # Fall through to crash handling
 
                     orchestrator_crash_count += 1
                     state = dispatcher.shared_state

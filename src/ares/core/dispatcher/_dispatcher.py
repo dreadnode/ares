@@ -51,6 +51,7 @@ from ares.core.task_queue import RedisTaskQueue
 from ares.core.task_queue import TaskResult as QueueTaskResult
 
 if TYPE_CHECKING:
+    import threading
     from collections.abc import Callable
 
     from ares.core.messages import AgentMessage, MessageType
@@ -135,7 +136,11 @@ class RedTeamDispatcher(
 
         # Track task IDs submitted via Redis for result consumption
         self._redis_task_ids: set[str] = set()
-        self._result_consumer_task: asyncio.Task | None = None
+        # Threaded result consumer (initialized in MonitoringMixin methods)
+        self._result_consumer_thread: threading.Thread | None = None
+        self._result_consumer_stop_event: threading.Event | None = None
+        # Asyncio task for maintenance (stale cleanup, reconciliation)
+        self._maintenance_task: asyncio.Task | None = None
 
         # Rate limiting / throttling state
         self._last_dispatch_time: float = 0.0
@@ -188,9 +193,19 @@ class RedTeamDispatcher(
         # Workers send results via task_queue.send_result(), they don't consume them.
         # Running result consumer on workers causes spurious warnings because workers
         # recover pending_tasks from Redis but never update them when tasks complete.
+        #
+        # IMPORTANT: The result consumer runs in a SEPARATE THREAD to prevent blocking
+        # when the orchestrator's LLM API calls timeout. This mirrors the worker's
+        # threaded heartbeat pattern. Without this, 14+ minute freezes can occur
+        # when LiteLLM retries timeout (5 retries x 300s = 25 min blocking).
         if self._task_queue and self._is_orchestrator:
-            self._result_consumer_task = asyncio.create_task(self._result_consumer())
-            logger.info("Result consumer started for Redis task completion")
+            self._start_threaded_result_consumer()
+            logger.info("Threaded result consumer started for Redis task completion")
+
+            # Start maintenance task for stale cleanup and reconciliation
+            # This runs on the main event loop (okay if it gets blocked occasionally)
+            self._maintenance_task = asyncio.create_task(self._maintenance_loop())
+            logger.info("Maintenance task started for stale cleanup")
 
             # Start deferred queue processor (handles throttled tasks)
             await self._start_deferred_processor()
@@ -208,10 +223,14 @@ class RedTeamDispatcher(
             except asyncio.CancelledError:
                 pass
 
-        if self._result_consumer_task:
-            self._result_consumer_task.cancel()
+        # Stop threaded result consumer (runs in separate thread)
+        self._stop_threaded_result_consumer()
+
+        # Stop maintenance task
+        if self._maintenance_task:
+            self._maintenance_task.cancel()
             try:
-                await self._result_consumer_task
+                await self._maintenance_task
             except asyncio.CancelledError:
                 pass
 

@@ -334,3 +334,92 @@ class TestEdgeCases:
         )
         report = generator.generate(red_team_state)
         assert isinstance(report, str)
+
+
+class TestGenerateComprehensiveReport:
+    """Tests for generate_comprehensive_report function."""
+
+    def test_mitre_techniques_collected_from_timeline(self):
+        """Test that MITRE techniques from timeline events appear in the mapping section."""
+        from ares.core.models import SharedRedTeamState, TimelineEvent
+        from ares.reports.redteam import generate_comprehensive_report
+
+        # Create a SharedRedTeamState with timeline events containing MITRE techniques
+        # but with empty identified_techniques set
+        state = SharedRedTeamState(
+            operation_id="op-test-mitre",
+            target=Target(
+                ip="192.168.58.100",
+                hostname="dc01.contoso.local",
+                domain="contoso.local",
+            ),
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            operation_timeline=[
+                TimelineEvent(
+                    id="evt-001",
+                    timestamp=datetime.now(timezone.utc),
+                    description="Network scan completed",
+                    mitre_techniques=["T1046"],
+                    source="nmap",
+                ),
+                TimelineEvent(
+                    id="evt-002",
+                    timestamp=datetime.now(timezone.utc),
+                    description="Credential discovered via Kerberoasting",
+                    mitre_techniques=["T1558.003"],
+                    source="kerberoast",
+                ),
+                TimelineEvent(
+                    id="evt-003",
+                    timestamp=datetime.now(timezone.utc),
+                    description="DCSync attack performed",
+                    mitre_techniques=["T1003.006"],
+                    source="secretsdump",
+                ),
+            ],
+            identified_techniques=set(),  # Empty - the bug we're fixing
+        )
+
+        report = generate_comprehensive_report(state)
+
+        # The MITRE ATT&CK Mapping section should contain the techniques from timeline
+        assert "## MITRE ATT&CK Mapping" in report
+        assert "T1046" in report
+        assert "T1558.003" in report
+        assert "T1003.006" in report
+        # Should NOT say "No MITRE techniques mapped"
+        assert "No MITRE techniques mapped" not in report
+
+    def test_mitre_techniques_combined_from_both_sources(self):
+        """Test that techniques from both identified_techniques and timeline are combined."""
+        from ares.core.models import SharedRedTeamState, TimelineEvent
+        from ares.reports.redteam import generate_comprehensive_report
+
+        state = SharedRedTeamState(
+            operation_id="op-test-combined",
+            target=Target(
+                ip="192.168.58.100",
+                hostname="dc01.contoso.local",
+                domain="contoso.local",
+            ),
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            operation_timeline=[
+                TimelineEvent(
+                    id="evt-001",
+                    timestamp=datetime.now(timezone.utc),
+                    description="Credential discovered",
+                    mitre_techniques=["T1552"],  # From timeline
+                    source="discovery",
+                ),
+            ],
+            identified_techniques={"T1078", "T1003"},  # Pre-existing techniques
+        )
+
+        report = generate_comprehensive_report(state)
+
+        # All techniques should be in the report
+        assert "T1552" in report  # From timeline
+        assert "T1078" in report  # From identified_techniques
+        assert "T1003" in report  # From identified_techniques

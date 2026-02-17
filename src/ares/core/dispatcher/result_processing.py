@@ -43,6 +43,7 @@ class ResultProcessingMixin:
         result: Any = None,
         error: str | None = None,
         source_agent: str = "",
+        skip_checkpoint: bool = False,
     ) -> None:
         """
         Mark a task as complete.
@@ -53,12 +54,14 @@ class ResultProcessingMixin:
             result: Task result (if successful).
             error: Error message (if failed).
             source_agent: Agent completing the task.
+            skip_checkpoint: If True, skip checkpointing (used when called from threaded consumer
+                where the Redis client is bound to a different event loop).
         """
-        if task_id not in self.shared_state.pending_tasks:
+        # Use atomic pop to avoid TOCTOU race with _cleanup_stale_tasks()
+        task_info = self.shared_state.pending_tasks.pop(task_id, None)
+        if task_info is None:
             logger.warning(f"Unknown task: {task_id}")
             return
-
-        task_info = self.shared_state.pending_tasks.pop(task_id)
         was_retry = task_info.status == TaskStatus.RETRYING
 
         task_info.status = TaskStatus.COMPLETED if success else TaskStatus.FAILED
@@ -187,7 +190,10 @@ class ResultProcessingMixin:
         # Resolve any waiting futures
         self._resolve_task_future(task_id, success, result, error)
 
-        await self._checkpoint()
+        # Skip checkpoint when called from threaded consumer (different event loop)
+        # The maintenance loop handles periodic checkpointing for this case
+        if not skip_checkpoint:
+            await self._checkpoint()
         logger.info(f"Task {task_id} completed: success={success}")
 
     async def _process_discovered_data(  # noqa: PLR0912
@@ -654,22 +660,42 @@ class ResultProcessingMixin:
             await self.publish_share(share, source_agent)
 
         # Extract hashes (Kerberoast, AS-REP, NTLM) from tool output
-        for hash_obj in self._extract_hashes_from_output(output):
-            # Track attack chain
-            if parent_credential_id:
-                hash_obj.parent_id = parent_credential_id
-                hash_obj.attack_step = parent_attack_step + 1
-            await self.publish_hash(hash_obj, source_agent)
+        # Skip extraction for agents with real-time hooks to avoid double processing
+        # (those agents already publish via task_queue.publish_discovery in hooks)
+        # Include variations: recon/reconnaissance, credential/credential_access, etc.
+        realtime_extraction_roles = {
+            "credential_access",
+            "credential",
+            "privesc",
+            "lateral",
+            "acl",
+            "recon",
+            "reconnaissance",
+        }
+        source_lower = source_agent.lower()
+        has_realtime_hooks = any(role in source_lower for role in realtime_extraction_roles)
+
+        if not has_realtime_hooks:
+            for hash_obj in self._extract_hashes_from_output(output):
+                # Track attack chain
+                if parent_credential_id:
+                    hash_obj.parent_id = parent_credential_id
+                    hash_obj.attack_step = parent_attack_step + 1
+                await self.publish_hash(hash_obj, source_agent)
 
         # Extract and auto-queue delegation vulnerabilities from findDelegation output
-        delegations = self._extract_delegation_from_output(output)
-        if delegations:
-            queued = await self._auto_queue_delegation_vulnerabilities(delegations, source_agent)
-            if queued > 0:
-                logger.warning(
-                    f"🎫 Auto-delegation: queued {queued} delegation vulnerability(ies) "
-                    f"for exploitation from {source_agent}"
+        # Skip for agents with real-time hooks (they publish via _process_realtime_delegation_discovery)
+        if not has_realtime_hooks:
+            delegations = self._extract_delegation_from_output(output)
+            if delegations:
+                queued = await self._auto_queue_delegation_vulnerabilities(
+                    delegations, source_agent
                 )
+                if queued > 0:
+                    logger.warning(
+                        f"🎫 Auto-delegation: queued {queued} delegation vulnerability(ies) "
+                        f"for exploitation from {source_agent}"
+                    )
 
         # Extract and auto-queue BloodHound vulnerabilities (GPO abuse, local admin, ACL)
         bloodhound_vulns = self._extract_bloodhound_vulns_from_output(output)
