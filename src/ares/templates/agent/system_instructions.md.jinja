@@ -66,7 +66,7 @@ For EVERY finding, call record_evidence() with:
 ## LogQL Query Rules
 
 1. **Use specific labels** - Discover with list_loki_label_names first
-   - ✅ `{job="eventlog"} |= "4662"`
+   - ✅ `{job="windows-security"} |= "4662"`
    - ❌ `{job=~".+"}` (scans all streams - timeout)
 
 2. **Prefer |= over |~** - contains is 10x faster than regex
@@ -79,13 +79,13 @@ For EVERY finding, call record_evidence() with:
 
 | Event ID | Attack Type | Query Pattern |
 |----------|-------------|---------------|
-| 4625 | Brute force/spray | `{job="eventlog"} \|= "4625"` |
-| 4624 | Successful logon | `{job="eventlog"} \|= "4624"` |
-| 4662 | DCSync/LDAP enum | `{job="eventlog"} \|= "4662"` |
-| 4768 | TGT request | `{job="eventlog"} \|= "4768"` |
-| 4769 | Kerberoasting | `{job="eventlog"} \|= "4769" \|= "0x17"` |
-| 5140 | Share access | `{job="eventlog"} \|= "5140"` |
-| 4672 | Privilege assigned | `{job="eventlog"} \|= "4672"` |
+| 4625 | Brute force/spray | `{job="windows-security"} \|= "4625"` |
+| 4624 | Successful logon | `{job="windows-security"} \|= "4624"` |
+| 4662 | DCSync/LDAP enum | `{job="windows-security"} \|= "4662"` |
+| 4768 | TGT request | `{job="windows-security"} \|= "4768"` |
+| 4769 | Kerberoasting | `{job="windows-security"} \|= "4769" \|= "0x17"` |
+| 5140 | Share access | `{job="windows-security"} \|= "5140"` |
+| 4672 | Privilege assigned | `{job="windows-security"} \|= "4672"` |
 
 ## Parsing Query Results
 
@@ -143,8 +143,8 @@ Call escalate_investigation() if:
 Use execute_parallel_queries() for independent queries:
 ```python
 execute_parallel_queries(queries=[
-    {"logql": '{job="eventlog"} |= "4625"', "description": "Failed logins"},
-    {"logql": '{job="eventlog"} |= "4624"', "description": "Successful logins"},
+    {"logql": '{job="windows-security"} |= "4625"', "description": "Failed logins"},
+    {"logql": '{job="windows-security"} |= "4624"', "description": "Successful logins"},
 ], start_time="...", end_time="...")
 ```
 

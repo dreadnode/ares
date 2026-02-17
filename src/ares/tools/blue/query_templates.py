@@ -38,8 +38,8 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         loki_url: Base URL of the Loki instance (fallback for direct HTTP queries).
         timeout: HTTP request timeout in seconds.
         default_label_selector: Base label selector for queries. Defaults to
-            '{job="eventlog"}' for Windows event logs. Override for other log
-            types (e.g., '{job="syslog"}', '{deployment="windows-dc"}').
+            '{job="windows-security"}' for Windows Security event logs. Override for other log
+            types (e.g., '{job="windows-system"}', '{job="windows-application"}').
             NEVER use broad patterns like '{job=~".+"}' - they scan all streams and timeout.
         default_hours_back: Default time range for queries. Shorter ranges are faster.
         mcp_query_fn: Optional MCP query function for authenticated Loki queries.
@@ -49,7 +49,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
     loki_url: str
     timeout: int = 30
-    default_label_selector: str = '{job="eventlog"}'
+    default_label_selector: str = '{job="windows-security"}'
     default_hours_back: int = 1  # Reduced from 4 hours for faster queries
     mcp_query_fn: MCPQueryFn | None = None
     datasource_uid: str = "loki"
@@ -2021,11 +2021,11 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         dn.log_metric("query_template_remote_registry", 1, mode="count")
         start_time, end_time = self._get_time_range(hours_back)
 
-        # Use System log for service events
+        # Use System log for service events (7036/7045 are in Windows System log)
         if target_host:
-            selector = f'{{job="eventlog", hostname=~"{target_host}"}}'
+            selector = f'{{job="windows-system", hostname=~"{target_host}"}}'
         else:
-            selector = '{job="eventlog"}'
+            selector = '{job="windows-system"}'
 
         # Event 7036: Service Control Manager
         logql = f'{selector} |~ "(7036|7045)" |~ "(?i)(remoteregistry|remote.registry)" |~ "(?i)(running|started|start)"'

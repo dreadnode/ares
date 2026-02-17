@@ -229,9 +229,9 @@ def _optimize_logql_query(query: str) -> tuple[str, bool]:
         if pattern in query:
             logger.warning(
                 f"Query contains broad selector '{pattern}' - auto-rewriting to "
-                '{{job="eventlog"}} to prevent timeout.'
+                '{{job="windows-security"}} to prevent timeout.'
             )
-            optimized = optimized.replace(pattern, '{job="eventlog"}')
+            optimized = optimized.replace(pattern, '{job="windows-security"}')
             was_modified = True
             # Continue checking for other broad patterns
 
@@ -961,7 +961,7 @@ def create_investigation_agent(
 
     loki_url = grafana_url.rstrip("/")
     # QueryTemplateTools now supports optimized queries:
-    # - default_label_selector: Override with specific labels like '{job="eventlog"}'
+    # - default_label_selector: Override with specific labels like '{job="windows-security"}'
     #   for better performance instead of scanning all streams
     # - default_hours_back: Defaults to 1 hour (reduced from 4) for faster queries
     # - mcp_query_fn: MCP query function for authenticated Loki queries

@@ -361,7 +361,7 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
             if pattern in logql_query:
                 return {
                     "status": "error",
-                    "error": f"Query contains broad selector '{pattern}' which would cause performance issues. Use specific labels like {{job=\"eventlog\"}}.",
+                    "error": f"Query contains broad selector '{pattern}' which would cause performance issues. Use specific labels like {{job=\"windows-security\"}}.",
                 }
 
         # Validate severity

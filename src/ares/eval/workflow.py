@@ -748,7 +748,7 @@ class EvaluationRunner:
             "alertname": alert_name,
             "instance": ground_truth.target_ip,
             "severity": severity,
-            "job": "eventlog",
+            "job": "windows-security",
             "source": "synthetic-evaluation",
         }
         if mitre_technique:
