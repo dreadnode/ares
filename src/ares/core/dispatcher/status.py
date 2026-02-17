@@ -170,7 +170,10 @@ class StatusMixin:
                         logger.debug(f"Failed to parse exploit status for {key_str}: {e}")
                         continue
                     vuln_id = key_str[len(key_prefix) :]
-                    if data.get("success"):
+                    # Handle case where data is not a dict (e.g., raw string error)
+                    if not isinstance(data, dict):
+                        failed[vuln_id] = {"error": str(data) if data else "Unknown error"}
+                    elif data.get("success"):
                         succeeded.add(vuln_id)
                     else:
                         failed[vuln_id] = data
@@ -178,6 +181,28 @@ class StatusMixin:
                 logger.warning(f"Failed to load exploitation status from Redis: {e}")
 
         failed_ids = set(failed.keys())
+
+        def _extract_error(data: dict[str, Any] | str | None) -> str:
+            """Extract error message from exploit result, handling various formats."""
+            # Handle non-dict data (e.g., if json.loads returned a string)
+            if data is None:
+                return "Unknown error"
+            if isinstance(data, str):
+                return data or "Unknown error"
+            if not isinstance(data, dict):
+                return str(data) if data else "Unknown error"
+            # Try result.error (dict format)
+            result = data.get("result")
+            if isinstance(result, dict):
+                if result.get("error"):
+                    return str(result["error"])
+            # result might be a string error message itself
+            elif isinstance(result, str) and result:
+                return result
+            # Try top-level error field
+            if data.get("error"):
+                return str(data["error"])
+            return "Unknown error"
 
         return {
             "total_discovered": len(discovered),
@@ -198,9 +223,7 @@ class StatusMixin:
                     "id": vid,
                     "type": discovered[vid].vuln_type if vid in discovered else "unknown",
                     "target": discovered[vid].target if vid in discovered else "unknown",
-                    "error": failed.get(vid, {}).get("result", {}).get("error")
-                    or failed.get(vid, {}).get("error")
-                    or "Unknown error",
+                    "error": _extract_error(failed.get(vid, {})),
                 }
                 for vid in failed
             ],

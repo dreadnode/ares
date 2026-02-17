@@ -153,6 +153,12 @@ class RedTeamDispatcher(
         # Signal for threaded consumer to request immediate checkpoint
         self._checkpoint_requested = threading.Event()
 
+        # Pending deferred tasks from threaded consumer (processed by main loop)
+        # This avoids event loop mismatch when enqueuing from non-main thread
+        self._pending_deferred_tasks: list[tuple[str, str, dict, str, int]] = []
+        self._deferred_task_requested = threading.Event()
+        self._pending_deferred_lock = threading.Lock()
+
     async def start(self, operation_id: str) -> None:
         """
         Start the dispatcher for an operation.

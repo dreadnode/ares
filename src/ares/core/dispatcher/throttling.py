@@ -105,13 +105,20 @@ class ThrottlingMixin:
             if t.assigned_agent == role and t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
         )
 
-    async def _get_queue_length(self: RedTeamDispatcher, role: str) -> int:
-        """Get Redis queue length for a specific role (tasks waiting to be picked up)."""
-        if not self._task_queue or not self._task_queue._client:
+    async def _get_queue_length(self: RedTeamDispatcher, role: str, task_queue: Any = None) -> int:
+        """Get Redis queue length for a specific role (tasks waiting to be picked up).
+
+        Args:
+            role: Worker role (e.g., "privesc", "lateral")
+            task_queue: Optional task queue to use (threaded consumer passes its own)
+        """
+        # Use passed task_queue (from threaded consumer) or fall back to self._task_queue
+        effective_queue = task_queue if task_queue is not None else self._task_queue
+        if not effective_queue or not effective_queue._client:
             return 0
         try:
             queue_key = f"ares:tasks:{role}"
-            return await self._task_queue._client.llen(queue_key)
+            return await effective_queue._client.llen(queue_key)
         except Exception as e:
             logger.debug(f"Failed to get queue length for {role}: {e}")
             return 0
@@ -508,7 +515,8 @@ class ThrottlingMixin:
         # FAILSAFE: If target worker is idle (queue empty), skip throttle wait entirely.
         # No point burning time waiting when the worker has nothing to do.
         # Check WITHOUT holding lock to avoid blocking other tasks.
-        role_queue_len = await self._get_queue_length(target_role)
+        # Pass effective_task_queue to use thread's Redis client when called from threaded consumer
+        role_queue_len = await self._get_queue_length(target_role, effective_task_queue)
         role_pending = await self._get_pending_count_by_role(target_role)
 
         # Check if this is a critical path task that should skip the wait loop

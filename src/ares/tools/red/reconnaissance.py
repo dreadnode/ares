@@ -411,23 +411,36 @@ class NetworkEnumerationTools(Toolset):
             >>> result = nmap_scan("192.168.58.2 192.168.58.3 192.168.58.4")
         """
 
-        def _parse_nmap_hosts(output: str) -> list[Host]:
+        def _parse_nmap_hosts(output: str) -> list[Host]:  # noqa: PLR0912
             hosts: list[Host] = []
             current_ip = ""
             current_hostname = ""
             current_os = ""
+            current_domain = ""
             current_services: list[str] = []
 
             def _commit_current() -> None:
+                nonlocal current_hostname
                 if not current_ip:
                     return
+                # Build FQDN from hostname and domain if available
+                hostname_to_use = current_hostname
+                if current_hostname and current_domain and "." not in current_hostname:
+                    hostname_to_use = f"{current_hostname.lower()}.{current_domain.lower()}"
+                # Detect DC based on services (LDAP + Kerberos = domain controller)
+                services_lower = [s.lower() for s in current_services]
+                has_ldap = any("ldap" in s for s in services_lower)
+                has_kerberos = any("kerberos" in s for s in services_lower)
+                is_dc = has_ldap and has_kerberos
                 host = Host(
                     ip=current_ip,
-                    hostname=current_hostname,
+                    hostname=hostname_to_use,
                     os=current_os or "Unknown",
-                    roles=[],
+                    roles=["AD DC"] if is_dc else [],
                     services=current_services,
                 )
+                if is_dc:
+                    host.is_dc = True
                 hosts.append(host)
 
             for line in output.splitlines():
@@ -440,6 +453,7 @@ class NetworkEnumerationTools(Toolset):
                     current_ip = ""
                     current_hostname = ""
                     current_os = ""
+                    current_domain = ""
                     current_services = []
 
                     host_line = report_match.group(1)
@@ -461,9 +475,21 @@ class NetworkEnumerationTools(Toolset):
                         current_services.append(
                             f"{svc_match.group(1)}/{svc_match.group(2)} {svc_match.group(3)}"
                         )
-                    os_match = re.search(r"Service Info: OS: ([^;]+)", line)
-                    if os_match and not current_os:
-                        current_os = os_match.group(1).strip()
+                    # Extract domain from LDAP line: "(Domain: sevenkingdoms.local, Site: ...)"
+                    domain_match = re.search(r"\(Domain:\s*([^,)]+)", line)
+                    if domain_match and not current_domain:
+                        current_domain = domain_match.group(1).strip()
+                    # Parse Service Info line for Host and OS
+                    # Format: "Service Info: Host: KINGSLANDING; OS: Windows; CPE: ..."
+                    if "Service Info:" in line:
+                        host_match = re.search(r"Host:\s*([^;]+)", line)
+                        if host_match:
+                            # Always prefer Service Info hostname over DNS-derived name
+                            # This gives us "KINGSLANDING" instead of "ip-10-1-2-183.us-west-2.compute.internal"
+                            current_hostname = host_match.group(1).strip()
+                        os_match = re.search(r"OS:\s*([^;]+)", line)
+                        if os_match and not current_os:
+                            current_os = os_match.group(1).strip()
 
             _commit_current()
             return hosts
@@ -477,6 +503,7 @@ class NetworkEnumerationTools(Toolset):
                     "os": h.os,
                     "roles": h.roles,
                     "services": h.services,
+                    "is_dc": h.is_dc,
                 }
                 for h in hosts
             ]
@@ -733,7 +760,7 @@ class NetworkEnumerationTools(Toolset):
                     host = Host(
                         ip=ip,
                         hostname=hostname,
-                        os="Unknown",
+                        os="Windows",  # All AD DCs are Windows
                         roles=["AD DC"],
                         services=["389/tcp ldap"],
                     )

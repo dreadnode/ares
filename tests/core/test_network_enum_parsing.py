@@ -276,3 +276,655 @@ def test_add_user_validates_against_motd_garbage():
     _add_user("   ")
 
     assert users == {"administrator", "john.doe", "svc-sql"}
+
+
+class TestNmapParsingHostnameExtraction:
+    """Test hostname extraction from nmap Service Info line."""
+
+    def test_extracts_hostname_from_service_info_line(self, monkeypatch):
+        """Host should be extracted from 'Service Info: Host: HOSTNAME; OS: ...'"""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-hostname")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        tool.set_state(state)
+
+        # Real nmap output format with Service Info line
+        nmap_output = """Starting Nmap 7.94 ( https://nmap.org )
+Nmap scan report for 192.168.58.10
+Host is up (0.0023s latency).
+
+PORT     STATE SERVICE
+88/tcp   open  kerberos-sec
+135/tcp  open  msrpc
+389/tcp  open  ldap
+445/tcp  open  microsoft-ds
+Service Info: Host: DC01; OS: Windows; CPE: cpe:/o:microsoft:windows
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.10")
+
+        # Verify hostname was extracted from Service Info
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+        # Should be dc01 (lowercased), without FQDN since no domain in this output
+        assert hosts[0]["hostname"].lower() == "dc01"
+        assert hosts[0]["os"] == "Windows"
+
+    def test_service_info_hostname_overrides_dns_reverse_lookup(self, monkeypatch):
+        """Service Info hostname should override DNS reverse lookup name."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-override")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        tool.set_state(state)
+
+        # When nmap resolves DNS, it shows hostname (IP) format
+        # Service Info should override this ugly DNS name
+        nmap_output = """Starting Nmap 7.94 ( https://nmap.org )
+Nmap scan report for ip-192-168-58-10.compute.internal (192.168.58.10)
+Host is up (0.0023s latency).
+
+PORT     STATE SERVICE
+88/tcp   open  kerberos-sec
+389/tcp  open  ldap
+445/tcp  open  microsoft-ds
+Service Info: Host: DC01; OS: Windows; CPE: cpe:/o:microsoft:windows
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.10")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+        # Should use DC01 from Service Info, not the ugly DNS name
+        assert "compute.internal" not in hosts[0]["hostname"]
+        assert hosts[0]["hostname"].lower() == "dc01"
+
+
+class TestNmapParsingOSExtraction:
+    """Test OS extraction from nmap Service Info line."""
+
+    def test_extracts_os_from_service_info(self, monkeypatch):
+        """OS should be extracted from 'Service Info: Host: X; OS: Windows'"""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-os")
+        state.target = Target(ip="192.168.58.20", domain="contoso.local")
+        tool.set_state(state)
+
+        nmap_output = """Nmap scan report for 192.168.58.20
+Host is up.
+
+PORT     STATE SERVICE
+445/tcp  open  microsoft-ds
+Service Info: Host: SQL01; OS: Windows; CPE: cpe:/o:microsoft:windows
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.20")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+        assert hosts[0]["os"] == "Windows"
+
+    def test_os_defaults_to_unknown_when_not_present(self, monkeypatch):
+        """OS should default to 'Unknown' when Service Info has no OS field."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-no-os")
+        state.target = Target(ip="192.168.58.30", domain="contoso.local")
+        tool.set_state(state)
+
+        # Service Info without OS field
+        nmap_output = """Nmap scan report for 192.168.58.30
+Host is up.
+
+PORT     STATE SERVICE
+22/tcp   open  ssh
+Service Info: Host: WEB01
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.30")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+        assert hosts[0]["os"] == "Unknown"
+
+
+class TestNmapParsingDomainExtraction:
+    """Test domain extraction from LDAP service output."""
+
+    def test_extracts_domain_from_ldap_line(self, monkeypatch):
+        """Domain should be extracted from '(Domain: contoso.local, Site: ...)'"""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-domain")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        tool.set_state(state)
+
+        # Real nmap output with LDAP domain info (from version detection)
+        nmap_output = """Nmap scan report for 192.168.58.10
+Host is up.
+
+PORT     STATE SERVICE       VERSION
+88/tcp   open  kerberos-sec  Microsoft Windows Kerberos
+389/tcp  open  ldap          Microsoft Windows Active Directory LDAP (Domain: contoso.local, Site: Default-First-Site-Name)
+445/tcp  open  microsoft-ds  Windows Server 2019 Build 17763
+Service Info: Host: DC01; OS: Windows; CPE: cpe:/o:microsoft:windows
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.10")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+        # Hostname should be FQDN: dc01.contoso.local
+        assert hosts[0]["hostname"] == "dc01.contoso.local"
+
+
+class TestNmapParsingFQDNBuilding:
+    """Test FQDN construction from hostname + domain."""
+
+    def test_builds_fqdn_from_hostname_and_domain(self, monkeypatch):
+        """Should build 'hostname.domain' when both are available."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-fqdn")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        tool.set_state(state)
+
+        nmap_output = """Nmap scan report for 192.168.58.10
+Host is up.
+
+PORT     STATE SERVICE       VERSION
+88/tcp   open  kerberos-sec  Microsoft Windows Kerberos
+389/tcp  open  ldap          Microsoft Windows Active Directory LDAP (Domain: contoso.local, Site: Default)
+445/tcp  open  microsoft-ds
+Service Info: Host: DC01; OS: Windows
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.10")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+        assert hosts[0]["hostname"] == "dc01.contoso.local"
+
+    def test_does_not_double_domain_if_hostname_already_fqdn(self, monkeypatch):
+        """Should not append domain if hostname already contains a dot."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-no-double")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        tool.set_state(state)
+
+        # When nmap resolves via DNS, hostname may already be FQDN
+        nmap_output = """Nmap scan report for dc01.contoso.local (192.168.58.10)
+Host is up.
+
+PORT     STATE SERVICE
+445/tcp  open  microsoft-ds
+389/tcp  open  ldap          (Domain: contoso.local, Site: Default)
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.10")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+        # Should NOT become dc01.contoso.local.contoso.local
+        assert hosts[0]["hostname"] == "dc01.contoso.local"
+        assert hosts[0]["hostname"].count("contoso.local") == 1
+
+    def test_hostname_without_domain_stays_short(self, monkeypatch):
+        """If no domain is found, hostname should remain as-is."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-no-domain")
+        state.target = Target(ip="192.168.58.50", domain="contoso.local")
+        tool.set_state(state)
+
+        # Non-DC host without LDAP service - no domain info
+        nmap_output = """Nmap scan report for 192.168.58.50
+Host is up.
+
+PORT     STATE SERVICE
+445/tcp  open  microsoft-ds
+3389/tcp open  ms-wbt-server
+Service Info: Host: WS01; OS: Windows
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.50")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+        # Without domain, stays as short name
+        assert hosts[0]["hostname"].lower() == "ws01"
+
+
+class TestNmapParsingDCDetection:
+    """Test domain controller detection via LDAP + Kerberos services."""
+
+    def test_detects_dc_with_ldap_and_kerberos(self, monkeypatch):
+        """Host with LDAP + Kerberos services should be marked as DC."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-dc")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        tool.set_state(state)
+
+        nmap_output = """Nmap scan report for 192.168.58.10
+Host is up.
+
+PORT     STATE SERVICE
+53/tcp   open  domain
+88/tcp   open  kerberos-sec
+135/tcp  open  msrpc
+389/tcp  open  ldap
+445/tcp  open  microsoft-ds
+464/tcp  open  kpasswd5
+636/tcp  open  ldapssl
+Service Info: Host: DC01; OS: Windows
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.10")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+        assert "AD DC" in hosts[0]["roles"]
+
+    def test_does_not_detect_dc_with_only_ldap(self, monkeypatch):
+        """Host with only LDAP (no Kerberos) should NOT be marked as DC."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-no-dc-ldap")
+        state.target = Target(ip="192.168.58.25", domain="contoso.local")
+        tool.set_state(state)
+
+        # LDAP-enabled server that is not a DC (e.g., LDAP proxy)
+        nmap_output = """Nmap scan report for 192.168.58.25
+Host is up.
+
+PORT     STATE SERVICE
+389/tcp  open  ldap
+636/tcp  open  ldapssl
+Service Info: Host: LDAP01; OS: Windows
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.25")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+        assert "AD DC" not in hosts[0]["roles"]
+
+    def test_does_not_detect_dc_with_only_kerberos(self, monkeypatch):
+        """Host with only Kerberos (no LDAP) should NOT be marked as DC."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-no-dc-kerb")
+        state.target = Target(ip="192.168.58.26", domain="contoso.local")
+        tool.set_state(state)
+
+        # Kerberos KDC that is not a full DC
+        nmap_output = """Nmap scan report for 192.168.58.26
+Host is up.
+
+PORT     STATE SERVICE
+88/tcp   open  kerberos-sec
+464/tcp  open  kpasswd5
+Service Info: Host: KDC01; OS: Windows
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.26")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+        assert "AD DC" not in hosts[0]["roles"]
+
+
+class TestNmapParsingMultipleHosts:
+    """Test parsing multiple hosts from single nmap output."""
+
+    def test_parses_multiple_hosts(self, monkeypatch):
+        """Should correctly parse multiple hosts in a single nmap scan."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-multi")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        tool.set_state(state)
+
+        # Scan of multiple hosts with different characteristics
+        nmap_output = """Starting Nmap 7.94 ( https://nmap.org )
+Nmap scan report for 192.168.58.10
+Host is up.
+
+PORT     STATE SERVICE
+88/tcp   open  kerberos-sec
+389/tcp  open  ldap          Microsoft Windows Active Directory LDAP (Domain: contoso.local, Site: Default)
+445/tcp  open  microsoft-ds
+Service Info: Host: DC01; OS: Windows
+
+Nmap scan report for 192.168.58.20
+Host is up.
+
+PORT     STATE SERVICE
+445/tcp  open  microsoft-ds
+1433/tcp open  ms-sql-s
+Service Info: Host: SQL01; OS: Windows
+
+Nmap scan report for 192.168.58.30
+Host is up.
+
+PORT     STATE SERVICE
+80/tcp   open  http
+443/tcp  open  https
+Service Info: Host: WEB01; OS: Windows
+
+Nmap done: 3 IP addresses (3 hosts up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.10 192.168.58.20 192.168.58.30")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 3
+
+        # Find each host by IP
+        hosts_by_ip = {h["ip"]: h for h in hosts}
+
+        # DC01: should be marked as DC with FQDN
+        dc = hosts_by_ip["192.168.58.10"]
+        assert dc["hostname"] == "dc01.contoso.local"
+        assert dc["os"] == "Windows"
+        assert "AD DC" in dc["roles"]
+
+        # SQL01: not a DC, no FQDN (no domain in its section)
+        sql = hosts_by_ip["192.168.58.20"]
+        assert sql["hostname"].lower() == "sql01"
+        assert sql["os"] == "Windows"
+        assert "AD DC" not in sql["roles"]
+
+        # WEB01: not a DC, no FQDN
+        web = hosts_by_ip["192.168.58.30"]
+        assert web["hostname"].lower() == "web01"
+        assert web["os"] == "Windows"
+        assert "AD DC" not in web["roles"]
+
+
+class TestNmapParsingServicesExtraction:
+    """Test service extraction from nmap port lines."""
+
+    def test_extracts_all_open_services(self, monkeypatch):
+        """Should extract all open ports/services."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-services")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        tool.set_state(state)
+
+        nmap_output = """Nmap scan report for 192.168.58.10
+Host is up.
+
+PORT     STATE SERVICE
+53/tcp   open  domain
+88/tcp   open  kerberos-sec
+135/tcp  open  msrpc
+389/tcp  open  ldap
+445/tcp  open  microsoft-ds
+464/tcp  open  kpasswd5
+636/tcp  open  ldapssl
+3268/tcp open  globalcatLDAP
+3389/tcp open  ms-wbt-server
+Service Info: Host: DC01; OS: Windows
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.10")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+
+        services = hosts[0]["services"]
+        # Should have all 9 services
+        assert len(services) == 9
+
+        # Check specific services are present
+        service_strs = " ".join(services).lower()
+        assert "88/tcp kerberos" in service_strs
+        assert "389/tcp ldap" in service_strs
+        assert "445/tcp microsoft-ds" in service_strs
+        assert "3389/tcp ms-wbt-server" in service_strs
+
+
+class TestNmapParsingEdgeCases:
+    """Test edge cases in nmap parsing."""
+
+    def test_handles_empty_output(self, monkeypatch):
+        """Should handle empty nmap output gracefully."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-empty")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        tool.set_state(state)
+
+        nmap_output = """Starting Nmap 7.94 ( https://nmap.org )
+Nmap done: 0 IP addresses (0 hosts up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.10")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 0
+
+    def test_handles_host_with_no_services(self, monkeypatch):
+        """Should handle hosts with no open ports."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-no-ports")
+        state.target = Target(ip="192.168.58.99", domain="contoso.local")
+        tool.set_state(state)
+
+        nmap_output = """Nmap scan report for 192.168.58.99
+Host is up.
+
+All 100 scanned ports on 192.168.58.99 are closed
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.99")
+
+        hosts = result.get("discovered_hosts", [])
+        # Host with no open ports should still be recorded
+        assert len(hosts) == 1
+        assert hosts[0]["ip"] == "192.168.58.99"
+        assert hosts[0]["services"] == []
+
+    def test_handles_ip_only_without_hostname(self, monkeypatch):
+        """Should handle hosts where no hostname could be determined."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-ip-only")
+        state.target = Target(ip="192.168.58.77", domain="contoso.local")
+        tool.set_state(state)
+
+        # No Service Info, no DNS resolution
+        nmap_output = """Nmap scan report for 192.168.58.77
+Host is up.
+
+PORT     STATE SERVICE
+445/tcp  open  microsoft-ds
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.77")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+        assert hosts[0]["ip"] == "192.168.58.77"
+        # Hostname should be empty or the IP if none was found
+        assert hosts[0]["hostname"] in ["", "192.168.58.77"]
+
+    def test_handles_fabrikam_secondary_domain(self, monkeypatch):
+        """Should correctly parse secondary domain (fabrikam.local)."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-fabrikam")
+        state.target = Target(ip="192.168.58.100", domain="fabrikam.local")
+        tool.set_state(state)
+
+        nmap_output = """Nmap scan report for 192.168.58.100
+Host is up.
+
+PORT     STATE SERVICE
+88/tcp   open  kerberos-sec
+389/tcp  open  ldap          Microsoft Windows Active Directory LDAP (Domain: fabrikam.local, Site: Default)
+445/tcp  open  microsoft-ds
+Service Info: Host: DC02; OS: Windows
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.100")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+        assert hosts[0]["hostname"] == "dc02.fabrikam.local"
+        assert hosts[0]["os"] == "Windows"
+        assert "AD DC" in hosts[0]["roles"]
+
+    def test_handles_child_domain(self, monkeypatch):
+        """Should correctly parse child domain (child.contoso.local)."""
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-nmap-child")
+        state.target = Target(ip="192.168.58.110", domain="child.contoso.local")
+        tool.set_state(state)
+
+        nmap_output = """Nmap scan report for 192.168.58.110
+Host is up.
+
+PORT     STATE SERVICE
+88/tcp   open  kerberos-sec
+389/tcp  open  ldap          Microsoft Windows Active Directory LDAP (Domain: child.contoso.local, Site: ChildSite)
+445/tcp  open  microsoft-ds
+Service Info: Host: CHILDDC; OS: Windows
+
+Nmap done: 1 IP address (1 host up)"""
+
+        def fake_run(cmd, timeout_seconds=300, target_role=None):
+            if "nmap" in cmd[0]:
+                return (nmap_output, "", 0)
+            return ("", "", 0)
+
+        monkeypatch.setattr(reconnaissance, "run_tool", fake_run)
+
+        result = tool.nmap_scan("192.168.58.110")
+
+        hosts = result.get("discovered_hosts", [])
+        assert len(hosts) == 1
+        assert hosts[0]["hostname"] == "childdc.child.contoso.local"
+        assert "AD DC" in hosts[0]["roles"]

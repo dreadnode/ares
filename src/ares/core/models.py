@@ -1725,6 +1725,12 @@ class SharedRedTeamState:
                 f"User rejected: path artifact '{normalized}' for domain {normalized_domain}"
             )
             return False
+        # Skip machine accounts (ending in $) - these are computer accounts, not users
+        if normalized.endswith("$"):
+            logger.debug(
+                f"User rejected: machine account '{normalized}' for domain {normalized_domain}"
+            )
+            return False
 
         target_domain = (self.target.domain or "").lower() if self.target else ""
         for existing in self.all_users:
@@ -2050,7 +2056,9 @@ class SharedRedTeamState:
                     # Signal credential access if dispatcher available
                     if self._dispatcher:
                         self._dispatcher.signal_credential_access()
-                        self._publish_async(self._dispatcher._checkpoint())
+                        # Request checkpoint from dispatcher's maintenance loop
+                        if hasattr(self._dispatcher, "_checkpoint_requested"):
+                            self._dispatcher._checkpoint_requested.set()
                     return True  # Return True since we updated it
                 logger.debug(
                     f"Hash rejected: duplicate hash for {domain}\\{username} ({hash_type}) from {source_agent}"

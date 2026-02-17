@@ -191,27 +191,25 @@ class OrchestratorTools(Toolset):
 
         techniques = technique_map.get(task_type, [task_type])
 
-        # Deduplicate network scans: skip if hosts already discovered in target range
+        # Deduplicate network scans: use scanned_targets as the authoritative check.
+        # The previous "hosts with services" check was too aggressive - SMB sweep adds
+        # a single service ("445/tcp smb") which caused nmap to be skipped entirely.
+        # Only scanned_targets is set when nmap actually completes successfully.
         if task_type == "network_scan" and target_ips:
-            # Primary check: hosts with services IN THE REQUESTED RANGE
-            hosts_in_range = [
-                h
-                for h in self.shared_state.all_hosts
-                if h.services and _ip_in_targets(h.ip, target_ips)
-            ]
-            if hosts_in_range:
-                return (
-                    f"✓ Network scan already complete for this range. "
-                    f"{len(hosts_in_range)} hosts with services found. "
-                    f"No new nmap scan needed."
-                )
-
-            # Secondary check: scanned_targets tracking (for individual IPs)
             already_scanned = set(self.shared_state.scanned_targets)
             unscanned = [ip for ip in target_ips if ip not in already_scanned]
             if not unscanned:
+                # All targets have been scanned by nmap
+                hosts_with_services = len(
+                    [
+                        h
+                        for h in self.shared_state.all_hosts
+                        if h.services and len(h.services) > 1 and _ip_in_targets(h.ip, target_ips)
+                    ]
+                )
                 return (
-                    f"✓ All targets in scanned_targets ({len(target_ips)} targets). "
+                    f"✓ All {len(target_ips)} targets in scanned_targets. "
+                    f"{hosts_with_services} hosts with multiple services found. "
                     f"No new nmap scan needed."
                 )
             if len(unscanned) < len(target_ips):

@@ -632,7 +632,9 @@ async def _exploit_vulnerability(
 
     vuln_type = vuln["type"]
     target = vuln["target"]
-    details = vuln.get("details", {})
+    # Defensive: ensure details is a dict (may be string from improper serialization)
+    raw_details = vuln.get("details", {})
+    details = raw_details if isinstance(raw_details, dict) else {}
 
     async def dispatch_exploit() -> str:
         return await _dispatch_exploit(dispatcher, vuln_type, vuln["id"], target, details)

@@ -625,9 +625,24 @@ class RedisWorkerAgent:
                     f"[{self.agent_name}] ⏱️ Task {task.task_id} timed out after "
                     f"{agent_timeout}s - agent stuck in retry loop"
                 )
+                # Preserve any discoveries made before timeout (e.g., nmap found hosts)
+                timeout_payload: dict[str, Any] = {
+                    "output": "",
+                    "task_type": task.task_type,
+                }
+                state_discoveries = self._serialize_state_discoveries()
+                if state_discoveries:
+                    timeout_payload.update(state_discoveries)
+                    logger.info(
+                        f"[{self.agent_name}] Preserving state from timed-out task: "
+                        f"{len(state_discoveries.get('discovered_hosts', []))} hosts, "
+                        f"{len(state_discoveries.get('discovered_credentials', []))} creds, "
+                        f"{len(state_discoveries.get('discovered_hashes', []))} hashes"
+                    )
                 await self.task_queue.send_result(
                     task_id=task.task_id,
                     success=False,
+                    result=timeout_payload if state_discoveries else None,
                     error=f"Task timeout: agent exceeded {agent_timeout}s limit",
                     worker_pod=self.pod_name,
                     agent_name=self.agent_name,

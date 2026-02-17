@@ -68,6 +68,53 @@ async def test_get_exploitation_status_loads_redis_vulns():
     assert status["succeeded"][0]["id"] == "ADCS_ESC1_dc01"
 
 
+@pytest.mark.asyncio
+async def test_get_exploitation_status_handles_string_result():
+    """Failed vulnerability with string result should not raise AttributeError.
+
+    Regression test for bug where result is a string instead of a dict,
+    causing 'str' object has no attribute 'get' error.
+    """
+    dispatcher = RedTeamDispatcher()
+    dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-str-result")
+
+    vuln_key = b"ares:op:op-test-str-result:vulns:adcs_esc8_10.1.2.183"
+    vuln_payload = json.dumps(
+        {
+            "type": "adcs_esc8",
+            "target": "10.1.2.183",
+            "details": {"ca_server": "ADCS01"},
+            "discovered_by": "recon",
+            "queued_at": "2024-01-01T00:00:00+00:00",
+        }
+    )
+    # Bug case: result is a string error message, not a dict
+    exploit_key = b"ares:op:op-test-str-result:exploited:adcs_esc8_10.1.2.183"
+    exploit_payload = json.dumps(
+        {
+            "success": False,
+            "result": "AttributeError: 'str' object has no attribute 'get'",
+            "exploited_at": "2024-01-01T00:01:00+00:00",
+        }
+    )
+
+    dispatcher._redis_client = FakeRedis(
+        {vuln_key: vuln_payload},
+        {exploit_key: exploit_payload},
+    )
+
+    # This should not raise AttributeError
+    status = await dispatcher.get_exploitation_status()
+
+    assert status["total_discovered"] == 1
+    assert status["total_failed"] == 1
+    assert len(status["failed"]) == 1
+    assert status["failed"][0]["type"] == "adcs_esc8"
+    assert status["failed"][0]["target"] == "10.1.2.183"
+    # Error should be extracted from string result
+    assert "AttributeError" in status["failed"][0]["error"]
+
+
 class TestMssqlScanning:
     """Tests for MSSQL auto-detection and scanning functionality."""
 

@@ -273,7 +273,26 @@ class DeferredQueueMixin:
         """Add a task to the deferred queue in Redis.
 
         Returns True if queued, False if rejected (queue full with higher priority tasks).
+
+        When called from the threaded result consumer (non-main thread), queues
+        the task for processing by the main event loop instead of accessing
+        Redis directly (avoids event loop mismatch).
         """
+        import threading
+
+        # When called from non-main thread (threaded consumer), queue for main loop
+        # This avoids "Future attached to a different loop" errors
+        if threading.current_thread() is not threading.main_thread():
+            with self._pending_deferred_lock:
+                self._pending_deferred_tasks.append(
+                    (task_type, target_role, payload.copy(), source_agent, priority)
+                )
+            self._deferred_task_requested.set()
+            logger.debug(
+                f"Queued deferred task for main loop: {task_type} -> {target_role} (priority {priority})"
+            )
+            return True  # Task accepted for deferred processing
+
         if not self._task_queue or not self._task_queue.redis:
             logger.error("Cannot enqueue deferred task: Redis not available")
             return False

@@ -1317,7 +1317,9 @@ async def _auto_share_spider(
         try:
             state = dispatcher.shared_state
 
-            if state.completed or state.has_domain_admin:
+            # Only stop when operation is explicitly completed, NOT when DA is achieved
+            # We still want to spider shares after DA to find additional credentials and loot
+            if state.completed:
                 logger.debug("Operation complete, stopping auto share spider")
                 break
 
@@ -1566,12 +1568,14 @@ def _has_constrained_delegation_for_target(state: SharedRedTeamState, target_ip:
     for vuln in state.discovered_vulnerabilities.values():
         if vuln.vuln_type != "constrained_delegation":
             continue
+        # Defensive: ensure vuln.details is a dict before calling .get()
+        details = vuln.details if isinstance(vuln.details, dict) else {}
         # Check if target matches the vulnerability's target
-        vuln_target_ip = vuln.details.get("target_ip", "")
+        vuln_target_ip = details.get("target_ip", "")
         if vuln_target_ip == target_ip:
             return True
         # Also check hostname in target_spn
-        target_spn = vuln.details.get("target_spn", "")
+        target_spn = details.get("target_spn", "")
         if target_spn:
             # Extract hostname from SPN (e.g., cifs/dc01.contoso.local -> dc01.contoso.local)
             spn_host = target_spn.split("/", 1)[1] if "/" in target_spn else ""
@@ -2576,7 +2580,8 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
                     continue
 
                 # Get details about who has admin access
-                details = vuln.details or {}
+                # Defensive: ensure vuln.details is a dict before calling .get()
+                details = vuln.details if isinstance(vuln.details, dict) else {}
                 admin_user = details.get("username") or details.get("principal")
                 admin_domain = details.get("domain", "")
 
@@ -2996,6 +3001,58 @@ def _get_running_crack_tasks(dispatcher: RedTeamDispatcher) -> list[str]:
     return crack_task_ids
 
 
+async def _wait_for_loot_collection(
+    dispatcher: RedTeamDispatcher,
+    grace_period: float = 60.0,
+    check_interval: float = 5.0,
+) -> None:
+    """
+    Wait for loot collection tasks (share spider, etc.) after DA is achieved.
+
+    When DA is achieved quickly, share spidering and other credential collection
+    may not have completed. This gives background tasks time to finish.
+
+    Args:
+        dispatcher: The dispatcher instance
+        grace_period: Seconds to wait for loot collection
+        check_interval: Seconds between status logs
+    """
+    state = dispatcher.shared_state
+    initial_creds = len(state.all_credentials)
+    initial_hashes = len(state.all_hashes)
+    shares_to_spider = [
+        s
+        for s in state.all_shares
+        if s.permissions
+        and "READ" in s.permissions.upper()
+        and s.name.lower() not in ("ipc$", "print$", "admin$", "c$", "d$", "e$")
+    ]
+
+    if not shares_to_spider:
+        logger.debug("No readable shares to spider, skipping loot collection wait")
+        return
+
+    logger.info(
+        f"🕷️ Post-DA loot collection: {len(shares_to_spider)} readable share(s), "
+        f"waiting up to {grace_period}s for share spidering..."
+    )
+
+    start_time = asyncio.get_event_loop().time()
+
+    while True:
+        elapsed = asyncio.get_event_loop().time() - start_time
+
+        if elapsed >= grace_period:
+            new_creds = len(state.all_credentials) - initial_creds
+            new_hashes = len(state.all_hashes) - initial_hashes
+            logger.info(
+                f"🕷️ Loot collection complete: +{new_creds} credentials, +{new_hashes} hashes"
+            )
+            break
+
+        await asyncio.sleep(check_interval)
+
+
 async def _wait_for_crack_tasks(
     dispatcher: RedTeamDispatcher,
     timeout: float | None = None,
@@ -3160,6 +3217,8 @@ async def _wait_for_completion(
         # Check for domain admin or explicit completion
         if dispatcher.shared_state.has_domain_admin:
             logger.success("Domain Admin achieved! Operation complete.")
+            # Wait for loot collection (share spider, etc.) while background tasks are still running
+            await _wait_for_loot_collection(dispatcher)
             # Wait for golden ticket generation (if krbtgt hash is available)
             await _wait_for_golden_ticket(dispatcher)
             # Wait for running crack tasks before fully exiting

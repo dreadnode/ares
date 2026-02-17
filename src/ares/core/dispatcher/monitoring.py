@@ -810,6 +810,10 @@ class MonitoringMixin:
                     await self._checkpoint()
                     last_checkpoint = now
 
+                # Process pending deferred tasks from threaded consumer
+                # These were queued because the threaded consumer can't access Redis directly
+                await self._process_pending_deferred_tasks()
+
                 # Reset failure counter on success
                 consecutive_failures = 0
 
@@ -827,6 +831,49 @@ class MonitoringMixin:
                 await asyncio.sleep(min(15, consecutive_failures * 5))
 
         logger.info("Maintenance loop stopped")
+
+    async def _process_pending_deferred_tasks(self: RedTeamDispatcher) -> None:
+        """Process deferred tasks queued by the threaded consumer.
+
+        The threaded result consumer can't call _enqueue_deferred_task directly
+        because it uses the main thread's Redis client. Instead, it queues tasks
+        in _pending_deferred_tasks and sets _deferred_task_requested. This method
+        processes those pending tasks on the main event loop.
+        """
+        if not self._deferred_task_requested.is_set():
+            return
+
+        self._deferred_task_requested.clear()
+
+        # Atomically get and clear pending tasks
+        with self._pending_deferred_lock:
+            tasks_to_process = self._pending_deferred_tasks.copy()
+            self._pending_deferred_tasks.clear()
+
+        if not tasks_to_process:
+            return
+
+        logger.info(
+            f"Processing {len(tasks_to_process)} pending deferred tasks from threaded consumer"
+        )
+
+        for task_type, target_role, payload, source_agent, priority in tasks_to_process:
+            try:
+                # Now we're on the main thread, so Redis operations will work
+                queued = await self._enqueue_deferred_task(
+                    task_type=task_type,
+                    target_role=target_role,
+                    payload=payload,
+                    source_agent=source_agent,
+                    priority=priority,
+                )
+                if not queued:
+                    logger.warning(
+                        f"Failed to enqueue deferred task from threaded consumer: "
+                        f"{task_type} -> {target_role}"
+                    )
+            except Exception as e:  # noqa: PERF203
+                logger.error(f"Error processing pending deferred task: {e}")
 
     async def _log_throttle_health(self: RedTeamDispatcher) -> None:
         """

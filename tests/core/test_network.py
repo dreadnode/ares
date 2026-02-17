@@ -204,8 +204,9 @@ class TestNetworkEnumerationTools:
             )
             result = tools.nmap_scan("192.168.58.100")
 
-        assert "PORT" in result
-        assert "22/tcp" in result
+        assert isinstance(result, dict)
+        assert "PORT" in result["output"]
+        assert "22/tcp" in result["output"]
         assert "192.168.58.100" in red_team_state.queried_hosts
 
     def test_nmap_scan_failure(self, red_team_state: SharedRedTeamState):
@@ -221,7 +222,9 @@ class TestNetworkEnumerationTools:
             )
             result = tools.nmap_scan("192.168.58.100")
 
-        assert "unreachable" in result.lower() or "failed" in result.lower()
+        assert isinstance(result, dict)
+        output = result["output"].lower()
+        assert "unreachable" in output or "failed" in output
 
     def test_nmap_scan_exception(self, red_team_state: SharedRedTeamState):
         """Test nmap scan handles exceptions."""
@@ -234,7 +237,8 @@ class TestNetworkEnumerationTools:
             mock_run.side_effect = Exception("Connection error")
             result = tools.nmap_scan("192.168.58.100")
 
-        assert "failed" in result.lower()
+        assert isinstance(result, dict)
+        assert "failed" in result["output"].lower()
 
     def test_nmap_scan_multiple_targets(self, red_team_state: SharedRedTeamState):
         """Test nmap scan with multiple targets."""
@@ -269,7 +273,8 @@ class TestNetworkEnumerationTools:
 
         # Should skip without calling nmap
         mock_run.assert_not_called()
-        assert "already scanned" in result.lower()
+        assert isinstance(result, dict)
+        assert "already scanned" in result["output"].lower()
 
     def test_nmap_scan_deduplication_partial_skip(self, red_team_state: SharedRedTeamState):
         """Test that nmap_scan only scans new targets when some are already scanned."""

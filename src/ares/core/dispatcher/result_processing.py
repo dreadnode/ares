@@ -615,10 +615,8 @@ class ResultProcessingMixin:
             domain = self.shared_state.target.domain
 
         for host in self._extract_hosts_from_output(output):
-            if hasattr(self.shared_state, "add_host"):
-                self.shared_state.add_host(host)
-            elif not any(h.ip == host.ip for h in self.shared_state.all_hosts):
-                self.shared_state.all_hosts.append(host)
+            # Use publish_host to ensure checkpoint is triggered for merged data
+            await self.publish_host(host, source_agent)
 
         for username, extracted_domain in self._extract_users_from_output(output):
             # Use extracted domain if available, otherwise fall back to target domain
@@ -783,6 +781,9 @@ class ResultProcessingMixin:
         if not normalized or normalized.lower() in {"(none)", "none", "null", "(null)"}:
             return False
         if "/" in normalized or "\\" in normalized or normalized.endswith(".txt"):
+            return False
+        # Skip machine accounts (ending in $) - these are computer accounts, not users
+        if normalized.endswith("$"):
             return False
         for existing in self.shared_state.all_users:
             if existing.username == normalized and existing.domain == domain:
