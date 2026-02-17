@@ -8,6 +8,12 @@ from loguru import logger
 
 from ares.core.models import InvestigationState
 
+# Formatting constants for consistent UX
+STATUS_SUCCESS = "[+]"
+STATUS_WARNING = "[!]"
+STATUS_INFO = "[*]"
+SECTION_SEPARATOR = "=" * 40
+
 
 class CompletionTools(Toolset):  # type: ignore[misc]
     """Tools for completing investigations with validation.
@@ -121,7 +127,84 @@ class CompletionTools(Toolset):  # type: ignore[misc]
 
         logger.success(f"Investigation completed: {summary[:100]}...")
 
-        return "Investigation completed. Report will be generated."
+        return self._format_completion_output(summary)
+
+    def _format_completion_output(self, summary: str) -> str:
+        """Format the completion output with visual indicators."""
+        if not self.state:
+            return "→ Report will be generated."
+
+        lines = [
+            "📝 INVESTIGATION COMPLETED",
+            SECTION_SEPARATOR,
+            "",
+        ]
+
+        # Final metrics
+        evidence_count = len(self.state.evidence)
+        timeline_count = len(self.state.timeline)
+        technique_count = len(self.state.identified_techniques)
+
+        # Calculate highest pyramid level
+        highest_level = max(
+            (e.pyramid_level.value for e in self.state.evidence),
+            default=0,
+        )
+
+        lines.extend(
+            [
+                "📊 Final Metrics:",
+                f"  • Evidence: {evidence_count} items",
+                f"  • Timeline: {timeline_count} events",
+                f"  • Techniques: {technique_count} identified",
+                f"  • Pyramid Level: {highest_level}/6",
+                "",
+            ]
+        )
+
+        # Achievements - build list of achievements then add
+        achievements = self._get_completion_achievements(evidence_count, technique_count)
+        lines.append("🏆 Achievements:")
+        lines.extend(achievements)
+        lines.append("")
+
+        # Summary preview
+        summary_preview = summary[:150] + "..." if len(summary) > 150 else summary
+        lines.extend(
+            [
+                "📋 Summary:",
+                f"  {summary_preview}",
+                "",
+                "→ Report will be generated.",
+            ]
+        )
+
+        return "\n".join(lines)
+
+    def _get_completion_achievements(self, evidence_count: int, technique_count: int) -> list[str]:
+        """Get list of achievement lines for completion output."""
+        if not self.state:
+            return []
+
+        achievements = []
+
+        ttp_count = sum(1 for e in self.state.evidence if e.pyramid_level.value == 6)
+        tool_count = sum(1 for e in self.state.evidence if e.pyramid_level.value == 5)
+        validated_count = sum(1 for e in self.state.evidence if e.validated)
+
+        # Add achievements based on conditions
+        if ttp_count > 0:
+            achievements.append(f"  ✅ TTP LEVEL REACHED ({ttp_count} TTPs)")
+        if tool_count > 0:
+            achievements.append(f"  ✅ TOOL IDENTIFICATION COMPLETE ({tool_count} tools)")
+        if technique_count >= 3:
+            achievements.append("  ✅ COMPREHENSIVE TECHNIQUE COVERAGE")
+        if self.state.recommendations:
+            achievements.append(f"  ✅ {len(self.state.recommendations)} RECOMMENDATIONS GENERATED")
+        if validated_count > 0:
+            achievements.append(f"  ✅ VALIDATED EVIDENCE ({validated_count}/{evidence_count})")
+
+        return achievements
 
     def _generate_fallback_synopsis(self) -> None:  # noqa: PLR0912
         """Generate a comprehensive synopsis from evidence if none provided.
@@ -302,4 +385,29 @@ async def escalate_investigation(
 
     logger.info(f"Investigation escalated: {reason}")
 
-    return f"Investigation escalated with severity={severity}. Human analyst notified."
+    # Build formatted escalation output
+    severity_upper = severity.upper()
+    severity_tag = f"[{severity_upper}]"
+
+    lines = [
+        f"⚠️ INVESTIGATION ESCALATED {severity_tag}",
+        SECTION_SEPARATOR,
+        "",
+        "🚨 Escalation Details:",
+        f"  Reason: {reason}",
+        f"  Severity: {severity}",
+        "",
+        "📋 Current Findings:",
+        f"  {current_findings[:200]}{'...' if len(current_findings) > 200 else ''}",
+        "",
+    ]
+
+    if immediate_actions:
+        lines.append("🔥 Immediate Actions Required:")
+        for i, action in enumerate(immediate_actions[:5], 1):
+            lines.append(f"  {i}. {action}")
+        lines.append("")
+
+    lines.append("→ Human analyst has been notified.")
+
+    return "\n".join(lines)

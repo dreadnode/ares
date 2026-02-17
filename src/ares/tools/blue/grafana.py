@@ -1,10 +1,11 @@
 """Grafana alerting and MCP tools."""
 
+import asyncio
 import os
 import shutil
 import subprocess  # nosec B404
 from pathlib import Path
-from typing import Any
+from typing import Any, Self, cast
 
 import dreadnode as dn
 import httpx
@@ -12,6 +13,113 @@ from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
 from ares.core.exceptions import AuthenticationError, ConfigurationError
+
+
+class MCPConnectionPool:
+    """Singleton connection pool for MCP client reuse across investigations.
+
+    This eliminates the 60-second connection overhead per investigation
+    by reusing the same MCP client connection.
+    """
+
+    _instance: "MCPConnectionPool | None" = None
+    _client: Any = None
+    _lock: asyncio.Lock | None = None
+    _grafana_url: str | None = None
+    _grafana_api_key: str | None = None
+
+    def __new__(cls) -> Self:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._lock = asyncio.Lock()
+        return cast("Self", cls._instance)
+
+    @classmethod
+    async def get_client(
+        cls,
+        grafana_url: str | None = None,
+        grafana_api_key: str | None = None,
+        force_reconnect: bool = False,
+    ) -> Any:
+        """Get or create the MCP client connection.
+
+        Args:
+            grafana_url: Grafana instance URL
+            grafana_api_key: Grafana API key
+            force_reconnect: Force a new connection even if one exists
+
+        Returns:
+            Connected MCPClient with Grafana tools
+        """
+        instance = cls()
+
+        if instance._lock is None:
+            instance._lock = asyncio.Lock()
+
+        async with instance._lock:
+            # Check if credentials changed
+            creds_changed = (grafana_url and grafana_url != cls._grafana_url) or (
+                grafana_api_key and grafana_api_key != cls._grafana_api_key
+            )
+
+            # Return existing client if valid
+            if cls._client is not None and not force_reconnect and not creds_changed:
+                logger.debug("Reusing existing MCP connection")
+                return cls._client
+
+            # Close existing connection if needed
+            if cls._client is not None:
+                try:
+                    await asyncio.wait_for(
+                        cls._client.__aexit__(None, None, None),
+                        timeout=5.0,
+                    )
+                    logger.info("Closed previous MCP connection")
+                except Exception as e:
+                    logger.warning(f"Error closing previous MCP connection: {e}")
+                cls._client = None
+
+            # Store credentials
+            cls._grafana_url = grafana_url
+            cls._grafana_api_key = grafana_api_key
+
+            # Create new connection
+            logger.info("Creating new MCP connection (pooled)")
+            cls._client = await _connect_grafana_mcp_internal(
+                grafana_url=grafana_url,
+                grafana_api_key=grafana_api_key,
+            )
+            return cls._client
+
+    @classmethod
+    async def close(cls) -> None:
+        """Close the pooled connection.
+
+        Note: The MCP stdio client uses async generators which can produce
+        RuntimeError during shutdown when tasks are cancelled. This is expected
+        and we suppress these errors during cleanup.
+        """
+        if cls._client is not None:
+            try:
+                await asyncio.wait_for(
+                    cls._client.__aexit__(None, None, None),
+                    timeout=5.0,
+                )
+                logger.info("MCP connection pool closed cleanly")
+            except (RuntimeError, asyncio.CancelledError, GeneratorExit) as e:
+                # Expected during shutdown - async generator cleanup issues
+                logger.debug(f"MCP pool closed with expected shutdown error: {type(e).__name__}")
+            except Exception as e:
+                logger.warning(f"Error closing MCP pool: {e}")
+            finally:
+                cls._client = None
+                cls._grafana_url = None
+                cls._grafana_api_key = None
+
+    @classmethod
+    def is_connected(cls) -> bool:
+        """Check if a pooled connection exists."""
+        return cls._client is not None
 
 
 class GrafanaTools(Toolset):  # type: ignore[misc]
@@ -253,7 +361,7 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
             if pattern in logql_query:
                 return {
                     "status": "error",
-                    "error": f"Query contains broad selector '{pattern}' which would cause performance issues. Use specific labels like {{job=\"eventlog\"}}.",
+                    "error": f"Query contains broad selector '{pattern}' which would cause performance issues. Use specific labels like {{job=\"windows-security\"}}.",
                 }
 
         # Validate severity
@@ -478,28 +586,18 @@ def find_mcp_grafana() -> str:
     raise RuntimeError(msg)
 
 
-async def connect_grafana_mcp(
+async def _connect_grafana_mcp_internal(
     grafana_url: str | None = None,
     grafana_api_key: str | None = None,
 ) -> Any:
-    """
-    Connect to Grafana MCP server via Rigging.
+    """Internal function to create a new MCP connection.
 
-    Args:
-        grafana_url: Grafana instance URL (default: from GRAFANA_URL env)
-        grafana_api_key: Grafana service account token (default: from GRAFANA_SERVICE_ACCOUNT_TOKEN or GRAFANA_API_KEY env)
-
-    Returns:
-        Connected MCPClient with Grafana tools loaded
-
-    Raises:
-        RuntimeError: If mcp-grafana binary cannot be found
-        ValueError: If credentials are not provided
+    This is used by MCPConnectionPool. External code should use
+    connect_grafana_mcp() which leverages connection pooling.
     """
     import rigging as rg
 
     grafana_url = grafana_url or os.getenv("GRAFANA_URL", "")
-    # Prefer GRAFANA_SERVICE_ACCOUNT_TOKEN, fallback to GRAFANA_API_KEY for compatibility
     grafana_api_key = (
         grafana_api_key
         or os.getenv("GRAFANA_SERVICE_ACCOUNT_TOKEN", "")
@@ -514,34 +612,70 @@ async def connect_grafana_mcp(
         msg = "GRAFANA_SERVICE_ACCOUNT_TOKEN (or GRAFANA_API_KEY) must be provided or set in environment"
         raise ValueError(msg)
 
-    # Find mcp-grafana binary
     mcp_grafana_path = find_mcp_grafana()
     logger.info(f"Found mcp-grafana at: {mcp_grafana_path}")
 
-    # Increase rigging's MCP initialize timeout from the default 5s.
-    # mcp-grafana spends ~6s on datasource discovery before it's ready,
-    # so the default 5s timeout causes a BrokenResourceError in the TaskGroup.
-    # Note: must use importlib because `rigging.tools.mcp` is shadowed by the
-    # `mcp` function re-export in rigging.tools.__init__.
     import importlib
 
     _rg_mcp_mod = importlib.import_module("rigging.tools.mcp")
     _rg_mcp_mod.INITIALIZE_TIMEOUT = 30
 
-    # Connect to MCP server using the new environment variable name
+    mcp_args = [
+        "--disable-admin",
+        "--disable-alerting",
+        "--disable-annotations",
+        "--disable-asserts",
+        "--disable-dashboard",
+        "--disable-folder",
+        "--disable-incident",
+        "--disable-navigation",
+        "--disable-oncall",
+        "--disable-proxied",
+        "--disable-pyroscope",
+        "--disable-rendering",
+        "--disable-search",
+        "--disable-sift",
+        "--disable-write",
+    ]
+    logger.info(f"Starting mcp-grafana with args: {' '.join(mcp_args)}")
+
     client = rg.mcp(
         "stdio",
         command=mcp_grafana_path,
-        args=[],
+        args=mcp_args,
         env={
             "GRAFANA_URL": grafana_url,
             "GRAFANA_SERVICE_ACCOUNT_TOKEN": grafana_api_key,
         },
     )
 
-    # Enter the async context to initialize connection
     await client.__aenter__()
-
     logger.success(f"Connected to Grafana MCP server ({len(client.tools)} tools loaded)")
-
     return client
+
+
+async def connect_grafana_mcp(
+    grafana_url: str | None = None,
+    grafana_api_key: str | None = None,
+) -> Any:
+    """
+    Connect to Grafana MCP server via Rigging with connection pooling.
+
+    This function reuses existing MCP connections across investigations,
+    eliminating the ~60 second connection overhead per investigation.
+
+    Args:
+        grafana_url: Grafana instance URL (default: from GRAFANA_URL env)
+        grafana_api_key: Grafana service account token (default: from env)
+
+    Returns:
+        Connected MCPClient with Grafana tools loaded
+
+    Raises:
+        RuntimeError: If mcp-grafana binary cannot be found
+        ValueError: If credentials are not provided
+    """
+    return await MCPConnectionPool.get_client(
+        grafana_url=grafana_url,
+        grafana_api_key=grafana_api_key,
+    )

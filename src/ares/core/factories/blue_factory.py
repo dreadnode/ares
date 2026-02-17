@@ -28,6 +28,7 @@ from ares.core.evidence_validation import (
 from ares.core.models import Evidence, InvestigationState, PyramidLevel
 from ares.core.query_resilience import QueryResilientExecutor, get_resilient_executor
 from ares.core.templates import get_template_loader
+from ares.core.tool_retrieval import filter_tools_for_alert
 from ares.integrations.mitre import MITREAttackClient
 from ares.tools.blue import (
     CompletionTools,
@@ -51,6 +52,23 @@ _executed_queries: list[dict] = []
 _seen_queries: dict[str, int] = {}  # Track query -> count to detect loops
 _current_state: "InvestigationState | None" = None
 _bonus_queries_granted = 0  # Track bonus queries granted
+_in_resilient_execution = False  # Flag to bypass duplicate check during retries/chunks
+
+# Evidence type to follow-up detection methods mapping for auto-chaining
+EVIDENCE_CHAIN_MAP: dict[str, list[str]] = {
+    # Evidence type → follow-up detection methods to queue
+    "kerberoast_hash": ["detect_pass_the_hash", "detect_lateral_movement"],
+    "dcsync": ["detect_golden_ticket", "detect_lateral_movement"],
+    "s4u_delegation": ["detect_dcsync_replication", "detect_lsa_secrets_access"],
+    "credential": ["detect_pass_the_hash", "detect_lateral_movement"],
+    "service_creation": ["detect_impacket_psexec", "detect_suspicious_execution"],
+    "pass_the_hash": ["detect_lateral_movement", "detect_remote_execution"],
+    "golden_ticket": ["detect_lateral_movement", "detect_dcsync_replication"],
+    "lateral_movement": ["detect_service_creation", "detect_scheduled_task"],
+    "psexec": ["detect_service_creation", "detect_lateral_movement"],
+    "wmiexec": ["detect_lateral_movement", "detect_service_creation"],
+    "smbexec": ["detect_service_creation", "detect_lateral_movement"],
+}
 
 # LogQL optimization patterns - broad selectors that cause timeouts
 _BROAD_SELECTOR_PATTERNS = [
@@ -60,6 +78,133 @@ _BROAD_SELECTOR_PATTERNS = [
     '{app=~".+"}',
     '{hostname=~".+"}',
 ]
+
+
+def _extract_hosts_from_results(result_data: dict) -> set[str]:
+    """Extract target hosts from lateral movement detection results.
+
+    Args:
+        result_data: Query result containing lateral movement detections
+
+    Returns:
+        Set of lowercase hostnames discovered in the results
+    """
+    hosts: set[str] = set()
+    results = result_data.get("results", [])
+    if not isinstance(results, list):
+        return hosts
+
+    host_fields = [
+        "target_host",
+        "TargetHost",
+        "computer",
+        "Computer",
+        "dest_host",
+        "destination",
+        "TargetComputer",
+    ]
+    event_fields = ["TargetServerName", "TargetComputer", "IpAddress"]
+
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        for field in host_fields:
+            if item.get(field):
+                hosts.add(str(item[field]).lower())
+        event_data = item.get("event_data", {})
+        if isinstance(event_data, dict):
+            for field in event_fields:
+                if event_data.get(field):
+                    hosts.add(str(event_data[field]).lower())
+    return hosts
+
+
+def _queue_pivot_queries(state: "InvestigationState", result_data: dict) -> None:
+    """Queue pivot queries for hosts discovered via lateral movement detection.
+
+    When lateral movement is detected, this function extracts target hosts
+    from the results and queues follow-up queries to investigate those hosts.
+
+    Args:
+        state: Current investigation state
+        result_data: Query result containing lateral movement detections
+    """
+    if not state or not result_data:
+        return
+
+    # Extract hosts from various result formats
+    hosts_to_investigate = _extract_hosts_from_results(result_data)
+
+    # Remove already-queried hosts
+    hosts_to_investigate -= state.queried_hosts
+
+    if not hosts_to_investigate:
+        return
+
+    # Queue pivot queries for each new host
+    for host in hosts_to_investigate:
+        # Add host to pending in lateral graph if available
+        if state.lateral_graph and hasattr(state.lateral_graph, "pending_hosts"):
+            state.lateral_graph.pending_hosts.add(host)
+
+        # Queue follow-up queries for this host
+        pivot_query = {
+            "type": "pivot",
+            "host": host,
+            "reason": "Discovered via lateral movement detection",
+            "suggested_methods": [
+                "detect_lateral_movement",
+                "detect_service_creation",
+                "detect_suspicious_execution",
+            ],
+        }
+        if pivot_query not in state.queued_pivot_queries:
+            state.queued_pivot_queries.append(pivot_query)
+
+    if hosts_to_investigate:
+        logger.info(
+            f"🔄 Auto-queued pivot investigation for {len(hosts_to_investigate)} hosts: "
+            f"{', '.join(list(hosts_to_investigate)[:3])}{'...' if len(hosts_to_investigate) > 3 else ''}"
+        )
+
+
+def _queue_chained_queries(evidence_type: str, state: "InvestigationState") -> None:
+    """Queue follow-up detection methods based on evidence type.
+
+    When evidence is found, this function determines what follow-up
+    detection methods should be run to expand investigation scope.
+
+    Args:
+        evidence_type: Type of evidence found (e.g., "kerberoast_hash", "dcsync")
+        state: Current investigation state
+    """
+    if not state or not evidence_type:
+        return
+
+    # Normalize evidence type for lookup
+    normalized_type = evidence_type.lower().replace("-", "_").replace(" ", "_")
+
+    # Look up chained queries for this evidence type
+    chain = EVIDENCE_CHAIN_MAP.get(normalized_type, [])
+
+    if not chain:
+        return
+
+    # Queue methods that haven't been executed yet
+    new_methods = []
+    for method_name in chain:
+        if (
+            method_name not in state.executed_query_types
+            and method_name not in state.queued_chain_queries
+        ):
+            state.queued_chain_queries.append(method_name)
+            new_methods.append(method_name)
+
+    if new_methods:
+        logger.info(
+            f"🔗 Auto-queued {len(new_methods)} chained queries for {evidence_type}: "
+            f"{', '.join(new_methods)}"
+        )
 
 
 def _optimize_logql_query(query: str) -> tuple[str, bool]:
@@ -84,9 +229,9 @@ def _optimize_logql_query(query: str) -> tuple[str, bool]:
         if pattern in query:
             logger.warning(
                 f"Query contains broad selector '{pattern}' - auto-rewriting to "
-                '{{job="eventlog"}} to prevent timeout.'
+                '{{job="windows-security"}} to prevent timeout.'
             )
-            optimized = optimized.replace(pattern, '{job="eventlog"}')
+            optimized = optimized.replace(pattern, '{job="windows-security"}')
             was_modified = True
             # Continue checking for other broad patterns
 
@@ -112,7 +257,8 @@ def reset_query_tracking():
         _executed_queries, \
         _seen_queries, \
         _current_state, \
-        _bonus_queries_granted
+        _bonus_queries_granted, \
+        _in_resilient_execution
     _total_queries = 0
     _total_queries_attempted = 0
     _consecutive_queries = []
@@ -121,6 +267,7 @@ def reset_query_tracking():
     _seen_queries = {}
     _current_state = None
     _bonus_queries_granted = 0
+    _in_resilient_execution = False
     reset_resilient_executor()
     reset_evidence_validation()  # Reset evidence validation state
 
@@ -229,8 +376,23 @@ def _check_query_limit() -> str | None:
     return None
 
 
-def _check_duplicate_query(query: str) -> str | None:
-    """Check if query is a duplicate. Returns error message if duplicate limit hit."""
+def _check_duplicate_query(query: str, bypass_for_resilience: bool = False) -> str | None:
+    """Check if query is a duplicate. Returns error message if duplicate limit hit.
+
+    Args:
+        query: The query string to check
+        bypass_for_resilience: If True, skip the duplicate check (used during
+            resilient execution retries/chunks to avoid blocking internal retries)
+
+    Returns:
+        Error message if duplicate limit hit, None otherwise
+    """
+    # Skip duplicate check during resilient execution (retries, time range reduction, chunks)
+    # This prevents internal retry mechanisms from being blocked
+    if bypass_for_resilience or _in_resilient_execution:
+        logger.debug("Bypassing duplicate check during resilient execution")
+        return None
+
     # Normalize query for comparison (strip whitespace, lowercase)
     normalized = query.strip().lower()
 
@@ -359,8 +521,20 @@ def _record_query(
                             f"🔍 Auto-extracted {added_count} IOCs from query results "
                             f"(total evidence: {len(_current_state.evidence)})"
                         )
+
+                        # AUTO-CHAIN: Queue follow-up queries based on evidence types
+                        for item in extracted:
+                            _queue_chained_queries(item["type"], _current_state)
+
             except Exception as e:
                 logger.warning(f"Auto-extraction failed: {e}")
+
+            # AUTO-PIVOT: Queue pivot queries for lateral movement detections
+            if result_data and isinstance(result_data, dict) and result_data.get("_auto_pivot"):
+                _queue_pivot_queries(_current_state, result_data)
+
+            # Track executed query type for deduplication
+            _current_state.executed_query_types.add(tool_name)
 
 
 def create_rate_limited_mcp_tool(
@@ -383,6 +557,13 @@ def create_rate_limited_mcp_tool(
 
     # Only wrap query tools
     if "query_loki" not in tool_name and "query_prometheus" not in tool_name:
+        return original_tool
+
+    # Prevent double-wrapping: if already wrapped, return as-is
+    # This is critical because _mcp_tools persists across investigations,
+    # and double-wrapping causes recursive calls to execute_with_resilience
+    if getattr(original_tool, "_ares_rate_limited", False):
+        logger.debug(f"Tool {tool_name} already wrapped, skipping")
         return original_tool
 
     logger.debug(f"Wrapping MCP tool with rate limiting and resilience: {tool_name}")
@@ -425,8 +606,13 @@ def create_rate_limited_mcp_tool(
 
         # If we have time parameters, use resilient executor
         if start_time and end_time and query_str:
+            global _in_resilient_execution
             logger.info(f"Using resilient executor for {tool_name}")
             try:
+                # Set flag to bypass duplicate detection during resilient execution
+                # This allows internal retries, time range reductions, and chunking
+                # to proceed without being blocked by duplicate detection
+                _in_resilient_execution = True
 
                 async def query_wrapper(logql: str, start_time: str, end_time: str, **kw):
                     updated_kwargs = {**kwargs}
@@ -479,6 +665,9 @@ def create_rate_limited_mcp_tool(
                     "error": str(e),
                     "suggestion": "Try a shorter time range or more specific filters.",
                 }
+            finally:
+                # Always reset the flag after resilient execution completes
+                _in_resilient_execution = False
 
         # Fallback to original execution without resilience (no time params)
         try:
@@ -506,9 +695,12 @@ def create_rate_limited_mcp_tool(
     if hasattr(original_tool, "fn"):
         # It's a Tool object with a .fn attribute
         original_tool.fn = rate_limited_wrapper
+        # Mark as wrapped to prevent double-wrapping on subsequent investigations
+        original_tool._ares_rate_limited = True
         return original_tool
     # It's a callable, just return the wrapper
     rate_limited_wrapper.__name__ = tool_name
+    rate_limited_wrapper._ares_rate_limited = True
     return rate_limited_wrapper
 
 
@@ -532,6 +724,52 @@ def _extract_result_count(result: Any) -> int | None:
     if isinstance(result, str):
         return result.count("\n") if result else 0
     return None
+
+
+# Essential MCP tool patterns to keep (query-related only)
+# Other tools (dashboards, alerts, annotations) are handled by internal GrafanaTools
+_ESSENTIAL_MCP_PATTERNS = [
+    "query_loki",
+    "query_prometheus",
+    "list_datasources",  # Needed to discover datasource UIDs
+]
+
+
+def filter_mcp_tools(mcp_tools: list) -> list:
+    """
+    Filter MCP tools to only include essential ones.
+
+    This prevents hitting the OpenAI 128-tool limit by excluding
+    tools that are either:
+    - Redundant with internal tools (GrafanaTools handles annotations, alerts)
+    - Not needed for investigation (dashboard management, etc.)
+
+    Args:
+        mcp_tools: Full list of MCP tools from Grafana MCPClient
+
+    Returns:
+        Filtered list containing only essential query tools
+    """
+    filtered = []
+    excluded = []
+
+    for tool in mcp_tools:
+        tool_name = getattr(tool, "name", "") or getattr(tool, "__name__", str(tool))
+
+        # Only keep tools matching essential patterns
+        if any(pattern in tool_name for pattern in _ESSENTIAL_MCP_PATTERNS):
+            filtered.append(tool)
+        else:
+            excluded.append(tool_name)
+
+    if excluded:
+        logger.info(
+            f"Filtered out {len(excluded)} non-essential MCP tools: "
+            f"{', '.join(excluded[:5])}{'...' if len(excluded) > 5 else ''}"
+        )
+
+    logger.info(f"Keeping {len(filtered)} essential MCP tools")
+    return filtered
 
 
 def wrap_mcp_query_tools(mcp_tools: list) -> list:
@@ -632,6 +870,27 @@ def max_queries_stop(max_queries: int = 5) -> StopCondition:
     return StopCondition(stop, name="stop_on_max_queries")
 
 
+def query_limit_hit_stop() -> StopCondition:
+    """Stop condition that fires when the query limit has been hit.
+
+    This is critical because when queries are blocked by the rate limiter,
+    the MCP tool never actually runs, so max_queries_stop doesn't count them.
+    This condition checks the global _query_limit_hit flag directly.
+    """
+    from collections.abc import Sequence
+
+    def stop(events: Sequence[AgentEvent]) -> bool:
+        if _query_limit_hit:
+            logger.critical(
+                "🛑 STOP CONDITION: Query limit hit flag is set. "
+                "All queries are being blocked - forcing agent to stop."
+            )
+            return True
+        return False
+
+    return StopCondition(stop, name="stop_on_query_limit_hit")
+
+
 def max_tool_calls_stop(max_calls: int = 20) -> StopCondition:
     """Stop condition that fires after max_calls TOTAL tool calls without completion.
 
@@ -702,30 +961,88 @@ def create_investigation_agent(
 
     loki_url = grafana_url.rstrip("/")
     # QueryTemplateTools now supports optimized queries:
-    # - default_label_selector: Override with specific labels like '{job="eventlog"}'
+    # - default_label_selector: Override with specific labels like '{job="windows-security"}'
     #   for better performance instead of scanning all streams
     # - default_hours_back: Defaults to 1 hour (reduced from 4) for faster queries
+    # - mcp_query_fn: MCP query function for authenticated Loki queries
     # Example: QueryTemplateTools(loki_url=loki_url, default_label_selector='{job="windows"}')
-    query_template_tools = QueryTemplateTools(loki_url=loki_url)
+
+    # Extract MCP query_loki_logs function if available (fixes auth issues with direct HTTP)
+    mcp_query_fn = None
+    if grafana_mcp_tools:
+        for tool in grafana_mcp_tools:
+            tool_name = getattr(tool, "name", "") or getattr(tool, "__name__", "")
+            if "query_loki_logs" in tool_name:
+                # Extract the underlying function from the MCP tool
+                tool_fn = getattr(tool, "fn", None)
+                if tool_fn is None and callable(tool):
+                    tool_fn = tool
+
+                if tool_fn:
+                    # Create a wrapper that matches our expected signature
+                    async def mcp_loki_wrapper(
+                        datasource_uid: str,
+                        logql: str,
+                        start_time: str,
+                        end_time: str,
+                        limit: int,
+                        _fn=tool_fn,
+                    ):
+                        return await _fn(
+                            datasourceUid=datasource_uid,
+                            logql=logql,
+                            startRfc3339=start_time,
+                            endRfc3339=end_time,
+                            limit=limit,
+                        )
+
+                    mcp_query_fn = mcp_loki_wrapper
+                    logger.info(
+                        "QueryTemplateTools will use MCP query_loki_logs for authenticated queries"
+                    )
+                break
+
+    query_template_tools = QueryTemplateTools(loki_url=loki_url, mcp_query_fn=mcp_query_fn)
 
     learning_tools = LearningTools()
 
-    tools: list = [
+    # Core tools that are always needed
+    core_tools: list = [
         grafana_tools,
         investigation_tools,
         question_tools,
         mitre_tools,
         completion_tools,
-        query_template_tools,
         learning_tools,
         escalate_investigation,
     ]
 
+    # Filter query template tools based on alert context (42 -> ~10 tools)
+    # This significantly reduces LLM token overhead and improves response time
+    alert = state.alert if state else {}
+    filtered_query_tools = filter_tools_for_alert(
+        alert=alert,
+        all_tools=query_template_tools.tools() if hasattr(query_template_tools, "tools") else [],
+        use_semantic=True,
+        top_k=10,
+    )
+
+    if filtered_query_tools:
+        logger.info(f"Using {len(filtered_query_tools)} filtered query template tools")
+        tools: list = core_tools + filtered_query_tools
+    else:
+        # Fallback to all query templates if filtering fails
+        logger.warning("Tool filtering failed, using all query template tools")
+        tools = core_tools + [query_template_tools]
+
     if grafana_mcp_tools:
-        logger.info(f"Adding {len(grafana_mcp_tools)} Grafana MCP tools to agent")
+        logger.info(f"Received {len(grafana_mcp_tools)} Grafana MCP tools")
+        # Filter to essential tools only (prevents OpenAI 128-tool limit)
+        filtered_tools = filter_mcp_tools(grafana_mcp_tools)
         # Wrap query tools with rate limiting to prevent infinite query loops
-        wrapped_tools = wrap_mcp_query_tools(grafana_mcp_tools)
+        wrapped_tools = wrap_mcp_query_tools(filtered_tools)
         tools.extend(wrapped_tools)
+        logger.info(f"Final tool count: {len(tools)}")
     else:
         logger.warning(
             "No Grafana MCP tools available - agent will have limited query capabilities"
@@ -745,6 +1062,7 @@ def create_investigation_agent(
         stop_conditions=[
             tool_use("complete_investigation"),
             tool_use("escalate_investigation"),
+            query_limit_hit_stop(),  # Stop immediately when query limit is hit
             max_queries_stop(max_queries=12),  # Was 5 - force stop after 12 queries
             max_tool_calls_stop(max_calls=50),  # Was 20 - force stop after 50 total tool calls
         ],

@@ -1191,3 +1191,210 @@ class TestInternalHelperMethods:
         result = tools._build_pattern_filter(["Mimikatz"], case_insensitive=False)
         assert "(?i)" not in result
         assert "Mimikatz" in result
+
+
+# =============================================================================
+# Tests for new detection methods (BLUE-BETTER.md - op-20260214-141846)
+# =============================================================================
+
+
+class TestS4UDelegationDetection:
+    """Tests for detect_s4u_delegation method.
+
+    This detection catches the attack from op-20260214-141846:
+    - jon.snow used constrained delegation via S4U2Proxy
+    - Impersonated Administrator to CIFS/winterfell
+    - Led to secretsdump and krbtgt extraction
+    """
+
+    @pytest.fixture
+    def tools(self) -> QueryTemplateTools:
+        return QueryTemplateTools(loki_url="http://localhost:3100")
+
+    @pytest.mark.asyncio
+    async def test_detect_s4u_delegation(self, tools: QueryTemplateTools):
+        """Test S4U delegation abuse detection."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_response
+            )
+            result = await tools.detect_s4u_delegation()
+
+        assert result["_query_template"] == "s4u_delegation"
+        assert result["_mitre_technique"] == "T1558.003"
+        assert result["_red_team_tool"] == "get_st"
+        assert result["_severity"] == "critical"
+
+    @pytest.mark.asyncio
+    async def test_detect_s4u_delegation_with_dc(self, tools: QueryTemplateTools):
+        """Test S4U delegation detection with DC filter."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_response
+            )
+            result = await tools.detect_s4u_delegation(
+                domain_controller="winterfell.north.contoso.local"
+            )
+
+        assert result["_query_template"] == "s4u_delegation"
+        assert result["_mitre_technique"] == "T1558.003"
+
+
+class TestDCSyncReplicationDetection:
+    """Tests for detect_dcsync_replication method.
+
+    This detection catches DCSync via DS-Replication GUIDs (Event 4662):
+    - 1131f6aa: DS-Replication-Get-Changes
+    - 1131f6ad: DS-Replication-Get-Changes-All
+    - 89e95b76: DS-Replication-Get-Changes-In-Filtered-Set
+
+    From op-20260214-141846:
+    - secretsdump extracted krbtgt hash via DCSync
+    """
+
+    @pytest.fixture
+    def tools(self) -> QueryTemplateTools:
+        return QueryTemplateTools(loki_url="http://localhost:3100")
+
+    @pytest.mark.asyncio
+    async def test_detect_dcsync_replication(self, tools: QueryTemplateTools):
+        """Test DCSync replication detection."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_response
+            )
+            result = await tools.detect_dcsync_replication()
+
+        assert result["_query_template"] == "dcsync_replication"
+        assert result["_mitre_technique"] == "T1003.006"
+        assert result["_red_team_tool"] == "secretsdump"
+        assert result["_severity"] == "critical"
+        assert result["_attack_chain_indicator"] == "domain_admin"
+
+    @pytest.mark.asyncio
+    async def test_detect_dcsync_replication_with_dc(self, tools: QueryTemplateTools):
+        """Test DCSync detection with DC filter."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_response
+            )
+            result = await tools.detect_dcsync_replication(domain_controller="dc01.contoso.local")
+
+        assert result["_query_template"] == "dcsync_replication"
+
+
+class TestLSASecretsAccessDetection:
+    """Tests for detect_lsa_secrets_access method.
+
+    This detection catches LSA Secrets extraction (Events 4656/4663):
+    - Registry access to SECURITY\\Policy\\Secrets
+    - DefaultPassword, DPAPI, NLKM patterns
+
+    From op-20260214-141846:
+    - LSA secret 'DefaultPassword' contained robb.stark credentials
+    """
+
+    @pytest.fixture
+    def tools(self) -> QueryTemplateTools:
+        return QueryTemplateTools(loki_url="http://localhost:3100")
+
+    @pytest.mark.asyncio
+    async def test_detect_lsa_secrets_access(self, tools: QueryTemplateTools):
+        """Test LSA secrets access detection."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_response
+            )
+            result = await tools.detect_lsa_secrets_access()
+
+        assert result["_query_template"] == "lsa_secrets_access"
+        assert result["_mitre_technique"] == "T1003.004"
+        assert result["_red_team_tool"] == "secretsdump"
+        assert result["_severity"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_detect_lsa_secrets_access_with_host(self, tools: QueryTemplateTools):
+        """Test LSA secrets detection with target host filter."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_response
+            )
+            result = await tools.detect_lsa_secrets_access(target_host="winterfell.contoso.local")
+
+        assert result["_query_template"] == "lsa_secrets_access"
+
+
+class TestRemoteRegistryStartDetection:
+    """Tests for detect_remote_registry_start method.
+
+    This detection catches RemoteRegistry service start (Event 7036):
+    - Precursor to secretsdump credential dumping
+    - Service state change to running/started
+
+    From op-20260214-141846:
+    - "secretsdump started the RemoteRegistry service on winterfell"
+    """
+
+    @pytest.fixture
+    def tools(self) -> QueryTemplateTools:
+        return QueryTemplateTools(loki_url="http://localhost:3100")
+
+    @pytest.mark.asyncio
+    async def test_detect_remote_registry_start(self, tools: QueryTemplateTools):
+        """Test RemoteRegistry service start detection."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_response
+            )
+            result = await tools.detect_remote_registry_start()
+
+        assert result["_query_template"] == "remote_registry_start"
+        assert result["_mitre_technique"] == "T1569.002"
+        assert result["_red_team_tool"] == "secretsdump"
+        assert result["_severity"] == "medium"
+        assert result["_precursor_indicator"] == "credential_dumping"
+
+    @pytest.mark.asyncio
+    async def test_detect_remote_registry_start_with_host(self, tools: QueryTemplateTools):
+        """Test RemoteRegistry detection with target host filter."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_response
+            )
+            result = await tools.detect_remote_registry_start(
+                target_host="winterfell.contoso.local"
+            )
+
+        assert result["_query_template"] == "remote_registry_start"

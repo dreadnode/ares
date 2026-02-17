@@ -180,52 +180,63 @@ class InvestigationOrchestrator:
         )
 
     async def _ensure_mcp_connection(self) -> None:
-        """Ensure MCP connection is established (with 60s timeout)."""
+        """Ensure MCP connection is established using connection pool.
+
+        Uses MCPConnectionPool to reuse connections across investigations,
+        eliminating the ~60 second connection overhead per investigation.
+        """
         import asyncio
 
-        if self._mcp_client is None:
-            from ares.tools.blue.grafana import connect_grafana_mcp
+        from ares.tools.blue.grafana import MCPConnectionPool, connect_grafana_mcp
 
-            try:
-                logger.info("Connecting to Grafana MCP server...")
-                self._mcp_client = await asyncio.wait_for(  # type: ignore[func-returns-value]
-                    connect_grafana_mcp(
-                        grafana_url=self.grafana_url,
-                        grafana_api_key=self.grafana_api_key,
-                    ),
-                    timeout=60.0,
-                )
-                self._mcp_tools = self._mcp_client.tools
-                tool_count = len(self._mcp_tools) if self._mcp_tools else 0
-                logger.success(f"Grafana MCP connected ({tool_count} tools available)")
-            except asyncio.TimeoutError:
-                logger.warning("Grafana MCP connection timed out after 60s")
-                logger.warning("Continuing without MCP tools")
-                self._mcp_tools = None
-            except Exception as e:
-                logger.warning(f"Failed to connect to Grafana MCP: {e}")
-                logger.warning("Continuing without MCP tools")
-                self._mcp_tools = None
+        # Check if we already have tools from the pool
+        if self._mcp_tools is not None:
+            logger.debug("MCP tools already available, skipping connection")
+            return
 
-    async def _shutdown_mcp(self) -> None:
-        """Shutdown MCP connection if active."""
-        import asyncio
+        try:
+            logger.info("Getting Grafana MCP connection from pool...")
+            # connect_grafana_mcp now uses the connection pool internally
+            # Timeout is much shorter since pool reuses existing connections
+            timeout = 10.0 if MCPConnectionPool.is_connected() else 60.0
+            self._mcp_client = await asyncio.wait_for(  # type: ignore[func-returns-value]
+                connect_grafana_mcp(
+                    grafana_url=self.grafana_url,
+                    grafana_api_key=self.grafana_api_key,
+                ),
+                timeout=timeout,
+            )
+            self._mcp_tools = self._mcp_client.tools
+            tool_count = len(self._mcp_tools) if self._mcp_tools else 0
+            logger.success(f"Grafana MCP ready ({tool_count} tools, pooled)")
+        except asyncio.TimeoutError:
+            logger.warning(f"Grafana MCP connection timed out after {timeout}s")
+            logger.warning("Continuing without MCP tools")
+            self._mcp_tools = None
+        except Exception as e:
+            logger.warning(f"Failed to connect to Grafana MCP: {e}")
+            logger.warning("Continuing without MCP tools")
+            self._mcp_tools = None
 
-        if self._mcp_client:
-            try:
-                # Add timeout to prevent hanging on shutdown
-                await asyncio.wait_for(
-                    self._mcp_client.__aexit__(None, None, None),
-                    timeout=10.0,
-                )
-                logger.info("Grafana MCP connection closed")
-            except asyncio.TimeoutError:
-                logger.warning("MCP shutdown timed out after 10s, forcing close")
-            except Exception as e:
-                logger.warning(f"Error closing MCP connection: {e}")
-            finally:
-                self._mcp_client = None
-                self._mcp_tools = None
+    async def _shutdown_mcp(self, close_pool: bool = True) -> None:
+        """Shutdown MCP connections.
+
+        Args:
+            close_pool: If True, close the shared connection pool (use at program exit).
+                       If False, just clear local references (use between investigations).
+        """
+        from ares.tools.blue.grafana import MCPConnectionPool
+
+        # Clear local references
+        self._mcp_client = None
+        self._mcp_tools = None
+
+        # Close the pool if requested (typically at program exit)
+        if close_pool:
+            await MCPConnectionPool.close()
+            logger.info("MCP connection pool closed")
+        else:
+            logger.debug("Cleared local MCP references (pool connection preserved)")
 
     def _extract_mitre_technique(self, alert: dict, state: InvestigationState) -> None:
         """Extract MITRE technique ID from alert labels or annotations."""
@@ -411,7 +422,19 @@ class InvestigationOrchestrator:
                     }
 
                 except Exception as e:
-                    logger.error(f"Investigation failed: {e}")
+                    import traceback
+
+                    error_msg = str(e)
+                    logger.error(f"Investigation failed: {error_msg}")
+
+                    # Log full traceback for ContentText errors (framework bug)
+                    if "ContentText" in error_msg:
+                        logger.error(f"ContentText error traceback:\n{traceback.format_exc()}")
+                        logger.error(f"State alert type: {type(state.alert)}")
+                        logger.error(
+                            f"State alert keys: {state.alert.keys() if hasattr(state.alert, 'keys') else 'N/A'}"
+                        )
+
                     dn.log_metric("investigation_failed", 1)
 
                     # Persist failed investigation

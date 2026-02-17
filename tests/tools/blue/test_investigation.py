@@ -772,3 +772,143 @@ class TestListDetectionRecipes:
         assert len(result) == 2
         assert any(r["recipe_name"] == "password_spray" for r in result)
         assert any(r["recipe_name"] == "kerberoasting" for r in result)
+
+
+class TestGetQueuedQueries:
+    """Tests for InvestigationTools.get_queued_queries method."""
+
+    def test_get_queued_queries_no_state(self):
+        """Test get_queued_queries with no state."""
+        tools = InvestigationTools()
+        result = tools.get_queued_queries()
+        assert "error" in result
+
+    def test_get_queued_queries_empty_queues(self, investigation_state):
+        """Test get_queued_queries with empty queues."""
+        tools = InvestigationTools()
+        tools.set_state(investigation_state)
+
+        result = tools.get_queued_queries()
+
+        assert result["pivot_queries"] == []
+        assert result["chain_queries"] == []
+        assert result["total_queued"] == 0
+        assert "recommendation" in result
+
+    def test_get_queued_queries_with_pivot_queries(self, investigation_state):
+        """Test get_queued_queries with pivot queries."""
+        tools = InvestigationTools()
+        tools.set_state(investigation_state)
+
+        # Add pivot queries
+        investigation_state.queued_pivot_queries = [
+            {"type": "pivot", "host": "dc01.contoso.local", "reason": "Lateral movement"},
+            {"type": "pivot", "host": "ws01.contoso.local", "reason": "Lateral movement"},
+        ]
+
+        result = tools.get_queued_queries()
+
+        assert len(result["pivot_queries"]) == 2
+        assert result["total_queued"] == 2
+
+    def test_get_queued_queries_with_chain_queries(self, investigation_state):
+        """Test get_queued_queries with chain queries."""
+        tools = InvestigationTools()
+        tools.set_state(investigation_state)
+
+        # Add chain queries
+        investigation_state.queued_chain_queries = [
+            "detect_golden_ticket",
+            "detect_lateral_movement",
+        ]
+
+        result = tools.get_queued_queries()
+
+        assert len(result["chain_queries"]) == 2
+        assert result["total_queued"] == 2
+
+    def test_get_queued_queries_limits_to_top_3(self, investigation_state):
+        """Test get_queued_queries limits results to top 3."""
+        tools = InvestigationTools()
+        tools.set_state(investigation_state)
+
+        # Add more than 3 pivot queries
+        investigation_state.queued_pivot_queries = [
+            {"type": "pivot", "host": f"host{i}.contoso.local"} for i in range(5)
+        ]
+        investigation_state.queued_chain_queries = [f"detect_method_{i}" for i in range(5)]
+
+        result = tools.get_queued_queries()
+
+        assert len(result["pivot_queries"]) == 3
+        assert len(result["chain_queries"]) == 3
+        # But total reflects all queued
+        assert result["total_queued"] == 10
+
+
+class TestPopQueuedPivot:
+    """Tests for InvestigationTools.pop_queued_pivot method."""
+
+    def test_pop_queued_pivot_no_state(self):
+        """Test pop_queued_pivot with no state."""
+        tools = InvestigationTools()
+        result = tools.pop_queued_pivot()
+        assert result is None
+
+    def test_pop_queued_pivot_empty_queue(self, investigation_state):
+        """Test pop_queued_pivot with empty queue."""
+        tools = InvestigationTools()
+        tools.set_state(investigation_state)
+
+        result = tools.pop_queued_pivot()
+        assert result is None
+
+    def test_pop_queued_pivot_returns_first(self, investigation_state):
+        """Test pop_queued_pivot returns and removes first item."""
+        tools = InvestigationTools()
+        tools.set_state(investigation_state)
+
+        investigation_state.queued_pivot_queries = [
+            {"type": "pivot", "host": "first.contoso.local"},
+            {"type": "pivot", "host": "second.contoso.local"},
+        ]
+
+        result = tools.pop_queued_pivot()
+
+        assert result["host"] == "first.contoso.local"
+        assert len(investigation_state.queued_pivot_queries) == 1
+        assert investigation_state.queued_pivot_queries[0]["host"] == "second.contoso.local"
+
+
+class TestPopQueuedChain:
+    """Tests for InvestigationTools.pop_queued_chain method."""
+
+    def test_pop_queued_chain_no_state(self):
+        """Test pop_queued_chain with no state."""
+        tools = InvestigationTools()
+        result = tools.pop_queued_chain()
+        assert result is None
+
+    def test_pop_queued_chain_empty_queue(self, investigation_state):
+        """Test pop_queued_chain with empty queue."""
+        tools = InvestigationTools()
+        tools.set_state(investigation_state)
+
+        result = tools.pop_queued_chain()
+        assert result is None
+
+    def test_pop_queued_chain_returns_first(self, investigation_state):
+        """Test pop_queued_chain returns and removes first item."""
+        tools = InvestigationTools()
+        tools.set_state(investigation_state)
+
+        investigation_state.queued_chain_queries = [
+            "detect_golden_ticket",
+            "detect_lateral_movement",
+        ]
+
+        result = tools.pop_queued_chain()
+
+        assert result == "detect_golden_ticket"
+        assert len(investigation_state.queued_chain_queries) == 1
+        assert investigation_state.queued_chain_queries[0] == "detect_lateral_movement"

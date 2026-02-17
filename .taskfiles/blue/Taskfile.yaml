@@ -21,7 +21,7 @@ tasks:
       DREADNODE_API_KEY:
         sh: op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo ""
       GRAFANA_SERVICE_ACCOUNT_TOKEN:
-        sh: op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo ""
+        sh: op item get "Ares Grafana MCP" --fields api-token --reveal 2>/dev/null || echo ""
       OPENAI_API_KEY:
         sh: op item get "Openai" --fields dreadnode-personal-api-key --reveal 2>/dev/null || echo ""
       MODEL_ARG:
@@ -114,7 +114,7 @@ tasks:
       DREADNODE_API_KEY:
         sh: op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo ""
       GRAFANA_SERVICE_ACCOUNT_TOKEN:
-        sh: op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo ""
+        sh: op item get "Ares Grafana MCP" --fields api-token --reveal 2>/dev/null || echo ""
       OPENAI_API_KEY:
         sh: op item get "Openai" --fields dreadnode-personal-api-key --reveal 2>/dev/null || echo ""
       MODEL_ARG:
