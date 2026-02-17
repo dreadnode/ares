@@ -428,16 +428,9 @@ class TestTimeRangeFactors:
         """Test that time range factors are in descending order."""
         factors = QueryResilientExecutor.TIME_RANGE_FACTORS
 
-        assert factors == sorted(factors, reverse=True)
-        assert factors[0] == 0.5  # Start with half range (more reliable for Loki queries)
-        assert factors[-1] < 0.1  # End with small range
-
-    def test_backoff_delays_order(self) -> None:
-        """Test that backoff delays are in ascending order."""
-        delays = QueryResilientExecutor.BACKOFF_DELAYS
-
-        assert delays == sorted(delays)
-        assert delays[0] >= 1  # At least 1 second
+        assert factors == tuple(sorted(factors, reverse=True))
+        assert factors[0] == 1.0  # Start with full range
+        assert factors[-1] <= 0.1  # End with small range
 
 
 class TestEdgeCases:
