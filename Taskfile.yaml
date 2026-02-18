@@ -134,16 +134,6 @@ tasks:
     cmds:
       - grep '^{{.KEY}}=' .env | sed 's/^{{.KEY}}=//;s/^"//;s/"$//'
 
-  deactivate:
-    internal: true
-    silent: true
-    cmds:
-      - |
-        if [ -n "${VIRTUAL_ENV:-}" ]; then
-          echo "Deactivated venv - try again."
-          deactivate
-        fi
-
   setup-git-hooks:
     desc: Set up Git hooks
     silent: true
@@ -399,24 +389,6 @@ tasks:
           rm -rf {{.REPORT_DIR}}/*.md
           echo "✅ Reports cleaned"
         fi
-
-  # ===========================================================================
-  # Ares Logs
-  # ===========================================================================
-
-  ares:logs:
-    desc: "Tail remote logs (usage: task ares:logs [ROLE=recon|orchestrator] [LINES=100] [FOLLOW=true])"
-    silent: true
-    vars:
-      ROLE: '{{.ROLE | default ""}}'
-      FOLLOW: '{{.FOLLOW | default "true"}}'
-      LINES: '{{.LINES | default "100"}}'
-    cmds:
-      - task: remote:logs
-        vars:
-          ROLE: '{{.ROLE}}'
-          FOLLOW: '{{.FOLLOW}}'
-          LINES: '{{.LINES}}'
 
   ares:version:
     desc: Show Ares version information
