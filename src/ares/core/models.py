@@ -2088,9 +2088,12 @@ class SharedRedTeamState:
                     )
                     self.add_credential(cracked_cred, source_agent)
                     # Signal credential access if dispatcher available
-                    # Only call from main thread - asyncio.Event is not thread-safe
-                    if self._dispatcher and threading.current_thread() is threading.main_thread():
-                        self._dispatcher.signal_credential_access()
+                    if self._dispatcher:
+                        if threading.current_thread() is threading.main_thread():
+                            self._dispatcher.signal_credential_access()
+                        elif hasattr(self._dispatcher, "_credential_access_requested"):
+                            # Thread-safe signal - maintenance loop will transfer to asyncio.Event
+                            self._dispatcher._credential_access_requested.set()
                     # Request checkpoint from dispatcher's maintenance loop
                     # _checkpoint_requested is a threading.Event, safe from any thread
                     if self._dispatcher and hasattr(self._dispatcher, "_checkpoint_requested"):
