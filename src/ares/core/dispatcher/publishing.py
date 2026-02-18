@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 class PublishingMixin:
     """Discovery publishing for credentials, hosts, shares, and vulnerabilities."""
 
-    async def publish_credential(  # noqa: PLR0912
+    async def publish_credential(
         self: RedTeamDispatcher,
         credential: Credential,
         source_agent: str,
@@ -356,7 +356,7 @@ class PublishingMixin:
         # This discovers sa/sysadmin impersonation rights early, triggering priority boost
         await self._dispatch_mssql_enum(host, sql_creds, source_agent)
 
-    async def _dispatch_mssql_enum(  # noqa: PLR0912
+    async def _dispatch_mssql_enum(
         self: RedTeamDispatcher,
         host: Host,
         sql_creds: list[dict[str, str]],
@@ -794,8 +794,13 @@ class PublishingMixin:
                     f"(vuln_id: {vuln_id})"
                 )
                 try:
-                    await asyncio.wait_for(
-                        self.request_exploit(
+                    # Skip asyncio.wait_for when in threaded consumer to avoid
+                    # "Future attached to different loop" errors. The threaded
+                    # consumer has its own event loop and the timeout wrapper
+                    # can cause cross-loop Future issues.
+                    is_threaded = threading.current_thread() is not threading.main_thread()
+                    if is_threaded:
+                        await self.request_exploit(
                             vuln_type="constrained_delegation",
                             vuln_id=vuln_id,
                             target=credential.username,
@@ -811,9 +816,28 @@ class PublishingMixin:
                                 "action": "s4u_attack",
                             },
                             task_queue=task_queue,
-                        ),
-                        timeout=30.0,
-                    )
+                        )
+                    else:
+                        await asyncio.wait_for(
+                            self.request_exploit(
+                                vuln_type="constrained_delegation",
+                                vuln_id=vuln_id,
+                                target=credential.username,
+                                source_agent="auto_delegation",
+                                params={
+                                    "account": credential.username,
+                                    "account_name": credential.username,
+                                    "password": credential.password,
+                                    "domain": domain,
+                                    "target_spn": target_spn,
+                                    "dc_ip": dc_ip,
+                                    "impersonate": "Administrator",
+                                    "action": "s4u_attack",
+                                },
+                                task_queue=task_queue,
+                            ),
+                            timeout=30.0,
+                        )
                 except asyncio.TimeoutError:
                     logger.error(
                         f"Timeout auto-exploiting constrained delegation: {credential.username} -> {target_spn}"

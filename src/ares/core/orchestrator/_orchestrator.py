@@ -27,6 +27,7 @@ from ares.core.config import (
     get_rate_limit_backoff_delays,
     get_rate_limit_max_retries,
     get_redis_url,
+    get_stop_on_domain_admin,
 )
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.factories.red_agents import (
@@ -204,6 +205,198 @@ async def _ensure_required_workers(
         )
 
 
+def _parse_nmap_report_header(host_line: str) -> tuple[str, str]:
+    """Parse IP and hostname from nmap report header line."""
+    ip_match = re.match(r"(.+) \((\d+\.\d+\.\d+\.\d+)\)$", host_line)
+    if ip_match:
+        return ip_match.group(2), ip_match.group(1).strip()
+    ip_only = re.match(r"^(\d+\.\d+\.\d+\.\d+)$", host_line)
+    if ip_only:
+        return ip_only.group(1), ""
+    return "", host_line
+
+
+def _parse_nmap_service_line(line: str, current: dict) -> None:
+    """Parse service/port line and update current host dict."""
+    svc_match = re.match(r"^(\d+)/(tcp|udp)\s+open\s+([^\s]+)", line)
+    if svc_match:
+        current["services"].append(
+            f"{svc_match.group(1)}/{svc_match.group(2)} {svc_match.group(3)}"
+        )
+    domain_match = re.search(r"\(Domain:\s*([^,)]+)", line)
+    if domain_match and not current["domain"]:
+        current["domain"] = domain_match.group(1).strip()
+    if "Service Info:" in line:
+        host_match = re.search(r"Host:\s*([^;]+)", line)
+        if host_match:
+            current["hostname"] = host_match.group(1).strip()
+        os_match = re.search(r"OS:\s*([^;]+)", line)
+        if os_match and not current["os"]:
+            current["os"] = os_match.group(1).strip()
+
+
+def _build_host_from_nmap(current: dict) -> Host | None:
+    """Build Host object from parsed nmap data."""
+    if not current["ip"]:
+        return None
+    hostname = current["hostname"]
+    if hostname and current["domain"] and "." not in hostname:
+        hostname = f"{hostname.lower()}.{current['domain'].lower()}"
+    services_lower = [s.lower() for s in current["services"]]
+    is_dc = any("ldap" in s for s in services_lower) and any(
+        "kerberos" in s for s in services_lower
+    )
+    host = Host(
+        ip=current["ip"],
+        hostname=hostname,
+        os=current["os"] or "Unknown",
+        roles=["AD DC"] if is_dc else [],
+        services=current["services"],
+    )
+    if is_dc:
+        host.is_dc = True
+    return host
+
+
+def _parse_nmap_hosts(output: str) -> list[Host]:
+    """Parse nmap output into Host objects."""
+    hosts: list[Host] = []
+    current = {"ip": "", "hostname": "", "os": "", "domain": "", "services": []}
+
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        report_match = re.match(r"^Nmap scan report for (.+)$", line)
+        if report_match:
+            host = _build_host_from_nmap(current)
+            if host:
+                hosts.append(host)
+            current["ip"], current["hostname"] = _parse_nmap_report_header(report_match.group(1))
+            current["os"], current["domain"], current["services"] = "", "", []
+        elif current["ip"]:
+            _parse_nmap_service_line(line, current)
+
+    host = _build_host_from_nmap(current)
+    if host:
+        hosts.append(host)
+    return hosts
+
+
+async def _run_nmap_on_worker(targets: list[str], namespace: str) -> tuple[str, list[Host]]:
+    """Run nmap on a recon worker pod via kubectl exec.
+
+    Two-phase scan:
+    1. Fast port discovery (top 100 ports)
+    2. Service version detection on discovered ports
+    """
+    from ares.core.k8s_executor import KubernetesPodExecutor
+
+    if not targets:
+        return "", []
+
+    executor = KubernetesPodExecutor(namespace=namespace, in_cluster=True)
+
+    logger.info(f"[DIRECT NMAP] Phase 1: Fast port discovery on {len(targets)} targets")
+
+    # Phase 1: Fast port scan
+    port_cmd = ["nmap", "-Pn", "-sT", "-T4", "--open", "--top-ports", "100"] + targets
+    try:
+        stdout, stderr, returncode = await executor.execute(
+            role="recon", command=port_cmd, timeout_seconds=120
+        )
+        if returncode != 0:
+            logger.warning(f"[DIRECT NMAP] Port scan failed: {stderr[:200]}")
+            return stderr, []
+        port_output = stdout
+    except Exception as e:
+        logger.warning(f"[DIRECT NMAP] Port scan error: {e}")
+        return str(e), []
+
+    # Parse open ports
+    open_ports = set()
+    for match in re.finditer(r"(\d+)/tcp\s+open", port_output):
+        open_ports.add(match.group(1))
+
+    if not open_ports:
+        logger.info("[DIRECT NMAP] No open ports found")
+        hosts = _parse_nmap_hosts(port_output)
+        return port_output, hosts
+
+    ports_str = ",".join(sorted(open_ports, key=int))
+    logger.info(f"[DIRECT NMAP] Phase 2: Service detection on {len(open_ports)} ports: {ports_str}")
+
+    # Phase 2: Service version detection
+    svc_cmd = ["nmap", "-Pn", "-sT", "-T4", "--open", "-sV", "-p", ports_str] + targets
+    try:
+        stdout, stderr, returncode = await executor.execute(
+            role="recon", command=svc_cmd, timeout_seconds=300
+        )
+        if returncode != 0:
+            logger.warning(f"[DIRECT NMAP] Service scan had issues: {stderr[:200]}")
+            # Use port scan results
+            hosts = _parse_nmap_hosts(port_output)
+            return port_output, hosts
+        svc_output = stdout
+    except Exception as e:
+        logger.warning(f"[DIRECT NMAP] Service scan error: {e}, using port scan results")
+        hosts = _parse_nmap_hosts(port_output)
+        return port_output, hosts
+
+    logger.info(f"[DIRECT NMAP] Scan completed for {len(targets)} targets")
+    hosts = _parse_nmap_hosts(svc_output)
+    return svc_output, hosts
+
+
+async def _run_direct_nmap(
+    state: SharedRedTeamState,
+    target_ips: list[str],
+    namespace: str,
+) -> None:
+    """Run nmap directly (not via LLM task queue) and add hosts to state.
+
+    This runs BEFORE the LLM orchestrator starts, ensuring host discovery
+    doesn't get stuck behind slow LLM-guided tasks in the worker queue.
+    Uses kubectl exec to run nmap on a recon worker pod.
+    """
+    if not target_ips:
+        return
+
+    # Filter already-scanned targets
+    unscanned = [ip for ip in target_ips if ip not in state.scanned_targets]
+    if not unscanned:
+        logger.info(f"[DIRECT NMAP] All {len(target_ips)} targets already scanned")
+        return
+
+    logger.info(f"[DIRECT NMAP] Running nmap via kubectl exec on {len(unscanned)} targets")
+
+    try:
+        _output, hosts = await _run_nmap_on_worker(unscanned, namespace)
+    except Exception as e:
+        logger.warning(f"[DIRECT NMAP] Failed to run nmap: {e}")
+        return
+
+    # Add hosts to state
+    for host in hosts:
+        state.add_host(host)
+
+    # Mark targets as scanned
+    for ip in unscanned:
+        state.scanned_targets.add(ip)
+
+    # Persist to backend if available
+    if state._backend:
+        try:
+            await state._backend.set_meta("nmap_completed", "true")
+        except Exception as e:
+            logger.warning(f"[DIRECT NMAP] Failed to persist nmap completion: {e}")
+
+    dc_count = sum(1 for h in hosts if h.is_dc)
+    logger.success(
+        f"[DIRECT NMAP] Discovered {len(hosts)} hosts ({dc_count} DCs) from {len(unscanned)} targets"
+    )
+
+
 async def _prime_operation(
     recovery: OperationRecoveryManager,
     dispatcher: RedTeamDispatcher,
@@ -242,6 +435,12 @@ async def _prime_operation(
         logger.info("Operation state initialized in Redis - workers can discover operation")
     else:
         logger.warning("No state backend configured - operation may not be discoverable")
+
+    # Run nmap directly BEFORE the orchestrator LLM starts.
+    # This ensures host discovery doesn't get stuck behind slow LLM-guided tasks.
+    if target_ips:
+        namespace = get_namespace()
+        await _run_direct_nmap(state, target_ips, namespace)
 
 
 def _is_rate_limit_error(error: Exception | str) -> bool:
@@ -371,7 +570,7 @@ def _create_completion_tools(
     return complete_operation, announce_domain_admin
 
 
-async def run_multi_agent_operation(  # noqa: PLR0912
+async def run_multi_agent_operation(
     operation_id: str,
     target_domain: str,
     target_ips: list[str],
@@ -503,6 +702,12 @@ async def run_multi_agent_operation(  # noqa: PLR0912
     try:
         # Do initial checkpoint so workers can discover the operation.
         await _prime_operation(recovery, dispatcher, target_ips, target_domain)
+
+        # Check if DA was already achieved (e.g., recovery after restart) and should stop
+        if dispatcher.shared_state.has_domain_admin and get_stop_on_domain_admin():
+            logger.info("DA already achieved and stop_on_domain_admin=True; marking complete")
+            dispatcher.shared_state.completed = True
+            await dispatcher._checkpoint()
 
         # Create the orchestrator agent with tools
         orchestrator_agent = await _create_orchestrator_agent(
@@ -730,6 +935,9 @@ async def run_multi_agent_operation(  # noqa: PLR0912
                 report_dir=report_dir,
                 exploitation_status=exploitation_status,
             )
+            # Persist report to Redis for CLI access
+            if report_markdown and final_state._backend:
+                await final_state._backend.store_report(report_markdown)
         except Exception as e:
             logger.warning(f"Failed to generate report for {operation_id}: {e}")
 
@@ -981,7 +1189,7 @@ async def _monitor_agent_health(
 
             await asyncio.sleep(check_interval)
 
-        except asyncio.CancelledError:  # noqa: PERF203
+        except asyncio.CancelledError:
             break
         except Exception as e:
             logger.error(f"Health monitor error: {e}", exc_info=True)
@@ -1132,7 +1340,7 @@ async def _auto_mssql_detection(
             await asyncio.sleep(check_interval)
 
 
-async def _auto_adcs_enumeration(  # noqa: PLR0912
+async def _auto_adcs_enumeration(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 45.0,
     max_retries: int = 2,
@@ -1388,7 +1596,7 @@ async def _auto_share_spider(
             await asyncio.sleep(check_interval)
 
 
-async def _auto_bloodhound(  # noqa: PLR0912
+async def _auto_bloodhound(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 30.0,
     max_retries: int = 3,
@@ -1606,7 +1814,7 @@ def _is_likely_privileged_credential(username: str, source: str | None) -> bool:
     return bool(source and "secretsdump" in source.lower())
 
 
-async def _auto_credential_access(  # noqa: PLR0912
+async def _auto_credential_access(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 60.0,
     min_hosts: int = 1,
@@ -2119,7 +2327,7 @@ async def _auto_crack_dispatch(
             await asyncio.sleep(check_interval)
 
 
-async def _auto_coercion(  # noqa: PLR0912
+async def _auto_coercion(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 60.0,
 ) -> None:
@@ -2298,7 +2506,7 @@ async def _auto_coercion(  # noqa: PLR0912
             await asyncio.sleep(check_interval)
 
 
-async def _auto_delegation_enumeration(  # noqa: PLR0912
+async def _auto_delegation_enumeration(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 15.0,
 ) -> None:
@@ -2428,7 +2636,7 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
             await asyncio.sleep(check_interval)
 
 
-async def _auto_local_admin_secretsdump(  # noqa: PLR0912
+async def _auto_local_admin_secretsdump(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 45.0,
 ) -> None:
@@ -2648,7 +2856,7 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
             await asyncio.sleep(check_interval)
 
 
-async def _auto_golden_ticket(  # noqa: PLR0912
+async def _auto_golden_ticket(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 30.0,
 ) -> None:
@@ -2867,7 +3075,7 @@ async def _auto_golden_ticket(  # noqa: PLR0912
             await asyncio.sleep(check_interval)
 
 
-async def _auto_acl_chain_follow(  # noqa: PLR0912
+async def _auto_acl_chain_follow(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 30.0,
 ) -> None:

@@ -445,7 +445,7 @@ class RedisWorkerAgent:
                 # Reset retry delay on successful poll
                 retry_delay = 1.0
 
-            except asyncio.CancelledError:  # noqa: PERF203
+            except asyncio.CancelledError:
                 break
             except (AuthenticationError, ConfigurationError, CriticalWorkerError) as e:
                 # Fatal errors that should stop the worker immediately
@@ -492,7 +492,7 @@ class RedisWorkerAgent:
                     await asyncio.sleep(5)
                     retry_delay = 1.0  # Reset backoff for non-connection errors
 
-    async def _process_task(self, task: TaskMessage) -> None:  # noqa: PLR0912
+    async def _process_task(self, task: TaskMessage) -> None:
         """Process a task from the Redis queue."""
         self._current_task = task.task_id
         started_at = datetime.now(timezone.utc).isoformat()
@@ -972,6 +972,13 @@ class RedisWorkerAgent:
         ):
             setattr(current, attr, getattr(fresh, attr))
 
+        # Populate weakness dedup keys from the merged weakness list
+        # This is critical to prevent duplicate weakness recording across workers
+        current._weakness_dedup_keys.clear()
+        for weakness in current.all_weaknesses:
+            dedup_key = current._extract_weakness_dedup_key(weakness)
+            current._weakness_dedup_keys.add(dedup_key)
+
         # Re-add local discoveries that may not be in the fresh state yet.
         # This preserves discoveries made during the current task before they're
         # serialized and sent back to the orchestrator.
@@ -986,8 +993,7 @@ class RedisWorkerAgent:
         for user in local_users:
             current.add_user(user.username, user.domain, user.source)
         for weakness in local_weaknesses:
-            if weakness not in current.all_weaknesses:
-                current.all_weaknesses.append(weakness)
+            current.add_weakness(weakness)  # Uses normalized dedup
 
         # Merge dynamic tracking attributes (set via object.__setattr__)
         # These track queried hosts and tested credentials to avoid duplicates
@@ -1589,7 +1595,7 @@ class RedisWorkerAgent:
             loop.close()
             logger.debug(f"Heartbeat thread stopped for {self.agent_name}")
 
-    def _threaded_state_subscriber_loop(self) -> None:  # noqa: PLR0912
+    def _threaded_state_subscriber_loop(self) -> None:
         """Subscribe to Redis pub/sub for real-time state updates from orchestrator.
 
         When the orchestrator checkpoints state changes (new credentials, hosts, etc.),
@@ -1650,7 +1656,7 @@ class RedisWorkerAgent:
                     # Reset retry delay on success
                     retry_delay = 1.0
 
-                except Exception as e:  # noqa: PERF203
+                except Exception as e:
                     error_str = str(e).lower()
                     is_connection_error = any(
                         keyword in error_str
@@ -1852,7 +1858,7 @@ class WorkerAgent:
                 # Small sleep to prevent busy-waiting
                 await asyncio.sleep(0.5)
 
-            except asyncio.CancelledError:  # noqa: PERF203
+            except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Worker loop error: {e}")
@@ -2072,7 +2078,7 @@ class WorkerAgent:
             logger.debug(f"Heartbeat thread stopped for {self.agent_name}")
 
 
-async def run_worker(  # noqa: PLR0912
+async def run_worker(
     role: AgentRole,
     operation_id: str | None = None,
     redis_url: str | None = None,

@@ -1051,6 +1051,129 @@ tasks:
         echo "All pods in {{.K8S_NAMESPACE}}:"
         kubectl get pods -n {{.K8S_NAMESPACE}} -o wide 2>/dev/null || echo "  Unable to list pods"
 
+  # ===========================================================================
+  # Replay Recording Tasks
+  # ===========================================================================
+
+  multi:replay:copy:
+    desc: "Copy replay recordings from agent pods (usage: task red:multi:replay:copy [ROLE=recon] [OUTPUT_DIR=./recordings])"
+    silent: true
+    vars:
+      ROLE: '{{.ROLE | default ""}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./recordings"}}'
+      AGENTS: "recon credential-access lateral-movement coercion acl cracker privesc"
+    cmds:
+      - |
+        mkdir -p "{{.OUTPUT_DIR}}"
+
+        if [ -n "{{.ROLE}}" ]; then
+          # Copy from specific agent
+          AGENT_NAME="{{.ROLE}}"
+          # Normalize role name to pod name format (e.g., credential_access -> credential-access)
+          POD_ROLE=$(echo "$AGENT_NAME" | tr '_' '-')
+          POD="ares-${POD_ROLE}-agent-0"
+
+          echo "Copying recording from $POD..."
+          if kubectl cp "{{.K8S_NAMESPACE}}/${POD}:/ares/replay/recording.jsonl" "{{.OUTPUT_DIR}}/${POD_ROLE}-recording.jsonl" 2>/dev/null; then
+            FILE_SIZE=$(ls -lh "{{.OUTPUT_DIR}}/${POD_ROLE}-recording.jsonl" 2>/dev/null | awk '{print $5}')
+            echo "  ✓ Copied ${POD_ROLE}-recording.jsonl ($FILE_SIZE)"
+          else
+            echo "  ✗ No recording found for ${POD_ROLE}"
+          fi
+        else
+          # Copy from all agents
+          echo "Copying recordings from all agents to {{.OUTPUT_DIR}}/"
+          echo ""
+
+          for agent in {{.AGENTS}}; do
+            POD="ares-${agent}-agent-0"
+            if kubectl cp "{{.K8S_NAMESPACE}}/${POD}:/ares/replay/recording.jsonl" "{{.OUTPUT_DIR}}/${agent}-recording.jsonl" 2>/dev/null; then
+              FILE_SIZE=$(ls -lh "{{.OUTPUT_DIR}}/${agent}-recording.jsonl" 2>/dev/null | awk '{print $5}')
+              echo "  ✓ Copied ${agent}-recording.jsonl ($FILE_SIZE)"
+            else
+              echo "  ✗ No recording for ${agent}"
+            fi
+          done
+        fi
+
+        echo ""
+        echo "Recordings saved to {{.OUTPUT_DIR}}/"
+
+  multi:replay:cat:
+    desc: "Stream replay recording contents from an agent pod (usage: task red:multi:replay:cat ROLE=recon)"
+    silent: true
+    vars:
+      ROLE: '{{.ROLE | default "recon"}}'
+    cmds:
+      - |
+        POD_ROLE=$(echo "{{.ROLE}}" | tr '_' '-')
+        POD="ares-${POD_ROLE}-agent-0"
+
+        echo "# Streaming recording from $POD..."
+        echo "# ========================================"
+        kubectl exec -n {{.K8S_NAMESPACE}} "$POD" -- cat /ares/replay/recording.jsonl 2>/dev/null || \
+          echo "No recording found for ${POD_ROLE}"
+
+  multi:replay:list:
+    desc: "List replay recordings available on agent pods"
+    silent: true
+    vars:
+      AGENTS: "recon credential-access lateral-movement coercion acl cracker privesc"
+    cmds:
+      - |
+        echo "Replay recordings in {{.K8S_NAMESPACE}}:"
+        echo "========================================"
+
+        for agent in {{.AGENTS}}; do
+          POD="ares-${agent}-agent-0"
+          INFO=$(kubectl exec -n {{.K8S_NAMESPACE}} "$POD" -- ls -lh /ares/replay/recording.jsonl 2>/dev/null || true)
+          if [ -n "$INFO" ]; then
+            SIZE=$(echo "$INFO" | awk '{print $5}')
+            DATE=$(echo "$INFO" | awk '{print $6, $7, $8}')
+            echo "  ✓ ${agent}: $SIZE ($DATE)"
+          else
+            echo "  - ${agent}: (no recording)"
+          fi
+        done
+
+  multi:replay:clear:
+    desc: "Clear replay recordings from agent pods (usage: task red:multi:replay:clear [ROLE=recon] [CONFIRM=true])"
+    silent: true
+    vars:
+      ROLE: '{{.ROLE | default ""}}'
+      CONFIRM: '{{.CONFIRM | default "false"}}'
+      AGENTS: "recon credential-access lateral-movement coercion acl cracker privesc"
+    preconditions:
+      - sh: test "{{.CONFIRM}}" = "true"
+        msg: "This will delete replay recordings. Re-run with CONFIRM=true to proceed."
+    cmds:
+      - |
+        if [ -n "{{.ROLE}}" ]; then
+          POD_ROLE=$(echo "{{.ROLE}}" | tr '_' '-')
+          POD="ares-${POD_ROLE}-agent-0"
+
+          echo "Clearing recording from $POD..."
+          if kubectl exec -n {{.K8S_NAMESPACE}} "$POD" -- rm -f /ares/replay/recording.jsonl 2>/dev/null; then
+            echo "  ✓ Cleared ${POD_ROLE}"
+          else
+            echo "  ✗ Failed to clear ${POD_ROLE}"
+          fi
+        else
+          echo "Clearing recordings from all agents..."
+
+          for agent in {{.AGENTS}}; do
+            POD="ares-${agent}-agent-0"
+            if kubectl exec -n {{.K8S_NAMESPACE}} "$POD" -- rm -f /ares/replay/recording.jsonl 2>/dev/null; then
+              echo "  ✓ Cleared ${agent}"
+            else
+              echo "  - ${agent}: (no recording or failed)"
+            fi
+          done
+        fi
+
+        echo ""
+        echo "Done."
+
   redeploy:
     desc: "Restart all red team deployments in the cluster"
     silent: true

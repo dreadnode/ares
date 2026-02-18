@@ -131,7 +131,7 @@ class MonitoringMixin:
 
                                     # Update task activity when worker reports working on it
                                     self._update_task_activity(current_task, now)
-                        except Exception as e:  # noqa: PERF203
+                        except Exception as e:
                             # Heartbeat failures could indicate auth issues - log at ERROR level
                             logger.error(
                                 f"Failed to get heartbeat for {agent_name}: {e}. "
@@ -152,7 +152,7 @@ class MonitoringMixin:
                 consecutive_failures = 0
                 await asyncio.sleep(15)
 
-            except asyncio.CancelledError:  # noqa: PERF203
+            except asyncio.CancelledError:
                 logger.info("Heartbeat monitor cancelled")
                 break
 
@@ -196,7 +196,7 @@ class MonitoringMixin:
 
                 await asyncio.sleep(1)
 
-            except asyncio.CancelledError:  # noqa: PERF203
+            except asyncio.CancelledError:
                 logger.info("Result consumer cancelled")
                 break
 
@@ -471,7 +471,7 @@ class MonitoringMixin:
                 heartbeat_data = await self._task_queue.get_heartbeat(agent_name)
                 if heartbeat_data:
                     worker_current_tasks[agent_name] = heartbeat_data.get("current_task")
-            except Exception:  # noqa: PERF203
+            except Exception:
                 pass
 
         # Check each pending task
@@ -561,7 +561,7 @@ class MonitoringMixin:
                         error=result.error,
                         source_agent=result.agent_name or result.worker_pod or "unknown",
                     )
-            except Exception as e:  # noqa: PERF203
+            except Exception as e:
                 logger.warning(f"Error checking result for task {task_id}: {e}")
 
         # Poll for real-time discoveries from workers
@@ -609,12 +609,15 @@ class MonitoringMixin:
             logger.warning(f"Error polling discoveries: {e}")
 
     async def _process_realtime_delegation_discovery(
-        self: RedTeamDispatcher, data: dict, source_agent: str
+        self: RedTeamDispatcher, data: dict, source_agent: str, task_queue: Any = None
     ) -> None:
         """Process a real-time delegation discovery and dispatch exploit if applicable.
 
-        NOTE: When called from threaded consumer (non-main thread), only updates
-        in-memory state. Redis operations and dispatching happen on main loop.
+        Args:
+            data: Delegation discovery data dict
+            source_agent: Agent that discovered the delegation
+            task_queue: Optional task queue for thread-safe Redis operations.
+                        When called from threaded consumer, pass the thread's queue.
         """
         account = data.get("account", "")
         delegation_type = data.get("delegation_type", "").lower()
@@ -633,15 +636,11 @@ class MonitoringMixin:
             f"📡 Processing real-time {vuln_type} discovery: {account} -> {target_spn or 'any'}"
         )
 
-        # Skip Redis-heavy operations when in non-main thread
-        # The main loop will handle queuing and dispatching via normal processing
-        if threading.current_thread() is not threading.main_thread():
-            logger.debug(f"Skipping delegation dispatch from threaded consumer: {account}")
-            return
-
         # Queue vulnerability and dispatch exploit using existing logic
         # This reuses _auto_queue_delegation_vulnerabilities which handles deduplication
-        queued = await self._auto_queue_delegation_vulnerabilities([data], source_agent)
+        queued = await self._auto_queue_delegation_vulnerabilities(
+            [data], source_agent, task_queue=task_queue
+        )
         if queued > 0:
             logger.warning(
                 f"🚀 Real-time delegation exploit dispatched for {account} "
@@ -700,7 +699,7 @@ class MonitoringMixin:
         logger.info(f"📡 Real-time hash: {domain}\\{username} ({hash_type})")
 
     async def _process_realtime_vulnerability_discovery(
-        self: RedTeamDispatcher, data: dict, source_agent: str
+        self: RedTeamDispatcher, data: dict, source_agent: str, task_queue: Any = None
     ) -> None:
         """Process a real-time vulnerability discovery and queue for exploitation."""
         from ares.core.models import VulnerabilityInfo
@@ -757,13 +756,12 @@ class MonitoringMixin:
             "mssql_impersonation",
         }
 
-        # Skip dispatch when in non-main thread - main loop handles it
+        # Auto-dispatch exploit for high-value vulnerabilities
         if vuln_type.lower() in high_value_vulns:
-            if threading.current_thread() is threading.main_thread():
-                await self.request_exploit(vuln_type, vuln_id, target, source_agent, details)
-                logger.warning(f"🚀 Auto-dispatched exploit for {vuln_type} on {target}")
-            else:
-                logger.debug(f"Skipping exploit dispatch from threaded consumer: {vuln_type}")
+            await self.request_exploit(
+                vuln_type, vuln_id, target, source_agent, details, task_queue=task_queue
+            )
+            logger.warning(f"🚀 Auto-dispatched exploit for {vuln_type} on {target}")
 
     async def _maintenance_loop(self: RedTeamDispatcher) -> None:
         """
@@ -825,7 +823,7 @@ class MonitoringMixin:
                 # Run maintenance every 2 seconds to respond quickly to checkpoint requests
                 await asyncio.sleep(2)
 
-            except asyncio.CancelledError:  # noqa: PERF203
+            except asyncio.CancelledError:
                 logger.info("Maintenance loop cancelled")
                 break
 
@@ -877,7 +875,7 @@ class MonitoringMixin:
                         f"Failed to enqueue deferred task from threaded consumer: "
                         f"{task_type} -> {target_role}"
                     )
-            except Exception as e:  # noqa: PERF203
+            except Exception as e:
                 logger.error(f"Error processing pending deferred task: {e}")
 
     async def _process_pending_dispatches(self: RedTeamDispatcher) -> None:
@@ -953,7 +951,7 @@ class MonitoringMixin:
                             f"Task {task_id} ({task_type}) submitted from pending dispatch, "
                             f"added to pending_tasks for result tracking"
                         )
-            except Exception as e:  # noqa: PERF203
+            except Exception as e:
                 logger.error(f"Error processing pending task dispatch: {e}")
 
     async def _log_throttle_health(self: RedTeamDispatcher) -> None:
@@ -1046,7 +1044,7 @@ class MonitoringMixin:
         self._result_consumer_thread = None
         self._result_consumer_stop_event = None
 
-    def _threaded_result_consumer_loop(self: RedTeamDispatcher) -> None:  # noqa: PLR0912
+    def _threaded_result_consumer_loop(self: RedTeamDispatcher) -> None:
         """Run result consumer in a dedicated thread with its own event loop.
 
         This mirrors the worker's threaded heartbeat pattern. By running in a
@@ -1304,7 +1302,9 @@ class MonitoringMixin:
                 source_agent = discovery.get("source_agent", "unknown")
 
                 if discovery_type == "delegation":
-                    await self._process_realtime_delegation_discovery(data, source_agent)
+                    await self._process_realtime_delegation_discovery(
+                        data, source_agent, task_queue=task_queue
+                    )
                 elif discovery_type == "credential":
                     await self._process_realtime_credential_discovery(
                         data, source_agent, task_queue=task_queue
@@ -1312,7 +1312,9 @@ class MonitoringMixin:
                 elif discovery_type == "hash":
                     await self._process_realtime_hash_discovery(data, source_agent)
                 elif discovery_type == "vulnerability":
-                    await self._process_realtime_vulnerability_discovery(data, source_agent)
+                    await self._process_realtime_vulnerability_discovery(
+                        data, source_agent, task_queue=task_queue
+                    )
                 else:
                     logger.debug(f"Unknown discovery type: {discovery_type}")
 

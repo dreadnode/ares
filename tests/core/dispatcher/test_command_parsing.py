@@ -270,6 +270,56 @@ class TestExtractHashesFromOutput:
 
         assert len(hashes) == 1
 
+    def test_extracts_line_wrapped_ntlm_hashes(self):
+        """Test extraction of NTLM hashes that are wrapped across multiple lines.
+
+        secretsdump output can be wrapped at terminal width (e.g., 80 chars),
+        breaking the NT hash across two lines:
+          Administrator:500:aad3b435b51404eeaad3b435b51404ee:deadbeef12345678
+          90abcdef12345678:::
+        """
+        dispatcher = self._make_dispatcher()
+        # Simulates terminal wrapping at ~75 chars
+        output = (
+            "Administrator:500:aad3b435b51404eeaad3b435b51404ee:deadbeef12345678\n"
+            "90abcdef12345678:::\n"
+            "krbtgt:502:aad3b435b51404eeaad3b435b51404ee:cafebabe00001111\n"
+            "22223333aaaabbbb:::"
+        )
+
+        hashes = dispatcher._extract_hashes_from_output(output)
+
+        assert len(hashes) == 2
+        usernames = {h.username for h in hashes}
+        assert "Administrator" in usernames
+        assert "krbtgt" in usernames
+        for h in hashes:
+            assert h.hash_type == "NTLM"
+            # Verify full NT hash was reconstructed (32 chars after colon)
+            lm, nt = h.hash_value.split(":")
+            assert len(lm) == 32
+            assert len(nt) == 32
+
+    def test_extracts_line_wrapped_domain_prefixed_hashes(self):
+        """Test line-wrapped hashes with domain prefix like contoso.local\\krbtgt."""
+        dispatcher = self._make_dispatcher()
+        # NT hash split: deadbeefcafe1234 (16) + 567890abcdef0000 (16) = 32 chars
+        output = (
+            "contoso.local\\krbtgt:502:aad3b435b51404eeaad3b435b51404ee:deadbeefcafe1234\n"
+            "567890abcdef0000:::"
+        )
+
+        hashes = dispatcher._extract_hashes_from_output(output)
+
+        # Domain-prefixed format is: domain\user:rid:lm:nt:::
+        # The unwrap regex [^:\s]+ matches domain\user (backslash is not excluded)
+        assert len(hashes) == 1
+        assert hashes[0].username == "krbtgt"
+        assert hashes[0].domain == "contoso.local"
+        lm, nt = hashes[0].hash_value.split(":")
+        assert len(lm) == 32
+        assert len(nt) == 32
+
     def test_sam_hash_does_not_match_machine_accounts(self):
         """Test that machine accounts (ending in $) are not matched by SAM regex."""
         dispatcher = self._make_dispatcher()

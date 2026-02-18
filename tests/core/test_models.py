@@ -665,6 +665,159 @@ class TestSharedRedTeamStateHelpers:
         assert state.admin_count == 2
 
 
+class TestWeaknessDeduplication:
+    """Tests for SharedRedTeamState weakness deduplication."""
+
+    def test_add_weakness_basic(self) -> None:
+        """Test basic weakness recording."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        result = state.add_weakness("### Test Weakness\n**Vulnerability:** Test description")
+        assert result is True
+        assert len(state.all_weaknesses) == 1
+
+    def test_add_weakness_exact_duplicate(self) -> None:
+        """Test that exact duplicate weaknesses are rejected."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        block = "### Test Weakness\n**Vulnerability:** Test description"
+
+        state.add_weakness(block)
+        result = state.add_weakness(block)  # Exact duplicate
+
+        assert result is False
+        assert len(state.all_weaknesses) == 1
+
+    def test_add_weakness_normalized_duplicate_delegation(self) -> None:
+        """Test that unconstrained delegation on same account is deduplicated.
+
+        Key case: LLM rephrases same finding with different title/wording.
+        """
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # First finding - formal title
+        block1 = """### Unconstrained Kerberos Delegation Enabled (DC01$)
+**Vulnerability:** Unconstrained delegation configured on account
+- **Impact:** Can capture TGTs from any user"""
+
+        # Second finding - different phrasing, same account
+        block2 = """### Unconstrained delegation on Domain Controller machine account
+**Vulnerability:** The domain controller machine account (DC01$) has unconstrained delegation
+- **Impact:** Enables TGT capture for privilege escalation"""
+
+        # Third finding - yet another phrasing
+        block3 = """Unconstrained delegation enabled on DC01$ (Domain Controller)
+Computer account DC01$ is configured for unconstrained delegation."""
+
+        result1 = state.add_weakness(block1)
+        result2 = state.add_weakness(block2)
+        result3 = state.add_weakness(block3)
+
+        assert result1 is True
+        assert result2 is False  # Same type + account
+        assert result3 is False  # Same type + account
+        assert len(state.all_weaknesses) == 1
+
+    def test_add_weakness_different_accounts_not_deduplicated(self) -> None:
+        """Test that constrained delegation on different accounts are NOT deduplicated."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        block1 = """Constrained delegation configured for svc_backup (protocol transition)
+The user svc_backup is configured for constrained delegation."""
+
+        block2 = """Constrained delegation configured for SQL01$ (HTTP to DC01)
+The computer account SQL01$ is configured for constrained delegation."""
+
+        result1 = state.add_weakness(block1)
+        result2 = state.add_weakness(block2)
+
+        assert result1 is True
+        assert result2 is True  # Different accounts
+        assert len(state.all_weaknesses) == 2
+
+    def test_add_weakness_smb_signing_dedup(self) -> None:
+        """Test that SMB signing findings for same hosts are deduplicated."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        block1 = """SMB signing not required on SQL01 (NTLM relay candidate)
+Host 192.168.58.50 (SQL01) reports SMB signing: False"""
+
+        block2 = """SMB signing not required on some hosts (NTLM relay possible)
+SMB signing is disabled on SQL01 (192.168.58.50)"""
+
+        result1 = state.add_weakness(block1)
+        result2 = state.add_weakness(block2)
+
+        assert result1 is True
+        assert result2 is False  # Same type + same hosts
+        assert len(state.all_weaknesses) == 1
+
+    def test_add_weakness_smb_signing_different_hosts(self) -> None:
+        """Test SMB signing on different hosts are NOT deduplicated."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        block1 = """SMB signing not required on SQL01
+Host 192.168.58.50 has signing disabled"""
+
+        block2 = """SMB signing not required on WEB01
+Host 192.168.58.60 has signing disabled"""
+
+        result1 = state.add_weakness(block1)
+        result2 = state.add_weakness(block2)
+
+        assert result1 is True
+        assert result2 is True  # Different hosts
+        assert len(state.all_weaknesses) == 2
+
+    def test_extract_weakness_dedup_key_unconstrained_delegation(self) -> None:
+        """Test dedup key extraction for unconstrained delegation."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        block = """Unconstrained delegation on DC01$
+Computer account has unconstrained Kerberos delegation enabled."""
+
+        key = state._extract_weakness_dedup_key(block)
+        assert key == "unconstrained_delegation:dc01$"
+
+    def test_extract_weakness_dedup_key_constrained_delegation(self) -> None:
+        """Test dedup key extraction for constrained delegation with user."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        block = """Constrained delegation configured for svc_backup
+User svc_backup has constrained delegation to CIFS SPNs."""
+
+        key = state._extract_weakness_dedup_key(block)
+        assert key == "constrained_delegation:svc_backup"
+
+    def test_extract_weakness_dedup_key_smb_signing(self) -> None:
+        """Test dedup key extraction for SMB signing with IP."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        block = """SMB signing not required on 192.168.58.10
+Host does not require SMB signing, relay attacks possible."""
+
+        key = state._extract_weakness_dedup_key(block)
+        assert "smb_signing" in key
+        assert "192.168.58.10" in key
+
+
 class TestExtractDomains:
     """Tests for SharedRedTeamState._extract_domains."""
 

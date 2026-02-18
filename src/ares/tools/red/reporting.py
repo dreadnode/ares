@@ -144,8 +144,8 @@ class RedTeamReportingTools(Toolset):
             discovery_method,
         )
 
-        if block not in self.state.all_weaknesses:
-            self.state.all_weaknesses.append(block)
+        # Use add_weakness() for proper normalized deduplication
+        if self.state.add_weakness(block):
             return f"[+] Recorded weakness: {title}"
         return f"[*] Weakness already recorded: {title}"
 

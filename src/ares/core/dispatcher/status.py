@@ -92,7 +92,7 @@ class StatusMixin:
             for name, agent in self._agents.items()
         }
 
-    async def get_exploitation_status(self: RedTeamDispatcher) -> dict[str, Any]:  # noqa: PLR0912
+    async def get_exploitation_status(self: RedTeamDispatcher) -> dict[str, Any]:
         """Get status of discovered vs exploited vulnerabilities."""
         discovered: dict[str, VulnerabilityInfo] = dict(
             self.shared_state.discovered_vulnerabilities
@@ -137,7 +137,8 @@ class StatusMixin:
                         continue
                     seen_type_target.add(type_target_key)
                     discovered_by = data.get("discovered_by", "unknown")
-                    details = data.get("details") or {}
+                    raw_details = data.get("details") or {}
+                    details = raw_details if isinstance(raw_details, dict) else {}
                     priority = self._vulnerability_priorities.get(vuln_type, 99)
                     discovered_at = datetime.now(timezone.utc)
                     queued_at = data.get("queued_at")

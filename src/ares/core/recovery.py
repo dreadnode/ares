@@ -221,13 +221,17 @@ class OperationRecoveryManager:
         state.all_hosts.extend(await backend.get_hosts())
         state.all_users.extend(await backend.get_users())
         state.all_shares.extend(await backend.get_shares())
-        state.all_weaknesses.extend(await backend.get_weaknesses())
+        # Load weaknesses and populate dedup keys for proper deduplication
+        weaknesses = await backend.get_weaknesses()
+        for weakness in weaknesses:
+            state.all_weaknesses.append(weakness)
+            # Populate dedup keys set from loaded weaknesses
+            dedup_key = state._extract_weakness_dedup_key(weakness)
+            state._weakness_dedup_keys.add(dedup_key)
         state.all_domains.extend(await backend.get_domains())
 
-        # Load vulnerabilities
-        vulns = await backend.get_vulnerabilities()
-        for vuln in vulns:
-            state.discovered_vulnerabilities[vuln.vuln_id] = vuln
+        # Load vulnerabilities (get_vulnerabilities returns dict[str, VulnerabilityInfo])
+        state.discovered_vulnerabilities.update(await backend.get_vulnerabilities())
 
         # Load exploited vulnerabilities
         state.exploited_vulnerabilities.update(await backend.get_exploited_vulnerabilities())

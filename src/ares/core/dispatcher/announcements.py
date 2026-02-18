@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from ares.core.config import get_stop_on_domain_admin
+
 if TYPE_CHECKING:
     from ares.core.dispatcher._dispatcher import RedTeamDispatcher
 
@@ -45,6 +47,11 @@ class AnnouncementMixin:
         # Record completion time for accurate report duration
         if not self.shared_state.completed_at:
             self.shared_state.completed_at = datetime.now(timezone.utc)
+
+        # Check if we should stop immediately on DA
+        if get_stop_on_domain_admin():
+            self.shared_state.completed = True
+            logger.info("ARES_STOP_ON_DOMAIN_ADMIN enabled - marking operation complete")
 
         await self._checkpoint()
         logger.success(f"DOMAIN ADMIN ACHIEVED: {domain}\\{username}")

@@ -94,7 +94,7 @@ class RoutingMixin:
                     credential = cred
         return credential
 
-    def _find_domain_controller_ip(self: RedTeamDispatcher, domain: str) -> str:  # noqa: PLR0912
+    def _find_domain_controller_ip(self: RedTeamDispatcher, domain: str) -> str:
         """Find DC IP for the specified domain.
 
         Detection priority:
@@ -742,7 +742,7 @@ class RoutingMixin:
         logger.warning("No task queue available, cannot route crack request")
         return ""
 
-    async def request_lateral_movement(  # noqa: PLR0912
+    async def request_lateral_movement(
         self: RedTeamDispatcher,
         target_host: str,
         username: str,
@@ -1034,6 +1034,34 @@ class RoutingMixin:
                 logger.info(f"Skipping nmap - all {len(scan_targets)} targets already scanned")
                 return ""
 
+        # PREREQUISITE: Non-nmap recon tasks require targets to be scanned first
+        # This ensures nmap runs before SMB enumeration, user enumeration, etc.
+        # We dispatch nmap (priority 1) AND continue to dispatch enumeration (priority 5).
+        # Priority-based insertion ensures nmap runs first.
+        is_nmap_task = reason == "network_scan" or (techniques and "nmap_scan" in techniques)
+        if not is_nmap_task and target_ips and self._task_queue:
+            unscanned = set(target_ips) - self.shared_state.scanned_targets
+            if unscanned:
+                logger.info(
+                    f"Dispatching nmap for {len(unscanned)} unscanned targets before {reason} "
+                    f"(targets: {list(unscanned)[:3]}{'...' if len(unscanned) > 3 else ''})"
+                )
+                # Dispatch nmap with high priority - it will run before the enumeration task
+                await self._throttled_submit_task(
+                    task_type="recon",
+                    target_role="recon",
+                    payload={
+                        "domain": domain,
+                        "target_ips": list(unscanned),
+                        "reason": "network_scan",
+                        "techniques": ["nmap_scan"],
+                    },
+                    source_agent="dispatcher",
+                    priority=1,  # Urgent - runs first due to priority-based queue insertion
+                )
+                # DON'T return - continue to dispatch the enumeration task with lower priority
+                # It will be queued behind nmap and run after nmap completes
+
         # Normalize domain to FQDN format
         domain = self._normalize_domain(domain)
 
@@ -1064,11 +1092,14 @@ class RoutingMixin:
         }
 
         if self._task_queue:
+            # Nmap tasks get high priority to ensure they run before enumeration
+            priority = 1 if is_nmap_task else 5
             task_id = await self._throttled_submit_task(
                 task_type="recon",
                 target_role="recon",
                 payload=payload,
                 source_agent=source_agent,
+                priority=priority,
             )
             if not task_id:
                 return ""
@@ -1217,6 +1248,37 @@ class RoutingMixin:
         logger.warning("No task queue available, cannot route credential access request")
         return ""
 
+    def _enrich_delegation_payload(
+        self: RedTeamDispatcher, payload: dict[str, Any], vuln_type: str
+    ) -> None:
+        """Enrich delegation exploit payload with credentials from state if missing."""
+        if vuln_type not in ("constrained_delegation", "unconstrained_delegation"):
+            return
+        if payload.get("password"):
+            return
+        account = payload.get("account_name") or payload.get("account", payload.get("target", ""))
+        account_lower = account.lower().rstrip("$") if account else ""
+        for cred in self.shared_state.all_credentials:
+            if cred.username.lower() == account_lower and cred.password:
+                payload["password"] = cred.password
+                if not payload.get("domain") and cred.domain:
+                    payload["domain"] = cred.domain
+                logger.info(f"Enriched {vuln_type} payload with credential for {account}")
+                break
+
+    def _resolve_dc_ip_for_payload(
+        self: RedTeamDispatcher, payload: dict[str, Any], vuln_type: str
+    ) -> None:
+        """Resolve dc_ip for exploit payload if not already set."""
+        if payload.get("dc_ip") or not payload.get("domain"):
+            return
+        dc_ip = self._find_domain_controller_ip(payload["domain"]) or payload.get("target_ip", "")
+        if not dc_ip and self.shared_state.target:
+            dc_ip = self.shared_state.target.ip
+        if dc_ip:
+            payload["dc_ip"] = dc_ip
+            logger.info(f"Resolved dc_ip={dc_ip} for exploit {vuln_type}")
+
     async def request_exploit(
         self: RedTeamDispatcher,
         vuln_type: str,
@@ -1226,101 +1288,58 @@ class RoutingMixin:
         params: dict[str, Any] | None = None,
         task_queue: Any = None,
     ) -> str:
-        """
-        Request PrivEscAgent to exploit vulnerability.
-
-        Uses Redis task queue for cross-pod communication when available.
-
-        Args:
-            vuln_type: ADCS_ESC1, DELEGATION_UNCONSTRAINED, etc.
-            vuln_id: Vulnerability ID.
-            target: Target to exploit.
-            source_agent: Agent making the request.
-            params: Vulnerability-specific parameters.
-            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
-
-        Returns:
-            Task ID for tracking.
-        """
-        # Skip new exploit tasks if DA already achieved
+        """Request PrivEscAgent to exploit vulnerability."""
         if self.shared_state.has_domain_admin:
             logger.debug(f"Skipping exploit {vuln_type} on {target} - DA already achieved")
             return ""
 
-        # Normalize domain to FQDN format in params
         params = params or {}
         if "domain" in params:
             params["domain"] = self._normalize_domain(params["domain"])
 
-        payload = {
-            "vuln_type": vuln_type,
-            "vuln_id": vuln_id,
-            "target": target,
-            **params,
-        }
+        payload = {"vuln_type": vuln_type, "vuln_id": vuln_id, "target": target, **params}
 
-        # Track attack chain - look up credential from params
+        # Enrich with credentials and resolve DC IP
+        self._enrich_delegation_payload(payload, vuln_type)
+        self._resolve_dc_ip_for_payload(payload, vuln_type)
+
+        # Track attack chain
         username = payload.get("username") or payload.get("account_name", "")
-        domain = payload.get("domain", "")
-        password = payload.get("password", "")
         if username:
-            parent_id, parent_step = self._find_credential_id(username, domain, password)
+            parent_id, parent_step = self._find_credential_id(
+                username, payload.get("domain", ""), payload.get("password", "")
+            )
             payload["parent_credential_id"] = parent_id
             payload["parent_attack_step"] = parent_step
 
-        # Ensure dc_ip is resolved for exploit tasks that need it
-        if not payload.get("dc_ip") and payload.get("domain"):
-            dc_ip = self._find_domain_controller_ip(payload["domain"])
-            if not dc_ip:
-                dc_ip = payload.get("target_ip", "")
-            if not dc_ip and self.shared_state.target:
-                dc_ip = self.shared_state.target.ip
-            if dc_ip:
-                payload["dc_ip"] = dc_ip
-                logger.info(f"Resolved dc_ip={dc_ip} for exploit {vuln_type}")
-
-        # Use provided task_queue (from threaded consumer) or fall back to self._task_queue
         effective_task_queue = task_queue if task_queue is not None else self._task_queue
-        if effective_task_queue:
-            # Use priority=1 (highest) - exploit tasks are the actual DA path.
-            # Combined with phase adjustment (-2 in privilege_escalation),
-            # exploits will have effective priority -1 → clamped to 1,
-            # beating discovery tasks (priority=2 after +1 adjustment).
-            task_id = await self._throttled_submit_task(
-                task_type="exploit",
-                target_role="privesc",
-                payload=payload,
-                source_agent=source_agent,
-                priority=1,
-                task_queue=effective_task_queue,
-            )
-            if not task_id:
-                return ""
+        if not effective_task_queue:
+            logger.warning("No task queue available, cannot route exploit request")
+            return ""
 
-            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
-            # The main loop's _process_pending_dispatches will create TaskInfo when it submits
-            if task_id in ("deferred", "queued"):
-                logger.info(f"Exploit task for {vuln_type} {task_id} to background/main loop queue")
-                self._record_exploit_weakness(vuln_type, target, payload)
-                return "deferred"
+        task_id = await self._throttled_submit_task(
+            task_type="exploit",
+            target_role="privesc",
+            payload=payload,
+            source_agent=source_agent,
+            priority=1,
+            task_queue=effective_task_queue,
+        )
+        if not task_id:
+            return ""
 
-            task_info = TaskInfo(
-                task_id=task_id,
-                task_type="exploit",
-                assigned_agent="privesc",
-                params=payload,
-            )
-            self.shared_state.pending_tasks[task_id] = task_info
-
-            logger.info(f"Exploit task {task_id} for {vuln_type} submitted to Redis queue")
-
+        if task_id in ("deferred", "queued"):
+            logger.info(f"Exploit task for {vuln_type} {task_id} to background/main loop queue")
             self._record_exploit_weakness(vuln_type, target, payload)
+            return "deferred"
 
-            return task_id
-
-        # No Redis task queue - cannot dispatch
-        logger.warning("No task queue available, cannot route exploit request")
-        return ""
+        task_info = TaskInfo(
+            task_id=task_id, task_type="exploit", assigned_agent="privesc", params=payload
+        )
+        self.shared_state.pending_tasks[task_id] = task_info
+        logger.info(f"Exploit task {task_id} for {vuln_type} submitted to Redis queue")
+        self._record_exploit_weakness(vuln_type, target, payload)
+        return task_id
 
     async def request_privesc_enumeration(
         self: RedTeamDispatcher,

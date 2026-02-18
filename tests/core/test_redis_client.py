@@ -39,6 +39,10 @@ class DummySentinel:
         self.slave_kwargs = kwargs
         return "replica-client"
 
+    async def discover_master(self, master: str) -> tuple[str, int]:
+        """Mock discover_master - returns a dummy master address."""
+        return ("redis-master", 6379)
+
 
 def install_dummy_redis(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     redis_module = types.ModuleType("redis")

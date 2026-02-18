@@ -168,6 +168,10 @@ class OperationConfig:
     # Priority 1-N tasks are critical, force-drain even at capacity
     critical_priority_threshold: int = 3
 
+    # Vulnerability exploitation settings
+    # Max failures per vulnerability before skipping (prevents infinite retry loops)
+    max_vulnerability_failures: int = 3
+
     # Worker agent settings
     # Timeout for agent tasks (prevents infinite retry loops)
     agent_task_timeout: int = 300  # 5 minutes
@@ -207,6 +211,8 @@ class OperationConfig:
     max_runtime: float = 3600.0
     # Grace period for crack tasks when operation is completing (seconds)
     crack_task_grace_period: float = 300.0
+    # Stop operation immediately when domain admin is achieved
+    stop_on_domain_admin: bool = False
 
     # Rate limit retry settings (for worker agents)
     # Delays between retries when rate limited (list of seconds)
@@ -401,6 +407,7 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         # Orchestrator runtime settings
         max_runtime=operation.get("max_runtime", 3600.0),
         crack_task_grace_period=operation.get("crack_task_grace_period", 300.0),
+        stop_on_domain_admin=operation.get("stop_on_domain_admin", False),
         # Rate limit retry settings
         rate_limit_backoff_delays=operation.get(
             "rate_limit_backoff_delays", [5.0, 10.0, 20.0, 40.0, 60.0, 60.0]
@@ -423,7 +430,7 @@ def _resolve_env(value: str) -> str:
     return value
 
 
-def _apply_env_overrides(config: OperationConfig) -> OperationConfig:  # noqa: PLR0912
+def _apply_env_overrides(config: OperationConfig) -> OperationConfig:
     """Apply environment variable overrides to config."""
     # Check for explicit Redis URL override
     explicit_redis_url = os.environ.get("ARES_REDIS_URL") or os.environ.get("REDIS_URL")
@@ -611,6 +618,8 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:  # noqa: P
             config.crack_task_grace_period = float(crack_grace)
         except ValueError:
             pass
+    if stop_on_da := os.environ.get("ARES_STOP_ON_DOMAIN_ADMIN"):
+        config.stop_on_domain_admin = stop_on_da.lower() in ("true", "1", "yes")
 
     # Replay overrides
     if replay_mode := os.environ.get("ARES_REPLAY_MODE"):
@@ -856,6 +865,11 @@ def get_vulnerability_priorities() -> dict[str, int]:
     return priorities
 
 
+def get_max_vulnerability_failures() -> int:
+    """Get max failures per vulnerability before skipping."""
+    return load_config().max_vulnerability_failures
+
+
 def get_agent_task_timeout() -> int:
     """Get timeout (seconds) for agent tasks."""
     return load_config().agent_task_timeout
@@ -924,6 +938,11 @@ def get_max_runtime() -> float:
 def get_crack_task_grace_period() -> float:
     """Get grace period for crack tasks when operation is completing (seconds)."""
     return load_config().crack_task_grace_period
+
+
+def get_stop_on_domain_admin() -> bool:
+    """Get whether to stop operation immediately when domain admin is achieved."""
+    return load_config().stop_on_domain_admin
 
 
 def get_rate_limit_backoff_delays() -> list[float]:
@@ -999,6 +1018,7 @@ __all__ = [
     "get_max_runtime",
     "get_max_stored_results",
     "get_max_total_queries",
+    "get_max_vulnerability_failures",
     "get_min_messages_to_keep",
     "get_min_slots_per_role",
     "get_namespace",
@@ -1017,6 +1037,7 @@ __all__ = [
     "get_replay_mode",
     "get_replay_seed",
     "get_stale_task_timeout",
+    "get_stop_on_domain_admin",
     "get_task_dispatch_delay",
     "get_unvalidated_confidence_penalty",
     "get_vulnerability_priorities",

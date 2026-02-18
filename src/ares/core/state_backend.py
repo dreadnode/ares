@@ -96,6 +96,9 @@ class RedisStateBackend:
 
     # Dispatch tracking keys
     KEY_MSSQL_ENUM_DISPATCHED = "mssql_enum_dispatched"
+    KEY_PENDING_TASKS = "pending_tasks"
+    KEY_COMPLETED_TASKS = "completed_tasks"
+    KEY_VULN_TYPE_FAILURES = "vuln_type_failures"
 
     # TTL for all keys (24 hours)
     DEFAULT_TTL = 86400
@@ -941,6 +944,197 @@ class RedisStateBackend:
             return {}
 
     # =========================================================================
+    # Pending Tasks Tracking (Redis HASH)
+    # =========================================================================
+
+    async def add_pending_task(self, task_id: str, task_info: dict) -> bool:
+        """Add a pending task to Redis HASH.
+
+        Args:
+            task_id: Unique task identifier
+            task_info: Serialized TaskInfo dict
+
+        Returns:
+            True if added successfully
+        """
+        redis_key = self._key(self.KEY_PENDING_TASKS)
+        try:
+            data = json.dumps(task_info, separators=(",", ":"), default=str)
+            await self._redis.hset(redis_key, task_id, data)
+            await self._set_ttl(redis_key)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to add pending task to Redis: {e}")
+            return False
+
+    async def remove_pending_task(self, task_id: str) -> bool:
+        """Remove a pending task from Redis HASH.
+
+        Args:
+            task_id: Task ID to remove
+
+        Returns:
+            True if removed (or didn't exist)
+        """
+        redis_key = self._key(self.KEY_PENDING_TASKS)
+        try:
+            await self._redis.hdel(redis_key, task_id)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to remove pending task from Redis: {e}")
+            return False
+
+    async def get_pending_tasks(self) -> dict[str, dict]:
+        """Get all pending tasks from Redis HASH.
+
+        Returns:
+            Dict mapping task_id to task_info dict
+        """
+        redis_key = self._key(self.KEY_PENDING_TASKS)
+        try:
+            raw = await self._redis.hgetall(redis_key)
+            result = {}
+            for k, v in raw.items():
+                task_id = k if isinstance(k, str) else k.decode()
+                try:
+                    result[task_id] = json.loads(v)
+                except json.JSONDecodeError:
+                    logger.warning(f"Invalid JSON for pending task {task_id}")
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to get pending tasks from Redis: {e}")
+            return {}
+
+    async def update_pending_task_activity(self, task_id: str) -> bool:
+        """Update last_activity_at for a pending task.
+
+        Args:
+            task_id: Task ID to update
+
+        Returns:
+            True if updated successfully
+        """
+        redis_key = self._key(self.KEY_PENDING_TASKS)
+        try:
+            raw = await self._redis.hget(redis_key, task_id)
+            if not raw:
+                return False
+            data = json.loads(raw)
+            data["last_activity_at"] = datetime.now(timezone.utc).isoformat()
+            await self._redis.hset(
+                redis_key, task_id, json.dumps(data, separators=(",", ":"), default=str)
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to update pending task activity: {e}")
+            return False
+
+    # =========================================================================
+    # Completed Tasks Tracking (Redis HASH)
+    # =========================================================================
+
+    async def add_completed_task(self, task_id: str, task_result: dict) -> bool:
+        """Add a completed task to Redis HASH.
+
+        Args:
+            task_id: Unique task identifier
+            task_result: Serialized TaskResult dict
+
+        Returns:
+            True if added successfully
+        """
+        redis_key = self._key(self.KEY_COMPLETED_TASKS)
+        try:
+            data = json.dumps(task_result, separators=(",", ":"), default=str)
+            await self._redis.hset(redis_key, task_id, data)
+            await self._set_ttl(redis_key)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to add completed task to Redis: {e}")
+            return False
+
+    async def get_completed_tasks(self) -> dict[str, dict]:
+        """Get all completed tasks from Redis HASH.
+
+        Returns:
+            Dict mapping task_id to task_result dict
+        """
+        redis_key = self._key(self.KEY_COMPLETED_TASKS)
+        try:
+            raw = await self._redis.hgetall(redis_key)
+            result = {}
+            for k, v in raw.items():
+                task_id = k if isinstance(k, str) else k.decode()
+                try:
+                    result[task_id] = json.loads(v)
+                except json.JSONDecodeError:
+                    logger.warning(f"Invalid JSON for completed task {task_id}")
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to get completed tasks from Redis: {e}")
+            return {}
+
+    # =========================================================================
+    # Vulnerability Type Failure Tracking (Redis HASH)
+    # =========================================================================
+
+    async def increment_vuln_type_failure(self, vuln_type: str) -> int:
+        """Increment failure count for a vulnerability type.
+
+        Args:
+            vuln_type: The vulnerability type (e.g., "mssql_impersonation")
+
+        Returns:
+            New failure count after increment
+        """
+        redis_key = self._key(self.KEY_VULN_TYPE_FAILURES)
+        try:
+            count = await self._redis.hincrby(redis_key, vuln_type, 1)
+            await self._set_ttl(redis_key)
+            return count
+        except Exception as e:
+            logger.warning(f"Failed to increment vuln type failure count: {e}")
+            return 0
+
+    async def get_vuln_type_failure_count(self, vuln_type: str) -> int:
+        """Get failure count for a vulnerability type.
+
+        Args:
+            vuln_type: The vulnerability type
+
+        Returns:
+            Current failure count (0 if not found)
+        """
+        redis_key = self._key(self.KEY_VULN_TYPE_FAILURES)
+        try:
+            count = await self._redis.hget(redis_key, vuln_type)
+            return int(count) if count else 0
+        except Exception as e:
+            logger.warning(f"Failed to get vuln type failure count: {e}")
+            return 0
+
+    async def get_all_vuln_type_failures(self) -> dict[str, int]:
+        """Get all vulnerability type failure counts.
+
+        Returns:
+            Dict mapping vuln_type to failure count
+        """
+        redis_key = self._key(self.KEY_VULN_TYPE_FAILURES)
+        try:
+            raw = await self._redis.hgetall(redis_key)
+            result = {}
+            for k, v in raw.items():
+                vuln_type = k if isinstance(k, str) else k.decode()
+                try:
+                    result[vuln_type] = int(v)
+                except (ValueError, TypeError):
+                    result[vuln_type] = 0
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to get all vuln type failures: {e}")
+            return {}
+
+    # =========================================================================
     # MSSQL Enum Dispatch Tracking (Redis SET)
     # =========================================================================
 
@@ -1182,6 +1376,48 @@ class RedisStateBackend:
             logger.warning(f"Failed to get gMSA accounts from Redis: {e}")
             return []
 
+    # =========================================================================
+    # Report Storage (Redis STRING)
+    # =========================================================================
+
+    async def store_report(self, report_markdown: str) -> bool:
+        """Store the operation report in Redis.
+
+        Args:
+            report_markdown: The markdown report content
+
+        Returns:
+            True if stored successfully
+        """
+        try:
+            key = f"{self._key_prefix}:report"
+            await self._redis.set(key, report_markdown, ex=self._ttl)
+            logger.info(
+                f"Stored report for operation {self._operation_id} ({len(report_markdown)} bytes)"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to store report: {e}")
+            return False
+
+    async def get_report(self) -> str | None:
+        """Get the stored operation report.
+
+        Returns:
+            The markdown report content, or None if not found
+        """
+        try:
+            key = f"{self._key_prefix}:report"
+            report = await self._redis.get(key)
+            if report:
+                if isinstance(report, bytes):
+                    return report.decode()
+                return report
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get report: {e}")
+            return None
+
     async def delete_all_keys(self) -> int:
         """Delete all keys for this operation.
 
@@ -1229,14 +1465,15 @@ def _deserialize_credential(data: str | bytes) -> Credential:
     if isinstance(data, bytes):
         data = data.decode()
     d = json.loads(data)
+    # Use `or ""` instead of `get(key, "")` to handle JSON null values
     return Credential(
-        id=d.get("id", ""),
-        username=d.get("username", ""),
-        password=d.get("password", ""),
-        domain=d.get("domain", ""),
-        source=d.get("source", ""),
+        id=d.get("id") or "",
+        username=d.get("username") or "",
+        password=d.get("password") or "",
+        domain=d.get("domain") or "",
+        source=d.get("source") or "",
         parent_id=d.get("parent_id"),
-        attack_step=d.get("attack_step", 0),
+        attack_step=d.get("attack_step") or 0,
     )
 
 
@@ -1269,17 +1506,18 @@ def _deserialize_hash(data: str | bytes) -> Hash:
     discovered_at = None
     if d.get("discovered_at"):
         discovered_at = datetime.fromisoformat(d["discovered_at"])
+    # Use `or ""` instead of `get(key, "")` to handle JSON null values
     return Hash(
-        id=d.get("id", ""),
-        username=d.get("username", ""),
-        hash_type=d.get("hash_type", ""),
-        hash_value=d.get("hash_value", ""),
-        domain=d.get("domain", ""),
-        source=d.get("source", ""),
+        id=d.get("id") or "",
+        username=d.get("username") or "",
+        hash_type=d.get("hash_type") or "",
+        hash_value=d.get("hash_value") or "",
+        domain=d.get("domain") or "",
+        source=d.get("source") or "",
         cracked_password=d.get("cracked_password"),
         discovered_at=discovered_at,
         parent_id=d.get("parent_id"),
-        attack_step=d.get("attack_step", 0),
+        attack_step=d.get("attack_step") or 0,
     )
 
 
@@ -1305,14 +1543,15 @@ def _deserialize_host(data: str | bytes) -> Host:
     if isinstance(data, bytes):
         data = data.decode()
     d = json.loads(data)
+    # Use `or` instead of `get(key, default)` to handle JSON null values
     host = Host(
-        ip=d.get("ip", ""),
-        hostname=d.get("hostname", ""),
-        os=d.get("os", ""),
-        roles=d.get("roles", []),
-        services=d.get("services", []),
+        ip=d.get("ip") or "",
+        hostname=d.get("hostname") or "",
+        os=d.get("os") or "",
+        roles=d.get("roles") or [],
+        services=d.get("services") or [],
     )
-    host.is_dc = d.get("is_dc", False)
+    host.is_dc = d.get("is_dc") or False
     return host
 
 
@@ -1335,10 +1574,11 @@ def _deserialize_user(data: str | bytes) -> User:
     if isinstance(data, bytes):
         data = data.decode()
     d = json.loads(data)
+    # Use `or ""` instead of `get(key, "")` to handle JSON null values
     return User(
-        username=d.get("username", ""),
-        domain=d.get("domain", ""),
-        source=d.get("source", ""),
+        username=d.get("username") or "",
+        domain=d.get("domain") or "",
+        source=d.get("source") or "",
     )
 
 
@@ -1362,11 +1602,12 @@ def _deserialize_share(data: str | bytes) -> Share:
     if isinstance(data, bytes):
         data = data.decode()
     d = json.loads(data)
+    # Use `or ""` instead of `get(key, "")` to handle JSON null values
     return Share(
-        host=d.get("host", ""),
-        name=d.get("name", ""),
-        permissions=d.get("permissions", ""),
-        comment=d.get("comment", ""),
+        host=d.get("host") or "",
+        name=d.get("name") or "",
+        permissions=d.get("permissions") or "",
+        comment=d.get("comment") or "",
     )
 
 
@@ -1397,13 +1638,15 @@ def _deserialize_vulnerability(data: str | bytes) -> VulnerabilityInfo:
     discovered_at = datetime.now(timezone.utc)
     if d.get("discovered_at"):
         discovered_at = datetime.fromisoformat(d["discovered_at"])
+    raw_details = d.get("details", {})
+    details = raw_details if isinstance(raw_details, dict) else {}
     return VulnerabilityInfo(
         vuln_id=d.get("vuln_id", ""),
         vuln_type=d.get("vuln_type", ""),
         target=d.get("target", ""),
         discovered_by=d.get("discovered_by", ""),
         discovered_at=discovered_at,
-        details=d.get("details", {}),
+        details=details,
         recommended_agent=d.get("recommended_agent", ""),
         priority=d.get("priority", 5),
     )

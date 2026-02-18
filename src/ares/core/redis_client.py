@@ -210,17 +210,26 @@ def _get_or_create_sentinel():
     return sentinel_client
 
 
-async def create_redis_client(redis_url: str | None = None, *, decode_responses: bool = False):
+async def create_redis_client(
+    redis_url: str | None = None,
+    *,
+    decode_responses: bool = False,
+    direct_connection: bool = False,
+):
     """
     Create a Redis client, using Sentinel master if configured.
 
     When Sentinel is configured (via REDIS_SENTINEL_HOST and REDIS_SENTINEL_MASTER),
-    this returns a client connected to the current master. The client automatically
-    handles master failover via Sentinel discovery.
+    this returns a client connected to the current master.
 
     Args:
         redis_url: Direct Redis URL (used when Sentinel not configured)
         decode_responses: Whether to decode responses to strings
+        direct_connection: If True, create a direct connection to the discovered
+            master instead of using SentinelConnectionPool. Use this for threads
+            with separate event loops to avoid cross-loop Future errors.
+            The client won't auto-failover but avoids SentinelConnectionPool's
+            internal async state sharing issues.
 
     Returns:
         Async Redis client connected to master
@@ -233,25 +242,60 @@ async def create_redis_client(redis_url: str | None = None, *, decode_responses:
     sentinel_config = get_redis_sentinel_config()
     socket_timeout, socket_connect_timeout, health_check_interval = _get_redis_timeouts()
 
+    thread_name = threading.current_thread().name
     logger.debug(
-        f"Redis client config: socket_timeout={socket_timeout}, "
-        f"connect_timeout={socket_connect_timeout}, health_check={health_check_interval}"
+        f"Redis client config for thread '{thread_name}': socket_timeout={socket_timeout}, "
+        f"connect_timeout={socket_connect_timeout}, health_check={health_check_interval}, "
+        f"direct_connection={direct_connection}"
     )
 
     if sentinel_config:
+        if direct_connection:
+            # For direct connections (threaded consumers), create a FRESH Sentinel client
+            # rather than reusing the thread-local one. This avoids cross-loop Future errors
+            # that can occur if the Sentinel client's internal connection state was created
+            # on a previous event loop (e.g., after reconnection or error recovery).
+            import redis.asyncio as redis_async
+
+            socket_timeout, socket_connect_timeout, _ = _get_redis_timeouts()
+            fresh_sentinel = redis_async.Sentinel(
+                sentinel_config["sentinels"],
+                password=sentinel_config["sentinel_password"],
+                socket_timeout=socket_timeout,
+                socket_connect_timeout=socket_connect_timeout,
+            )
+            master_addr = await fresh_sentinel.discover_master(sentinel_config["master"])
+            logger.info(
+                f"Creating direct Redis connection for thread '{thread_name}' "
+                f"to {master_addr[0]}:{master_addr[1]} (fresh Sentinel discovery)"
+            )
+            # Use single_connection_client=True to avoid connection pool's asyncio state
+            # sharing issues. This creates a dedicated connection that doesn't share any
+            # asyncio primitives (locks, futures) with other clients.
+            # Also disable health_check_interval to prevent background tasks.
+            password = sentinel_config["redis_password"]
+            db = sentinel_config["db"]
+            redis_url = f"redis://:{password}@{master_addr[0]}:{master_addr[1]}/{db}"
+            return redis_async.from_url(
+                redis_url,
+                decode_responses=decode_responses,
+                socket_timeout=socket_timeout,
+                socket_connect_timeout=socket_connect_timeout,
+                health_check_interval=0,
+                single_connection_client=True,  # Dedicated connection, no pool sharing
+            )
+
+        # Non-direct connection: use thread-local Sentinel client
         sentinel_client = _get_or_create_sentinel()
         if sentinel_client:
-            # Force Sentinel to discover master NOW in this async context.
-            # This ensures all async resources (Futures, connections) are bound to
-            # the current event loop, avoiding "Future attached to different loop"
-            # errors when the threaded result consumer uses this client.
+            # Discover master NOW in this async context
             master_addr = await sentinel_client.discover_master(sentinel_config["master"])
-            thread_name = threading.current_thread().name
             logger.debug(
                 f"Sentinel discovered master for thread '{thread_name}': "
                 f"{master_addr[0]}:{master_addr[1]}"
             )
 
+            # Use SentinelConnectionPool for automatic failover detection
             return sentinel_client.master_for(
                 sentinel_config["master"],
                 password=sentinel_config["redis_password"],

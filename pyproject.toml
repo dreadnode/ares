@@ -218,6 +218,8 @@ ignore = [
     "BLE001",  # acceptable in top-level handlers
     "PT017",   # valid test pattern
     "PLR0915", # acceptable for main functions
+    "PLR0912", # acceptable for complex workflow/parsing functions
+    "PERF203", # try/except in loops is intentional for async error handling
     "G004",    # we use loguru, not stdlib logging
     "TRY400",  # we use loguru
     "PLR0911", # acceptable for tool methods

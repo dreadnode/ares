@@ -62,24 +62,42 @@ async def _generate_local_report(
     operation_id: str,
     redis_url: str,
     report_dir: Path | None = None,
+    *,
+    force_regenerate: bool = False,
 ) -> Path | None:
     """Generate a comprehensive report locally from Redis state.
 
-    This pulls the operation state from Redis and generates a detailed
-    report with full attack path, credentials, and hashes.
+    First checks if a report was already stored by the orchestrator.
+    If not (or if force_regenerate=True), generates from state.
 
     Args:
         operation_id: The operation to generate a report for.
         redis_url: Redis connection URL.
         report_dir: Directory to save the report (default: ./reports).
+        force_regenerate: If True, regenerate even if cached report exists.
 
     Returns:
         Path to the generated report, or None if state not found.
     """
+    from ares.core.state_backend import RedisStateBackend
     from ares.reports import generate_comprehensive_report
 
     client = await create_redis_client(redis_url, decode_responses=False)
     try:
+        # Check for cached report first (stored by orchestrator on completion)
+        if not force_regenerate:
+            backend = RedisStateBackend(client, operation_id)
+            cached_report = await backend.get_report()
+            if cached_report:
+                resolved_dir = Path(report_dir or "./reports").resolve()
+                resolved_dir.mkdir(parents=True, exist_ok=True)
+                filename = f"{operation_id}_report.md"
+                output_path = resolved_dir / filename
+                output_path.write_text(cached_report)
+                logger.success(f"Report saved (from cache): {output_path}")
+                return output_path
+
+        # Fall back to regenerating from state
         state = await _load_state_from_redis(client, operation_id)
         if not state:
             logger.warning(f"No state found for operation {operation_id}")
@@ -445,7 +463,9 @@ def _dedup_users(users: list) -> list:
     seen: set[tuple[str, str]] = set()
     result = []
     for user in users:
-        key = (user.domain.strip().lower(), user.username.strip().lower())
+        domain = (user.domain or "").strip().lower()
+        username = (user.username or "").strip().lower()
+        key = (domain, username)
         if key not in seen:
             seen.add(key)
             result.append(user)
@@ -457,7 +477,10 @@ def _dedup_credentials(credentials: list) -> list:
     seen: set[tuple[str, str, str]] = set()
     result = []
     for cred in credentials:
-        key = (cred.domain.strip().lower(), cred.username.strip().lower(), cred.password)
+        domain = (cred.domain or "").strip().lower()
+        username = (cred.username or "").strip().lower()
+        password = cred.password or ""
+        key = (domain, username, password)
         if key not in seen:
             seen.add(key)
             result.append(cred)
@@ -470,10 +493,10 @@ def _dedup_hashes(hashes: list) -> list:
     result = []
     for h in hashes:
         key = (
-            h.domain.strip().lower(),
-            h.username.strip().lower(),
-            h.hash_type.strip().lower(),
-            h.hash_value.strip().lower(),
+            (h.domain or "").strip().lower(),
+            (h.username or "").strip().lower(),
+            (h.hash_type or "").strip().lower(),
+            (h.hash_value or "").strip().lower(),
         )
         if key not in seen:
             seen.add(key)
@@ -630,6 +653,29 @@ def _loot_snapshot(state) -> dict:
     }
 
 
+_WEAKNESS_NOISE_PREFIXES = (
+    "next step:",
+    "next action:",
+    "next task",
+    "task suggestion:",
+    "recommendation:",
+    "todo:",
+    "to do:",
+    "action item:",
+)
+
+
+def _filter_real_weaknesses(weaknesses: list[str]) -> list[tuple[str, dict]]:
+    """Filter out agent task suggestions incorrectly recorded as weaknesses."""
+    real = []
+    for w in weaknesses:
+        parsed = _parse_weakness_block(w)
+        title = parsed.get("title", "").lower().strip()
+        if not any(title.startswith(prefix) for prefix in _WEAKNESS_NOISE_PREFIXES):
+            real.append((w, parsed))
+    return real
+
+
 def _print_loot(state, *, json_output: bool = False) -> None:
     """Print loot from state in human-readable or JSON format."""
     import json as json_module
@@ -637,6 +683,7 @@ def _print_loot(state, *, json_output: bool = False) -> None:
     unique_users = _dedup_users(state.all_users)
     unique_creds = _dedup_credentials(state.all_credentials)
     unique_hashes = _dedup_hashes(state.all_hashes)
+    real_weaknesses = _filter_real_weaknesses(list(state.all_weaknesses))
 
     if json_output:
         output = {
@@ -687,7 +734,7 @@ def _print_loot(state, *, json_output: bool = False) -> None:
                 {"host": s.host, "name": s.name, "permissions": s.permissions}
                 for s in state.all_shares
             ],
-            "weaknesses": list(state.all_weaknesses),
+            "weaknesses": [w for w, _ in real_weaknesses],
         }
         print(json_module.dumps(output, indent=2, default=str))
         return
@@ -796,13 +843,12 @@ def _print_loot(state, *, json_output: bool = False) -> None:
         print(f"  - {line}")
     print()
 
-    # Weaknesses - parse markdown blocks and display cleanly
-    print(f"Weaknesses ({len(state.all_weaknesses)}):")
-    if not state.all_weaknesses:
+    # Weaknesses - use pre-filtered list (noise already removed at top of function)
+    print(f"Weaknesses ({len(real_weaknesses)}):")
+    if not real_weaknesses:
         print("  None")
     else:
-        for i, w in enumerate(state.all_weaknesses, 1):
-            parsed = _parse_weakness_block(w)
+        for i, (_w, parsed) in enumerate(real_weaknesses, 1):
             title = parsed.get("title", "Untitled Weakness")
             vuln = parsed.get("vulnerability", "")
             impact = parsed.get("impact", "")
@@ -1164,6 +1210,9 @@ async def report(
     latest: Annotated[
         bool, cyclopts.Parameter(help="Use the latest operation (prefer running)")
     ] = False,
+    regenerate: Annotated[
+        bool, cyclopts.Parameter(help="Regenerate report from state (ignore cached)")
+    ] = False,
     redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
     output_dir: Annotated[
         str, cyclopts.Parameter(help="Output directory for report (default: ./reports)")
@@ -1174,9 +1223,13 @@ async def report(
     The report includes full attack path, all credentials with passwords,
     NTLM hashes, discovered vulnerabilities, and timeline events.
 
+    By default, uses the cached report stored by the orchestrator on completion.
+    Use --regenerate to rebuild the report from current state.
+
     Examples:
         ares-ops report op-20250128-123456
         ares-ops report --latest
+        ares-ops report --latest --regenerate
         ares-ops report --latest --output-dir ./my-reports
     """
     resolved_redis_url = redis_url or get_redis_url()
@@ -1197,6 +1250,7 @@ async def report(
             operation_id,
             resolved_redis_url,
             report_dir=Path(output_dir),
+            force_regenerate=regenerate,
         )
         if report_path:
             logger.success(f"Report generated: {report_path}")

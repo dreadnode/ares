@@ -6,6 +6,7 @@ Replaces in-memory asyncio.Queue with Redis Lists for cross-pod messaging.
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -111,19 +112,31 @@ class RedisTaskQueue:
         return self._client
 
     async def connect(self) -> None:
-        """Connect to Redis."""
+        """Connect to Redis.
+
+        When called from a non-main thread (e.g., threaded result consumer),
+        uses direct connection to avoid SentinelConnectionPool's cross-loop
+        Future issues.
+        """
         if self._connected:
             return
+
+        # Use direct connection when in a non-main thread to avoid
+        # SentinelConnectionPool's async state being shared across event loops
+        is_main_thread = threading.current_thread() is threading.main_thread()
+        direct_connection = not is_main_thread
 
         try:
             self._client = await create_redis_client(
                 self.redis_url,
                 decode_responses=True,  # Auto-decode to strings
+                direct_connection=direct_connection,
             )
             await self._client.ping()
             self._connected = True
             if get_redis_sentinel_config():
-                logger.info("TaskQueue connected to Redis via Sentinel")
+                conn_type = "direct" if direct_connection else "via Sentinel"
+                logger.info(f"TaskQueue connected to Redis {conn_type}")
             else:
                 logger.info(f"TaskQueue connected to Redis at {self.redis_url}")
 

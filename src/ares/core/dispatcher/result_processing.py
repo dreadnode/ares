@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 class ResultProcessingMixin:
     """Task result processing and data extraction."""
 
-    async def complete_task(  # noqa: PLR0912
+    async def complete_task(
         self: RedTeamDispatcher,
         task_id: str,
         success: bool,
@@ -63,6 +63,15 @@ class ResultProcessingMixin:
             return
         was_retry = task_info.status == TaskStatus.RETRYING
 
+        # Remove from Redis pending_tasks HASH for immediate consistency
+        # This is important for throttle state - we don't want stale tasks affecting limits
+        if self._redis_client is not None and not skip_checkpoint:
+            try:
+                pending_key = f"ares:op:{self.shared_state.operation_id}:pending_tasks"
+                await self._redis_client.hdel(pending_key, task_id)
+            except Exception as e:
+                logger.warning(f"Failed to remove {task_id} from Redis pending_tasks: {e}")
+
         task_info.status = TaskStatus.COMPLETED if success else TaskStatus.FAILED
         task_info.completed_at = datetime.now(timezone.utc)
         task_info.result = result
@@ -81,6 +90,26 @@ class ResultProcessingMixin:
             error=error,
         )
         self.shared_state.completed_tasks[task_id] = task_result
+
+        # Persist completed task to Redis immediately for deduplication
+        # This ensures completed_tasks is available even before next checkpoint
+        if self._redis_client is not None and not skip_checkpoint:
+            try:
+                completed_key = f"ares:op:{self.shared_state.operation_id}:completed_tasks"
+                result_dict = {
+                    "task_id": task_id,
+                    "success": success,
+                    "result": result,
+                    "error": error,
+                    "completed_at": task_result.completed_at.isoformat(),
+                }
+                import json
+
+                await self._redis_client.hset(
+                    completed_key, task_id, json.dumps(result_dict, default=str)
+                )
+            except Exception as e:
+                logger.warning(f"Failed to persist completed task {task_id} to Redis: {e}")
 
         # Mark targets as scanned after successful nmap recon
         if success and task_info.task_type == "recon":
@@ -134,7 +163,12 @@ class ResultProcessingMixin:
         # Process additional result fields only on success
         if success and isinstance(result, dict):
             await self._process_success_result_data(
-                result, task_id, source_agent, parent_credential_id, parent_attack_step
+                result,
+                task_id,
+                source_agent,
+                parent_credential_id,
+                parent_attack_step,
+                task_queue=task_queue,
             )
             output = self._extract_output_from_result(result)
         elif success and isinstance(result, str):
@@ -179,7 +213,7 @@ class ResultProcessingMixin:
             await self._checkpoint()
         logger.info(f"Task {task_id} completed: success={success}")
 
-    async def _process_discovered_data(  # noqa: PLR0912
+    async def _process_discovered_data(
         self: RedTeamDispatcher,
         result: dict[str, Any],
         source_agent: str,
@@ -491,8 +525,18 @@ class ResultProcessingMixin:
         source_agent: str,
         parent_credential_id: str | None = None,
         parent_attack_step: int = 0,
+        task_queue: Any = None,
     ) -> None:
-        """Process credential/hash/share fields from successful result."""
+        """Process credential/hash/share fields from successful result.
+
+        Args:
+            result: Task result dictionary.
+            task_id: Task ID for logging.
+            source_agent: Agent that produced the result.
+            parent_credential_id: ID of credential used to discover these items.
+            parent_attack_step: Attack step of parent credential.
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
+        """
         # Calculate attack_step for discoveries (parent + 1)
         discovery_step = parent_attack_step + 1 if parent_credential_id else 0
 
@@ -508,7 +552,7 @@ class ResultProcessingMixin:
                 parent_id=parent_credential_id,
                 attack_step=discovery_step,
             )
-            await self.publish_credential(credential, source_agent, task_queue=None)
+            await self.publish_credential(credential, source_agent, task_queue=task_queue)
 
         creds_data = result.get("credentials")
         if isinstance(creds_data, list):
@@ -525,7 +569,7 @@ class ResultProcessingMixin:
                     parent_id=parent_credential_id,
                     attack_step=discovery_step,
                 )
-                await self.publish_credential(credential, source_agent, task_queue=None)
+                await self.publish_credential(credential, source_agent, task_queue=task_queue)
 
         hash_data = result.get("hash")
         if isinstance(hash_data, dict):
@@ -549,7 +593,7 @@ class ResultProcessingMixin:
                     parent_id=hash_obj.id,
                     attack_step=hash_obj.attack_step + 1,
                 )
-                await self.publish_credential(cracked_cred, source_agent, task_queue=None)
+                await self.publish_credential(cracked_cred, source_agent, task_queue=task_queue)
 
         hashes_data = result.get("hashes")
         if isinstance(hashes_data, list):
@@ -576,7 +620,7 @@ class ResultProcessingMixin:
                         parent_id=hash_obj.id,
                         attack_step=hash_obj.attack_step + 1,
                     )
-                    await self.publish_credential(cracked_cred, source_agent, task_queue=None)
+                    await self.publish_credential(cracked_cred, source_agent, task_queue=task_queue)
 
         # NOTE: share/shares from JSON is NOT processed here.
         # LLM agents parse netexec output non-deterministically. Shares are
@@ -593,7 +637,7 @@ class ResultProcessingMixin:
                 output_parts.append(chunk.strip())
         return "\n".join(output_parts).strip()
 
-    async def _process_output_text(  # noqa: PLR0912
+    async def _process_output_text(
         self: RedTeamDispatcher,
         output: str,
         source_agent: str,
@@ -885,9 +929,7 @@ class ResultProcessingMixin:
 
         return hosts
 
-    def _extract_users_from_output(  # noqa: PLR0912
-        self: RedTeamDispatcher, output: str
-    ) -> list[tuple[str, str]]:
+    def _extract_users_from_output(self: RedTeamDispatcher, output: str) -> list[tuple[str, str]]:
         """Extract (username, domain) tuples from various tool output formats.
 
         Returns:
@@ -965,7 +1007,7 @@ class ResultProcessingMixin:
 
         return users
 
-    def _extract_plaintext_passwords_from_output(  # noqa: PLR0912
+    def _extract_plaintext_passwords_from_output(
         self: RedTeamDispatcher, output: str
     ) -> list[tuple[str, str, str]]:
         """Extract username/password/domain tuples from tool output.
@@ -1034,7 +1076,7 @@ class ResultProcessingMixin:
             creds.append((username, password, extracted_domain))
         return creds
 
-    def _resolve_credential_domain(  # noqa: PLR0912
+    def _resolve_credential_domain(
         self: RedTeamDispatcher, username: str, extracted_domain: str
     ) -> str:
         """Resolve the correct domain for a credential.
@@ -1106,7 +1148,7 @@ class ResultProcessingMixin:
         logger.debug(f"Cannot determine domain for credential: {username}")
         return ""
 
-    def _extract_shares_from_output(  # noqa: PLR0912
+    def _extract_shares_from_output(
         self: RedTeamDispatcher, output: str, default_host: str = ""
     ) -> list[Share]:
         """Extract shares from netexec --shares output."""
@@ -1178,104 +1220,100 @@ class ResultProcessingMixin:
                 )
         return shares
 
+    def _unwrap_ntlm_lines(self: RedTeamDispatcher, output: str) -> list[str]:
+        """Unwrap line-wrapped NTLM hashes from secretsdump output."""
+        lines = output.splitlines()
+        unwrapped: list[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            # Partial NTLM: word:number:32hexchars:partial_hex (no ::: at end)
+            if re.match(r"^[^:\s]+:\d+:[a-fA-F0-9]{32}:[a-fA-F0-9]+$", line) and i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if re.match(r"^[a-fA-F0-9]+:::$", next_line):
+                    unwrapped.append(line + next_line)
+                    i += 2
+                    continue
+            unwrapped.append(line)
+            i += 1
+        return unwrapped
+
+    def _try_extract_tgs_hash(self: RedTeamDispatcher, line: str, seen: set[str]) -> Hash | None:
+        """Try to extract a TGS hash from a line."""
+        match = re.search(r"(\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^$]+\$[a-fA-F0-9$]+)", line)
+        if match and match.group(1) not in seen:
+            seen.add(match.group(1))
+            return Hash(
+                username=match.group(2),
+                hash_value=match.group(1),
+                hash_type="TGS",
+                domain=match.group(3),
+            )
+        return None
+
+    def _try_extract_asrep_hash(self: RedTeamDispatcher, line: str, seen: set[str]) -> Hash | None:
+        """Try to extract an AS-REP hash from a line."""
+        match = re.search(r"(\$krb5asrep\$\d+\$([^@:]+)@([^:]+):[a-fA-F0-9$]+)", line)
+        if match and match.group(1) not in seen:
+            seen.add(match.group(1))
+            return Hash(
+                username=match.group(2),
+                hash_value=match.group(1),
+                hash_type="AS-REP",
+                domain=match.group(3),
+            )
+        return None
+
+    def _try_extract_ntlm_hash(self: RedTeamDispatcher, line: str, seen: set[str]) -> Hash | None:
+        """Try to extract an NTLM hash from a line (domain-prefixed or plain)."""
+        # Domain-prefixed: domain\user:rid:lmhash:nthash:::
+        match = re.search(
+            r"([^\\:\s]+)\\([^:\\]+):\d+:([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::", line
+        )
+        if match:
+            hash_value = f"{match.group(3)}:{match.group(4)}"
+            if hash_value not in seen:
+                seen.add(hash_value)
+                return Hash(
+                    username=match.group(2),
+                    hash_value=hash_value,
+                    hash_type="NTLM",
+                    domain=match.group(1),
+                )
+        # Non-domain-prefixed: user:rid:lmhash:nthash:::
+        match = re.match(r"([^:\\$\s]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::", line)
+        if match:
+            hash_value = f"{match.group(3)}:{match.group(4)}"
+            if hash_value not in seen:
+                seen.add(hash_value)
+                return Hash(
+                    username=match.group(1), hash_value=hash_value, hash_type="NTLM", domain=""
+                )
+        return None
+
     def _extract_hashes_from_output(self: RedTeamDispatcher, output: str) -> list[Hash]:
-        """Extract Kerberos hashes (TGS, AS-REP) from tool output."""
+        """Extract Kerberos hashes (TGS, AS-REP, NTLM) from tool output."""
         if not output:
             return []
         hashes: list[Hash] = []
         seen: set[str] = set()
 
-        for line in output.splitlines():
+        for line in self._unwrap_ntlm_lines(output):
             stripped = line.strip()
             if not stripped:
                 continue
-
-            # Match Kerberoast TGS hashes: $krb5tgs$23$*username$domain$...
-            tgs_match = re.search(
-                r"(\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^$]+\$[a-fA-F0-9$]+)",
-                stripped,
-            )
-            if tgs_match:
-                hash_value = tgs_match.group(1)
-                username = tgs_match.group(2)
-                domain = tgs_match.group(3)
-                if hash_value not in seen:
-                    seen.add(hash_value)
-                    hashes.append(
-                        Hash(
-                            username=username,
-                            hash_value=hash_value,
-                            hash_type="TGS",
-                            domain=domain,
-                        )
-                    )
+            # Try each hash type in order
+            h = self._try_extract_tgs_hash(stripped, seen)
+            if h:
+                hashes.append(h)
                 continue
-
-            # Match AS-REP hashes: $krb5asrep$23$username@domain:...
-            asrep_match = re.search(
-                r"(\$krb5asrep\$\d+\$([^@:]+)@([^:]+):[a-fA-F0-9$]+)",
-                stripped,
-            )
-            if asrep_match:
-                hash_value = asrep_match.group(1)
-                username = asrep_match.group(2)
-                domain = asrep_match.group(3)
-                if hash_value not in seen:
-                    seen.add(hash_value)
-                    hashes.append(
-                        Hash(
-                            username=username,
-                            hash_value=hash_value,
-                            hash_type="AS-REP",
-                            domain=domain,
-                        )
-                    )
+            h = self._try_extract_asrep_hash(stripped, seen)
+            if h:
+                hashes.append(h)
                 continue
-
-            # Match NTLM hashes from secretsdump: domain\user:rid:lmhash:nthash:::
-            ntlm_match = re.search(
-                r"([^\\:\s]+)\\([^:\\]+):\d+:([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::",
-                stripped,
-            )
-            if ntlm_match:
-                domain = ntlm_match.group(1)
-                username = ntlm_match.group(2)
-                lm_hash = ntlm_match.group(3)
-                nt_hash = ntlm_match.group(4)
-                hash_value = f"{lm_hash}:{nt_hash}"
-                if hash_value not in seen:
-                    seen.add(hash_value)
-                    hashes.append(
-                        Hash(
-                            username=username,
-                            hash_value=hash_value,
-                            hash_type="NTLM",
-                            domain=domain,
-                        )
-                    )
-                continue
-
-            # Match non-domain-prefixed NTLM: user:rid:lmhash:nthash:::
-            # (SAM dump entries like Administrator:500:lmhash:nthash:::)
-            ntlm_plain = re.match(
-                r"([^:\\$\s]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::",
-                stripped,
-            )
-            if ntlm_plain:
-                username = ntlm_plain.group(1)
-                lm_hash = ntlm_plain.group(3)
-                nt_hash = ntlm_plain.group(4)
-                hash_value = f"{lm_hash}:{nt_hash}"
-                if hash_value not in seen:
-                    seen.add(hash_value)
-                    hashes.append(
-                        Hash(
-                            username=username,
-                            hash_value=hash_value,
-                            hash_type="NTLM",
-                            domain="",
-                        )
-                    )
+            h = self._try_extract_ntlm_hash(stripped, seen)
+            if h:
+                hashes.append(h)
 
         return hashes
 
@@ -1438,7 +1476,7 @@ class ResultProcessingMixin:
 
         return queued
 
-    def _extract_delegation_from_output(  # noqa: PLR0912
+    def _extract_delegation_from_output(
         self: RedTeamDispatcher, output: str
     ) -> list[dict[str, str]]:
         """
@@ -1532,7 +1570,7 @@ class ResultProcessingMixin:
 
         return delegations
 
-    async def _auto_queue_delegation_vulnerabilities(  # noqa: PLR0912
+    async def _auto_queue_delegation_vulnerabilities(
         self: RedTeamDispatcher,
         delegations: list[dict[str, str]],
         source_agent: str,
@@ -1645,7 +1683,7 @@ class ResultProcessingMixin:
 
         return queued
 
-    def _extract_bloodhound_vulns_from_output(  # noqa: PLR0912
+    def _extract_bloodhound_vulns_from_output(
         self: RedTeamDispatcher, output: str
     ) -> list[dict[str, Any]]:
         """

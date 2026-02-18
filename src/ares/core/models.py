@@ -814,6 +814,10 @@ class SharedRedTeamState:
     _tested_credentials: set[str] = field(
         default_factory=set, init=False, repr=False, compare=False
     )
+    # Weakness deduplication keys (normalized title + affected entity)
+    _weakness_dedup_keys: set[str] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
 
     # Redis-native state backend (NOT serialized)
     # When set, all add_* methods persist directly to Redis instead of in-memory lists
@@ -1530,7 +1534,7 @@ class SharedRedTeamState:
             )
         return resolved
 
-    def add_credential(self, credential: Credential, source_agent: str) -> bool:  # noqa: PLR0912
+    def add_credential(self, credential: Credential, source_agent: str) -> bool:
         """Add credential if not duplicate. Returns True if added."""
         username = credential.username.strip()
         # Normalize domain to lowercase for consistency
@@ -1944,7 +1948,7 @@ class SharedRedTeamState:
         # "contoso.local" that should be reassigned to this child domain
         self._normalize_parent_domain_credentials(fqdn)
 
-    def _normalize_parent_domain_credentials(self, child_fqdn: str) -> None:  # noqa: PLR0912
+    def _normalize_parent_domain_credentials(self, child_fqdn: str) -> None:
         """Normalize credentials with parent domain when a child domain is discovered.
 
         In AD forests, tools sometimes report credentials with the parent/root domain
@@ -2031,7 +2035,7 @@ class SharedRedTeamState:
             # Deduplicate after normalization
             self.all_credentials = self._dedupe_credentials(self.all_credentials)
 
-    def add_hash(self, hash_obj: Hash, source_agent: str) -> bool:  # noqa: PLR0912
+    def add_hash(self, hash_obj: Hash, source_agent: str) -> bool:
         """Add hash if not duplicate. Returns True if added."""
         hash_type = (hash_obj.hash_type or "").strip().lower()
         username = (hash_obj.username or "").strip().lower()
@@ -2297,7 +2301,7 @@ class SharedRedTeamState:
                 parts.append(f"{source} → {domain}\\{username}")
         return " → ".join(parts) if parts else "Unknown path"
 
-    def add_host(self, host: Host) -> bool:  # noqa: PLR0912
+    def add_host(self, host: Host) -> bool:
         """Add host if not duplicate. Returns True if added or meaningfully merged."""
         if not host.ip or not host.ip.strip():
             logger.debug("Host rejected: empty IP address")
@@ -2490,12 +2494,129 @@ class SharedRedTeamState:
 
         return True
 
+    def _extract_entities_from_weakness(self, block_lower: str) -> list[str]:
+        """Extract affected entities from a weakness block in priority order."""
+        import re
+
+        # Machine accounts (DC01$, SQL01$) - highest priority
+        machine_accounts = [m.group(1) for m in re.finditer(r"\b([a-z0-9_-]+\$)", block_lower)]
+        if machine_accounts:
+            return machine_accounts
+
+        # IP addresses - high priority
+        ips = [m.group(1) for m in re.finditer(r"\b(\d+\.\d+\.\d+\.\d+)\b", block_lower)]
+        if ips:
+            return ips
+
+        # User accounts with dots/underscores (svc_backup, admin.user)
+        user_accounts = [
+            m.group(1)
+            for m in re.finditer(r"\b([a-z]+[._][a-z]+)\b", block_lower)
+            if m.group(1) not in ("e.g", "i.e", "et.al")
+        ]
+        if user_accounts:
+            return user_accounts
+
+        # Hostnames with digits (dc01, sql01)
+        common_words = {
+            "the",
+            "this",
+            "some",
+            "multiple",
+            "all",
+            "any",
+            "account",
+            "accounts",
+            "host",
+            "hosts",
+            "server",
+            "servers",
+            "configured",
+            "enabled",
+            "disabled",
+            "on",
+            "for",
+            "from",
+            "to",
+            "has",
+            "with",
+            "domain",
+            "controller",
+        }
+        return [
+            m.group(1)
+            for m in re.finditer(
+                r"(?:on|from|host|server)\s+([a-z][a-z0-9-]+)(?:\s|$|\.|,)", block_lower
+            )
+            if m.group(1) not in common_words and any(c.isdigit() for c in m.group(1))
+        ]
+
+    def _classify_weakness_type(self, block_lower: str) -> str:
+        """Classify weakness type from block content."""
+        type_patterns = [
+            (("unconstrained", "delegation"), "unconstrained_delegation"),
+            (("constrained", "delegation"), "constrained_delegation"),
+            (("rbcd",), "rbcd"),
+            (("resource-based",), "rbcd"),
+            (("smb", "signing"), "smb_signing"),
+            (("smbv1",), "smbv1"),
+            (("llmnr",), "name_poisoning"),
+            (("nbt-ns",), "name_poisoning"),
+            (("mdns",), "name_poisoning"),
+            (("rdp", "exposed"), "rdp_exposed"),
+            (("rdp", "3389"), "rdp_exposed"),
+            (("sql", "1433"), "mssql_exposed"),
+            (("sql", "exposed"), "mssql_exposed"),
+            (("kerberoast",), "kerberoastable"),
+            (("asrep",), "asrep_roastable"),
+            (("as-rep",), "asrep_roastable"),
+            (("password", "policy"), "weak_password_policy"),
+        ]
+        for keywords, wtype in type_patterns:
+            if all(kw in block_lower for kw in keywords):
+                return wtype
+        return "other"
+
+    def _extract_weakness_dedup_key(self, block: str) -> str:
+        """Extract a normalized deduplication key from a weakness block.
+
+        The key is derived from weakness TYPE + affected entities.
+        This handles LLM rephrasing the same finding with different titles.
+        """
+        block_lower = block.lower()
+        entities = self._extract_entities_from_weakness(block_lower)
+        weakness_type = self._classify_weakness_type(block_lower)
+        unique_entities = sorted(set(entities))
+        if unique_entities:
+            return f"{weakness_type}:{','.join(unique_entities[:3])}"
+        return weakness_type
+
     def add_weakness(self, block: str) -> bool:
-        """Add weakness if not duplicate. Returns True if added. Triggers pub/sub."""
-        if not block or block in self.all_weaknesses:
+        """Add weakness if not duplicate. Returns True if added. Triggers pub/sub.
+
+        Deduplication uses normalized keys extracted from the weakness:
+        - Title (### header)
+        - Affected resource/account (if present)
+
+        This prevents duplicates like "Unconstrained delegation on HOST$" being
+        recorded multiple times with slightly different descriptions.
+        """
+        if not block:
             return False
+
+        # Extract normalized dedup key from the weakness block
+        dedup_key = self._extract_weakness_dedup_key(block)
+        if dedup_key in self._weakness_dedup_keys:
+            logger.debug(f"Weakness rejected (duplicate key): {dedup_key}")
+            return False
+
+        # Also check exact match for legacy weaknesses without proper structure
+        if block in self.all_weaknesses:
+            return False
+
+        self._weakness_dedup_keys.add(dedup_key)
         self.all_weaknesses.append(block)
-        logger.info(f"Weakness added: {block[:80]}...")
+        logger.info(f"Weakness added [{dedup_key}]: {block[:60]}...")
 
         # Persist to Redis backend if available and in the correct event loop
         if self._can_persist_to_backend():
@@ -2695,7 +2816,7 @@ class SharedRedTeamState:
         return deduped
 
     @staticmethod
-    def _extract_domains(state: SharedRedTeamState) -> list[str]:  # noqa: PLR0912
+    def _extract_domains(state: SharedRedTeamState) -> list[str]:
         """Extract all domains from state objects."""
         domains: set[str] = set()
         if state.target and state.target.domain:

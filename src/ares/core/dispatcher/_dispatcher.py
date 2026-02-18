@@ -216,6 +216,12 @@ class RedTeamDispatcher(
         # Load in-progress vulnerability IDs for crash recovery
         await self._load_in_progress_vulns()
 
+        # Load pending tasks for throttle state recovery
+        await self._load_pending_tasks()
+
+        # Load completed tasks for task deduplication
+        await self._load_completed_tasks()
+
         # Connect task queue for cross-pod communication
         if self._task_queue:
             try:
