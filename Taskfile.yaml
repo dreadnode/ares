@@ -314,81 +314,11 @@ tasks:
         echo "Output:"
         echo "  Reports: {{.REPORT_DIR}}"
 
-  ares:reports:list:
-    desc: List all investigation reports
-    silent: true
-    cmds:
-      - |
-        echo "Investigation Reports:"
-        echo "======================"
-        if [ -d {{.REPORT_DIR}} ]; then
-          ls -lht {{.REPORT_DIR}}/*.md 2>/dev/null || echo "No reports found"
-        else
-          echo "Report directory not found: {{.REPORT_DIR}}"
-        fi
-
-  ares:reports:latest:
-    desc: Show the latest investigation report
-    silent: true
-    cmds:
-      - |
-        LATEST=$(ls -t {{.REPORT_DIR}}/*.md 2>/dev/null | head -1)
-        if [ -n "$LATEST" ]; then
-          echo "Latest report: $LATEST"
-          echo "===================="
-          cat "$LATEST"
-        else
-          echo "No reports found in {{.REPORT_DIR}}"
-        fi
-
-  ares:reports:clean:
-    desc: Remove all investigation reports
-    silent: true
-    cmds:
-      - |
-        read -p "Delete all reports in {{.REPORT_DIR}}? (y/N) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-          rm -rf {{.REPORT_DIR}}/*.md
-          echo "✅ Reports cleaned"
-        fi
-
   ares:version:
     desc: Show Ares version information
     silent: true
     cmds:
       - uv run python -c "import ares; print('Ares version:', ares.__version__)"
-
-  ares:mitre:test:
-    desc: Test MITRE ATT&CK data loading
-    silent: true
-    cmds:
-      - |
-        uv run python -c "
-        import asyncio
-        from ares.integrations.mitre import MITREAttackClient
-
-        async def test():
-            client = MITREAttackClient()
-            await client.load()
-            print(f'✅ Loaded {len(client._techniques)} techniques')
-            print(f'✅ Loaded {len(client._tactics)} tactics')
-
-            # Show a sample technique
-            sample = list(client._techniques.values())[0]
-            print(f'\nSample technique:')
-            print(f'  ID: {sample.id}')
-            print(f'  Name: {sample.name}')
-            print(f'  Tactic: {sample.tactic}')
-
-        asyncio.run(test())
-        "
-
-  ares:example:grafana-windows:
-    desc: Show example Grafana MCP queries for Windows attack detection
-    silent: true
-    cmds:
-      - python examples/grafana_mcp_windows_example.py
 
   # ===========================================================================
   # Ares Red Team Agent Tasks

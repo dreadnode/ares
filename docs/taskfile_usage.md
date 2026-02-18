@@ -189,10 +189,10 @@ task red:multi:tasks:list LATEST=true STATUS=running
 task red:multi:tasks:list LATEST=true STATUS=all ROLE=lateral
 ```
 
-List multi-agent operations and their Redis queue state:
+List multi-agent operations and their state:
 
 ```bash
-task red:multi:queue
+task red:multi:list
 ```
 
 Clear multi-agent Redis operation cache (drops ops/locks/status):
@@ -311,34 +311,34 @@ task ares:config:show
 
 ### Reports
 
-#### `task ares:reports:list`
+#### `task blue:reports:list`
 
 List all investigation reports.
 
 **Example:**
 
 ```bash
-task ares:reports:list
+task blue:reports:list
 ```
 
-#### `task ares:reports:latest`
+#### `task blue:reports:latest`
 
 Display the most recent investigation report.
 
 **Example:**
 
 ```bash
-task ares:reports:latest
+task blue:reports:latest
 ```
 
-#### `task ares:reports:clean`
+#### `task blue:reports:clean`
 
 Remove all investigation reports (prompts for confirmation).
 
 **Example:**
 
 ```bash
-task ares:reports:clean
+task blue:reports:clean
 ```
 
 ### Development
@@ -353,14 +353,14 @@ Show Ares version information.
 task ares:version
 ```
 
-#### `task ares:mitre:test`
+#### `task blue:mitre:test`
 
 Test MITRE ATT&CK data loading.
 
 **Example:**
 
 ```bash
-task ares:mitre:test
+task blue:mitre:test
 ```
 
 **Output:**
@@ -516,16 +516,16 @@ op item get "Dreadnode Claude" --fields api-key --reveal
 task ares:config:check
 
 # 2. Test MITRE data loading
-task ares:mitre:test
+task blue:mitre:test
 
 # 3. Run Blue Team agent in poll mode
 task blue:poll
 
 # 4. In another terminal, check reports
-task ares:reports:list
+task blue:reports:list
 
 # 5. View latest report
-task ares:reports:latest
+task blue:reports:latest
 ```
 
 ### Blue Team Production Workflow
@@ -556,7 +556,7 @@ EOF
 task blue:investigate ALERT=suspicious-activity.json
 
 # 3. View report
-task ares:reports:latest
+task blue:reports:latest
 ```
 
 ### Remote Dev Workflow

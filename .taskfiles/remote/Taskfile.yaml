@@ -552,12 +552,53 @@ tasks:
   # STATUS: Check pod status
   # ============================================================================
   status:
-    desc: "Show remote pod status"
+    desc: "Show remote pod status and infrastructure health"
     silent: true
     cmds:
       - |
         echo ""
-        echo -e "{{.INFO}} Pod Status in {{.K8S_NAMESPACE}}"
+        echo -e "{{.INFO}} Infrastructure Status: {{.K8S_NAMESPACE}}"
+        echo "========================================"
+
+        # Check namespace
+        if kubectl get namespace {{.K8S_NAMESPACE}} >/dev/null 2>&1; then
+          echo -e "{{.SUCCESS}} Namespace exists"
+        else
+          echo -e "{{.ERROR}} Namespace not found"
+        fi
+
+        # Check Redis
+        REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
+        if [ -n "$REDIS_POD" ]; then
+          if kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- redis-cli ping >/dev/null 2>&1; then
+            echo -e "{{.SUCCESS}} Redis responding"
+          else
+            echo -e "{{.ERROR}} Redis not responding"
+          fi
+        else
+          echo -e "{{.WARN}} No Redis pods found"
+        fi
+
+        echo ""
+        echo -e "{{.INFO}} Agent Pods"
+        echo "========================================"
+        for role in orchestrator recon cracker acl privesc lateral coercion; do
+          if [ "$role" = "orchestrator" ]; then
+            POD_COUNT=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -o name 2>/dev/null | wc -l | xargs)
+            STATUS=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
+          else
+            POD_COUNT=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role=$role -o name 2>/dev/null | wc -l | xargs)
+            STATUS=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role=$role -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
+          fi
+          if [ "$POD_COUNT" -gt 0 ]; then
+            echo -e "{{.SUCCESS}} $role: $POD_COUNT pod(s) - $STATUS"
+          else
+            echo -e "{{.WARN}} $role: No pods"
+          fi
+        done
+
+        echo ""
+        echo -e "{{.INFO}} All Pods"
         echo "========================================"
         kubectl get pods -n {{.K8S_NAMESPACE}} -o wide 2>/dev/null || echo -e "{{.ERROR}} Failed to get pods"
 

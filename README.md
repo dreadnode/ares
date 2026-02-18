@@ -130,8 +130,8 @@ task blue:once
 task blue:investigate ALERT=test-alerts/example-alert.json
 
 # View investigation reports
-task ares:reports:list        # List all reports
-task ares:reports:latest      # Show latest report
+task blue:reports:list        # List all reports
+task blue:reports:latest      # Show latest report
 ```
 
 **Available Tasks:**
@@ -144,10 +144,10 @@ task ares:reports:latest      # Show latest report
 | `task blue:investigate ALERT=<file>` | Investigate a specific alert from JSON file                  |
 | `task ares:config:check`             | Verify configuration and 1Password access                    |
 | `task ares:config:show`              | Display current configuration (no secrets)                   |
-| `task ares:reports:list`             | List all investigation reports                               |
-| `task ares:reports:latest`           | Show the most recent report                                  |
-| `task ares:reports:clean`            | Delete all reports (asks for confirmation)                   |
-| `task ares:mitre:test`               | Test MITRE ATT&CK data loading                               |
+| `task blue:reports:list`             | List all investigation reports                               |
+| `task blue:reports:latest`           | Show the most recent report                                  |
+| `task blue:reports:clean`            | Delete all reports (asks for confirmation)                   |
+| `task blue:mitre:test`               | Test MITRE ATT&CK data loading                               |
 
 See [Taskfile Usage Guide](docs/taskfile_usage.md) for detailed documentation.
 

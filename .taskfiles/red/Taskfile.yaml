@@ -268,19 +268,6 @@ tasks:
         fi
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops tasks $OP_ID_ARG $LATEST_FLAG --task-status {{.STATUS}} $ROLE_ARG
 
-  multi:list:
-    desc: "List multi-agent operations (usage: task red:multi:list [LATEST=true])"
-    silent: true
-    vars:
-      LATEST: '{{.LATEST | default ""}}'
-    cmds:
-      - |
-        LATEST_FLAG=""
-        if [ "{{.LATEST}}" = "true" ]; then
-          LATEST_FLAG="--latest"
-        fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops list $LATEST_FLAG
-
   multi:runtime:
     desc: "Show runtime for an operation (usage: task red:multi:runtime [OPERATION_ID=op-xxx] [LATEST=true])"
     silent: true
@@ -302,8 +289,8 @@ tasks:
         fi
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops runtime $OP_ID_ARG $LATEST_FLAG
 
-  multi:queue:
-    desc: "List multi-agent operations and state from the Redis queue"
+  multi:list:
+    desc: "List multi-agent operations and their state"
     silent: true
     cmds:
       - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops queue
@@ -863,51 +850,6 @@ tasks:
   # K8s Infrastructure Tasks
   # ===========================================================================
 
-  k8s:check:
-    desc: "Check Kubernetes infrastructure for multi-agent operations"
-    silent: true
-    cmds:
-      - |
-        echo "Checking Kubernetes infrastructure for multi-agent operations"
-        echo "=================================================================="
-        echo ""
-
-        # Check namespace
-        echo "Namespace: {{.K8S_NAMESPACE}}"
-        if kubectl get namespace {{.K8S_NAMESPACE}} >/dev/null 2>&1; then
-          echo "  Namespace exists"
-        else
-          echo "  Namespace not found"
-        fi
-        echo ""
-
-        # Check Redis
-        echo "Redis:"
-        REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
-        if [ -n "$REDIS_POD" ]; then
-          echo "  Redis pod found: $REDIS_POD"
-          kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- redis-cli ping 2>/dev/null && echo "  Redis responding" || echo "  Redis not responding"
-        else
-          echo "  No Redis pods found"
-        fi
-        echo ""
-
-        # Check agent pods
-        echo "Agent Pods:"
-        for role in recon cracker acl privesc lateral coercion; do
-          POD_COUNT=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role=$role -o name 2>/dev/null | wc -l | xargs)
-          if [ "$POD_COUNT" -gt 0 ]; then
-            STATUS=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role=$role -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
-            echo "  $role: $POD_COUNT pod(s) - $STATUS"
-          else
-            echo "  $role: No pods found"
-          fi
-        done
-        echo ""
-
-        echo "All pods in {{.K8S_NAMESPACE}}:"
-        kubectl get pods -n {{.K8S_NAMESPACE}} -o wide 2>/dev/null || echo "  Unable to list pods"
-
   # ===========================================================================
   # Replay Recording Tasks
   # ===========================================================================
@@ -1030,13 +972,3 @@ tasks:
 
         echo ""
         echo "Done."
-
-  redeploy:
-    desc: "Restart all red team deployments in the cluster"
-    silent: true
-    cmds:
-      - |
-        echo "Restarting red team workloads in namespace: {{.K8S_NAMESPACE}}"
-        kubectl rollout restart deployment -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team
-        kubectl rollout restart statefulset -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team
-        echo "Red team workloads restarted"
