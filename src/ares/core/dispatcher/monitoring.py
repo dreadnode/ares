@@ -808,6 +808,13 @@ class MonitoringMixin:
                     await self._checkpoint()
                     last_checkpoint = now
 
+                # Transfer thread-safe credential access signal to asyncio.Event
+                # This wakes up _auto_credential_access immediately instead of waiting 60s
+                if self._credential_access_requested.is_set():
+                    self._credential_access_requested.clear()
+                    self.signal_credential_access()
+                    logger.debug("Credential access signal transferred from threaded consumer")
+
                 # Process pending deferred tasks from threaded consumer
                 # These were queued because the threaded consumer can't access Redis directly
                 await self._process_pending_deferred_tasks()

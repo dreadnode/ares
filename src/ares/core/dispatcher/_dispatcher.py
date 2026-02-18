@@ -153,6 +153,10 @@ class RedTeamDispatcher(
         # Signal for threaded consumer to request immediate checkpoint
         self._checkpoint_requested = threading.Event()
 
+        # Thread-safe signal for credential access (asyncio.Event is not thread-safe)
+        # Threaded consumer sets this, maintenance loop transfers to asyncio.Event
+        self._credential_access_requested = threading.Event()
+
         # Pending deferred tasks from threaded consumer (processed by main loop)
         # This avoids event loop mismatch when enqueuing from non-main thread
         self._pending_deferred_tasks: list[tuple[str, str, dict, str, int]] = []

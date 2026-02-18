@@ -55,9 +55,12 @@ class PublishingMixin:
         added = self.shared_state.add_credential(credential, source_agent)
 
         if added:
-            # Only signal credential access from main thread - asyncio.Event is not thread-safe
+            # Signal credential access - use thread-safe event from non-main thread
             if threading.current_thread() is threading.main_thread():
                 self.signal_credential_access()
+            else:
+                # Thread-safe signal - maintenance loop will transfer to asyncio.Event
+                self._credential_access_requested.set()
             # Add timeline event for credential discovery
             import uuid
             from datetime import datetime, timezone
@@ -194,9 +197,12 @@ class PublishingMixin:
         added = self.shared_state.add_hash(hash_obj, source_agent)
 
         if added:
-            # Only signal credential access from main thread - asyncio.Event is not thread-safe
+            # Signal credential access - use thread-safe event from non-main thread
             if threading.current_thread() is threading.main_thread():
                 self.signal_credential_access()
+            else:
+                # Thread-safe signal - maintenance loop will transfer to asyncio.Event
+                self._credential_access_requested.set()
             # Add timeline event for hash discovery
             import uuid
             from datetime import datetime, timezone
