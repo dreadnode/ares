@@ -352,8 +352,8 @@ class MonitoringMixin:
         """Remove stale tasks from pending_tasks dict.
 
         This runs in the threaded consumer to ensure cleanup happens even when
-        the main event loop is blocked by LLM API timeouts. Uses the same 180s
-        timeout as the main loop since LLM API calls regularly take 60+ seconds.
+        the main event loop is blocked by LLM API timeouts. Uses the configured
+        stale_task_timeout (default 180s) since LLM API calls can take 60+ seconds.
 
         NOTE: This only updates in-memory state, not Redis. The main loop's
         _cleanup_stale_tasks handles Redis task ID cleanup when it's available.
@@ -362,7 +362,7 @@ class MonitoringMixin:
             return
 
         now = datetime.now(timezone.utc)
-        stale_timeout = 180  # Match main loop timeout - LLM calls can take 60+ seconds
+        stale_timeout = get_stale_task_timeout()  # Use config value
         stale_task_ids: list[str] = []
 
         # Count LLM tasks to determine if we're at hard cap

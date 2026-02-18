@@ -366,7 +366,7 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         rate_limit_backoff=operation.get("rate_limit_backoff", 30.0),
         rate_limit_threshold=operation.get("rate_limit_threshold", 3),
         # Task monitoring / resilience from operation section
-        stale_task_timeout=operation.get("stale_task_timeout", 600),
+        stale_task_timeout=operation.get("stale_task_timeout", 180),  # Match field default
         max_redis_consecutive_failures=operation.get("max_redis_consecutive_failures", 30),
         redis_retry_base_delay=operation.get("redis_retry_base_delay", 1.0),
         redis_retry_max_delay=operation.get("redis_retry_max_delay", 10.0),

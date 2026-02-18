@@ -1098,6 +1098,14 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
         except Exception:
             pass
 
+    completed_at_str = meta.get("completed_at")
+    completed_at = None
+    if completed_at_str:
+        try:
+            completed_at = datetime.fromisoformat(completed_at_str)
+        except Exception:
+            pass
+
     # Load target from meta if present
     target = None
     target_ip = meta.get("target_ip")
@@ -1130,6 +1138,8 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
     }
     if started_at is not None:
         kwargs["started_at"] = started_at
+    if completed_at is not None:
+        kwargs["completed_at"] = completed_at
     return SharedRedTeamState(**kwargs)
 
 
