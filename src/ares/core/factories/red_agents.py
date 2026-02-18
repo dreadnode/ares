@@ -234,7 +234,7 @@ def create_role_hooks(
             logger.info(f"🔧 [{log_name}] Tool: {event.tool_call.name}")
             dn.log_metric(f"multiagent_{log_name}_tool_{event.tool_call.name}", 1, mode="count")
 
-    async def log_tool_result(event: ToolEnd) -> Reaction | None:  # noqa: PLR0912
+    async def log_tool_result(event: ToolEnd) -> Reaction | None:
         """Log tool results and apply circuit breaker for repeated failures."""
         if not isinstance(event, ToolEnd):
             return None
@@ -642,7 +642,7 @@ def create_role_hooks(
                         f"📡 [{log_name}] Published delegation discovery: "
                         f"{deleg.get('account')} ({deleg.get('delegation_type')})"
                     )
-                except Exception as e:  # noqa: PERF203
+                except Exception as e:
                     logger.warning(f"Failed to publish delegation discovery: {e}")
 
             return
@@ -711,7 +711,7 @@ def create_role_hooks(
                         logger.info(
                             f"📡 [{log_name}] Published hash: {h.domain}\\{h.username} ({h.hash_type})"
                         )
-                    except Exception as e:  # noqa: PERF203
+                    except Exception as e:
                         logger.warning(f"Failed to publish hash discovery: {e}")
 
             # Extract and publish credentials
@@ -730,7 +730,7 @@ def create_role_hooks(
                             source_agent=log_name,
                         )
                         logger.info(f"📡 [{log_name}] Published credential: {username}")
-                    except Exception as e:  # noqa: PERF203
+                    except Exception as e:
                         logger.warning(f"Failed to publish credential discovery: {e}")
 
             return
@@ -747,7 +747,7 @@ def create_role_hooks(
     if role in vuln_extraction_roles:
         import re
 
-        async def publish_vulnerability_discoveries(event: ToolEnd) -> None:  # noqa: PLR0912
+        async def publish_vulnerability_discoveries(event: ToolEnd) -> None:
             """Extract and publish vulnerability discoveries from tool output."""
             if not isinstance(event, ToolEnd):
                 return
@@ -937,7 +937,7 @@ def create_role_hooks(
     return hooks
 
 
-def create_specialized_agent(  # noqa: PLR0912
+def create_specialized_agent(
     role: AgentRole,
     model: str,
     shared_state: SharedRedTeamState,
@@ -983,7 +983,7 @@ def create_specialized_agent(  # noqa: PLR0912
     for cls in ALL_TOOLSETS:
         try:
             toolset = cls()
-            # Set shared state on toolset (all toolsets accept AnyRedTeamState)
+            # Set shared state on toolset
             if hasattr(toolset, "set_state"):
                 toolset.set_state(shared_state)
             if hasattr(toolset, "set_dispatcher"):
@@ -1001,7 +1001,7 @@ def create_specialized_agent(  # noqa: PLR0912
                     f"[{role.value}] Added {cls.__name__} with "
                     f"{len(filtered.get_tools())} enabled tools"
                 )
-        except Exception as e:  # noqa: PERF203
+        except Exception as e:
             logger.warning(f"Failed to initialize toolset {cls.__name__}: {e}")
 
     # Add universal toolsets (not capability-filtered)
@@ -1013,7 +1013,7 @@ def create_specialized_agent(  # noqa: PLR0912
             if hasattr(toolset, "set_dispatcher"):
                 toolset.set_dispatcher(dispatcher)
             tools.append(toolset)
-        except Exception as e:  # noqa: PERF203
+        except Exception as e:
             logger.warning(f"Failed to initialize universal toolset {cls.__name__}: {e}")
 
     # Add role-specific callback tools (not capability-filtered)
@@ -1026,7 +1026,7 @@ def create_specialized_agent(  # noqa: PLR0912
             if hasattr(toolset, "set_dispatcher"):
                 toolset.set_dispatcher(dispatcher)
             tools.append(toolset)
-        except Exception as e:  # noqa: PERF203
+        except Exception as e:
             logger.warning(f"Failed to initialize callback toolset {cls.__name__}: {e}")
 
     # Add additional tools

@@ -63,7 +63,7 @@ async def offload_large_output(
 
     # Generate storage key
     content_hash = _hash_content(output)
-    redis_key = f"ares:operation:{operation_id}:output:{task_id}:{content_hash}"
+    redis_key = f"ares:op:{operation_id}:output:{task_id}:{content_hash}"
 
     # Store full output in Redis
     await redis.set(redis_key, output, ex=get_offload_ttl())
@@ -105,7 +105,7 @@ async def retrieve_offloaded_output(
         Full output text, or None if not found
     """
     # Search for keys matching this task
-    pattern = f"ares:operation:{operation_id}:output:{task_id}:*"
+    pattern = f"ares:op:{operation_id}:output:{task_id}:*"
     keys = []
     async for key in redis.scan_iter(pattern):
         keys.append(key)
@@ -281,7 +281,7 @@ class ContextOffloader:
             if was_offloaded:
                 self._offloaded_tasks.add(task_id)
                 processed["_full_output_available"] = True
-                processed["_offloaded_key"] = f"ares:operation:{self.operation_id}:output:{task_id}"
+                processed["_offloaded_key"] = f"ares:op:{self.operation_id}:output:{task_id}"
 
                 # Keep summary in output field
                 processed["output"] = summary

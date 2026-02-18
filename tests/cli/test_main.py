@@ -13,7 +13,6 @@ from ares.main import (
     app,
     investigate_alert,
     main,
-    redteam,
     version,
 )
 
@@ -328,78 +327,6 @@ class TestInvestigateAlertCommand:
             await investigate_alert(str(alert_file), args=args)
 
             mock_orchestrator.investigate.assert_called_once()
-
-
-class TestRedteamCommand:
-    """Tests for redteam command."""
-
-    @pytest.mark.asyncio
-    async def test_redteam_success(self, tmp_path: Path):
-        """Test redteam command executes successfully."""
-        with (
-            patch("ares.main.dn.configure"),
-            patch("ares.agents.red.RedTeamOrchestrator") as mock_orchestrator_class,
-            patch("ares.integrations.mitre.MITREAttackClient") as mock_mitre_class,
-        ):
-            mock_mitre = MagicMock()
-            mock_mitre.load = AsyncMock()
-            mock_mitre._techniques = {}
-            mock_mitre._tactics = {}
-            mock_mitre_class.return_value = mock_mitre
-
-            mock_orchestrator = MagicMock()
-            mock_orchestrator.execute_operation = AsyncMock(
-                return_value={
-                    "status": "completed",
-                    "host_count": 5,
-                    "credential_count": 3,
-                    "admin_count": 1,
-                    "has_domain_admin": False,
-                    "has_golden_ticket": False,
-                    "report_path": str(tmp_path / "redteam.md"),
-                }
-            )
-            mock_orchestrator_class.return_value = mock_orchestrator
-
-            args = Args(model="test-model", report_dir=str(tmp_path))
-
-            await redteam("192.168.58.100", args=args)
-
-            mock_orchestrator.execute_operation.assert_called_once_with("192.168.58.100")
-
-    @pytest.mark.asyncio
-    async def test_redteam_domain_admin_achieved(self, tmp_path: Path):
-        """Test redteam logs domain admin achievement."""
-        with (
-            patch("ares.main.dn.configure"),
-            patch("ares.agents.red.RedTeamOrchestrator") as mock_orchestrator_class,
-            patch("ares.integrations.mitre.MITREAttackClient") as mock_mitre_class,
-        ):
-            mock_mitre = MagicMock()
-            mock_mitre.load = AsyncMock()
-            mock_mitre._techniques = {}
-            mock_mitre._tactics = {}
-            mock_mitre_class.return_value = mock_mitre
-
-            mock_orchestrator = MagicMock()
-            mock_orchestrator.execute_operation = AsyncMock(
-                return_value={
-                    "status": "completed",
-                    "host_count": 10,
-                    "credential_count": 5,
-                    "admin_count": 2,
-                    "has_domain_admin": True,
-                    "has_golden_ticket": True,
-                    "report_path": str(tmp_path / "redteam.md"),
-                }
-            )
-            mock_orchestrator_class.return_value = mock_orchestrator
-
-            args = Args(model="test-model", report_dir=str(tmp_path))
-
-            await redteam("192.168.58.100", args=args)
-
-            mock_orchestrator.execute_operation.assert_called_once()
 
 
 class TestAppObject:

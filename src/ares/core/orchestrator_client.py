@@ -97,7 +97,7 @@ async def submit_operation(
         # Store env_vars separately to avoid exposing secrets in the main queue
         # The orchestrator will read and delete this key when processing
         if env_vars:
-            env_vars_key = f"ares:operation:{operation_id}:env_vars"
+            env_vars_key = f"ares:op:{operation_id}:env_vars"
             await task_queue._client.set(env_vars_key, json.dumps(env_vars))
             # Set TTL of 1 hour in case operation is never processed
             await task_queue._client.expire(env_vars_key, 3600)
@@ -156,7 +156,7 @@ async def wait_for_operation_completion(
         if not task_queue._client:
             raise RuntimeError("Redis connection not established")
 
-        status_key = f"ares:operations:{operation_id}:status"
+        status_key = f"ares:op:{operation_id}:status"
         start_time = asyncio.get_event_loop().time()
 
         while True:
@@ -211,7 +211,7 @@ async def get_operation_status(
         if not task_queue._client:
             raise RuntimeError("Redis connection not established")
 
-        status_key = f"ares:operations:{operation_id}:status"
+        status_key = f"ares:op:{operation_id}:status"
         status_json = await task_queue.redis.get(status_key)
 
         if status_json:

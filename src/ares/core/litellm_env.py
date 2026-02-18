@@ -9,11 +9,17 @@ def configure_litellm_env() -> None:
     """Set safe LiteLLM defaults for long-running multi-agent operations.
 
     Configures:
+    - Disable telemetry to prevent LoggingWorker timeouts
     - Logging worker timeout to reduce noise
     - Retry logic for rate limit errors (critical for multi-agent systems)
     - Request timeout for long-running operations
     """
-    # Reduce logging worker timeout noise
+    # Disable LiteLLM telemetry to prevent LoggingWorker TimeoutError noise.
+    # LiteLLM's default telemetry can timeout when network is slow/blocked,
+    # causing noisy errors in logging_worker.py:_process_log_task.
+    os.environ.setdefault("LITELLM_TELEMETRY", "false")
+
+    # Reduce logging worker timeout noise (for any remaining callbacks)
     os.environ.setdefault("LOGGING_WORKER_MAX_TIME_PER_COROUTINE", "60")
 
     # Rate limit retry configuration - critical for multi-agent systems

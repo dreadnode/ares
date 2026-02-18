@@ -116,7 +116,7 @@ def _is_child_domain(child_domain: str, parent_domain: str) -> bool:
     return child_domain.endswith(f".{parent_domain}")
 
 
-async def credential_expansion_loop(  # noqa: PLR0912
+async def credential_expansion_loop(
     dispatcher: RedTeamDispatcher,
     max_iterations: int = 10,
     delay_between_tests: float = 5.0,
@@ -211,11 +211,17 @@ async def credential_expansion_loop(  # noqa: PLR0912
                         domain=domain_override,
                     )
 
-                    if task_id:
+                    if task_id and task_id != "deferred":
                         tasks_dispatched.append(task_id)
                         new_tests += 1
                         logger.debug(
                             f"Dispatched lateral test: {domain_override}\\{cred.username} -> {host.ip}"
+                        )
+                    elif task_id == "deferred":
+                        # Task queued to deferred queue - count it but don't wait for it
+                        new_tests += 1
+                        logger.debug(
+                            f"Deferred lateral test: {domain_override}\\{cred.username} -> {host.ip}"
                         )
 
                     tracker.mark_tested(test_cred, host)
@@ -237,7 +243,7 @@ async def credential_expansion_loop(  # noqa: PLR0912
                 if result.get("success"):
                     # Find the credential/host pair and mark as successful
                     logger.success(f"Task {task_id} succeeded")
-            except asyncio.TimeoutError:  # noqa: PERF203
+            except asyncio.TimeoutError:
                 logger.warning(f"Task {task_id} timed out (45s) - continuing with next")
 
         iterations += 1
@@ -251,7 +257,7 @@ async def credential_expansion_loop(  # noqa: PLR0912
     return tracker
 
 
-async def exploitation_workflow(  # noqa: PLR0912
+async def exploitation_workflow(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 10.0,
     max_runtime: float = 7200.0,  # 2 hours default
@@ -276,19 +282,17 @@ async def exploitation_workflow(  # noqa: PLR0912
     Returns:
         Summary of exploitation results
     """
-    from ares.core.messages import (
-        DomainAdminAchieved,
-    )
-
     start_time = asyncio.get_event_loop().time()
     exploited_count = 0
     credentials_gained = 0
 
-    # Track failures by vuln_type to skip stuck exploits
-    failure_counts: dict[str, int] = {}
-    max_failures_per_type = 3
+    # Failure tracking is now persisted to Redis via dispatcher methods:
+    # - dispatcher.increment_vuln_type_failure(vuln_type) - increment on failure
+    # - dispatcher.is_vuln_type_exhausted(vuln_type) - check if should skip
+    # This survives orchestrator restarts and prevents infinite retry loops.
 
     # Track retry counts per vulnerability (prevent infinite retry loops)
+    # Note: Per-vuln retries are also tracked in ZSET via failure_count field
     retry_counts: dict[str, int] = {}
     max_retries_per_vuln = 2  # Allow 2 retries (3 total attempts)
 
@@ -377,14 +381,9 @@ async def exploitation_workflow(  # noqa: PLR0912
 
             exploited_count += 1
 
-            # Track failures by type
+            # Track failures by type (persisted to Redis)
             if not result.get("success"):
-                failure_counts[vuln_type] = failure_counts.get(vuln_type, 0) + 1
-                if failure_counts[vuln_type] >= max_failures_per_type:
-                    logger.warning(
-                        f"{vuln_type} has failed {max_failures_per_type} times - "
-                        f"will skip remaining {vuln_type} vulns"
-                    )
+                await dispatcher.increment_vuln_type_failure(vuln_type)
 
             # If exploitation yielded credentials, trigger expansion
             result_payload: dict[str, Any] | None = None
@@ -424,19 +423,7 @@ async def exploitation_workflow(  # noqa: PLR0912
                 await asyncio.gather(*active_tasks, return_exceptions=True)
                 active_tasks.clear()
 
-            # Broadcast DA achieved (in-memory broadcast to local agents)
-            await dispatcher._broadcast(
-                DomainAdminAchieved(
-                    source_agent="exploitation_workflow",
-                    username="",  # Will be filled from state
-                    domain=state.target.domain if state.target else "",
-                    attack_path=state.domain_admin_path or "Unknown path",
-                    credential_type="credential",
-                )
-            )
-
-            # Announce operation complete - this broadcasts to local agents AND
-            # sets Redis status key so remote workers detect completion
+            # Announce operation complete - sets Redis status key so workers detect completion
             await dispatcher.announce_operation_complete(
                 source_agent="exploitation_workflow",
                 success=True,
@@ -473,16 +460,19 @@ async def exploitation_workflow(  # noqa: PLR0912
                 logger.debug(f"Skipping {vuln_id} - already in-flight")
                 continue
 
-            # Skip vulnerability types that have failed too many times
-            if failure_counts.get(vuln_type, 0) >= max_failures_per_type:
+            # Skip vulnerability types that have failed too many times (persisted check)
+            if await dispatcher.is_vuln_type_exhausted(vuln_type):
+                from ares.core.config import get_max_vulnerability_failures
+
+                max_failures = get_max_vulnerability_failures()
                 logger.warning(
-                    f"Skipping {vuln_type} - failed {max_failures_per_type} times, moving to next"
+                    f"Skipping {vuln_type} - failed {max_failures} times, moving to next"
                 )
                 dispatcher.shared_state.mark_exploited(vuln["id"])
                 await dispatcher.mark_vulnerability_exploited(
                     vuln["id"],
                     success=False,
-                    result={"error": f"Skipped: {vuln_type} failed {max_failures_per_type} times"},
+                    result={"error": f"Skipped: {vuln_type} failed {max_failures} times"},
                 )
                 continue
 
@@ -642,7 +632,9 @@ async def _exploit_vulnerability(
 
     vuln_type = vuln["type"]
     target = vuln["target"]
-    details = vuln.get("details", {})
+    # Defensive: ensure details is a dict (may be string from improper serialization)
+    raw_details = vuln.get("details", {})
+    details = raw_details if isinstance(raw_details, dict) else {}
 
     async def dispatch_exploit() -> str:
         return await _dispatch_exploit(dispatcher, vuln_type, vuln["id"], target, details)
@@ -672,6 +664,12 @@ async def _exploit_vulnerability(
     if not task_id:
         logger.warning(f"Failed to dispatch exploitation for {vuln_type}")
         return {"success": False, "error": "Failed to dispatch task"}
+
+    # Task was queued to deferred queue - will be processed by background processor
+    # Return success so workflow moves on (don't wait for a non-existent task ID)
+    if task_id == "deferred":
+        logger.info(f"Exploit task for {vuln_type} deferred to background queue")
+        return {"success": True, "deferred": True}
 
     # Wait for task completion with periodic DA checks
     # Uses chunked waits to detect DA achievement and abandon stale tasks early

@@ -276,6 +276,7 @@ class RedisWorkerAgent:
                     "os": h.os,
                     "roles": list(h.roles) if h.roles else [],
                     "services": list(h.services) if h.services else [],
+                    "is_dc": h.is_dc,
                 }
                 for h in self.shared_state.all_hosts
             ]
@@ -444,7 +445,7 @@ class RedisWorkerAgent:
                 # Reset retry delay on successful poll
                 retry_delay = 1.0
 
-            except asyncio.CancelledError:  # noqa: PERF203
+            except asyncio.CancelledError:
                 break
             except (AuthenticationError, ConfigurationError, CriticalWorkerError) as e:
                 # Fatal errors that should stop the worker immediately
@@ -491,7 +492,7 @@ class RedisWorkerAgent:
                     await asyncio.sleep(5)
                     retry_delay = 1.0  # Reset backoff for non-connection errors
 
-    async def _process_task(self, task: TaskMessage) -> None:  # noqa: PLR0912
+    async def _process_task(self, task: TaskMessage) -> None:
         """Process a task from the Redis queue."""
         self._current_task = task.task_id
         started_at = datetime.now(timezone.utc).isoformat()
@@ -624,9 +625,24 @@ class RedisWorkerAgent:
                     f"[{self.agent_name}] ⏱️ Task {task.task_id} timed out after "
                     f"{agent_timeout}s - agent stuck in retry loop"
                 )
+                # Preserve any discoveries made before timeout (e.g., nmap found hosts)
+                timeout_payload: dict[str, Any] = {
+                    "output": "",
+                    "task_type": task.task_type,
+                }
+                state_discoveries = self._serialize_state_discoveries()
+                if state_discoveries:
+                    timeout_payload.update(state_discoveries)
+                    logger.info(
+                        f"[{self.agent_name}] Preserving state from timed-out task: "
+                        f"{len(state_discoveries.get('discovered_hosts', []))} hosts, "
+                        f"{len(state_discoveries.get('discovered_credentials', []))} creds, "
+                        f"{len(state_discoveries.get('discovered_hashes', []))} hashes"
+                    )
                 await self.task_queue.send_result(
                     task_id=task.task_id,
                     success=False,
+                    result=timeout_payload if state_discoveries else None,
                     error=f"Task timeout: agent exceeded {agent_timeout}s limit",
                     worker_pod=self.pod_name,
                     agent_name=self.agent_name,
@@ -873,11 +889,24 @@ class RedisWorkerAgent:
                 self._state_refresh_client = await create_redis_client(
                     self.redis_url, decode_responses=False
                 )
-            key = f"ares:operation:{self.operation_id}:state"
-            data = await self._state_refresh_client.get(key)
-            if not data:
-                return
-            fresh = SharedRedTeamState.from_bytes(data)
+
+            from ares.core.state_backend import RedisStateBackend
+
+            backend = RedisStateBackend(self._state_refresh_client, self.operation_id)
+            fresh = SharedRedTeamState(operation_id=self.operation_id)
+
+            # Load collections from Redis backend
+            fresh.all_credentials.extend(await backend.get_credentials())
+            fresh.all_hashes.extend(await backend.get_hashes())
+            fresh.all_hosts.extend(await backend.get_hosts())
+            fresh.all_users.extend(await backend.get_users())
+            fresh.all_shares.extend(await backend.get_shares())
+            fresh.all_domains.extend(await backend.get_domains())
+            fresh.has_domain_admin, fresh.domain_admin_path = await backend.get_domain_admin()
+            fresh.has_golden_ticket = await backend.get_golden_ticket()
+            # Load DC map for child domain resolution
+            fresh.domain_controllers.update(await backend.get_all_dcs())
+
             self._merge_shared_state(fresh)
         except Exception as e:
             logger.debug(f"[{self.agent_name}] Failed to refresh shared state: {e}")
@@ -918,6 +947,7 @@ class RedisWorkerAgent:
             "target",
             "started_at",
             "all_domains",
+            "domain_controllers",
             "all_credentials",
             "all_hashes",
             "all_hosts",
@@ -936,8 +966,18 @@ class RedisWorkerAgent:
             "operation_timeline",
             "identified_techniques",
             "pending_credential_findings",
+            # Reset scanned_targets to prevent false "already scanned" skips
+            # This set is not persisted to Redis, so we reset it on each refresh
+            "scanned_targets",
         ):
             setattr(current, attr, getattr(fresh, attr))
+
+        # Populate weakness dedup keys from the merged weakness list
+        # This is critical to prevent duplicate weakness recording across workers
+        current._weakness_dedup_keys.clear()
+        for weakness in current.all_weaknesses:
+            dedup_key = current._extract_weakness_dedup_key(weakness)
+            current._weakness_dedup_keys.add(dedup_key)
 
         # Re-add local discoveries that may not be in the fresh state yet.
         # This preserves discoveries made during the current task before they're
@@ -953,8 +993,7 @@ class RedisWorkerAgent:
         for user in local_users:
             current.add_user(user.username, user.domain, user.source)
         for weakness in local_weaknesses:
-            if weakness not in current.all_weaknesses:
-                current.all_weaknesses.append(weakness)
+            current.add_weakness(weakness)  # Uses normalized dedup
 
         # Merge dynamic tracking attributes (set via object.__setattr__)
         # These track queried hosts and tested credentials to avoid duplicates
@@ -995,8 +1034,11 @@ class RedisWorkerAgent:
         hash_type = (payload.get("hash_type") or "").upper()
         username = payload.get("username", "")
         domain = payload.get("domain", "")
-        wordlist_path = self._resolve_wordlist_path(
-            payload.get("wordlist") or "/usr/share/wordlists/rockyou.txt"
+        # Only use explicit wordlist if specified; otherwise pass None to use DEFAULT_WORDLISTS
+        # which includes rockyou.txt AND SecLists for better coverage
+        explicit_wordlist = payload.get("wordlist")
+        wordlist_path = (
+            self._resolve_wordlist_path(explicit_wordlist) if explicit_wordlist else None
         )
 
         # Skip if password is already known for this user
@@ -1556,7 +1598,7 @@ class RedisWorkerAgent:
             loop.close()
             logger.debug(f"Heartbeat thread stopped for {self.agent_name}")
 
-    def _threaded_state_subscriber_loop(self) -> None:  # noqa: PLR0912
+    def _threaded_state_subscriber_loop(self) -> None:
         """Subscribe to Redis pub/sub for real-time state updates from orchestrator.
 
         When the orchestrator checkpoints state changes (new credentials, hosts, etc.),
@@ -1617,7 +1659,7 @@ class RedisWorkerAgent:
                     # Reset retry delay on success
                     retry_delay = 1.0
 
-                except Exception as e:  # noqa: PERF203
+                except Exception as e:
                     error_str = str(e).lower()
                     is_connection_error = any(
                         keyword in error_str
@@ -1691,11 +1733,23 @@ class RedisWorkerAgent:
         if not self.operation_id:
             return
         try:
-            key = f"ares:operation:{self.operation_id}:state"
-            data = await redis_client.get(key)
-            if not data:
-                return
-            fresh = SharedRedTeamState.from_bytes(data)
+            from ares.core.state_backend import RedisStateBackend
+
+            backend = RedisStateBackend(redis_client, self.operation_id)
+            fresh = SharedRedTeamState(operation_id=self.operation_id)
+
+            # Load collections from Redis backend
+            fresh.all_credentials.extend(await backend.get_credentials())
+            fresh.all_hashes.extend(await backend.get_hashes())
+            fresh.all_hosts.extend(await backend.get_hosts())
+            fresh.all_users.extend(await backend.get_users())
+            fresh.all_shares.extend(await backend.get_shares())
+            fresh.all_domains.extend(await backend.get_domains())
+            fresh.has_domain_admin, fresh.domain_admin_path = await backend.get_domain_admin()
+            fresh.has_golden_ticket = await backend.get_golden_ticket()
+            # Load DC map for child domain resolution
+            fresh.domain_controllers.update(await backend.get_all_dcs())
+
             self._merge_shared_state(fresh)
         except Exception as e:
             logger.debug(f"[{self.agent_name}] Failed to fetch/merge state: {e}")
@@ -1804,16 +1858,10 @@ class WorkerAgent:
                     if await self._check_for_pointer_switch():
                         return
 
-                # Poll for messages
-                messages = await self.dispatcher.get_messages(self.agent_name, timeout=1.0)
-
-                for msg in messages:
-                    await self._handle_message(msg)
-
                 # Small sleep to prevent busy-waiting
                 await asyncio.sleep(0.5)
 
-            except asyncio.CancelledError:  # noqa: PERF203
+            except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Worker loop error: {e}")
@@ -2033,7 +2081,7 @@ class WorkerAgent:
             logger.debug(f"Heartbeat thread stopped for {self.agent_name}")
 
 
-async def run_worker(  # noqa: PLR0912
+async def run_worker(
     role: AgentRole,
     operation_id: str | None = None,
     redis_url: str | None = None,

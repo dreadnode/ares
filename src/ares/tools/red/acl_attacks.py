@@ -10,11 +10,8 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
-from ares.core.models import Hash
-from ares.tools.red.common import (
-    AnyRedTeamState,
-    run_tool,
-)
+from ares.core.models import Hash, SharedRedTeamState
+from ares.tools.red.common import run_tool
 
 
 class ACLExploitTools(Toolset):
@@ -24,9 +21,9 @@ class ACLExploitTools(Toolset):
     permissions, use these tools to exploit them.
     """
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -877,12 +874,10 @@ class ACLExploitTools(Toolset):
             if "success" in result.lower() or returncode == 0:
                 logger.info(f"[+] AdminSDHolder backdoor planted for {principal}!")
 
-                # Store backdoor in state for persistence tracking
-                if self.state and hasattr(self.state, "adminsd_holder_backdoors"):
+                # Store backdoor in state for persistence tracking (persisted to Redis)
+                if self.state and hasattr(self.state, "add_adminsd_backdoor"):
                     backdoor_key = f"{domain.lower()}:{principal.lower()}"
-                    if backdoor_key not in self.state.adminsd_holder_backdoors:
-                        self.state.adminsd_holder_backdoors.append(backdoor_key)
-                        logger.info(f"[+] AdminSDHolder backdoor tracked in state: {backdoor_key}")
+                    self.state.add_adminsd_backdoor(backdoor_key)
 
                 return (
                     f"✅ AdminSDHolder backdoor planted!\n"

@@ -17,7 +17,6 @@ from loguru import logger
 from ares.core.models import Hash, SharedRedTeamState
 from ares.tools.red.common import (
     PLACEHOLDER_PASSWORDS,
-    AnyRedTeamState,
     check_port,
     get_credential_context,
     resolve_password,
@@ -34,9 +33,9 @@ class LateralMovementTools(Toolset):
 
     _PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = PLACEHOLDER_PASSWORDS
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -665,9 +664,7 @@ class LateralMovementTools(Toolset):
         except Exception as e:
             return f"Kerberos secretsdump failed: {e}"
 
-    def _extract_ntlm_hashes_to_state(  # noqa: PLR0912
-        self, output: str, domain: str
-    ) -> None:
+    def _extract_ntlm_hashes_to_state(self, output: str, domain: str) -> None:
         """Extract NTLM hashes from secretsdump output and add to state immediately.
 
         This triggers real-time Redis checkpoint so the orchestrator sees hashes
@@ -1092,9 +1089,9 @@ class MSSQLTools(Toolset):
     and lateral movement through linked servers.
     """
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 

@@ -14,10 +14,9 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
-from ares.core.models import Credential
+from ares.core.models import Credential, SharedRedTeamState
 from ares.tools.red.common import (
     PLACEHOLDER_PASSWORDS,
-    AnyRedTeamState,
     add_credential_to_state,
     fetch_remote_file,
     resolve_password,
@@ -29,11 +28,11 @@ from ares.tools.red.common import (
 class SharePilferingTools(Toolset):
     """Tools for searching SMB shares for sensitive files and credentials."""
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
     dispatcher: Any | None = None
     _PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = PLACEHOLDER_PASSWORDS
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -65,10 +64,10 @@ class SharePilferingTools(Toolset):
             source=source,
             is_admin=is_admin,
         )
-        add_credential_to_state(self.state, cred, "credential_access", self.dispatcher)
+        add_credential_to_state(self.state, cred, "credential_access")
 
     @dn.tool_method
-    def smbclient_spider(  # noqa: PLR0912
+    def smbclient_spider(
         self,
         target: str,
         share: str,
@@ -260,7 +259,7 @@ class SharePilferingTools(Toolset):
                             else "",
                             source=f"share_spider:{share_name}/{file_path}",
                         )
-                        add_credential_to_state(self.state, cred, "share_spider", self.dispatcher)
+                        add_credential_to_state(self.state, cred, "share_spider")
 
     @dn.tool_method
     def gpp_password_finder(
@@ -327,7 +326,7 @@ class SharePilferingTools(Toolset):
             return f"GPP password search failed: {e}"
 
     @dn.tool_method
-    def sysvol_script_search(  # noqa: PLR0912
+    def sysvol_script_search(
         self,
         target: str,
         username: str,

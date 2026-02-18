@@ -50,12 +50,12 @@ async def test_submit_operation_uses_env_model_and_env_vars(monkeypatch):
     # env_vars should be stored in a separate Redis key
     fake_queue._client.set.assert_awaited_once()
     set_call = fake_queue._client.set.call_args
-    assert set_call.args[0] == "ares:operation:op-1:env_vars"
+    assert set_call.args[0] == "ares:op:op-1:env_vars"
     env_vars_payload = json.loads(set_call.args[1])
     assert env_vars_payload == {"OPENAI_API_KEY": "test-key"}  # pragma: allowlist secret
 
     # Should set TTL on the env_vars key
-    fake_queue._client.expire.assert_awaited_once_with("ares:operation:op-1:env_vars", 3600)
+    fake_queue._client.expire.assert_awaited_once_with("ares:op:op-1:env_vars", 3600)
 
 
 @pytest.mark.asyncio

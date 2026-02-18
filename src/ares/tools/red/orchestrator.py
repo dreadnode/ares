@@ -13,8 +13,6 @@ import dreadnode as dn
 from dreadnode.agent.tools import Toolset
 from loguru import logger
 
-from ares.core.config import get_default_network_interface
-
 
 def _ip_in_targets(ip: str, targets: list[str]) -> bool:
     """Check if IP falls within any target range (individual IP or CIDR)."""
@@ -193,27 +191,25 @@ class OrchestratorTools(Toolset):
 
         techniques = technique_map.get(task_type, [task_type])
 
-        # Deduplicate network scans: skip if hosts already discovered in target range
+        # Deduplicate network scans: use scanned_targets as the authoritative check.
+        # The previous "hosts with services" check was too aggressive - SMB sweep adds
+        # a single service ("445/tcp smb") which caused nmap to be skipped entirely.
+        # Only scanned_targets is set when nmap actually completes successfully.
         if task_type == "network_scan" and target_ips:
-            # Primary check: hosts with services IN THE REQUESTED RANGE
-            hosts_in_range = [
-                h
-                for h in self.shared_state.all_hosts
-                if h.services and _ip_in_targets(h.ip, target_ips)
-            ]
-            if hosts_in_range:
-                return (
-                    f"✓ Network scan already complete for this range. "
-                    f"{len(hosts_in_range)} hosts with services found. "
-                    f"No new nmap scan needed."
-                )
-
-            # Secondary check: scanned_targets tracking (for individual IPs)
             already_scanned = set(self.shared_state.scanned_targets)
             unscanned = [ip for ip in target_ips if ip not in already_scanned]
             if not unscanned:
+                # All targets have been scanned by nmap
+                hosts_with_services = len(
+                    [
+                        h
+                        for h in self.shared_state.all_hosts
+                        if h.services and len(h.services) > 1 and _ip_in_targets(h.ip, target_ips)
+                    ]
+                )
                 return (
-                    f"✓ All targets in scanned_targets ({len(target_ips)} targets). "
+                    f"✓ All {len(target_ips)} targets in scanned_targets. "
+                    f"{hosts_with_services} hosts with multiple services found. "
                     f"No new nmap scan needed."
                 )
             if len(unscanned) < len(target_ips):
@@ -346,8 +342,7 @@ class OrchestratorTools(Toolset):
             "secretsdump": ["secretsdump"],
             "kerberoast": ["kerberoast"],
             "asrep_roast": ["asrep_roast"],
-            "lsassy": ["lsassy"],
-            "share_spider": ["share_spider"],
+            "share_spider": ["smbclient_spider"],
         }
 
         techniques = technique_map.get(task_type, [task_type])
@@ -789,16 +784,16 @@ class OrchestratorTools(Toolset):
             ...     duration=600
             ... )
         """
-        # Auto-detect interface if not specified (handles AWS ens5 vs eth0)
-        if interface is None:
-            interface = get_default_network_interface()
-            logger.debug(f"Auto-detected network interface: {interface}")
+        # NOTE: Do NOT detect interface here on the orchestrator side.
+        # Pass empty string and let the coercion worker detect the interface locally,
+        # since the orchestrator pod doesn't have hostNetwork and would fall back to eth0.
+        # The worker pod has hostNetwork: true and can detect the correct interface (ens5).
 
         tech_list = [t.strip() for t in techniques.split(",")]
 
         task_id = await self.dispatcher.request_coercion(
             source_agent=self._agent_name,
-            interface=interface,
+            interface=interface or "",  # Let worker auto-detect
             techniques=tech_list,
             duration=duration,
         )
@@ -976,7 +971,7 @@ class OrchestratorTools(Toolset):
         return result
 
     @dn.tool_method
-    async def cleanup_orphaned_tasks(  # noqa: PLR0912
+    async def cleanup_orphaned_tasks(
         self,
         task_ids: list[str] | None = None,
         force: bool = False,

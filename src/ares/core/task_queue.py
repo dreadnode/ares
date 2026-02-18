@@ -6,6 +6,7 @@ Replaces in-memory asyncio.Queue with Redis Lists for cross-pod messaging.
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -111,19 +112,31 @@ class RedisTaskQueue:
         return self._client
 
     async def connect(self) -> None:
-        """Connect to Redis."""
+        """Connect to Redis.
+
+        When called from a non-main thread (e.g., threaded result consumer),
+        uses direct connection to avoid SentinelConnectionPool's cross-loop
+        Future issues.
+        """
         if self._connected:
             return
+
+        # Use direct connection when in a non-main thread to avoid
+        # SentinelConnectionPool's async state being shared across event loops
+        is_main_thread = threading.current_thread() is threading.main_thread()
+        direct_connection = not is_main_thread
 
         try:
             self._client = await create_redis_client(
                 self.redis_url,
                 decode_responses=True,  # Auto-decode to strings
+                direct_connection=direct_connection,
             )
             await self._client.ping()
             self._connected = True
             if get_redis_sentinel_config():
-                logger.info("TaskQueue connected to Redis via Sentinel")
+                conn_type = "direct" if direct_connection else "via Sentinel"
+                logger.info(f"TaskQueue connected to Redis {conn_type}")
             else:
                 logger.info(f"TaskQueue connected to Redis at {self.redis_url}")
 
@@ -313,6 +326,53 @@ class RedisTaskQueue:
             return None
 
         return TaskResult.model_validate_json(data)
+
+    async def check_results_batch(self, task_ids: list[str]) -> dict[str, TaskResult | None]:
+        """
+        Batch check for task results using Redis pipeline.
+
+        This is significantly faster than sequential check_result calls when
+        checking many tasks, as it performs all operations in a single round-trip.
+        With N tasks and 30s socket timeout, sequential checking can take up to
+        N * 30s during connectivity issues. Pipeline batching reduces this to
+        a single timeout window regardless of N.
+
+        Args:
+            task_ids: List of task IDs to check
+
+        Returns:
+            Dict mapping task_id -> TaskResult (or None if not ready)
+        """
+        if not task_ids:
+            return {}
+
+        if not self._connected:
+            await self.connect()
+
+        # Use pipeline for single round-trip
+        pipe = self._client.pipeline()
+        for task_id in task_ids:
+            result_key = self._result_queue_key(task_id)
+            pipe.rpop(result_key)
+
+        results: dict[str, TaskResult | None] = {}
+        try:
+            raw_results = await pipe.execute()
+            for task_id, data in zip(task_ids, raw_results, strict=False):
+                if data is None:
+                    results[task_id] = None
+                else:
+                    try:
+                        results[task_id] = TaskResult.model_validate_json(data)
+                    except Exception as e:
+                        logger.warning(f"Failed to parse result for {task_id}: {e}")
+                        results[task_id] = None
+        except Exception as e:
+            # On pipeline failure, return empty results (caller will retry)
+            logger.warning(f"Pipeline check_results_batch failed: {e}")
+            return dict.fromkeys(task_ids)
+
+        return results
 
     # === Worker Methods ===
 
@@ -637,13 +697,26 @@ class RedisTaskQueue:
         return False
 
     async def release_operation_lock(self, operation_id: str) -> None:
-        """Release the operation lock."""
+        """Release the operation lock and clear active pointer if it matches."""
         if not self._connected:
             await self.connect()
 
         key = f"{self.LOCK_PREFIX}:{operation_id}"
         await self._client.delete(key)
         logger.info(f"Released operation lock for {operation_id}")
+
+        # Clear the active operation pointer if it points to this operation
+        try:
+            active_op = await self._client.get("ares:op:active")
+            if active_op:
+                active_op_str = (
+                    active_op.decode() if isinstance(active_op, bytes) else str(active_op)
+                )
+                if active_op_str == operation_id:
+                    await self._client.delete("ares:op:active")
+                    logger.info(f"Cleared active operation pointer for {operation_id}")
+        except Exception as e:
+            logger.warning(f"Failed to clear active operation pointer: {e}")
 
     async def extend_operation_lock(
         self,

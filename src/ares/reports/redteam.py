@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from ares.core.templates import get_template_loader
 
 if TYPE_CHECKING:
-    from ares.core.models import RedTeamState, SharedRedTeamState
+    from ares.core.models import SharedRedTeamState
 
 
 class RedTeamReportGenerator:
@@ -26,7 +26,7 @@ class RedTeamReportGenerator:
     def __init__(self):
         self.loader = get_template_loader()
 
-    def generate(self, state: RedTeamState) -> str:
+    def generate(self, state: SharedRedTeamState) -> str:
         """Generate the full markdown report.
 
         Args:
@@ -41,42 +41,43 @@ class RedTeamReportGenerator:
         duration_str = str(duration).split(".")[0]
 
         executive_summary = self._generate_executive_summary(state)
-        vulnerability_count = getattr(state, "vulnerability_count", None)
-        if vulnerability_count is None:
-            vulnerability_count = len(state.weaknesses)
-        exploited_count = getattr(state, "exploited_count", None)
-        if exploited_count is None:
-            exploited_count = "unknown"
+        vulnerability_count = len(state.discovered_vulnerabilities)
+        exploited_count = len(state.exploited_vulnerabilities)
+
+        # Calculate counts from SharedRedTeamState
+        host_count = len(state.all_hosts)
+        credential_count = len(state.all_credentials)
+        admin_count = sum(1 for c in state.all_credentials if c.is_admin)
 
         # Render the report using the template
         return self.loader.render(
             "redteam/reports/operation_summary.md.jinja",
             operation_id=state.operation_id,
-            target_ip=state.target.ip,
+            target_ip=state.target.ip if state.target else "Unknown",
             started_at=state.started_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
             completed_at=completed_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
             duration=duration_str,
-            stage=state.stage.value,
+            stage="completed" if state.completed else "in_progress",
             executive_summary=executive_summary,
             has_domain_admin=state.has_domain_admin,
             has_golden_ticket=state.has_golden_ticket,
-            host_count=state.host_count,
-            user_count=len(state.users),
-            credential_count=state.credential_count,
-            admin_count=state.admin_count,
+            host_count=host_count,
+            user_count=len(state.all_users),
+            credential_count=credential_count,
+            admin_count=admin_count,
             vulnerability_count=vulnerability_count,
             exploited_count=exploited_count,
-            share_count=len(state.shares),
-            hosts=state.hosts,
-            users=state.users,
-            credentials=state.credentials,
-            shares=state.shares,
-            weaknesses=state.weaknesses,
-            timeline=state.timeline,
+            share_count=len(state.all_shares),
+            hosts=state.all_hosts,
+            users=state.all_users,
+            credentials=state.all_credentials,
+            shares=state.all_shares,
+            weaknesses=state.all_weaknesses,
+            timeline=state.operation_timeline,
             techniques_identified=state.identified_techniques,
         )
 
-    def _generate_executive_summary(self, state: RedTeamState) -> str:
+    def _generate_executive_summary(self, state: SharedRedTeamState) -> str:
         """Generate the executive summary section.
 
         Args:
@@ -88,12 +89,20 @@ class RedTeamReportGenerator:
         if state.report_summary:
             return state.report_summary
 
+        # Calculate counts from SharedRedTeamState
+        host_count = len(state.all_hosts)
+        credential_count = len(state.all_credentials)
+        admin_count = sum(1 for c in state.all_credentials if c.is_admin)
+        vulnerability_count = len(state.discovered_vulnerabilities)
+        exploited_count = len(state.exploited_vulnerabilities)
+
         summary_parts = []
 
         # Operation overview
+        target_ip = state.target.ip if state.target else "Unknown"
         summary_parts.append(
             f"Red team operation **{state.operation_id}** was executed against target "
-            f"**{state.target.ip}** in an Active Directory penetration testing engagement."
+            f"**{target_ip}** in an Active Directory penetration testing engagement."
         )
 
         # Key achievements
@@ -102,26 +111,23 @@ class RedTeamReportGenerator:
             achievements.append("✓ **Domain Administrator access achieved**")
         if state.has_golden_ticket:
             achievements.append("✓ **Golden ticket generated** for persistent access")
-        if state.admin_count > 0:
-            achievements.append(f"✓ **{state.admin_count} administrator account(s)** discovered")
-        if state.credential_count > 0:
-            achievements.append(f"✓ **{state.credential_count} credential(s)** obtained")
+        if admin_count > 0:
+            achievements.append(f"✓ **{admin_count} administrator account(s)** discovered")
+        if credential_count > 0:
+            achievements.append(f"✓ **{credential_count} credential(s)** obtained")
 
         if achievements:
             summary_parts.append("\n\n**Key Achievements:**\n" + "\n".join(achievements))
 
         # Discovery statistics
-        vulnerability_count = getattr(state, "vulnerability_count", len(state.weaknesses))
-        exploited_count = getattr(state, "exploited_count", None)
-        exploited_label = exploited_count if exploited_count is not None else "unknown"
         summary_parts.append(
             f"\n\n**Discovery Statistics:**\n"
-            f"- Hosts Discovered: {state.host_count}\n"
-            f"- User Accounts: {len(state.users)}\n"
-            f"- Network Shares: {len(state.shares)}\n"
-            f"- Password Hashes: {len(state.hashes)}\n"
+            f"- Hosts Discovered: {host_count}\n"
+            f"- User Accounts: {len(state.all_users)}\n"
+            f"- Network Shares: {len(state.all_shares)}\n"
+            f"- Password Hashes: {len(state.all_hashes)}\n"
             f"- Vulnerabilities: {vulnerability_count}\n"
-            f"- Vulnerabilities Exploited: {exploited_label}"
+            f"- Vulnerabilities Exploited: {exploited_count}"
         )
 
         # Attack path summary
@@ -140,13 +146,13 @@ class RedTeamReportGenerator:
                 "The target environment has critical security weaknesses that allowed "
                 "full domain compromise. Immediate remediation is required."
             )
-        elif state.admin_count > 0:
+        elif admin_count > 0:
             posture = "**HIGH**"
             assessment = (
                 "The target environment has significant security weaknesses with administrative "
                 "access obtained. Remediation is strongly recommended."
             )
-        elif state.credential_count > 0:
+        elif credential_count > 0:
             posture = "**MEDIUM**"
             assessment = (
                 "The target environment has moderate security weaknesses with credentials "

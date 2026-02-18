@@ -88,7 +88,7 @@ task ares:config:check
 # Expected output: ✓ All configuration checks passed
 
 # 4. Run the blue team agent (polls Grafana for alerts)
-task ares:blue:
+task blue:poll
 ```
 
 **Verification:**
@@ -96,7 +96,7 @@ task ares:blue:
 ```bash
 # Confirm installation
 uv run python -m ares --help
-# Should display available commands: investigate-alert, red-team
+# Should display available commands: investigate-alert, evaluate
 ```
 
 **Without 1Password:**
@@ -107,7 +107,7 @@ cp .env.example .env
 # Edit .env with your API keys
 
 # Run using local environment
-task ares:blue:local:
+task blue:poll:local
 ```
 
 ## Usage
@@ -121,42 +121,33 @@ The easiest way to run Ares is using the provided Taskfile with 1Password integr
 task ares:config:check
 
 # Blue Team: Run SOC agent in poll mode
-task ares:blue:
+task blue:poll
 
 # Blue Team: Process current alerts once and exit
-task ares:blue:once:
+task blue:once
 
 # Blue Team: Investigate a specific alert from JSON file
-task ares:investigate ALERT=test-alerts/example-alert.json
-
-# Red Team: Run penetration testing agent (resolves target via AWS EC2 Name tag)
-task -y ares:red TARGET=dreadgoad
-
-# Red Team: Direct IP target (bypasses EC2 discovery)
-task ares:red: TARGET=192.168.56.100
+task blue:investigate ALERT=test-alerts/example-alert.json
 
 # View investigation reports
-task ares:reports:list        # List all reports
-task ares:reports:latest      # Show latest report
+task blue:reports:list        # List all reports
+task blue:reports:latest      # Show latest report
 ```
 
 **Available Tasks:**
 
 | Command                              | Description                                                  |
 | ------------------------------------ | ------------------------------------------------------------ |
-| `task ares:blue:`                    | Run blue team agent in poll mode (checks Grafana every 30s)  |
-| `task ares:blue:once:`               | Run blue team once and exit                                  |
-| `task ares:blue:local:`              | Run blue team using .env file instead of 1Password           |
-| `task ares:investigate ALERT=<file>` | Investigate a specific alert from JSON file                  |
-| `task ares:red TARGET=<filter>`      | Run red team agent (resolves target via EC2 Name tag filter) |
-| `task ares:red: TARGET=<ip>`         | Run red team agent against direct IP address                 |
-| `task ares:red:local: TARGET=<ip>`   | Run red team using .env file instead of 1Password            |
+| `task blue:poll`                     | Run blue team agent in poll mode (checks Grafana every 30s)  |
+| `task blue:once`                     | Run blue team once and exit                                  |
+| `task blue:poll:local`               | Run blue team using .env file instead of 1Password           |
+| `task blue:investigate ALERT=<file>` | Investigate a specific alert from JSON file                  |
 | `task ares:config:check`             | Verify configuration and 1Password access                    |
 | `task ares:config:show`              | Display current configuration (no secrets)                   |
-| `task ares:reports:list`             | List all investigation reports                               |
-| `task ares:reports:latest`           | Show the most recent report                                  |
-| `task ares:reports:clean`            | Delete all reports (asks for confirmation)                   |
-| `task ares:mitre:test`               | Test MITRE ATT&CK data loading                               |
+| `task blue:reports:list`             | List all investigation reports                               |
+| `task blue:reports:latest`           | Show the most recent report                                  |
+| `task blue:reports:clean`            | Delete all reports (asks for confirmation)                   |
+| `task blue:mitre:test`               | Test MITRE ATT&CK data loading                               |
 
 See [Taskfile Usage Guide](docs/taskfile_usage.md) for detailed documentation.
 
@@ -194,47 +185,6 @@ uv run python -m ares investigate-alert test-alerts/example-alert.json \
   --args.grafana-url https://grafana.example.com \
   --args.max-steps 30
 ```
-
-#### Red Team - Penetration Testing
-
-The red team agent supports two targeting modes:
-
-**EC2 Target Discovery (Recommended):**
-
-When using the Taskfile, provide an EC2 Name tag filter instead of an IP address.
-The task queries AWS EC2 to find running instances where the Name tag contains
-your filter string, then uses the first matching instance's private IP.
-
-```bash
-# Discover target via AWS EC2 Name tag filter
-# Finds instances where Name tag contains "dreadgoad"
-task -y ares:red TARGET=dreadgoad
-```
-
-This uses `aws ec2 describe-instances` with:
-
-- Filter: `Name=instance-state-name,Values=running`
-- Query: Instances where `Name` tag contains the TARGET value
-- Returns: First matching instance's `PrivateIpAddress`
-
-**Direct IP Target:**
-
-For direct IP targeting (bypasses EC2 discovery):
-
-```bash
-# Direct IP address
-task ares:red: TARGET=192.168.56.100
-
-# Or via CLI
-uv run python -m ares red-team 192.168.56.100 \
-  --args.model claude-sonnet-4-20250514 \
-  --args.max-steps 30 \
-  --args.report-dir ./reports
-```
-
-**Red Team Prerequisites:** The target environment must have penetration testing
-tools installed (nmap, netexec, impacket-scripts, hashcat, john, certipy-ad,
-bloodhound-python).
 
 ### Command-Line Options
 
@@ -622,10 +572,6 @@ uv run python -m ares \
   --dn-args.organization ares \
   --dn-args.workspace ares-protocol \
   --dn-args.project ares-soc
-
-# Via command line (red team)
-uv run python -m ares red-team 192.168.56.100 \
-  --dn-args.project ares-redteam
 
 # Via environment variable
 export DREADNODE_API_KEY="your-dreadnode-api-key"  # pragma: allowlist secret

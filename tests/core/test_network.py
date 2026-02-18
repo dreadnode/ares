@@ -1,13 +1,11 @@
 """Tests for red team network penetration testing tools."""
 
-from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
 
 from ares.core.models import (
-    InvestigationStage,
-    RedTeamState,
+    SharedRedTeamState,
     Target,
 )
 
@@ -22,25 +20,11 @@ class MockRunResult:
 
 
 @pytest.fixture
-def red_team_state() -> RedTeamState:
+def red_team_state() -> SharedRedTeamState:
     """Create a basic red team state for testing."""
-    return RedTeamState(
-        operation_id="op-test-001",
-        target=Target(ip="192.168.58.100", hostname="dc01", domain="contoso.local"),
-        started_at=datetime.now(timezone.utc),
-        stage=InvestigationStage.TRIAGE,
-        hosts=[],
-        users=[],
-        credentials=[],
-        hashes=[],
-        shares=[],
-        weaknesses=[],
-        timeline=[],
-        identified_techniques=set(),
-        has_domain_admin=False,
-        has_golden_ticket=False,
-        report_summary=None,
-    )
+    state = SharedRedTeamState(operation_id="op-test-001")
+    state.target = Target(ip="192.168.58.100", hostname="dc01", domain="contoso.local")
+    return state
 
 
 class TestRunToolFunction:
@@ -97,7 +81,7 @@ class TestNetworkEnumerationTools:
         tools = NetworkEnumerationTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import NetworkEnumerationTools
 
@@ -205,7 +189,7 @@ class TestNetworkEnumerationTools:
 
         assert "svc-sql" in users
 
-    def test_nmap_scan_success(self, red_team_state: RedTeamState):
+    def test_nmap_scan_success(self, red_team_state: SharedRedTeamState):
         """Test successful nmap scan."""
         from ares.tools.red import NetworkEnumerationTools
 
@@ -220,11 +204,12 @@ class TestNetworkEnumerationTools:
             )
             result = tools.nmap_scan("192.168.58.100")
 
-        assert "PORT" in result
-        assert "22/tcp" in result
+        assert isinstance(result, dict)
+        assert "PORT" in result["output"]
+        assert "22/tcp" in result["output"]
         assert "192.168.58.100" in red_team_state.queried_hosts
 
-    def test_nmap_scan_failure(self, red_team_state: RedTeamState):
+    def test_nmap_scan_failure(self, red_team_state: SharedRedTeamState):
         """Test nmap scan failure."""
         from ares.tools.red import NetworkEnumerationTools
 
@@ -237,9 +222,11 @@ class TestNetworkEnumerationTools:
             )
             result = tools.nmap_scan("192.168.58.100")
 
-        assert "unreachable" in result.lower() or "failed" in result.lower()
+        assert isinstance(result, dict)
+        output = result["output"].lower()
+        assert "unreachable" in output or "failed" in output
 
-    def test_nmap_scan_exception(self, red_team_state: RedTeamState):
+    def test_nmap_scan_exception(self, red_team_state: SharedRedTeamState):
         """Test nmap scan handles exceptions."""
         from ares.tools.red import NetworkEnumerationTools
 
@@ -250,9 +237,10 @@ class TestNetworkEnumerationTools:
             mock_run.side_effect = Exception("Connection error")
             result = tools.nmap_scan("192.168.58.100")
 
-        assert "failed" in result.lower()
+        assert isinstance(result, dict)
+        assert "failed" in result["output"].lower()
 
-    def test_nmap_scan_multiple_targets(self, red_team_state: RedTeamState):
+    def test_nmap_scan_multiple_targets(self, red_team_state: SharedRedTeamState):
         """Test nmap scan with multiple targets."""
         from ares.tools.red import NetworkEnumerationTools
 
@@ -267,7 +255,9 @@ class TestNetworkEnumerationTools:
         assert "192.168.58.100" in red_team_state.queried_hosts
         assert "192.168.58.101" in red_team_state.queried_hosts
 
-    def test_nmap_scan_deduplication_skips_scanned_targets(self, red_team_state: RedTeamState):
+    def test_nmap_scan_deduplication_skips_scanned_targets(
+        self, red_team_state: SharedRedTeamState
+    ):
         """Test that nmap_scan skips targets already in scanned_targets."""
         from ares.tools.red import NetworkEnumerationTools
 
@@ -283,9 +273,10 @@ class TestNetworkEnumerationTools:
 
         # Should skip without calling nmap
         mock_run.assert_not_called()
-        assert "already scanned" in result.lower()
+        assert isinstance(result, dict)
+        assert "already scanned" in result["output"].lower()
 
-    def test_nmap_scan_deduplication_partial_skip(self, red_team_state: RedTeamState):
+    def test_nmap_scan_deduplication_partial_skip(self, red_team_state: SharedRedTeamState):
         """Test that nmap_scan only scans new targets when some are already scanned."""
         from ares.tools.red import NetworkEnumerationTools
 
@@ -311,7 +302,7 @@ class TestNetworkEnumerationTools:
         # The already-scanned target should not be in the command
         # (though it might appear in logs, the scan itself should exclude it)
 
-    def test_nmap_scan_marks_targets_as_scanned(self, red_team_state: RedTeamState):
+    def test_nmap_scan_marks_targets_as_scanned(self, red_team_state: SharedRedTeamState):
         """Test that successful nmap scan adds targets to scanned_targets."""
         from ares.tools.red import NetworkEnumerationTools
 
@@ -331,7 +322,7 @@ class TestNetworkEnumerationTools:
         # After scan, target should be in scanned_targets
         assert "192.168.58.100" in red_team_state.scanned_targets
 
-    def test_enumerate_users_success(self, red_team_state: RedTeamState):
+    def test_enumerate_users_success(self, red_team_state: SharedRedTeamState):
         """Test successful user enumeration."""
         from ares.tools.red import NetworkEnumerationTools
 
@@ -351,7 +342,7 @@ class TestNetworkEnumerationTools:
 
         assert "Administrator" in result
 
-    def test_enumerate_users_null_session(self, red_team_state: RedTeamState):
+    def test_enumerate_users_null_session(self, red_team_state: SharedRedTeamState):
         """Test user enumeration with null session using realistic output."""
         from ares.tools.red import NetworkEnumerationTools
 
@@ -422,7 +413,7 @@ class TestCertipyTools:
         tools = CertipyTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import CertipyTools
 
@@ -430,7 +421,7 @@ class TestCertipyTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
-    def test_certipy_find_rejects_placeholder(self, red_team_state: RedTeamState):
+    def test_certipy_find_rejects_placeholder(self, red_team_state: SharedRedTeamState):
         """Test certipy_find rejects placeholder passwords."""
         from ares.tools.red import CertipyTools
 
@@ -446,7 +437,7 @@ class TestCertipyTools:
 
         assert "placeholder" in result.lower()
 
-    def test_enumerate_users_exception(self, red_team_state: RedTeamState):
+    def test_enumerate_users_exception(self, red_team_state: SharedRedTeamState):
         """Test user enumeration handles exceptions."""
         from ares.tools.red import NetworkEnumerationTools
 
@@ -463,7 +454,7 @@ class TestCertipyTools:
 
         assert "failed" in result.lower()
 
-    def test_enumerate_shares_success(self, red_team_state: RedTeamState):
+    def test_enumerate_shares_success(self, red_team_state: SharedRedTeamState):
         """Test successful share enumeration."""
         from ares.tools.red import NetworkEnumerationTools
 
@@ -483,7 +474,7 @@ class TestCertipyTools:
 
         assert "ADMIN$" in result or "SHARE1" in result
 
-    def test_enumerate_shares_exception(self, red_team_state: RedTeamState):
+    def test_enumerate_shares_exception(self, red_team_state: SharedRedTeamState):
         """Test share enumeration handles exceptions."""
         from ares.tools.red import NetworkEnumerationTools
 
@@ -511,7 +502,7 @@ class TestCredentialHarvestingTools:
         tools = CredentialHarvestingTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import CredentialHarvestingTools
 
@@ -519,7 +510,7 @@ class TestCredentialHarvestingTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
-    def test_kerberos_user_enum_noauth(self, red_team_state: RedTeamState):
+    def test_kerberos_user_enum_noauth(self, red_team_state: SharedRedTeamState):
         """Test Kerberos no-auth user enumeration using realistic output."""
         from ares.core.models import User
         from ares.tools.red import CredentialHarvestingTools
@@ -553,7 +544,7 @@ class TestCredentialHarvestingTools:
         assert "jane.doe" in result
         assert "bob.smith" in result
 
-    def test_check_smb_connectivity_success(self, red_team_state: RedTeamState):
+    def test_check_smb_connectivity_success(self, red_team_state: SharedRedTeamState):
         """Test SMB connectivity check success."""
         from ares.tools.red import CredentialHarvestingTools
 
@@ -566,7 +557,7 @@ class TestCredentialHarvestingTools:
 
         assert success is True
 
-    def test_check_smb_connectivity_failure(self, red_team_state: RedTeamState):
+    def test_check_smb_connectivity_failure(self, red_team_state: SharedRedTeamState):
         """Test SMB connectivity check failure."""
         from ares.tools.red import CredentialHarvestingTools
 
@@ -590,7 +581,7 @@ class TestCrackingTools:
         tools = CrackingTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import CrackingTools
 
@@ -609,7 +600,7 @@ class TestSharePilferingTools:
         tools = SharePilferingTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import SharePilferingTools
 
@@ -628,7 +619,7 @@ class TestGoldenTicketTools:
         tools = GoldenTicketTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import GoldenTicketTools
 
@@ -647,7 +638,7 @@ class TestBloodHoundTools:
         tools = BloodHoundTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import BloodHoundTools
 
@@ -666,7 +657,7 @@ class TestDelegationTools:
         tools = DelegationTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import DelegationTools
 
@@ -674,7 +665,7 @@ class TestDelegationTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
-    def test_parse_delegation_with_spn_exists_column(self, red_team_state: RedTeamState):
+    def test_parse_delegation_with_spn_exists_column(self, red_team_state: SharedRedTeamState):
         """Test parsing findDelegation output with SPN Exists column.
 
         Impacket's findDelegation.py may include a 5th column "SPN Exists" (Yes/No/-)
@@ -717,7 +708,7 @@ app_svc          User         Unconstrained                       N/A           
         assert delegations[2]["delegation_type"] == "unconstrained"
         assert delegations[2]["target_spn"] == "N/A"
 
-    def test_parse_delegation_without_spn_exists_column(self, red_team_state: RedTeamState):
+    def test_parse_delegation_without_spn_exists_column(self, red_team_state: SharedRedTeamState):
         """Test parsing findDelegation output without SPN Exists column.
 
         Older versions or different configurations may omit the SPN Exists column.
@@ -752,7 +743,7 @@ class TestRedTeamReportingTools:
         tools = RedTeamReportingTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import RedTeamReportingTools
 
@@ -760,7 +751,7 @@ class TestRedTeamReportingTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
-    def test_record_weakness_basic(self, red_team_state: RedTeamState):
+    def test_record_weakness_basic(self, red_team_state: SharedRedTeamState):
         """Test record_weakness records a finding."""
         from ares.tools.red import RedTeamReportingTools
 
@@ -787,7 +778,7 @@ class TestCoercionTools:
         tools = CoercionTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import CoercionTools
 
@@ -795,7 +786,7 @@ class TestCoercionTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
-    def test_petitpotam_unauthenticated(self, red_team_state: RedTeamState):
+    def test_petitpotam_unauthenticated(self, red_team_state: SharedRedTeamState):
         """Test PetitPotam unauthenticated coercion."""
         from ares.tools.red import CoercionTools
 
@@ -811,7 +802,7 @@ class TestCoercionTools:
         assert "success" in result.lower()
         mock_run.assert_called_once()
 
-    def test_petitpotam_authenticated(self, red_team_state: RedTeamState):
+    def test_petitpotam_authenticated(self, red_team_state: SharedRedTeamState):
         """Test PetitPotam authenticated coercion."""
         from ares.tools.red import CoercionTools
 
@@ -830,7 +821,7 @@ class TestCoercionTools:
 
         assert "success" in result.lower()
 
-    def test_petitpotam_failure(self, red_team_state: RedTeamState):
+    def test_petitpotam_failure(self, red_team_state: SharedRedTeamState):
         """Test PetitPotam failure handling."""
         from ares.tools.red import CoercionTools
 
@@ -843,7 +834,7 @@ class TestCoercionTools:
 
         assert "failed" in result.lower()
 
-    def test_coercer_success(self, red_team_state: RedTeamState):
+    def test_coercer_success(self, red_team_state: SharedRedTeamState):
         """Test Coercer tool success."""
         from ares.tools.red import CoercionTools
 
@@ -864,7 +855,7 @@ class TestCoercionTools:
 
         assert "triggered" in result.lower()
 
-    def test_coercer_exception(self, red_team_state: RedTeamState):
+    def test_coercer_exception(self, red_team_state: SharedRedTeamState):
         """Test Coercer exception handling."""
         from ares.tools.red import CoercionTools
 
@@ -894,7 +885,7 @@ class TestMSSQLTools:
         tools = MSSQLTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import MSSQLTools
 
@@ -902,7 +893,7 @@ class TestMSSQLTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
-    def test_mssql_command_success(self, red_team_state: RedTeamState):
+    def test_mssql_command_success(self, red_team_state: SharedRedTeamState):
         """Test MSSQL command execution success."""
         from ares.tools.red import MSSQLTools
 
@@ -921,7 +912,7 @@ class TestMSSQLTools:
 
         assert "system" in result.lower()
 
-    def test_mssql_command_exception(self, red_team_state: RedTeamState):
+    def test_mssql_command_exception(self, red_team_state: SharedRedTeamState):
         """Test MSSQL command exception handling."""
         from ares.tools.red import MSSQLTools
 
@@ -939,7 +930,7 @@ class TestMSSQLTools:
 
         assert "failed" in result.lower()
 
-    def test_mssql_enable_xp_cmdshell_success(self, red_team_state: RedTeamState):
+    def test_mssql_enable_xp_cmdshell_success(self, red_team_state: SharedRedTeamState):
         """Test xp_cmdshell enablement."""
         from ares.tools.red import MSSQLTools
 
@@ -957,7 +948,7 @@ class TestMSSQLTools:
 
         assert "enabled" in result.lower() or "changed" in result.lower()
 
-    def test_mssql_enable_xp_cmdshell_exception(self, red_team_state: RedTeamState):
+    def test_mssql_enable_xp_cmdshell_exception(self, red_team_state: SharedRedTeamState):
         """Test xp_cmdshell enablement exception handling."""
         from ares.tools.red import MSSQLTools
 
@@ -985,7 +976,7 @@ class TestACLExploitTools:
         tools = ACLExploitTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import ACLExploitTools
 
@@ -993,7 +984,7 @@ class TestACLExploitTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
-    def test_pywhisker_add_success(self, red_team_state: RedTeamState):
+    def test_pywhisker_add_success(self, red_team_state: SharedRedTeamState):
         """Test pywhisker shadow credentials success."""
         from ares.tools.red import ACLExploitTools
 
@@ -1014,7 +1005,7 @@ class TestACLExploitTools:
 
         assert ".pfx" in result.lower() or "shadow" in result.lower()
 
-    def test_pywhisker_exception(self, red_team_state: RedTeamState):
+    def test_pywhisker_exception(self, red_team_state: SharedRedTeamState):
         """Test pywhisker exception handling."""
         from ares.tools.red import ACLExploitTools
 
@@ -1033,7 +1024,7 @@ class TestACLExploitTools:
 
         assert "failed" in result.lower()
 
-    def test_bloodyad_add_group_member_success(self, red_team_state: RedTeamState):
+    def test_bloodyad_add_group_member_success(self, red_team_state: SharedRedTeamState):
         """Test bloodyAD group member addition."""
         from ares.tools.red import ACLExploitTools
 
@@ -1055,7 +1046,7 @@ class TestACLExploitTools:
 
         assert "added" in result.lower() or "success" in result.lower()
 
-    def test_bloodyad_add_group_member_exception(self, red_team_state: RedTeamState):
+    def test_bloodyad_add_group_member_exception(self, red_team_state: SharedRedTeamState):
         """Test bloodyAD group member exception handling."""
         from ares.tools.red import ACLExploitTools
 
@@ -1075,7 +1066,7 @@ class TestACLExploitTools:
 
         assert "failed" in result.lower()
 
-    def test_bloodyad_set_password_success(self, red_team_state: RedTeamState):
+    def test_bloodyad_set_password_success(self, red_team_state: SharedRedTeamState):
         """Test bloodyAD password reset."""
         from ares.tools.red import ACLExploitTools
 
@@ -1097,7 +1088,7 @@ class TestACLExploitTools:
 
         assert "reset" in result.lower() or "changed" in result.lower()
 
-    def test_bloodyad_set_password_exception(self, red_team_state: RedTeamState):
+    def test_bloodyad_set_password_exception(self, red_team_state: SharedRedTeamState):
         """Test bloodyAD password reset exception handling."""
         from ares.tools.red import ACLExploitTools
 
@@ -1128,7 +1119,7 @@ class TestCVEExploitTools:
         tools = CVEExploitTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import CVEExploitTools
 
@@ -1136,7 +1127,7 @@ class TestCVEExploitTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
-    def test_nopac_success(self, red_team_state: RedTeamState):
+    def test_nopac_success(self, red_team_state: SharedRedTeamState):
         """Test noPac exploitation success."""
         from ares.tools.red import CVEExploitTools
 
@@ -1158,7 +1149,7 @@ class TestCVEExploitTools:
 
         assert "hash" in result.lower() or "admin" in result.lower()
 
-    def test_nopac_exception(self, red_team_state: RedTeamState):
+    def test_nopac_exception(self, red_team_state: SharedRedTeamState):
         """Test noPac exception handling."""
         from ares.tools.red import CVEExploitTools
 
@@ -1177,7 +1168,7 @@ class TestCVEExploitTools:
 
         assert "failed" in result.lower()
 
-    def test_printnightmare_success(self, red_team_state: RedTeamState):
+    def test_printnightmare_success(self, red_team_state: SharedRedTeamState):
         """Test PrintNightmare exploitation."""
         from ares.tools.red import CVEExploitTools
 
@@ -1196,7 +1187,7 @@ class TestCVEExploitTools:
 
         assert "success" in result.lower() or "executed" in result.lower()
 
-    def test_printnightmare_exception(self, red_team_state: RedTeamState):
+    def test_printnightmare_exception(self, red_team_state: SharedRedTeamState):
         """Test PrintNightmare exception handling."""
         from ares.tools.red import CVEExploitTools
 
@@ -1226,7 +1217,7 @@ class TestTrustAttackTools:
         tools = TrustAttackTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import TrustAttackTools
 
@@ -1234,7 +1225,7 @@ class TestTrustAttackTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
-    def test_raise_child_success(self, red_team_state: RedTeamState):
+    def test_raise_child_success(self, red_team_state: SharedRedTeamState):
         """Test raise_child domain escalation."""
         from ares.tools.red import TrustAttackTools
 
@@ -1253,7 +1244,7 @@ class TestTrustAttackTools:
 
         assert "enterprise admin" in result.lower() or "golden ticket" in result.lower()
 
-    def test_raise_child_with_target_domain(self, red_team_state: RedTeamState):
+    def test_raise_child_with_target_domain(self, red_team_state: SharedRedTeamState):
         """Test raise_child with explicit target domain."""
         from ares.tools.red import TrustAttackTools
 
@@ -1271,7 +1262,7 @@ class TestTrustAttackTools:
 
         assert "success" in result.lower() or "escalation" in result.lower()
 
-    def test_raise_child_exception(self, red_team_state: RedTeamState):
+    def test_raise_child_exception(self, red_team_state: SharedRedTeamState):
         """Test raise_child exception handling."""
         from ares.tools.red import TrustAttackTools
 
@@ -1299,7 +1290,7 @@ class TestLateralMovementTools:
         tools = LateralMovementTools()
         assert tools.state is None
 
-    def test_set_state(self, red_team_state: RedTeamState):
+    def test_set_state(self, red_team_state: SharedRedTeamState):
         """Test setting state."""
         from ares.tools.red import LateralMovementTools
 
@@ -1307,7 +1298,7 @@ class TestLateralMovementTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
-    def test_evil_winrm_with_password(self, red_team_state: RedTeamState):
+    def test_evil_winrm_with_password(self, red_team_state: SharedRedTeamState):
         """Test evil-winrm with password authentication."""
         from ares.tools.red import LateralMovementTools
 
@@ -1326,7 +1317,7 @@ class TestLateralMovementTools:
 
         assert "administrator" in result.lower()
 
-    def test_evil_winrm_with_hash(self, red_team_state: RedTeamState):
+    def test_evil_winrm_with_hash(self, red_team_state: SharedRedTeamState):
         """Test evil-winrm with pass-the-hash."""
         from ares.tools.red import LateralMovementTools
 
@@ -1343,7 +1334,7 @@ class TestLateralMovementTools:
 
         assert "system" in result.lower()
 
-    def test_evil_winrm_no_creds(self, red_team_state: RedTeamState):
+    def test_evil_winrm_no_creds(self, red_team_state: SharedRedTeamState):
         """Test evil-winrm without credentials fails gracefully."""
         from ares.tools.red import LateralMovementTools
 
@@ -1354,7 +1345,7 @@ class TestLateralMovementTools:
 
         assert "error" in result.lower()
 
-    def test_evil_winrm_exception(self, red_team_state: RedTeamState):
+    def test_evil_winrm_exception(self, red_team_state: SharedRedTeamState):
         """Test evil-winrm exception handling."""
         from ares.tools.red import LateralMovementTools
 
@@ -1371,7 +1362,7 @@ class TestLateralMovementTools:
 
         assert "failed" in result.lower()
 
-    def test_psexec_with_password(self, red_team_state: RedTeamState):
+    def test_psexec_with_password(self, red_team_state: SharedRedTeamState):
         """Test psexec with password authentication."""
         from ares.tools.red import LateralMovementTools
 
@@ -1390,7 +1381,7 @@ class TestLateralMovementTools:
 
         assert "system" in result.lower()
 
-    def test_psexec_with_hash(self, red_team_state: RedTeamState):
+    def test_psexec_with_hash(self, red_team_state: SharedRedTeamState):
         """Test psexec with pass-the-hash."""
         from ares.tools.red import LateralMovementTools
 
@@ -1407,7 +1398,7 @@ class TestLateralMovementTools:
 
         assert "windows" in result.lower()
 
-    def test_psexec_exception(self, red_team_state: RedTeamState):
+    def test_psexec_exception(self, red_team_state: SharedRedTeamState):
         """Test psexec exception handling."""
         from ares.tools.red import LateralMovementTools
 
@@ -1428,7 +1419,7 @@ class TestLateralMovementTools:
 class TestPostureValidationTools:
     """Tests for PostureValidationTools."""
 
-    def test_check_credman_entries_adds_weakness(self, red_team_state: RedTeamState):
+    def test_check_credman_entries_adds_weakness(self, red_team_state: SharedRedTeamState):
         """Credential Manager entries should be tracked as weaknesses."""
         from ares.tools.red import PostureValidationTools
 
@@ -1447,7 +1438,7 @@ class TestPostureValidationTools:
         assert "Credential Manager entries found" in result
         assert any("Credential Manager Entries" in block for block in red_team_state.weaknesses)
 
-    def test_check_autologon_registry_adds_weakness(self, red_team_state: RedTeamState):
+    def test_check_autologon_registry_adds_weakness(self, red_team_state: SharedRedTeamState):
         """Autologon registry credentials should be flagged."""
         from ares.tools.red import PostureValidationTools
 
@@ -1470,7 +1461,7 @@ class TestPostureValidationTools:
         assert "Autologon credentials detected" in result
         assert any("Autologon Credentials" in block for block in red_team_state.weaknesses)
 
-    def test_check_lm_compatibility_level_adds_weakness(self, red_team_state: RedTeamState):
+    def test_check_lm_compatibility_level_adds_weakness(self, red_team_state: SharedRedTeamState):
         """LmCompatibilityLevel allowing NTLMv1 should be recorded."""
         from ares.tools.red import PostureValidationTools
 

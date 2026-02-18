@@ -14,9 +14,8 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
-from ares.core.models import Credential, Host, Share
+from ares.core.models import Credential, Host, Share, SharedRedTeamState
 from ares.tools.red.common import (
-    AnyRedTeamState,
     add_credential_to_state,
     add_user_to_state,
     format_weakness_block,
@@ -30,10 +29,10 @@ from ares.tools.red.common import (
 class NetworkEnumerationTools(Toolset):
     """Tools for network scanning and recon."""
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
     dispatcher: Any | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -90,7 +89,7 @@ class NetworkEnumerationTools(Toolset):
             return f"[+] WinRM reachable on {target} (ports {ports})"
         return f"[!] WinRM not reachable on {target} (ports 5985/5986 closed)"
 
-    def _extract_users_from_outputs(self, outputs: list[tuple[str, str]]) -> set[str]:  # noqa: PLR0912
+    def _extract_users_from_outputs(self, outputs: list[tuple[str, str]]) -> set[str]:
         users: set[str] = set()
         user_pattern = r"[A-Za-z0-9._$-]+"
 
@@ -190,7 +189,7 @@ class NetworkEnumerationTools(Toolset):
 
         return users
 
-    def _extract_passwords_from_user_enum_output(self, output: str) -> list[tuple[str, str]]:  # noqa: PLR0912
+    def _extract_passwords_from_user_enum_output(self, output: str) -> list[tuple[str, str]]:
         if not output:
             return []
         creds: list[tuple[str, str]] = []
@@ -263,7 +262,7 @@ class NetworkEnumerationTools(Toolset):
             source=source,
             is_admin=is_admin,
         )
-        add_credential_to_state(self.state, cred, "recon", self.dispatcher)
+        add_credential_to_state(self.state, cred, "recon")
 
     def _run_user_enum_commands(
         self, target: str, username: str, password: str, domain: str
@@ -393,7 +392,7 @@ class NetworkEnumerationTools(Toolset):
         return message
 
     @dn.tool_method
-    def nmap_scan(self, target: str) -> str:  # noqa: PLR0912
+    def nmap_scan(self, target: str) -> dict[str, Any]:
         """
         Scans target IPs to discover services, ports, and host information.
 
@@ -405,7 +404,7 @@ class NetworkEnumerationTools(Toolset):
             target: IP addresses to scan (space-separated for multiple targets)
 
         Returns:
-            Detailed nmap scan output showing discovered services and versions
+            Dict with 'output' (raw nmap output) and 'discovered_hosts' (parsed host data)
 
         Example:
             >>> result = nmap_scan("192.168.58.2")
@@ -417,18 +416,31 @@ class NetworkEnumerationTools(Toolset):
             current_ip = ""
             current_hostname = ""
             current_os = ""
+            current_domain = ""
             current_services: list[str] = []
 
             def _commit_current() -> None:
+                nonlocal current_hostname
                 if not current_ip:
                     return
+                # Build FQDN from hostname and domain if available
+                hostname_to_use = current_hostname
+                if current_hostname and current_domain and "." not in current_hostname:
+                    hostname_to_use = f"{current_hostname.lower()}.{current_domain.lower()}"
+                # Detect DC based on services (LDAP + Kerberos = domain controller)
+                services_lower = [s.lower() for s in current_services]
+                has_ldap = any("ldap" in s for s in services_lower)
+                has_kerberos = any("kerberos" in s for s in services_lower)
+                is_dc = has_ldap and has_kerberos
                 host = Host(
                     ip=current_ip,
-                    hostname=current_hostname,
+                    hostname=hostname_to_use,
                     os=current_os or "Unknown",
-                    roles=[],
+                    roles=["AD DC"] if is_dc else [],
                     services=current_services,
                 )
+                if is_dc:
+                    host.is_dc = True
                 hosts.append(host)
 
             for line in output.splitlines():
@@ -441,6 +453,7 @@ class NetworkEnumerationTools(Toolset):
                     current_ip = ""
                     current_hostname = ""
                     current_os = ""
+                    current_domain = ""
                     current_services = []
 
                     host_line = report_match.group(1)
@@ -462,12 +475,38 @@ class NetworkEnumerationTools(Toolset):
                         current_services.append(
                             f"{svc_match.group(1)}/{svc_match.group(2)} {svc_match.group(3)}"
                         )
-                    os_match = re.search(r"Service Info: OS: ([^;]+)", line)
-                    if os_match and not current_os:
-                        current_os = os_match.group(1).strip()
+                    # Extract domain from LDAP line: "(Domain: sevenkingdoms.local, Site: ...)"
+                    domain_match = re.search(r"\(Domain:\s*([^,)]+)", line)
+                    if domain_match and not current_domain:
+                        current_domain = domain_match.group(1).strip()
+                    # Parse Service Info line for Host and OS
+                    # Format: "Service Info: Host: KINGSLANDING; OS: Windows; CPE: ..."
+                    if "Service Info:" in line:
+                        host_match = re.search(r"Host:\s*([^;]+)", line)
+                        if host_match:
+                            # Always prefer Service Info hostname over DNS-derived name
+                            # This gives us "KINGSLANDING" instead of "ip-10-1-2-183.us-west-2.compute.internal"
+                            current_hostname = host_match.group(1).strip()
+                        os_match = re.search(r"OS:\s*([^;]+)", line)
+                        if os_match and not current_os:
+                            current_os = os_match.group(1).strip()
 
             _commit_current()
             return hosts
+
+        def _hosts_to_dicts(hosts: list[Host]) -> list[dict[str, Any]]:
+            """Serialize hosts for orchestrator processing."""
+            return [
+                {
+                    "ip": h.ip,
+                    "hostname": h.hostname,
+                    "os": h.os,
+                    "roles": h.roles,
+                    "services": h.services,
+                    "is_dc": h.is_dc,
+                }
+                for h in hosts
+            ]
 
         targets = target.split()
 
@@ -478,7 +517,10 @@ class NetworkEnumerationTools(Toolset):
 
             if not targets_to_scan:
                 logger.info(f"[*] All {len(targets)} targets already scanned, skipping nmap")
-                return f"All targets already scanned: {', '.join(targets)}"
+                return {
+                    "output": f"All targets already scanned: {', '.join(targets)}",
+                    "discovered_hosts": [],
+                }
 
             if len(targets_to_scan) < len(targets):
                 skipped = len(targets) - len(targets_to_scan)
@@ -489,12 +531,23 @@ class NetworkEnumerationTools(Toolset):
             logger.info(f"[*] Phase 1: Fast port discovery on {len(targets)} target(s)")
 
             # Phase 1: Fast port scan without version detection
-            port_scan_cmd = ["nmap", "-Pn", "-sT", "-T4", "--open", "--top-ports", "100"] + targets
+            port_scan_cmd = [
+                "nmap",
+                "-Pn",
+                "-sT",
+                "-T4",
+                "--open",
+                "--top-ports",
+                "100",
+            ] + targets
             stdout, stderr, returncode = run_tool(port_scan_cmd, timeout_seconds=120)
 
             if returncode != 0:
                 logger.error(f"[!] Port scan failed: {stderr}")
-                return stderr or f"Port scan failed with code {returncode}"
+                return {
+                    "output": stderr or f"Port scan failed with code {returncode}",
+                    "discovered_hosts": [],
+                }
 
             # Parse open ports from output (format: "22/tcp open ssh")
             open_ports = set()
@@ -503,18 +556,20 @@ class NetworkEnumerationTools(Toolset):
 
             if not open_ports:
                 logger.info("[*] No open ports found")
+                parsed_hosts = _parse_nmap_hosts(stdout)
                 if self.state:
                     for ip in targets:
                         self.state.queried_hosts.add(ip)
                         self.state.scanned_targets.add(ip)
-                if self.state:
-                    parsed_hosts = _parse_nmap_hosts(stdout)
                     for host in parsed_hosts:
                         if hasattr(self.state, "add_host"):
                             self.state.add_host(host)
                         elif not any(h.ip == host.ip for h in self.state.hosts):
                             self.state.hosts.append(host)
-                return stdout
+                return {
+                    "output": stdout,
+                    "discovered_hosts": _hosts_to_dicts(parsed_hosts),
+                }
 
             ports_str = ",".join(sorted(open_ports, key=int))
             logger.info(f"[*] Phase 2: Service detection on {len(open_ports)} ports: {ports_str}")
@@ -526,38 +581,47 @@ class NetworkEnumerationTools(Toolset):
             if svc_returncode != 0:
                 logger.warning(f"[!] Service scan had issues: {svc_stderr}")
                 # Return port scan results if service scan fails
+                parsed_hosts = _parse_nmap_hosts(stdout)
                 if self.state:
                     for ip in targets:
                         self.state.queried_hosts.add(ip)
                         self.state.scanned_targets.add(ip)
-                    parsed_hosts = _parse_nmap_hosts(stdout)
                     for host in parsed_hosts:
                         if hasattr(self.state, "add_host"):
                             self.state.add_host(host)
                         elif not any(h.ip == host.ip for h in self.state.hosts):
                             self.state.hosts.append(host)
-                return stdout
+                return {
+                    "output": stdout,
+                    "discovered_hosts": _hosts_to_dicts(parsed_hosts),
+                }
 
             logger.info(f"[*] Nmap scan completed for {len(targets)} target(s)")
 
-            # Track the scanned hosts
+            # Parse and track the scanned hosts
+            parsed_hosts = _parse_nmap_hosts(svc_stdout)
             if self.state:
                 for ip in targets:
                     self.state.queried_hosts.add(ip)
                     self.state.scanned_targets.add(ip)
-
-                parsed_hosts = _parse_nmap_hosts(svc_stdout)
                 for host in parsed_hosts:
                     if hasattr(self.state, "add_host"):
                         self.state.add_host(host)
                     elif not any(h.ip == host.ip for h in self.state.hosts):
                         self.state.hosts.append(host)
 
-            return svc_stdout
+            # Return both raw output AND parsed hosts for orchestrator
+            return {
+                "output": svc_stdout,
+                "discovered_hosts": _hosts_to_dicts(parsed_hosts),
+            }
 
         except Exception as e:
             logger.error(f"Scan failed: {e!s}")
-            return f"Scan failed: {e!s}"
+            return {
+                "output": f"Scan failed: {e!s}",
+                "discovered_hosts": [],
+            }
 
     @dn.tool_method
     def smb_sweep(self, targets: str) -> str:
@@ -696,7 +760,7 @@ class NetworkEnumerationTools(Toolset):
                     host = Host(
                         ip=ip,
                         hostname=hostname,
-                        os="Unknown",
+                        os="Windows",  # All AD DCs are Windows
                         roles=["AD DC"],
                         services=["389/tcp ldap"],
                     )
@@ -710,7 +774,7 @@ class NetworkEnumerationTools(Toolset):
             return f"SRV lookup failed: {e!s}"
 
     @dn.tool_method
-    def enumerate_users(self, target: str, username: str, password: str, domain: str = "") -> str:  # noqa: PLR0912
+    def enumerate_users(self, target: str, username: str, password: str, domain: str = "") -> str:
         """
         Enumerate user accounts on a target using netexec (crackmapexec successor).
 
@@ -866,7 +930,7 @@ class NetworkEnumerationTools(Toolset):
             return f"User recon failed for {target}: {e}"
 
     @dn.tool_method
-    def enumerate_shares(  # noqa: PLR0912
+    def enumerate_shares(
         self, target: str, domain: str = "", username: str = "", password: str = ""
     ) -> str:
         """
@@ -1288,9 +1352,9 @@ class NetworkEnumerationTools(Toolset):
 class PostureValidationTools(Toolset):
     """Tools for validating AD security posture on compromised hosts."""
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
@@ -1672,13 +1736,13 @@ class PostureValidationTools(Toolset):
 class BloodHoundTools(Toolset):
     """Tools for ACL recon and privilege escalation path discovery."""
 
-    state: AnyRedTeamState | None = None
+    state: SharedRedTeamState | None = None
 
-    def set_state(self, state: AnyRedTeamState) -> None:
+    def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
         self.state = state
 
-    def _parse_bloodhound_output(self, raw_output: str) -> dict[str, Any]:  # noqa: PLR0912
+    def _parse_bloodhound_output(self, raw_output: str) -> dict[str, Any]:
         """Parse BloodHound collection output for actionable attack paths.
 
         Returns:
@@ -1847,7 +1911,7 @@ class BloodHoundTools(Toolset):
         return result
 
     @dn.tool_method
-    def run_bloodhound(  # noqa: PLR0912
+    def run_bloodhound(
         self,
         domain: str,
         username: str,
@@ -2013,12 +2077,7 @@ class BloodHoundTools(Toolset):
                         roles=["DC"] if "DC" in short_hostname.upper() else [],
                         services=[],
                     )
-                    # Use add_host if available (SharedRedTeamState), else append
-                    if hasattr(self.state, "add_host"):
-                        self.state.add_host(host)
-                    # RedTeamState uses hosts list directly
-                    elif not any(h.hostname == short_hostname for h in self.state.hosts):
-                        self.state.hosts.append(host)
+                    self.state.add_host(host)
                     logger.debug(f"Registered host from BloodHound: {short_hostname}")
 
                 logger.info(

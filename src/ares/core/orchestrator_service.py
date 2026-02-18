@@ -17,7 +17,7 @@ from typing import Any
 
 from loguru import logger
 
-from ares.core.config import get_namespace, get_redis_url
+from ares.core.config import clear_config_cache, get_namespace, get_redis_url
 from ares.core.litellm_env import configure_litellm_env
 from ares.core.models import Credential
 from ares.core.orchestrator import run_multi_agent_operation
@@ -114,15 +114,21 @@ class OrchestratorService:
         return value.decode() if isinstance(value, bytes) else str(value)
 
     async def _get_checkpoint_time(self, op_id: str) -> datetime | None:
-        time_key = f"ares:operation:{op_id}:checkpoint_time"
         if self.task_queue is None:
             return None
-        checkpoint_data = await self.task_queue._client.get(time_key)
-        if not checkpoint_data:
-            logger.debug(f"Operation {op_id} has no checkpoint time, skipping")
+        # Read started_at from redis-native meta hash
+        meta_key = f"ares:op:{op_id}:meta"
+        started_at = await self.task_queue._client.hget(meta_key, "started_at")
+        if not started_at:
+            logger.debug(f"Operation {op_id} has no started_at in meta, skipping")
             return None
 
-        checkpoint_str = self._decode_redis_value(checkpoint_data)
+        checkpoint_str = self._decode_redis_value(started_at)
+        # Decode JSON since set_meta uses json.dumps()
+        try:
+            checkpoint_str = json.loads(checkpoint_str)
+        except json.JSONDecodeError:
+            pass
         checkpoint_time = datetime.fromisoformat(checkpoint_str)
         if checkpoint_time.tzinfo is None:
             checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
@@ -146,9 +152,9 @@ class OrchestratorService:
         now = datetime.now(timezone.utc)
 
         try:
-            # Scan for operation state keys
-            async for key in self.task_queue._client.scan_iter("ares:operation:*:state"):
-                # Extract operation ID from key: ares:operation:<op_id>:state
+            # Scan for operation state keys (redis-native format)
+            async for key in self.task_queue._client.scan_iter("ares:op:*:meta"):
+                # Extract operation ID from key: ares:op:<op_id>:meta
                 key_str = key.decode() if isinstance(key, bytes) else str(key)
                 parts = key_str.split(":")
                 if len(parts) < 3:
@@ -177,7 +183,7 @@ class OrchestratorService:
                     continue
 
                 # Check operation status - don't recover completed/failed operations
-                status_key = f"ares:operations:{op_id}:status"
+                status_key = f"ares:op:{op_id}:status"
                 status_data = await self.task_queue._client.get(status_key)
                 if status_data:
                     status_str = self._decode_redis_value(status_data)
@@ -238,7 +244,7 @@ class OrchestratorService:
 
             # Load stored model from Redis (required for recovery)
             model: str | None = None
-            model_key = f"ares:operation:{operation_id}:model"
+            model_key = f"ares:op:{operation_id}:model"
             if self.task_queue and self.task_queue._client:
                 stored_model = await self.task_queue._client.get(model_key)
                 if stored_model:
@@ -353,7 +359,7 @@ class OrchestratorService:
                 if result:
                     await self._process_operation_request(result)
 
-            except asyncio.TimeoutError:  # noqa: PERF203
+            except asyncio.TimeoutError:
                 # No operation in queue, continue polling
                 continue
             except Exception as e:
@@ -407,7 +413,7 @@ class OrchestratorService:
         if not self.task_queue or not self.task_queue._client:
             logger.warning("Cannot persist operation model: Redis client unavailable")
             return
-        key = f"ares:operation:{operation_id}:model"
+        key = f"ares:op:{operation_id}:model"
         try:
             await self.task_queue._client.set(key, model)
         except Exception as e:
@@ -437,13 +443,13 @@ class OrchestratorService:
         if not overrides:
             return
 
-        key = f"ares:operation:{operation_id}:model_overrides"
+        key = f"ares:op:{operation_id}:model_overrides"
         try:
             await self.task_queue._client.set(key, json.dumps(overrides))
         except Exception as e:
             logger.warning(f"Failed to persist model overrides for {operation_id}: {e}")
 
-    async def _process_operation_request(self, request_data: dict[str, Any]) -> None:  # noqa: PLR0912
+    async def _process_operation_request(self, request_data: dict[str, Any]) -> None:
         """Process an operation request.
 
         Args:
@@ -453,7 +459,7 @@ class OrchestratorService:
         try:
             # Fetch env_vars from separate key if not in request (security: secrets stored separately)
             if not request_data.get("env_vars") and request_data.get("operation_id"):
-                env_vars_key = f"ares:operation:{request_data['operation_id']}:env_vars"
+                env_vars_key = f"ares:op:{request_data['operation_id']}:env_vars"
                 if self.task_queue and self.task_queue._client:
                     env_vars_data = await self.task_queue._client.get(env_vars_key)
                     if env_vars_data:
@@ -476,6 +482,8 @@ class OrchestratorService:
                     if value:  # Only set non-empty values
                         os.environ[key] = value
                         logger.debug(f"Set environment variable: {key}")
+                # Clear config cache so env overrides are applied on next load_config()
+                clear_config_cache()
 
             if request.model:
                 await self._persist_operation_model(request.operation_id, request.model)
@@ -596,7 +604,7 @@ class OrchestratorService:
         if not self.task_queue or not self.task_queue._client:
             return
 
-        status_key = f"ares:operations:{operation_id}:status"
+        status_key = f"ares:op:{operation_id}:status"
         status_data = {
             "status": status,
             "updated_at": datetime.now(timezone.utc).isoformat(),

@@ -13,10 +13,8 @@ __all__ = [
     "InvestigationOrchestrator",
     "InvestigationState",
     "MITREAttackClient",
-    "RedTeamOrchestrator",
-    "RedTeamState",
+    "SharedRedTeamState",
     "create_investigation_agent",
-    "create_redteam_agent",
 ]
 
 
@@ -26,30 +24,20 @@ def __getattr__(name: str):
 
         return InvestigationOrchestrator
 
-    if name == "RedTeamOrchestrator":
-        from ares.agents.red.pentester import RedTeamOrchestrator
-
-        return RedTeamOrchestrator
-
     if name == "InvestigationState":
         from ares.core.models import InvestigationState
 
         return InvestigationState
 
-    if name == "RedTeamState":
-        from ares.core.models import RedTeamState
+    if name == "SharedRedTeamState":
+        from ares.core.models import SharedRedTeamState
 
-        return RedTeamState
+        return SharedRedTeamState
 
     if name == "create_investigation_agent":
         from ares.core.factories.blue_factory import create_investigation_agent
 
         return create_investigation_agent
-
-    if name == "create_redteam_agent":
-        from ares.core.factories.red_factory import create_redteam_agent
-
-        return create_redteam_agent
 
     if name == "MITREAttackClient":
         from ares.integrations.mitre import MITREAttackClient

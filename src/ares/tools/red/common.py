@@ -16,7 +16,7 @@ from typing import ClassVar
 
 from loguru import logger
 
-from ares.core.models import Credential, RedTeamState, SharedRedTeamState
+from ares.core.models import Credential, SharedRedTeamState
 from ares.core.remote import run_remote
 
 
@@ -96,11 +96,11 @@ def clear_credential_context() -> None:
     _credential_context = CredentialContext()
 
 
-# Type alias for state that works with both single-agent and multi-agent modes
-AnyRedTeamState = RedTeamState | SharedRedTeamState
-
 # Shared placeholder passwords used across multiple toolsets
 PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = {"password", "changeme", "<password>"}
+
+# Well-known NTLM hash for empty/NULL password - skip these when extracting creds
+EMPTY_NT_HASH = "31d6cfe0d16ae931b73c59d7e0c089c0"  # pragma: allowlist secret
 
 # Characters that indicate Kali MOTD pollution (box-drawing characters)
 # These appear when bash outputs the Kali "minimal installation" message
@@ -310,7 +310,7 @@ def format_weakness_block(
     return "\n".join(lines)
 
 
-def track_cross_domain_reuse(state: AnyRedTeamState, credential: Credential) -> None:
+def track_cross_domain_reuse(state: SharedRedTeamState, credential: Credential) -> None:
     """Track credential reuse across domains and record as weakness."""
     if not state or not credential.domain:
         return
@@ -444,7 +444,7 @@ def fetch_remote_file(
 
 
 def store_remote_artifact(
-    state: AnyRedTeamState,
+    state: SharedRedTeamState,
     remote_path: str,
     artifact_key: str,
     target_role: str | None = None,
@@ -616,7 +616,7 @@ def filter_users_file_remote(
 
 
 def resolve_password(
-    state: AnyRedTeamState | None,
+    state: SharedRedTeamState | None,
     username: str,
     domain: str | None,
     password: str | None,
@@ -651,7 +651,7 @@ def resolve_password(
     return password
 
 
-def resolve_host_or_ip(state: AnyRedTeamState | None, host: str) -> str:
+def resolve_host_or_ip(state: SharedRedTeamState | None, host: str) -> str:
     """Resolve a hostname to IP using state host list if needed."""
     if not host:
         return host
@@ -681,122 +681,65 @@ def check_port(target: str, port: int, timeout_seconds: int = 5) -> bool:
 
 
 def add_credential_to_state(
-    state: AnyRedTeamState | None,
+    state: SharedRedTeamState | None,
     cred: Credential,
     source_role: str = "recon",
-    dispatcher=None,
 ) -> None:
-    """Add a credential to state (real-time Redis publish handled by state.add_credential)."""
+    """Add a credential to state."""
     if not state or not cred.username:
         return
-
-    # SharedRedTeamState.add_credential() handles real-time Redis checkpoint internally
-    if hasattr(state, "add_credential"):
-        state.add_credential(cred, source_role)
-    else:
-        # Legacy single-agent state
-        existing = any(
-            c.username == cred.username and c.password == cred.password and c.domain == cred.domain
-            for c in state.credentials
-        )
-        if existing:
-            return
-        state.credentials.append(cred)
-        cred_key = state.get_credential_key(cred.username, cred.password, cred.domain)
-        state.tested_credentials.add(cred_key)
-        track_cross_domain_reuse(state, cred)
-
-    # Signal dispatcher if provided (for legacy compatibility)
-    if dispatcher:
-        dispatcher.signal_credential_access()
+    state.add_credential(cred, source_role)
 
 
-def add_weakness_to_state(state: AnyRedTeamState | None, block: str) -> None:
-    """Add a weakness block to state if not already present. Uses pub/sub if available."""
+def add_weakness_to_state(state: SharedRedTeamState | None, block: str) -> None:
+    """Add a weakness block to state if not already present."""
     if not state or not block:
         return
-    from ares.core.models import SharedRedTeamState
-
-    if isinstance(state, SharedRedTeamState):
-        state.add_weakness(block)
-    elif block not in state.weaknesses:
-        state.weaknesses.append(block)
+    state.add_weakness(block)
 
 
 def add_host_to_state(
-    state: AnyRedTeamState | None,
+    state: SharedRedTeamState | None,
     host,
     source_role: str = "recon",
-    dispatcher=None,
 ) -> None:
-    """Add a host to state (real-time Redis publish handled by state.add_host)."""
+    """Add a host to state."""
     if not state or not host:
         return
-
-    # SharedRedTeamState.add_host() handles real-time Redis checkpoint internally
-    if hasattr(state, "add_host"):
-        state.add_host(host)
+    state.add_host(host)
 
 
 def add_hash_to_state(
-    state: AnyRedTeamState | None,
+    state: SharedRedTeamState | None,
     hash_obj,
     source_role: str = "recon",
-    dispatcher=None,
 ) -> None:
-    """Add a hash to state (real-time Redis publish handled by state.add_hash)."""
+    """Add a hash to state."""
     if not state or not hash_obj:
         return
-
-    # SharedRedTeamState.add_hash() handles real-time Redis checkpoint internally
-    if hasattr(state, "add_hash"):
-        state.add_hash(hash_obj, source_role)
-
-    # Signal dispatcher if provided (for legacy compatibility)
-    if dispatcher:
-        dispatcher.signal_credential_access()
+    state.add_hash(hash_obj, source_role)
 
 
 def add_user_to_state(
-    state: AnyRedTeamState | None,
+    state: SharedRedTeamState | None,
     username: str,
     domain: str,
     source: str = "",
 ) -> bool:
     """Add a user to state if not duplicate.
 
-    Uses SharedRedTeamState.add_user() which handles domain normalization,
-    deduplication, and real-time Redis checkpoint.
-
     Args:
-        state: The operation state (RedTeamState or SharedRedTeamState).
+        state: The operation state.
         username: The username to add.
         domain: The domain for the user.
-        source: Tool/method that discovered this user (e.g., "netexec_user_enum").
+        source: Tool/method that discovered this user.
 
     Returns:
         True if user was added, False if duplicate or invalid.
     """
     if not state or not username:
         return False
-
-    # SharedRedTeamState.add_user() handles validation, normalization, and Redis checkpoint
-    if hasattr(state, "add_user"):
-        return state.add_user(username, domain, source)
-
-    # Legacy single-agent state fallback
-    from ares.core.models import User
-
-    normalized = username.strip()
-    normalized_domain = (domain or "").strip().lower()
-    if not normalized:
-        return False
-    # Check for duplicate
-    for existing in state.users:
-        if existing.username == normalized and (existing.domain or "").lower() == normalized_domain:
-            return False
-    state.users.append(User(username=normalized, domain=normalized_domain, source=source))
-    return True
+    return state.add_user(username, domain, source)
 
 
 def check_tool_result(

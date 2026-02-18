@@ -7,6 +7,7 @@ and phase-aware priority adjustments based on operation progress.
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -69,6 +70,10 @@ class ThrottlingMixin:
         }
     )
 
+    # ESC8-related techniques that should bypass hard cap when dispatched as coercion tasks
+    # ESC8 is a critical path to DA via ADCS web enrollment relay
+    ESC8_COERCION_TECHNIQUES = frozenset({"ntlmrelayx_to_adcs", "petitpotam"})
+
     def _get_throttle_lock(self: RedTeamDispatcher) -> asyncio.Lock:
         """Get or create the throttle lock (lazy init for event loop safety)."""
         lock = self._throttle_lock
@@ -83,7 +88,6 @@ class ThrottlingMixin:
             return 0
         # Clean up phantom empty-string task from throttle drops
         self._shared_state.pending_tasks.pop("", None)
-        self._redis_task_ids.discard("")
         pending = len(self._shared_state.pending_tasks)
         in_progress = sum(
             1
@@ -102,13 +106,20 @@ class ThrottlingMixin:
             if t.assigned_agent == role and t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
         )
 
-    async def _get_queue_length(self: RedTeamDispatcher, role: str) -> int:
-        """Get Redis queue length for a specific role (tasks waiting to be picked up)."""
-        if not self._task_queue or not self._task_queue._client:
+    async def _get_queue_length(self: RedTeamDispatcher, role: str, task_queue: Any = None) -> int:
+        """Get Redis queue length for a specific role (tasks waiting to be picked up).
+
+        Args:
+            role: Worker role (e.g., "privesc", "lateral")
+            task_queue: Optional task queue to use (threaded consumer passes its own)
+        """
+        # Use passed task_queue (from threaded consumer) or fall back to self._task_queue
+        effective_queue = task_queue if task_queue is not None else self._task_queue
+        if not effective_queue or not effective_queue._client:
             return 0
         try:
             queue_key = f"ares:tasks:{role}"
-            return await self._task_queue._client.llen(queue_key)
+            return await effective_queue._client.llen(queue_key)
         except Exception as e:
             logger.debug(f"Failed to get queue length for {role}: {e}")
             return 0
@@ -175,27 +186,36 @@ class ThrottlingMixin:
                 "delegation" in t.lower() for t in techniques
             )
 
-            if is_critical_exploit or is_delegation_enum:
+            # Check for ESC8-related coercion tasks (ntlmrelayx_to_adcs, petitpotam)
+            # ESC8 is a critical path to DA via ADCS web enrollment relay, but is
+            # dispatched as coercion tasks rather than exploit tasks
+            is_esc8_coercion = task_type == "coercion" and any(
+                t.lower() in self.ESC8_COERCION_TECHNIQUES for t in techniques
+            )
+
+            if is_critical_exploit or is_delegation_enum or is_esc8_coercion:
                 # Count how many tasks are already bypassing hard cap
                 bypass_count = llm_count - hard_cap
                 if bypass_count >= self.MAX_BYPASS_TASKS:
                     # Already have MAX_BYPASS_TASKS above hard cap - defer this one too
-                    bypass_reason = (
-                        f"{task_type}/{vuln_type}"
-                        if is_critical_exploit
-                        else f"{task_type}/find_delegation"
-                    )
+                    if is_critical_exploit:
+                        bypass_reason = f"{task_type}/{vuln_type}"
+                    elif is_esc8_coercion:
+                        bypass_reason = f"{task_type}/esc8_relay"
+                    else:
+                        bypass_reason = f"{task_type}/find_delegation"
                     logger.warning(
                         f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
                         f"DEFERRING {bypass_reason} (already {bypass_count} bypass tasks, max={self.MAX_BYPASS_TASKS})"
                     )
                     return True
 
-                bypass_reason = (
-                    f"{task_type}/{vuln_type}"
-                    if is_critical_exploit
-                    else f"{task_type}/find_delegation"
-                )
+                if is_critical_exploit:
+                    bypass_reason = f"{task_type}/{vuln_type}"
+                elif is_esc8_coercion:
+                    bypass_reason = f"{task_type}/esc8_relay"
+                else:
+                    bypass_reason = f"{task_type}/find_delegation"
                 logger.info(
                     f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
                     f"ALLOWING {bypass_reason} (high-value DA path, bypass {bypass_count + 1}/{self.MAX_BYPASS_TASKS})"
@@ -462,6 +482,7 @@ class ThrottlingMixin:
         source_agent: str,
         priority: int = 5,
         max_wait: float = 60.0,
+        task_queue: Any = None,
     ) -> str:
         """
         Submit a task with throttling to prevent overwhelming the LLM API.
@@ -473,6 +494,7 @@ class ThrottlingMixin:
             source_agent: Agent requesting the task
             priority: Task priority (lower = higher priority)
             max_wait: Maximum time to wait for throttle to clear
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
 
         Returns:
             Task ID if submitted, empty string on failure
@@ -482,20 +504,8 @@ class ThrottlingMixin:
             logger.debug(f"Rejecting {task_type} task - Domain Admin achieved, halting new tasks")
             return ""
 
-        if not self._task_queue:
-            logger.warning("No task queue available for throttled submit")
-            return ""
-
-        start_wait = asyncio.get_event_loop().time()
-        total_waited = 0.0
-
-        # FAILSAFE: If target worker is idle (queue empty), skip throttle wait entirely.
-        # No point burning time waiting when the worker has nothing to do.
-        # Check WITHOUT holding lock to avoid blocking other tasks.
-        role_queue_len = await self._get_queue_length(target_role)
-        role_pending = await self._get_pending_count_by_role(target_role)
-
-        # Check if this is a critical path task that should skip the wait loop
+        # Check if this is a critical path task BEFORE the threading check
+        # Critical path tasks can be dispatched directly from threaded consumer
         techniques = payload.get("techniques", []) if payload else []
         is_delegation_enum = task_type == "privesc_enumeration" and any(
             "delegation" in t.lower() for t in techniques
@@ -505,7 +515,60 @@ class ThrottlingMixin:
             task_type in self.CRITICAL_PATH_TASK_TYPES
             and vuln_type in self.CRITICAL_PATH_VULN_TYPES
         )
-        skip_wait_loop = is_delegation_enum or is_critical_exploit
+        is_esc8_coercion = task_type == "coercion" and any(
+            t.lower() in self.ESC8_COERCION_TECHNIQUES for t in techniques
+        )
+        is_critical_path = is_delegation_enum or is_critical_exploit or is_esc8_coercion
+
+        # When called from non-main thread (threaded consumer):
+        # - If task_queue is provided AND task is critical path, dispatch directly
+        #   This prevents freezes when main loop is blocked on LLM calls
+        # - Otherwise queue for main loop to avoid asyncio cross-loop errors
+        if threading.current_thread() is not threading.main_thread():
+            if task_queue is not None and is_critical_path:
+                # CRITICAL PATH: Bypass throttling and dispatch directly from threaded consumer
+                # These tasks (delegation checks, S4U exploits) are DA-critical and shouldn't
+                # wait for the main loop which may be blocked on slow LLM API calls
+                logger.info(
+                    f"🚀 Direct dispatch from threaded consumer: {task_type} -> {target_role} "
+                    f"(delegation_enum={is_delegation_enum}, critical_exploit={is_critical_exploit})"
+                )
+                return await task_queue.submit_task(
+                    task_type=task_type,
+                    target_role=target_role,
+                    payload=payload,
+                    source_agent=source_agent,
+                    priority=priority,
+                )
+            # Non-critical: queue for main loop to use proper throttling
+            with self._pending_dispatch_lock:
+                self._pending_dispatches.append(
+                    (task_type, target_role, payload.copy(), source_agent, priority, max_wait)
+                )
+            self._dispatch_requested.set()
+            logger.debug(
+                f"Queued task dispatch for main loop: {task_type} -> {target_role} "
+                f"(priority {priority})"
+            )
+            return "queued"  # Task accepted for dispatch on main loop
+
+        # Use provided task_queue (from threaded consumer) or fall back to self._task_queue
+        effective_task_queue = task_queue if task_queue is not None else self._task_queue
+        if not effective_task_queue:
+            logger.warning("No task queue available for throttled submit")
+            return ""
+
+        start_wait = asyncio.get_event_loop().time()
+        total_waited = 0.0
+
+        # FAILSAFE: If target worker is idle (queue empty), skip throttle wait entirely.
+        # No point burning time waiting when the worker has nothing to do.
+        # Check WITHOUT holding lock to avoid blocking other tasks.
+        # Pass effective_task_queue to use thread's Redis client when called from threaded consumer
+        role_queue_len = await self._get_queue_length(target_role, effective_task_queue)
+        role_pending = await self._get_pending_count_by_role(target_role)
+
+        # Skip wait loop for critical path tasks (already computed above)
 
         if role_queue_len == 0 and role_pending == 0:
             logger.debug(
@@ -513,11 +576,8 @@ class ThrottlingMixin:
                 f"(queue={role_queue_len}, pending={role_pending})"
             )
             # Skip directly to submit (acquire lock below)
-        elif skip_wait_loop:
-            logger.debug(
-                f"Bypassing throttle wait for {task_type} - critical path task "
-                f"(delegation_enum={is_delegation_enum}, critical_exploit={is_critical_exploit})"
-            )
+        elif is_critical_path:
+            logger.debug(f"Bypassing throttle wait for {task_type} - critical path task")
             # Skip directly to submit - critical path tasks bypass 60s wait loop
         else:
             # Wait loop - DO NOT hold the lock during sleep to avoid deadlock.
@@ -559,10 +619,10 @@ class ThrottlingMixin:
                         source_agent=source_agent,
                         priority=adjusted_priority,
                     )
-                    # Return empty string - caller sees it as "not immediately dispatched"
-                    # but the task is queued rather than lost
+                    # Return "deferred" marker so callers can distinguish from dropped tasks
+                    # The deferred queue processor will submit this task when slots open up
                     if queued:
-                        return ""  # Task queued, not lost
+                        return "deferred"  # Task queued, will be processed later
                     # Queue rejected the task (full with higher priority tasks)
                     logger.warning(
                         f"Task {task_type} for {target_role} dropped - "
@@ -581,7 +641,7 @@ class ThrottlingMixin:
             self._last_dispatch_time = asyncio.get_event_loop().time()
 
             # Submit the task (call underlying queue directly, not recursively)
-            return await self._task_queue.submit_task(
+            return await effective_task_queue.submit_task(
                 task_type=task_type,
                 target_role=target_role,
                 payload=payload,

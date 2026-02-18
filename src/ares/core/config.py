@@ -168,6 +168,10 @@ class OperationConfig:
     # Priority 1-N tasks are critical, force-drain even at capacity
     critical_priority_threshold: int = 3
 
+    # Vulnerability exploitation settings
+    # Max failures per vulnerability before skipping (prevents infinite retry loops)
+    max_vulnerability_failures: int = 3
+
     # Worker agent settings
     # Timeout for agent tasks (prevents infinite retry loops)
     agent_task_timeout: int = 300  # 5 minutes
@@ -207,6 +211,8 @@ class OperationConfig:
     max_runtime: float = 3600.0
     # Grace period for crack tasks when operation is completing (seconds)
     crack_task_grace_period: float = 300.0
+    # Stop operation immediately when domain admin is achieved
+    stop_on_domain_admin: bool = False
 
     # Rate limit retry settings (for worker agents)
     # Delays between retries when rate limited (list of seconds)
@@ -235,6 +241,16 @@ class OperationConfig:
     # Grafana integration
     grafana_url: str = ""
     grafana_api_key: str = ""
+
+    # Replay settings (for deterministic runs)
+    # Mode: "record" to capture, "replay" to use cached, "" for off
+    replay_mode: str = ""
+    # Path to JSONL file for recording/replay
+    replay_file: str = ""
+    # Seed for deterministic value generation (UUIDs, timestamps)
+    replay_seed: int = 42
+    # Behavior on cache miss in replay: "error", "live", "skip"
+    replay_fallback: str = "error"
 
 
 # Default config file locations (searched in order)
@@ -391,6 +407,7 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         # Orchestrator runtime settings
         max_runtime=operation.get("max_runtime", 3600.0),
         crack_task_grace_period=operation.get("crack_task_grace_period", 300.0),
+        stop_on_domain_admin=operation.get("stop_on_domain_admin", False),
         # Rate limit retry settings
         rate_limit_backoff_delays=operation.get(
             "rate_limit_backoff_delays", [5.0, 10.0, 20.0, 40.0, 60.0, 60.0]
@@ -413,7 +430,7 @@ def _resolve_env(value: str) -> str:
     return value
 
 
-def _apply_env_overrides(config: OperationConfig) -> OperationConfig:  # noqa: PLR0912
+def _apply_env_overrides(config: OperationConfig) -> OperationConfig:
     """Apply environment variable overrides to config."""
     # Check for explicit Redis URL override
     explicit_redis_url = os.environ.get("ARES_REDIS_URL") or os.environ.get("REDIS_URL")
@@ -601,6 +618,25 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:  # noqa: P
             config.crack_task_grace_period = float(crack_grace)
         except ValueError:
             pass
+    if stop_on_da := os.environ.get("ARES_STOP_ON_DOMAIN_ADMIN"):
+        config.stop_on_domain_admin = stop_on_da.lower() in ("true", "1", "yes")
+
+    # Replay overrides
+    if replay_mode := os.environ.get("ARES_REPLAY_MODE"):
+        config.replay_mode = replay_mode.lower()
+    if replay_file := os.environ.get("ARES_REPLAY_FILE"):
+        config.replay_file = replay_file
+    if replay_seed := os.environ.get("ARES_REPLAY_SEED"):
+        try:
+            config.replay_seed = int(replay_seed)
+        except ValueError:
+            pass
+    if (replay_fallback := os.environ.get("ARES_REPLAY_FALLBACK")) and replay_fallback.lower() in (
+        "error",
+        "live",
+        "skip",
+    ):
+        config.replay_fallback = replay_fallback.lower()
 
     # Model overrides (Viper-style precedence: role-specific > orchestrator/worker > global)
     global_model = os.environ.get("ARES_MODEL")
@@ -829,6 +865,11 @@ def get_vulnerability_priorities() -> dict[str, int]:
     return priorities
 
 
+def get_max_vulnerability_failures() -> int:
+    """Get max failures per vulnerability before skipping."""
+    return load_config().max_vulnerability_failures
+
+
 def get_agent_task_timeout() -> int:
     """Get timeout (seconds) for agent tasks."""
     return load_config().agent_task_timeout
@@ -899,6 +940,11 @@ def get_crack_task_grace_period() -> float:
     return load_config().crack_task_grace_period
 
 
+def get_stop_on_domain_admin() -> bool:
+    """Get whether to stop operation immediately when domain admin is achieved."""
+    return load_config().stop_on_domain_admin
+
+
 def get_rate_limit_backoff_delays() -> list[float]:
     """Get list of delays (seconds) between rate limit retries."""
     return load_config().rate_limit_backoff_delays
@@ -912,6 +958,26 @@ def get_rate_limit_max_retries() -> int:
 def get_query_limits_by_stage() -> dict[str, int]:
     """Get stage-based query limits for blue team investigations."""
     return load_config().query_limits_by_stage
+
+
+def get_replay_mode() -> str:
+    """Get replay mode (record/replay/empty for off)."""
+    return load_config().replay_mode
+
+
+def get_replay_file() -> str:
+    """Get replay file path."""
+    return load_config().replay_file
+
+
+def get_replay_seed() -> int:
+    """Get seed for deterministic value generation."""
+    return load_config().replay_seed
+
+
+def get_replay_fallback() -> str:
+    """Get replay fallback behavior (error/live/skip)."""
+    return load_config().replay_fallback
 
 
 def clear_config_cache() -> None:
@@ -952,6 +1018,7 @@ __all__ = [
     "get_max_runtime",
     "get_max_stored_results",
     "get_max_total_queries",
+    "get_max_vulnerability_failures",
     "get_min_messages_to_keep",
     "get_min_slots_per_role",
     "get_namespace",
@@ -965,7 +1032,12 @@ __all__ = [
     "get_redis_retry_base_delay",
     "get_redis_retry_max_delay",
     "get_redis_url",
+    "get_replay_fallback",
+    "get_replay_file",
+    "get_replay_mode",
+    "get_replay_seed",
     "get_stale_task_timeout",
+    "get_stop_on_domain_admin",
     "get_task_dispatch_delay",
     "get_unvalidated_confidence_penalty",
     "get_vulnerability_priorities",

@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
 
-from ares.core.models import InvestigationStage, RedTeamState, SharedRedTeamState, Target
+from ares.core.models import SharedRedTeamState, Target
 from ares.tools.red import SharePilferingTools
 
 
@@ -21,25 +20,11 @@ class MockRunResult:
 
 
 @pytest.fixture
-def red_team_state() -> RedTeamState:
+def red_team_state() -> SharedRedTeamState:
     """Create a basic red team state for testing."""
-    return RedTeamState(
-        operation_id="op-test-sysvol",
-        target=Target(ip="192.168.58.10", hostname="dc01", domain="contoso.local"),
-        started_at=datetime.now(timezone.utc),
-        stage=InvestigationStage.TRIAGE,
-        hosts=[],
-        users=[],
-        credentials=[],
-        hashes=[],
-        shares=[],
-        weaknesses=[],
-        timeline=[],
-        identified_techniques=set(),
-        has_domain_admin=False,
-        has_golden_ticket=False,
-        report_summary=None,
-    )
+    state = SharedRedTeamState(operation_id="op-test-sysvol")
+    state.target = Target(ip="192.168.58.10", hostname="dc01", domain="contoso.local")
+    return state
 
 
 @pytest.fixture
@@ -51,7 +36,7 @@ def shared_state() -> SharedRedTeamState:
 class TestSysvolScriptSearch:
     """Tests for sysvol_script_search method."""
 
-    def test_rejects_placeholder_password(self, red_team_state: RedTeamState):
+    def test_rejects_placeholder_password(self, red_team_state: SharedRedTeamState):
         """Should reject placeholder passwords."""
         tools = SharePilferingTools()
         tools.set_state(red_team_state)
@@ -65,7 +50,7 @@ class TestSysvolScriptSearch:
 
         assert "placeholder password" in result.lower()
 
-    def test_returns_no_passwords_message_when_empty(self, red_team_state: RedTeamState):
+    def test_returns_no_passwords_message_when_empty(self, red_team_state: SharedRedTeamState):
         """Should return no passwords message when nothing found."""
         tools = SharePilferingTools()
         tools.set_state(red_team_state)
@@ -83,7 +68,7 @@ class TestSysvolScriptSearch:
 
         assert "No obvious passwords found" in result
 
-    def test_detects_password_in_script(self, red_team_state: RedTeamState):
+    def test_detects_password_in_script(self, red_team_state: SharedRedTeamState):
         """Should detect password patterns in scripts."""
         tools = SharePilferingTools()
         tools.set_state(red_team_state)
@@ -155,7 +140,7 @@ class TestSysvolScriptSearch:
             if svc_backup_creds:
                 assert svc_backup_creds[0].password == "P@ssw0rd123"  # pragma: allowlist secret
 
-    def test_handles_exception_gracefully(self, red_team_state: RedTeamState):
+    def test_handles_exception_gracefully(self, red_team_state: SharedRedTeamState):
         """Should handle exceptions gracefully."""
         tools = SharePilferingTools()
         tools.set_state(red_team_state)
@@ -172,7 +157,7 @@ class TestSysvolScriptSearch:
 
         assert "failed" in result.lower()
 
-    def test_searches_multiple_script_extensions(self, red_team_state: RedTeamState):
+    def test_searches_multiple_script_extensions(self, red_team_state: SharedRedTeamState):
         """Should search for multiple script file extensions."""
         tools = SharePilferingTools()
         tools.set_state(red_team_state)
@@ -206,7 +191,7 @@ class TestSysvolScriptSearch:
 class TestSysvolScriptSearchPatterns:
     """Tests for pattern matching in sysvol_script_search."""
 
-    def test_pattern_password_equals(self, red_team_state: RedTeamState):
+    def test_pattern_password_equals(self, red_team_state: SharedRedTeamState):
         """Should match password= pattern."""
         tools = SharePilferingTools()
         tools.set_state(red_team_state)
@@ -226,7 +211,7 @@ class TestSysvolScriptSearchPatterns:
         # Should process without error
         assert result is not None
 
-    def test_pattern_pwd_colon(self, red_team_state: RedTeamState):
+    def test_pattern_pwd_colon(self, red_team_state: SharedRedTeamState):
         """Should match pwd: pattern."""
         tools = SharePilferingTools()
         tools.set_state(red_team_state)
@@ -243,7 +228,7 @@ class TestSysvolScriptSearchPatterns:
 
         assert result is not None
 
-    def test_pattern_credential(self, red_team_state: RedTeamState):
+    def test_pattern_credential(self, red_team_state: SharedRedTeamState):
         """Should match cred= pattern."""
         tools = SharePilferingTools()
         tools.set_state(red_team_state)

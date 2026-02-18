@@ -39,7 +39,6 @@ includes:
       K8S_NAMESPACE: '{{.K8S_NAMESPACE}}'
       TARGET_PROFILE: '{{.TARGET_PROFILE}}'
       TARGET_REGION: '{{.TARGET_REGION}}'
-      REDTEAM_PROJECT: '{{.REDTEAM_PROJECT}}'
       TARGET: '{{.TARGET}}'
       DOMAIN: '{{.DOMAIN}}'
   blue:
@@ -90,7 +89,6 @@ vars:
   TARGET_PROFILE: '{{.TARGET_PROFILE | default "lab"}}'
   TARGET_REGION: '{{.TARGET_REGION | default "us-west-1"}}'
   # Red team defaults
-  REDTEAM_PROJECT: '{{.REDTEAM_PROJECT | default "ares-redteam"}}'
   TARGET: '{{.TARGET | default "dreadgoad"}}'
   DOMAIN: '{{.DOMAIN | default "sevenkingdoms.local"}}'
 
@@ -135,16 +133,6 @@ tasks:
       KEY: '{{.CLI_ARGS}}'
     cmds:
       - grep '^{{.KEY}}=' .env | sed 's/^{{.KEY}}=//;s/^"//;s/"$//'
-
-  deactivate:
-    internal: true
-    silent: true
-    cmds:
-      - |
-        if [ -n "${VIRTUAL_ENV:-}" ]; then
-          echo "Deactivated venv - try again."
-          deactivate
-        fi
 
   setup-git-hooks:
     desc: Set up Git hooks
@@ -233,43 +221,6 @@ tasks:
   # ===========================================================================
   # Ares Blue Team (SOC) Agent Tasks
   # ===========================================================================
-
-  ares:investigate:
-    desc: "Investigate a specific alert from JSON file (usage: task ares:investigate ALERT=alert.json)"
-    silent: true
-    vars:
-      ALERT: '{{.ALERT | default ""}}'
-    preconditions:
-      - sh: test -n "{{.ALERT}}"
-        msg: "ALERT variable is required. Usage: task ares:investigate ALERT=alert.json"
-      - sh: test -f "{{.ALERT}}"
-        msg: "Alert file not found: {{.ALERT}}"
-    deps:
-      - task: check-aws-auth
-        vars:
-          PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-2"}}'
-    cmds:
-      - |
-        export ANTHROPIC_API_KEY=$(op item get "Dreadnode Claude" --fields api-key --reveal 2>/dev/null || echo "")
-        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
-        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
-        export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-personal-api-key --reveal 2>/dev/null)
-        MODEL_ARG="{{.MODEL}}"
-        if [ -n "{{.MODEL_ALL}}" ]; then
-          MODEL_ARG="{{.MODEL_ALL}}"
-        fi
-
-        uv run python -m ares investigate-alert {{.ALERT}} \
-          --args.model "$MODEL_ARG" \
-          --args.grafana-url {{.GRAFANA_URL}} \
-          --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
-          --args.report-dir {{.REPORT_DIR}} \
-          --dn-args.server {{.DREADNODE_SERVER_URL}} \
-          --dn-args.token "$DREADNODE_API_KEY" \
-          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
-          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.DREADNODE_PROJECT}}
 
   ares:config:check:
     desc: Check configuration and API key access
@@ -363,99 +314,11 @@ tasks:
         echo "Output:"
         echo "  Reports: {{.REPORT_DIR}}"
 
-  ares:reports:list:
-    desc: List all investigation reports
-    silent: true
-    cmds:
-      - |
-        echo "Investigation Reports:"
-        echo "======================"
-        if [ -d {{.REPORT_DIR}} ]; then
-          ls -lht {{.REPORT_DIR}}/*.md 2>/dev/null || echo "No reports found"
-        else
-          echo "Report directory not found: {{.REPORT_DIR}}"
-        fi
-
-  ares:reports:latest:
-    desc: Show the latest investigation report
-    silent: true
-    cmds:
-      - |
-        LATEST=$(ls -t {{.REPORT_DIR}}/*.md 2>/dev/null | head -1)
-        if [ -n "$LATEST" ]; then
-          echo "Latest report: $LATEST"
-          echo "===================="
-          cat "$LATEST"
-        else
-          echo "No reports found in {{.REPORT_DIR}}"
-        fi
-
-  ares:reports:clean:
-    desc: Remove all investigation reports
-    silent: true
-    cmds:
-      - |
-        read -p "Delete all reports in {{.REPORT_DIR}}? (y/N) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-          rm -rf {{.REPORT_DIR}}/*.md
-          echo "✅ Reports cleaned"
-        fi
-
-  # ===========================================================================
-  # Ares Logs
-  # ===========================================================================
-
-  ares:logs:
-    desc: "Tail remote logs (usage: task ares:logs [ROLE=recon|orchestrator] [LINES=100] [FOLLOW=true])"
-    silent: true
-    vars:
-      ROLE: '{{.ROLE | default ""}}'
-      FOLLOW: '{{.FOLLOW | default "true"}}'
-      LINES: '{{.LINES | default "100"}}'
-    cmds:
-      - task: remote:logs
-        vars:
-          ROLE: '{{.ROLE}}'
-          FOLLOW: '{{.FOLLOW}}'
-          LINES: '{{.LINES}}'
-
   ares:version:
     desc: Show Ares version information
     silent: true
     cmds:
       - uv run python -c "import ares; print('Ares version:', ares.__version__)"
-
-  ares:mitre:test:
-    desc: Test MITRE ATT&CK data loading
-    silent: true
-    cmds:
-      - |
-        uv run python -c "
-        import asyncio
-        from ares.integrations.mitre import MITREAttackClient
-
-        async def test():
-            client = MITREAttackClient()
-            await client.load()
-            print(f'✅ Loaded {len(client._techniques)} techniques')
-            print(f'✅ Loaded {len(client._tactics)} tactics')
-
-            # Show a sample technique
-            sample = list(client._techniques.values())[0]
-            print(f'\nSample technique:')
-            print(f'  ID: {sample.id}')
-            print(f'  Name: {sample.name}')
-            print(f'  Tactic: {sample.tactic}')
-
-        asyncio.run(test())
-        "
-
-  ares:example:grafana-windows:
-    desc: Show example Grafana MCP queries for Windows attack detection
-    silent: true
-    cmds:
-      - python examples/grafana_mcp_windows_example.py
 
   # ===========================================================================
   # Ares Red Team Agent Tasks

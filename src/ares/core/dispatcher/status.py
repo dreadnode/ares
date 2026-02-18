@@ -92,7 +92,7 @@ class StatusMixin:
             for name, agent in self._agents.items()
         }
 
-    async def get_exploitation_status(self: RedTeamDispatcher) -> dict[str, Any]:  # noqa: PLR0912
+    async def get_exploitation_status(self: RedTeamDispatcher) -> dict[str, Any]:
         """Get status of discovered vs exploited vulnerabilities."""
         discovered: dict[str, VulnerabilityInfo] = dict(
             self.shared_state.discovered_vulnerabilities
@@ -109,7 +109,7 @@ class StatusMixin:
             try:
                 import json
 
-                vuln_prefix = f"ares:operation:{self.shared_state.operation_id}:vulns:"
+                vuln_prefix = f"ares:op:{self.shared_state.operation_id}:vulns:"
                 async for key in self._redis_client.scan_iter(f"{vuln_prefix}*"):
                     key_str = key.decode() if isinstance(key, bytes) else str(key)
                     if not key_str.startswith(vuln_prefix):
@@ -137,7 +137,8 @@ class StatusMixin:
                         continue
                     seen_type_target.add(type_target_key)
                     discovered_by = data.get("discovered_by", "unknown")
-                    details = data.get("details") or {}
+                    raw_details = data.get("details") or {}
+                    details = raw_details if isinstance(raw_details, dict) else {}
                     priority = self._vulnerability_priorities.get(vuln_type, 99)
                     discovered_at = datetime.now(timezone.utc)
                     queued_at = data.get("queued_at")
@@ -156,7 +157,7 @@ class StatusMixin:
                         priority=priority,
                     )
 
-                key_prefix = f"ares:operation:{self.shared_state.operation_id}:exploited:"
+                key_prefix = f"ares:op:{self.shared_state.operation_id}:exploited:"
                 async for key in self._redis_client.scan_iter(f"{key_prefix}*"):
                     key_str = key.decode() if isinstance(key, bytes) else str(key)
                     if not key_str.startswith(key_prefix):
@@ -170,7 +171,10 @@ class StatusMixin:
                         logger.debug(f"Failed to parse exploit status for {key_str}: {e}")
                         continue
                     vuln_id = key_str[len(key_prefix) :]
-                    if data.get("success"):
+                    # Handle case where data is not a dict (e.g., raw string error)
+                    if not isinstance(data, dict):
+                        failed[vuln_id] = {"error": str(data) if data else "Unknown error"}
+                    elif data.get("success"):
                         succeeded.add(vuln_id)
                     else:
                         failed[vuln_id] = data
@@ -178,6 +182,28 @@ class StatusMixin:
                 logger.warning(f"Failed to load exploitation status from Redis: {e}")
 
         failed_ids = set(failed.keys())
+
+        def _extract_error(data: dict[str, Any] | str | None) -> str:
+            """Extract error message from exploit result, handling various formats."""
+            # Handle non-dict data (e.g., if json.loads returned a string)
+            if data is None:
+                return "Unknown error"
+            if isinstance(data, str):
+                return data or "Unknown error"
+            if not isinstance(data, dict):
+                return str(data) if data else "Unknown error"
+            # Try result.error (dict format)
+            result = data.get("result")
+            if isinstance(result, dict):
+                if result.get("error"):
+                    return str(result["error"])
+            # result might be a string error message itself
+            elif isinstance(result, str) and result:
+                return result
+            # Try top-level error field
+            if data.get("error"):
+                return str(data["error"])
+            return "Unknown error"
 
         return {
             "total_discovered": len(discovered),
@@ -198,15 +224,13 @@ class StatusMixin:
                     "id": vid,
                     "type": discovered[vid].vuln_type if vid in discovered else "unknown",
                     "target": discovered[vid].target if vid in discovered else "unknown",
-                    "error": failed.get(vid, {}).get("result", {}).get("error")
-                    or failed.get(vid, {}).get("error")
-                    or "Unknown error",
+                    "error": _extract_error(failed.get(vid, {})),
                 }
                 for vid in failed
             ],
         }
 
-    def get_throttle_status(self: RedTeamDispatcher) -> dict[str, Any]:
+    async def get_throttle_status(self: RedTeamDispatcher) -> dict[str, Any]:
         """Get throttling and deferred queue status for monitoring.
 
         Returns dict with:
@@ -217,7 +241,7 @@ class StatusMixin:
         """
         from ares.core.config import get_max_concurrent_tasks
 
-        deferred_status = self.get_deferred_queue_status()
+        deferred_status = await self.get_deferred_queue_status()
         phase = self._get_operation_phase()
 
         return {

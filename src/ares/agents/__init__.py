@@ -1,11 +1,13 @@
-"""Ares agent orchestrators for blue and red team operations.
+"""Ares agent orchestrators for blue team operations.
 
-Imports are lazy to prevent cross-contamination between blue and red team code.
+Imports are lazy to prevent loading unnecessary dependencies.
+
+Note: Red team operations now use the multi-agent orchestrator system
+(see ares.core.orchestrator) instead of single-agent RedTeamOrchestrator.
 """
 
 __all__ = [
     "InvestigationOrchestrator",
-    "RedTeamOrchestrator",
 ]
 
 
@@ -14,10 +16,5 @@ def __getattr__(name: str):
         from ares.agents.blue.soc_investigator import InvestigationOrchestrator
 
         return InvestigationOrchestrator
-
-    if name == "RedTeamOrchestrator":
-        from ares.agents.red.pentester import RedTeamOrchestrator
-
-        return RedTeamOrchestrator
 
     raise AttributeError(f"module 'ares.agents' has no attribute {name!r}")

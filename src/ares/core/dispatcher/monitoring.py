@@ -13,8 +13,9 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from loguru import logger
 
@@ -56,6 +57,26 @@ class MonitoringMixin:
     _result_consumer_stop_event: threading.Event | None = None
     _last_result_consumer_iteration: float = 0.0  # For watchdog logging
 
+    def _update_task_activity(
+        self: RedTeamDispatcher,
+        current_task: str | None,
+        now: datetime,
+    ) -> None:
+        """Update task activity when a worker reports working on it.
+
+        This keeps the task "alive" in stale detection and transitions
+        PENDING tasks to IN_PROGRESS when a worker picks them up.
+        """
+        if not current_task or not self._shared_state:
+            return
+        task_info = self._shared_state.pending_tasks.get(current_task)
+        if not task_info:
+            return
+        task_info.last_activity_at = now
+        if task_info.status == TaskStatus.PENDING:
+            task_info.status = TaskStatus.IN_PROGRESS
+            task_info.started_at = now
+
     async def heartbeat(
         self: RedTeamDispatcher,
         agent_name: str,
@@ -77,15 +98,7 @@ class MonitoringMixin:
             self._agents[agent_name].last_heartbeat = now
 
         # Update task activity when worker reports working on it
-        # This keeps the task "alive" in stale detection
-        if current_task and self._shared_state:
-            task_info = self._shared_state.pending_tasks.get(current_task)
-            if task_info:
-                task_info.last_activity_at = now
-                # Also mark as in_progress if still pending
-                if task_info.status == TaskStatus.PENDING:
-                    task_info.status = TaskStatus.IN_PROGRESS
-                    task_info.started_at = now
+        self._update_task_activity(current_task, now)
 
     async def _heartbeat_monitor(self: RedTeamDispatcher) -> None:
         """Background task to monitor agent heartbeats.
@@ -113,10 +126,12 @@ class MonitoringMixin:
                                     self._agents[agent_name].status = heartbeat_data.get(
                                         "status", "idle"
                                     )
-                                    self._agents[agent_name].current_task = heartbeat_data.get(
-                                        "current_task"
-                                    )
-                        except Exception as e:  # noqa: PERF203
+                                    current_task = heartbeat_data.get("current_task")
+                                    self._agents[agent_name].current_task = current_task
+
+                                    # Update task activity when worker reports working on it
+                                    self._update_task_activity(current_task, now)
+                        except Exception as e:
                             # Heartbeat failures could indicate auth issues - log at ERROR level
                             logger.error(
                                 f"Failed to get heartbeat for {agent_name}: {e}. "
@@ -137,7 +152,7 @@ class MonitoringMixin:
                 consecutive_failures = 0
                 await asyncio.sleep(15)
 
-            except asyncio.CancelledError:  # noqa: PERF203
+            except asyncio.CancelledError:
                 logger.info("Heartbeat monitor cancelled")
                 break
 
@@ -181,7 +196,7 @@ class MonitoringMixin:
 
                 await asyncio.sleep(1)
 
-            except asyncio.CancelledError:  # noqa: PERF203
+            except asyncio.CancelledError:
                 logger.info("Result consumer cancelled")
                 break
 
@@ -242,9 +257,8 @@ class MonitoringMixin:
         - Tasks get lost in Redis
         - Network partitions cause result delivery failures
 
-        Tasks older than stale_task_timeout (from config) are removed from:
-        - pending_tasks (decreases LLM task count)
-        - _redis_task_ids (stops result polling)
+        Tasks older than stale_task_timeout (from config) are removed from
+        pending_tasks (decreases LLM task count and stops result polling).
 
         Also detects deadlock conditions (at hard cap with no progress) and
         applies aggressive cleanup to break the deadlock.
@@ -317,8 +331,7 @@ class MonitoringMixin:
                 stale_task: TaskInfo | None = self._shared_state.pending_tasks.get(task_id)
                 if stale_task is not None:
                     del self._shared_state.pending_tasks[task_id]
-                self._redis_task_ids.discard(task_id)
-                MonitoringMixin._warned_tasks.discard(task_id)  # Clean up warning tracking
+                    MonitoringMixin._warned_tasks.discard(task_id)  # Clean up warning tracking
 
                 if stale_task is not None:
                     activity_time = (
@@ -381,7 +394,6 @@ class MonitoringMixin:
         if stale_task_ids:
             for task_id in stale_task_ids:
                 stale_task: TaskInfo | None = self._shared_state.pending_tasks.pop(task_id, None)
-                self._redis_task_ids.discard(task_id)
                 MonitoringMixin._warned_tasks.discard(task_id)
 
                 if stale_task is not None:
@@ -459,7 +471,7 @@ class MonitoringMixin:
                 heartbeat_data = await self._task_queue.get_heartbeat(agent_name)
                 if heartbeat_data:
                     worker_current_tasks[agent_name] = heartbeat_data.get("current_task")
-            except Exception:  # noqa: PERF203
+            except Exception:
                 pass
 
         # Check each pending task
@@ -497,13 +509,16 @@ class MonitoringMixin:
             logger.warning("Result consumer has no task queue; skipping result checks")
             return
 
+        if not self._shared_state:
+            return
+
         # Periodically clean up stale tasks to prevent throttle deadlock
         await self._cleanup_stale_tasks()
 
         # Reconcile tasks with workers every cycle to detect orphans
         await self._reconcile_tasks_with_workers()
 
-        task_ids_to_check = list(self._redis_task_ids)
+        task_ids_to_check = list(self._shared_state.pending_tasks.keys())
 
         for task_id in task_ids_to_check:
             try:
@@ -538,9 +553,6 @@ class MonitoringMixin:
                             )
                             self.record_rate_limit_error()
 
-                    # Remove from tracking set
-                    self._redis_task_ids.discard(task_id)
-
                     # Call complete_task to update dispatcher state
                     await self.complete_task(
                         task_id=task_id,
@@ -549,7 +561,7 @@ class MonitoringMixin:
                         error=result.error,
                         source_agent=result.agent_name or result.worker_pod or "unknown",
                     )
-            except Exception as e:  # noqa: PERF203
+            except Exception as e:
                 logger.warning(f"Error checking result for task {task_id}: {e}")
 
         # Poll for real-time discoveries from workers
@@ -583,7 +595,9 @@ class MonitoringMixin:
                 if discovery_type == "delegation":
                     await self._process_realtime_delegation_discovery(data, source_agent)
                 elif discovery_type == "credential":
-                    await self._process_realtime_credential_discovery(data, source_agent)
+                    await self._process_realtime_credential_discovery(
+                        data, source_agent, task_queue=None
+                    )
                 elif discovery_type == "hash":
                     await self._process_realtime_hash_discovery(data, source_agent)
                 elif discovery_type == "vulnerability":
@@ -595,12 +609,15 @@ class MonitoringMixin:
             logger.warning(f"Error polling discoveries: {e}")
 
     async def _process_realtime_delegation_discovery(
-        self: RedTeamDispatcher, data: dict, source_agent: str
+        self: RedTeamDispatcher, data: dict, source_agent: str, task_queue: Any = None
     ) -> None:
         """Process a real-time delegation discovery and dispatch exploit if applicable.
 
-        NOTE: When called from threaded consumer (non-main thread), only updates
-        in-memory state. Redis operations and dispatching happen on main loop.
+        Args:
+            data: Delegation discovery data dict
+            source_agent: Agent that discovered the delegation
+            task_queue: Optional task queue for thread-safe Redis operations.
+                        When called from threaded consumer, pass the thread's queue.
         """
         account = data.get("account", "")
         delegation_type = data.get("delegation_type", "").lower()
@@ -619,15 +636,11 @@ class MonitoringMixin:
             f"📡 Processing real-time {vuln_type} discovery: {account} -> {target_spn or 'any'}"
         )
 
-        # Skip Redis-heavy operations when in non-main thread
-        # The main loop will handle queuing and dispatching via normal processing
-        if threading.current_thread() is not threading.main_thread():
-            logger.debug(f"Skipping delegation dispatch from threaded consumer: {account}")
-            return
-
         # Queue vulnerability and dispatch exploit using existing logic
         # This reuses _auto_queue_delegation_vulnerabilities which handles deduplication
-        queued = await self._auto_queue_delegation_vulnerabilities([data], source_agent)
+        queued = await self._auto_queue_delegation_vulnerabilities(
+            [data], source_agent, task_queue=task_queue
+        )
         if queued > 0:
             logger.warning(
                 f"🚀 Real-time delegation exploit dispatched for {account} "
@@ -635,7 +648,7 @@ class MonitoringMixin:
             )
 
     async def _process_realtime_credential_discovery(
-        self: RedTeamDispatcher, data: dict, source_agent: str
+        self: RedTeamDispatcher, data: dict, source_agent: str, task_queue: Any = None
     ) -> None:
         """Process a real-time credential discovery."""
         from ares.core.models import Credential
@@ -656,7 +669,7 @@ class MonitoringMixin:
         )
 
         # publish_credential handles deduplication and triggers auto-exploit
-        await self.publish_credential(cred, source_agent)
+        await self.publish_credential(cred, source_agent, task_queue=task_queue)
         logger.info(f"📡 Real-time credential: {domain}\\{username}")
 
     async def _process_realtime_hash_discovery(
@@ -686,7 +699,7 @@ class MonitoringMixin:
         logger.info(f"📡 Real-time hash: {domain}\\{username} ({hash_type})")
 
     async def _process_realtime_vulnerability_discovery(
-        self: RedTeamDispatcher, data: dict, source_agent: str
+        self: RedTeamDispatcher, data: dict, source_agent: str, task_queue: Any = None
     ) -> None:
         """Process a real-time vulnerability discovery and queue for exploitation."""
         from ares.core.models import VulnerabilityInfo
@@ -698,17 +711,24 @@ class MonitoringMixin:
         if not vuln_type or not target:
             return
 
-        # Generate vuln_id if not provided
+        # Generate vuln_id if not provided (must match queue_vulnerability format)
+        normalized_type = vuln_type.lower()
         if not vuln_id:
-            vuln_id = f"{vuln_type}_{target}".replace(".", "_").replace(":", "_")
+            vuln_id = f"{normalized_type}_{target}_{uuid.uuid4().hex[:8]}"
 
-        # Check for duplicates
-        if vuln_id in self.shared_state.discovered_vulnerabilities:
-            logger.debug(f"Skipping duplicate vulnerability: {vuln_id}")
-            return
+        # Check for duplicates by type+target (same logic as queue_vulnerability)
+        for existing in self.shared_state.discovered_vulnerabilities.values():
+            if existing.vuln_type.lower() == normalized_type and existing.target == target:
+                logger.debug(
+                    f"Skipping duplicate vulnerability: {existing.vuln_id} "
+                    f"(type={normalized_type}, target={target})"
+                )
+                return
 
         # Create and store vulnerability
-        details = data.get("details", {})
+        # Defensive: ensure details is always a dict (may be string from improper serialization)
+        raw_details = data.get("details", {})
+        details = raw_details if isinstance(raw_details, dict) else {}
         priority = data.get("priority", 5)
 
         vuln = VulnerabilityInfo(
@@ -736,13 +756,12 @@ class MonitoringMixin:
             "mssql_impersonation",
         }
 
-        # Skip dispatch when in non-main thread - main loop handles it
+        # Auto-dispatch exploit for high-value vulnerabilities
         if vuln_type.lower() in high_value_vulns:
-            if threading.current_thread() is threading.main_thread():
-                await self.request_exploit(vuln_type, vuln_id, target, source_agent, details)
-                logger.warning(f"🚀 Auto-dispatched exploit for {vuln_type} on {target}")
-            else:
-                logger.debug(f"Skipping exploit dispatch from threaded consumer: {vuln_type}")
+            await self.request_exploit(
+                vuln_type, vuln_id, target, source_agent, details, task_queue=task_queue
+            )
+            logger.warning(f"🚀 Auto-dispatched exploit for {vuln_type} on {target}")
 
     async def _maintenance_loop(self: RedTeamDispatcher) -> None:
         """
@@ -759,7 +778,9 @@ class MonitoringMixin:
         logger.info("Maintenance loop started")
         consecutive_failures = 0
         checkpoint_interval = 10  # seconds
+        health_log_interval = 30  # seconds
         last_checkpoint = 0.0
+        last_health_log = 0.0
 
         while self._running:
             try:
@@ -769,19 +790,40 @@ class MonitoringMixin:
                 # Reconcile tasks with workers to detect orphans
                 await self._reconcile_tasks_with_workers()
 
-                # Periodic checkpoint (handles results processed by threaded consumer)
                 now = time.monotonic()
-                if now - last_checkpoint >= checkpoint_interval:
+
+                # Log throttle health periodically (uses Redis, must run on main loop)
+                if now - last_health_log >= health_log_interval:
+                    await self._log_throttle_health()
+                    last_health_log = now
+
+                # Checkpoint if requested by threaded consumer or on periodic interval
+                checkpoint_requested = self._checkpoint_requested.is_set()
+                if checkpoint_requested or now - last_checkpoint >= checkpoint_interval:
+                    if checkpoint_requested:
+                        self._checkpoint_requested.clear()
+                        logger.info(
+                            f"⚡ Immediate checkpoint triggered by threaded consumer (creds={len(self.shared_state.all_credentials)})"
+                        )
                     await self._checkpoint()
                     last_checkpoint = now
+
+                # Process pending deferred tasks from threaded consumer
+                # These were queued because the threaded consumer can't access Redis directly
+                await self._process_pending_deferred_tasks()
+
+                # Process pending task dispatches from threaded consumer
+                # These were queued because _throttled_submit_task can't use asyncio primitives
+                # from a non-main thread (locks, event loop time, etc.)
+                await self._process_pending_dispatches()
 
                 # Reset failure counter on success
                 consecutive_failures = 0
 
-                # Run maintenance every 5 seconds (less frequent than result polling)
-                await asyncio.sleep(5)
+                # Run maintenance every 2 seconds to respond quickly to checkpoint requests
+                await asyncio.sleep(2)
 
-            except asyncio.CancelledError:  # noqa: PERF203
+            except asyncio.CancelledError:
                 logger.info("Maintenance loop cancelled")
                 break
 
@@ -792,6 +834,125 @@ class MonitoringMixin:
                 await asyncio.sleep(min(15, consecutive_failures * 5))
 
         logger.info("Maintenance loop stopped")
+
+    async def _process_pending_deferred_tasks(self: RedTeamDispatcher) -> None:
+        """Process deferred tasks queued by the threaded consumer.
+
+        The threaded result consumer can't call _enqueue_deferred_task directly
+        because it uses the main thread's Redis client. Instead, it queues tasks
+        in _pending_deferred_tasks and sets _deferred_task_requested. This method
+        processes those pending tasks on the main event loop.
+        """
+        if not self._deferred_task_requested.is_set():
+            return
+
+        self._deferred_task_requested.clear()
+
+        # Atomically get and clear pending tasks
+        with self._pending_deferred_lock:
+            tasks_to_process = self._pending_deferred_tasks.copy()
+            self._pending_deferred_tasks.clear()
+
+        if not tasks_to_process:
+            return
+
+        logger.info(
+            f"Processing {len(tasks_to_process)} pending deferred tasks from threaded consumer"
+        )
+
+        for task_type, target_role, payload, source_agent, priority in tasks_to_process:
+            try:
+                # Now we're on the main thread, so Redis operations will work
+                queued = await self._enqueue_deferred_task(
+                    task_type=task_type,
+                    target_role=target_role,
+                    payload=payload,
+                    source_agent=source_agent,
+                    priority=priority,
+                )
+                if not queued:
+                    logger.warning(
+                        f"Failed to enqueue deferred task from threaded consumer: "
+                        f"{task_type} -> {target_role}"
+                    )
+            except Exception as e:
+                logger.error(f"Error processing pending deferred task: {e}")
+
+    async def _process_pending_dispatches(self: RedTeamDispatcher) -> None:
+        """Process task dispatches queued by the threaded consumer.
+
+        The threaded result consumer can't call _throttled_submit_task directly
+        because it uses asyncio primitives bound to the main event loop (locks,
+        event loop time). Instead, it queues dispatch requests in _pending_dispatches
+        and sets _dispatch_requested. This method processes those requests on the
+        main event loop where the asyncio primitives work correctly.
+        """
+        if not self._dispatch_requested.is_set():
+            return
+
+        self._dispatch_requested.clear()
+
+        # Atomically get and clear pending dispatches
+        with self._pending_dispatch_lock:
+            dispatches_to_process = self._pending_dispatches.copy()
+            self._pending_dispatches.clear()
+
+        if not dispatches_to_process:
+            return
+
+        logger.info(
+            f"Processing {len(dispatches_to_process)} pending task dispatches from threaded consumer"
+        )
+
+        for (
+            task_type,
+            target_role,
+            payload,
+            source_agent,
+            priority,
+            max_wait,
+        ) in dispatches_to_process:
+            try:
+                # Now we're on the main thread, so asyncio operations will work
+                task_id = await self._throttled_submit_task(
+                    task_type=task_type,
+                    target_role=target_role,
+                    payload=payload,
+                    source_agent=source_agent,
+                    priority=priority,
+                    max_wait=max_wait,
+                )
+                if not task_id:
+                    logger.debug(
+                        f"Task dispatch from threaded consumer returned no ID: "
+                        f"{task_type} -> {target_role}"
+                    )
+                elif task_id in ("deferred", "queued"):
+                    # Task was deferred again (rare) - skip TaskInfo creation
+                    logger.debug(
+                        f"Task dispatch from threaded consumer {task_id}: "
+                        f"{task_type} -> {target_role}"
+                    )
+                else:
+                    # Task was successfully submitted - create TaskInfo for tracking
+                    # This is critical: without this, results for tasks dispatched from
+                    # the threaded consumer would never be processed (no entry in pending_tasks)
+                    from ares.core.models import TaskInfo
+
+                    task_info = TaskInfo(
+                        task_id=task_id,
+                        task_type=task_type,
+                        assigned_agent=target_role,
+                        params=payload,
+                    )
+                    if self._shared_state:
+                        self._shared_state.pending_tasks[task_id] = task_info
+                        logger.info(
+                            f"Task {task_id} ({task_type}) submitted from pending dispatch, "
+                            f"added to pending_tasks for result tracking"
+                        )
+            except Exception as e:
+                logger.error(f"Error processing pending task dispatch: {e}")
 
     async def _log_throttle_health(self: RedTeamDispatcher) -> None:
         """
@@ -829,10 +990,10 @@ class MonitoringMixin:
         max_tasks = get_max_concurrent_tasks()
         hard_cap = int(max_tasks * 1.5)
 
-        # Get deferred queue status
-        deferred_status = (
-            self.get_deferred_queue_status() if hasattr(self, "get_deferred_queue_status") else {}
-        )
+        # Get deferred queue status (async - Redis-backed)
+        deferred_status: dict[str, Any] = {}
+        if hasattr(self, "get_deferred_queue_status"):
+            deferred_status = await self.get_deferred_queue_status()
         deferred_total = deferred_status.get("total_queued", 0)
 
         # Log warning if at hard cap or tasks are very old
@@ -903,10 +1064,29 @@ class MonitoringMixin:
         task_queue: RedisTaskQueue | None = None
 
         try:
+            # Connect to Redis with retries (Sentinel may not be ready immediately)
             if redis_url:
-                task_queue = RedisTaskQueue(redis_url)
-                loop.run_until_complete(task_queue.connect())
-                logger.debug("Threaded result consumer connected to Redis")
+                max_connect_retries = 10
+                for attempt in range(max_connect_retries):
+                    try:
+                        task_queue = RedisTaskQueue(redis_url)
+                        loop.run_until_complete(task_queue.connect())
+                        logger.info("Threaded result consumer connected to Redis")
+                        break
+                    except Exception as e:
+                        if attempt < max_connect_retries - 1:
+                            wait_time = min(2**attempt, 30)  # Exponential backoff, max 30s
+                            logger.warning(
+                                f"Threaded consumer Redis connect failed (attempt {attempt + 1}/"
+                                f"{max_connect_retries}): {e}. Retrying in {wait_time}s..."
+                            )
+                            time.sleep(wait_time)
+                        else:
+                            logger.error(
+                                f"Threaded consumer failed to connect to Redis after "
+                                f"{max_connect_retries} attempts. Result processing disabled."
+                            )
+                            return  # Exit thread - can't function without Redis
 
             consecutive_failures = 0
             health_check_counter = 0
@@ -932,11 +1112,11 @@ class MonitoringMixin:
                     health_check_counter += 1
                     if health_check_counter >= 10:
                         self._threaded_stale_cleanup()
-
-                    # Log throttle health every 30 cycles (~30 seconds)
-                    if health_check_counter >= 30:
                         health_check_counter = 0
-                        loop.run_until_complete(self._log_throttle_health())
+
+                    # NOTE: _log_throttle_health() is NOT called here because it uses
+                    # the main loop's Redis client (self._task_queue.redis). Health
+                    # logging is handled by the maintenance loop on the main event loop.
 
                     # Watchdog: log if iteration took too long (indicates blocking)
                     iteration_duration = time.monotonic() - iteration_start
@@ -953,7 +1133,8 @@ class MonitoringMixin:
                         break
 
                 # Sleep between iterations (use threading.Event for interruptibility)
-                stop_event.wait(timeout=1.0)
+                # Reduced from 1.0s to 0.5s since batch checking is now O(1) round-trips
+                stop_event.wait(timeout=0.5)
 
         finally:
             if task_queue:
@@ -1015,6 +1196,11 @@ class MonitoringMixin:
         thread-local task queue for Redis operations but updates the shared
         dispatcher state (which is thread-safe for the operations we perform).
 
+        Uses batched pipeline checking for efficiency - with N tasks and 30s
+        socket timeout, sequential checking can block for N * 30s during
+        connectivity issues. Pipeline batching reduces this to a single
+        timeout window regardless of N.
+
         NOTE: Stale cleanup and task reconciliation are NOT done here because
         they use self._task_queue which is bound to the main event loop.
         Those operations continue to run on the main loop when it's not blocked.
@@ -1024,57 +1210,74 @@ class MonitoringMixin:
         if not task_queue:
             return
 
-        # Check results for all pending Redis tasks
-        task_ids_to_check = list(self._redis_task_ids)
+        if not self._shared_state:
+            return
 
-        for task_id in task_ids_to_check:
+        # Check results for all pending Redis tasks using batch pipeline
+        # This is O(1) round-trips instead of O(N), critical for preventing
+        # 787s blocking when checking 25+ tasks with 30s socket timeout
+        task_ids_to_check = list(self._shared_state.pending_tasks.keys())
+
+        if not task_ids_to_check:
+            # No tasks to check - still poll discoveries
+            await self._poll_discoveries_threaded(task_queue)
+            return
+
+        try:
+            batch_results = await task_queue.check_results_batch(task_ids_to_check)
+        except Exception as e:
+            logger.warning(f"Batch result check failed: {e}")
+            batch_results = {}
+
+        # Process results
+        for task_id, result in batch_results.items():
+            if result is None:
+                continue
+
             try:
-                result = await task_queue.check_result(task_id)
-                if result:
-                    logger.info(
-                        f"Threaded result consumer received result for task {task_id}: "
-                        f"success={result.success}"
-                    )
+                logger.info(
+                    f"Threaded result consumer received result for task {task_id}: "
+                    f"success={result.success}"
+                )
 
-                    # Track rate limit status
-                    if result.success:
-                        self.clear_rate_limit_backoff()
-                    elif result.error:
-                        error_str = str(result.error).lower()
-                        rate_limit_indicators = [
-                            "rate limit",
-                            "rate_limit",
-                            "ratelimit",
-                            "too many requests",
-                            "429",
-                            "quota exceeded",
-                            "tokens per min",
-                            "requests per min",
-                            "tpm limit",
-                            "rpm limit",
-                        ]
-                        if any(ind in error_str for ind in rate_limit_indicators):
-                            logger.warning(
-                                f"Task {task_id} failed with rate limit error - triggering backoff"
-                            )
-                            self.record_rate_limit_error()
+                # Track rate limit status
+                if result.success:
+                    self.clear_rate_limit_backoff()
+                elif result.error:
+                    error_str = str(result.error).lower()
+                    rate_limit_indicators = [
+                        "rate limit",
+                        "rate_limit",
+                        "ratelimit",
+                        "too many requests",
+                        "429",
+                        "quota exceeded",
+                        "tokens per min",
+                        "requests per min",
+                        "tpm limit",
+                        "rpm limit",
+                    ]
+                    if any(ind in error_str for ind in rate_limit_indicators):
+                        logger.warning(
+                            f"Task {task_id} failed with rate limit error - triggering backoff"
+                        )
+                        self.record_rate_limit_error()
 
-                    # Remove from tracking set
-                    self._redis_task_ids.discard(task_id)
-
-                    # Complete the task (updates shared state)
-                    # Skip checkpoint because we're in a different event loop (threaded consumer)
-                    # Checkpointing is handled by the maintenance loop on the main loop
-                    await self.complete_task(
-                        task_id=task_id,
-                        success=result.success,
-                        result=result.result,
-                        error=result.error,
-                        source_agent=result.agent_name or result.worker_pod or "unknown",
-                        skip_checkpoint=True,
-                    )
-            except Exception as e:  # noqa: PERF203
-                logger.warning(f"Error checking result for task {task_id}: {e}")
+                # Complete the task (updates shared state)
+                # Skip checkpoint because we're in a different event loop (threaded consumer)
+                # Checkpointing is handled by the maintenance loop on the main loop
+                # Pass task_queue so dispatches happen directly (don't wait for blocked main loop)
+                await self.complete_task(
+                    task_id=task_id,
+                    success=result.success,
+                    result=result.result,
+                    error=result.error,
+                    source_agent=result.agent_name or result.worker_pod or "unknown",
+                    skip_checkpoint=True,
+                    task_queue=task_queue,
+                )
+            except Exception as e:
+                logger.warning(f"Error processing result for task {task_id}: {e}")
 
         # Poll for real-time discoveries
         await self._poll_discoveries_threaded(task_queue)
@@ -1099,13 +1302,19 @@ class MonitoringMixin:
                 source_agent = discovery.get("source_agent", "unknown")
 
                 if discovery_type == "delegation":
-                    await self._process_realtime_delegation_discovery(data, source_agent)
+                    await self._process_realtime_delegation_discovery(
+                        data, source_agent, task_queue=task_queue
+                    )
                 elif discovery_type == "credential":
-                    await self._process_realtime_credential_discovery(data, source_agent)
+                    await self._process_realtime_credential_discovery(
+                        data, source_agent, task_queue=task_queue
+                    )
                 elif discovery_type == "hash":
                     await self._process_realtime_hash_discovery(data, source_agent)
                 elif discovery_type == "vulnerability":
-                    await self._process_realtime_vulnerability_discovery(data, source_agent)
+                    await self._process_realtime_vulnerability_discovery(
+                        data, source_agent, task_queue=task_queue
+                    )
                 else:
                     logger.debug(f"Unknown discovery type: {discovery_type}")
 

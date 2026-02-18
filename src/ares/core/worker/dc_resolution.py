@@ -46,7 +46,7 @@ def _has_dc_role(host: Any) -> bool:
     return any(m in roles_str for m in ("dc", "domain controller", "ad dc"))
 
 
-def resolve_dc_ip_for_domain(  # noqa: PLR0912
+def resolve_dc_ip_for_domain(
     state: SharedRedTeamState | None,
     domain: str,
     provided_dc_ip: str,
@@ -68,6 +68,17 @@ def resolve_dc_ip_for_domain(  # noqa: PLR0912
         return provided_dc_ip, None
 
     domain_lower = domain.lower()
+
+    # Priority 0: Check cached domain_controllers (populated by orchestrator)
+    # This handles child domains where hostname doesn't match domain FQDN
+    # e.g., north.sevenkingdoms.local DC is winterfell.sevenkingdoms.local
+    cached_dc = getattr(state, "domain_controllers", {}).get(domain_lower)
+    if cached_dc:
+        if provided_dc_ip and provided_dc_ip != cached_dc:
+            logger.info(f"DC IP from cache: {cached_dc} (overriding {provided_dc_ip}) for {domain}")
+        else:
+            logger.debug(f"DC IP from cache: {cached_dc} for {domain}")
+        return cached_dc, None
 
     # Check if provided DC IP belongs to a host matching this domain
     provided_host = None

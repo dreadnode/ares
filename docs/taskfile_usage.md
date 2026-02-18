@@ -39,17 +39,7 @@ This will check:
 Start the Blue Team agent in poll mode (automatically polls Grafana for alerts):
 
 ```bash
-task ares:blue:
-```
-
-Or run the Red Team agent against a target:
-
-```bash
-# Discover target via AWS EC2 Name tag filter
-task -y ares:red TARGET=dreadgoad
-
-# Or use a direct IP address
-task ares:red: TARGET=192.168.56.100
+task blue:poll
 ```
 
 This will:
@@ -64,7 +54,7 @@ This will:
 
 ### Blue Team Tasks
 
-#### `task ares:blue:`
+#### `task blue:poll`
 
 Run Blue Team agent in poll mode with 1Password API keys.
 
@@ -72,30 +62,30 @@ Run Blue Team agent in poll mode with 1Password API keys.
 
 ```bash
 # Use default configuration
-task ares:blue:
+task blue:poll
 
 # Custom Grafana URL
-task ares:blue: GRAFANA_URL=http://grafana.example.com:3000
+task blue:poll GRAFANA_URL=http://grafana.example.com:3000
 
 # Custom model
-task ares:blue: MODEL=gpt-4o
+task blue:poll MODEL=gpt-4o
 
 # Override all agents with one value (single- or multi-agent)
-task ares:blue: MODEL_ALL=gpt-4o
+task blue:poll MODEL_ALL=gpt-4o
 
 # Custom poll interval (60 seconds)
-task ares:blue: POLL_INTERVAL=60
+task blue:poll POLL_INTERVAL=60
 ```
 
-#### `task ares:blue:once:`
+#### `task blue:once`
 
 Run Blue Team agent once and exit (processes current alerts only).
 
 ```bash
-task ares:blue:once:
+task blue:once
 ```
 
-#### `task ares:blue:local:`
+#### `task blue:poll:local`
 
 Run Blue Team using `.env` file instead of 1Password.
 
@@ -105,63 +95,12 @@ cp .env.example .env
 # Edit .env with your API keys
 
 # Run with .env
-task ares:blue:local:
+task blue:poll:local
 ```
 
-### Red Team Tasks
+### Red Team Tasks (Multi-Agent)
 
-#### `task ares:red TARGET=<filter>`
-
-Run Red Team agent with automatic EC2 target discovery.
-
-**How Target Discovery Works:**
-
-When you provide a non-IP target (like `dreadgoad`), the task queries AWS EC2 to
-find running instances where the Name tag contains your filter string:
-
-```bash
-aws ec2 describe-instances \
-  --filters "Name=instance-state-name,Values=running" \
-  --query "Reservations[*].Instances[?contains(Tags[?Key=='Name'].Value|[0], 'TARGET')].PrivateIpAddress"
-```
-
-The first matching instance's private IP is used as the target.
-
-**Example:**
-
-```bash
-# EC2 target discovery - finds instances with "dreadgoad" in Name tag
-task -y ares:red TARGET=dreadgoad
-
-# Custom model and max steps
-task -y ares:red TARGET=dreadgoad MODEL=claude-sonnet-4-20250514 MAX_STEPS=300
-
-# Override all agents with one value
-task -y ares:red TARGET=dreadgoad MODEL_ALL=gpt-5.2 MAX_STEPS=300
-
-# Custom AWS profile and region
-task -y ares:red TARGET=dreadgoad PROFILE=production REGION=us-east-1
-```
-
-#### `task ares:red: TARGET=<ip>`
-
-Run Red Team agent against a direct IP address (bypasses EC2 discovery).
-
-```bash
-task ares:red: TARGET=192.168.56.100
-```
-
-#### `task ares:red:local: TARGET=<ip>`
-
-Run Red Team using `.env` file instead of 1Password.
-
-```bash
-task ares:red:local: TARGET=192.168.56.100
-```
-
-#### Multi-Agent Operations
-
-##### `task ares:red:multi TARGET=<target>`
+#### `task red:multi TARGET=<target>`
 
 Run multi-agent red team operation with clean, sequential output.
 
@@ -169,7 +108,7 @@ Run multi-agent red team operation with clean, sequential output.
 
 ```bash
 # Run against dreadgoad in us-west-1
-task ares:red:multi TARGET=dreadgoad DOMAIN=sevenkingdoms.local \
+task red:multi TARGET=dreadgoad DOMAIN=sevenkingdoms.local \
   MODEL_ALL=gpt-5.2 \
   TARGET_REGION=us-west-1 \
   TARGET_PROFILE=lab
@@ -215,49 +154,71 @@ task ares:red:multi TARGET=dreadgoad DOMAIN=sevenkingdoms.local \
 
 **Managing Operations:**
 
-Tail logs for a specific multi-agent operation:
+Tail logs from pods:
 
 ```bash
-task ares:logs:operation OPERATION_ID=op-xxx
-task ares:logs:operation OPERATION_ID=op-xxx FOLLOW=true LINES=200
+task remote:logs ROLE=orchestrator
+task remote:logs ROLE=recon FOLLOW=true LINES=200
 ```
 
 Check operation status:
 
 ```bash
-task ares:red:multi:status OPERATION_ID=op-xxx
+task red:multi:status OPERATION_ID=op-xxx
+task red:multi:status LATEST=true
 ```
 
 List all multi-agent operations:
 
 ```bash
-task ares:red:multi:list
+task red:multi:list
+task red:multi:list LATEST=true
 ```
 
-List multi-agent operations and their Redis queue state:
+Show loot (credentials, hosts, hashes):
 
 ```bash
-task ares:red:multi:queue
+task red:multi:loot LATEST=true
+task red:multi:loot LATEST=true WATCH=10 DIFF=true
+```
+
+List tasks for an operation:
+
+```bash
+task red:multi:tasks:list LATEST=true STATUS=running
+task red:multi:tasks:list LATEST=true STATUS=all ROLE=lateral
+```
+
+List multi-agent operations and their state:
+
+```bash
+task red:multi:list
 ```
 
 Clear multi-agent Redis operation cache (drops ops/locks/status):
 
 ```bash
-task ares:red:multi:redis:clear
+task red:multi:redis:clear
 ```
 
 List multi-agent Redis operations, statuses, and locks:
 
 ```bash
-task ares:red:multi:redis:list
+task red:multi:redis:list
 ```
 
 **Syncing Code to Pods:**
 
-Hot-sync code changes to pods without restarting (for Python changes):
+Sync specific files to pods:
 
 ```bash
-task red:multi:sync:code
+task remote:sync FILES=src/ares/core/worker.py
+```
+
+Full sync of src/ares tree to pods:
+
+```bash
+task remote:sync:full
 ```
 
 Full sync with Redis clear and pod rollout (clean slate):
@@ -266,7 +227,13 @@ Full sync with Redis clear and pod rollout (clean slate):
 task red:multi:sync:align
 ```
 
-#### `task ares:investigate`
+Watch for changes and auto-sync (hot reload):
+
+```bash
+task remote:hot
+```
+
+#### `task blue:investigate`
 
 Investigate a specific alert from a JSON file.
 
@@ -291,7 +258,7 @@ cat > alert.json <<EOF
 EOF
 
 # Investigate the alert
-task ares:investigate ALERT=alert.json
+task blue:investigate ALERT=alert.json
 ```
 
 ### Configuration
@@ -344,34 +311,34 @@ task ares:config:show
 
 ### Reports
 
-#### `task ares:reports:list`
+#### `task blue:reports:list`
 
 List all investigation reports.
 
 **Example:**
 
 ```bash
-task ares:reports:list
+task blue:reports:list
 ```
 
-#### `task ares:reports:latest`
+#### `task blue:reports:latest`
 
 Display the most recent investigation report.
 
 **Example:**
 
 ```bash
-task ares:reports:latest
+task blue:reports:latest
 ```
 
-#### `task ares:reports:clean`
+#### `task blue:reports:clean`
 
 Remove all investigation reports (prompts for confirmation).
 
 **Example:**
 
 ```bash
-task ares:reports:clean
+task blue:reports:clean
 ```
 
 ### Development
@@ -386,14 +353,14 @@ Show Ares version information.
 task ares:version
 ```
 
-#### `task ares:mitre:test`
+#### `task blue:mitre:test`
 
 Test MITRE ATT&CK data loading.
 
 **Example:**
 
 ```bash
-task ares:mitre:test
+task blue:mitre:test
 ```
 
 **Output:**
@@ -461,13 +428,13 @@ The agent has multiple timeout layers:
 - Hard timeout: `max_steps × 60 seconds` (1 minute per step)
 - Watchdog thread: Force-exits if timeout exceeded
 
-| Mode                         | Default Steps | Max Timeout           |
-| ---------------------------- | ------------- | --------------------- |
-| `ares:blue:once:`            | 15            | ~15 minutes           |
-| `ares:blue:local:once:`      | 15            | ~15 minutes           |
-| `ares:investigate`           | 15            | ~15 minutes           |
-| `ares:blue:` (polling)       | 50            | ~50 minutes per alert |
-| `ares:blue:local:` (polling) | 50            | ~50 minutes per alert |
+| Mode                    | Default Steps | Max Timeout           |
+| ----------------------- | ------------- | --------------------- |
+| `blue:once`             | 15            | ~15 minutes           |
+| `blue:once:local`       | 15            | ~15 minutes           |
+| `ares:investigate`      | 15            | ~15 minutes           |
+| `blue:poll` (polling)   | 50            | ~50 minutes per alert |
+| `blue:poll:local`       | 50            | ~50 minutes per alert |
 
 **Example with custom variables:**
 
@@ -549,23 +516,23 @@ op item get "Dreadnode Claude" --fields api-key --reveal
 task ares:config:check
 
 # 2. Test MITRE data loading
-task ares:mitre:test
+task blue:mitre:test
 
 # 3. Run Blue Team agent in poll mode
-task ares:blue:
+task blue:poll
 
 # 4. In another terminal, check reports
-task ares:reports:list
+task blue:reports:list
 
 # 5. View latest report
-task ares:reports:latest
+task blue:reports:latest
 ```
 
 ### Blue Team Production Workflow
 
 ```bash
 # Run with production configuration
-task ares:blue: \
+task blue:poll \
   GRAFANA_URL=http://grafana.prod.example.com:3000 \
   DREADNODE_PROJECT=ares-prod \
   POLL_INTERVAL=60
@@ -586,23 +553,10 @@ cat > suspicious-activity.json <<EOF
 EOF
 
 # 2. Investigate
-task ares:investigate ALERT=suspicious-activity.json
+task blue:investigate ALERT=suspicious-activity.json
 
 # 3. View report
-task ares:reports:latest
-```
-
-### Red Team Workflow
-
-```bash
-# 1. Run red team agent (discovers target via EC2 Name tag)
-task -y ares:red TARGET=dreadgoad
-
-# Or target a specific IP directly
-task ares:red: TARGET=192.168.56.100
-
-# 2. Monitor progress (reports generated on completion)
-task ares:reports:latest
+task blue:reports:latest
 ```
 
 ### Remote Dev Workflow
@@ -610,20 +564,26 @@ task ares:reports:latest
 Use remote tasks to sync code to running pods and manage dev PVCs.
 
 ```bash
-# Hot-sync code to all pods without restart (most Python changes work immediately)
-task red:multi:sync:code
+# Watch for changes and auto-sync (hot reload)
+task remote:hot
+
+# Sync specific files to pods
+task remote:sync FILES=src/ares/core/worker.py
+
+# Full sync of src/ares tree to pods
+task remote:sync:full
 
 # Full sync + clear Redis + rollout pods (for clean slate)
 task red:multi:sync:align
 
-# One-time sync of current branch changes (low-level)
-task remote:sync:branch
-
-# Full sync of src/ares tree (low-level)
-task remote:sync:full
-
 # Clear dev code from PVCs (wipes /ares/src/ares in pods)
 task remote:pvc:clear CONFIRM=true
+
+# Restart pods to pick up changes
+task remote:rollout
+
+# Check pod status
+task remote:status
 ```
 
 ## Troubleshooting

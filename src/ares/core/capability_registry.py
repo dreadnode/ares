@@ -135,8 +135,8 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
     "dfscoerce": ["dfscoerce"],
     "printerbug": ["unconstrained_coerce_and_capture"],
     "krbrelayx": [],  # Used for relay attacks but no direct method mapping
-    "addspn": [],  # Not directly mapped
-    "dnstool": [],  # Not directly mapped
+    "addspn": ["addspn"],  # SPN manipulation for Kerberoast/delegation attacks
+    "dnstool": ["dnstool"],  # DNS record manipulation for relay attacks
     # ===================
     # Kerberos Attack Tools
     # ===================
@@ -166,7 +166,7 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
     # ===================
     # Credential Harvesting
     # ===================
-    "lsassy": ["unconstrained_tgt_dump"],
+    "lsassy": ["unconstrained_tgt_dump", "lsassy"],
     "sprayhound": ["password_spray"],
     "gmsadumper": ["gmsa_dump_passwords"],
     # ===================
@@ -181,22 +181,22 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
     # ===================
     "printnightmare": ["printnightmare"],
     "zerologon": [],  # Zerologon check now uses netexec -M zerologon
-    "scmuacbypass": [],  # Not directly mapped
     # ===================
-    # Windows Privesc Binaries (run via other methods, e.g., psexec upload+execute)
+    # Windows Privesc Binaries (PrivilegeEscalationTools toolset)
     # Config uses PascalCase to match binary names, registry normalizes to lowercase
-    # NOTE: krbrelayup, sharpgpoabuse, scmuacbypass are defined earlier - do not duplicate!
+    # NOTE: krbrelayup, sharpgpoabuse are defined earlier - do not duplicate!
     # ===================
-    "printspoofer": [],  # SeImpersonatePrivilege exploit
-    "godpotato": [],  # SeImpersonatePrivilege exploit
-    "sweetpotato": [],  # SeImpersonatePrivilege exploit
-    "seatbelt": [],  # Windows enumeration
-    "sharpup": [],  # Privesc checks
-    "runascs": [],  # Run commands as another user
-    "powerup": [],  # PowerShell privesc enumeration
-    "powerupsql": [],  # MSSQL enumeration/exploitation
-    "winpeas": [],  # Windows privesc enumeration
-    "linpeas": [],  # Linux privesc enumeration
+    "printspoofer": ["printspoofer"],  # SeImpersonatePrivilege exploit
+    "godpotato": ["godpotato"],  # SeImpersonatePrivilege exploit
+    "sweetpotato": ["sweetpotato"],  # SeImpersonatePrivilege exploit
+    "seatbelt": ["seatbelt"],  # Windows enumeration
+    "sharpup": ["sharpup"],  # Privesc checks
+    "runascs": ["runas_cs"],  # Run commands as another user
+    "scmuacbypass": ["scm_uac_bypass"],  # UAC bypass via SCM
+    "powerup": ["powerup"],  # PowerShell privesc enumeration
+    "powerupsql": ["powerupsql"],  # MSSQL enumeration/exploitation
+    "winpeas": ["winpeas"],  # Windows privesc enumeration
+    "linpeas": ["linpeas"],  # Linux privesc enumeration
     # ===================
     # Posture Validation (always available for status checks)
     # ===================

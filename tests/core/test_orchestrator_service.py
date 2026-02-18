@@ -23,23 +23,25 @@ async def test_discover_orphaned_operations_filters_and_sorts():
 
     now = datetime.now(timezone.utc)
 
+    # Use redis-native format: ares:op:*:meta
     async def scan_iter(_pattern):
         keys = [
-            b"ares:operation:op_recent:state",
-            b"ares:operation:op_less_recent:state",
-            b"ares:operation:op_stale:state",
-            b"ares:operation:op_locked:state",
-            b"ares:operation:op_completed:state",
-            b"ares:operation:op_no_checkpoint:state",
+            b"ares:op:op_recent:meta",
+            b"ares:op:op_less_recent:meta",
+            b"ares:op:op_stale:meta",
+            b"ares:op:op_locked:meta",
+            b"ares:op:op_completed:meta",
+            b"ares:op:op_no_checkpoint:meta",
         ]
         for key in keys:
             yield key
 
     client.scan_iter = scan_iter
 
-    def get_side_effect(key):
+    # Mock hget for started_at from meta hash
+    def hget_side_effect(key, field):
         key = key.decode() if isinstance(key, bytes) else key
-        if key.endswith(":checkpoint_time"):
+        if field == "started_at" and key.startswith("ares:op:"):
             op_id = key.split(":")[2]
             if op_id == "op_recent":
                 return (now - timedelta(seconds=10)).isoformat().encode()
@@ -53,6 +55,12 @@ async def test_discover_orphaned_operations_filters_and_sorts():
                 return (now - timedelta(seconds=40)).isoformat().encode()
             if op_id == "op_no_checkpoint":
                 return None
+        return None
+
+    client.hget = AsyncMock(side_effect=hget_side_effect)
+
+    def get_side_effect(key):
+        key = key.decode() if isinstance(key, bytes) else key
         if key.endswith(":status"):
             op_id = key.split(":")[2]
             if op_id == "op_completed":
@@ -241,9 +249,9 @@ async def test_process_operation_request_fetches_env_vars_from_separate_key():
         assert os.environ.get("OPENAI_API_KEY") == "test-key"  # pragma: allowlist secret
 
     # Verify the separate key was fetched
-    mock_client.get.assert_awaited_with("ares:operation:op-env-separate:env_vars")
+    mock_client.get.assert_awaited_with("ares:op:op-env-separate:env_vars")
     # Verify the key was deleted after reading (security)
-    mock_client.delete.assert_awaited_with("ares:operation:op-env-separate:env_vars")
+    mock_client.delete.assert_awaited_with("ares:op:op-env-separate:env_vars")
 
 
 @pytest.mark.asyncio

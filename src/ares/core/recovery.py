@@ -2,6 +2,9 @@
 
 This module provides recovery capabilities for handling pod restarts
 and operation recovery in a Kubernetes environment.
+
+State is stored directly in Redis using native data structures via RedisStateBackend.
+Recovery loads state from Redis - no JSON checkpoint deserialization or merge logic needed.
 """
 
 from __future__ import annotations
@@ -18,7 +21,6 @@ from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue
 
 if TYPE_CHECKING:
-    from ares.core.dispatcher import RedTeamDispatcher
     from ares.core.k8s_executor import KubernetesPodExecutor
 
 
@@ -26,223 +28,33 @@ class RecoveryError(Exception):
     """Raised when recovery fails."""
 
 
-def _merge_state(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:  # noqa: PLR0912
-    """Merge existing checkpoint data into current state to prevent regressions."""
-    # Hosts, domains, users (using built-in dedup methods)
-    for host in existing.all_hosts:
-        target.add_host(host)
-    for domain in getattr(existing, "all_domains", []):
-        target.add_domain(domain)
-    for user in existing.all_users:
-        target.add_user(user.username, user.domain, user.source)
-
-    # Credentials (preserve original source fields)
-    _merge_credentials(target, existing)
-    _merge_hashes(target, existing)
-    _merge_shares(target, existing)
-    _merge_weaknesses(target, existing)
-
-    # Vulnerabilities and techniques
-    for vuln_id, vuln in existing.discovered_vulnerabilities.items():
-        target.discovered_vulnerabilities.setdefault(vuln_id, vuln)
-    target.exploited_vulnerabilities |= existing.exploited_vulnerabilities
-    target.identified_techniques |= existing.identified_techniques
-
-    # Timeline
-    _merge_timeline(target, existing)
-
-    # Domain Admin / Golden Ticket flags (OR logic - once achieved, never regress)
-    if existing.has_domain_admin and not target.has_domain_admin:
-        target.has_domain_admin = True
-        target.domain_admin_path = existing.domain_admin_path or target.domain_admin_path
-    if existing.has_golden_ticket and not target.has_golden_ticket:
-        target.has_golden_ticket = True
-
-    # Preserve earliest completed_at timestamp (prefer existing if set)
-    if existing.completed_at and not target.completed_at:
-        target.completed_at = existing.completed_at
-
-    # Merge domain controller cache (prefer existing mappings)
-    for domain, ip in existing.domain_controllers.items():
-        if domain not in target.domain_controllers:
-            target.domain_controllers[domain] = ip
-
-    # Merge NetBIOS to FQDN mappings (prefer existing mappings)
-    for netbios, fqdn in existing.netbios_to_fqdn.items():
-        if netbios not in target.netbios_to_fqdn:
-            target.netbios_to_fqdn[netbios] = fqdn
-
-    # Merge persistence tracking (CRITICAL for orchestrator visibility)
-    _merge_golden_tickets(target, existing)
-    _merge_acl_chains(target, existing)
-    _merge_gmsa_accounts(target, existing)
-    _merge_adminsd_backdoors(target, existing)
-
-    # Merge background task deduplication tracking (CRITICAL for preventing duplicate work)
-    _merge_background_task_tracking(target, existing)
-
-    # Safety net: scan merged hashes for DA indicators if flag not yet set
-    # NOTE: Only krbtgt counts as DA proof - Administrator could be LOCAL admin on workstation
-    if not target.has_domain_admin:
-        from datetime import datetime, timezone
-
-        for h in target.all_hashes:
-            ht = (h.hash_type or "").strip().lower()
-            un = (h.username or "").strip().lower()
-            if ht == "ntlm" and un == "krbtgt":
-                target.has_domain_admin = True
-                target.domain_admin_path = (
-                    "secretsdump → krbtgt NTLM hash found in state (detected during merge)"
-                )
-                if not target.completed_at:
-                    target.completed_at = datetime.now(timezone.utc)
-                break
-
-    # Merge dynamic tracking attributes (set via object.__setattr__)
-    for dynamic_attr in ("_queried_hosts", "_tested_credentials"):
-        existing_value = getattr(existing, dynamic_attr, None)
-        if existing_value is not None:
-            target_value: set = getattr(target, dynamic_attr, set())
-            object.__setattr__(target, dynamic_attr, target_value | existing_value)
-
-
-def _merge_credentials(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
-    """Merge credentials from existing state into target."""
-    seen = {
-        f"{c.domain.strip()}:{c.username.strip()}:{c.password.strip()}".lower()
-        for c in target.all_credentials
-    }
-    for cred in existing.all_credentials:
-        key = f"{cred.domain.strip()}:{cred.username.strip()}:{cred.password.strip()}".lower()
-        if cred.username and key not in seen:
-            seen.add(key)
-            target.all_credentials.append(cred)
-
-
-def _merge_hashes(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
-    """Merge hashes from existing state into target."""
-    seen = {h.hash_value for h in target.all_hashes}
-    for h in existing.all_hashes:
-        if h.hash_value not in seen:
-            seen.add(h.hash_value)
-            target.all_hashes.append(h)
-
-
-def _merge_shares(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
-    """Merge shares from existing state into target."""
-    seen = {(s.host, s.name) for s in target.all_shares}
-    for s in existing.all_shares:
-        key = (s.host, s.name)
-        if key not in seen:
-            seen.add(key)
-            target.all_shares.append(s)
-
-
-def _merge_weaknesses(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
-    """Merge weaknesses from existing state into target."""
-    seen = set(target.all_weaknesses)
-    for w in existing.all_weaknesses:
-        if w not in seen:
-            seen.add(w)
-            target.all_weaknesses.append(w)
-
-
-def _merge_timeline(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
-    """Merge timeline events from existing state into target."""
-    seen = {e.id for e in target.operation_timeline}
-    for event in existing.operation_timeline:
-        if event.id not in seen:
-            seen.add(event.id)
-            target.operation_timeline.append(event)
-
-
-def _merge_golden_tickets(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
-    """Merge golden tickets from existing state into target."""
-    seen = {t.get("domain", "").lower() for t in target.golden_tickets}
-    for ticket in existing.golden_tickets:
-        domain = ticket.get("domain", "").lower()
-        if domain and domain not in seen:
-            seen.add(domain)
-            target.golden_tickets.append(ticket)
-
-
-def _merge_acl_chains(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
-    """Merge ACL chains from existing state into target."""
-    seen = {c.get("chain_id", "") for c in target.acl_chains}
-    for chain in existing.acl_chains:
-        chain_id = chain.get("chain_id", "")
-        if chain_id and chain_id not in seen:
-            seen.add(chain_id)
-            target.acl_chains.append(chain)
-
-
-def _merge_gmsa_accounts(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
-    """Merge gMSA accounts from existing state into target."""
-    seen = {g.get("account", "").lower() for g in target.gmsa_accounts}
-    for gmsa in existing.gmsa_accounts:
-        account = gmsa.get("account", "").lower()
-        if account and account not in seen:
-            seen.add(account)
-            target.gmsa_accounts.append(gmsa)
-
-
-def _merge_adminsd_backdoors(target: SharedRedTeamState, existing: SharedRedTeamState) -> None:
-    """Merge AdminSDHolder backdoors from existing state into target."""
-    seen = set(target.adminsd_holder_backdoors)
-    for backdoor in existing.adminsd_holder_backdoors:
-        if backdoor and backdoor not in seen:
-            seen.add(backdoor)
-            target.adminsd_holder_backdoors.append(backdoor)
-
-
-def _merge_background_task_tracking(
-    target: SharedRedTeamState, existing: SharedRedTeamState
-) -> None:
-    """Merge background task deduplication sets from existing state into target.
-
-    These sets track which operations have already been performed to prevent
-    duplicate work after orchestrator restart.
-    """
-    # Merge all the tracking sets (union operation)
-    target.processed_cred_expansion |= existing.processed_cred_expansion
-    target.processed_hash_lateral |= existing.processed_hash_lateral
-    target.processed_crack_requests |= existing.processed_crack_requests
-    target.processed_asrep_domains |= existing.processed_asrep_domains
-    target.processed_username_spray |= existing.processed_username_spray
-    target.processed_password_spray |= existing.processed_password_spray
-    target.processed_secretsdump |= existing.processed_secretsdump
-    target.dispatched_acl_steps |= existing.dispatched_acl_steps
-    # Coercion and delegation tracking
-    target.processed_esc8_servers |= existing.processed_esc8_servers
-    target.processed_coerced_dcs |= existing.processed_coerced_dcs
-    target.processed_writable_shares |= existing.processed_writable_shares
-    target.processed_delegation_creds |= existing.processed_delegation_creds
-    # Additional automation tracking
-    target.processed_adcs_servers |= existing.processed_adcs_servers
-    target.processed_bloodhound_domains |= existing.processed_bloodhound_domains
-    target.processed_spidered_shares |= existing.processed_spidered_shares
-    target.processed_expansion_creds |= existing.processed_expansion_creds
-
-
 class OperationRecoveryManager:
     """
     Handle pod restarts and operation recovery.
 
-    Provides checkpoint/restore functionality using Redis to enable
-    recovery from pod crashes in Kubernetes environments.
+    Provides recovery functionality using Redis-native state storage
+    to enable recovery from pod crashes in Kubernetes environments.
 
     Usage:
         manager = OperationRecoveryManager(
             k8s_executor=executor,
-            # redis_url defaults to config value from ares.core.config
+            redis_url="redis://..."
         )
-
-        # Regular checkpoints during operation
-        await manager.checkpoint(state)
 
         # Recover after pod restart
         state, requeued_task_ids = await manager.recover_operation(operation_id)
     """
+
+    # Connection error keywords to detect stale/failed connections
+    _CONNECTION_ERROR_KEYWORDS = (
+        "connection",
+        "connect",
+        "closed",
+        "timeout",
+        "broken pipe",
+        "reset",
+        "reading from",
+    )
 
     def __init__(
         self,
@@ -256,14 +68,63 @@ class OperationRecoveryManager:
         Args:
             k8s_executor: Kubernetes executor for pod management.
             redis_url: Redis URL for state persistence.
-            checkpoint_interval: Seconds between automatic checkpoints.
+            checkpoint_interval: Deprecated - checkpoints are no longer periodic.
         """
         self._k8s = k8s_executor
         self._redis_url = redis_url
         self._redis_client = None
+        self._connected = False
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_task: asyncio.Task | None = None
         self._running = False
+
+    def _is_connection_error(self, error: Exception) -> bool:
+        """Check if an exception is a connection-related error."""
+        error_str = str(error).lower()
+        return any(keyword in error_str for keyword in self._CONNECTION_ERROR_KEYWORDS)
+
+    def _handle_connection_error(self, error: Exception) -> None:
+        """
+        Handle Redis connection errors by resetting connection state.
+
+        This allows the next operation to attempt reconnection via Sentinel,
+        which will discover the current master (handles pod restarts/failover).
+        """
+        self._connected = False
+        if self._redis_client:
+            # Don't await close here - just drop the stale client reference
+            # The client will be recreated on next _ensure_connected()
+            self._redis_client = None
+        logger.warning(f"Redis connection error, will reconnect: {error}")
+
+    async def _ensure_connected(self) -> bool:
+        """
+        Ensure Redis client is connected, reconnecting if needed.
+
+        Returns:
+            True if connected, False if connection failed.
+        """
+        # If client already exists (e.g., set directly in tests), consider connected
+        if self._redis_client is not None:
+            if not self._connected:
+                # Mark as connected if client was set directly
+                self._connected = True
+            return True
+
+        if not self._redis_url:
+            return False
+
+        try:
+            self._redis_client = await create_redis_client(self._redis_url)
+            await self._redis_client.ping()
+            self._connected = True
+            logger.info("Recovery manager reconnected to Redis")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to connect to Redis: {e}")
+            self._redis_client = None
+            self._connected = False
+            return False
 
     async def start(self) -> None:
         """Initialize Redis connection."""
@@ -271,6 +132,7 @@ class OperationRecoveryManager:
             try:
                 self._redis_client = await create_redis_client(self._redis_url)
                 await self._redis_client.ping()
+                self._connected = True
                 logger.info(f"Recovery manager connected to Redis: {self._redis_url}")
             except Exception as e:
                 logger.warning(f"Failed to connect to Redis: {e}")
@@ -288,66 +150,16 @@ class OperationRecoveryManager:
 
         if self._redis_client:
             await self._redis_client.close()
+            self._redis_client = None
+            self._connected = False
 
-    async def checkpoint(self, state: SharedRedTeamState) -> bool:
-        """
-        Save state checkpoint to Redis.
-
-        Args:
-            state: The shared state to checkpoint.
-
-        Returns:
-            True if checkpoint was saved successfully.
-        """
-        if self._redis_client is None:
-            return False
-
-        try:
-            key = f"ares:operation:{state.operation_id}:state"
-            existing_data = await self._redis_client.get(key)
-            if existing_data:
-                try:
-                    existing_state = SharedRedTeamState.from_bytes(existing_data)
-                    _merge_state(state, existing_state)
-                except (ValueError, KeyError, TypeError) as exc:
-                    # ValueError: invalid data format, KeyError: missing fields, TypeError: type mismatch
-                    logger.warning(f"Failed to merge existing checkpoint state: {exc}")
-            # Debug: log state counts before checkpoint
-            logger.info(
-                f"Checkpointing state: hosts={len(state.all_hosts)}, "
-                f"users={len(state.all_users)}, creds={len(state.all_credentials)}, "
-                f"hashes={len(state.all_hashes)}, domain_admin={state.has_domain_admin}"
-            )
-            await self._redis_client.set(key, state.to_bytes())
-
-            # Set checkpoint timestamp
-            time_key = f"ares:operation:{state.operation_id}:checkpoint_time"
-            await self._redis_client.set(
-                time_key,
-                datetime.now(timezone.utc).isoformat(),
-            )
-
-            # Set 24 hour TTL
-            await self._redis_client.expire(key, 86400)
-            await self._redis_client.expire(time_key, 86400)
-
-            logger.debug(f"Checkpoint saved for operation {state.operation_id}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to save checkpoint: {e}")
-            return False
-
-    async def recover_operation(  # noqa: PLR0912
+    async def recover_operation(
         self,
         operation_id: str,
         auto_requeue: bool = True,
     ) -> tuple[SharedRedTeamState, list[str]]:
         """
-        Recover state from last checkpoint.
-
-        By default, automatically requeues interrupted tasks for retry.
-        Tasks that exceed max_retries are marked as permanently failed.
+        Recover state from Redis-native storage.
 
         Args:
             operation_id: The operation ID to recover.
@@ -355,105 +167,39 @@ class OperationRecoveryManager:
 
         Returns:
             Tuple of (recovered state, list of requeued task IDs).
-            The caller should add requeued task IDs to dispatcher._redis_task_ids
-            so the result consumer can track them.
+            Requeued tasks are already in pending_tasks which the result
+            consumer polls automatically.
 
         Raises:
-            RecoveryError: If no checkpoint found or recovery fails.
+            RecoveryError: If no state found or recovery fails.
         """
-        if self._redis_client is None:
+        if not await self._ensure_connected():
             raise RecoveryError("Redis not available for recovery")
 
+        # Check if Redis-native keys exist for this operation
+        meta_key = f"ares:op:{operation_id}:meta"
+        has_data = await self._redis_client.exists(meta_key)
+
+        if not has_data:
+            raise RecoveryError(f"No state found for operation {operation_id}")
+
         try:
-            key = f"ares:operation:{operation_id}:state"
-            data = await self._redis_client.get(key)
+            from ares.core.state_backend import RedisStateBackend
 
-            if not data:
-                raise RecoveryError(f"No checkpoint found for operation {operation_id}")
+            # Create state with backend - data is already in Redis
+            state = SharedRedTeamState(operation_id=operation_id)
+            backend = RedisStateBackend(self._redis_client, operation_id)
+            state.set_backend(backend)
 
-            state = SharedRedTeamState.from_bytes(data)
+            # Load all data from Redis into memory for sync access
+            await self._load_state_from_backend(state, backend)
 
-            # Handle in-progress tasks that were interrupted
-            interrupted_count = 0
-            requeued_count = 0
-            failed_count = 0
-            requeued_task_ids: list[str] = []
+            # Handle task requeuing
+            requeued_task_ids = await self._requeue_interrupted_tasks(
+                state, operation_id, auto_requeue
+            )
 
-            # Create task queue for requeuing
-            task_queue = RedisTaskQueue(self._redis_url) if auto_requeue else None
-            if task_queue:
-                await task_queue.connect()
-
-            try:
-                for task_id, task in list(state.pending_tasks.items()):
-                    # PENDING/RETRYING tasks may have been submitted to Redis but not yet picked up
-                    # when pods restarted, so they need to be requeued.
-                    if task.status in (
-                        TaskStatus.PENDING,
-                        TaskStatus.IN_PROGRESS,
-                        TaskStatus.RETRYING,
-                    ):
-                        interrupted_count += 1
-
-                        # IN_PROGRESS tasks were running, so they count as a retry. PENDING/RETRYING
-                        # tasks were never started, so they shouldn't increment.
-                        if task.status == TaskStatus.IN_PROGRESS:
-                            task.retry_count += 1
-
-                        max_retries = getattr(task, "max_retries", get_default_max_retries())
-                        if auto_requeue and task.retry_count <= max_retries:
-                            task.status = TaskStatus.RETRYING
-                            if task.retry_count > 0:
-                                task.error = f"Pod restart during execution (retry {task.retry_count}/{max_retries})"
-                            else:
-                                task.error = "Requeued after pod restart (task was pending)"
-
-                            if task_queue:
-                                await task_queue.requeue_task(
-                                    task_type=task.task_type,
-                                    target_role=task.assigned_agent,
-                                    payload=task.params,
-                                    task_id=task_id,
-                                    retry_count=task.retry_count,
-                                )
-                                requeued_count += 1
-                                requeued_task_ids.append(task_id)
-                                logger.info(
-                                    f"Task {task_id} requeued for retry "
-                                    f"({task.retry_count}/{max_retries})"
-                                )
-                        else:
-                            task.status = TaskStatus.FAILED
-                            task.error = (
-                                f"Pod restart during execution (max retries {max_retries} exceeded)"
-                            )
-                            task.completed_at = datetime.now(timezone.utc)
-                            failed_count += 1
-                            logger.error(
-                                f"Task {task_id} permanently failed after "
-                                f"{task.retry_count} retries"
-                            )
-            finally:
-                if task_queue:
-                    await task_queue.disconnect()
-
-            if interrupted_count:
-                logger.warning(
-                    f"Recovery: {interrupted_count} interrupted tasks - "
-                    f"{requeued_count} requeued, {failed_count} permanently failed"
-                )
-
-            # Get checkpoint time for logging
-            time_key = f"ares:operation:{operation_id}:checkpoint_time"
-            checkpoint_time = await self._redis_client.get(time_key)
-            if checkpoint_time:
-                checkpoint_str = (
-                    checkpoint_time.decode()
-                    if isinstance(checkpoint_time, (bytes, bytearray))
-                    else str(checkpoint_time)
-                )
-                logger.info(f"Recovered state from checkpoint at {checkpoint_str}")
-
+            logger.info(f"Recovered state from Redis for {operation_id}")
             return state, requeued_task_ids
 
         except RecoveryError:
@@ -461,53 +207,240 @@ class OperationRecoveryManager:
         except Exception as e:
             raise RecoveryError(f"Failed to recover operation: {e}") from e
 
-    async def get_checkpoint_time(self, operation_id: str) -> datetime | None:
-        """
-        Get the timestamp of the last checkpoint.
+    async def _load_state_from_backend(
+        self,
+        state: SharedRedTeamState,
+        backend,  # RedisStateBackend, but avoid circular import
+    ) -> None:
+        """Load all state data from Redis backend into memory."""
+        # Load collections
+        state.all_credentials.extend(await backend.get_credentials())
+        state.all_hashes.extend(await backend.get_hashes())
+        # Safety net dedup (HASH storage with HSETNX prevents dupes, but handles legacy data)
+        state.all_hashes = self._dedupe_hashes(state.all_hashes)
+        state.all_hosts.extend(await backend.get_hosts())
+        state.all_users.extend(await backend.get_users())
+        state.all_shares.extend(await backend.get_shares())
+        # Load weaknesses and populate dedup keys for proper deduplication
+        weaknesses = await backend.get_weaknesses()
+        for weakness in weaknesses:
+            state.all_weaknesses.append(weakness)
+            # Populate dedup keys set from loaded weaknesses
+            dedup_key = state._extract_weakness_dedup_key(weakness)
+            state._weakness_dedup_keys.add(dedup_key)
+        state.all_domains.extend(await backend.get_domains())
+
+        # Load vulnerabilities (get_vulnerabilities returns dict[str, VulnerabilityInfo])
+        state.discovered_vulnerabilities.update(await backend.get_vulnerabilities())
+
+        # Load exploited vulnerabilities
+        state.exploited_vulnerabilities.update(await backend.get_exploited_vulnerabilities())
+
+        # Load processed sets
+        await state.load_processed_sets_from_backend()
+
+        # Load persistence tracking (golden tickets, backdoors, ACL chains, gMSA accounts)
+        await state.load_persistence_tracking_from_backend()
+
+        # Load meta fields
+        state.has_domain_admin, state.domain_admin_path = await backend.get_domain_admin()
+        state.has_golden_ticket = await backend.get_meta("has_golden_ticket", default=False)
+        completed_at_str = await backend.get_meta("completed_at")
+        if completed_at_str:
+            try:
+                state.completed_at = datetime.fromisoformat(completed_at_str)
+            except (ValueError, TypeError):
+                pass
+
+        # Load DC map
+        dc_map = await backend.get_all_dcs()
+        state.domain_controllers.update(dc_map)
+
+        # Load NetBIOS map
+        netbios_map = await backend.get_all_netbios_mappings()
+        state.netbios_to_fqdn.update(netbios_map)
+
+        # Load artifacts
+        artifacts = await backend.get_all_artifacts()
+        state.downloaded_artifacts.update(artifacts)
+
+    def _dedupe_hashes(self, hashes: list) -> list:
+        """Deduplicate hashes, keeping first occurrence.
+
+        For AS-REP hashes: dedupe by (domain, username) since each AS-REP request
+        generates a different hash but cracks to the same password.
+
+        For Kerberoast hashes: dedupe by (domain, username, spn, etype).
+
+        For other hashes: dedupe by exact hash value.
 
         Args:
-            operation_id: The operation ID.
+            hashes: List of Hash objects
 
         Returns:
-            Datetime of last checkpoint, or None if not found.
+            Deduplicated list of Hash objects
         """
-        if self._redis_client is None:
+        seen_asrep: set[tuple[str, str]] = set()  # (domain, username)
+        seen_kerberoast: set[tuple[str, str, str]] = set()  # (domain, username, spn_key)
+        seen_other: set[str] = set()  # hash_value
+        result = []
+
+        for h in hashes:
+            hash_type = (h.hash_type or "").strip().lower()
+            hash_value = h.hash_value or ""
+            username = (h.username or "").strip().lower()
+            domain = (h.domain or "").strip().lower()
+
+            is_asrep = hash_type in {"as-rep", "asrep", "krb5asrep"} or hash_value.startswith(
+                "$krb5asrep$"
+            )
+            is_kerberoast = hash_type in {
+                "kerberoast",
+                "krb5tgs",
+                "tgs-rep",
+                "tgs",
+            } or hash_value.startswith("$krb5tgs$")
+
+            if is_asrep:
+                asrep_key = (domain, username)
+                if asrep_key in seen_asrep:
+                    continue
+                seen_asrep.add(asrep_key)
+            elif is_kerberoast:
+                spn_key = self._extract_kerberoast_spn_key(hash_value) or ""
+                kerb_key = (domain, username, spn_key)
+                if kerb_key in seen_kerberoast:
+                    continue
+                seen_kerberoast.add(kerb_key)
+            else:
+                if hash_value in seen_other:
+                    continue
+                seen_other.add(hash_value)
+
+            result.append(h)
+
+        if len(result) < len(hashes):
+            logger.info(f"Deduplicated {len(hashes) - len(result)} duplicate hashes")
+
+        return result
+
+    def _extract_kerberoast_spn_key(self, hash_value: str) -> str | None:
+        """Extract SPN and encryption type from Kerberoast hash for deduplication."""
+        if not hash_value.startswith("$krb5tgs$"):
+            return None
+        try:
+            parts = hash_value.split("$")
+            if len(parts) < 4:
+                return None
+            etype = parts[2]
+            asterisk_parts = hash_value.split("*")
+            if len(asterisk_parts) < 2:
+                return None
+            inner = asterisk_parts[1]
+            inner_parts = inner.split("$")
+            if len(inner_parts) < 3:
+                return None
+            spn = inner_parts[2]
+            return f"{etype}:{spn}"
+        except Exception:
             return None
 
-        try:
-            time_key = f"ares:operation:{operation_id}:checkpoint_time"
-            data = await self._redis_client.get(time_key)
-            if data:
-                return datetime.fromisoformat(data.decode())
-        except (OSError, ValueError) as e:
-            # OSError: Redis connection issues, ValueError: invalid datetime format
-            logger.warning(f"Failed to get checkpoint time: {e}")
+    async def _requeue_interrupted_tasks(
+        self,
+        state: SharedRedTeamState,
+        operation_id: str,
+        auto_requeue: bool,
+    ) -> list[str]:
+        """Requeue tasks that were interrupted by pod restart."""
+        interrupted_count = 0
+        requeued_count = 0
+        failed_count = 0
+        requeued_task_ids: list[str] = []
 
-        return None
+        task_queue = RedisTaskQueue(self._redis_url) if auto_requeue else None
+        if task_queue:
+            await task_queue.connect()
+
+        try:
+            for task_id, task in list(state.pending_tasks.items()):
+                if task.status in (
+                    TaskStatus.PENDING,
+                    TaskStatus.IN_PROGRESS,
+                    TaskStatus.RETRYING,
+                ):
+                    interrupted_count += 1
+
+                    if task.status == TaskStatus.IN_PROGRESS:
+                        task.retry_count += 1
+
+                    max_retries = getattr(task, "max_retries", get_default_max_retries())
+                    if auto_requeue and task.retry_count <= max_retries:
+                        task.status = TaskStatus.RETRYING
+                        if task.retry_count > 0:
+                            task.error = f"Pod restart during execution (retry {task.retry_count}/{max_retries})"
+                        else:
+                            task.error = "Requeued after pod restart (task was pending)"
+
+                        if task_queue:
+                            await task_queue.requeue_task(
+                                task_type=task.task_type,
+                                target_role=task.assigned_agent,
+                                payload=task.params,
+                                task_id=task_id,
+                                retry_count=task.retry_count,
+                            )
+                            requeued_count += 1
+                            requeued_task_ids.append(task_id)
+                            logger.info(
+                                f"Task {task_id} requeued for retry "
+                                f"({task.retry_count}/{max_retries})"
+                            )
+                    else:
+                        task.status = TaskStatus.FAILED
+                        task.error = (
+                            f"Pod restart during execution (max retries {max_retries} exceeded)"
+                        )
+                        task.completed_at = datetime.now(timezone.utc)
+                        failed_count += 1
+                        logger.error(
+                            f"Task {task_id} permanently failed after {task.retry_count} retries"
+                        )
+        finally:
+            if task_queue:
+                await task_queue.disconnect()
+
+        if interrupted_count:
+            logger.warning(
+                f"Recovery: {interrupted_count} interrupted tasks - "
+                f"{requeued_count} requeued, {failed_count} permanently failed"
+            )
+
+        return requeued_task_ids
 
     async def has_checkpoint(self, operation_id: str) -> bool:
         """
-        Check if a checkpoint exists for an operation.
+        Check if state exists for an operation.
 
         Args:
             operation_id: The operation ID.
 
         Returns:
-            True if checkpoint exists.
+            True if state exists.
         """
-        if self._redis_client is None:
+        if not await self._ensure_connected():
             return False
 
         try:
-            key = f"ares:operation:{operation_id}:state"
+            key = f"ares:op:{operation_id}:meta"
             return await self._redis_client.exists(key) > 0
-        except OSError:
-            # Redis connection issue
+        except Exception as e:
+            if self._is_connection_error(e):
+                self._handle_connection_error(e)
             return False
 
     async def delete_checkpoint(self, operation_id: str) -> bool:
         """
-        Delete checkpoint for an operation.
+        Delete state for an operation.
 
         Args:
             operation_id: The operation ID.
@@ -515,18 +448,20 @@ class OperationRecoveryManager:
         Returns:
             True if deleted successfully.
         """
-        if self._redis_client is None:
+        if not await self._ensure_connected():
             return False
 
         try:
-            key = f"ares:operation:{operation_id}:state"
-            time_key = f"ares:operation:{operation_id}:checkpoint_time"
-            await self._redis_client.delete(key, time_key)
-            logger.info(f"Deleted checkpoint for operation {operation_id}")
-            return True
-        except OSError as e:
-            # Redis connection issue
-            logger.error(f"Failed to delete checkpoint: {e}")
+            from ares.core.state_backend import RedisStateBackend
+
+            backend = RedisStateBackend(self._redis_client, operation_id)
+            deleted = await backend.delete_all_keys()
+            logger.info(f"Deleted {deleted} keys for operation {operation_id}")
+            return deleted > 0
+        except Exception as e:
+            if self._is_connection_error(e):
+                self._handle_connection_error(e)
+            logger.error(f"Failed to delete state: {e}")
             return False
 
     async def ensure_pods_ready(
@@ -553,156 +488,85 @@ class OperationRecoveryManager:
 
         return await self._k8s.wait_for_all_pods(roles, timeout)
 
-    async def start_auto_checkpoint(
-        self,
-        state: SharedRedTeamState,
-        interval: int | None = None,
-    ) -> None:
-        """
-        Start automatic periodic checkpointing.
-
-        Args:
-            state: The state to checkpoint periodically.
-            interval: Checkpoint interval in seconds (uses default if None).
-        """
-        if self._checkpoint_task is not None:
-            logger.warning("Auto checkpoint already running")
-            return
-
-        interval = interval or self._checkpoint_interval
-        self._running = True
-
-        async def _checkpoint_loop():
-            while self._running:
-                await asyncio.sleep(interval)
-                if self._running:
-                    await self.checkpoint(state)
-
-        self._checkpoint_task = asyncio.create_task(_checkpoint_loop())
-        logger.info(f"Started auto checkpoint every {interval} seconds")
-
-    async def stop_auto_checkpoint(self) -> None:
-        """Stop automatic periodic checkpointing."""
-        self._running = False
-
-        if self._checkpoint_task:
-            self._checkpoint_task.cancel()
-            try:
-                await self._checkpoint_task
-            except asyncio.CancelledError:
-                pass
-            self._checkpoint_task = None
-
-        logger.info("Stopped auto checkpoint")
-
-    async def start_periodic_checkpoint(
-        self,
-        dispatcher: RedTeamDispatcher,
-        interval: int | None = None,
-    ) -> None:
-        """
-        Start automatic periodic checkpointing using dispatcher's shared state.
-
-        This method runs as a coroutine and should be used with asyncio.create_task().
-
-        Args:
-            dispatcher: The RedTeamDispatcher to checkpoint state from.
-            interval: Checkpoint interval in seconds (uses default if None).
-        """
-
-        interval = interval or self._checkpoint_interval
-        self._running = True
-
-        logger.info(f"Starting periodic checkpoint every {interval} seconds")
-
-        # Immediate checkpoint on start so workers can discover the operation
-        if dispatcher._shared_state:
-            success = await self.checkpoint(dispatcher.shared_state)
-            if success:
-                logger.info("Initial checkpoint saved - workers can now discover operation")
-            else:
-                logger.warning("Failed to save initial checkpoint")
-
-        while self._running:
-            await asyncio.sleep(interval)
-            if self._running and dispatcher._shared_state:
-                success = await self.checkpoint(dispatcher.shared_state)
-                if success:
-                    logger.debug("Periodic checkpoint saved")
-                else:
-                    logger.warning("Failed to save periodic checkpoint")
-
     async def list_operations(self) -> list[dict]:
         """
-        List all operations with checkpoints.
+        List all operations with state in Redis.
 
         Returns:
             List of operation info dicts.
         """
-        if self._redis_client is None:
+        if not await self._ensure_connected():
             return []
 
         try:
-            # Scan for operation keys
+            # Scan for operation meta keys
             operations = []
-            async for key in self._redis_client.scan_iter("ares:operation:*:state"):
+            async for key in self._redis_client.scan_iter("ares:op:*:meta"):
                 # Extract operation ID from key
-                parts = key.decode().split(":")
+                key_str = key.decode() if isinstance(key, bytes) else key
+                parts = key_str.split(":")
                 if len(parts) >= 3:
                     op_id = parts[2]
-                    checkpoint_time = await self.get_checkpoint_time(op_id)
-                    operations.append(
-                        {
-                            "operation_id": op_id,
-                            "checkpoint_time": checkpoint_time.isoformat()
-                            if checkpoint_time
-                            else None,
-                        }
-                    )
+                    operations.append({"operation_id": op_id})
 
             return operations
 
-        except OSError as e:
-            # Redis connection issue
+        except Exception as e:
+            if self._is_connection_error(e):
+                self._handle_connection_error(e)
             logger.error(f"Failed to list operations: {e}")
             return []
 
     async def cleanup_old_checkpoints(self, max_age_hours: int = 24) -> int:
         """
-        Remove checkpoints older than specified age.
+        Clean up old operation state from Redis.
+
+        With Redis-native state backend, keys have TTL and auto-expire.
+        This method provides explicit cleanup for operations older than max_age_hours.
 
         Args:
-            max_age_hours: Maximum age in hours.
+            max_age_hours: Delete operations older than this many hours.
 
         Returns:
-            Number of checkpoints removed.
+            Number of operations cleaned up.
         """
-        if self._redis_client is None:
+        if not await self._ensure_connected():
             return 0
+
+        cleaned = 0
+        cutoff = datetime.now(timezone.utc) - __import__("datetime").timedelta(hours=max_age_hours)
 
         try:
-            removed = 0
-            cutoff = datetime.now(timezone.utc)
+            # Scan for operation meta keys
+            async for key in self._redis_client.scan_iter("ares:op:*:meta"):
+                key_str = key.decode() if isinstance(key, bytes) else key
+                parts = key_str.split(":")
+                if len(parts) >= 3:
+                    op_id = parts[2]
 
-            operations = await self.list_operations()
-            for op in operations:
-                if op["checkpoint_time"]:
-                    checkpoint_time = datetime.fromisoformat(op["checkpoint_time"])
-                    age_hours = (cutoff - checkpoint_time).total_seconds() / 3600
+                    # Check operation timestamp from ID (format: op-YYYYMMDD-HHMMSS)
+                    try:
+                        if op_id.startswith("op-") and len(op_id) >= 18:
+                            date_str = op_id[3:11]  # YYYYMMDD
+                            time_str = op_id[12:18]  # HHMMSS
+                            op_time = datetime.strptime(
+                                f"{date_str}{time_str}", "%Y%m%d%H%M%S"
+                            ).replace(tzinfo=timezone.utc)
 
-                    if age_hours > max_age_hours:
-                        await self.delete_checkpoint(op["operation_id"])
-                        removed += 1
+                            if op_time < cutoff and await self.delete_checkpoint(op_id):
+                                cleaned += 1
+                                logger.info(f"Cleaned up old operation: {op_id}")
+                    except (ValueError, IndexError):
+                        # Can't parse timestamp, skip
+                        continue
 
-            if removed:
-                logger.info(f"Cleaned up {removed} old checkpoints")
+            return cleaned
 
-            return removed
-
-        except (OSError, ValueError) as e:
-            # OSError: Redis connection, ValueError: datetime parsing
-            logger.error(f"Failed to cleanup checkpoints: {e}")
-            return 0
+        except Exception as e:
+            if self._is_connection_error(e):
+                self._handle_connection_error(e)
+            logger.error(f"Failed to cleanup old checkpoints: {e}")
+            return cleaned
 
 
 class OperationResumeHelper:

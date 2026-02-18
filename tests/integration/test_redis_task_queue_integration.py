@@ -31,7 +31,7 @@ if "redis" not in sys.modules:
     sys.modules["redis.asyncio"] = mock_redis_asyncio
 
 from ares.core.dispatcher import RedTeamDispatcher  # noqa: E402
-from ares.core.models import AgentInfo, AgentRole  # noqa: E402
+from ares.core.models import AgentRole  # noqa: E402
 from ares.core.task_queue import RedisTaskQueue, TaskMessage, TaskResult  # noqa: E402
 from ares.core.worker import (  # noqa: E402
     RedisWorkerAgent,
@@ -394,7 +394,6 @@ class TestDispatcherRedisIntegration:
 
         await dispatcher_with_redis._consume_pending_results()
 
-        assert task_id not in dispatcher_with_redis._redis_task_ids
         assert task_id not in dispatcher_with_redis.shared_state.pending_tasks
         assert task_id in dispatcher_with_redis.shared_state.completed_tasks
         assert dispatcher_with_redis.shared_state.completed_tasks[task_id].success is True
@@ -686,35 +685,13 @@ class TestOrchestratorWorkerFlow:
         dispatcher._running = False
 
     @pytest.mark.asyncio
-    async def test_worker_fallback_to_inmemory(self, mock_redis_client):
-        """Test dispatcher falls back to in-memory queue without Redis URL."""
+    async def test_dispatcher_requires_redis_url(self):
+        """Test dispatcher raises error when started without Redis URL."""
         dispatcher = RedTeamDispatcher()  # No redis_url
-        await dispatcher.start("fallback-test")
 
-        # Register a cracker agent for in-memory routing
-        agent_info = AgentInfo(
-            name="cracker-agent",
-            pod_name="cracker-0",
-            role=AgentRole.CRACKER,
-            capabilities={"hashcat"},
-        )
-        await dispatcher.register(agent_info)
-
-        # Submit task - should use in-memory queue
-        task_id = await dispatcher.request_crack(
-            hash_value="test_hash",
-            hash_type="NTLM",
-            source_agent="orchestrator",
-        )
-
-        assert task_id != ""
-
-        # Message should be in in-memory queue
-        messages = await dispatcher.get_messages("cracker-agent")
-        assert len(messages) == 1
-        assert messages[0].type.value == "crack_request"
-
-        await dispatcher.stop()
+        # Starting without Redis URL should raise RuntimeError
+        with pytest.raises(RuntimeError, match="Redis URL required"):
+            await dispatcher.start("test-operation")
 
 
 # ============================================================================

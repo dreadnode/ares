@@ -438,194 +438,6 @@ tasks:
         fi
 
   # ============================================================================
-  # SYNC:BRANCH: Sync only files changed on current branch
-  # ============================================================================
-  sync:branch:
-    desc: "Sync only files changed on current branch (vs main)"
-    silent: true
-    vars:
-      BASE_BRANCH: '{{.BASE_BRANCH | default "main"}}'
-      CHANGED_FILES:
-        sh: |
-          # Get changed Python files in src/ares
-          CHANGED=$(git diff --name-only {{.BASE_BRANCH}}...HEAD -- 'src/ares/*.py' 'src/ares/**/*.py' 2>/dev/null | grep -E '\.py$' || true)
-          # Also include uncommitted changes (staged + unstaged)
-          UNCOMMITTED=$(git diff --name-only HEAD -- 'src/ares/*.py' 'src/ares/**/*.py' 2>/dev/null | grep -E '\.py$' || true)
-          STAGED=$(git diff --name-only --cached -- 'src/ares/*.py' 'src/ares/**/*.py' 2>/dev/null | grep -E '\.py$' || true)
-          # Combine and dedupe
-          echo -e "$CHANGED\n$UNCOMMITTED\n$STAGED" | grep -v '^$' | sort -u | tr '\n' ' ' | xargs
-    preconditions:
-      - sh: '[ -n "{{.CHANGED_FILES}}" ]'
-        msg: "No Python files changed in src/ares/ on this branch"
-    cmds:
-      - cmd: |
-          FILE_COUNT=$(echo "{{.CHANGED_FILES}}" | wc -w | tr -d ' ')
-          echo -e "{{.INFO}} Finding files changed on branch vs {{.BASE_BRANCH}}..."
-          echo -e "{{.SUCCESS}} Found $FILE_COUNT changed file(s)"
-          echo ""
-        silent: true
-      - for: {var: CHANGED_FILES, split: ' '}
-        task: _sync-file
-        vars:
-          FILE: '{{.ITEM}}'
-      - cmd: |
-          FILE_COUNT=$(echo "{{.CHANGED_FILES}}" | wc -w | tr -d ' ')
-          echo ""
-          echo -e "{{.SUCCESS}} Branch sync complete ($FILE_COUNT files)"
-        silent: true
-
-  # ============================================================================
-  # INTERNAL: Sync single file to all pods
-  # ============================================================================
-  _sync-file:
-    internal: true
-    silent: true
-    vars:
-      REL_PATH:
-        sh: echo "{{.FILE}}" | sed 's|^src/ares/||'
-      WORKER_PODS:
-        sh: |
-          ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-            -l app.kubernetes.io/name=ares-orchestrator \
-            --field-selector=status.phase=Running \
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-          kubectl get pods -n {{.K8S_NAMESPACE}} \
-            -l ares.dreadnode.io/component=red-team \
-            --field-selector=status.phase=Running \
-            -o json | jq -r --arg orch "$ORCH_POD" \
-            '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ' | xargs
-      ORCH_POD:
-        sh: |
-          kubectl get pods -n {{.K8S_NAMESPACE}} \
-            -l app.kubernetes.io/name=ares-orchestrator \
-            --field-selector=status.phase=Running \
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
-    preconditions:
-      - sh: 'test -f "{{.FILE}}"'
-        msg: "File not found: {{.FILE}}"
-    cmds:
-      - cmd: echo -e "{{.INFO}} {{.REL_PATH}}"
-        silent: true
-      - for: {var: WORKER_PODS, split: ' '}
-        task: _sync-to-worker
-        vars:
-          POD: '{{.ITEM}}'
-          FILE: '{{.FILE}}'
-          REL_PATH: '{{.REL_PATH}}'
-      - task: _sync-to-orchestrator
-        vars:
-          POD: '{{.ORCH_POD}}'
-          FILE: '{{.FILE}}'
-          REL_PATH: '{{.REL_PATH}}'
-
-  # ============================================================================
-  # INTERNAL: Sync file to single worker pod
-  # ============================================================================
-  _sync-to-worker:
-    internal: true
-    silent: true
-    preconditions:
-      - sh: '[ -n "{{.POD}}" ]'
-    vars:
-      CONTAINER:
-        sh: |
-          container="{{.WORKER_CONTAINER}}"
-          if [ -z "$container" ]; then
-            container=$(kubectl get pod -n {{.K8S_NAMESPACE}} "{{.POD}}" \
-              -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
-          fi
-          echo "$container"
-    cmds:
-      - cmd: |
-          # Ensure directory exists
-          if [ -n "{{.CONTAINER}}" ]; then
-            kubectl exec -n {{.K8S_NAMESPACE}} {{.POD}} -c {{.CONTAINER}} -- \
-              mkdir -p $(dirname {{.PVC_PATH}}/src/ares/{{.REL_PATH}}) 2>/dev/null || true
-          else
-            kubectl exec -n {{.K8S_NAMESPACE}} {{.POD}} -- \
-              mkdir -p $(dirname {{.PVC_PATH}}/src/ares/{{.REL_PATH}}) 2>/dev/null || true
-          fi
-
-          # Copy file
-          if [ -n "{{.CONTAINER}}" ]; then
-            if kubectl cp "{{.FILE}}" "{{.POD}}:{{.PVC_PATH}}/src/ares/{{.REL_PATH}}" \
-                -n {{.K8S_NAMESPACE}} -c {{.CONTAINER}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> {{.POD}}"
-            else
-              echo -e "{{.WARN}}   x {{.POD}}"
-              exit 0
-            fi
-          else
-            if kubectl cp "{{.FILE}}" "{{.POD}}:{{.PVC_PATH}}/src/ares/{{.REL_PATH}}" \
-                -n {{.K8S_NAMESPACE}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> {{.POD}}"
-            else
-              echo -e "{{.WARN}}   x {{.POD}}"
-              exit 0
-            fi
-          fi
-
-          # Verify if enabled
-          if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
-            local_hash=$(shasum -a 256 "{{.FILE}}" 2>/dev/null | awk '{print $1}')
-            if [ -n "{{.CONTAINER}}" ]; then
-              remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} -c {{.CONTAINER}} "{{.POD}}" -- \
-                sha256sum "{{.PVC_PATH}}/src/ares/{{.REL_PATH}}" 2>/dev/null | awk '{print $1}')
-            else
-              remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} "{{.POD}}" -- \
-                sha256sum "{{.PVC_PATH}}/src/ares/{{.REL_PATH}}" 2>/dev/null | awk '{print $1}')
-            fi
-
-            if [ -z "$remote_hash" ]; then
-              echo -e "{{.WARN}}   x {{.POD}} (pvc missing)"
-            elif [ "$remote_hash" = "$local_hash" ]; then
-              echo -e "{{.SUCCESS}}   -> {{.POD}} (pvc verified)"
-            else
-              echo -e "{{.WARN}}   x {{.POD}} (pvc differs)"
-            fi
-          fi
-        silent: true
-
-  # ============================================================================
-  # INTERNAL: Sync file to orchestrator pod
-  # ============================================================================
-  _sync-to-orchestrator:
-    internal: true
-    silent: true
-    preconditions:
-      - sh: '[ -n "{{.POD}}" ]'
-    cmds:
-      - cmd: |
-          # Ensure directory exists
-          kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "{{.POD}}" -- \
-            mkdir -p $(dirname {{.PVC_PATH}}/src/ares/{{.REL_PATH}}) 2>/dev/null || true
-
-          # Copy file
-          if kubectl cp "{{.FILE}}" "{{.POD}}:{{.PVC_PATH}}/src/ares/{{.REL_PATH}}" \
-              -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
-            echo -e "{{.SUCCESS}}   -> {{.POD}}"
-          else
-            echo -e "{{.WARN}}   x {{.POD}}"
-            exit 0
-          fi
-
-          # Verify if enabled
-          if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
-            local_hash=$(shasum -a 256 "{{.FILE}}" 2>/dev/null | awk '{print $1}')
-            remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "{{.POD}}" -- \
-              sha256sum "{{.PVC_PATH}}/src/ares/{{.REL_PATH}}" 2>/dev/null | awk '{print $1}')
-
-            if [ -z "$remote_hash" ]; then
-              echo -e "{{.WARN}}   x {{.POD}} (pvc missing)"
-            elif [ "$remote_hash" = "$local_hash" ]; then
-              echo -e "{{.SUCCESS}}   -> {{.POD}} (pvc verified)"
-            else
-              echo -e "{{.WARN}}   x {{.POD}} (pvc differs)"
-            fi
-          fi
-        silent: true
-
-  # ============================================================================
   # ROLLOUT: Restart pods
   # ============================================================================
   rollout:
@@ -740,12 +552,53 @@ tasks:
   # STATUS: Check pod status
   # ============================================================================
   status:
-    desc: "Show remote pod status"
+    desc: "Show remote pod status and infrastructure health"
     silent: true
     cmds:
       - |
         echo ""
-        echo -e "{{.INFO}} Pod Status in {{.K8S_NAMESPACE}}"
+        echo -e "{{.INFO}} Infrastructure Status: {{.K8S_NAMESPACE}}"
+        echo "========================================"
+
+        # Check namespace
+        if kubectl get namespace {{.K8S_NAMESPACE}} >/dev/null 2>&1; then
+          echo -e "{{.SUCCESS}} Namespace exists"
+        else
+          echo -e "{{.ERROR}} Namespace not found"
+        fi
+
+        # Check Redis
+        REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
+        if [ -n "$REDIS_POD" ]; then
+          if kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- redis-cli ping >/dev/null 2>&1; then
+            echo -e "{{.SUCCESS}} Redis responding"
+          else
+            echo -e "{{.ERROR}} Redis not responding"
+          fi
+        else
+          echo -e "{{.WARN}} No Redis pods found"
+        fi
+
+        echo ""
+        echo -e "{{.INFO}} Agent Pods"
+        echo "========================================"
+        for role in orchestrator recon cracker acl privesc lateral coercion; do
+          if [ "$role" = "orchestrator" ]; then
+            POD_COUNT=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -o name 2>/dev/null | wc -l | xargs)
+            STATUS=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
+          else
+            POD_COUNT=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role=$role -o name 2>/dev/null | wc -l | xargs)
+            STATUS=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/role=$role -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
+          fi
+          if [ "$POD_COUNT" -gt 0 ]; then
+            echo -e "{{.SUCCESS}} $role: $POD_COUNT pod(s) - $STATUS"
+          else
+            echo -e "{{.WARN}} $role: No pods"
+          fi
+        done
+
+        echo ""
+        echo -e "{{.INFO}} All Pods"
         echo "========================================"
         kubectl get pods -n {{.K8S_NAMESPACE}} -o wide 2>/dev/null || echo -e "{{.ERROR}} Failed to get pods"
 
@@ -764,7 +617,7 @@ tasks:
       ROLE: '{{.ROLE | default ""}}'
       FOLLOW: '{{.FOLLOW | default "true"}}'
       LINES: '{{.LINES | default "100"}}'
-      MAX_LOG_REQUESTS: '{{.MAX_LOG_REQUESTS | default "20"}}'
+      MAX_LOG_REQUESTS: '{{.MAX_LOG_REQUESTS | default "50"}}'
     cmds:
       - |
         CONTAINER_ARGS=""
@@ -814,7 +667,7 @@ tasks:
       LINES: '{{.LINES | default "5000"}}'
       SINCE: '{{.SINCE | default ""}}'
       OUTPUT_DIR: '{{.OUTPUT_DIR | default "/tmp"}}'
-      MAX_LOG_REQUESTS: '{{.MAX_LOG_REQUESTS | default "20"}}'
+      MAX_LOG_REQUESTS: '{{.MAX_LOG_REQUESTS | default "50"}}'
     cmds:
       - |
         CONTAINER_ARGS=""

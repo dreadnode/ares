@@ -23,7 +23,6 @@ from loguru import logger
 
 from ares.core.models import (
     InvestigationState,
-    RedTeamState,
     SharedRedTeamState,
 )
 from ares.eval.ground_truth import (
@@ -264,7 +263,7 @@ class EvaluationScenario:
         alert_matching_rules: Custom alert matching rules for this scenario.
     """
 
-    red_state: RedTeamState | SharedRedTeamState | Path | str
+    red_state: SharedRedTeamState | Path | str
     ground_truth: EvaluationGroundTruth | None = None
     name: str = ""
     tags: list[str] = field(default_factory=list)
@@ -278,9 +277,9 @@ class EvaluationScenario:
         state = self.get_red_state()
         return create_ground_truth_from_red_state(state)
 
-    def get_red_state(self) -> RedTeamState | SharedRedTeamState:
+    def get_red_state(self) -> SharedRedTeamState:
         """Get red team state, loading from file if necessary."""
-        if isinstance(self.red_state, (RedTeamState, SharedRedTeamState)):
+        if isinstance(self.red_state, SharedRedTeamState):
             return self.red_state
 
         # Load from file
@@ -705,7 +704,7 @@ class EvaluationRunner:
     def _create_synthetic_alert(
         self,
         ground_truth: EvaluationGroundTruth,
-        red_state: RedTeamState | SharedRedTeamState,
+        red_state: SharedRedTeamState,
     ) -> dict[str, Any]:
         """Create a synthetic alert from ground truth for testing.
 
@@ -774,7 +773,7 @@ class EvaluationRunner:
     async def _poll_for_alert(
         self,
         ground_truth: EvaluationGroundTruth,
-        red_state: RedTeamState | SharedRedTeamState,
+        red_state: SharedRedTeamState,
         timeout_seconds: int = 60,
         matching_rules: AlertMatchingRules | None = None,
     ) -> dict[str, Any] | None:
@@ -971,37 +970,61 @@ class EvaluationRunner:
         return filepath
 
 
-def _deserialize_red_state(data: dict[str, Any]) -> RedTeamState | SharedRedTeamState:
+def _deserialize_red_state(data: dict[str, Any]) -> SharedRedTeamState:
     """Deserialize red team state from JSON data.
 
-    Uses SharedRedTeamState.from_bytes() for multi-agent state (preferred),
-    falls back to manual construction for single-agent RedTeamState.
+    Creates a SharedRedTeamState from a dict, handling only the fields
+    needed for evaluation (credentials, hashes, hosts, etc).
     """
-    from ares.core.models import (
-        Credential,
-        Hash,
-        Host,
-        Target,
-        User,
-    )
+    from ares.core.models import Credential, Hash, Host, User
 
-    # Check if it's SharedRedTeamState or RedTeamState
-    if "all_credentials" in data:
-        # SharedRedTeamState - use the proper from_bytes() method
-        # which handles all fields including newer ones
-        return SharedRedTeamState.from_bytes(json.dumps(data).encode("utf-8"))
+    state = SharedRedTeamState(operation_id=data.get("operation_id", "unknown"))
 
-    # RedTeamState - manual construction (no from_bytes method)
-    target = Target.model_validate(data.get("target", {"ip": ""}))
+    # Load credentials
+    for cred_data in data.get("all_credentials", []):
+        cred = Credential(
+            username=cred_data.get("username", ""),
+            password=cred_data.get("password", ""),
+            domain=cred_data.get("domain", ""),
+            source=cred_data.get("source", ""),
+        )
+        state.all_credentials.append(cred)
 
-    return RedTeamState(
-        operation_id=data.get("operation_id", ""),
-        target=target,
-        hosts=[Host.model_validate(h) for h in data.get("hosts", [])],
-        users=[User.model_validate(u) for u in data.get("users", [])],
-        credentials=[Credential.model_validate(c) for c in data.get("credentials", [])],
-        hashes=[Hash.model_validate(h) for h in data.get("hashes", [])],
-        has_domain_admin=data.get("has_domain_admin", False),
-        has_golden_ticket=data.get("has_golden_ticket", False),
-        identified_techniques=set(data.get("identified_techniques", [])),
-    )
+    # Load hashes
+    for hash_data in data.get("all_hashes", []):
+        h = Hash(
+            username=hash_data.get("username", ""),
+            hash_type=hash_data.get("hash_type", ""),
+            hash_value=hash_data.get("hash_value", ""),
+            domain=hash_data.get("domain", ""),
+            source=hash_data.get("source", ""),
+        )
+        state.all_hashes.append(h)
+
+    # Load hosts
+    for host_data in data.get("all_hosts", []):
+        host = Host(
+            ip=host_data.get("ip", ""),
+            hostname=host_data.get("hostname", ""),
+            os=host_data.get("os", ""),
+            roles=host_data.get("roles", []),
+            services=host_data.get("services", []),
+        )
+        state.all_hosts.append(host)
+
+    # Load users
+    for user_data in data.get("all_users", []):
+        user = User(
+            username=user_data.get("username", ""),
+            domain=user_data.get("domain", ""),
+            source=user_data.get("source", ""),
+        )
+        state.all_users.append(user)
+
+    # Load simple fields
+    state.all_domains = data.get("all_domains", [])
+    state.has_domain_admin = data.get("has_domain_admin", False)
+    state.has_golden_ticket = data.get("has_golden_ticket", False)
+    state.domain_admin_path = data.get("domain_admin_path")
+
+    return state

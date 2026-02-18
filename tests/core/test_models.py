@@ -612,63 +612,210 @@ class TestTaskStatusAndTaskInfo:
         assert "Pod restart" in task.error
 
 
-class TestRedTeamStateHelpers:
-    """Tests for RedTeamState helper methods."""
+class TestSharedRedTeamStateHelpers:
+    """Tests for SharedRedTeamState helper methods."""
 
     def test_get_credential_key(self) -> None:
         """Test generating credential key."""
-        from ares.core.models import RedTeamState, Target
+        from ares.core.models import SharedRedTeamState, Target
 
-        state = RedTeamState(
-            operation_id="test-op",
-            target=Target(ip="192.168.58.1"),
-        )
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="192.168.58.1")
 
         key = state.get_credential_key("danj", "P@ssword123", "CONTOSO")
         assert key == "contoso:danj:p@ssword123"
 
     def test_get_credential_key_no_domain(self) -> None:
         """Test generating credential key without domain."""
-        from ares.core.models import RedTeamState, Target
+        from ares.core.models import SharedRedTeamState, Target
 
-        state = RedTeamState(
-            operation_id="test-op",
-            target=Target(ip="192.168.58.1"),
-        )
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="192.168.58.1")
 
         key = state.get_credential_key("adamb", "pass")
         assert key == ":adamb:pass"
 
     def test_admin_count(self) -> None:
         """Test counting admin credentials."""
-        from ares.core.models import Credential, RedTeamState, Target
+        from ares.core.models import Credential, SharedRedTeamState, Target
 
-        state = RedTeamState(
-            operation_id="test-op",
-            target=Target(ip="192.168.58.1"),
-            credentials=[
-                Credential(
-                    username="danj",
-                    password="pass",  # pragma: allowlist secret
-                    domain="CONTOSO",
-                    is_admin=True,
-                ),
-                Credential(
-                    username="adamb",
-                    password="pass",  # pragma: allowlist secret
-                    domain="CONTOSO",
-                    is_admin=False,
-                ),
-                Credential(
-                    username="karimm",
-                    password="pass",  # pragma: allowlist secret
-                    domain="CONTOSO",
-                    is_admin=True,
-                ),
-            ],
-        )
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="192.168.58.1")
+        state.all_credentials = [
+            Credential(
+                username="danj",
+                password="pass",  # pragma: allowlist secret
+                domain="CONTOSO",
+                is_admin=True,
+            ),
+            Credential(
+                username="adamb",
+                password="pass",  # pragma: allowlist secret
+                domain="CONTOSO",
+                is_admin=False,
+            ),
+            Credential(
+                username="karimm",
+                password="pass",  # pragma: allowlist secret
+                domain="CONTOSO",
+                is_admin=True,
+            ),
+        ]
 
         assert state.admin_count == 2
+
+
+class TestWeaknessDeduplication:
+    """Tests for SharedRedTeamState weakness deduplication."""
+
+    def test_add_weakness_basic(self) -> None:
+        """Test basic weakness recording."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        result = state.add_weakness("### Test Weakness\n**Vulnerability:** Test description")
+        assert result is True
+        assert len(state.all_weaknesses) == 1
+
+    def test_add_weakness_exact_duplicate(self) -> None:
+        """Test that exact duplicate weaknesses are rejected."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        block = "### Test Weakness\n**Vulnerability:** Test description"
+
+        state.add_weakness(block)
+        result = state.add_weakness(block)  # Exact duplicate
+
+        assert result is False
+        assert len(state.all_weaknesses) == 1
+
+    def test_add_weakness_normalized_duplicate_delegation(self) -> None:
+        """Test that unconstrained delegation on same account is deduplicated.
+
+        Key case: LLM rephrases same finding with different title/wording.
+        """
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # First finding - formal title
+        block1 = """### Unconstrained Kerberos Delegation Enabled (DC01$)
+**Vulnerability:** Unconstrained delegation configured on account
+- **Impact:** Can capture TGTs from any user"""
+
+        # Second finding - different phrasing, same account
+        block2 = """### Unconstrained delegation on Domain Controller machine account
+**Vulnerability:** The domain controller machine account (DC01$) has unconstrained delegation
+- **Impact:** Enables TGT capture for privilege escalation"""
+
+        # Third finding - yet another phrasing
+        block3 = """Unconstrained delegation enabled on DC01$ (Domain Controller)
+Computer account DC01$ is configured for unconstrained delegation."""
+
+        result1 = state.add_weakness(block1)
+        result2 = state.add_weakness(block2)
+        result3 = state.add_weakness(block3)
+
+        assert result1 is True
+        assert result2 is False  # Same type + account
+        assert result3 is False  # Same type + account
+        assert len(state.all_weaknesses) == 1
+
+    def test_add_weakness_different_accounts_not_deduplicated(self) -> None:
+        """Test that constrained delegation on different accounts are NOT deduplicated."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        block1 = """Constrained delegation configured for svc_backup (protocol transition)
+The user svc_backup is configured for constrained delegation."""
+
+        block2 = """Constrained delegation configured for SQL01$ (HTTP to DC01)
+The computer account SQL01$ is configured for constrained delegation."""
+
+        result1 = state.add_weakness(block1)
+        result2 = state.add_weakness(block2)
+
+        assert result1 is True
+        assert result2 is True  # Different accounts
+        assert len(state.all_weaknesses) == 2
+
+    def test_add_weakness_smb_signing_dedup(self) -> None:
+        """Test that SMB signing findings for same hosts are deduplicated."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        block1 = """SMB signing not required on SQL01 (NTLM relay candidate)
+Host 192.168.58.50 (SQL01) reports SMB signing: False"""
+
+        block2 = """SMB signing not required on some hosts (NTLM relay possible)
+SMB signing is disabled on SQL01 (192.168.58.50)"""
+
+        result1 = state.add_weakness(block1)
+        result2 = state.add_weakness(block2)
+
+        assert result1 is True
+        assert result2 is False  # Same type + same hosts
+        assert len(state.all_weaknesses) == 1
+
+    def test_add_weakness_smb_signing_different_hosts(self) -> None:
+        """Test SMB signing on different hosts are NOT deduplicated."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        block1 = """SMB signing not required on SQL01
+Host 192.168.58.50 has signing disabled"""
+
+        block2 = """SMB signing not required on WEB01
+Host 192.168.58.60 has signing disabled"""
+
+        result1 = state.add_weakness(block1)
+        result2 = state.add_weakness(block2)
+
+        assert result1 is True
+        assert result2 is True  # Different hosts
+        assert len(state.all_weaknesses) == 2
+
+    def test_extract_weakness_dedup_key_unconstrained_delegation(self) -> None:
+        """Test dedup key extraction for unconstrained delegation."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        block = """Unconstrained delegation on DC01$
+Computer account has unconstrained Kerberos delegation enabled."""
+
+        key = state._extract_weakness_dedup_key(block)
+        assert key == "unconstrained_delegation:dc01$"
+
+    def test_extract_weakness_dedup_key_constrained_delegation(self) -> None:
+        """Test dedup key extraction for constrained delegation with user."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        block = """Constrained delegation configured for svc_backup
+User svc_backup has constrained delegation to CIFS SPNs."""
+
+        key = state._extract_weakness_dedup_key(block)
+        assert key == "constrained_delegation:svc_backup"
+
+    def test_extract_weakness_dedup_key_smb_signing(self) -> None:
+        """Test dedup key extraction for SMB signing with IP."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        block = """SMB signing not required on 192.168.58.10
+Host does not require SMB signing, relay attacks possible."""
+
+        key = state._extract_weakness_dedup_key(block)
+        assert "smb_signing" in key
+        assert "192.168.58.10" in key
 
 
 class TestExtractDomains:
@@ -716,25 +863,27 @@ class TestExtractDomains:
         )
 
         state = SharedRedTeamState(operation_id="test-op")
-        state.target = Target(ip="192.168.58.1", hostname="dc.target.local", domain="target.local")
-        state.all_users = [User(username="admin", domain="users.local")]
+        state.target = Target(
+            ip="192.168.58.1", hostname="dc.contoso.local", domain="contoso.local"
+        )
+        state.all_users = [User(username="admin", domain="child.contoso.local")]
         state.all_credentials = [
             Credential(
                 username="admin",
                 password="pass",  # pragma: allowlist secret
-                domain="creds.local",
+                domain="corp.contoso.local",
             )
         ]
-        state.all_hashes = [Hash(username="admin", hash_value="abc", domain="hashes.local")]
-        state.all_hosts = [Host(ip="192.168.58.2", hostname="server.hosts.local")]
+        state.all_hashes = [Hash(username="admin", hash_value="abc", domain="fabrikam.local")]
+        state.all_hosts = [Host(ip="192.168.58.2", hostname="server.child.fabrikam.local")]
 
         domains = SharedRedTeamState._extract_domains(state)
 
-        assert "target.local" in domains  # from target.domain
-        assert "users.local" in domains  # from user
-        assert "creds.local" in domains  # from credential
-        assert "hashes.local" in domains  # from hash
-        assert "hosts.local" in domains  # from host FQDN
+        assert "contoso.local" in domains  # from target.domain
+        assert "child.contoso.local" in domains  # from user
+        assert "corp.contoso.local" in domains  # from credential
+        assert "fabrikam.local" in domains  # from hash
+        assert "child.fabrikam.local" in domains  # from host FQDN
 
     def test_extracts_domain_from_target_hostname(self) -> None:
         """Test that domain is extracted from target hostname FQDN."""
@@ -1072,30 +1221,30 @@ class TestHashDomainValidation:
     def test_hash_domain_corrected_when_user_known_in_different_domain(self) -> None:
         """Test that hash domain is corrected when user is known to exist elsewhere.
 
-        Scenario: kerberoast against essos.local returns hash with ESSOS realm,
-        but BloodHound already found samwell.tarly in north.sevenkingdoms.local.
-        The hash domain should be corrected to north.sevenkingdoms.local.
+        Scenario: kerberoast against fabrikam.local returns hash with FABRIKAM realm,
+        but BloodHound already found svc.backup in child.contoso.local.
+        The hash domain should be corrected to child.contoso.local.
         """
         from ares.core.models import Hash, SharedRedTeamState
 
         state = SharedRedTeamState(operation_id="test-op")
 
-        # Simulate BloodHound discovering user in north.sevenkingdoms.local
-        state.add_user("samwell.tarly", "north.sevenkingdoms.local", source="bloodhound")
+        # Simulate BloodHound discovering user in child.contoso.local
+        state.add_user("svc.backup", "child.contoso.local", source="bloodhound")
 
-        # Now a hash comes in with wrong domain (ESSOS realm from kerberoast)
+        # Now a hash comes in with wrong domain (FABRIKAM realm from kerberoast)
         hash_obj = Hash(
-            username="samwell.tarly",
-            hash_value="$krb5tgs$23$*samwell.tarly$ESSOS$http/web01$abc123",
+            username="svc.backup",
+            hash_value="$krb5tgs$23$*svc.backup$FABRIKAM$http/web01$abc123",
             hash_type="Kerberoast",
-            domain="essos.local",  # Wrong domain from Kerberos realm
+            domain="fabrikam.local",  # Wrong domain from Kerberos realm
         )
         result = state.add_hash(hash_obj, "kerberoast")
 
         assert result is True
         assert len(state.all_hashes) == 1
         # Domain should be corrected to the known domain
-        assert state.all_hashes[0].domain == "north.sevenkingdoms.local"
+        assert state.all_hashes[0].domain == "child.contoso.local"
 
     def test_hash_domain_not_changed_when_matches_known_domain(self) -> None:
         """Test that hash domain is preserved when it matches known user domain."""
@@ -1103,20 +1252,20 @@ class TestHashDomainValidation:
 
         state = SharedRedTeamState(operation_id="test-op")
 
-        # User known in essos.local
-        state.add_user("daenerys", "essos.local", source="bloodhound")
+        # User known in fabrikam.local
+        state.add_user("svc.sql", "fabrikam.local", source="bloodhound")
 
         # Hash comes in with correct domain
         hash_obj = Hash(
-            username="daenerys",
-            hash_value="$krb5tgs$23$*daenerys$ESSOS$http/web01$def456",
+            username="svc.sql",
+            hash_value="$krb5tgs$23$*svc.sql$FABRIKAM$http/web01$def456",
             hash_type="Kerberoast",
-            domain="essos.local",
+            domain="fabrikam.local",
         )
         result = state.add_hash(hash_obj, "kerberoast")
 
         assert result is True
-        assert state.all_hashes[0].domain == "essos.local"
+        assert state.all_hashes[0].domain == "fabrikam.local"
 
     def test_hash_domain_accepted_when_user_not_previously_seen(self) -> None:
         """Test that hash domain is accepted as-is when user not previously discovered."""
@@ -1140,28 +1289,28 @@ class TestHashDomainValidation:
         """Test that longer FQDN is preferred when user exists in multiple domains.
 
         In AD forests, child domains are more specific. If a user exists in both
-        sevenkingdoms.local and north.sevenkingdoms.local, prefer the child.
+        contoso.local and child.contoso.local, prefer the child.
         """
         from ares.core.models import Hash, SharedRedTeamState
 
         state = SharedRedTeamState(operation_id="test-op")
 
         # User seen in multiple domains (parent and child)
-        state.add_user("testuser", "sevenkingdoms.local", source="ldap")
-        state.add_user("testuser", "north.sevenkingdoms.local", source="bloodhound")
+        state.add_user("testuser", "contoso.local", source="ldap")
+        state.add_user("testuser", "child.contoso.local", source="bloodhound")
 
         # Hash comes in with wrong domain
         hash_obj = Hash(
             username="testuser",
             hash_value="aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890",
             hash_type="NTLM",
-            domain="essos.local",  # Wrong domain
+            domain="fabrikam.local",  # Wrong domain
         )
         result = state.add_hash(hash_obj, "secretsdump")
 
         assert result is True
         # Should prefer the longer (more specific) FQDN
-        assert state.all_hashes[0].domain == "north.sevenkingdoms.local"
+        assert state.all_hashes[0].domain == "child.contoso.local"
 
 
 class TestAddUserNetBIOSResolution:
@@ -1179,6 +1328,65 @@ class TestAddUserNetBIOSResolution:
         assert result is True
         assert len(state.all_users) == 1
         assert state.all_users[0].domain == "corp.contoso.local"
+
+
+class TestSiblingDomainHandling:
+    """Tests for sibling domain handling in multi-forest environments."""
+
+    def test_user_domain_corrected_from_target_fallback_to_specific(self) -> None:
+        """Test that user domain is corrected when discovered with specific domain after target fallback."""
+        from ares.core.models import SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        # Target is fabrikam.local but user is actually in child.contoso.local
+        state.target = Target(ip="192.168.58.1", domain="fabrikam.local")
+
+        # First discovery with target fallback
+        result1 = state.add_user("svc_backup", "fabrikam.local")
+        assert result1 is True
+        assert state.all_users[0].domain == "fabrikam.local"
+
+        # Second discovery with correct specific domain
+        result2 = state.add_user("svc_backup", "child.contoso.local")
+        assert result2 is True  # Should update, not add duplicate
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "child.contoso.local"
+
+    def test_user_rejected_when_target_fallback_after_specific(self) -> None:
+        """Test that target fallback domain is rejected when user already has specific domain."""
+        from ares.core.models import SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="192.168.58.1", domain="fabrikam.local")
+
+        # First discovery with specific domain
+        result1 = state.add_user("svc_backup", "child.contoso.local")
+        assert result1 is True
+        assert state.all_users[0].domain == "child.contoso.local"
+
+        # Second discovery with target fallback should be rejected
+        result2 = state.add_user("svc_backup", "fabrikam.local")
+        assert result2 is False
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "child.contoso.local"
+
+    def test_sibling_domain_conflict_keeps_first(self) -> None:
+        """Test that when two non-target sibling domains conflict, first one is kept."""
+        from ares.core.models import SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        # Target is a third domain, so both discoveries are "specific"
+        state.target = Target(ip="192.168.58.1", domain="contoso.local")
+
+        # First discovery in one domain
+        result1 = state.add_user("testuser", "child.contoso.local")
+        assert result1 is True
+
+        # Second discovery in sibling domain should be rejected (keep first)
+        result2 = state.add_user("testuser", "fabrikam.local")
+        assert result2 is False
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "child.contoso.local"
 
 
 class TestRetroactiveDomainNormalization:

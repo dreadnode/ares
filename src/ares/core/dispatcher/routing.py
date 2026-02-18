@@ -11,18 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from ares.core.messages import (
-    ACLAnalysisRequest,
-    CoercionRequest,
-    CrackRequest,
-    CredentialAccessRequest,
-    ExploitRequest,
-    LateralMovementRequest,
-    ReconRequest,
-    generate_task_id,
-)
 from ares.core.models import (
-    AgentRole,
     Credential,
     Host,
     TaskInfo,
@@ -105,7 +94,7 @@ class RoutingMixin:
                     credential = cred
         return credential
 
-    def _find_domain_controller_ip(self: RedTeamDispatcher, domain: str) -> str:  # noqa: PLR0912
+    def _find_domain_controller_ip(self: RedTeamDispatcher, domain: str) -> str:
         """Find DC IP for the specified domain.
 
         Detection priority:
@@ -197,23 +186,47 @@ class RoutingMixin:
                     logger.debug(f"DC IP found via services: {host.ip} ({hostname})")
                     return host.ip
 
-        # Priority 4: Fallback - hosts with DC roles (any domain) - log warning
-        for host in self.shared_state.all_hosts:
-            if _has_dc_role(host):
-                logger.warning(
-                    f"DC IP fallback (no domain match): {host.ip} ({host.hostname}) for domain {domain}"
-                )
-                return host.ip
+        # Priority 3.5: For child domains, find a DC in the same forest
+        # e.g., north.sevenkingdoms.local -> find a DC with hostname *.sevenkingdoms.local
+        # that is NOT the parent domain's registered DC (prefer child domain's own DC)
+        if domain_lower and "." in domain_lower:
+            parts = domain_lower.split(".")
+            if len(parts) >= 3:  # child.parent.tld has 3+ parts
+                parent_domain = ".".join(
+                    parts[1:]
+                )  # north.sevenkingdoms.local -> sevenkingdoms.local
+                parent_dc_ip = self.shared_state.domain_controllers.get(parent_domain)
 
-        # Priority 5: Any host with DC-like services (risky, may be wrong) - log warning
-        for host in self.shared_state.all_hosts:
-            if _has_dc_services(host):
-                logger.warning(
-                    f"DC IP last resort (services only): {host.ip} ({host.hostname}) for domain {domain}"
-                )
-                return host.ip
+                # Find all DCs in the same forest (hostname ends with parent domain)
+                forest_dcs = [
+                    host
+                    for host in self.shared_state.all_hosts
+                    if _has_dc_role(host)
+                    and host.hostname
+                    and host.hostname.lower().endswith(f".{parent_domain}")
+                ]
 
-        # Priority 6: DNS SRV lookup (last resort, requires network access)
+                # Prefer a DC that is NOT the parent domain's DC (likely child domain's DC)
+                for dc in forest_dcs:
+                    if dc.ip != parent_dc_ip:
+                        self.shared_state.domain_controllers[domain_lower] = dc.ip
+                        logger.info(
+                            f"DC IP from forest (not parent): {dc.ip} ({dc.hostname}) -> {domain}"
+                        )
+                        return dc.ip
+
+                # If only parent DC found, use it as fallback BUT DON'T CACHE
+                # Caching the parent DC prevents finding the correct child DC later
+                # when host enumeration completes and identifies the real DC
+                if parent_dc_ip:
+                    logger.info(
+                        f"DC IP from parent domain (uncached fallback): {parent_dc_ip} ({parent_domain}) -> {domain}"
+                    )
+                    return parent_dc_ip
+
+        # Priority 4: DNS SRV lookup (try before generic fallback - more accurate)
+        # This correctly finds DCs for child domains like north.sevenkingdoms.local
+        # when hostname data is incomplete or missing
         if domain_lower:
             dc_ip = self._dns_lookup_dc(domain_lower)
             if dc_ip:
@@ -221,6 +234,33 @@ class RoutingMixin:
                 self.shared_state.domain_controllers[domain_lower] = dc_ip
                 logger.info(f"DC IP found via DNS SRV: {dc_ip} for {domain}")
                 return dc_ip
+
+        # Priority 4.5: LDAP rootDSE query to determine which DC serves the domain
+        # When hostnames are missing, try LDAP against each DC candidate
+        candidate_dcs = [h for h in self.shared_state.all_hosts if _has_dc_role(h)]
+        if candidate_dcs and domain_lower:
+            for dc_candidate in candidate_dcs:
+                dc_domain = self._ldap_get_domain(dc_candidate.ip)
+                if dc_domain and dc_domain.lower() == domain_lower:
+                    self.shared_state.domain_controllers[domain_lower] = dc_candidate.ip
+                    logger.info(f"DC IP found via LDAP: {dc_candidate.ip} serves {dc_domain}")
+                    return dc_candidate.ip
+
+        # Priority 5: Fallback - hosts with DC roles (any domain) - log warning
+        for host in self.shared_state.all_hosts:
+            if _has_dc_role(host):
+                logger.warning(
+                    f"DC IP fallback (no domain match): {host.ip} ({host.hostname}) for domain {domain}"
+                )
+                return host.ip
+
+        # Priority 6: Any host with DC-like services (risky, may be wrong) - log warning
+        for host in self.shared_state.all_hosts:
+            if _has_dc_services(host):
+                logger.warning(
+                    f"DC IP last resort (services only): {host.ip} ({host.hostname}) for domain {domain}"
+                )
+                return host.ip
 
         logger.warning(f"No DC IP found for domain {domain}")
         return ""
@@ -302,6 +342,114 @@ class RoutingMixin:
 
         return ""
 
+    def _ldap_get_domain(self: RedTeamDispatcher, dc_ip: str) -> str:
+        """Query LDAP rootDSE to get the domain name a DC serves.
+
+        Uses raw socket LDAP to query the defaultNamingContext attribute which
+        contains the domain DN (e.g., DC=north,DC=sevenkingdoms,DC=local).
+
+        Args:
+            dc_ip: IP address of the DC to query
+
+        Returns:
+            Domain name (e.g., "north.sevenkingdoms.local") or empty string on failure
+        """
+        import socket
+
+        try:
+            # LDAP rootDSE search request (precomputed BER encoding)
+            # This requests defaultNamingContext from the rootDSE
+            ldap_rootdse_request = bytes(
+                [
+                    0x30,
+                    0x25,  # SEQUENCE, length 37
+                    0x02,
+                    0x01,
+                    0x01,  # messageID: 1
+                    0x63,
+                    0x20,  # SearchRequest, length 32
+                    0x04,
+                    0x00,  # baseObject: ""
+                    0x0A,
+                    0x01,
+                    0x00,  # scope: baseObject
+                    0x0A,
+                    0x01,
+                    0x00,  # derefAliases: neverDerefAliases
+                    0x02,
+                    0x01,
+                    0x00,  # sizeLimit: 0
+                    0x02,
+                    0x01,
+                    0x00,  # timeLimit: 0
+                    0x01,
+                    0x01,
+                    0x00,  # typesOnly: false
+                    0x87,
+                    0x0B,
+                    0x6F,
+                    0x62,
+                    0x6A,
+                    0x65,
+                    0x63,
+                    0x74,  # filter: present "objectclass"
+                    0x63,
+                    0x6C,
+                    0x61,
+                    0x73,
+                    0x73,
+                    0x30,
+                    0x00,  # attributes: empty (return all)
+                ]
+            )
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3)
+            sock.connect((dc_ip, 389))
+            sock.sendall(ldap_rootdse_request)
+
+            # Read all response data (LDAP responses may be fragmented)
+            response = b""
+            try:
+                while True:
+                    chunk = sock.recv(8192)
+                    if not chunk:
+                        break
+                    response += chunk
+            except TimeoutError:
+                pass  # Expected when all data is read
+            sock.close()
+
+            # Parse response - look for defaultNamingContext in the raw bytes
+            response_str = response.decode("utf-8", errors="replace")
+
+            # Find defaultNamingContext - look for the attribute name followed by DC= pattern
+            # The BER encoding puts length bytes between attribute and value, so we use .*? to skip them
+            # Use [A-Za-z]+ for the last DC component to avoid capturing BER length bytes (e.g., '0')
+            # Pattern handles both "DC=x,DC=local" and "DC=x,DC=y,DC=local" formats
+            match = re.search(
+                r"defaultNamingContext.*?(DC=[A-Za-z0-9_-]+(?:,DC=[A-Za-z]+)+)",
+                response_str,
+                re.IGNORECASE | re.DOTALL,
+            )
+            if match:
+                dn = match.group(1)
+                # Convert DN to domain name: DC=north,DC=sevenkingdoms,DC=local -> north.sevenkingdoms.local
+                parts = []
+                for component in dn.split(","):
+                    stripped = component.strip()
+                    if stripped.upper().startswith("DC="):
+                        parts.append(stripped[3:])
+                if parts:
+                    domain = ".".join(parts)
+                    logger.info(f"LDAP rootDSE: {dc_ip} serves domain {domain}")
+                    return domain
+
+        except (OSError, TimeoutError, Exception) as e:
+            logger.debug(f"LDAP domain lookup failed for {dc_ip}: {e}")
+
+        return ""
+
     def _extract_ticket_path_from_output(self: RedTeamDispatcher, output: str) -> str:
         """Extract .ccache ticket path from S4U attack or getTGT output.
 
@@ -341,12 +489,55 @@ class RoutingMixin:
             return parts[1]
         return None
 
+    def _extract_target_from_ccache_path(
+        self: RedTeamDispatcher, ccache_path: str
+    ) -> tuple[str | None, str]:
+        """Extract target host and domain from ccache ticket path.
+
+        Ticket paths follow format:
+        - Administrator@cifs_dc01.contoso.local@CONTOSO.LOCAL.ccache
+        - user@service_host.contoso.local@CONTOSO.LOCAL.ccache
+
+        Args:
+            ccache_path: Path to the .ccache ticket file
+
+        Returns:
+            Tuple of (target_host, domain). Either may be empty if extraction fails.
+        """
+        if not ccache_path:
+            return None, ""
+
+        # Remove .ccache extension and path prefix
+        ticket_name = ccache_path.rsplit("/", 1)[-1]
+        ticket_name = ticket_name.replace(".ccache", "")
+
+        # Format: user@service_host.domain@REALM
+        # Split by @ - last part is realm (domain), middle has service_host
+        parts = ticket_name.split("@")
+        if len(parts) < 2:
+            return None, ""
+
+        domain = parts[-1].lower() if len(parts) >= 2 else ""
+
+        # Middle part has service_host like: cifs_dc01.contoso.local
+        if len(parts) >= 2:
+            service_host = parts[1] if len(parts) >= 3 else parts[0]
+            # Remove service prefix (cifs_, http_, ldap_, host_)
+            for prefix in ["cifs_", "http_", "ldap_", "host_", "gc_"]:
+                if service_host.lower().startswith(prefix):
+                    service_host = service_host[len(prefix) :]
+                    break
+            return service_host, domain
+
+        return None, domain
+
     async def _auto_chain_s4u_lateral_movement(
         self: RedTeamDispatcher,
         task_id: str,
         task_info: TaskInfo,
         result: dict[str, Any],
         source_agent: str,
+        task_queue: Any = None,
     ) -> int:
         """Auto-chain lateral movement after successful S4U attack.
 
@@ -354,34 +545,41 @@ class RoutingMixin:
         automatically dispatches secretsdump to harvest credentials using
         the generated ticket.
 
+        This function now works for ANY task type (exploit, privesc_enumeration, etc.)
+        as long as the output contains a .ccache file. It extracts target info from
+        the ticket path itself when task params aren't available.
+
         Args:
             task_id: ID of the completed task
             task_info: Information about the completed task
             result: Task result containing output
             source_agent: Agent that completed the task
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
 
         Returns:
             Number of lateral movement tasks dispatched
         """
-        if task_info.task_type != "exploit":
-            return 0
-
-        params = task_info.params or {}
-        if params.get("vuln_type") != "constrained_delegation":
-            return 0
-
         output = result.get("output", "") or result.get("stdout", "") or str(result)
         if ".ccache" not in output:
-            logger.debug(f"No .ccache found in S4U output for task {task_id}")
             return 0
 
         ticket_path = self._extract_ticket_path_from_output(output)
+
+        # Try to get target info from task params first
+        params = task_info.params or {}
         target_spn = params.get("target_spn", "")
-        target_host = self._extract_host_from_spn(target_spn)
+        target_host = self._extract_host_from_spn(target_spn) if target_spn else None
         domain = params.get("domain", "")
 
+        # If params missing, extract from ccache ticket path
+        # Format: Administrator@cifs_dc01.contoso.local@CONTOSO.LOCAL.ccache
+        if not target_host or not domain:
+            target_host, domain = self._extract_target_from_ccache_path(ticket_path)
+
         if not target_host:
-            logger.warning(f"Could not extract host from SPN: {target_spn}")
+            logger.warning(
+                f"Could not extract target host from output or ccache path: {ticket_path}"
+            )
             return 0
 
         target_ip: str | None = None
@@ -408,6 +606,7 @@ class RoutingMixin:
                 "no_pass": True,  # nosec B105 - not a password, it's a flag
                 "dc_ip": dc_ip,
             },
+            task_queue=task_queue,
         )
         return 1
 
@@ -522,6 +721,12 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            # The main loop's _process_pending_dispatches will create TaskInfo when it submits
+            if task_id in ("deferred", "queued"):
+                logger.info(f"Crack task {task_id} to background/main loop queue")
+                return task_id
+
             task_info = TaskInfo(
                 task_id=task_id,
                 task_type="crack",
@@ -529,44 +734,15 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             logger.info(f"Crack task {task_id} submitted to Redis queue")
             return task_id
 
-        task_id = generate_task_id()
-        cracker_agent = self._role_queues.get(AgentRole.CRACKER)
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route crack request")
+        return ""
 
-        if not cracker_agent:
-            logger.warning("No cracker agent registered, cannot route crack request")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="crack",
-            assigned_agent=cracker_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[cracker_agent].put(
-            CrackRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                hash_value=hash_value,
-                hash_type=hash_type,
-                username=username,
-                domain=domain,
-                callback_agent=source_agent,
-                wordlist=wordlist,
-                priority=priority,
-            )
-        )
-
-        logger.info(f"Crack request {task_id} sent to {cracker_agent}")
-        return task_id
-
-    async def request_lateral_movement(  # noqa: PLR0912
+    async def request_lateral_movement(
         self: RedTeamDispatcher,
         target_host: str,
         username: str,
@@ -687,6 +863,11 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            if task_id in ("deferred", "queued"):
+                logger.info(f"Lateral movement task {task_id} to background/main loop queue")
+                return task_id
+
             task_info = TaskInfo(
                 task_id=task_id,
                 task_type="lateral_movement",
@@ -694,42 +875,13 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             logger.info(f"Lateral movement task {task_id} submitted to Redis queue")
             return task_id
 
-        task_id = generate_task_id()
-        lateral_agent = self._role_queues.get(AgentRole.LATERAL)
-
-        if not lateral_agent:
-            logger.warning("No lateral agent registered, cannot route lateral request")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="lateral_movement",
-            assigned_agent=lateral_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[lateral_agent].put(
-            LateralMovementRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                target_host=target_host,
-                username=username,
-                password=password,
-                hash_value=hash_value,
-                domain=domain,
-                method=method,
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"Lateral movement request {task_id} sent to {lateral_agent}")
-        return task_id
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route lateral movement request")
+        return ""
 
     async def request_acl_analysis(
         self: RedTeamDispatcher,
@@ -820,6 +972,11 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            if task_id in ("deferred", "queued"):
+                logger.info(f"ACL analysis task {task_id} to background/main loop queue")
+                return task_id
+
             task_info = TaskInfo(
                 task_id=task_id,
                 task_type="acl_analysis",
@@ -827,39 +984,13 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             logger.info(f"ACL analysis task {task_id} submitted to Redis queue")
             return task_id
 
-        task_id = generate_task_id()
-        acl_agent = self._role_queues.get(AgentRole.ACL)
-
-        if not acl_agent:
-            logger.warning("No ACL agent registered, cannot route ACL request")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="acl_analysis",
-            assigned_agent=acl_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[acl_agent].put(
-            ACLAnalysisRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                target_user=target_user,
-                domain=domain,
-                find_path_to=find_path_to,
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"ACL analysis request {task_id} sent to {acl_agent}")
-        return task_id
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route ACL analysis request")
+        return ""
 
     async def request_recon(
         self: RedTeamDispatcher,
@@ -903,6 +1034,34 @@ class RoutingMixin:
                 logger.info(f"Skipping nmap - all {len(scan_targets)} targets already scanned")
                 return ""
 
+        # PREREQUISITE: Non-nmap recon tasks require targets to be scanned first
+        # This ensures nmap runs before SMB enumeration, user enumeration, etc.
+        # We dispatch nmap (priority 1) AND continue to dispatch enumeration (priority 5).
+        # Priority-based insertion ensures nmap runs first.
+        is_nmap_task = reason == "network_scan" or (techniques and "nmap_scan" in techniques)
+        if not is_nmap_task and target_ips and self._task_queue:
+            unscanned = set(target_ips) - self.shared_state.scanned_targets
+            if unscanned:
+                logger.info(
+                    f"Dispatching nmap for {len(unscanned)} unscanned targets before {reason} "
+                    f"(targets: {list(unscanned)[:3]}{'...' if len(unscanned) > 3 else ''})"
+                )
+                # Dispatch nmap with high priority - it will run before the enumeration task
+                await self._throttled_submit_task(
+                    task_type="recon",
+                    target_role="recon",
+                    payload={
+                        "domain": domain,
+                        "target_ips": list(unscanned),
+                        "reason": "network_scan",
+                        "techniques": ["nmap_scan"],
+                    },
+                    source_agent="dispatcher",
+                    priority=1,  # Urgent - runs first due to priority-based queue insertion
+                )
+                # DON'T return - continue to dispatch the enumeration task with lower priority
+                # It will be queued behind nmap and run after nmap completes
+
         # Normalize domain to FQDN format
         domain = self._normalize_domain(domain)
 
@@ -933,14 +1092,22 @@ class RoutingMixin:
         }
 
         if self._task_queue:
+            # Nmap tasks get high priority to ensure they run before enumeration
+            priority = 1 if is_nmap_task else 5
             task_id = await self._throttled_submit_task(
                 task_type="recon",
                 target_role="recon",
                 payload=payload,
                 source_agent=source_agent,
+                priority=priority,
             )
             if not task_id:
                 return ""
+
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            if task_id in ("deferred", "queued"):
+                logger.info(f"Recon task {task_id} to background/main loop queue")
+                return task_id
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -949,7 +1116,6 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             cred_label = username or "unauthenticated"
             if hash_value and not password:
@@ -962,39 +1128,9 @@ class RoutingMixin:
             )
             return task_id
 
-        task_id = generate_task_id()
-        recon_agent = self._role_queues.get(AgentRole.RECON)
-
-        if not recon_agent:
-            logger.warning("No recon agent registered, cannot route request")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="recon",
-            assigned_agent=recon_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[recon_agent].put(
-            ReconRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                domain=domain,
-                target_ips=payload["target_ips"],
-                dc_ip=dc_ip,
-                username=username,
-                password=password,
-                hash_value=hash_value,
-                reason=reason,
-                techniques=payload["techniques"],
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"Recon request {task_id} sent to {recon_agent}")
-        return task_id
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route recon request")
+        return ""
 
     async def request_credential_access(
         self: RedTeamDispatcher,
@@ -1009,6 +1145,7 @@ class RoutingMixin:
         reason: str | None = None,
         techniques: list[str] | None = None,
         extra_params: dict[str, Any] | None = None,
+        task_queue: Any = None,
     ) -> str:
         """
         Request credential access actions (AS-REP roast, Kerberoast, secretsdump, LSASS).
@@ -1024,6 +1161,7 @@ class RoutingMixin:
             hash_value: Optional NTLM hash for pass-the-hash actions.
             techniques: Optional list of techniques to prioritize.
             extra_params: Optional additional parameters to pass (e.g., ticket_path, no_pass).
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
 
         Returns:
             Task ID for tracking.
@@ -1067,15 +1205,23 @@ class RoutingMixin:
         if extra_params:
             payload.update(extra_params)
 
-        if self._task_queue:
+        # Use provided task_queue (from threaded consumer) or fall back to self._task_queue
+        effective_task_queue = task_queue if task_queue is not None else self._task_queue
+        if effective_task_queue:
             task_id = await self._throttled_submit_task(
                 task_type="credential_access",
                 target_role="credential_access",
                 payload=payload,
                 source_agent=source_agent,
+                task_queue=effective_task_queue,
             )
             if not task_id:
                 return ""
+
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            if task_id in ("deferred", "queued"):
+                logger.info(f"Credential access task {task_id} to background/main loop queue")
+                return task_id
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1084,7 +1230,6 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             cred_label = username or "no-cred"
             if hash_value and not password:
@@ -1099,38 +1244,40 @@ class RoutingMixin:
             )
             return task_id
 
-        task_id = generate_task_id()
-        credential_agent = self._role_queues.get(AgentRole.CREDENTIAL_ACCESS)
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route credential access request")
+        return ""
 
-        if not credential_agent:
-            logger.warning("No credential access agent registered, cannot route request")
-            return ""
+    def _enrich_delegation_payload(
+        self: RedTeamDispatcher, payload: dict[str, Any], vuln_type: str
+    ) -> None:
+        """Enrich delegation exploit payload with credentials from state if missing."""
+        if vuln_type not in ("constrained_delegation", "unconstrained_delegation"):
+            return
+        if payload.get("password"):
+            return
+        account = payload.get("account_name") or payload.get("account", payload.get("target", ""))
+        account_lower = account.lower().rstrip("$") if account else ""
+        for cred in self.shared_state.all_credentials:
+            if cred.username.lower() == account_lower and cred.password:
+                payload["password"] = cred.password
+                if not payload.get("domain") and cred.domain:
+                    payload["domain"] = cred.domain
+                logger.info(f"Enriched {vuln_type} payload with credential for {account}")
+                break
 
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="credential_access",
-            assigned_agent=credential_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[credential_agent].put(
-            CredentialAccessRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                domain=domain,
-                target_ips=payload["target_ips"],
-                dc_ip=dc_ip,
-                username=username,
-                password=password,
-                hash_value=hash_value,
-                techniques=payload["techniques"],
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"Credential access request {task_id} sent to {credential_agent}")
-        return task_id
+    def _resolve_dc_ip_for_payload(
+        self: RedTeamDispatcher, payload: dict[str, Any], vuln_type: str
+    ) -> None:
+        """Resolve dc_ip for exploit payload if not already set."""
+        if payload.get("dc_ip") or not payload.get("domain"):
+            return
+        dc_ip = self._find_domain_controller_ip(payload["domain"]) or payload.get("target_ip", "")
+        if not dc_ip and self.shared_state.target:
+            dc_ip = self.shared_state.target.ip
+        if dc_ip:
+            payload["dc_ip"] = dc_ip
+            logger.info(f"Resolved dc_ip={dc_ip} for exploit {vuln_type}")
 
     async def request_exploit(
         self: RedTeamDispatcher,
@@ -1139,117 +1286,59 @@ class RoutingMixin:
         target: str,
         source_agent: str,
         params: dict[str, Any] | None = None,
+        task_queue: Any = None,
     ) -> str:
-        """
-        Request PrivEscAgent to exploit vulnerability.
-
-        Uses Redis task queue for cross-pod communication when available.
-
-        Args:
-            vuln_type: ADCS_ESC1, DELEGATION_UNCONSTRAINED, etc.
-            vuln_id: Vulnerability ID.
-            target: Target to exploit.
-            source_agent: Agent making the request.
-            params: Vulnerability-specific parameters.
-
-        Returns:
-            Task ID for tracking.
-        """
-        # Skip new exploit tasks if DA already achieved
+        """Request PrivEscAgent to exploit vulnerability."""
         if self.shared_state.has_domain_admin:
             logger.debug(f"Skipping exploit {vuln_type} on {target} - DA already achieved")
             return ""
 
-        # Normalize domain to FQDN format in params
         params = params or {}
         if "domain" in params:
             params["domain"] = self._normalize_domain(params["domain"])
 
-        payload = {
-            "vuln_type": vuln_type,
-            "vuln_id": vuln_id,
-            "target": target,
-            **params,
-        }
+        payload = {"vuln_type": vuln_type, "vuln_id": vuln_id, "target": target, **params}
 
-        # Track attack chain - look up credential from params
+        # Enrich with credentials and resolve DC IP
+        self._enrich_delegation_payload(payload, vuln_type)
+        self._resolve_dc_ip_for_payload(payload, vuln_type)
+
+        # Track attack chain
         username = payload.get("username") or payload.get("account_name", "")
-        domain = payload.get("domain", "")
-        password = payload.get("password", "")
         if username:
-            parent_id, parent_step = self._find_credential_id(username, domain, password)
+            parent_id, parent_step = self._find_credential_id(
+                username, payload.get("domain", ""), payload.get("password", "")
+            )
             payload["parent_credential_id"] = parent_id
             payload["parent_attack_step"] = parent_step
 
-        # Ensure dc_ip is resolved for exploit tasks that need it
-        if not payload.get("dc_ip") and payload.get("domain"):
-            dc_ip = self._find_domain_controller_ip(payload["domain"])
-            if not dc_ip:
-                dc_ip = payload.get("target_ip", "")
-            if not dc_ip and self.shared_state.target:
-                dc_ip = self.shared_state.target.ip
-            if dc_ip:
-                payload["dc_ip"] = dc_ip
-                logger.info(f"Resolved dc_ip={dc_ip} for exploit {vuln_type}")
-
-        if self._task_queue:
-            # Use priority=1 (highest) - exploit tasks are the actual DA path.
-            # Combined with phase adjustment (-2 in privilege_escalation),
-            # exploits will have effective priority -1 → clamped to 1,
-            # beating discovery tasks (priority=2 after +1 adjustment).
-            task_id = await self._throttled_submit_task(
-                task_type="exploit",
-                target_role="privesc",
-                payload=payload,
-                source_agent=source_agent,
-                priority=1,
-            )
-            if not task_id:
-                return ""
-
-            task_info = TaskInfo(
-                task_id=task_id,
-                task_type="exploit",
-                assigned_agent="privesc",
-                params=payload,
-            )
-            self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
-
-            logger.info(f"Exploit task {task_id} for {vuln_type} submitted to Redis queue")
-
-            self._record_exploit_weakness(vuln_type, target, payload)
-
-            return task_id
-
-        task_id = generate_task_id()
-        privesc_agent = self._role_queues.get(AgentRole.PRIVESC)
-
-        if not privesc_agent:
-            logger.warning("No privesc agent registered, cannot route exploit request")
+        effective_task_queue = task_queue if task_queue is not None else self._task_queue
+        if not effective_task_queue:
+            logger.warning("No task queue available, cannot route exploit request")
             return ""
 
-        task_info = TaskInfo(
-            task_id=task_id,
+        task_id = await self._throttled_submit_task(
             task_type="exploit",
-            assigned_agent=privesc_agent,
-            params=payload,
+            target_role="privesc",
+            payload=payload,
+            source_agent=source_agent,
+            priority=1,
+            task_queue=effective_task_queue,
+        )
+        if not task_id:
+            return ""
+
+        if task_id in ("deferred", "queued"):
+            logger.info(f"Exploit task for {vuln_type} {task_id} to background/main loop queue")
+            self._record_exploit_weakness(vuln_type, target, payload)
+            return "deferred"
+
+        task_info = TaskInfo(
+            task_id=task_id, task_type="exploit", assigned_agent="privesc", params=payload
         )
         self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[privesc_agent].put(
-            ExploitRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                vuln_type=vuln_type,
-                vuln_id=vuln_id,
-                target=target,
-                params=params or {},
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"Exploit request {task_id} for {vuln_type} sent to {privesc_agent}")
+        logger.info(f"Exploit task {task_id} for {vuln_type} submitted to Redis queue")
+        self._record_exploit_weakness(vuln_type, target, payload)
         return task_id
 
     async def request_privesc_enumeration(
@@ -1259,6 +1348,7 @@ class RoutingMixin:
         username: str,
         password: str,
         techniques: list[str] | None = None,
+        task_queue: Any = None,
     ) -> str:
         """
         Request PRIVESC agent to run enumeration tasks (e.g., find_delegation).
@@ -1332,7 +1422,9 @@ class RoutingMixin:
             "parent_attack_step": parent_step,
         }
 
-        if self._task_queue:
+        # Use provided task_queue (from threaded consumer) or fall back to self._task_queue
+        effective_task_queue = task_queue if task_queue is not None else self._task_queue
+        if effective_task_queue:
             # Use priority=1 (highest) for delegation enumeration - these are critical
             # for discovering constrained delegation paths to Domain Admin
             task_id = await self._throttled_submit_task(
@@ -1341,9 +1433,15 @@ class RoutingMixin:
                 payload=payload,
                 source_agent=source_agent,
                 priority=1,  # Highest priority - delegation discovery is critical path
+                task_queue=effective_task_queue,
             )
             if not task_id:
                 return ""
+
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            if task_id in ("deferred", "queued"):
+                logger.info(f"Privesc enumeration task {task_id} to background/main loop queue")
+                return task_id
 
             task_info = TaskInfo(
                 task_id=task_id,
@@ -1352,7 +1450,6 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             logger.info(
                 f"Privesc enumeration task {task_id} submitted to Redis queue "
@@ -1360,40 +1457,9 @@ class RoutingMixin:
             )
             return task_id
 
-        task_id = generate_task_id()
-        privesc_agent = self._role_queues.get(AgentRole.PRIVESC)
-
-        if not privesc_agent:
-            logger.warning("No privesc agent registered, cannot route enumeration request")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="privesc_enumeration",
-            assigned_agent=privesc_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[privesc_agent].put(
-            ExploitRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                vuln_type="PRIVESC_ENUMERATION",
-                vuln_id=f"enum-{task_id}",
-                target=dc_ip or domain,
-                params={
-                    "domain": domain,
-                    "username": username,
-                    "password": password,
-                    "techniques": techniques or [],
-                },
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"Privesc enumeration request {task_id} sent to {privesc_agent}")
-        return task_id
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route privesc enumeration request")
+        return ""
 
     async def request_coercion(
         self: RedTeamDispatcher,
@@ -1450,6 +1516,11 @@ class RoutingMixin:
             if not task_id:
                 return ""
 
+            # Task queued for main loop dispatch or deferred - don't create TaskInfo here
+            if task_id in ("deferred", "queued"):
+                logger.info(f"Coercion task {task_id} to background/main loop queue")
+                return task_id
+
             task_info = TaskInfo(
                 task_id=task_id,
                 task_type="coercion",
@@ -1457,39 +1528,13 @@ class RoutingMixin:
                 params=payload,
             )
             self.shared_state.pending_tasks[task_id] = task_info
-            self._redis_task_ids.add(task_id)
 
             logger.info(f"Coercion task {task_id} submitted to Redis queue")
             return task_id
 
-        task_id = generate_task_id()
-        coercion_agent = self._role_queues.get(AgentRole.COERCION)
-
-        if not coercion_agent:
-            logger.warning("No coercion agent registered, cannot route coercion request")
-            return ""
-
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_type="coercion",
-            assigned_agent=coercion_agent,
-            params=payload,
-        )
-        self.shared_state.pending_tasks[task_id] = task_info
-
-        await self._message_queues[coercion_agent].put(
-            CoercionRequest(
-                source_agent=source_agent,
-                task_id=task_id,
-                interface=interface,
-                techniques=techniques,
-                duration=duration,
-                callback_agent=source_agent,
-            )
-        )
-
-        logger.info(f"Coercion request {task_id} sent to {coercion_agent}")
-        return task_id
+        # No Redis task queue - cannot dispatch
+        logger.warning("No task queue available, cannot route coercion request")
+        return ""
 
 
 __all__ = ["RoutingMixin"]

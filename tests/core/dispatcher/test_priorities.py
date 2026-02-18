@@ -10,7 +10,10 @@ Priority scheme rationale:
 
 from __future__ import annotations
 
+import pytest
+
 from ares.core.dispatcher import RedTeamDispatcher
+from ares.core.models import SharedRedTeamState
 
 
 class TestVulnerabilityPriorities:
@@ -295,6 +298,580 @@ class TestCredentialAwarePriorityBoost:
         assert boosted == 3
 
 
+class TestDelegationCredentialPrerequisite:
+    """Tests for deferring delegation vulns until credentials exist."""
+
+    def test_account_has_credentials_with_password(self):
+        """Should return True when account has cleartext password."""
+        from ares.core.models import Credential
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-op")
+
+        # Add credential with password
+        cred = Credential(
+            username="svc_backup",
+            password="Backup123!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "test")
+
+        assert dispatcher._account_has_credentials("svc_backup") is True
+        assert dispatcher._account_has_credentials("SVC_BACKUP") is True  # Case insensitive
+        assert dispatcher._account_has_credentials("svc_backup$") is True  # Strips $
+
+    def test_account_has_credentials_without_password(self):
+        """Should return False when account has no cleartext password."""
+        from ares.core.models import Credential
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-op")
+
+        # Add credential without password (hash only)
+        cred = Credential(
+            username="svc_backup",
+            password="",
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "test")
+
+        assert dispatcher._account_has_credentials("svc_backup") is False
+
+    def test_account_has_credentials_unknown_account(self):
+        """Should return False for unknown accounts."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-op")
+
+        assert dispatcher._account_has_credentials("unknown.user") is False
+        assert dispatcher._account_has_credentials("") is False
+
+    @pytest.mark.asyncio
+    async def test_get_next_vulnerability_defers_delegation_without_creds(self):
+        """Constrained delegation vuln should be deferred when no credentials exist."""
+        from ares.core.models import VulnerabilityInfo
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-defer")
+
+        # Add constrained delegation vulnerability without credentials
+        vuln = VulnerabilityInfo(
+            vuln_id="cd_svc_backup_12345678",
+            vuln_type="constrained_delegation",
+            target="svc_backup",
+            discovered_by="recon",
+            details={
+                "account_name": "svc_backup",
+                "target_spn": "cifs/dc01.contoso.local",
+                "domain": "contoso.local",
+            },
+            priority=4,
+        )
+        dispatcher.shared_state.add_vulnerability(vuln)
+
+        # No credentials for svc_backup - should return None (deferred)
+        result = await dispatcher.get_next_vulnerability()
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_next_vulnerability_returns_delegation_with_creds(self):
+        """Constrained delegation vuln should be returned when credentials exist."""
+        from ares.core.models import Credential, VulnerabilityInfo
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-with-creds")
+
+        # Add credential for the account
+        cred = Credential(
+            username="svc_backup",
+            password="Backup123!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "cracker")
+
+        # Add constrained delegation vulnerability
+        vuln = VulnerabilityInfo(
+            vuln_id="cd_svc_backup_12345678",
+            vuln_type="constrained_delegation",
+            target="svc_backup",
+            discovered_by="recon",
+            details={
+                "account_name": "svc_backup",
+                "target_spn": "cifs/dc01.contoso.local",
+                "domain": "contoso.local",
+            },
+            priority=4,
+        )
+        dispatcher.shared_state.add_vulnerability(vuln)
+
+        # With credentials - should return the vulnerability
+        result = await dispatcher.get_next_vulnerability()
+
+        assert result is not None
+        assert result["id"] == "cd_svc_backup_12345678"
+        assert result["type"] == "constrained_delegation"
+
+    @pytest.mark.asyncio
+    async def test_get_next_vulnerability_skips_delegation_returns_other(self):
+        """Should skip delegation without creds and return next available vuln."""
+        from ares.core.models import VulnerabilityInfo
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-skip")
+
+        # Add constrained delegation WITHOUT credentials (should be skipped)
+        cd_vuln = VulnerabilityInfo(
+            vuln_id="cd_svc_backup_12345678",
+            vuln_type="constrained_delegation",
+            target="svc_backup",
+            discovered_by="recon",
+            details={"account_name": "svc_backup"},
+            priority=2,  # Higher priority
+        )
+        dispatcher.shared_state.add_vulnerability(cd_vuln)
+
+        # Add MSSQL vuln (no credential prereq, lower priority but available)
+        mssql_vuln = VulnerabilityInfo(
+            vuln_id="mssql_impersonation_192.168.58.20",
+            vuln_type="mssql_impersonation",
+            target="192.168.58.20",
+            discovered_by="recon",
+            details={"can_impersonate_sa": True},
+            priority=10,
+        )
+        dispatcher.shared_state.add_vulnerability(mssql_vuln)
+
+        # Should skip delegation (no creds) and return MSSQL
+        result = await dispatcher.get_next_vulnerability()
+
+        assert result is not None
+        assert result["id"] == "mssql_impersonation_192.168.58.20"
+        assert result["type"] == "mssql_impersonation"
+
+    @pytest.mark.asyncio
+    async def test_get_next_vulnerability_uses_account_key_fallback(self):
+        """Should check both account_name and account keys for delegation."""
+        from ares.core.models import Credential, VulnerabilityInfo
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-account-key")
+
+        # Add credential
+        cred = Credential(
+            username="svc_backup",
+            password="Backup123!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "cracker")
+
+        # Add vulnerability using "account" key instead of "account_name"
+        vuln = VulnerabilityInfo(
+            vuln_id="cd_svc_backup_abcd1234",
+            vuln_type="constrained_delegation",
+            target="svc_backup",
+            discovered_by="recon",
+            details={
+                "account": "svc_backup",  # Uses "account" key
+                "target_spn": "cifs/dc01.contoso.local",
+            },
+            priority=4,
+        )
+        dispatcher.shared_state.add_vulnerability(vuln)
+
+        # Should find credential using fallback key
+        result = await dispatcher.get_next_vulnerability()
+
+        assert result is not None
+        assert result["id"] == "cd_svc_backup_abcd1234"
+
+    def test_can_exploit_vulnerability_delegation_with_creds(self):
+        """Constrained delegation should be exploitable when credentials exist."""
+        from ares.core.models import Credential
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-can-exploit")
+
+        cred = Credential(
+            username="svc_backup",
+            password="Backup123!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "test")
+
+        result = dispatcher._can_exploit_vulnerability(
+            "constrained_delegation", {"account_name": "svc_backup"}
+        )
+        assert result is True
+
+    def test_can_exploit_vulnerability_delegation_without_creds(self):
+        """Constrained delegation should NOT be exploitable without credentials."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-no-exploit")
+
+        result = dispatcher._can_exploit_vulnerability(
+            "constrained_delegation", {"account_name": "svc_backup"}
+        )
+        assert result is False
+
+    def test_can_exploit_vulnerability_other_types_always_true(self):
+        """Non-delegation vulnerabilities should always be exploitable."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-other-vuln")
+
+        # MSSQL, ADCS, etc. don't require credential prereq check
+        assert dispatcher._can_exploit_vulnerability("mssql_impersonation", {}) is True
+        assert dispatcher._can_exploit_vulnerability("adcs_esc1", {}) is True
+        assert dispatcher._can_exploit_vulnerability("krbtgt_hash", {}) is True
+
+
+class TestCredentialEnrichmentInRequestExploit:
+    """Tests for credential enrichment when dispatching delegation exploits.
+
+    Bug fix: Vulnerabilities queued BEFORE credentials are cracked have empty
+    password in details. When dequeued AFTER credentials exist, request_exploit()
+    must enrich the payload with the credential from state.
+    """
+
+    @pytest.mark.asyncio
+    async def test_request_exploit_enriches_delegation_payload_with_credential(self):
+        """request_exploit should enrich delegation payload with password from state.
+
+        This tests the fix for the 7-minute credential propagation delay bug:
+        - Vuln queued before credentials cracked (no password in details)
+        - Credentials cracked and added to state
+        - Vuln dequeued and dispatched via request_exploit()
+        - request_exploit() should find and include the password
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.models import Credential
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-enrich")
+
+        # Add credential for the account (simulates cracked hash)
+        cred = Credential(
+            username="svc_backup",
+            password="Backup123!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "cracker")
+
+        # Mock task queue to capture what gets submitted
+        mock_task_queue = MagicMock()
+        mock_task_queue.submit_task = AsyncMock(return_value="task-123")
+        dispatcher._task_queue = mock_task_queue
+
+        # Call request_exploit with params that DON'T have password
+        # (simulates vuln details from before credential was cracked)
+        await dispatcher.request_exploit(
+            vuln_type="constrained_delegation",
+            vuln_id="cd_svc_backup_12345678",
+            target="svc_backup",
+            source_agent="orchestrator",
+            params={
+                "account_name": "svc_backup",
+                "target_spn": "cifs/dc01.contoso.local",
+                "domain": "contoso.local",
+                # NOTE: No password in params - should be enriched from state
+            },
+        )
+
+        # Verify submit_task was called
+        assert mock_task_queue.submit_task.called
+
+        # Extract the payload that was submitted
+        call_kwargs = mock_task_queue.submit_task.call_args
+        payload = call_kwargs.kwargs.get("payload") or call_kwargs[1].get("payload")
+
+        # Password should have been enriched from the credential in state
+        assert payload["password"] == "Backup123!"  # pragma: allowlist secret
+
+    @pytest.mark.asyncio
+    async def test_request_exploit_does_not_override_existing_password(self):
+        """request_exploit should NOT override password if already in params."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.models import Credential
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-no-override")
+
+        # Add credential with different password
+        cred = Credential(
+            username="svc_backup",
+            password="StatePassword",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "cracker")
+
+        mock_task_queue = MagicMock()
+        mock_task_queue.submit_task = AsyncMock(return_value="task-456")
+        dispatcher._task_queue = mock_task_queue
+
+        # Call with password already in params
+        await dispatcher.request_exploit(
+            vuln_type="constrained_delegation",
+            vuln_id="cd_svc_backup_12345678",
+            target="svc_backup",
+            source_agent="orchestrator",
+            params={
+                "account_name": "svc_backup",
+                "password": "ParamsPassword",  # pragma: allowlist secret
+                "domain": "contoso.local",
+            },
+        )
+
+        call_kwargs = mock_task_queue.submit_task.call_args
+        payload = call_kwargs.kwargs.get("payload") or call_kwargs[1].get("payload")
+
+        # Should keep the password from params, not override with state
+        assert payload["password"] == "ParamsPassword"  # pragma: allowlist secret
+
+    @pytest.mark.asyncio
+    async def test_request_exploit_enriches_unconstrained_delegation_too(self):
+        """Unconstrained delegation should also be enriched with credentials."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.models import Credential
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-unconstrained")
+
+        cred = Credential(
+            username="dc01",
+            password="DCPassword!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "cracker")
+
+        mock_task_queue = MagicMock()
+        mock_task_queue.submit_task = AsyncMock(return_value="task-789")
+        dispatcher._task_queue = mock_task_queue
+
+        await dispatcher.request_exploit(
+            vuln_type="unconstrained_delegation",
+            vuln_id="ud_dc01_12345678",
+            target="dc01",
+            source_agent="orchestrator",
+            params={
+                "account_name": "dc01$",  # With $ suffix
+                "domain": "contoso.local",
+            },
+        )
+
+        call_kwargs = mock_task_queue.submit_task.call_args
+        payload = call_kwargs.kwargs.get("payload") or call_kwargs[1].get("payload")
+
+        # Should enrich with password (stripping $ for matching)
+        assert payload["password"] == "DCPassword!"  # pragma: allowlist secret
+
+
+class TestPriorityRecalculation:
+    """Tests for priority recalculation when credentials arrive after queuing.
+
+    This tests the fix for the "14 minutes of wasted attacks" bug:
+    - Constrained delegation discovered and queued at priority 4 (no creds)
+    - Hash sent to cracker
+    - System exploited MSSQL, PSExec, etc. at lower priorities
+    - Finally came back to CD after 14 minutes
+
+    The fix: recalculate priorities in get_next_vulnerability() based on
+    CURRENT state, not stored priority from queue time.
+    """
+
+    def test_recalculate_priority_boosts_delegation_with_late_creds(self):
+        """Priority should be boosted when credentials arrive after queueing."""
+        from ares.core.models import Credential
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-recalc")
+
+        # Initially no credentials - stored priority 4
+        stored_priority = 4
+        details = {
+            "account_name": "svc_backup",
+            "target_spn": "cifs/dc01.contoso.local",
+        }
+
+        # Without credentials, priority stays at 4
+        recalc = dispatcher._recalculate_priority(
+            "constrained_delegation", details, stored_priority
+        )
+        assert recalc == 4, "Priority should stay 4 without credentials"
+
+        # Now credentials arrive (hash cracked)
+        cred = Credential(
+            username="svc_backup",
+            password="Backup123!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "cracker")
+
+        # Priority should now be boosted to 2 (DC SPN)
+        recalc = dispatcher._recalculate_priority(
+            "constrained_delegation", details, stored_priority
+        )
+        assert recalc == 2, "Priority should boost to 2 with credentials + DC SPN"
+
+    def test_recalculate_priority_non_dc_spn(self):
+        """Priority should boost to 3 for non-DC SPNs when creds arrive."""
+        from ares.core.models import Credential
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-recalc-non-dc")
+
+        cred = Credential(
+            username="svc_backup",
+            password="Backup123!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "cracker")
+
+        details = {
+            "account_name": "svc_backup",
+            "target_spn": "http/web01.contoso.local",  # Non-DC SPN
+        }
+
+        recalc = dispatcher._recalculate_priority(
+            "constrained_delegation", details, stored_priority=4
+        )
+        assert recalc == 3, "Priority should boost to 3 for non-DC SPN"
+
+    def test_recalculate_priority_no_boost_for_other_types(self):
+        """Non-delegation vulns should keep their stored priority."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-other")
+
+        # MSSQL, ADCS, etc. don't benefit from late credential arrival
+        assert dispatcher._recalculate_priority("mssql_impersonation", {}, 10) == 10
+        assert dispatcher._recalculate_priority("adcs_esc1", {}, 1) == 1
+        assert dispatcher._recalculate_priority("krbtgt_hash", {}, 7) == 7
+
+    @pytest.mark.asyncio
+    async def test_get_next_vulnerability_reprioritizes_after_creds_arrive(self):
+        """CD should jump ahead of lower-priority vulns when creds arrive.
+
+        Scenario:
+        1. CD queued at priority 4 (no creds)
+        2. MSSQL queued at priority 10
+        3. Credentials cracked
+        4. get_next_vulnerability() should now return CD (boosted to 2)
+
+        This is the key fix for the "14 minutes of wasted attacks" bug.
+        """
+        from ares.core.models import Credential, VulnerabilityInfo
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-reprioritize")
+
+        # Queue CD at priority 4 (no creds yet, no boost)
+        cd_vuln = VulnerabilityInfo(
+            vuln_id="cd_svc_backup_12345678",
+            vuln_type="constrained_delegation",
+            target="svc_backup",
+            discovered_by="recon",
+            details={
+                "account_name": "svc_backup",
+                "target_spn": "cifs/dc01.contoso.local",
+            },
+            priority=4,  # Not boosted because no creds when queued
+        )
+        dispatcher.shared_state.add_vulnerability(cd_vuln)
+
+        # Queue MSSQL at priority 10
+        mssql_vuln = VulnerabilityInfo(
+            vuln_id="mssql_192.168.58.20_abcd1234",
+            vuln_type="mssql_impersonation",
+            target="192.168.58.20",
+            discovered_by="recon",
+            details={"can_impersonate_sa": True},
+            priority=10,
+        )
+        dispatcher.shared_state.add_vulnerability(mssql_vuln)
+
+        # Without creds, CD deferred, MSSQL returned (wrong order!)
+        result = await dispatcher.get_next_vulnerability()
+        assert result is not None
+        assert result["type"] == "mssql_impersonation", "Before creds, MSSQL returned"
+
+        # Clear dequeued state for test
+        dispatcher._dequeued_vuln_ids.clear()
+
+        # NOW credentials arrive (hash cracked)
+        cred = Credential(
+            username="svc_backup",
+            password="Backup123!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "cracker")
+
+        # CD should now be returned FIRST (priority recalculated to 2 < 10)
+        result = await dispatcher.get_next_vulnerability()
+        assert result is not None
+        assert result["type"] == "constrained_delegation", (
+            "After creds arrive, CD should be returned first (priority 2 < 10)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_priority_recalculation_order_matters(self):
+        """Verify correct ordering: CD boosted to 2 < ADCS_ESC8 at 3 < MSSQL at 10."""
+        from ares.core.models import Credential, VulnerabilityInfo
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-order-test")
+
+        # Add credentials upfront
+        cred = Credential(
+            username="svc_backup",
+            password="Backup123!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+        dispatcher.shared_state.add_credential(cred, "cracker")
+
+        # Queue 3 vulns in "wrong" order of stored priority
+        mssql_vuln = VulnerabilityInfo(
+            vuln_id="mssql_192.168.58.20_1",
+            vuln_type="mssql_impersonation",
+            target="192.168.58.20",
+            discovered_by="recon",
+            details={},
+            priority=10,
+        )
+        esc8_vuln = VulnerabilityInfo(
+            vuln_id="esc8_ca01_2",
+            vuln_type="adcs_esc8",
+            target="ca01.contoso.local",
+            discovered_by="recon",
+            details={},
+            priority=3,
+        )
+        cd_vuln = VulnerabilityInfo(
+            vuln_id="cd_svc_backup_3",
+            vuln_type="constrained_delegation",
+            target="svc_backup",
+            discovered_by="recon",
+            details={
+                "account_name": "svc_backup",
+                "target_spn": "cifs/dc01.contoso.local",
+            },
+            priority=4,  # Will be recalculated to 2
+        )
+        dispatcher.shared_state.add_vulnerability(mssql_vuln)
+        dispatcher.shared_state.add_vulnerability(esc8_vuln)
+        dispatcher.shared_state.add_vulnerability(cd_vuln)
+
+        # Should return in recalculated order: CD(2), ESC8(3), MSSQL(10)
+        result1 = await dispatcher.get_next_vulnerability()
+        assert result1["type"] == "constrained_delegation", "CD boosted to priority 2"
+
+        result2 = await dispatcher.get_next_vulnerability()
+        assert result2["type"] == "adcs_esc8", "ESC8 at priority 3"
+
+        result3 = await dispatcher.get_next_vulnerability()
+        assert result3["type"] == "mssql_impersonation", "MSSQL at priority 10"
+
+
 class TestThrottleBypass:
     """Tests for critical path task throttle bypass logic."""
 
@@ -336,3 +913,223 @@ class TestThrottleBypass:
             "delegation" in t.lower() for t in techniques
         )
         assert is_delegation_enum is False
+
+    def test_esc8_relay_coercion_bypasses_hard_cap(self):
+        """ESC8 relay (ntlmrelayx_to_adcs) coercion tasks should bypass hard cap.
+
+        ESC8 is a critical path to DA via ADCS web enrollment relay.
+        The ntlmrelayx_to_adcs technique is dispatched as a coercion task.
+        """
+        dispatcher = RedTeamDispatcher()
+
+        # Verify ESC8_COERCION_TECHNIQUES exists and contains ntlmrelayx_to_adcs
+        assert hasattr(dispatcher, "ESC8_COERCION_TECHNIQUES")
+        assert "ntlmrelayx_to_adcs" in dispatcher.ESC8_COERCION_TECHNIQUES
+
+        # Test detection logic
+        task_type = "coercion"
+        payload = {"techniques": ["ntlmrelayx_to_adcs"]}
+        techniques = payload.get("techniques", [])
+        is_esc8_coercion = task_type == "coercion" and any(
+            t.lower() in dispatcher.ESC8_COERCION_TECHNIQUES for t in techniques
+        )
+        assert is_esc8_coercion is True
+
+    def test_esc8_petitpotam_coercion_bypasses_hard_cap(self):
+        """ESC8 petitpotam coercion tasks should bypass hard cap.
+
+        ESC8 attack coordinates ntlmrelayx listener with petitpotam coercion.
+        Both are critical path tasks that should bypass throttling.
+        """
+        dispatcher = RedTeamDispatcher()
+
+        # Verify ESC8_COERCION_TECHNIQUES contains petitpotam
+        assert "petitpotam" in dispatcher.ESC8_COERCION_TECHNIQUES
+
+        # Test detection logic
+        task_type = "coercion"
+        payload = {"techniques": ["petitpotam"]}
+        techniques = payload.get("techniques", [])
+        is_esc8_coercion = task_type == "coercion" and any(
+            t.lower() in dispatcher.ESC8_COERCION_TECHNIQUES for t in techniques
+        )
+        assert is_esc8_coercion is True
+
+    def test_non_esc8_coercion_does_not_bypass(self):
+        """Regular coercion tasks (responder, LLMNR) should NOT bypass hard cap."""
+        dispatcher = RedTeamDispatcher()
+
+        task_type = "coercion"
+        payload = {"techniques": ["LLMNR", "NBT-NS", "mDNS"]}
+        techniques = payload.get("techniques", [])
+        is_esc8_coercion = task_type == "coercion" and any(
+            t.lower() in dispatcher.ESC8_COERCION_TECHNIQUES for t in techniques
+        )
+        assert is_esc8_coercion is False
+
+
+class TestNmapPrerequisiteForRecon:
+    """Tests for nmap prerequisite enforcement in recon tasks.
+
+    Bug fix: SMB enumeration and other recon tasks were running before nmap,
+    causing hosts to show 'Unknown' OS and 0 DCs. Nmap must run first to
+    identify live hosts and services before enumeration tasks.
+    """
+
+    @pytest.mark.asyncio
+    async def test_request_recon_dispatches_nmap_first_for_unscanned_targets(self):
+        """request_recon should dispatch nmap AND enumeration (nmap first via priority)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-nmap-prereq")
+
+        # No targets scanned yet
+        assert len(dispatcher.shared_state.scanned_targets) == 0
+
+        # Mock task queue to capture what gets submitted
+        mock_task_queue = MagicMock()
+        # Return different task IDs for each call
+        mock_task_queue.submit_task = AsyncMock(side_effect=["task-nmap", "task-enum"])
+        dispatcher._task_queue = mock_task_queue
+
+        # Request user enumeration (NOT nmap)
+        result = await dispatcher.request_recon(
+            source_agent="orchestrator",
+            domain="contoso.local",
+            target_ips=["192.168.58.10", "192.168.58.20"],
+            reason="user_enumeration",
+            techniques=["enumerate_users"],
+        )
+
+        # Should return enumeration task ID (not deferred anymore)
+        assert result == "task-enum"
+
+        # Verify TWO tasks were submitted: nmap first, then enumeration
+        assert mock_task_queue.submit_task.call_count == 2
+
+        # First call should be nmap (priority 1)
+        first_call = mock_task_queue.submit_task.call_args_list[0]
+        first_payload = first_call.kwargs.get("payload") or first_call[1].get("payload")
+        first_priority = first_call.kwargs.get("priority") or first_call[1].get("priority")
+        assert first_payload["reason"] == "network_scan"
+        assert "nmap_scan" in first_payload["techniques"]
+        assert first_priority == 1
+
+        # Second call should be enumeration (priority 5)
+        second_call = mock_task_queue.submit_task.call_args_list[1]
+        second_payload = second_call.kwargs.get("payload") or second_call[1].get("payload")
+        assert second_payload["reason"] == "user_enumeration"
+        assert "enumerate_users" in second_payload["techniques"]
+
+    @pytest.mark.asyncio
+    async def test_request_recon_allows_nmap_directly(self):
+        """request_recon should allow nmap tasks without prerequisite check."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-nmap-direct")
+
+        # No targets scanned
+        assert len(dispatcher.shared_state.scanned_targets) == 0
+
+        mock_task_queue = MagicMock()
+        mock_task_queue.submit_task = AsyncMock(return_value="task-nmap-123")
+        dispatcher._task_queue = mock_task_queue
+
+        # Request nmap directly
+        result = await dispatcher.request_recon(
+            source_agent="orchestrator",
+            domain="contoso.local",
+            target_ips=["192.168.58.10"],
+            reason="network_scan",
+            techniques=["nmap_scan"],
+        )
+
+        # Should submit task and return task ID (not deferred)
+        assert result == "task-nmap-123"
+
+        # Verify it was submitted with priority=1
+        call_kwargs = mock_task_queue.submit_task.call_args
+        priority = call_kwargs.kwargs.get("priority") or call_kwargs[1].get("priority")
+        assert priority == 1
+
+    @pytest.mark.asyncio
+    async def test_request_recon_allows_enum_after_targets_scanned(self):
+        """request_recon should allow enumeration if targets already scanned."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-enum-ok")
+
+        # Mark targets as already scanned
+        dispatcher.shared_state.scanned_targets.add("192.168.58.10")
+        dispatcher.shared_state.scanned_targets.add("192.168.58.20")
+
+        mock_task_queue = MagicMock()
+        mock_task_queue.submit_task = AsyncMock(return_value="task-enum-456")
+        dispatcher._task_queue = mock_task_queue
+
+        # Request user enumeration
+        result = await dispatcher.request_recon(
+            source_agent="orchestrator",
+            domain="contoso.local",
+            target_ips=["192.168.58.10", "192.168.58.20"],
+            reason="user_enumeration",
+            techniques=["enumerate_users"],
+        )
+
+        # Should submit task normally (not deferred)
+        assert result == "task-enum-456"
+
+        # Verify enumeration payload (NOT nmap)
+        call_kwargs = mock_task_queue.submit_task.call_args
+        payload = call_kwargs.kwargs.get("payload") or call_kwargs[1].get("payload")
+        assert payload["reason"] == "user_enumeration"
+        assert "enumerate_users" in payload["techniques"]
+
+        # Enumeration should have lower priority than nmap (higher number = lower priority)
+        priority = call_kwargs.kwargs.get("priority") or call_kwargs[1].get("priority")
+        assert priority > 1  # Nmap gets priority=1, enumeration should be higher number
+
+    @pytest.mark.asyncio
+    async def test_request_recon_partial_scan_dispatches_nmap_for_unscanned(self):
+        """If some targets scanned, should dispatch nmap for unscanned only, then enum."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-partial")
+
+        # Only one target scanned
+        dispatcher.shared_state.scanned_targets.add("192.168.58.10")
+
+        mock_task_queue = MagicMock()
+        mock_task_queue.submit_task = AsyncMock(side_effect=["task-nmap", "task-enum"])
+        dispatcher._task_queue = mock_task_queue
+
+        # Request enumeration for both targets
+        result = await dispatcher.request_recon(
+            source_agent="orchestrator",
+            domain="contoso.local",
+            target_ips=["192.168.58.10", "192.168.58.20"],  # .20 not scanned
+            reason="share_enumeration",
+            techniques=["enumerate_shares"],
+        )
+
+        # Should return enumeration task ID (both nmap and enum dispatched)
+        assert result == "task-enum"
+
+        # Two tasks: nmap for unscanned, then enumeration
+        assert mock_task_queue.submit_task.call_count == 2
+
+        # First call: nmap for unscanned target only
+        first_call = mock_task_queue.submit_task.call_args_list[0]
+        nmap_payload = first_call.kwargs.get("payload") or first_call[1].get("payload")
+        assert nmap_payload["reason"] == "network_scan"
+        assert "192.168.58.20" in nmap_payload["target_ips"]
+        assert "192.168.58.10" not in nmap_payload["target_ips"]
+
+        # Second call: enumeration for all targets
+        second_call = mock_task_queue.submit_task.call_args_list[1]
+        enum_payload = second_call.kwargs.get("payload") or second_call[1].get("payload")
+        assert enum_payload["reason"] == "share_enumeration"

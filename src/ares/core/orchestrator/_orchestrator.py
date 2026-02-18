@@ -27,6 +27,7 @@ from ares.core.config import (
     get_rate_limit_backoff_delays,
     get_rate_limit_max_retries,
     get_redis_url,
+    get_stop_on_domain_admin,
 )
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.factories.red_agents import (
@@ -38,8 +39,6 @@ from ares.core.models import (
     AgentRole,
     Credential,
     Host,
-    InvestigationStage,
-    RedTeamState,
     SharedRedTeamState,
     Target,
     TaskStatus,
@@ -152,13 +151,10 @@ async def _load_or_initialize_state(
         try:
             state, requeued_task_ids = await recovery.recover_operation(operation_id)
             dispatcher._shared_state = state
-            # Add requeued task IDs to dispatcher so result consumer can track them
-            for task_id in requeued_task_ids:
-                dispatcher._redis_task_ids.add(task_id)
+            # Requeued tasks are already in pending_tasks (restored from checkpoint)
+            # which the result consumer polls automatically
             if requeued_task_ids:
-                logger.info(
-                    f"Added {len(requeued_task_ids)} requeued task IDs to result consumer tracking"
-                )
+                logger.info(f"Recovered {len(requeued_task_ids)} pending tasks from checkpoint")
             if state.all_credentials or state.all_hashes:
                 dispatcher.signal_credential_access()
             logger.info(f"Resumed operation {operation_id} from checkpoint")
@@ -209,17 +205,242 @@ async def _ensure_required_workers(
         )
 
 
+def _parse_nmap_report_header(host_line: str) -> tuple[str, str]:
+    """Parse IP and hostname from nmap report header line."""
+    ip_match = re.match(r"(.+) \((\d+\.\d+\.\d+\.\d+)\)$", host_line)
+    if ip_match:
+        return ip_match.group(2), ip_match.group(1).strip()
+    ip_only = re.match(r"^(\d+\.\d+\.\d+\.\d+)$", host_line)
+    if ip_only:
+        return ip_only.group(1), ""
+    return "", host_line
+
+
+def _parse_nmap_service_line(line: str, current: dict) -> None:
+    """Parse service/port line and update current host dict."""
+    svc_match = re.match(r"^(\d+)/(tcp|udp)\s+open\s+([^\s]+)", line)
+    if svc_match:
+        current["services"].append(
+            f"{svc_match.group(1)}/{svc_match.group(2)} {svc_match.group(3)}"
+        )
+    domain_match = re.search(r"\(Domain:\s*([^,)]+)", line)
+    if domain_match and not current["domain"]:
+        current["domain"] = domain_match.group(1).strip()
+    if "Service Info:" in line:
+        host_match = re.search(r"Host:\s*([^;]+)", line)
+        if host_match:
+            current["hostname"] = host_match.group(1).strip()
+        os_match = re.search(r"OS:\s*([^;]+)", line)
+        if os_match and not current["os"]:
+            current["os"] = os_match.group(1).strip()
+
+
+def _build_host_from_nmap(current: dict) -> Host | None:
+    """Build Host object from parsed nmap data."""
+    if not current["ip"]:
+        return None
+    hostname = current["hostname"]
+    if hostname and current["domain"] and "." not in hostname:
+        hostname = f"{hostname.lower()}.{current['domain'].lower()}"
+    services_lower = [s.lower() for s in current["services"]]
+    is_dc = any("ldap" in s for s in services_lower) and any(
+        "kerberos" in s for s in services_lower
+    )
+    host = Host(
+        ip=current["ip"],
+        hostname=hostname,
+        os=current["os"] or "Unknown",
+        roles=["AD DC"] if is_dc else [],
+        services=current["services"],
+    )
+    if is_dc:
+        host.is_dc = True
+    return host
+
+
+def _parse_nmap_hosts(output: str) -> list[Host]:
+    """Parse nmap output into Host objects."""
+    hosts: list[Host] = []
+    current = {"ip": "", "hostname": "", "os": "", "domain": "", "services": []}
+
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        report_match = re.match(r"^Nmap scan report for (.+)$", line)
+        if report_match:
+            host = _build_host_from_nmap(current)
+            if host:
+                hosts.append(host)
+            current["ip"], current["hostname"] = _parse_nmap_report_header(report_match.group(1))
+            current["os"], current["domain"], current["services"] = "", "", []
+        elif current["ip"]:
+            _parse_nmap_service_line(line, current)
+
+    host = _build_host_from_nmap(current)
+    if host:
+        hosts.append(host)
+    return hosts
+
+
+async def _run_nmap_on_worker(targets: list[str], namespace: str) -> tuple[str, list[Host]]:
+    """Run nmap on a recon worker pod via kubectl exec.
+
+    Two-phase scan:
+    1. Fast port discovery (top 100 ports)
+    2. Service version detection on discovered ports
+    """
+    from ares.core.k8s_executor import KubernetesPodExecutor
+
+    if not targets:
+        return "", []
+
+    executor = KubernetesPodExecutor(namespace=namespace, in_cluster=True)
+
+    logger.info(f"[DIRECT NMAP] Phase 1: Fast port discovery on {len(targets)} targets")
+
+    # Phase 1: Fast port scan
+    port_cmd = ["nmap", "-Pn", "-sT", "-T4", "--open", "--top-ports", "100"] + targets
+    try:
+        stdout, stderr, returncode = await executor.execute(
+            role="recon", command=port_cmd, timeout_seconds=120
+        )
+        if returncode != 0:
+            logger.warning(f"[DIRECT NMAP] Port scan failed: {stderr[:200]}")
+            return stderr, []
+        port_output = stdout
+    except Exception as e:
+        logger.warning(f"[DIRECT NMAP] Port scan error: {e}")
+        return str(e), []
+
+    # Parse open ports
+    open_ports = set()
+    for match in re.finditer(r"(\d+)/tcp\s+open", port_output):
+        open_ports.add(match.group(1))
+
+    if not open_ports:
+        logger.info("[DIRECT NMAP] No open ports found")
+        hosts = _parse_nmap_hosts(port_output)
+        return port_output, hosts
+
+    ports_str = ",".join(sorted(open_ports, key=int))
+    logger.info(f"[DIRECT NMAP] Phase 2: Service detection on {len(open_ports)} ports: {ports_str}")
+
+    # Phase 2: Service version detection
+    svc_cmd = ["nmap", "-Pn", "-sT", "-T4", "--open", "-sV", "-p", ports_str] + targets
+    try:
+        stdout, stderr, returncode = await executor.execute(
+            role="recon", command=svc_cmd, timeout_seconds=300
+        )
+        if returncode != 0:
+            logger.warning(f"[DIRECT NMAP] Service scan had issues: {stderr[:200]}")
+            # Use port scan results
+            hosts = _parse_nmap_hosts(port_output)
+            return port_output, hosts
+        svc_output = stdout
+    except Exception as e:
+        logger.warning(f"[DIRECT NMAP] Service scan error: {e}, using port scan results")
+        hosts = _parse_nmap_hosts(port_output)
+        return port_output, hosts
+
+    logger.info(f"[DIRECT NMAP] Scan completed for {len(targets)} targets")
+    hosts = _parse_nmap_hosts(svc_output)
+    return svc_output, hosts
+
+
+async def _run_direct_nmap(
+    state: SharedRedTeamState,
+    target_ips: list[str],
+    namespace: str,
+) -> None:
+    """Run nmap directly (not via LLM task queue) and add hosts to state.
+
+    This runs BEFORE the LLM orchestrator starts, ensuring host discovery
+    doesn't get stuck behind slow LLM-guided tasks in the worker queue.
+    Uses kubectl exec to run nmap on a recon worker pod.
+    """
+    if not target_ips:
+        return
+
+    # Filter already-scanned targets
+    unscanned = [ip for ip in target_ips if ip not in state.scanned_targets]
+    if not unscanned:
+        logger.info(f"[DIRECT NMAP] All {len(target_ips)} targets already scanned")
+        return
+
+    logger.info(f"[DIRECT NMAP] Running nmap via kubectl exec on {len(unscanned)} targets")
+
+    try:
+        _output, hosts = await _run_nmap_on_worker(unscanned, namespace)
+    except Exception as e:
+        logger.warning(f"[DIRECT NMAP] Failed to run nmap: {e}")
+        return
+
+    # Add hosts to state
+    for host in hosts:
+        state.add_host(host)
+
+    # Mark targets as scanned
+    for ip in unscanned:
+        state.scanned_targets.add(ip)
+
+    # Persist to backend if available
+    if state._backend:
+        try:
+            await state._backend.set_meta("nmap_completed", "true")
+        except Exception as e:
+            logger.warning(f"[DIRECT NMAP] Failed to persist nmap completion: {e}")
+
+    dc_count = sum(1 for h in hosts if h.is_dc)
+    logger.success(
+        f"[DIRECT NMAP] Discovered {len(hosts)} hosts ({dc_count} DCs) from {len(unscanned)} targets"
+    )
+
+
 async def _prime_operation(
     recovery: OperationRecoveryManager,
     dispatcher: RedTeamDispatcher,
     target_ips: list[str],
     target_domain: str,
 ) -> None:
-    success = await recovery.checkpoint(dispatcher.shared_state)
-    if success:
-        logger.info("Initial checkpoint saved - workers can now discover operation")
+    """Initialize operation state in Redis so workers can discover it.
+
+    With Redis-native state backend, state persists immediately on mutation.
+    This function writes initial metadata to mark the operation as active,
+    including setting the active operation pointer for worker discovery.
+    """
+    state = dispatcher.shared_state
+    operation_id = state.operation_id
+    if state._backend:
+        # Set started_at timestamp so workers can determine operation freshness
+        now = datetime.now(timezone.utc)
+        await state._backend.set_meta("started_at", now.isoformat())
+        await state._backend.set_meta("initialized", value=True)
+
+        # Store target info so CLI can reconstruct state
+        if target_ips:
+            await state._backend.set_meta("target_ip", target_ips[0])
+        if target_domain:
+            await state._backend.set_meta("target_domain", target_domain)
+
+        # Set the active operation pointer for worker discovery
+        # This allows workers to find the operation immediately via the pointer
+        # instead of scanning and potentially rejecting based on stale timestamps
+        try:
+            await state._backend._redis.set("ares:op:active", operation_id)
+            logger.info(f"Set active operation pointer: {operation_id}")
+        except Exception as e:
+            logger.warning(f"Failed to set active operation pointer: {e}")
+
+        logger.info("Operation state initialized in Redis - workers can discover operation")
     else:
-        logger.warning("Failed to save initial checkpoint - workers may not discover operation")
+        logger.warning("No state backend configured - operation may not be discoverable")
+
+    # Run nmap directly BEFORE the orchestrator LLM starts.
+    # This ensures host discovery doesn't get stuck behind slow LLM-guided tasks.
+    if target_ips:
+        namespace = get_namespace()
+        await _run_direct_nmap(state, target_ips, namespace)
 
 
 def _is_rate_limit_error(error: Exception | str) -> bool:
@@ -349,7 +570,7 @@ def _create_completion_tools(
     return complete_operation, announce_domain_admin
 
 
-async def run_multi_agent_operation(  # noqa: PLR0912
+async def run_multi_agent_operation(
     operation_id: str,
     target_domain: str,
     target_ips: list[str],
@@ -447,8 +668,8 @@ async def run_multi_agent_operation(  # noqa: PLR0912
     await _ensure_required_workers(dispatcher, ["recon"], timeout=120.0)
 
     # Start background tasks
+    # Note: No periodic checkpoint task needed - state persists directly to Redis via RedisStateBackend
     tasks = [
-        asyncio.create_task(recovery.start_periodic_checkpoint(dispatcher), name="checkpoint"),
         asyncio.create_task(_monitor_agent_health(dispatcher), name="health_monitor"),
         asyncio.create_task(exploitation_workflow(dispatcher), name="exploitation_workflow"),
         asyncio.create_task(_extend_operation_lock(task_queue, operation_id), name="lock_extender"),
@@ -482,6 +703,12 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         # Do initial checkpoint so workers can discover the operation.
         await _prime_operation(recovery, dispatcher, target_ips, target_domain)
 
+        # Check if DA was already achieved (e.g., recovery after restart) and should stop
+        if dispatcher.shared_state.has_domain_admin and get_stop_on_domain_admin():
+            logger.info("DA already achieved and stop_on_domain_admin=True; marking complete")
+            dispatcher.shared_state.completed = True
+            await dispatcher._checkpoint()
+
         # Create the orchestrator agent with tools
         orchestrator_agent = await _create_orchestrator_agent(
             dispatcher=dispatcher,
@@ -504,6 +731,8 @@ async def run_multi_agent_operation(  # noqa: PLR0912
         rate_limit_count = 0
         rate_limit_max_retries = get_rate_limit_max_retries()
         rate_limit_delays = get_rate_limit_backoff_delays()
+        redis_retry_count = 0
+        max_redis_retries = 5
         result = None
 
         with dn.run(tags=["multi-agent-operation", target_domain]):
@@ -572,6 +801,36 @@ async def run_multi_agent_operation(  # noqa: PLR0912
                         # Exhausted rate limit retries - treat as crash
                         logger.error(
                             f"Rate limit retries exhausted ({rate_limit_count} attempts), "
+                            "treating as crash"
+                        )
+                        # Fall through to crash handling
+
+                    # Redis connection errors get special treatment - retry with backoff
+                    # These are transient and should be retried even without progress
+                    redis_error_keywords = [
+                        "timeout",
+                        "connection",
+                        "connect",
+                        "closed",
+                        "broken pipe",
+                        "reset",
+                        "refused",
+                        "sentinel",
+                    ]
+                    if any(kw in error_str.lower() for kw in redis_error_keywords):
+                        redis_retry_count += 1
+                        if redis_retry_count <= max_redis_retries:
+                            # Exponential backoff: 2, 4, 8, 16, 32 seconds
+                            delay = min(2**redis_retry_count, 32)
+                            logger.warning(
+                                f"⏳ Redis connection error (attempt {redis_retry_count}/{max_redis_retries}), "
+                                f"backing off {delay}s: {e}"
+                            )
+                            await asyncio.sleep(delay)
+                            continue  # Retry without incrementing crash count
+                        # Exhausted Redis retries - treat as crash
+                        logger.error(
+                            f"Redis retries exhausted ({redis_retry_count} attempts), "
                             "treating as crash"
                         )
                         # Fall through to crash handling
@@ -676,6 +935,9 @@ async def run_multi_agent_operation(  # noqa: PLR0912
                 report_dir=report_dir,
                 exploitation_status=exploitation_status,
             )
+            # Persist report to Redis for CLI access
+            if report_markdown and final_state._backend:
+                await final_state._backend.store_report(report_markdown)
         except Exception as e:
             logger.warning(f"Failed to generate report for {operation_id}: {e}")
 
@@ -795,52 +1057,28 @@ def _generate_multi_agent_report(
     report_dir: str | Path | None,
     exploitation_status: dict[str, Any] | None = None,
 ) -> tuple[Path, str]:
-    report_state = _build_redteam_report_state(state, exploitation_status)
     resolved_report_dir = Path(report_dir or "./reports").resolve()
     resolved_report_dir.mkdir(parents=True, exist_ok=True)
 
+    # Set vulnerability/exploitation counts from status if provided
+    if exploitation_status:
+        state.vulnerability_count = exploitation_status.get(
+            "total_discovered",
+            len(state.discovered_vulnerabilities),
+        )
+        state.exploited_count = exploitation_status.get(
+            "total_succeeded",
+            len(state.exploited_vulnerabilities),
+        )
+
     report_generator = RedTeamReportGenerator()
-    report_content = report_generator.generate(report_state)
+    report_content = report_generator.generate(state)
 
     report_filename = f"{state.operation_id}_report.md"
     report_path = resolved_report_dir / report_filename
     report_path.write_text(report_content)
     logger.success(f"Red team report generated: {report_path}")
     return report_path, report_content
-
-
-def _build_redteam_report_state(
-    state: SharedRedTeamState,
-    exploitation_status: dict[str, Any] | None = None,
-) -> RedTeamState:
-    target = state.target or Target(ip="", domain="")
-    report_state = RedTeamState(operation_id=state.operation_id, target=target)
-    report_state.completed = state.completed
-    report_state.started_at = state.started_at
-    report_state.stage = InvestigationStage.SYNTHESIS
-    report_state.hosts = list(state.all_hosts)
-    report_state.users = list(state.all_users)
-    report_state.credentials = list(state.all_credentials)
-    report_state.hashes = list(state.all_hashes)
-    report_state.shares = list(state.all_shares)
-    report_state.has_domain_admin = state.has_domain_admin
-    report_state.has_golden_ticket = state.has_golden_ticket
-    report_state.timeline = list(state.operation_timeline)
-    report_state.identified_techniques = set(state.identified_techniques)
-    report_state.weaknesses = [
-        f"{v.vuln_type} on {v.target} ({v.vuln_id})"
-        for v in state.discovered_vulnerabilities.values()
-    ]
-    if exploitation_status:
-        report_state.vulnerability_count = exploitation_status.get(
-            "total_discovered",
-            len(state.discovered_vulnerabilities),
-        )
-        report_state.exploited_count = exploitation_status.get(
-            "total_succeeded",
-            len(state.exploited_vulnerabilities),
-        )
-    return report_state
 
 
 async def _create_agent_ensemble(
@@ -951,7 +1189,7 @@ async def _monitor_agent_health(
 
             await asyncio.sleep(check_interval)
 
-        except asyncio.CancelledError:  # noqa: PERF203
+        except asyncio.CancelledError:
             break
         except Exception as e:
             logger.error(f"Health monitor error: {e}", exc_info=True)
@@ -1102,7 +1340,7 @@ async def _auto_mssql_detection(
             await asyncio.sleep(check_interval)
 
 
-async def _auto_adcs_enumeration(  # noqa: PLR0912
+async def _auto_adcs_enumeration(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 45.0,
     max_retries: int = 2,
@@ -1287,7 +1525,9 @@ async def _auto_share_spider(
         try:
             state = dispatcher.shared_state
 
-            if state.completed or state.has_domain_admin:
+            # Only stop when operation is explicitly completed, NOT when DA is achieved
+            # We still want to spider shares after DA to find additional credentials and loot
+            if state.completed:
                 logger.debug("Operation complete, stopping auto share spider")
                 break
 
@@ -1335,7 +1575,7 @@ async def _auto_share_spider(
                         username=cred.username,
                         password=cred.password,
                         reason=f"auto_share_spider_{share.name}",
-                        techniques=["share_spider"],
+                        techniques=["smbclient_spider"],
                     )
 
                     # Always mark as processed to prevent retry storm when throttled
@@ -1356,7 +1596,7 @@ async def _auto_share_spider(
             await asyncio.sleep(check_interval)
 
 
-async def _auto_bloodhound(  # noqa: PLR0912
+async def _auto_bloodhound(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 30.0,
     max_retries: int = 3,
@@ -1483,7 +1723,7 @@ async def _auto_bloodhound(  # noqa: PLR0912
                         username=cred.username,
                         password=cred.password,
                         reason="bloodhound",
-                        techniques=["bloodhound"],
+                        techniques=["run_bloodhound"],
                     )
 
                     # Always record attempt to prevent retry storm when throttled
@@ -1536,12 +1776,14 @@ def _has_constrained_delegation_for_target(state: SharedRedTeamState, target_ip:
     for vuln in state.discovered_vulnerabilities.values():
         if vuln.vuln_type != "constrained_delegation":
             continue
+        # Defensive: ensure vuln.details is a dict before calling .get()
+        details = vuln.details if isinstance(vuln.details, dict) else {}
         # Check if target matches the vulnerability's target
-        vuln_target_ip = vuln.details.get("target_ip", "")
+        vuln_target_ip = details.get("target_ip", "")
         if vuln_target_ip == target_ip:
             return True
         # Also check hostname in target_spn
-        target_spn = vuln.details.get("target_spn", "")
+        target_spn = details.get("target_spn", "")
         if target_spn:
             # Extract hostname from SPN (e.g., cifs/dc01.contoso.local -> dc01.contoso.local)
             spn_host = target_spn.split("/", 1)[1] if "/" in target_spn else ""
@@ -1572,7 +1814,7 @@ def _is_likely_privileged_credential(username: str, source: str | None) -> bool:
     return bool(source and "secretsdump" in source.lower())
 
 
-async def _auto_credential_access(  # noqa: PLR0912
+async def _auto_credential_access(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 60.0,
     min_hosts: int = 1,
@@ -1801,7 +2043,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                 non_dc_hosts = [h for h in domain_hosts if h not in dc_ips]
                 dc_hosts_in_domain = [h for h in domain_hosts if h in dc_ips]
 
-                # For non-DC hosts: always try secretsdump + lsassy (might have local admin)
+                # For non-DC hosts: always try secretsdump (might have local admin)
                 cred_task_id: str | None = None
                 if non_dc_hosts:
                     cred_task_id = await dispatcher.request_credential_access(
@@ -1812,7 +2054,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                         password=cred.password,
                         credential_source=cred.source,
                         reason="new_credential_non_dc",
-                        techniques=["kerberoast", "secretsdump", "lsassy"],
+                        techniques=["kerberoast", "secretsdump"],
                     )
 
                 # For DC hosts: only try secretsdump if credential is privileged OR
@@ -1907,7 +2149,7 @@ async def _auto_credential_access(  # noqa: PLR0912
                                 hash_value=hash_obj.hash_value,
                                 hash_type=hash_obj.hash_type,
                                 reason="new_hash_non_dc",
-                                techniques=["kerberoast", "secretsdump", "lsassy"],
+                                techniques=["kerberoast", "secretsdump"],
                             )
 
                         # For DC hosts: only try if privileged or no S4U path
@@ -2085,7 +2327,7 @@ async def _auto_crack_dispatch(
             await asyncio.sleep(check_interval)
 
 
-async def _auto_coercion(  # noqa: PLR0912
+async def _auto_coercion(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 60.0,
 ) -> None:
@@ -2264,7 +2506,7 @@ async def _auto_coercion(  # noqa: PLR0912
             await asyncio.sleep(check_interval)
 
 
-async def _auto_delegation_enumeration(  # noqa: PLR0912
+async def _auto_delegation_enumeration(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 15.0,
 ) -> None:
@@ -2367,18 +2609,24 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
                     techniques=["find_delegation"],
                 )
 
-                if task_id:
+                if task_id and task_id != "deferred":
                     # Track as dispatched - will be marked processed only on success
                     dispatched_tasks[task_id] = cred_key
                     logger.info(
                         f"Auto-delegation: dispatched find_delegation task {task_id} "
                         f"for {cred.domain}\\{cred.username}"
                     )
-                else:
-                    # Task was deferred or deduplicated - don't spam logs
+                elif task_id == "deferred":
+                    # Task queued to deferred queue - will run when capacity allows
                     logger.debug(
                         f"Auto-delegation: find_delegation for {cred.domain}\\{cred.username} "
-                        "was deferred or already pending"
+                        "deferred to background queue"
+                    )
+                else:
+                    # Task was deduplicated (already pending)
+                    logger.debug(
+                        f"Auto-delegation: find_delegation for {cred.domain}\\{cred.username} "
+                        "already pending"
                     )
 
         except asyncio.CancelledError:
@@ -2388,7 +2636,7 @@ async def _auto_delegation_enumeration(  # noqa: PLR0912
             await asyncio.sleep(check_interval)
 
 
-async def _auto_local_admin_secretsdump(  # noqa: PLR0912
+async def _auto_local_admin_secretsdump(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 45.0,
 ) -> None:
@@ -2427,6 +2675,11 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
             # Check completed tasks to update tracking
             for key, task_id in list(secretsdump_attempts.items()):
                 host_ip, username, domain = key
+
+                # Skip deferred tasks - they're queued but not yet submitted
+                # The deferred queue processor will handle them
+                if task_id == "deferred":
+                    continue
 
                 # Check if task completed
                 if task_id not in state.pending_tasks:
@@ -2507,11 +2760,18 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
                         techniques=["secretsdump"],
                     )
 
-                    if task_id:
+                    if task_id and task_id != "deferred":
                         secretsdump_attempts[key] = task_id
                         logger.info(
                             f"Auto-secretsdump task {task_id} dispatched for "
                             f"{cred_domain}\\{cred.username} -> {host.ip}"
+                        )
+                    elif task_id == "deferred":
+                        # Task queued to deferred queue - mark as attempted to prevent retry storm
+                        secretsdump_attempts[key] = "deferred"
+                        logger.debug(
+                            f"Auto-secretsdump for {cred_domain}\\{cred.username} -> {host.ip} "
+                            "deferred to background queue"
                         )
 
             # Also check for BloodHound AdminTo relationships
@@ -2528,7 +2788,8 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
                     continue
 
                 # Get details about who has admin access
-                details = vuln.details or {}
+                # Defensive: ensure vuln.details is a dict before calling .get()
+                details = vuln.details if isinstance(vuln.details, dict) else {}
                 admin_user = details.get("username") or details.get("principal")
                 admin_domain = details.get("domain", "")
 
@@ -2573,12 +2834,19 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
                     techniques=["secretsdump"],
                 )
 
-                if task_id:
+                if task_id and task_id != "deferred":
                     secretsdump_attempts[key] = task_id
                     # Mark vulnerability as exploited to avoid re-processing
                     state.mark_exploited(vuln_id)
                     logger.info(
                         f"Auto-secretsdump task {task_id} dispatched for BloodHound {vuln.vuln_type}"
+                    )
+                elif task_id == "deferred":
+                    # Task queued to deferred queue - mark as attempted to prevent retry storm
+                    secretsdump_attempts[key] = "deferred"
+                    state.mark_exploited(vuln_id)
+                    logger.debug(
+                        f"Auto-secretsdump for BloodHound {vuln.vuln_type} deferred to background queue"
                     )
 
         except asyncio.CancelledError:
@@ -2588,7 +2856,7 @@ async def _auto_local_admin_secretsdump(  # noqa: PLR0912
             await asyncio.sleep(check_interval)
 
 
-async def _auto_golden_ticket(  # noqa: PLR0912
+async def _auto_golden_ticket(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 30.0,
 ) -> None:
@@ -2684,7 +2952,7 @@ async def _auto_golden_ticket(  # noqa: PLR0912
                 if not dc_ip:
                     logger.warning(f"🎫 Auto-golden-ticket: No DC IP found for {domain}, skipping")
                     # Add failed attempt to state so we don't retry forever
-                    state.golden_tickets.append(
+                    state.add_golden_ticket(
                         {
                             "domain": domain,
                             "ticket_path": None,
@@ -2711,7 +2979,7 @@ async def _auto_golden_ticket(  # noqa: PLR0912
                         logger.warning(
                             f"🎫 Auto-golden-ticket: Could not extract domain SID for {domain}"
                         )
-                        state.golden_tickets.append(
+                        state.add_golden_ticket(
                             {
                                 "domain": domain,
                                 "ticket_path": None,
@@ -2751,7 +3019,7 @@ async def _auto_golden_ticket(  # noqa: PLR0912
                         state.has_golden_ticket = True
 
                         # Store ticket details in state (persisted to Redis!)
-                        state.golden_tickets.append(
+                        state.add_golden_ticket(
                             {
                                 "domain": domain,
                                 "ticket_path": ticket_path,
@@ -2778,7 +3046,7 @@ async def _auto_golden_ticket(  # noqa: PLR0912
                         logger.warning(
                             f"🎫 Auto-golden-ticket: Failed to generate ticket for {domain}: {output}"
                         )
-                        state.golden_tickets.append(
+                        state.add_golden_ticket(
                             {
                                 "domain": domain,
                                 "ticket_path": None,
@@ -2790,7 +3058,7 @@ async def _auto_golden_ticket(  # noqa: PLR0912
 
                 except Exception as e:
                     logger.warning(f"🎫 Auto-golden-ticket: Error generating ticket: {e}")
-                    state.golden_tickets.append(
+                    state.add_golden_ticket(
                         {
                             "domain": domain,
                             "ticket_path": None,
@@ -2807,7 +3075,7 @@ async def _auto_golden_ticket(  # noqa: PLR0912
             await asyncio.sleep(check_interval)
 
 
-async def _auto_acl_chain_follow(  # noqa: PLR0912
+async def _auto_acl_chain_follow(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 30.0,
 ) -> None:
@@ -2939,6 +3207,58 @@ def _get_running_crack_tasks(dispatcher: RedTeamDispatcher) -> list[str]:
         if task_info.task_type == "crack":
             crack_task_ids.append(task_id)
     return crack_task_ids
+
+
+async def _wait_for_loot_collection(
+    dispatcher: RedTeamDispatcher,
+    grace_period: float = 60.0,
+    check_interval: float = 5.0,
+) -> None:
+    """
+    Wait for loot collection tasks (share spider, etc.) after DA is achieved.
+
+    When DA is achieved quickly, share spidering and other credential collection
+    may not have completed. This gives background tasks time to finish.
+
+    Args:
+        dispatcher: The dispatcher instance
+        grace_period: Seconds to wait for loot collection
+        check_interval: Seconds between status logs
+    """
+    state = dispatcher.shared_state
+    initial_creds = len(state.all_credentials)
+    initial_hashes = len(state.all_hashes)
+    shares_to_spider = [
+        s
+        for s in state.all_shares
+        if s.permissions
+        and "READ" in s.permissions.upper()
+        and s.name.lower() not in ("ipc$", "print$", "admin$", "c$", "d$", "e$")
+    ]
+
+    if not shares_to_spider:
+        logger.debug("No readable shares to spider, skipping loot collection wait")
+        return
+
+    logger.info(
+        f"🕷️ Post-DA loot collection: {len(shares_to_spider)} readable share(s), "
+        f"waiting up to {grace_period}s for share spidering..."
+    )
+
+    start_time = asyncio.get_event_loop().time()
+
+    while True:
+        elapsed = asyncio.get_event_loop().time() - start_time
+
+        if elapsed >= grace_period:
+            new_creds = len(state.all_credentials) - initial_creds
+            new_hashes = len(state.all_hashes) - initial_hashes
+            logger.info(
+                f"🕷️ Loot collection complete: +{new_creds} credentials, +{new_hashes} hashes"
+            )
+            break
+
+        await asyncio.sleep(check_interval)
 
 
 async def _wait_for_crack_tasks(
@@ -3105,6 +3425,8 @@ async def _wait_for_completion(
         # Check for domain admin or explicit completion
         if dispatcher.shared_state.has_domain_admin:
             logger.success("Domain Admin achieved! Operation complete.")
+            # Wait for loot collection (share spider, etc.) while background tasks are still running
+            await _wait_for_loot_collection(dispatcher)
             # Wait for golden ticket generation (if krbtgt hash is available)
             await _wait_for_golden_ticket(dispatcher)
             # Wait for running crack tasks before fully exiting

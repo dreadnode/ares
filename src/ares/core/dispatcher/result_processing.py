@@ -15,9 +15,6 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from ares.core.config import get_max_output_chars
-from ares.core.context_manager import summarize_task_result
-from ares.core.messages import TaskComplete, TaskFailed
 from ares.core.models import (
     Credential,
     Hash,
@@ -36,7 +33,7 @@ if TYPE_CHECKING:
 class ResultProcessingMixin:
     """Task result processing and data extraction."""
 
-    async def complete_task(  # noqa: PLR0912
+    async def complete_task(
         self: RedTeamDispatcher,
         task_id: str,
         success: bool,
@@ -44,6 +41,7 @@ class ResultProcessingMixin:
         error: str | None = None,
         source_agent: str = "",
         skip_checkpoint: bool = False,
+        task_queue: Any = None,
     ) -> None:
         """
         Mark a task as complete.
@@ -56,6 +54,7 @@ class ResultProcessingMixin:
             source_agent: Agent completing the task.
             skip_checkpoint: If True, skip checkpointing (used when called from threaded consumer
                 where the Redis client is bound to a different event loop).
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
         """
         # Use atomic pop to avoid TOCTOU race with _cleanup_stale_tasks()
         task_info = self.shared_state.pending_tasks.pop(task_id, None)
@@ -63,6 +62,15 @@ class ResultProcessingMixin:
             logger.warning(f"Unknown task: {task_id}")
             return
         was_retry = task_info.status == TaskStatus.RETRYING
+
+        # Remove from Redis pending_tasks HASH for immediate consistency
+        # This is important for throttle state - we don't want stale tasks affecting limits
+        if self._redis_client is not None and not skip_checkpoint:
+            try:
+                pending_key = f"ares:op:{self.shared_state.operation_id}:pending_tasks"
+                await self._redis_client.hdel(pending_key, task_id)
+            except Exception as e:
+                logger.warning(f"Failed to remove {task_id} from Redis pending_tasks: {e}")
 
         task_info.status = TaskStatus.COMPLETED if success else TaskStatus.FAILED
         task_info.completed_at = datetime.now(timezone.utc)
@@ -82,6 +90,26 @@ class ResultProcessingMixin:
             error=error,
         )
         self.shared_state.completed_tasks[task_id] = task_result
+
+        # Persist completed task to Redis immediately for deduplication
+        # This ensures completed_tasks is available even before next checkpoint
+        if self._redis_client is not None and not skip_checkpoint:
+            try:
+                completed_key = f"ares:op:{self.shared_state.operation_id}:completed_tasks"
+                result_dict = {
+                    "task_id": task_id,
+                    "success": success,
+                    "result": result,
+                    "error": error,
+                    "completed_at": task_result.completed_at.isoformat(),
+                }
+                import json
+
+                await self._redis_client.hset(
+                    completed_key, task_id, json.dumps(result_dict, default=str)
+                )
+            except Exception as e:
+                logger.warning(f"Failed to persist completed task {task_id} to Redis: {e}")
 
         # Mark targets as scanned after successful nmap recon
         if success and task_info.task_type == "recon":
@@ -124,13 +152,23 @@ class ResultProcessingMixin:
         # Workers serialize discoveries and send them regardless of success/failure
         if isinstance(result, dict):
             await self._process_discovered_data(
-                result, source_agent, target_label, parent_credential_id, parent_attack_step
+                result,
+                source_agent,
+                target_label,
+                parent_credential_id,
+                parent_attack_step,
+                task_queue=task_queue,
             )
 
         # Process additional result fields only on success
         if success and isinstance(result, dict):
             await self._process_success_result_data(
-                result, task_id, source_agent, parent_credential_id, parent_attack_step
+                result,
+                task_id,
+                source_agent,
+                parent_credential_id,
+                parent_attack_step,
+                task_queue=task_queue,
             )
             output = self._extract_output_from_result(result)
         elif success and isinstance(result, str):
@@ -138,19 +176,24 @@ class ResultProcessingMixin:
 
         if output:
             await self._process_output_text(
-                output, source_agent, parent_credential_id, parent_attack_step
+                output,
+                source_agent,
+                parent_credential_id,
+                parent_attack_step,
+                task_queue=task_queue,
             )
 
-        # Auto-chain lateral movement after successful S4U attack
-        if success and task_info.task_type == "exploit":
+        # Auto-chain secretsdump after successful S4U attack (any task type with ccache output)
+        if success:
             chained = await self._auto_chain_s4u_lateral_movement(
                 task_id=task_id,
                 task_info=task_info,
                 result=result if isinstance(result, dict) else {"output": str(result)},
                 source_agent=source_agent,
+                task_queue=task_queue,
             )
             if chained > 0:
-                logger.info(f"🎫 Auto-S4U-chain: dispatched {chained} lateral movement task(s)")
+                logger.info(f"🎫 Auto-S4U-chain: dispatched {chained} secretsdump task(s)")
 
         # Mark vulnerability as exploited when exploit task completes
         if task_info.task_type == "exploit":
@@ -161,32 +204,6 @@ class ResultProcessingMixin:
                 if success:
                     logger.info(f"✅ Marked vulnerability {vuln_id} as exploited")
 
-        # Broadcast completion with summarized result to save orchestrator context
-        # Full structured discoveries are already extracted above into shared state
-        if success:
-            # Summarize result to prevent context bloat in orchestrator
-            # Keeps structured discoveries, truncates large raw outputs
-            broadcast_result = result
-            if isinstance(result, dict):
-                broadcast_result = summarize_task_result(
-                    result, task_info.task_type, max_output_chars=get_max_output_chars()
-                )
-            await self._broadcast(
-                TaskComplete(
-                    source_agent=source_agent,
-                    task_id=task_id,
-                    result={"task_type": task_info.task_type, "data": broadcast_result},
-                )
-            )
-        else:
-            await self._broadcast(
-                TaskFailed(
-                    source_agent=source_agent,
-                    task_id=task_id,
-                    error=error or "Unknown error",
-                )
-            )
-
         # Resolve any waiting futures
         self._resolve_task_future(task_id, success, result, error)
 
@@ -196,13 +213,14 @@ class ResultProcessingMixin:
             await self._checkpoint()
         logger.info(f"Task {task_id} completed: success={success}")
 
-    async def _process_discovered_data(  # noqa: PLR0912
+    async def _process_discovered_data(
         self: RedTeamDispatcher,
         result: dict[str, Any],
         source_agent: str,
         target_label: str,
         parent_credential_id: str | None = None,
         parent_attack_step: int = 0,
+        task_queue: Any = None,
     ) -> None:
         """Process discovered_* fields from worker result.
 
@@ -212,6 +230,7 @@ class ResultProcessingMixin:
             target_label: Label for logging.
             parent_credential_id: ID of credential used to discover these items (for attack chain).
             parent_attack_step: Attack step of parent credential.
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
         """
         discovered_hosts = result.get("discovered_hosts")
         if isinstance(discovered_hosts, list) and discovered_hosts:
@@ -226,6 +245,9 @@ class ResultProcessingMixin:
                     roles=h.get("roles", []),
                     services=h.get("services", []),
                 )
+                # Preserve is_dc flag from worker's detection
+                if h.get("is_dc"):
+                    host.is_dc = True
                 await self.publish_host(host, source_agent)
 
         discovered_credentials = result.get("discovered_credentials")
@@ -245,7 +267,7 @@ class ResultProcessingMixin:
                     parent_id=parent_credential_id,  # Track attack chain
                     attack_step=parent_attack_step + 1 if parent_credential_id else 0,
                 )
-                await self.publish_credential(credential, source_agent)
+                await self.publish_credential(credential, source_agent, task_queue=task_queue)
 
         discovered_hashes = result.get("discovered_hashes")
         if isinstance(discovered_hashes, list) and discovered_hashes:
@@ -281,7 +303,9 @@ class ResultProcessingMixin:
                     )
                     try:
                         await asyncio.wait_for(
-                            self.publish_credential(cracked_cred, source_agent),
+                            self.publish_credential(
+                                cracked_cred, source_agent, task_queue=task_queue
+                            ),
                             timeout=30.0,
                         )
                     except asyncio.TimeoutError:
@@ -294,18 +318,11 @@ class ResultProcessingMixin:
                             f"Error publishing cracked credential {hash_obj.domain}\\{hash_obj.username}: {e}"
                         )
 
-        discovered_shares = result.get("discovered_shares")
-        if isinstance(discovered_shares, list):
-            for s in discovered_shares:
-                if not isinstance(s, dict):
-                    continue
-                share = Share(
-                    host=s.get("host", ""),
-                    name=s.get("name", ""),
-                    permissions=s.get("permissions", ""),
-                    comment=s.get("comment", ""),
-                )
-                await self.publish_share(share, source_agent)
+        # NOTE: discovered_shares from JSON is NOT processed here.
+        # LLM agents parse netexec output non-deterministically, often returning
+        # invalid permissions (e.g., "Basic", "Remote" from comment text).
+        # Instead, shares are extracted deterministically from raw output via
+        # _extract_shares_from_output() in _process_output_text().
 
         discovered_users = result.get("discovered_users")
         if isinstance(discovered_users, list):
@@ -329,18 +346,22 @@ class ResultProcessingMixin:
         # Process discovered vulnerabilities (delegation, ADCS, etc.)
         discovered_vulns = result.get("discovered_vulnerabilities")
         if isinstance(discovered_vulns, list) and discovered_vulns:
-            await self._process_discovered_vulnerabilities(discovered_vulns, source_agent)
+            await self._process_discovered_vulnerabilities(
+                discovered_vulns, source_agent, task_queue=task_queue
+            )
 
     async def _process_discovered_vulnerabilities(
         self: RedTeamDispatcher,
         vulnerabilities: list[dict[str, Any]],
         source_agent: str,
+        task_queue: Any = None,
     ) -> None:
         """Process vulnerabilities discovered by workers and queue for exploitation.
 
         Args:
             vulnerabilities: List of vulnerability dicts from worker serialization
             source_agent: Agent that discovered the vulnerabilities
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
         """
         queued = 0
         for vuln_data in vulnerabilities:
@@ -350,7 +371,9 @@ class ResultProcessingMixin:
             vuln_id = vuln_data.get("vuln_id", "")
             vuln_type = vuln_data.get("vuln_type", "")
             target = vuln_data.get("target", "")
-            details = vuln_data.get("details", {})
+            # Defensive: ensure details is always a dict (may be string from improper serialization)
+            raw_details = vuln_data.get("details", {})
+            details = raw_details if isinstance(raw_details, dict) else {}
 
             if not vuln_type or not target:
                 continue
@@ -370,8 +393,8 @@ class ResultProcessingMixin:
             # For delegation vulnerabilities, check if we have credentials
             # (worker might not know about creds orchestrator has discovered)
             if vuln_type in ("constrained_delegation", "unconstrained_delegation"):
-                account = details.get("account_name") or details.get("account", target)
-                account_lower = account.lower().rstrip("$")
+                account = details.get("account_name") or details.get("account") or target
+                account_lower = account.lower().rstrip("$") if account else target.lower()
                 for cred in self.shared_state.all_credentials:
                     if cred.username.lower() == account_lower and cred.password:
                         details["has_credentials"] = True
@@ -395,7 +418,12 @@ class ResultProcessingMixin:
             # For delegation vulnerabilities with credentials, auto-dispatch exploit
             if vuln_type in ("constrained_delegation", "unconstrained_delegation") and vuln_id:
                 await self._auto_dispatch_delegation_exploit(
-                    vuln_type, target, details, source_agent, vuln_id
+                    vuln_type,
+                    target,
+                    details,
+                    source_agent,
+                    vuln_id,
+                    task_queue=task_queue,
                 )
 
         if queued > 0:
@@ -407,19 +435,25 @@ class ResultProcessingMixin:
         self: RedTeamDispatcher,
         vuln_type: str,
         target: str,
-        details: dict[str, Any],
+        details: dict[str, Any] | str,
         source_agent: str,
         vuln_id: str = "",
+        task_queue: Any = None,
     ) -> None:
         """Auto-dispatch exploitation for delegation vulnerabilities with credentials.
 
         Args:
             vuln_type: Type of delegation vulnerability
             target: Target account for delegation
-            details: Vulnerability details including credentials
+            details: Vulnerability details including credentials (may be string if improperly serialized)
             source_agent: Agent that discovered the vulnerability
             vuln_id: Vulnerability ID from queue_vulnerability (for tracking exploitation)
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
         """
+        # Defensive: ensure details is a dict
+        if not isinstance(details, dict):
+            return
+
         if not details.get("has_credentials"):
             return
 
@@ -442,13 +476,31 @@ class ResultProcessingMixin:
         if not account_cred:
             return
 
-        # Use provided vuln_id or generate fallback
-        exploit_vuln_id = vuln_id or f"cd_{account.lower()}"
+        # Use provided vuln_id or lookup from discovered_vulnerabilities
+        exploit_vuln_id = vuln_id
+        if not exploit_vuln_id:
+            # Find matching vulnerability in discovered_vulnerabilities
+            for vid, vuln in self.shared_state.discovered_vulnerabilities.items():
+                if vuln.vuln_type != "constrained_delegation":
+                    continue
+                # Defensive: ensure vuln.details is a dict before calling .get()
+                vuln_details = vuln.details if isinstance(vuln.details, dict) else {}
+                vuln_account = vuln_details.get("account_name", vuln.target).lower().rstrip("$")
+                if vuln_account == account_lower:
+                    exploit_vuln_id = vid
+                    break
+
+        if not exploit_vuln_id:
+            logger.warning(
+                f"Cannot dispatch S4U attack for {account}: no matching vulnerability found"
+            )
+            return
 
         logger.warning(
             f"🚀 Auto-dispatching S4U attack for {account} -> {target_spn} "
             f"(have credentials, DC: {dc_ip}, vuln_id: {exploit_vuln_id})"
         )
+
         await self.request_exploit(
             vuln_type="constrained_delegation",
             vuln_id=exploit_vuln_id,
@@ -463,17 +515,28 @@ class ResultProcessingMixin:
                 "password": account_cred.password,
                 "dc_ip": dc_ip,
             },
+            task_queue=task_queue,
         )
 
-    async def _process_success_result_data(  # noqa: PLR0912
+    async def _process_success_result_data(
         self: RedTeamDispatcher,
         result: dict[str, Any],
         task_id: str,
         source_agent: str,
         parent_credential_id: str | None = None,
         parent_attack_step: int = 0,
+        task_queue: Any = None,
     ) -> None:
-        """Process credential/hash/share fields from successful result."""
+        """Process credential/hash/share fields from successful result.
+
+        Args:
+            result: Task result dictionary.
+            task_id: Task ID for logging.
+            source_agent: Agent that produced the result.
+            parent_credential_id: ID of credential used to discover these items.
+            parent_attack_step: Attack step of parent credential.
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
+        """
         # Calculate attack_step for discoveries (parent + 1)
         discovery_step = parent_attack_step + 1 if parent_credential_id else 0
 
@@ -489,7 +552,7 @@ class ResultProcessingMixin:
                 parent_id=parent_credential_id,
                 attack_step=discovery_step,
             )
-            await self.publish_credential(credential, source_agent)
+            await self.publish_credential(credential, source_agent, task_queue=task_queue)
 
         creds_data = result.get("credentials")
         if isinstance(creds_data, list):
@@ -506,7 +569,7 @@ class ResultProcessingMixin:
                     parent_id=parent_credential_id,
                     attack_step=discovery_step,
                 )
-                await self.publish_credential(credential, source_agent)
+                await self.publish_credential(credential, source_agent, task_queue=task_queue)
 
         hash_data = result.get("hash")
         if isinstance(hash_data, dict):
@@ -530,7 +593,7 @@ class ResultProcessingMixin:
                     parent_id=hash_obj.id,
                     attack_step=hash_obj.attack_step + 1,
                 )
-                await self.publish_credential(cracked_cred, source_agent)
+                await self.publish_credential(cracked_cred, source_agent, task_queue=task_queue)
 
         hashes_data = result.get("hashes")
         if isinstance(hashes_data, list):
@@ -557,30 +620,11 @@ class ResultProcessingMixin:
                         parent_id=hash_obj.id,
                         attack_step=hash_obj.attack_step + 1,
                     )
-                    await self.publish_credential(cracked_cred, source_agent)
+                    await self.publish_credential(cracked_cred, source_agent, task_queue=task_queue)
 
-        share_data = result.get("share")
-        if isinstance(share_data, dict):
-            share = Share(
-                host=share_data.get("host", share_data.get("host_ip", "")),
-                name=share_data.get("name", share_data.get("share_name", "")),
-                permissions=share_data.get("permissions", ""),
-                comment=share_data.get("comment", share_data.get("description", "")),
-            )
-            await self.publish_share(share, source_agent)
-
-        shares_data = result.get("shares")
-        if isinstance(shares_data, list):
-            for s in shares_data:
-                if not isinstance(s, dict):
-                    continue
-                share = Share(
-                    host=s.get("host", s.get("host_ip", "")),
-                    name=s.get("name", s.get("share_name", "")),
-                    permissions=s.get("permissions", ""),
-                    comment=s.get("comment", s.get("description", "")),
-                )
-                await self.publish_share(share, source_agent)
+        # NOTE: share/shares from JSON is NOT processed here.
+        # LLM agents parse netexec output non-deterministically. Shares are
+        # extracted deterministically from raw output via _extract_shares_from_output().
 
     def _extract_output_from_result(self: RedTeamDispatcher, result: dict[str, Any]) -> str:
         """Extract combined output text from result dict."""
@@ -593,12 +637,13 @@ class ResultProcessingMixin:
                 output_parts.append(chunk.strip())
         return "\n".join(output_parts).strip()
 
-    async def _process_output_text(  # noqa: PLR0912
+    async def _process_output_text(
         self: RedTeamDispatcher,
         output: str,
         source_agent: str,
         parent_credential_id: str | None = None,
         parent_attack_step: int = 0,
+        task_queue: Any = None,
     ) -> None:
         """Process raw output text to extract discoveries.
 
@@ -607,19 +652,20 @@ class ResultProcessingMixin:
             source_agent: Agent that produced the output.
             parent_credential_id: ID of credential used to run the command (for attack chain).
             parent_attack_step: Attack step of parent credential.
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
         """
         domain = ""
         if self.shared_state.target and self.shared_state.target.domain:
             domain = self.shared_state.target.domain
 
         for host in self._extract_hosts_from_output(output):
-            if hasattr(self.shared_state, "add_host"):
-                self.shared_state.add_host(host)
-            elif not any(h.ip == host.ip for h in self.shared_state.all_hosts):
-                self.shared_state.all_hosts.append(host)
+            # Use publish_host to ensure checkpoint is triggered for merged data
+            await self.publish_host(host, source_agent)
 
-        for username in self._extract_users_from_output(output):
-            self._add_user(username, domain, source_agent)
+        for username, extracted_domain in self._extract_users_from_output(output):
+            # Use extracted domain if available, otherwise fall back to target domain
+            user_domain = extracted_domain or domain
+            self._add_user(username, user_domain, source_agent)
 
         creds = self._extract_plaintext_passwords_from_output(output)
         if "password :" in output.lower() and not creds and domain:
@@ -653,49 +699,34 @@ class ResultProcessingMixin:
                 parent_id=parent_credential_id,  # Track attack chain
                 attack_step=parent_attack_step + 1 if parent_credential_id else 0,
             )
-            await self.publish_credential(credential, source_agent)
+            await self.publish_credential(credential, source_agent, task_queue=task_queue)
 
         # Extract shares from netexec --shares output
         for share in self._extract_shares_from_output(output):
             await self.publish_share(share, source_agent)
 
         # Extract hashes (Kerberoast, AS-REP, NTLM) from tool output
-        # Skip extraction for agents with real-time hooks to avoid double processing
-        # (those agents already publish via task_queue.publish_discovery in hooks)
-        # Include variations: recon/reconnaissance, credential/credential_access, etc.
-        realtime_extraction_roles = {
-            "credential_access",
-            "credential",
-            "privesc",
-            "lateral",
-            "acl",
-            "recon",
-            "reconnaissance",
-        }
-        source_lower = source_agent.lower()
-        has_realtime_hooks = any(role in source_lower for role in realtime_extraction_roles)
-
-        if not has_realtime_hooks:
-            for hash_obj in self._extract_hashes_from_output(output):
-                # Track attack chain
-                if parent_credential_id:
-                    hash_obj.parent_id = parent_credential_id
-                    hash_obj.attack_step = parent_attack_step + 1
-                await self.publish_hash(hash_obj, source_agent)
+        # Always extract as a backup - real-time hooks may fail silently or not complete
+        # before worker crash. Duplicates are handled by dedup logic in add_hash().
+        for hash_obj in self._extract_hashes_from_output(output):
+            # Track attack chain
+            if parent_credential_id:
+                hash_obj.parent_id = parent_credential_id
+                hash_obj.attack_step = parent_attack_step + 1
+            await self.publish_hash(hash_obj, source_agent)
 
         # Extract and auto-queue delegation vulnerabilities from findDelegation output
-        # Skip for agents with real-time hooks (they publish via _process_realtime_delegation_discovery)
-        if not has_realtime_hooks:
-            delegations = self._extract_delegation_from_output(output)
-            if delegations:
-                queued = await self._auto_queue_delegation_vulnerabilities(
-                    delegations, source_agent
+        # Always extract as a backup - dedup handled in _auto_queue_delegation_vulnerabilities
+        delegations = self._extract_delegation_from_output(output)
+        if delegations:
+            queued = await self._auto_queue_delegation_vulnerabilities(
+                delegations, source_agent, task_queue=task_queue
+            )
+            if queued > 0:
+                logger.warning(
+                    f"🎫 Auto-delegation: queued {queued} delegation vulnerability(ies) "
+                    f"for exploitation from {source_agent}"
                 )
-                if queued > 0:
-                    logger.warning(
-                        f"🎫 Auto-delegation: queued {queued} delegation vulnerability(ies) "
-                        f"for exploitation from {source_agent}"
-                    )
 
         # Extract and auto-queue BloodHound vulnerabilities (GPO abuse, local admin, ACL)
         bloodhound_vulns = self._extract_bloodhound_vulns_from_output(output)
@@ -795,6 +826,24 @@ class ResultProcessingMixin:
             return False
         if "/" in normalized or "\\" in normalized or normalized.endswith(".txt"):
             return False
+        # Skip machine accounts (ending in $) - these are computer accounts, not users
+        if normalized.endswith("$"):
+            return False
+        # Filter out tool output artifacts that look like usernames but are actually
+        # status messages or descriptions (e.g., "gpp_passwords_found" from netexec)
+        artifact_patterns = (
+            "_found",
+            "_failed",
+            "_success",
+            "_error",
+            "_status",
+            "passwords_",
+            "credentials_",
+            "hashes_",
+        )
+        normalized_lower = normalized.lower()
+        if any(pattern in normalized_lower for pattern in artifact_patterns):
+            return False
         for existing in self.shared_state.all_users:
             if existing.username == normalized and existing.domain == domain:
                 return False
@@ -802,7 +851,15 @@ class ResultProcessingMixin:
         return True
 
     def _extract_hosts_from_output(self: RedTeamDispatcher, output: str) -> list[Host]:
-        """Extract hosts from netexec SMB output."""
+        """Extract hosts from netexec SMB output.
+
+        Parses two types of SMB output lines:
+        1. Banner lines with [*]: "SMB 10.1.2.183 445 KINGSLANDING [*] Windows 10..."
+           - Extracts IP, hostname, and OS from the banner details
+        2. Non-banner lines: "SMB 10.1.2.240 445 WINTERFELL ADMIN$ Remote Admin"
+           - Extracts IP and hostname only (OS will be "Unknown")
+           - These appear in share enumeration, user enumeration, etc.
+        """
         if not output:
             return []
         hosts: list[Host] = []
@@ -811,76 +868,146 @@ class ResultProcessingMixin:
             stripped = line.strip()
             if not stripped:
                 continue
+
+            # Try banner line first (has OS info): "SMB IP PORT HOSTNAME [*] OS info..."
             smb_match = re.search(
                 r"SMB\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+([A-Za-z0-9_.-]+)\s+\[\*\]\s+(.+)",
                 stripped,
             )
-            if not smb_match:
-                continue
-            ip = smb_match.group(1)
-            host_col = smb_match.group(2)
-            details = smb_match.group(3)
-            name_match = re.search(r"\(name:([^)]+)\)", details)
-            domain_match = re.search(r"\(domain:([^)]+)\)", details)
-            domain = domain_match.group(1) if domain_match else ""
-            hostname = name_match.group(1) if name_match else host_col
-            if domain and hostname and not hostname.lower().endswith(domain.lower()):
-                hostname = f"{hostname.lower()}.{domain}"
-            os_match = re.search(r"^\s*([^(]+?)\s+\(name:", details)
-            os_name = os_match.group(1).strip() if os_match else "Unknown"
-            if ip in seen:
-                continue
-            seen.add(ip)
-            hosts.append(
-                Host(
-                    ip=ip,
-                    hostname=hostname,
-                    os=os_name,
-                    roles=[],
-                    services=[],
+            if smb_match:
+                ip = smb_match.group(1)
+                host_col = smb_match.group(2)
+                details = smb_match.group(3)
+                name_match = re.search(r"\(name:([^)]+)\)", details)
+                domain_match = re.search(r"\(domain:([^)]+)\)", details)
+                domain = domain_match.group(1) if domain_match else ""
+                hostname = name_match.group(1) if name_match else host_col
+                if domain and hostname and not hostname.lower().endswith(domain.lower()):
+                    hostname = f"{hostname.lower()}.{domain}"
+                os_match = re.search(r"^\s*([^(]+?)\s+\(name:", details)
+                os_name = os_match.group(1).strip() if os_match else "Unknown"
+                if ip in seen:
+                    continue
+                seen.add(ip)
+                hosts.append(
+                    Host(
+                        ip=ip,
+                        hostname=hostname,
+                        os=os_name,
+                        roles=[],
+                        services=[],
+                    )
                 )
+                continue
+
+            # Fallback: non-banner SMB lines (share table, user enum, etc.)
+            # Format: "SMB IP PORT HOSTNAME ..." where HOSTNAME is short name (no [*])
+            # This catches hosts from share enumeration output that don't have banner lines
+            simple_match = re.match(
+                r"^SMB\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+([A-Za-z0-9_-]+)\s+",
+                stripped,
             )
+            if simple_match:
+                ip = simple_match.group(1)
+                hostname_short = simple_match.group(2)
+                # Skip if we already have this IP (banner line takes precedence)
+                if ip in seen:
+                    continue
+                # Skip if hostname looks like a table header or separator
+                if hostname_short.lower() in ("share", "name", "permissions", "remark"):
+                    continue
+                seen.add(ip)
+                hosts.append(
+                    Host(
+                        ip=ip,
+                        hostname=hostname_short,  # Short name, will be upgraded later if FQDN found
+                        os="Unknown",  # No OS info in non-banner lines
+                        roles=[],
+                        services=[],
+                    )
+                )
+
         return hosts
 
-    def _extract_users_from_output(self: RedTeamDispatcher, output: str) -> list[str]:
-        """Extract usernames from various tool output formats."""
+    def _extract_users_from_output(self: RedTeamDispatcher, output: str) -> list[tuple[str, str]]:
+        """Extract (username, domain) tuples from various tool output formats.
+
+        Returns:
+            List of (username, domain) tuples. Domain may be empty if not
+            extractable from output.
+        """
         if not output:
             return []
-        users: list[str] = []
+        users: list[tuple[str, str]] = []
         seen: set[str] = set()
+        # Track current domain context from output (e.g., from DOMAIN\user patterns)
+        current_domain = ""
+
         for line in output.splitlines():
             stripped = line.strip()
             if not stripped:
                 continue
+
+            # Extract domain from (domain:XXX) patterns in output (e.g., NetExec SMB)
+            domain_match = re.search(r"\(domain:([^)]+)\)", stripped, re.IGNORECASE)
+            if domain_match:
+                current_domain = domain_match.group(1).strip()
+
+            # Extract domain from DOMAIN\user patterns
+            domain_user_match = re.search(r"([A-Za-z0-9_.-]+)\\([A-Za-z0-9_.-]+)", stripped)
+            if domain_user_match:
+                extracted_domain = domain_user_match.group(1).strip()
+                extracted_user = domain_user_match.group(2).strip()
+                if extracted_user and extracted_user.lower() not in seen:
+                    users.append((extracted_user, extracted_domain))
+                    seen.add(extracted_user.lower())
+
+            # Extract domain from user@domain UPN patterns
+            upn_match = re.search(r"([A-Za-z0-9_.-]+)@([A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)", stripped)
+            if upn_match:
+                extracted_user = upn_match.group(1).strip()
+                extracted_domain = upn_match.group(2).strip()
+                if extracted_user and extracted_user.lower() not in seen:
+                    users.append((extracted_user, extracted_domain))
+                    seen.add(extracted_user.lower())
+
+            # user:[XXX] patterns (use current_domain as context)
             for match in re.findall(r"user:\[([^\]]+)\]", stripped, re.IGNORECASE):
                 user = match.strip()
-                if user and user not in seen:
-                    users.append(user)
-                    seen.add(user)
+                if user and user.lower() not in seen:
+                    users.append((user, current_domain))
+                    seen.add(user.lower())
+
+            # Account: XXX patterns
             account_match = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)
             if account_match:
                 user = account_match.group(1).strip()
-                if user and user not in seen:
-                    users.append(user)
-                    seen.add(user)
+                if user and user.lower() not in seen:
+                    users.append((user, current_domain))
+                    seen.add(user.lower())
+
+            # samaccountname: XXX patterns
             sam_match = re.search(r"samaccountname:\s*([A-Za-z0-9_.-]+)", stripped, re.IGNORECASE)
             if sam_match:
                 user = sam_match.group(1).strip()
-                if user and user not in seen:
-                    users.append(user)
-                    seen.add(user)
+                if user and user.lower() not in seen:
+                    users.append((user, current_domain))
+                    seen.add(user.lower())
+
+            # SMB output with timestamp (user enum)
             smb_match = re.search(
                 r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.-]+)\s+\d{4}-\d{2}-\d{2}",
                 stripped,
             )
             if smb_match:
                 user = smb_match.group(1).strip()
-                if user and user not in seen:
-                    users.append(user)
-                    seen.add(user)
+                if user and user.lower() not in seen:
+                    users.append((user, current_domain))
+                    seen.add(user.lower())
+
         return users
 
-    def _extract_plaintext_passwords_from_output(  # noqa: PLR0912
+    def _extract_plaintext_passwords_from_output(
         self: RedTeamDispatcher, output: str
     ) -> list[tuple[str, str, str]]:
         """Extract username/password/domain tuples from tool output.
@@ -949,7 +1076,7 @@ class ResultProcessingMixin:
             creds.append((username, password, extracted_domain))
         return creds
 
-    def _resolve_credential_domain(  # noqa: PLR0912
+    def _resolve_credential_domain(
         self: RedTeamDispatcher, username: str, extracted_domain: str
     ) -> str:
         """Resolve the correct domain for a credential.
@@ -1021,7 +1148,7 @@ class ResultProcessingMixin:
         logger.debug(f"Cannot determine domain for credential: {username}")
         return ""
 
-    def _extract_shares_from_output(  # noqa: PLR0912
+    def _extract_shares_from_output(
         self: RedTeamDispatcher, output: str, default_host: str = ""
     ) -> list[Share]:
         """Extract shares from netexec --shares output."""
@@ -1067,8 +1194,18 @@ class ResultProcessingMixin:
                 name = parts[0].strip()
                 if not name or name.lower() == "share":
                     continue
-                permissions = parts[1].strip() if len(parts) > 1 else ""
-                comment = parts[2].strip() if len(parts) > 2 else ""
+                # Validate permissions - netexec only outputs READ, WRITE, or READ,WRITE
+                # If parts[1] isn't a valid permission, it's actually the comment
+                # (happens when share has no permissions, e.g., "ADMIN$  Remote Admin")
+                valid_perms = {"read", "write", "read,write", "write,read"}
+                raw_perm = parts[1].strip().lower() if len(parts) > 1 else ""
+                if raw_perm in valid_perms:
+                    permissions = parts[1].strip().upper()
+                    comment = parts[2].strip() if len(parts) > 2 else ""
+                else:
+                    # No valid permission - parts[1:] is actually the comment
+                    permissions = ""
+                    comment = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
                 key = (current_host.lower(), name.lower())
                 if key in seen:
                     continue
@@ -1083,104 +1220,100 @@ class ResultProcessingMixin:
                 )
         return shares
 
+    def _unwrap_ntlm_lines(self: RedTeamDispatcher, output: str) -> list[str]:
+        """Unwrap line-wrapped NTLM hashes from secretsdump output."""
+        lines = output.splitlines()
+        unwrapped: list[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            # Partial NTLM: word:number:32hexchars:partial_hex (no ::: at end)
+            if re.match(r"^[^:\s]+:\d+:[a-fA-F0-9]{32}:[a-fA-F0-9]+$", line) and i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if re.match(r"^[a-fA-F0-9]+:::$", next_line):
+                    unwrapped.append(line + next_line)
+                    i += 2
+                    continue
+            unwrapped.append(line)
+            i += 1
+        return unwrapped
+
+    def _try_extract_tgs_hash(self: RedTeamDispatcher, line: str, seen: set[str]) -> Hash | None:
+        """Try to extract a TGS hash from a line."""
+        match = re.search(r"(\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^$]+\$[a-fA-F0-9$]+)", line)
+        if match and match.group(1) not in seen:
+            seen.add(match.group(1))
+            return Hash(
+                username=match.group(2),
+                hash_value=match.group(1),
+                hash_type="TGS",
+                domain=match.group(3),
+            )
+        return None
+
+    def _try_extract_asrep_hash(self: RedTeamDispatcher, line: str, seen: set[str]) -> Hash | None:
+        """Try to extract an AS-REP hash from a line."""
+        match = re.search(r"(\$krb5asrep\$\d+\$([^@:]+)@([^:]+):[a-fA-F0-9$]+)", line)
+        if match and match.group(1) not in seen:
+            seen.add(match.group(1))
+            return Hash(
+                username=match.group(2),
+                hash_value=match.group(1),
+                hash_type="AS-REP",
+                domain=match.group(3),
+            )
+        return None
+
+    def _try_extract_ntlm_hash(self: RedTeamDispatcher, line: str, seen: set[str]) -> Hash | None:
+        """Try to extract an NTLM hash from a line (domain-prefixed or plain)."""
+        # Domain-prefixed: domain\user:rid:lmhash:nthash:::
+        match = re.search(
+            r"([^\\:\s]+)\\([^:\\]+):\d+:([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::", line
+        )
+        if match:
+            hash_value = f"{match.group(3)}:{match.group(4)}"
+            if hash_value not in seen:
+                seen.add(hash_value)
+                return Hash(
+                    username=match.group(2),
+                    hash_value=hash_value,
+                    hash_type="NTLM",
+                    domain=match.group(1),
+                )
+        # Non-domain-prefixed: user:rid:lmhash:nthash:::
+        match = re.match(r"([^:\\$\s]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::", line)
+        if match:
+            hash_value = f"{match.group(3)}:{match.group(4)}"
+            if hash_value not in seen:
+                seen.add(hash_value)
+                return Hash(
+                    username=match.group(1), hash_value=hash_value, hash_type="NTLM", domain=""
+                )
+        return None
+
     def _extract_hashes_from_output(self: RedTeamDispatcher, output: str) -> list[Hash]:
-        """Extract Kerberos hashes (TGS, AS-REP) from tool output."""
+        """Extract Kerberos hashes (TGS, AS-REP, NTLM) from tool output."""
         if not output:
             return []
         hashes: list[Hash] = []
         seen: set[str] = set()
 
-        for line in output.splitlines():
+        for line in self._unwrap_ntlm_lines(output):
             stripped = line.strip()
             if not stripped:
                 continue
-
-            # Match Kerberoast TGS hashes: $krb5tgs$23$*username$domain$...
-            tgs_match = re.search(
-                r"(\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^$]+\$[a-fA-F0-9$]+)",
-                stripped,
-            )
-            if tgs_match:
-                hash_value = tgs_match.group(1)
-                username = tgs_match.group(2)
-                domain = tgs_match.group(3)
-                if hash_value not in seen:
-                    seen.add(hash_value)
-                    hashes.append(
-                        Hash(
-                            username=username,
-                            hash_value=hash_value,
-                            hash_type="TGS",
-                            domain=domain,
-                        )
-                    )
+            # Try each hash type in order
+            h = self._try_extract_tgs_hash(stripped, seen)
+            if h:
+                hashes.append(h)
                 continue
-
-            # Match AS-REP hashes: $krb5asrep$23$username@domain:...
-            asrep_match = re.search(
-                r"(\$krb5asrep\$\d+\$([^@:]+)@([^:]+):[a-fA-F0-9$]+)",
-                stripped,
-            )
-            if asrep_match:
-                hash_value = asrep_match.group(1)
-                username = asrep_match.group(2)
-                domain = asrep_match.group(3)
-                if hash_value not in seen:
-                    seen.add(hash_value)
-                    hashes.append(
-                        Hash(
-                            username=username,
-                            hash_value=hash_value,
-                            hash_type="AS-REP",
-                            domain=domain,
-                        )
-                    )
+            h = self._try_extract_asrep_hash(stripped, seen)
+            if h:
+                hashes.append(h)
                 continue
-
-            # Match NTLM hashes from secretsdump: domain\user:rid:lmhash:nthash:::
-            ntlm_match = re.search(
-                r"([^\\:\s]+)\\([^:\\]+):\d+:([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::",
-                stripped,
-            )
-            if ntlm_match:
-                domain = ntlm_match.group(1)
-                username = ntlm_match.group(2)
-                lm_hash = ntlm_match.group(3)
-                nt_hash = ntlm_match.group(4)
-                hash_value = f"{lm_hash}:{nt_hash}"
-                if hash_value not in seen:
-                    seen.add(hash_value)
-                    hashes.append(
-                        Hash(
-                            username=username,
-                            hash_value=hash_value,
-                            hash_type="NTLM",
-                            domain=domain,
-                        )
-                    )
-                continue
-
-            # Match non-domain-prefixed NTLM: user:rid:lmhash:nthash:::
-            # (SAM dump entries like Administrator:500:lmhash:nthash:::)
-            ntlm_plain = re.match(
-                r"([^:\\$\s]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::",
-                stripped,
-            )
-            if ntlm_plain:
-                username = ntlm_plain.group(1)
-                lm_hash = ntlm_plain.group(3)
-                nt_hash = ntlm_plain.group(4)
-                hash_value = f"{lm_hash}:{nt_hash}"
-                if hash_value not in seen:
-                    seen.add(hash_value)
-                    hashes.append(
-                        Hash(
-                            username=username,
-                            hash_value=hash_value,
-                            hash_type="NTLM",
-                            domain="",
-                        )
-                    )
+            h = self._try_extract_ntlm_hash(stripped, seen)
+            if h:
+                hashes.append(h)
 
         return hashes
 
@@ -1294,7 +1427,7 @@ class ResultProcessingMixin:
 
             account_lower = account.lower()
 
-            # Store in state.gmsa_accounts for persistence (if not already there)
+            # Store in state.gmsa_accounts for persistence (persisted to Redis)
             if account_lower not in existing_gmsa:
                 gmsa_entry = {
                     "account": account,
@@ -1303,9 +1436,8 @@ class ResultProcessingMixin:
                     "discovered_by": source_agent,
                     "discovered_at": datetime.now(timezone.utc).isoformat(),
                 }
-                self.shared_state.gmsa_accounts.append(gmsa_entry)
+                self.shared_state.add_gmsa_account(gmsa_entry)
                 existing_gmsa.add(account_lower)
-                logger.info(f"🔑 gMSA account stored in state: {account}")
 
             # Check if already queued as vulnerability
             vuln_key = f"gmsa_readable:{account_lower}"
@@ -1344,7 +1476,7 @@ class ResultProcessingMixin:
 
         return queued
 
-    def _extract_delegation_from_output(  # noqa: PLR0912
+    def _extract_delegation_from_output(
         self: RedTeamDispatcher, output: str
     ) -> list[dict[str, str]]:
         """
@@ -1438,8 +1570,11 @@ class ResultProcessingMixin:
 
         return delegations
 
-    async def _auto_queue_delegation_vulnerabilities(  # noqa: PLR0912
-        self: RedTeamDispatcher, delegations: list[dict[str, str]], source_agent: str
+    async def _auto_queue_delegation_vulnerabilities(
+        self: RedTeamDispatcher,
+        delegations: list[dict[str, str]],
+        source_agent: str,
+        task_queue: Any = None,
     ) -> int:
         """
         Auto-queue delegation vulnerabilities for exploitation.
@@ -1447,6 +1582,7 @@ class ResultProcessingMixin:
         Args:
             delegations: List of delegation findings from _extract_delegation_from_output
             source_agent: Agent that discovered the delegation
+            task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
 
         Returns:
             Number of vulnerabilities queued
@@ -1495,7 +1631,7 @@ class ResultProcessingMixin:
                 details["password"] = account_cred.password
                 details["domain"] = account_cred.domain
 
-            await self.queue_vulnerability(
+            queued_vuln_id = await self.queue_vulnerability(
                 vuln_type=vuln_type,
                 target=account,
                 details=details,
@@ -1505,10 +1641,11 @@ class ResultProcessingMixin:
             logger.warning(
                 f"🎫 Auto-queued {vuln_type} for {account} (target: {target_spn or 'any'})"
             )
-            queued += 1
+            if queued_vuln_id:
+                queued += 1
 
             # Auto-dispatch S4U attack if we have credentials for constrained delegation
-            if account_cred and delegation_type == "constrained" and target_spn:
+            if account_cred and delegation_type == "constrained" and target_spn and queued_vuln_id:
                 dc_ip = self._find_domain_controller_ip(account_cred.domain)
                 # Fallback: extract DC IP from target SPN hostname or vulnerability details
                 if not dc_ip:
@@ -1525,11 +1662,12 @@ class ResultProcessingMixin:
                     dc_ip = details.get("target_ip", "")
                 logger.warning(
                     f"🚀 Auto-dispatching S4U attack for {account} -> {target_spn} "
-                    f"(have credentials, DC: {dc_ip})"
+                    f"(have credentials, DC: {dc_ip}, vuln_id: {queued_vuln_id})"
                 )
+
                 await self.request_exploit(
                     vuln_type="constrained_delegation",
-                    vuln_id=f"cd_{account.lower()}",
+                    vuln_id=queued_vuln_id,
                     target=account,
                     source_agent="auto_delegation",
                     params={
@@ -1540,11 +1678,12 @@ class ResultProcessingMixin:
                         "password": account_cred.password,
                         "dc_ip": dc_ip,
                     },
+                    task_queue=task_queue,
                 )
 
         return queued
 
-    def _extract_bloodhound_vulns_from_output(  # noqa: PLR0912
+    def _extract_bloodhound_vulns_from_output(
         self: RedTeamDispatcher, output: str
     ) -> list[dict[str, Any]]:
         """

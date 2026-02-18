@@ -6,8 +6,7 @@ import pytest
 
 from ares.core.models import (
     Credential,
-    InvestigationStage,
-    RedTeamState,
+    SharedRedTeamState,
     Target,
     User,
 )
@@ -32,28 +31,14 @@ class TestGenerateReport:
         return RedTeamReportGenerator()
 
     @pytest.fixture
-    def minimal_state(self, sample_target: Target) -> RedTeamState:
+    def minimal_state(self, sample_target: Target) -> SharedRedTeamState:
         """Create minimal red team state."""
-        return RedTeamState(
-            operation_id="op-test-001",
-            target=sample_target,
-            started_at=datetime.now(timezone.utc),
-            stage=InvestigationStage.TRIAGE,
-            hosts=[],
-            users=[],
-            credentials=[],
-            hashes=[],
-            shares=[],
-            weaknesses=[],
-            timeline=[],
-            identified_techniques=set(),
-            has_domain_admin=False,
-            has_golden_ticket=False,
-            report_summary=None,
-        )
+        state = SharedRedTeamState(operation_id="op-test-001")
+        state.target = sample_target
+        return state
 
     def test_generate_returns_string(
-        self, generator: RedTeamReportGenerator, minimal_state: RedTeamState
+        self, generator: RedTeamReportGenerator, minimal_state: SharedRedTeamState
     ):
         """Test generate returns a string."""
         report = generator.generate(minimal_state)
@@ -61,14 +46,14 @@ class TestGenerateReport:
         assert len(report) > 0
 
     def test_generate_contains_operation_id(
-        self, generator: RedTeamReportGenerator, minimal_state: RedTeamState
+        self, generator: RedTeamReportGenerator, minimal_state: SharedRedTeamState
     ):
         """Test report contains operation ID."""
         report = generator.generate(minimal_state)
         assert minimal_state.operation_id in report
 
     def test_generate_contains_target_ip(
-        self, generator: RedTeamReportGenerator, minimal_state: RedTeamState
+        self, generator: RedTeamReportGenerator, minimal_state: SharedRedTeamState
     ):
         """Test report contains target IP."""
         report = generator.generate(minimal_state)
@@ -82,25 +67,16 @@ class TestExecutiveSummary:
     def generator(self) -> RedTeamReportGenerator:
         return RedTeamReportGenerator()
 
-    def test_summary_with_custom_summary(
-        self, generator: RedTeamReportGenerator, red_team_state: RedTeamState
+    def test_summary_generated(
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
     ):
-        """Test using custom report summary."""
-        red_team_state.report_summary = "Custom executive summary for this operation."
-        summary = generator._generate_executive_summary(red_team_state)
-        assert summary == "Custom executive summary for this operation."
-
-    def test_summary_generated_without_custom(
-        self, generator: RedTeamReportGenerator, red_team_state: RedTeamState
-    ):
-        """Test auto-generated summary when no custom provided."""
-        red_team_state.report_summary = None
+        """Test auto-generated summary."""
         summary = generator._generate_executive_summary(red_team_state)
         assert "Red team operation" in summary
         assert red_team_state.target.ip in summary
 
     def test_summary_with_domain_admin(
-        self, generator: RedTeamReportGenerator, populated_red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, populated_red_team_state: SharedRedTeamState
     ):
         """Test summary with domain admin achieved."""
         populated_red_team_state.has_domain_admin = True
@@ -108,7 +84,7 @@ class TestExecutiveSummary:
         assert "Domain Administrator" in summary
 
     def test_summary_with_golden_ticket(
-        self, generator: RedTeamReportGenerator, populated_red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, populated_red_team_state: SharedRedTeamState
     ):
         """Test summary with golden ticket."""
         populated_red_team_state.has_golden_ticket = True
@@ -116,18 +92,18 @@ class TestExecutiveSummary:
         assert "Golden ticket" in summary
 
     def test_summary_with_credentials(
-        self, generator: RedTeamReportGenerator, populated_red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, populated_red_team_state: SharedRedTeamState
     ):
         """Test summary includes credential count."""
         summary = generator._generate_executive_summary(populated_red_team_state)
         assert "credential" in summary.lower()
 
     def test_summary_with_admins(
-        self, generator: RedTeamReportGenerator, populated_red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, populated_red_team_state: SharedRedTeamState
     ):
         """Test summary includes admin count."""
         # Set admin count
-        populated_red_team_state.users = [
+        populated_red_team_state.all_users = [
             User(username="admin1", is_admin=True),
             User(username="admin2", is_admin=True),
         ]
@@ -144,7 +120,7 @@ class TestSecurityPostureAssessment:
         return RedTeamReportGenerator()
 
     def test_critical_posture_domain_admin(
-        self, generator: RedTeamReportGenerator, red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
     ):
         """Test CRITICAL posture with domain admin."""
         red_team_state.has_domain_admin = True
@@ -152,7 +128,7 @@ class TestSecurityPostureAssessment:
         assert "CRITICAL" in summary
 
     def test_critical_posture_golden_ticket(
-        self, generator: RedTeamReportGenerator, red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
     ):
         """Test CRITICAL posture with golden ticket."""
         red_team_state.has_golden_ticket = True
@@ -160,11 +136,11 @@ class TestSecurityPostureAssessment:
         assert "CRITICAL" in summary
 
     def test_high_posture_admins_found(
-        self, generator: RedTeamReportGenerator, red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
     ):
         """Test HIGH posture when admin credentials found."""
-        # admin_count in RedTeamState counts admin credentials, not admin users
-        red_team_state.credentials = [
+        # admin_count in SharedRedTeamState counts admin credentials, not admin users
+        red_team_state.all_credentials = [
             Credential(
                 username="admin",
                 password="admin123",  # pragma: allowlist secret
@@ -175,17 +151,17 @@ class TestSecurityPostureAssessment:
         assert "HIGH" in summary
 
     def test_medium_posture_credentials(
-        self, generator: RedTeamReportGenerator, red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
     ):
         """Test MEDIUM posture with credentials only."""
-        red_team_state.credentials = [
+        red_team_state.all_credentials = [
             Credential(username="user", password="abc123")  # pragma: allowlist secret
         ]
         summary = generator._generate_executive_summary(red_team_state)
         assert "MEDIUM" in summary
 
     def test_low_posture_nothing_found(
-        self, generator: RedTeamReportGenerator, red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
     ):
         """Test LOW posture when nothing significant found."""
         summary = generator._generate_executive_summary(red_team_state)
@@ -200,29 +176,29 @@ class TestDiscoveryStatistics:
         return RedTeamReportGenerator()
 
     def test_statistics_hosts(
-        self, generator: RedTeamReportGenerator, populated_red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, populated_red_team_state: SharedRedTeamState
     ):
         """Test discovery statistics include hosts."""
         summary = generator._generate_executive_summary(populated_red_team_state)
         assert "Host" in summary
-        assert str(populated_red_team_state.host_count) in summary
+        assert str(len(populated_red_team_state.all_hosts)) in summary
 
     def test_statistics_users(
-        self, generator: RedTeamReportGenerator, populated_red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, populated_red_team_state: SharedRedTeamState
     ):
         """Test discovery statistics include users."""
         summary = generator._generate_executive_summary(populated_red_team_state)
         assert "User" in summary
 
     def test_statistics_shares(
-        self, generator: RedTeamReportGenerator, populated_red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, populated_red_team_state: SharedRedTeamState
     ):
         """Test discovery statistics include shares."""
         summary = generator._generate_executive_summary(populated_red_team_state)
         assert "Share" in summary
 
     def test_statistics_vulnerabilities(
-        self, generator: RedTeamReportGenerator, populated_red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, populated_red_team_state: SharedRedTeamState
     ):
         """Test discovery statistics include vulnerabilities."""
         summary = generator._generate_executive_summary(populated_red_team_state)
@@ -241,7 +217,7 @@ class TestAttackPath:
         return RedTeamReportGenerator()
 
     def test_attack_path_with_domain_admin(
-        self, generator: RedTeamReportGenerator, red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
     ):
         """Test attack path shown when domain admin achieved."""
         red_team_state.has_domain_admin = True
@@ -249,7 +225,7 @@ class TestAttackPath:
         assert "Attack Path" in summary
 
     def test_attack_path_with_golden_ticket(
-        self, generator: RedTeamReportGenerator, red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
     ):
         """Test attack path shown when golden ticket obtained."""
         red_team_state.has_golden_ticket = True
@@ -257,7 +233,7 @@ class TestAttackPath:
         assert "Attack Path" in summary
 
     def test_no_attack_path_without_success(
-        self, generator: RedTeamReportGenerator, red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
     ):
         """Test attack path not shown without significant success."""
         generator._generate_executive_summary(red_team_state)
@@ -273,7 +249,7 @@ class TestReportWithTimeline:
         return RedTeamReportGenerator()
 
     def test_report_with_timeline_events(
-        self, generator: RedTeamReportGenerator, populated_red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, populated_red_team_state: SharedRedTeamState
     ):
         """Test report generation with timeline events."""
         report = generator.generate(populated_red_team_state)
@@ -290,7 +266,7 @@ class TestReportWithTechniques:
         return RedTeamReportGenerator()
 
     def test_report_includes_techniques(
-        self, generator: RedTeamReportGenerator, populated_red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, populated_red_team_state: SharedRedTeamState
     ):
         """Test report includes identified techniques."""
         report = generator.generate(populated_red_team_state)
@@ -306,14 +282,16 @@ class TestEdgeCases:
     def generator(self) -> RedTeamReportGenerator:
         return RedTeamReportGenerator()
 
-    def test_empty_lists(self, generator: RedTeamReportGenerator, red_team_state: RedTeamState):
+    def test_empty_lists(
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
+    ):
         """Test report with all empty lists."""
         report = generator.generate(red_team_state)
         assert isinstance(report, str)
         assert len(report) > 0
 
     def test_full_state(
-        self, generator: RedTeamReportGenerator, populated_red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, populated_red_team_state: SharedRedTeamState
     ):
         """Test report with fully populated state."""
         populated_red_team_state.has_domain_admin = True
@@ -323,7 +301,7 @@ class TestEdgeCases:
         assert len(report) > 0
 
     def test_special_characters_in_target(
-        self, generator: RedTeamReportGenerator, red_team_state: RedTeamState
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
     ):
         """Test report with special characters in target."""
         red_team_state.target = Target(

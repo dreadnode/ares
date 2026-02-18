@@ -35,7 +35,7 @@ def _is_pass_the_hash_compatible(hash_value: str | None) -> bool:
     return bool(re.fullmatch(r"[0-9a-fA-F]{32}", normalized))
 
 
-def format_state_context(  # noqa: PLR0912
+def format_state_context(
     state: SharedRedTeamState | None,
     task_type: str,
     current_target: str | None = None,
@@ -341,6 +341,9 @@ def generate_prompt_from_task(
     if task.task_type == "privesc_enumeration":
         return _generate_privesc_enumeration_prompt(task, payload, state)
 
+    if task.task_type == "recon":
+        return _generate_recon_prompt(task, payload, state)
+
     # "command" tasks are handled specially - executed directly, not via agent
     if task.task_type == "command":
         # Return None to signal direct execution
@@ -350,7 +353,7 @@ def generate_prompt_from_task(
     return f"Execute task: {task.task_type}\nPayload: {payload}\nTask ID: {task.task_id}"
 
 
-def _generate_credential_access_prompt(  # noqa: PLR0912
+def _generate_credential_access_prompt(
     task: TaskMessage,
     payload: dict[str, Any],
     state: SharedRedTeamState | None,
@@ -1101,6 +1104,90 @@ def _generate_privesc_enumeration_prompt(
         "The ticket is your key to Domain Admin - don't stop after getting it."
     )
     state_context = format_state_context(state, "privesc", current_target=dc_ip)
+    return base_prompt + state_context
+
+
+def _generate_recon_prompt(
+    task: TaskMessage,
+    payload: dict[str, Any],
+    state: SharedRedTeamState | None,
+) -> str:
+    """Generate prompt for reconnaissance tasks (nmap, user enum, shares, etc.)."""
+    techniques = payload.get("techniques", [])
+    target_ips = payload.get("target_ips", [])
+    domain = payload.get("domain", "")
+    dc_ip = payload.get("dc_ip", "")
+    username = payload.get("username", "")
+    password = payload.get("password", "")
+    hash_value = payload.get("hash_value", "")
+    reason = payload.get("reason", "")
+
+    # Build credential info
+    cred_line = ""
+    if username:
+        if password:
+            cred_line = f"Credentials: {domain}\\{username} / {password}\n"
+        elif hash_value:
+            cred_line = f"Credentials: {domain}\\{username} (hash: {hash_value})\n"
+        else:
+            cred_line = f"User context: {domain}\\{username}\n"
+
+    # Build target info
+    targets_str = ", ".join(target_ips[:10]) if target_ips else "N/A"
+    if len(target_ips) > 10:
+        targets_str += f" ... ({len(target_ips)} total)"
+
+    # Build technique instructions
+    technique_instructions = []
+    for tech in techniques:
+        if tech == "nmap_scan":
+            technique_instructions.append(
+                f"- **nmap_scan(target='{targets_str}')** - Scan for open ports and services"
+            )
+        elif tech == "enumerate_users":
+            technique_instructions.append(
+                f"- **enumerate_users(target='{dc_ip}', domain='{domain}')** - List domain users"
+            )
+        elif tech == "enumerate_shares":
+            technique_instructions.append(
+                f"- **enumerate_shares(target='{targets_str}')** - Find SMB shares"
+            )
+        elif tech == "run_bloodhound":
+            technique_instructions.append(
+                f"- **run_bloodhound(domain='{domain}', dc_ip='{dc_ip}')** - Collect AD data for path analysis"
+            )
+        elif tech == "smb_signing_check":
+            technique_instructions.append(
+                f"- **smb_signing_check(targets='{targets_str}')** - Find relay-able hosts"
+            )
+        else:
+            technique_instructions.append(f"- **{tech}(...)**")
+
+    techniques_section = (
+        "\n".join(technique_instructions)
+        if technique_instructions
+        else "Execute appropriate reconnaissance for the task."
+    )
+
+    base_prompt = (
+        f"**RECONNAISSANCE TASK**\n\n"
+        f"Target IPs: {targets_str}\n"
+        f"Domain: {domain or 'N/A'}\n"
+        f"DC IP: {dc_ip or 'N/A'}\n"
+        f"{cred_line}"
+        f"Reason: {reason or 'general recon'}\n"
+        f"Task ID: {task.task_id}\n\n"
+        f"**EXECUTE THESE TECHNIQUES:**\n{techniques_section}\n\n"
+        "**IMPORTANT:**\n"
+        "- Parse and record ALL discovered information (hosts, services, users, shares)\n"
+        "- The system will automatically extract discovered data from tool outputs\n"
+        "- Report any vulnerabilities or interesting findings\n"
+        "- Mark task complete when reconnaissance is finished\n"
+    )
+
+    state_context = format_state_context(
+        state, "recon", current_target=target_ips[0] if target_ips else dc_ip
+    )
     return base_prompt + state_context
 
 

@@ -17,7 +17,6 @@ __all__ = [
     "OperationConfig",
     "OperationRecoveryManager",
     "RedTeamDispatcher",
-    "RedTeamState",
     "RedisTaskQueue",
     "RedisWorkerAgent",
     "SharedRedTeamState",
@@ -26,7 +25,6 @@ __all__ = [
     "WorkerAgent",
     "create_investigation_agent",
     "create_multi_agent_ensemble",
-    "create_redteam_agent",
     "create_specialized_agent",
     "credential_expansion_loop",
     "exploitation_workflow",
@@ -65,7 +63,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "ares.core.factories.red_agents",
         "create_multi_agent_ensemble",
     ),
-    "create_redteam_agent": ("ares.core.factories.red_factory", "create_redteam_agent"),
     "create_specialized_agent": ("ares.core.factories.red_agents", "create_specialized_agent"),
     # K8s
     "KubernetesPodExecutor": ("ares.core.k8s_executor", "KubernetesPodExecutor"),
@@ -74,7 +71,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "AgentLocalState": ("ares.core.models", "AgentLocalState"),
     "AgentRole": ("ares.core.models", "AgentRole"),
     "InvestigationState": ("ares.core.models", "InvestigationState"),
-    "RedTeamState": ("ares.core.models", "RedTeamState"),
     "SharedRedTeamState": ("ares.core.models", "SharedRedTeamState"),
     # Orchestrator
     "run_multi_agent_operation": ("ares.core.orchestrator", "run_multi_agent_operation"),
