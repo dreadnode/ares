@@ -233,7 +233,7 @@ Watch for changes and auto-sync (hot reload):
 task remote:hot
 ```
 
-#### `task ares:investigate`
+#### `task blue:investigate`
 
 Investigate a specific alert from a JSON file.
 
@@ -258,7 +258,7 @@ cat > alert.json <<EOF
 EOF
 
 # Investigate the alert
-task ares:investigate ALERT=alert.json
+task blue:investigate ALERT=alert.json
 ```
 
 ### Configuration
@@ -553,7 +553,7 @@ cat > suspicious-activity.json <<EOF
 EOF
 
 # 2. Investigate
-task ares:investigate ALERT=suspicious-activity.json
+task blue:investigate ALERT=suspicious-activity.json
 
 # 3. View report
 task ares:reports:latest

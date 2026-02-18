@@ -222,43 +222,6 @@ tasks:
   # Ares Blue Team (SOC) Agent Tasks
   # ===========================================================================
 
-  ares:investigate:
-    desc: "Investigate a specific alert from JSON file (usage: task ares:investigate ALERT=alert.json)"
-    silent: true
-    vars:
-      ALERT: '{{.ALERT | default ""}}'
-    preconditions:
-      - sh: test -n "{{.ALERT}}"
-        msg: "ALERT variable is required. Usage: task ares:investigate ALERT=alert.json"
-      - sh: test -f "{{.ALERT}}"
-        msg: "Alert file not found: {{.ALERT}}"
-    deps:
-      - task: check-aws-auth
-        vars:
-          PROFILE: '{{.PROFILE | default "infrastructure"}}'
-          REGION: '{{.REGION | default "us-west-2"}}'
-    cmds:
-      - |
-        export ANTHROPIC_API_KEY=$(op item get "Dreadnode Claude" --fields api-key --reveal 2>/dev/null || echo "")
-        export DREADNODE_API_KEY=$(op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo "")
-        export GRAFANA_SERVICE_ACCOUNT_TOKEN=$(op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo "")
-        export OPENAI_API_KEY=$(op item get "Openai" --fields dreadnode-personal-api-key --reveal 2>/dev/null)
-        MODEL_ARG="{{.MODEL}}"
-        if [ -n "{{.MODEL_ALL}}" ]; then
-          MODEL_ARG="{{.MODEL_ALL}}"
-        fi
-
-        uv run python -m ares investigate-alert {{.ALERT}} \
-          --args.model "$MODEL_ARG" \
-          --args.grafana-url {{.GRAFANA_URL}} \
-          --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
-          --args.report-dir {{.REPORT_DIR}} \
-          --dn-args.server {{.DREADNODE_SERVER_URL}} \
-          --dn-args.token "$DREADNODE_API_KEY" \
-          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
-          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.DREADNODE_PROJECT}}
-
   ares:config:check:
     desc: Check configuration and API key access
     silent: true

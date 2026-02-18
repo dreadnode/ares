@@ -88,7 +88,7 @@ task ares:config:check
 # Expected output: ✓ All configuration checks passed
 
 # 4. Run the blue team agent (polls Grafana for alerts)
-task ares:blue:
+task blue:poll
 ```
 
 **Verification:**
@@ -107,7 +107,7 @@ cp .env.example .env
 # Edit .env with your API keys
 
 # Run using local environment
-task ares:blue:local:
+task blue:poll:local
 ```
 
 ## Usage
@@ -121,13 +121,13 @@ The easiest way to run Ares is using the provided Taskfile with 1Password integr
 task ares:config:check
 
 # Blue Team: Run SOC agent in poll mode
-task ares:blue:
+task blue:poll
 
 # Blue Team: Process current alerts once and exit
-task ares:blue:once:
+task blue:once
 
 # Blue Team: Investigate a specific alert from JSON file
-task ares:investigate ALERT=test-alerts/example-alert.json
+task blue:investigate ALERT=test-alerts/example-alert.json
 
 # View investigation reports
 task ares:reports:list        # List all reports
@@ -138,10 +138,10 @@ task ares:reports:latest      # Show latest report
 
 | Command                              | Description                                                  |
 | ------------------------------------ | ------------------------------------------------------------ |
-| `task ares:blue:`                    | Run blue team agent in poll mode (checks Grafana every 30s)  |
-| `task ares:blue:once:`               | Run blue team once and exit                                  |
-| `task ares:blue:local:`              | Run blue team using .env file instead of 1Password           |
-| `task ares:investigate ALERT=<file>` | Investigate a specific alert from JSON file                  |
+| `task blue:poll`                     | Run blue team agent in poll mode (checks Grafana every 30s)  |
+| `task blue:once`                     | Run blue team once and exit                                  |
+| `task blue:poll:local`               | Run blue team using .env file instead of 1Password           |
+| `task blue:investigate ALERT=<file>` | Investigate a specific alert from JSON file                  |
 | `task ares:config:check`             | Verify configuration and 1Password access                    |
 | `task ares:config:show`              | Display current configuration (no secrets)                   |
 | `task ares:reports:list`             | List all investigation reports                               |
