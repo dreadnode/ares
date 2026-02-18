@@ -135,7 +135,7 @@ class ThrottlingMixin:
             and t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
         )
 
-    async def _check_llm_throttle_drop(  # noqa: PLR0912
+    async def _check_llm_throttle_drop(
         self: RedTeamDispatcher,
         task_type: str,
         target_role: str,
@@ -474,7 +474,7 @@ class ThrottlingMixin:
 
         return (False, 0.0, "")
 
-    async def _throttled_submit_task(  # noqa: PLR0912
+    async def _throttled_submit_task(
         self: RedTeamDispatcher,
         task_type: str,
         target_role: str,

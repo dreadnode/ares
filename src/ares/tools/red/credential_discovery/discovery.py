@@ -140,7 +140,7 @@ class CredentialDiscoveryTools(Toolset):
             creds.append((domain, username, password, is_admin))
         return creds
 
-    def _extract_passwords_from_user_enum_output(self, output: str) -> list[tuple[str, str]]:  # noqa: PLR0912
+    def _extract_passwords_from_user_enum_output(self, output: str) -> list[tuple[str, str]]:
         if not output:
             return []
         creds: list[tuple[str, str]] = []
@@ -337,7 +337,7 @@ class CredentialDiscoveryTools(Toolset):
             return f"LDAP search failed: {e}"
 
     @dn.tool_method
-    def password_spray(  # noqa: PLR0912
+    def password_spray(
         self,
         target: str,
         domain: str,

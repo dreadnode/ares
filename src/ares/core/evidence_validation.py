@@ -166,7 +166,7 @@ async def load_from_redis() -> int:
                         max_query_num = max(max_query_num, num)
                     except ValueError:
                         pass
-            except Exception as e:  # noqa: PERF203 - need per-item exception handling
+            except Exception as e:
                 logger.warning(f"Failed to deserialize query result: {e}")
 
         # Restore query counter
@@ -272,7 +272,7 @@ def _extract_searchable_values(data: Any, depth: int = 0) -> set[str]:
     return values
 
 
-def _extract_patterns_from_string(text: str) -> set[str]:  # noqa: PLR0912
+def _extract_patterns_from_string(text: str) -> set[str]:
     """Extract IOC patterns from a string.
 
     Args:

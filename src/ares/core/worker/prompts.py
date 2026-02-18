@@ -35,7 +35,7 @@ def _is_pass_the_hash_compatible(hash_value: str | None) -> bool:
     return bool(re.fullmatch(r"[0-9a-fA-F]{32}", normalized))
 
 
-def format_state_context(  # noqa: PLR0912
+def format_state_context(
     state: SharedRedTeamState | None,
     task_type: str,
     current_target: str | None = None,
@@ -353,7 +353,7 @@ def generate_prompt_from_task(
     return f"Execute task: {task.task_type}\nPayload: {payload}\nTask ID: {task.task_id}"
 
 
-def _generate_credential_access_prompt(  # noqa: PLR0912
+def _generate_credential_access_prompt(
     task: TaskMessage,
     payload: dict[str, Any],
     state: SharedRedTeamState | None,

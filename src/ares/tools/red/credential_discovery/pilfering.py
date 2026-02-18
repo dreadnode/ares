@@ -67,7 +67,7 @@ class SharePilferingTools(Toolset):
         add_credential_to_state(self.state, cred, "credential_access")
 
     @dn.tool_method
-    def smbclient_spider(  # noqa: PLR0912
+    def smbclient_spider(
         self,
         target: str,
         share: str,
@@ -326,7 +326,7 @@ class SharePilferingTools(Toolset):
             return f"GPP password search failed: {e}"
 
     @dn.tool_method
-    def sysvol_script_search(  # noqa: PLR0912
+    def sysvol_script_search(
         self,
         target: str,
         username: str,

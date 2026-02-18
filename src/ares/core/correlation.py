@@ -437,7 +437,7 @@ class RedBlueCorrelator:
         )
         return red_team_reports, blue_team_detections
 
-    def correlate(  # noqa: PLR0912
+    def correlate(
         self,
         red_activities: list[RedTeamActivity],
         blue_detections: list[BlueTeamDetection],
@@ -633,7 +633,7 @@ class RedBlueCorrelator:
 
         return coverage
 
-    def generate_report_markdown(self, report: CorrelationReport) -> str:  # noqa: PLR0912
+    def generate_report_markdown(self, report: CorrelationReport) -> str:
         """Generate a markdown report from correlation results.
 
         Args:

@@ -46,7 +46,7 @@ def _has_dc_role(host: Any) -> bool:
     return any(m in roles_str for m in ("dc", "domain controller", "ad dc"))
 
 
-def resolve_dc_ip_for_domain(  # noqa: PLR0912
+def resolve_dc_ip_for_domain(
     state: SharedRedTeamState | None,
     domain: str,
     provided_dc_ip: str,

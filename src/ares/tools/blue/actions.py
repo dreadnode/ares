@@ -206,7 +206,7 @@ class CompletionTools(Toolset):  # type: ignore[misc]
 
         return achievements
 
-    def _generate_fallback_synopsis(self) -> None:  # noqa: PLR0912
+    def _generate_fallback_synopsis(self) -> None:
         """Generate a comprehensive synopsis from evidence if none provided.
 
         Creates a structured narrative including:

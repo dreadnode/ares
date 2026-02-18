@@ -664,9 +664,7 @@ class LateralMovementTools(Toolset):
         except Exception as e:
             return f"Kerberos secretsdump failed: {e}"
 
-    def _extract_ntlm_hashes_to_state(  # noqa: PLR0912
-        self, output: str, domain: str
-    ) -> None:
+    def _extract_ntlm_hashes_to_state(self, output: str, domain: str) -> None:
         """Extract NTLM hashes from secretsdump output and add to state immediately.
 
         This triggers real-time Redis checkpoint so the orchestrator sees hashes

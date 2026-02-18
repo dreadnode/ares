@@ -140,7 +140,7 @@ def extract_users_from_output(output: str) -> list[str]:
     return users
 
 
-def extract_plaintext_passwords_from_output(output: str) -> list[tuple[str, str]]:  # noqa: PLR0912
+def extract_plaintext_passwords_from_output(output: str) -> list[tuple[str, str]]:
     """Extract username/password pairs from tool output.
 
     Parses patterns containing "Password:" field along with associated usernames.
@@ -216,7 +216,7 @@ def extract_plaintext_passwords_from_output(output: str) -> list[tuple[str, str]
     return creds
 
 
-def extract_shares_from_output(output: str, default_host: str = "") -> list[Share]:  # noqa: PLR0912
+def extract_shares_from_output(output: str, default_host: str = "") -> list[Share]:
     """Extract shares from netexec --shares output.
 
     Parses output like:

@@ -89,7 +89,7 @@ class NetworkEnumerationTools(Toolset):
             return f"[+] WinRM reachable on {target} (ports {ports})"
         return f"[!] WinRM not reachable on {target} (ports 5985/5986 closed)"
 
-    def _extract_users_from_outputs(self, outputs: list[tuple[str, str]]) -> set[str]:  # noqa: PLR0912
+    def _extract_users_from_outputs(self, outputs: list[tuple[str, str]]) -> set[str]:
         users: set[str] = set()
         user_pattern = r"[A-Za-z0-9._$-]+"
 
@@ -189,7 +189,7 @@ class NetworkEnumerationTools(Toolset):
 
         return users
 
-    def _extract_passwords_from_user_enum_output(self, output: str) -> list[tuple[str, str]]:  # noqa: PLR0912
+    def _extract_passwords_from_user_enum_output(self, output: str) -> list[tuple[str, str]]:
         if not output:
             return []
         creds: list[tuple[str, str]] = []
@@ -392,7 +392,7 @@ class NetworkEnumerationTools(Toolset):
         return message
 
     @dn.tool_method
-    def nmap_scan(self, target: str) -> dict[str, Any]:  # noqa: PLR0912
+    def nmap_scan(self, target: str) -> dict[str, Any]:
         """
         Scans target IPs to discover services, ports, and host information.
 
@@ -411,7 +411,7 @@ class NetworkEnumerationTools(Toolset):
             >>> result = nmap_scan("192.168.58.2 192.168.58.3 192.168.58.4")
         """
 
-        def _parse_nmap_hosts(output: str) -> list[Host]:  # noqa: PLR0912
+        def _parse_nmap_hosts(output: str) -> list[Host]:
             hosts: list[Host] = []
             current_ip = ""
             current_hostname = ""
@@ -774,7 +774,7 @@ class NetworkEnumerationTools(Toolset):
             return f"SRV lookup failed: {e!s}"
 
     @dn.tool_method
-    def enumerate_users(self, target: str, username: str, password: str, domain: str = "") -> str:  # noqa: PLR0912
+    def enumerate_users(self, target: str, username: str, password: str, domain: str = "") -> str:
         """
         Enumerate user accounts on a target using netexec (crackmapexec successor).
 
@@ -930,7 +930,7 @@ class NetworkEnumerationTools(Toolset):
             return f"User recon failed for {target}: {e}"
 
     @dn.tool_method
-    def enumerate_shares(  # noqa: PLR0912
+    def enumerate_shares(
         self, target: str, domain: str = "", username: str = "", password: str = ""
     ) -> str:
         """
@@ -1742,7 +1742,7 @@ class BloodHoundTools(Toolset):
         """Set the operation state for this toolset."""
         self.state = state
 
-    def _parse_bloodhound_output(self, raw_output: str) -> dict[str, Any]:  # noqa: PLR0912
+    def _parse_bloodhound_output(self, raw_output: str) -> dict[str, Any]:
         """Parse BloodHound collection output for actionable attack paths.
 
         Returns:
@@ -1911,7 +1911,7 @@ class BloodHoundTools(Toolset):
         return result
 
     @dn.tool_method
-    def run_bloodhound(  # noqa: PLR0912
+    def run_bloodhound(
         self,
         domain: str,
         username: str,

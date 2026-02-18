@@ -971,7 +971,7 @@ class OrchestratorTools(Toolset):
         return result
 
     @dn.tool_method
-    async def cleanup_orphaned_tasks(  # noqa: PLR0912
+    async def cleanup_orphaned_tasks(
         self,
         task_ids: list[str] | None = None,
         force: bool = False,

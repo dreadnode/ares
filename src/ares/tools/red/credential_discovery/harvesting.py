@@ -170,7 +170,7 @@ class CredentialHarvestingTools(Toolset):
         return formatted_output, parsed_hashes, has_krbtgt, has_administrator
 
     @dn.tool_method
-    def secretsdump(  # noqa: PLR0912
+    def secretsdump(
         self,
         target: str,
         username: str,
@@ -383,7 +383,7 @@ class CredentialHarvestingTools(Toolset):
             return f"Kerberoasting failed: {e!s}"
 
     @dn.tool_method
-    def kerberos_user_enum_noauth(  # noqa: PLR0912
+    def kerberos_user_enum_noauth(
         self,
         domain: str,
         dc_ip: str,
@@ -619,7 +619,7 @@ class CredentialHarvestingTools(Toolset):
             return f"AS-REP roasting failed: {e!s}"
 
     @dn.tool_method
-    def lsassy(  # noqa: PLR0912
+    def lsassy(
         self,
         target: str,
         username: str,

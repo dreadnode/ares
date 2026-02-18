@@ -18,7 +18,7 @@ from loguru import logger
 from ares.core.redis_client import create_redis_client
 
 
-async def discover_active_operation(  # noqa: PLR0912
+async def discover_active_operation(
     redis_url: str, max_wait: int | None = None, max_operation_age: int = 300
 ) -> str | None:
     """

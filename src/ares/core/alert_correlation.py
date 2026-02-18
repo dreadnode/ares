@@ -27,7 +27,7 @@ class AlertCluster:
     techniques: set[str] = field(default_factory=set)
     time_range: tuple[datetime, datetime] | None = None
 
-    def add_alert(self, alert: dict) -> None:  # noqa: PLR0912
+    def add_alert(self, alert: dict) -> None:
         """Add an alert to the cluster.
 
         Args:
@@ -79,7 +79,7 @@ class AlertCluster:
             except ValueError:
                 pass
 
-    def similarity_score(self, alert: dict) -> float:  # noqa: PLR0912
+    def similarity_score(self, alert: dict) -> float:
         """Calculate similarity score between this cluster and an alert.
 
         Args:

@@ -80,7 +80,7 @@ def _resolve_model(cli_model: str, *, prefer_orchestrator: bool = False) -> str:
 
 # Cyclopts decorator typing not yet fully supported by type checkers
 @app.default  # type: ignore[untyped-decorator]
-async def main(  # noqa: PLR0912
+async def main(
     *,
     args: Args | None = None,
     dn_args: DreadnodeArgs | None = None,
