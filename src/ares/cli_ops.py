@@ -1273,6 +1273,114 @@ async def report(
         sys.exit(1)
 
 
+@app.command(name="export-detection")
+async def export_detection(
+    operation_id: Annotated[str | None, cyclopts.Parameter(help="Operation ID")] = None,
+    *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Use the latest operation (prefer running)")
+    ] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+    output_dir: Annotated[
+        str, cyclopts.Parameter(help="Output directory (default: ./reports)")
+    ] = "./reports",
+    json_output: Annotated[
+        bool, cyclopts.Parameter(help="Output JSON to stdout instead of files")
+    ] = False,
+    markdown: Annotated[bool, cyclopts.Parameter(help="Also generate markdown report")] = True,
+) -> None:
+    """Export detection playbook for blue team from red team operation.
+
+    Generates actionable detection guidance including:
+    - Specific LogQL queries with IOCs filled in
+    - MITRE technique-specific detection guidance
+    - Priority-ordered detection queries
+    - Time windows for attack activity
+
+    This export is designed for blue team agents and security engineers
+    to build detections based on what the red team actually did.
+
+    Examples:
+        ares-ops export-detection op-20250128-123456
+        ares-ops export-detection --latest
+        ares-ops export-detection --latest --json
+        ares-ops export-detection --latest --output-dir ./detections
+    """
+    import json as json_module
+
+    from ares.eval.detection_playbook import create_detection_playbook
+
+    resolved_redis_url = redis_url or get_redis_url()
+
+    # Resolve operation ID
+    if latest and not operation_id:
+        operation_id = await _resolve_latest_operation(resolved_redis_url)
+        if not operation_id:
+            logger.error("No operations found")
+            sys.exit(1)
+        logger.info(f"Using latest operation: {operation_id}")
+    elif not operation_id:
+        logger.error("Either operation_id or --latest is required")
+        sys.exit(1)
+
+    try:
+        client = await create_redis_client(resolved_redis_url, decode_responses=False)
+        state = await _load_state_from_redis(client, operation_id)
+        await client.aclose()
+
+        if not state:
+            logger.error(f"No state found for operation: {operation_id}")
+            sys.exit(1)
+
+        # Generate the detection playbook
+        playbook = create_detection_playbook(state)
+
+        if json_output:
+            # Output JSON to stdout
+            print(json_module.dumps(playbook.to_dict(), indent=2, default=str))
+        else:
+            # Write to files
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+
+            # Write JSON
+            json_path = output_path / f"{operation_id}_detection_playbook.json"
+            json_content = json_module.dumps(playbook.to_dict(), indent=2, default=str)
+            json_path.write_text(json_content)
+            logger.success(f"Detection playbook JSON: {json_path}")
+
+            # Write markdown if requested
+            if markdown:
+                md_path = output_path / f"{operation_id}_detection_playbook.md"
+                md_path.write_text(playbook.to_markdown())
+                logger.success(f"Detection playbook markdown: {md_path}")
+
+            # Print summary
+            print(f"\nDetection Playbook Summary for {operation_id}")
+            print("=" * 60)
+            print(
+                f"Attack Window: {playbook.attack_window_start.strftime('%Y-%m-%d %H:%M')} to {playbook.attack_window_end.strftime('%Y-%m-%d %H:%M')}"
+            )
+            print(f"Techniques Used: {len(playbook.techniques_used)}")
+            print(f"Priority Queries: {len(playbook.priority_queries)}")
+            print(f"Detection Targets: {len(playbook.detection_targets)}")
+            print(f"Domain Admin Achieved: {'Yes' if playbook.achieved_domain_admin else 'No'}")
+
+            if playbook.priority_queries:
+                print("\nTop Priority Queries:")
+                for i, q in enumerate(playbook.priority_queries[:5], 1):
+                    print(
+                        f"  {i}. [{q.priority.upper()}] {q.technique_id}: {q.description[:50]}..."
+                    )
+
+    except Exception as e:
+        logger.error(f"Failed to export detection playbook: {e}")
+        import traceback
+
+        traceback.print_exc()
+        sys.exit(1)
+
+
 @app.command
 async def tasks(
     operation_id: Annotated[str | None, cyclopts.Parameter(help="Operation ID")] = None,

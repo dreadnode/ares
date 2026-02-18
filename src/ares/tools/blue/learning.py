@@ -341,3 +341,294 @@ class LearningTools(Toolset):  # type: ignore[misc]
             if guidance_parts
             else "Proceed with standard investigation approach."
         )
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def get_attack_playbook(
+        self,
+        operation_id: str | None = None,
+        redis_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Load detection playbook from a red team operation.
+
+        This gives you specific detection guidance based on what the red team
+        actually did during their operation. Use this to build targeted
+        detections for the exact techniques and IOCs discovered.
+
+        Args:
+            operation_id: Red team operation ID. If not provided, uses latest.
+            redis_url: Redis URL for connecting to state backend.
+
+        Returns:
+            Dictionary containing:
+            - attack_window: Start and end times of the attack
+            - techniques_used: MITRE technique IDs used
+            - priority_queries: Top LogQL queries to run (most important first)
+            - detection_targets: IOCs with specific detection guidance
+            - technique_detections: Per-technique detection advice
+        """
+        import os
+
+        from ares.core.redis_client import create_redis_client
+
+        dn.log_metric("learning_playbook_load", 1, mode="count")
+        logger.info(f"Loading attack playbook for operation: {operation_id or 'latest'}")
+
+        # Get Redis URL from environment if not provided
+        effective_redis_url = redis_url or os.environ.get(
+            "ARES_REDIS_URL", "redis://localhost:6379"
+        )
+
+        try:
+            client = await create_redis_client(effective_redis_url, decode_responses=False)
+
+            # Find latest operation if not specified
+            if not operation_id:
+                # Look for most recent operation
+                meta_keys = await client.keys("ares:op:*:meta")
+                if not meta_keys:
+                    await client.aclose()
+                    return {
+                        "found": False,
+                        "error": "No red team operations found in Redis.",
+                    }
+
+                # Parse operation IDs and find most recent
+                latest_op = None
+                for key in meta_keys:
+                    key_str = key.decode() if isinstance(key, bytes) else key
+                    parts = key_str.split(":")
+                    if len(parts) >= 3:
+                        op_id = parts[2]
+                        if not latest_op or op_id > latest_op:
+                            latest_op = op_id
+                operation_id = latest_op
+
+            if not operation_id:
+                await client.aclose()
+                return {"found": False, "error": "Could not determine operation ID."}
+
+            # Load state from Redis
+            from ares.cli_ops import _load_state_from_redis
+
+            state = await _load_state_from_redis(client, operation_id)
+            await client.aclose()
+
+            if not state:
+                return {
+                    "found": False,
+                    "error": f"No state found for operation: {operation_id}",
+                }
+
+            # Generate the detection playbook
+            from ares.eval.detection_playbook import create_detection_playbook
+
+            playbook = create_detection_playbook(state)
+
+            # Return a condensed version suitable for agent consumption
+            return {
+                "found": True,
+                "operation_id": playbook.operation_id,
+                "attack_window": {
+                    "start": playbook.attack_window_start.isoformat(),
+                    "end": playbook.attack_window_end.isoformat(),
+                },
+                "summary": {
+                    "techniques_used": playbook.techniques_used,
+                    "technique_count": len(playbook.techniques_used),
+                    "credentials_compromised": playbook.total_credentials,
+                    "hosts_discovered": playbook.total_hosts,
+                    "domain_admin_achieved": playbook.achieved_domain_admin,
+                },
+                "executive_summary": playbook.executive_summary,
+                # Top 10 priority queries
+                "priority_queries": [
+                    {
+                        "technique": q.technique_id,
+                        "name": q.technique_name,
+                        "description": q.description,
+                        "logql": q.logql,
+                        "priority": q.priority,
+                        "event_ids": q.windows_event_ids,
+                    }
+                    for q in playbook.priority_queries[:10]
+                ],
+                # Detection targets (IOCs)
+                "detection_targets": [
+                    {
+                        "type": t.ioc_type,
+                        "value": t.value,
+                        "pyramid_level": t.pyramid_level,
+                        "context": t.context,
+                        "queries": t.detection_queries[:2],  # Top 2 queries per IOC
+                    }
+                    for t in playbook.detection_targets[:20]  # Limit to 20 IOCs
+                ],
+                "guidance": (
+                    "Run the priority_queries in order. They are sorted by importance. "
+                    "Focus on 'critical' and 'high' priority queries first. "
+                    "Use detection_targets to search for specific IOCs in your logs."
+                ),
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to load attack playbook: {e}")
+            return {
+                "found": False,
+                "error": f"Failed to load playbook: {e!s}",
+            }
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def get_detection_queries_for_technique(
+        self,
+        technique_id: str,
+        operation_id: str | None = None,
+        redis_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Get specific detection queries for a MITRE technique.
+
+        Returns LogQL queries tailored to detect a specific technique,
+        populated with actual IOCs from the red team operation.
+
+        Args:
+            technique_id: MITRE ATT&CK technique ID (e.g., "T1003", "T1558.001")
+            operation_id: Red team operation ID. If not provided, uses latest.
+            redis_url: Redis URL for connecting to state backend.
+
+        Returns:
+            Dictionary with technique-specific detection guidance and queries.
+        """
+        dn.log_metric("learning_technique_queries", 1, mode="count")
+        logger.info(f"Getting detection queries for technique: {technique_id}")
+
+        # Load the full playbook
+        playbook_result = await self.get_attack_playbook(
+            operation_id=operation_id,
+            redis_url=redis_url,
+        )
+
+        if not playbook_result.get("found"):
+            return playbook_result
+
+        # Check if technique was used
+        techniques_used = playbook_result.get("summary", {}).get("techniques_used", [])
+
+        # Try to find exact match or parent match
+        found_technique = None
+        for tech in techniques_used:
+            if tech == technique_id:
+                found_technique = tech
+                break
+            # Check parent/child relationship
+            if "." in technique_id:
+                parent = technique_id.split(".", maxsplit=1)[0]
+                if tech == parent or tech.startswith(f"{technique_id}."):
+                    found_technique = tech
+                    break
+            elif tech.startswith(f"{technique_id}."):
+                found_technique = tech
+                break
+
+        if not found_technique:
+            # Return generic queries for the technique
+            return {
+                "found": True,
+                "technique_used": False,
+                "technique_id": technique_id,
+                "message": (
+                    f"Technique {technique_id} was not explicitly used in operation "
+                    f"{playbook_result['operation_id']}, but here are general detection queries."
+                ),
+                "queries": self._get_generic_queries_for_technique(technique_id),
+            }
+
+        # Find relevant queries from the playbook
+        relevant_queries = [
+            q
+            for q in playbook_result.get("priority_queries", [])
+            if q["technique"] == found_technique
+            or q["technique"].startswith(f"{technique_id}.")
+            or technique_id.startswith(f"{q['technique']}.")
+        ]
+
+        return {
+            "found": True,
+            "technique_used": True,
+            "technique_id": found_technique,
+            "operation_id": playbook_result["operation_id"],
+            "attack_window": playbook_result["attack_window"],
+            "queries": relevant_queries or self._get_generic_queries_for_technique(technique_id),
+            "guidance": (
+                f"Technique {found_technique} was used during the attack. "
+                "Run these queries within the attack window to find evidence."
+            ),
+        }
+
+    def _get_generic_queries_for_technique(self, technique_id: str) -> list[dict[str, Any]]:
+        """Return generic detection queries for common techniques."""
+        generic_queries: dict[str, list[dict[str, Any]]] = {
+            "T1003": [
+                {
+                    "technique": "T1003",
+                    "name": "Credential Dumping",
+                    "logql": '{job="windows-security"} |~ "(?i)(lsass|mimikatz|secretsdump)"',
+                    "priority": "critical",
+                    "event_ids": ["4624", "4672", "10"],
+                },
+            ],
+            "T1078": [
+                {
+                    "technique": "T1078",
+                    "name": "Valid Accounts",
+                    "logql": '{job="windows-security"} |~ "(4624|4625)" |~ "LogonType.*(3|10)"',
+                    "priority": "high",
+                    "event_ids": ["4624", "4625"],
+                },
+            ],
+            "T1558": [
+                {
+                    "technique": "T1558",
+                    "name": "Kerberos Attacks",
+                    "logql": '{job="windows-security"} |~ "(4768|4769)" |~ "(?i)(RC4|0x17)"',
+                    "priority": "critical",
+                    "event_ids": ["4768", "4769"],
+                },
+            ],
+            "T1021": [
+                {
+                    "technique": "T1021",
+                    "name": "Remote Services",
+                    "logql": '{job="windows-security"} |= "4624" |~ "LogonType.*(3|10)"',
+                    "priority": "high",
+                    "event_ids": ["4624"],
+                },
+            ],
+            "T1110": [
+                {
+                    "technique": "T1110",
+                    "name": "Brute Force",
+                    "logql": '{job="windows-security"} |= "4625"',
+                    "priority": "high",
+                    "event_ids": ["4625"],
+                },
+            ],
+        }
+
+        # Try exact match, then parent technique
+        if technique_id in generic_queries:
+            return generic_queries[technique_id]
+
+        parent = technique_id.split(".", maxsplit=1)[0] if "." in technique_id else technique_id
+        if parent in generic_queries:
+            return generic_queries[parent]
+
+        # Default query
+        return [
+            {
+                "technique": technique_id,
+                "name": "Generic Detection",
+                "logql": '{job="windows-security"} |~ "(?i)(4624|4625|4672)"',
+                "priority": "medium",
+                "event_ids": ["4624", "4625", "4672"],
+                "note": f"No specific query template for {technique_id}. Check MITRE ATT&CK for guidance.",
+            },
+        ]
