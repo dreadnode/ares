@@ -301,6 +301,7 @@ async def submit(
         "ARES_AGENT_COERCION_MODEL",
     ]
     env_vars = {name: os.environ.get(name, "") for name in env_var_names if os.environ.get(name)}
+
     if env_vars:
         present_keys = sorted(env_vars.keys())
         logger.info(f"Submitting with env vars: {', '.join(present_keys)}")

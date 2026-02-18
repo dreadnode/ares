@@ -17,7 +17,7 @@ from typing import Any
 
 from loguru import logger
 
-from ares.core.config import get_namespace, get_redis_url
+from ares.core.config import clear_config_cache, get_namespace, get_redis_url
 from ares.core.litellm_env import configure_litellm_env
 from ares.core.models import Credential
 from ares.core.orchestrator import run_multi_agent_operation
@@ -359,7 +359,7 @@ class OrchestratorService:
                 if result:
                     await self._process_operation_request(result)
 
-            except asyncio.TimeoutError:  # noqa: PERF203
+            except asyncio.TimeoutError:
                 # No operation in queue, continue polling
                 continue
             except Exception as e:
@@ -449,7 +449,7 @@ class OrchestratorService:
         except Exception as e:
             logger.warning(f"Failed to persist model overrides for {operation_id}: {e}")
 
-    async def _process_operation_request(self, request_data: dict[str, Any]) -> None:  # noqa: PLR0912
+    async def _process_operation_request(self, request_data: dict[str, Any]) -> None:
         """Process an operation request.
 
         Args:
@@ -482,6 +482,8 @@ class OrchestratorService:
                     if value:  # Only set non-empty values
                         os.environ[key] = value
                         logger.debug(f"Set environment variable: {key}")
+                # Clear config cache so env overrides are applied on next load_config()
+                clear_config_cache()
 
             if request.model:
                 await self._persist_operation_model(request.operation_id, request.model)

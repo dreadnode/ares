@@ -1034,8 +1034,11 @@ class RedisWorkerAgent:
         hash_type = (payload.get("hash_type") or "").upper()
         username = payload.get("username", "")
         domain = payload.get("domain", "")
-        wordlist_path = self._resolve_wordlist_path(
-            payload.get("wordlist") or "/usr/share/wordlists/rockyou.txt"
+        # Only use explicit wordlist if specified; otherwise pass None to use DEFAULT_WORDLISTS
+        # which includes rockyou.txt AND SecLists for better coverage
+        explicit_wordlist = payload.get("wordlist")
+        wordlist_path = (
+            self._resolve_wordlist_path(explicit_wordlist) if explicit_wordlist else None
         )
 
         # Skip if password is already known for this user
