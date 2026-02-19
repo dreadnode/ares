@@ -506,5 +506,356 @@ class TestCrackedHashImmediateDispatch:
         assert len(state.all_credentials) == 0
 
 
+class TestMarkVulnerabilityExploitedDirectPersist:
+    """Tests for mark_vulnerability_exploited direct Redis persist from threaded consumer.
+
+    When mark_vulnerability_exploited is called from a non-main thread (threaded
+    consumer), it should persist directly to Redis using task_queue.redis instead
+    of requesting a checkpoint. This ensures immediate visibility to CLI.
+    """
+
+    @pytest.mark.asyncio
+    async def test_threaded_consumer_persists_directly_to_redis(self):
+        """When called from non-main thread with task_queue, should persist to Redis directly."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-direct-persist")
+        dispatcher._checkpoint_requested = MagicMock()
+        dispatcher._checkpoint_requested.is_set = MagicMock(return_value=False)
+
+        # Create mock task_queue with redis client
+        mock_redis = AsyncMock()
+        mock_task_queue = MagicMock()
+        mock_task_queue.redis = mock_redis
+
+        # Mock RedisStateBackend
+        mock_backend = AsyncMock()
+        mock_backend.mark_exploited = AsyncMock(return_value=True)
+
+        # Simulate being in non-main thread by patching threading.current_thread
+        with patch("ares.core.dispatcher.vulnerability.threading.current_thread") as mock_current:
+            # Return a mock thread that is NOT the main thread
+            mock_current.return_value = MagicMock(name="ResultConsumerThread")
+
+            with patch("ares.core.state_backend.RedisStateBackend") as mock_backend_class:
+                mock_backend_class.return_value = mock_backend
+
+                await dispatcher.mark_vulnerability_exploited(
+                    vuln_id="constrained_delegation_192.168.58.10",
+                    success=True,
+                    result={"output": "Got DA!"},
+                    task_queue=mock_task_queue,
+                )
+
+        # Verify in-memory state was updated
+        assert (
+            "constrained_delegation_192.168.58.10"
+            in dispatcher.shared_state.exploited_vulnerabilities
+        )
+
+    @pytest.mark.asyncio
+    async def test_threaded_consumer_fallback_on_redis_failure(self):
+        """When direct Redis persist fails, should fallback to checkpoint request."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-fallback")
+        dispatcher._checkpoint_requested = MagicMock()
+
+        # Create mock task_queue with redis client that will fail
+        mock_redis = AsyncMock()
+        mock_task_queue = MagicMock()
+        mock_task_queue.redis = mock_redis
+
+        # Mock RedisStateBackend to raise exception
+        mock_backend = AsyncMock()
+        mock_backend.mark_exploited = AsyncMock(side_effect=Exception("Redis connection lost"))
+
+        with patch("ares.core.dispatcher.vulnerability.threading.current_thread") as mock_current:
+            mock_current.return_value = MagicMock(name="ResultConsumerThread")
+
+            with patch("ares.core.state_backend.RedisStateBackend") as mock_backend_class:
+                mock_backend_class.return_value = mock_backend
+
+                await dispatcher.mark_vulnerability_exploited(
+                    vuln_id="esc1_192.168.58.20",
+                    success=True,
+                    result={"output": "Certificate obtained"},
+                    task_queue=mock_task_queue,
+                )
+
+        # Should have requested checkpoint as fallback
+        dispatcher._checkpoint_requested.set.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_threaded_consumer_without_task_queue_requests_checkpoint(self):
+        """When called from non-main thread without task_queue, should request checkpoint."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-no-queue")
+        dispatcher._checkpoint_requested = MagicMock()
+
+        with patch("ares.core.dispatcher.vulnerability.threading.current_thread") as mock_current:
+            mock_current.return_value = MagicMock(name="ResultConsumerThread")
+
+            await dispatcher.mark_vulnerability_exploited(
+                vuln_id="mssql_impersonation_192.168.58.30",
+                success=True,
+                result={"output": "Impersonation successful"},
+                task_queue=None,  # No task queue provided
+            )
+
+        # Should request checkpoint since no task_queue for direct persist
+        dispatcher._checkpoint_requested.set.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_failed_exploit_requests_checkpoint_only(self):
+        """Failed exploitation should only request checkpoint, not direct persist."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-failed")
+        dispatcher._checkpoint_requested = MagicMock()
+
+        mock_task_queue = MagicMock()
+        mock_task_queue.redis = MagicMock()
+
+        with patch("ares.core.dispatcher.vulnerability.threading.current_thread") as mock_current:
+            mock_current.return_value = MagicMock(name="ResultConsumerThread")
+
+            await dispatcher.mark_vulnerability_exploited(
+                vuln_id="esc8_192.168.58.40",
+                success=False,  # Failed exploit
+                result={"error": "Connection refused"},
+                task_queue=mock_task_queue,
+            )
+
+        # Should request checkpoint (failed exploits don't need immediate persist)
+        dispatcher._checkpoint_requested.set.assert_called_once()
+        # Should NOT have added to exploited set
+        assert "esc8_192.168.58.40" not in dispatcher.shared_state.exploited_vulnerabilities
+
+    @pytest.mark.asyncio
+    async def test_main_thread_uses_redis_client_directly(self):
+        """When called from main thread, should use _mark_exploited_in_redis."""
+        import threading
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-main-thread")
+        dispatcher._redis_client = AsyncMock()
+        dispatcher._checkpoint = AsyncMock()
+        dispatcher._mark_exploited_in_redis = AsyncMock()
+        dispatcher._clear_vuln_in_progress = AsyncMock()
+
+        with patch("ares.core.dispatcher.vulnerability.threading.current_thread") as mock_current:
+            mock_current.return_value = threading.main_thread()
+
+            await dispatcher.mark_vulnerability_exploited(
+                vuln_id="unconstrained_192.168.58.50",
+                success=True,
+                result={"output": "Got TGT"},
+                task_queue=MagicMock(),
+            )
+
+        # Should use main thread path (direct Redis calls)
+        dispatcher._mark_exploited_in_redis.assert_called_once()
+        dispatcher._clear_vuln_in_progress.assert_called_once()
+        dispatcher._checkpoint.assert_called_once()
+
+
+class TestDispatcherStopFinalCheckpoint:
+    """Tests for final checkpoint on dispatcher stop.
+
+    When stop() is called, it should persist any pending state (especially
+    exploited_vulnerabilities set by threaded consumer) before cleanup.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stop_performs_final_checkpoint_when_requested(self):
+        """stop() should checkpoint when _checkpoint_requested is set."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-stop-1")
+        dispatcher._running = True
+
+        # Set checkpoint requested (simulates threaded consumer setting it)
+        dispatcher._checkpoint_requested = MagicMock()
+        dispatcher._checkpoint_requested.is_set = MagicMock(return_value=True)
+
+        # Mock cleanup methods
+        dispatcher._checkpoint = AsyncMock()
+        dispatcher._heartbeat_task = None
+        dispatcher._maintenance_task = None
+        dispatcher._task_queue = None
+        dispatcher._stop_threaded_result_consumer = MagicMock()
+        dispatcher._stop_deferred_processor = AsyncMock()
+
+        await dispatcher.stop()
+
+        # Final checkpoint should have been called
+        dispatcher._checkpoint.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_performs_final_checkpoint_with_shared_state(self):
+        """stop() should checkpoint when shared_state exists (even if not explicitly requested)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-stop-2")
+        dispatcher._running = True
+
+        # Checkpoint not explicitly requested, but state exists
+        dispatcher._checkpoint_requested = MagicMock()
+        dispatcher._checkpoint_requested.is_set = MagicMock(return_value=False)
+
+        dispatcher._checkpoint = AsyncMock()
+        dispatcher._heartbeat_task = None
+        dispatcher._maintenance_task = None
+        dispatcher._task_queue = None
+        dispatcher._stop_threaded_result_consumer = MagicMock()
+        dispatcher._stop_deferred_processor = AsyncMock()
+
+        await dispatcher.stop()
+
+        # Final checkpoint should still be called (shared_state truthy)
+        dispatcher._checkpoint.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_handles_checkpoint_failure_gracefully(self):
+        """stop() should continue cleanup even if final checkpoint fails."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-stop-fail")
+        dispatcher._running = True
+
+        dispatcher._checkpoint_requested = MagicMock()
+        dispatcher._checkpoint_requested.is_set = MagicMock(return_value=True)
+
+        # Make checkpoint fail
+        dispatcher._checkpoint = AsyncMock(side_effect=Exception("Redis connection lost"))
+        dispatcher._heartbeat_task = None
+        dispatcher._maintenance_task = None
+        dispatcher._task_queue = None
+        dispatcher._stop_threaded_result_consumer = MagicMock()
+        dispatcher._stop_deferred_processor = AsyncMock()
+
+        # Should not raise
+        await dispatcher.stop()
+
+        # Checkpoint was attempted
+        dispatcher._checkpoint.assert_called_once()
+        # Cleanup should have continued
+        dispatcher._stop_threaded_result_consumer.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_skips_checkpoint_without_state(self):
+        """stop() should skip checkpoint if no shared_state exists."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = None  # No state
+        dispatcher._running = True
+
+        dispatcher._checkpoint_requested = MagicMock()
+        dispatcher._checkpoint_requested.is_set = MagicMock(return_value=False)
+
+        dispatcher._checkpoint = AsyncMock()
+        dispatcher._heartbeat_task = None
+        dispatcher._maintenance_task = None
+        dispatcher._task_queue = None
+        dispatcher._stop_threaded_result_consumer = MagicMock()
+        dispatcher._stop_deferred_processor = AsyncMock()
+
+        await dispatcher.stop()
+
+        # No checkpoint needed without state
+        dispatcher._checkpoint.assert_not_called()
+
+
+class TestResultProcessingPassesTaskQueue:
+    """Tests for result_processing passing task_queue to mark_vulnerability_exploited."""
+
+    @pytest.mark.asyncio
+    async def test_complete_task_passes_task_queue_to_mark_exploited(self):
+        """complete_task should pass task_queue to mark_vulnerability_exploited for exploits."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState, TaskInfo
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-pass-queue")
+        dispatcher._running = True
+        dispatcher._redis_client = AsyncMock()
+
+        # Mock the methods we don't want to actually run
+        dispatcher._persist_completed_task = AsyncMock()
+        dispatcher._auto_chain_s4u_lateral_movement = AsyncMock(return_value=0)
+        dispatcher.mark_vulnerability_exploited = AsyncMock()
+        dispatcher._get_task_info_from_redis = AsyncMock(return_value=None)
+
+        # Create mock task_queue
+        mock_task_queue = MagicMock()
+        mock_task_queue.redis = AsyncMock()
+
+        # Create task info for exploit
+        task_info = TaskInfo(
+            task_id="task-exploit-1",
+            task_type="exploit",
+            assigned_agent="privesc",
+            params={"vuln_id": "constrained_delegation_192.168.58.10"},
+        )
+        dispatcher._shared_state.pending_tasks["task-exploit-1"] = task_info
+
+        # Also need to mock the persist method
+        dispatcher._persist_task_info_to_redis = AsyncMock()
+
+        result = {"output": "Got DA!"}
+
+        await dispatcher.complete_task(
+            task_id="task-exploit-1",
+            success=True,
+            result=result,
+            source_agent="privesc",
+            task_queue=mock_task_queue,
+        )
+
+        # mark_vulnerability_exploited should be called with task_queue
+        dispatcher.mark_vulnerability_exploited.assert_called_once()
+        call_kwargs = dispatcher.mark_vulnerability_exploited.call_args.kwargs
+        assert call_kwargs.get("task_queue") is mock_task_queue
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

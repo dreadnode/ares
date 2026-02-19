@@ -277,6 +277,16 @@ class RedTeamDispatcher(
         """Stop the dispatcher and cleanup resources."""
         self._running = False
 
+        # Final checkpoint to persist any pending state (especially exploited_vulnerabilities)
+        # This MUST happen BEFORE canceling the maintenance task, as checkpoint_requested
+        # may have been set by the threaded consumer but not yet processed
+        if self._checkpoint_requested.is_set() or self._shared_state:
+            try:
+                logger.info("Final checkpoint: persisting pending state before stop")
+                await self._checkpoint()
+            except Exception as e:
+                logger.warning(f"Final checkpoint failed: {e}")
+
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
             try:

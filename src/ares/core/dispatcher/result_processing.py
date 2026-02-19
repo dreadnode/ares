@@ -267,7 +267,9 @@ class ResultProcessingMixin:
             vuln_id = task_params.get("vuln_id", "")
             if vuln_id:
                 result_dict = result if isinstance(result, dict) else {"output": str(result)}
-                await self.mark_vulnerability_exploited(vuln_id, success, result_dict)
+                await self.mark_vulnerability_exploited(
+                    vuln_id, success, result_dict, task_queue=task_queue
+                )
                 if success:
                     logger.info(f"✅ Marked vulnerability {vuln_id} as exploited")
 
