@@ -15,6 +15,7 @@ main-thread checkpoint which may be blocked by LLM API calls.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -151,6 +152,9 @@ class PublishingMixin:
                                     timeout=30.0,
                                 )
                             if task_id:
+                                # Mark as processed to prevent _auto_credential_access from
+                                # dispatching the same delegation check again (duplicate)
+                                self.shared_state.processed_delegation_creds.add(cred_key)
                                 logger.info(
                                     f"🚀 Immediate delegation task {task_id} dispatched for "
                                     f"{credential.domain}\\{credential.username}"
@@ -182,58 +186,7 @@ class PublishingMixin:
                             )
                         except Exception as e:
                             logger.warning(f"Error exploiting delegation with credential: {e}")
-
-                        # IMMEDIATE: Dispatch secretsdump against all DCs
-                        # This saves ~1 minute vs waiting for _auto_credential_access
-                        try:
-                            dc_ips = [h.ip for h in self.shared_state.all_hosts if h.is_dc and h.ip]
-                            if dc_ips:
-                                secretsdump_key = (
-                                    f"{credential.domain}:{credential.username}:secretsdump"
-                                )
-                                if (
-                                    secretsdump_key
-                                    not in self.shared_state.processed_cred_expansion
-                                ):
-                                    if is_threaded:
-                                        sd_task_id = await self.request_credential_access(
-                                            source_agent="orchestrator",
-                                            domain=credential.domain,
-                                            username=credential.username,
-                                            password=credential.password,
-                                            target_ips=dc_ips,
-                                            reason="secretsdump_immediate",
-                                            techniques=["secretsdump"],
-                                            task_queue=effective_task_queue,
-                                        )
-                                    else:
-                                        sd_task_id = await asyncio.wait_for(
-                                            self.request_credential_access(
-                                                source_agent="orchestrator",
-                                                domain=credential.domain,
-                                                username=credential.username,
-                                                password=credential.password,
-                                                target_ips=dc_ips,
-                                                reason="secretsdump_immediate",
-                                                techniques=["secretsdump"],
-                                                task_queue=effective_task_queue,
-                                            ),
-                                            timeout=30.0,
-                                        )
-                                    if sd_task_id:
-                                        self.shared_state.processed_cred_expansion.add(
-                                            secretsdump_key
-                                        )
-                                        logger.info(
-                                            f"🚀 Immediate secretsdump dispatched for "
-                                            f"{credential.domain}\\{credential.username} against {len(dc_ips)} DCs: {sd_task_id}"
-                                        )
-                        except asyncio.TimeoutError:
-                            logger.warning(
-                                f"Timeout dispatching immediate secretsdump for {credential.domain}\\{credential.username}"
-                            )
-                        except Exception as e:
-                            logger.warning(f"Failed to dispatch immediate secretsdump: {e}")
+                        # NOTE: Secretsdump handled by _auto_credential_access (~15s interval, signaled on new creds)
                     else:
                         logger.warning(
                             f"Cannot dispatch delegation enum - no task_queue available: "
@@ -305,6 +258,21 @@ class PublishingMixin:
 
                     backend = RedisStateBackend(task_queue.redis, self.shared_state.operation_id)
                     await backend.add_hash(hash_obj)
+                    # CRITICAL: Also persist DA status if krbtgt hash was found
+                    # add_hash() sets has_domain_admin=True in memory but skips Redis
+                    # persist due to event loop check. We MUST persist DA to Redis here
+                    # so the orchestrator can see it and exit promptly.
+                    if (
+                        hash_obj.username.lower() == "krbtgt"
+                        and (hash_obj.hash_type or "").lower() == "ntlm"
+                        and self.shared_state.has_domain_admin
+                    ):
+                        await backend.set_domain_admin(
+                            achieved=True, path=self.shared_state.domain_admin_path
+                        )
+                        logger.success(
+                            "✅ Domain Admin status persisted directly to Redis (krbtgt found)"
+                        )
                     logger.debug(
                         f"✅ Hash persisted directly to Redis: "
                         f"{hash_obj.domain}\\{hash_obj.username}"
@@ -628,6 +596,8 @@ class PublishingMixin:
                     assigned_agent="lateral",
                     params=payload,
                 )
+                # Write to Redis FIRST (source of truth), then cache in memory
+                await self._persist_task_info_to_redis(task_id, task_info)
                 self.shared_state.pending_tasks[task_id] = task_info
                 dispatched += 1
                 logger.info(
@@ -879,7 +849,7 @@ class PublishingMixin:
 
         payload = {
             "vuln_type": "adcs_enumerate",
-            "vuln_id": f"adcs_enumerate_{target_ip}_{hash(f'{domain}{username}') % 10000:04d}",
+            "vuln_id": f"adcs_enumerate_{target_ip}_{hashlib.md5(f'{domain}{username}'.encode(), usedforsecurity=False).hexdigest()[:4]}",
             "target": target_ip,
             "domain": domain,
             "dc_ip": dc_ip or target_ip,
@@ -915,6 +885,8 @@ class PublishingMixin:
                 assigned_agent="privesc",
                 params=payload,
             )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(task_id, task_info)
             self.shared_state.pending_tasks[task_id] = task_info
 
             logger.info(f"ADCS enumeration task {task_id} submitted to Redis queue for {target_ip}")

@@ -59,8 +59,12 @@ class ResultProcessingMixin:
         # Use atomic pop to avoid TOCTOU race with _cleanup_stale_tasks()
         task_info = self.shared_state.pending_tasks.pop(task_id, None)
         if task_info is None:
-            logger.warning(f"Unknown task: {task_id}")
-            return
+            # Not in memory cache? Read from Redis (source of truth)
+            task_info = await self._get_task_info_from_redis(task_id, task_queue=task_queue)
+            if task_info is None:
+                logger.warning(f"Unknown task: {task_id}")
+                return
+            logger.debug(f"Task {task_id} retrieved from Redis (not in memory cache)")
         was_retry = task_info.status == TaskStatus.RETRYING
 
         # Remove from Redis pending_tasks HASH for immediate consistency
@@ -71,6 +75,15 @@ class ResultProcessingMixin:
                 await self._redis_client.hdel(pending_key, task_id)
             except Exception as e:
                 logger.warning(f"Failed to remove {task_id} from Redis pending_tasks: {e}")
+        elif task_queue is not None:
+            # CRITICAL: Direct Redis removal from threaded consumer using task_queue.redis
+            # The main-thread Redis client is bound to a different event loop
+            try:
+                pending_key = f"ares:op:{self.shared_state.operation_id}:pending_tasks"
+                await task_queue.redis.hdel(pending_key, task_id)
+                logger.debug(f"Removed pending task {task_id} via threaded Redis client")
+            except Exception as e:
+                logger.warning(f"Failed to remove {task_id} from Redis (threaded): {e}")
 
         task_info.status = TaskStatus.COMPLETED if success else TaskStatus.FAILED
         task_info.completed_at = datetime.now(timezone.utc)
@@ -136,6 +149,34 @@ class ResultProcessingMixin:
                 )
             except Exception as e:
                 logger.warning(f"Failed to persist completed task {task_id} to Redis: {e}")
+        elif task_queue is not None:
+            # CRITICAL: Direct Redis persistence from threaded consumer using task_queue.redis
+            # The main-thread Redis client is bound to a different event loop, so we use
+            # task_queue.redis which is owned by the threaded consumer's event loop.
+            # This ensures completed tasks are visible to CLI immediately, not blocked
+            # by LLM API calls on the main thread.
+            try:
+                import json
+
+                completed_key = f"ares:op:{self.shared_state.operation_id}:completed_tasks"
+                result_dict = {
+                    "task_id": task_id,
+                    "success": success,
+                    "result": processed_result,
+                    "error": error,
+                    "completed_at": task_result.completed_at.isoformat(),
+                }
+                await task_queue.redis.hset(
+                    completed_key, task_id, json.dumps(result_dict, default=str)
+                )
+                logger.debug(f"✅ Completed task {task_id} persisted via threaded Redis client")
+            except Exception as e:
+                # Fallback: request checkpoint on main thread
+                logger.warning(
+                    f"Direct Redis persist failed for completed task {task_id}, "
+                    f"falling back to checkpoint: {e}"
+                )
+                self._checkpoint_requested.set()
 
         # Mark targets as scanned after successful nmap recon
         if success and task_info.task_type == "recon":

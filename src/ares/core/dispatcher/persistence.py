@@ -134,27 +134,148 @@ class PersistenceMixin:
         pipe.expire(key, ttl)
         await pipe.execute()
 
-    async def _persist_pending_tasks(self: RedTeamDispatcher, op_id: str, ttl: int) -> None:
-        """Persist pending_tasks to Redis (clear-and-rewrite for consistency)."""
-        pending_key = f"ares:op:{op_id}:pending_tasks"
-        if not self.shared_state.pending_tasks:
-            await self._redis_client.delete(pending_key)
+    def _serialize_task_info(self: RedTeamDispatcher, task_info: TaskInfo) -> str:
+        """Serialize TaskInfo to JSON string for Redis storage."""
+        task_dict: dict[str, Any] = {
+            "task_id": task_info.task_id,
+            "task_type": task_info.task_type,
+            "assigned_agent": task_info.assigned_agent,
+            "status": task_info.status.value,
+            "created_at": task_info.created_at.isoformat(),
+            "last_activity_at": task_info.last_activity_at.isoformat(),
+            "retry_count": task_info.retry_count,
+        }
+        if task_info.started_at:
+            task_dict["started_at"] = task_info.started_at.isoformat()
+        if task_info.params:
+            task_dict["params"] = task_info.params
+        return json.dumps(task_dict)
+
+    async def _persist_task_info_to_redis(
+        self: RedTeamDispatcher,
+        task_id: str,
+        task_info: TaskInfo,
+        task_queue: Any = None,
+    ) -> None:
+        """Persist a single TaskInfo to Redis immediately on dispatch.
+
+        This is called when a task is dispatched to ensure Redis is the source of truth.
+        The in-memory pending_tasks dict becomes a cache.
+
+        Args:
+            task_id: The task ID.
+            task_info: The TaskInfo to persist.
+            task_queue: Optional task queue for threaded consumer (uses task_queue.redis).
+        """
+        if not self.shared_state:
             return
+
+        pending_key = f"ares:op:{self.shared_state.operation_id}:pending_tasks"
+        task_json = self._serialize_task_info(task_info)
+
+        # Determine which Redis client to use
+        redis_client = None
+        if task_queue is not None:
+            # Threaded consumer: use task_queue.redis
+            redis_client = task_queue.redis
+        elif self._redis_client is not None:
+            # Main thread: use dispatcher's Redis client
+            redis_client = self._redis_client
+
+        if redis_client is None:
+            logger.debug(f"No Redis client available to persist task {task_id}")
+            return
+
+        try:
+            await redis_client.hset(pending_key, task_id, task_json)
+            logger.debug(f"Persisted task {task_id} to Redis pending_tasks")
+        except Exception as e:
+            logger.warning(f"Failed to persist task {task_id} to Redis: {e}")
+
+    async def _get_task_info_from_redis(
+        self: RedTeamDispatcher,
+        task_id: str,
+        task_queue: Any = None,
+    ) -> TaskInfo | None:
+        """Retrieve TaskInfo from Redis (fallback when not in memory cache).
+
+        This is called by complete_task() when the task is not found in the
+        in-memory pending_tasks dict. Redis is the source of truth.
+
+        Args:
+            task_id: The task ID to retrieve.
+            task_queue: Optional task queue for threaded consumer (uses task_queue.redis).
+
+        Returns:
+            TaskInfo if found in Redis, None otherwise.
+        """
+        if not self.shared_state:
+            return None
+
+        pending_key = f"ares:op:{self.shared_state.operation_id}:pending_tasks"
+
+        # Determine which Redis client to use
+        redis_client = None
+        if task_queue is not None:
+            # Threaded consumer: use task_queue.redis
+            redis_client = task_queue.redis
+        elif self._redis_client is not None:
+            # Main thread: use dispatcher's Redis client
+            redis_client = self._redis_client
+
+        if redis_client is None:
+            return None
+
+        try:
+            task_data_raw = await redis_client.hget(pending_key, task_id)
+            if not task_data_raw:
+                return None
+
+            data = json.loads(task_data_raw)
+
+            # Parse datetimes
+            created_at = datetime.fromisoformat(data.get("created_at", ""))
+            last_activity_at = datetime.fromisoformat(
+                data.get("last_activity_at", data.get("created_at", ""))
+            )
+            started_at = None
+            if data.get("started_at"):
+                started_at = datetime.fromisoformat(data["started_at"])
+
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type=data.get("task_type", "unknown"),
+                assigned_agent=data.get("assigned_agent", "unknown"),
+                status=TaskStatus(data.get("status", "pending")),
+                created_at=created_at,
+                started_at=started_at,
+                last_activity_at=last_activity_at,
+                retry_count=data.get("retry_count", 0),
+                params=data.get("params", {}),
+            )
+
+            logger.debug(f"Retrieved task {task_id} from Redis (not in memory cache)")
+            return task_info
+
+        except Exception as e:
+            logger.warning(f"Failed to get task {task_id} from Redis: {e}")
+            return None
+
+    async def _persist_pending_tasks(self: RedTeamDispatcher, op_id: str, ttl: int) -> None:
+        """Persist pending_tasks to Redis (additive, no delete).
+
+        CRITICAL: NO DELETE! Tasks are written to Redis immediately on dispatch.
+        Checkpoint is additive to preserve tasks dispatched but not yet in memory.
+        Completed tasks are removed from Redis in complete_task().
+        """
+        if not self.shared_state.pending_tasks:
+            return
+
+        pending_key = f"ares:op:{op_id}:pending_tasks"
         pipe = self._redis_client.pipeline()
-        pipe.delete(pending_key)
+        # NO DELETE - additive HSET preserves tasks already in Redis
         for task_id, task_info in self.shared_state.pending_tasks.items():
-            task_dict = {
-                "task_id": task_info.task_id,
-                "task_type": task_info.task_type,
-                "assigned_agent": task_info.assigned_agent,
-                "status": task_info.status.value,
-                "created_at": task_info.created_at.isoformat(),
-                "last_activity_at": task_info.last_activity_at.isoformat(),
-                "retry_count": task_info.retry_count,
-            }
-            if task_info.started_at:
-                task_dict["started_at"] = task_info.started_at.isoformat()
-            pipe.hset(pending_key, task_id, json.dumps(task_dict))
+            pipe.hset(pending_key, task_id, self._serialize_task_info(task_info))
         pipe.expire(pending_key, ttl)
         await pipe.execute()
 

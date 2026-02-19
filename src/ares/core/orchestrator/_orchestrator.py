@@ -7,6 +7,7 @@ red team operations in a Kubernetes environment.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 from datetime import datetime, timezone
@@ -1761,8 +1762,14 @@ async def _auto_bloodhound(
 
 
 def _make_cred_key(username: str, domain: str, password: str) -> str:
-    """Generate consistent key for credential expansion tracking."""
-    return f"{domain.lower()}:{username.lower()}:{hash(password)}"
+    """Generate consistent key for credential expansion tracking.
+
+    Uses hashlib.md5 instead of Python's hash() because hash() returns
+    different values across Python sessions (randomized since Python 3.3).
+    This caused duplicate dispatches after orchestrator restarts.
+    """
+    pw_hash = hashlib.md5(password.encode(), usedforsecurity=False).hexdigest()[:8]
+    return f"{domain.lower()}:{username.lower()}:{pw_hash}"
 
 
 def _make_hash_key(username: str, domain: str, hash_value: str) -> str:

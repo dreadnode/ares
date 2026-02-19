@@ -409,6 +409,8 @@ class DeferredQueueMixin:
                     params=task.payload,
                     last_activity_at=now,
                 )
+                # Write to Redis FIRST (source of truth), then cache in memory
+                await self._persist_task_info_to_redis(task_id, task_info)
                 self._shared_state.pending_tasks[task_id] = task_info
 
             self._deferred_queue_stats["processed"] += 1

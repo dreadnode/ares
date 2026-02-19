@@ -966,6 +966,8 @@ class MonitoringMixin:
                         params=payload,
                     )
                     if self._shared_state:
+                        # Write to Redis FIRST (source of truth), then cache in memory
+                        await self._persist_task_info_to_redis(task_id, task_info)
                         self._shared_state.pending_tasks[task_id] = task_info
                         logger.info(
                             f"Task {task_id} ({task_type}) submitted from pending dispatch, "

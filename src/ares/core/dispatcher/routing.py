@@ -738,6 +738,10 @@ class RoutingMixin:
                 assigned_agent="cracker",
                 params=payload,
             )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(
+                task_id, task_info, task_queue=effective_task_queue
+            )
             self.shared_state.pending_tasks[task_id] = task_info
 
             logger.info(f"Crack task {task_id} submitted to Redis queue")
@@ -879,6 +883,8 @@ class RoutingMixin:
                 assigned_agent="lateral",
                 params=payload,
             )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(task_id, task_info)
             self.shared_state.pending_tasks[task_id] = task_info
 
             logger.info(f"Lateral movement task {task_id} submitted to Redis queue")
@@ -988,6 +994,8 @@ class RoutingMixin:
                 assigned_agent="acl",
                 params=payload,
             )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(task_id, task_info)
             self.shared_state.pending_tasks[task_id] = task_info
 
             logger.info(f"ACL analysis task {task_id} submitted to Redis queue")
@@ -1120,6 +1128,8 @@ class RoutingMixin:
                 assigned_agent="recon",
                 params=payload,
             )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(task_id, task_info)
             self.shared_state.pending_tasks[task_id] = task_info
 
             cred_label = username or "unauthenticated"
@@ -1233,6 +1243,10 @@ class RoutingMixin:
                 task_type="credential_access",
                 assigned_agent="credential_access",
                 params=payload,
+            )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(
+                task_id, task_info, task_queue=effective_task_queue
             )
             self.shared_state.pending_tasks[task_id] = task_info
 
@@ -1357,6 +1371,8 @@ class RoutingMixin:
         task_info = TaskInfo(
             task_id=task_id, task_type="exploit", assigned_agent="privesc", params=payload
         )
+        # Write to Redis FIRST (source of truth), then cache in memory
+        await self._persist_task_info_to_redis(task_id, task_info, task_queue=effective_task_queue)
         self.shared_state.pending_tasks[task_id] = task_info
         logger.info(f"Exploit task {task_id} for {vuln_type} submitted to Redis queue")
         self._record_exploit_weakness(vuln_type, target, payload)
@@ -1470,6 +1486,10 @@ class RoutingMixin:
                 assigned_agent="privesc",
                 params=payload,
             )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(
+                task_id, task_info, task_queue=effective_task_queue
+            )
             self.shared_state.pending_tasks[task_id] = task_info
 
             logger.info(
@@ -1548,6 +1568,8 @@ class RoutingMixin:
                 assigned_agent="coercion",
                 params=payload,
             )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(task_id, task_info)
             self.shared_state.pending_tasks[task_id] = task_info
 
             logger.info(f"Coercion task {task_id} submitted to Redis queue")
