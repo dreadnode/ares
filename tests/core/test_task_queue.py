@@ -392,6 +392,40 @@ class TestRedisTaskQueueConnectionErrorHandling:
         assert task_queue._connected is True
         assert task_queue._client is not None
 
+    @pytest.mark.asyncio
+    async def test_poll_task_asyncio_timeout_handles_stale_connection(
+        self, task_queue, mock_redis_client
+    ):
+        """Test poll_task handles asyncio.TimeoutError from hung BRPOP.
+
+        This tests the fix for stale Sentinel connections where BRPOP hangs
+        forever on a dead TCP socket. The asyncio.wait_for wrapper should
+        detect this and reset connection state.
+        """
+        import asyncio
+
+        # Simulate a hung BRPOP that never returns (stale connection)
+        async def hung_brpop(*args, **kwargs):
+            await asyncio.sleep(100)  # Would block forever without wait_for
+
+        mock_redis_client.brpop = hung_brpop
+
+        with patch("ares.core.task_queue.invalidate_sentinel_client") as mock_invalidate:
+            # poll_task with timeout=0.1 should trigger asyncio.TimeoutError
+            # after 0.1 + 2.0 = 2.1 seconds, but we mock so it's faster
+            # Actually the wait_for will use timeout + 2.0, so we use a tiny timeout
+            result = await task_queue.poll_task(role="cracker", timeout=0.1)
+
+            # Should return None (not raise) to allow retry
+            assert result is None
+
+            # Connection state should be reset
+            assert task_queue._connected is False
+            assert task_queue._client is None
+
+            # Sentinel client should be invalidated for fresh DNS resolution
+            mock_invalidate.assert_called_once()
+
 
 class TestRedisTaskQueueKeyGeneration:
     """Tests for queue key generation methods."""

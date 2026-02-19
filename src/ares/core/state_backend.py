@@ -12,7 +12,7 @@ Key design decisions:
 - Domain controller and NetBIOS maps use Redis HASH
 
 Redis key structure:
-    ares:op:{op_id}:credentials       LIST
+    ares:op:{op_id}:credentials       HASH (dedup_key -> JSON) - additive, no DELETE
     ares:op:{op_id}:hashes            HASH (dedup_key -> JSON)
     ares:op:{op_id}:hosts             LIST
     ares:op:{op_id}:users             LIST
@@ -127,42 +127,96 @@ class RedisStateBackend:
         await self._redis.expire(key, self.DEFAULT_TTL)
 
     # =========================================================================
-    # Credentials
+    # Credentials (Redis HASH with HSETNX for O(1) deduplication)
     # =========================================================================
 
     async def add_credential(self, cred: Credential) -> bool:
-        """Add a credential to Redis LIST.
+        """Add a credential to Redis HASH with O(1) deduplication via HSETNX.
 
-        Note: Deduplication should be done by the caller (SharedRedTeamState.add_credential)
-        before calling this method, as it requires checking against existing credentials.
+        Deduplication key: {domain}:{username}:{password} (case-insensitive)
+        This ensures the same credential isn't stored twice.
 
         Args:
             cred: Credential to add
 
         Returns:
-            True if added successfully
+            True if added (new), False if duplicate
         """
         key = self._key(self.KEY_CREDENTIALS)
         try:
+            dedup_field = self._build_credential_dedup_key(cred)
             data = _serialize_credential(cred)
-            await self._redis.rpush(key, data)
+            # HSETNX returns 1 if field was set (new), 0 if already existed
+            added = await self._redis.hsetnx(key, dedup_field, data)
+            if not added:
+                logger.debug(f"Credential rejected (duplicate): {dedup_field}")
+                return False
             await self._set_ttl(key)
             return True
         except Exception as e:
             logger.warning(f"Failed to add credential to Redis: {e}")
             return False
 
+    def _build_credential_dedup_key(self, cred: Credential) -> str:
+        """Build deduplication key for a credential.
+
+        Key format: {domain}:{username}:{password_hash}
+        Using password hash (first 16 chars) to keep keys shorter while still deduping.
+
+        Args:
+            cred: Credential object
+
+        Returns:
+            Deduplication key string
+        """
+        import hashlib
+
+        domain = (cred.domain or "").strip().lower()
+        username = (cred.username or "").strip().lower()
+        # Hash password to keep key shorter and avoid special chars
+        # MD5 is fine here - not used for security, just deduplication
+        password = cred.password or ""
+        password_hash = hashlib.md5(password.encode(), usedforsecurity=False).hexdigest()[:16]
+        return f"cred:{domain}:{username}:{password_hash}"
+
     async def get_credentials(self) -> list[Credential]:
-        """Get all credentials from Redis LIST.
+        """Get all credentials from Redis HASH.
+
+        Includes fallback for legacy LIST format to support operations that were
+        in-progress during deployment. Legacy LIST credentials are migrated to HASH
+        on first read.
 
         Returns:
             List of Credential objects
         """
-
         key = self._key(self.KEY_CREDENTIALS)
         try:
-            items = await self._redis.lrange(key, 0, -1)
-            return [_deserialize_credential(item) for item in items]
+            # Try HASH format first (new format)
+            items = await self._redis.hgetall(key)
+            if items:
+                # Values are the serialized Credential objects, keys are dedup keys (ignored)
+                return [_deserialize_credential(v) for v in items.values()]
+
+            # Fallback: check for legacy LIST format (pre-migration operations)
+            key_type = await self._redis.type(key)
+            if key_type == "list" or (isinstance(key_type, bytes) and key_type == b"list"):
+                legacy_items = await self._redis.lrange(key, 0, -1)
+                if legacy_items:
+                    logger.info(
+                        f"Migrating {len(legacy_items)} credentials from LIST to HASH format"
+                    )
+                    credentials = [_deserialize_credential(item) for item in legacy_items]
+                    # Migrate to HASH format (delete LIST, write as HASH)
+                    pipe = self._redis.pipeline()
+                    pipe.delete(key)
+                    for cred in credentials:
+                        dedup_key = self._build_credential_dedup_key(cred)
+                        pipe.hset(key, dedup_key, _serialize_credential(cred))
+                    pipe.expire(key, self.DEFAULT_TTL)
+                    await pipe.execute()
+                    return credentials
+
+            return []
         except Exception as e:
             logger.warning(f"Failed to get credentials from Redis: {e}")
             return []
@@ -1391,7 +1445,7 @@ class RedisStateBackend:
         """
         try:
             key = f"{self._key_prefix}:report"
-            await self._redis.set(key, report_markdown, ex=self._ttl)
+            await self._redis.set(key, report_markdown, ex=self.DEFAULT_TTL)
             logger.info(
                 f"Stored report for operation {self._operation_id} ({len(report_markdown)} bytes)"
             )

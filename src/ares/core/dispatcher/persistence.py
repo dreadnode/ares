@@ -46,6 +46,36 @@ class PersistenceMixin:
         pipe.expire(key, ttl)
         await pipe.execute()
 
+    async def _persist_credentials(
+        self: RedTeamDispatcher,
+        key: str,
+        credentials: list[Any],
+        serializer: Callable[[Any], str],
+        ttl: int,
+    ) -> None:
+        """Persist credentials to Redis HASH using HSET (additive, no delete).
+
+        Uses dedup key {domain}:{username}:{password_hash} to prevent duplicates.
+        HSET is idempotent so no DELETE needed - same credential overwrites itself.
+
+        CRITICAL: NO DELETE! Workers persist directly to Redis, orchestrator's
+        in-memory state may not have worker credentials yet. DELETE would wipe them.
+        """
+        if not credentials:
+            return
+
+        from ares.core.state_backend import RedisStateBackend
+
+        backend = RedisStateBackend(self._redis_client, self.shared_state.operation_id)
+
+        pipe = self._redis_client.pipeline()
+        # NO DELETE - additive HSET preserves worker-persisted credentials
+        for cred in credentials:
+            dedup_key = backend._build_credential_dedup_key(cred)
+            pipe.hset(key, dedup_key, serializer(cred))
+        pipe.expire(key, ttl)
+        await pipe.execute()
+
     async def _persist_hashes(
         self: RedTeamDispatcher,
         key: str,
@@ -53,7 +83,13 @@ class PersistenceMixin:
         serializer: Callable[[Any], str],
         ttl: int,
     ) -> None:
-        """Persist hashes to Redis HASH using clear-and-rewrite with dedup keys."""
+        """Persist hashes to Redis HASH using HSET (additive, no delete).
+
+        Uses dedup key to prevent duplicates. HSET is idempotent so no DELETE needed.
+
+        CRITICAL: NO DELETE! Workers persist directly to Redis, orchestrator's
+        in-memory state may not have worker hashes yet. DELETE would wipe them.
+        """
         if not hashes:
             return
 
@@ -63,7 +99,7 @@ class PersistenceMixin:
         backend = RedisStateBackend(self._redis_client, self.shared_state.operation_id)
 
         pipe = self._redis_client.pipeline()
-        pipe.delete(key)
+        # NO DELETE - additive HSET preserves worker-persisted hashes
         for h in hashes:
             hash_type = (h.hash_type or "").strip().lower()
             hash_value = h.hash_value or ""
@@ -173,7 +209,9 @@ class PersistenceMixin:
             await self._persist_collection(
                 f"ares:op:{op_id}:shares", self.shared_state.all_shares, _serialize_share, ttl
             )
-            await self._persist_collection(
+
+            # Persist credentials using HASH (additive, no delete - preserves worker data)
+            await self._persist_credentials(
                 f"ares:op:{op_id}:credentials",
                 self.shared_state.all_credentials,
                 _serialize_credential,
@@ -212,6 +250,9 @@ class PersistenceMixin:
             await backend.set_meta("has_golden_ticket", value=self.shared_state.has_golden_ticket)
             if self.shared_state.domain_admin_path:
                 await backend.set_meta("domain_admin_path", self.shared_state.domain_admin_path)
+            # Persist completed_at timestamp (set in-memory when DA achieved via add_hash)
+            if self.shared_state.completed_at:
+                await backend.set_meta("completed_at", self.shared_state.completed_at.isoformat())
 
             # Persist task tracking state
             await self._persist_pending_tasks(op_id, ttl)

@@ -1133,3 +1133,86 @@ class TestNmapPrerequisiteForRecon:
         second_call = mock_task_queue.submit_task.call_args_list[1]
         enum_payload = second_call.kwargs.get("payload") or second_call[1].get("payload")
         assert enum_payload["reason"] == "share_enumeration"
+
+
+class TestEnrichDelegationPayload:
+    """Tests for _enrich_delegation_payload target_ip resolution."""
+
+    def test_target_ip_resolved_from_spn(self):
+        """target_ip should be resolved from target_spn via known hosts."""
+        from ares.core.models import Credential, Host
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(
+            operation_id="test-op",
+            all_hosts=[
+                Host(ip="192.168.58.10", hostname="dc01.contoso.local"),
+                Host(ip="192.168.58.20", hostname="sql01.contoso.local"),
+            ],
+            all_credentials=[
+                Credential(
+                    username="svc_backup",
+                    password="P@ssw0rd!",  # pragma: allowlist secret
+                    domain="contoso.local",
+                )
+            ],
+        )
+
+        payload = {
+            "target": "svc_backup",  # username, not IP!
+            "target_spn": "cifs/dc01.contoso.local",
+            "account_name": "svc_backup",
+            "domain": "contoso.local",
+        }
+
+        dispatcher._enrich_delegation_payload(payload, "constrained_delegation")
+
+        # target_ip should be resolved from SPN, not from 'target' (username)
+        assert payload.get("target_ip") == "192.168.58.10"
+        assert payload.get("password") == "P@ssw0rd!"  # pragma: allowlist secret
+
+    def test_target_ip_not_overwritten_if_already_set(self):
+        """target_ip should not be overwritten if already present in payload."""
+        from ares.core.models import Host
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(
+            operation_id="test-op",
+            all_hosts=[
+                Host(ip="192.168.58.10", hostname="dc01.contoso.local"),
+            ],
+        )
+
+        payload = {
+            "target": "svc_backup",
+            "target_spn": "cifs/dc01.contoso.local",
+            "target_ip": "192.168.58.99",  # Already set to different IP
+            "domain": "contoso.local",
+        }
+
+        dispatcher._enrich_delegation_payload(payload, "constrained_delegation")
+
+        # Should keep existing target_ip
+        assert payload["target_ip"] == "192.168.58.99"
+
+    def test_target_ip_not_resolved_for_non_delegation(self):
+        """target_ip resolution should only apply to delegation vulns."""
+        from ares.core.models import Host
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(
+            operation_id="test-op",
+            all_hosts=[
+                Host(ip="192.168.58.10", hostname="dc01.contoso.local"),
+            ],
+        )
+
+        payload = {
+            "target": "svc_backup",
+            "target_spn": "cifs/dc01.contoso.local",
+        }
+
+        dispatcher._enrich_delegation_payload(payload, "mssql_impersonation")
+
+        # Should not set target_ip for non-delegation vuln types
+        assert "target_ip" not in payload

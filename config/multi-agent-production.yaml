@@ -267,13 +267,15 @@ phase_detection:
 # Prevents context window exhaustion in long-running operations
 context_management:
   # Trigger conversation summarization when orchestrator exceeds this token count
-  # Set to ~85% of model context window to leave room for response
-  max_context_tokens: 100000
+  # Lowered from 100k to 50k to prevent 3.6M+ token accumulation over operations
+  max_context_tokens: 50000
   # Keep this many recent messages after summarization
-  min_messages_to_keep: 10
+  # Increased from 10 to 15 to retain more context when summarizing earlier
+  min_messages_to_keep: 15
   # Truncate task outputs to this size in broadcasts to orchestrator
   # Structured discoveries are preserved; only raw output is truncated
-  max_output_chars: 2000
+  # Increased from 2000 to 3000 for better output visibility
+  max_output_chars: 3000
 
 # Vulnerability priorities (lower = higher priority)
 # NOTE: constrained_delegation gets boosted to priority 2 dynamically when

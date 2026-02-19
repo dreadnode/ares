@@ -599,7 +599,7 @@ class MonitoringMixin:
                         data, source_agent, task_queue=None
                     )
                 elif discovery_type == "hash":
-                    await self._process_realtime_hash_discovery(data, source_agent)
+                    await self._process_realtime_hash_discovery(data, source_agent, task_queue=None)
                 elif discovery_type == "vulnerability":
                     await self._process_realtime_vulnerability_discovery(data, source_agent)
                 else:
@@ -673,7 +673,7 @@ class MonitoringMixin:
         logger.info(f"📡 Real-time credential: {domain}\\{username}")
 
     async def _process_realtime_hash_discovery(
-        self: RedTeamDispatcher, data: dict, source_agent: str
+        self: RedTeamDispatcher, data: dict, source_agent: str, task_queue: Any = None
     ) -> None:
         """Process a real-time hash discovery."""
         from ares.core.models import Hash
@@ -694,8 +694,8 @@ class MonitoringMixin:
             source=f"realtime:{source_agent}",
         )
 
-        # publish_hash handles deduplication and DA detection
-        await self.publish_hash(hash_obj, source_agent)
+        # publish_hash handles deduplication, DA detection, and immediate crack dispatch
+        await self.publish_hash(hash_obj, source_agent, task_queue=task_queue)
         logger.info(f"📡 Real-time hash: {domain}\\{username} ({hash_type})")
 
     async def _process_realtime_vulnerability_discovery(
@@ -779,8 +779,10 @@ class MonitoringMixin:
         consecutive_failures = 0
         checkpoint_interval = 10  # seconds
         health_log_interval = 30  # seconds
+        connection_check_interval = 15  # seconds - check Redis health frequently
         last_checkpoint = 0.0
         last_health_log = 0.0
+        last_connection_check = 0.0
 
         while self._running:
             try:
@@ -791,6 +793,17 @@ class MonitoringMixin:
                 await self._reconcile_tasks_with_workers()
 
                 now = time.monotonic()
+
+                # Check Redis connection health to detect stale Sentinel connections
+                # This catches issues when Sentinel pods restart with new IPs
+                if now - last_connection_check >= connection_check_interval and self._task_queue:
+                    try:
+                        ping_ok = await self._task_queue.ping_or_reconnect(timeout=5.0)
+                        if not ping_ok:
+                            logger.warning("Redis connection was stale, reconnected successfully")
+                    except Exception as e:
+                        logger.error(f"Redis connection health check failed: {e}")
+                    last_connection_check = now
 
                 # Log throttle health periodically (uses Redis, must run on main loop)
                 if now - last_health_log >= health_log_interval:
@@ -1317,7 +1330,9 @@ class MonitoringMixin:
                         data, source_agent, task_queue=task_queue
                     )
                 elif discovery_type == "hash":
-                    await self._process_realtime_hash_discovery(data, source_agent)
+                    await self._process_realtime_hash_discovery(
+                        data, source_agent, task_queue=task_queue
+                    )
                 elif discovery_type == "vulnerability":
                     await self._process_realtime_vulnerability_discovery(
                         data, source_agent, task_queue=task_queue

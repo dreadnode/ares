@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import socket
 import threading
+import time
 from typing import Any
 
 from loguru import logger
@@ -32,6 +33,13 @@ from ares.core.config import get_redis_url
 # the event loop that created them. The threaded result consumer creates a new
 # event loop, so it needs its own Sentinel client.
 _thread_local = threading.local()
+
+# Sentinel client TTL in seconds - after this time, re-resolve DNS for fresh IPs
+# This handles Sentinel pod restarts that change pod IPs
+# NOTE: This TTL only applies when creating NEW connections. Existing connections
+# via SentinelConnectionPool are NOT affected by this TTL - they use their own
+# internal connection management. Use ping_or_reconnect() for health checks.
+_SENTINEL_CLIENT_TTL = float(os.getenv("REDIS_SENTINEL_CLIENT_TTL", "30"))
 
 
 def _parse_int(value: str | None, default: int) -> int:
@@ -154,8 +162,10 @@ def get_redis_sentinel_config() -> dict[str, Any] | None:
 
 def _get_redis_timeouts() -> tuple[float | None, float | None, float | None]:
     """Get Redis timeout configuration from environment."""
-    # Always use 30s socket timeout - None causes hangs during Redis failover
-    default_socket_timeout = 30.0
+    # Use 10s socket timeout to detect stale connections faster
+    # This is important when Sentinel pods restart with new IPs - the old
+    # connections will hang until socket timeout triggers
+    default_socket_timeout = 10.0
     socket_timeout = _parse_optional_float(
         os.getenv("REDIS_SOCKET_TIMEOUT"), default_socket_timeout
     )
@@ -171,11 +181,26 @@ def _get_or_create_sentinel():
     futures are bound to the event loop that created them. When the threaded
     result consumer creates a new event loop, reusing a Sentinel client from
     the main thread causes "Future attached to a different loop" errors.
+
+    The client is cached with a TTL to handle Sentinel pod restarts that change
+    pod IPs. After the TTL expires, we re-resolve DNS to get fresh IPs.
     """
     # Check thread-local storage for existing client
     sentinel_client = getattr(_thread_local, "sentinel_client", None)
+    sentinel_created_at = getattr(_thread_local, "sentinel_created_at", 0)
+
+    # Check if client exists and is still valid (within TTL)
     if sentinel_client is not None:
-        return sentinel_client
+        age = time.monotonic() - sentinel_created_at
+        if age < _SENTINEL_CLIENT_TTL:
+            return sentinel_client
+        # TTL expired - invalidate and recreate with fresh DNS resolution
+        thread_name = threading.current_thread().name
+        logger.info(
+            f"Sentinel client TTL expired for thread '{thread_name}' (age: {age:.1f}s), "
+            f"re-resolving DNS for fresh Sentinel IPs"
+        )
+        _thread_local.sentinel_client = None
 
     try:
         import redis.asyncio as redis_async
@@ -204,10 +229,23 @@ def _get_or_create_sentinel():
         # Note: decode_responses is set per-client, not on Sentinel
     )
 
-    # Store in thread-local storage
+    # Store in thread-local storage with creation timestamp
     _thread_local.sentinel_client = sentinel_client
+    _thread_local.sentinel_created_at = time.monotonic()
 
     return sentinel_client
+
+
+def invalidate_sentinel_client():
+    """Invalidate the cached Sentinel client to force fresh DNS resolution.
+
+    Call this when connection errors suggest Sentinel pods may have restarted.
+    """
+    if hasattr(_thread_local, "sentinel_client"):
+        thread_name = threading.current_thread().name
+        logger.warning(f"Invalidating Sentinel client for thread '{thread_name}'")
+        _thread_local.sentinel_client = None
+        _thread_local.sentinel_created_at = 0
 
 
 async def create_redis_client(

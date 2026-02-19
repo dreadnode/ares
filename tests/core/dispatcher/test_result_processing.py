@@ -159,14 +159,14 @@ class TestMaxOutputCharsConfig:
     """Tests for max_output_chars configuration integration."""
 
     def test_default_max_output_chars(self):
-        """Default max_output_chars should be 2000."""
+        """Default max_output_chars should be 3000 (increased for better output visibility)."""
         from ares.core.config import OperationConfig
 
         config = OperationConfig()
-        assert config.max_output_chars == 2000
+        assert config.max_output_chars == 3000
 
     def test_get_max_output_chars_function(self):
-        """get_max_output_chars returns configured value."""
+        """get_max_output_chars returns configured value (3000 default)."""
         import os
 
         from ares.core.config import clear_config_cache, get_max_output_chars
@@ -175,7 +175,7 @@ class TestMaxOutputCharsConfig:
         with patch.dict(os.environ, clean_env, clear=True):
             clear_config_cache()
             result = get_max_output_chars()
-            assert result == 2000
+            assert result == 3000
 
 
 class TestResultProcessingBroadcast:
@@ -381,6 +381,129 @@ SMB         192.168.58.20   445    WS01      public                          Bas
         # public has no permission
         assert public.permissions == ""
         assert public.comment == "Basic share"
+
+
+class TestCrackedHashImmediateDispatch:
+    """Tests for immediate dispatch when hash is cracked.
+
+    Regression test for bug where add_hash() created credential via add_credential()
+    (state layer), then result_processing called publish_credential() which saw
+    duplicate and skipped immediate dispatch logic.
+
+    Fix: publish_hash() now creates credential via publish_credential() when
+    hash has cracked_password. add_hash() no longer creates credentials.
+    """
+
+    @pytest.mark.asyncio
+    async def test_publish_hash_calls_publish_credential_for_cracked_hash(self):
+        """publish_hash should call publish_credential when hash has cracked_password."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import Hash, SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-cracked-hash")
+        dispatcher._credential_access_event = MagicMock()
+        dispatcher._checkpoint = AsyncMock()
+        dispatcher._immediate_crack_dispatch = AsyncMock()
+
+        # Mock publish_credential to track calls
+        dispatcher.publish_credential = AsyncMock()
+
+        cracked_hash = Hash(
+            username="svc_backup",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            hash_type="NTLM",
+            domain="contoso.local",
+            cracked_password="CrackedPass123!",  # pragma: allowlist secret
+        )
+
+        await dispatcher.publish_hash(cracked_hash, "cracker", task_queue=MagicMock())
+
+        # publish_credential should be called with the cracked credential
+        dispatcher.publish_credential.assert_called_once()
+        call_args = dispatcher.publish_credential.call_args
+        credential = call_args[0][0]
+
+        assert credential.username == "svc_backup"
+        assert credential.password == "CrackedPass123!"  # pragma: allowlist secret
+        assert credential.domain == "contoso.local"
+        assert "cracked:" in credential.source
+
+    @pytest.mark.asyncio
+    async def test_publish_hash_skips_credential_for_uncracked_hash(self):
+        """publish_hash should NOT call publish_credential when hash is not cracked."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import Hash, SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-uncracked-hash")
+        dispatcher._credential_access_event = MagicMock()
+        dispatcher._checkpoint = AsyncMock()
+        dispatcher._immediate_crack_dispatch = AsyncMock()
+        dispatcher.publish_credential = AsyncMock()
+
+        uncracked_hash = Hash(
+            username="svc_backup",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            hash_type="NTLM",
+            domain="contoso.local",
+            cracked_password="",  # Not cracked
+        )
+
+        await dispatcher.publish_hash(uncracked_hash, "secretsdump", task_queue=MagicMock())
+
+        # publish_credential should NOT be called
+        dispatcher.publish_credential.assert_not_called()
+
+        # But _immediate_crack_dispatch should be called to submit crack task
+        dispatcher._immediate_crack_dispatch.assert_called_once()
+
+    def test_add_hash_does_not_create_credential_on_cracked_update(self):
+        """add_hash should NOT create credential when updating with cracked password.
+
+        Credential creation is now handled by publish_hash() which calls
+        publish_credential() for proper immediate dispatch.
+        """
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-cracked-update")
+
+        # Add initial uncracked hash
+        hash1 = Hash(
+            username="svc_backup",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            hash_type="NTLM",
+            domain="contoso.local",
+            cracked_password="",
+        )
+        state.add_hash(hash1, "secretsdump")
+
+        # Verify no credentials yet
+        assert len(state.all_credentials) == 0
+
+        # Now update with cracked password
+        hash2 = Hash(
+            username="svc_backup",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            hash_type="NTLM",
+            domain="contoso.local",
+            cracked_password="CrackedPass123!",  # pragma: allowlist secret
+        )
+        result = state.add_hash(hash2, "cracker")
+
+        # Should return True (updated)
+        assert result is True
+
+        # Hash should be updated
+        assert state.all_hashes[0].cracked_password == "CrackedPass123!"  # pragma: allowlist secret
+
+        # Credential should NOT be created by add_hash
+        # (publish_hash handles this now via publish_credential)
+        assert len(state.all_credentials) == 0
 
 
 if __name__ == "__main__":

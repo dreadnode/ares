@@ -83,23 +83,49 @@ class ResultProcessingMixin:
                 f"success={success}"
             )
 
+        # Offload large outputs to Redis to prevent context bloat
+        # This processes the result dict, truncating large outputs and storing full content
+        # in Redis for later retrieval via retrieve_task_output()
+        processed_result = result
+        if (
+            self._context_offloader is not None
+            and isinstance(result, dict)
+            and not skip_checkpoint  # Skip when in threaded consumer (different event loop)
+        ):
+            try:
+                task_type = task_info.task_type or ""
+                processed_result = await self._context_offloader.process_task_result(
+                    task_id=task_id,
+                    result=result,
+                    task_type=task_type,
+                )
+                if processed_result.get("_full_output_available"):
+                    logger.debug(
+                        f"Offloaded large output for task {task_id} "
+                        f"(threshold: {self._context_offloader.offload_threshold} chars)"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to offload task {task_id} output: {e}")
+                processed_result = result  # Fall back to original
+
         task_result = TaskResult(
             task_id=task_id,
             success=success,
-            result=result,
+            result=processed_result,
             error=error,
         )
         self.shared_state.completed_tasks[task_id] = task_result
 
         # Persist completed task to Redis immediately for deduplication
         # This ensures completed_tasks is available even before next checkpoint
+        # Note: We store processed_result (with large outputs offloaded) to save Redis space
         if self._redis_client is not None and not skip_checkpoint:
             try:
                 completed_key = f"ares:op:{self.shared_state.operation_id}:completed_tasks"
                 result_dict = {
                     "task_id": task_id,
                     "success": success,
-                    "result": result,
+                    "result": processed_result,
                     "error": error,
                     "completed_at": task_result.completed_at.isoformat(),
                 }
@@ -287,7 +313,7 @@ class ResultProcessingMixin:
                     parent_id=parent_credential_id,  # Track attack chain
                     attack_step=parent_attack_step + 1 if parent_credential_id else 0,
                 )
-                await self.publish_hash(hash_obj, source_agent)
+                await self.publish_hash(hash_obj, source_agent, task_queue=task_queue)
                 if hash_obj.cracked_password:
                     logger.debug(
                         f"Creating credential from cracked hash: {hash_obj.domain}\\{hash_obj.username}"
@@ -582,18 +608,10 @@ class ResultProcessingMixin:
                 parent_id=parent_credential_id,
                 attack_step=discovery_step,
             )
-            await self.publish_hash(hash_obj, source_agent)
-            if hash_obj.cracked_password:
-                cracked_cred = Credential(
-                    username=hash_obj.username,
-                    password=hash_obj.cracked_password,
-                    domain=hash_obj.domain,
-                    source=f"hash:{task_id}",
-                    is_admin=False,
-                    parent_id=hash_obj.id,
-                    attack_step=hash_obj.attack_step + 1,
-                )
-                await self.publish_credential(cracked_cred, source_agent, task_queue=task_queue)
+            await self.publish_hash(hash_obj, source_agent, task_queue=task_queue)
+            # NOTE: Credential creation for cracked passwords is now handled by publish_hash()
+            # which calls publish_credential() with the cracked credential. This ensures
+            # immediate dispatch logic (delegation checks, secretsdump) is triggered.
 
         hashes_data = result.get("hashes")
         if isinstance(hashes_data, list):
@@ -609,18 +627,10 @@ class ResultProcessingMixin:
                     parent_id=parent_credential_id,
                     attack_step=discovery_step,
                 )
-                await self.publish_hash(hash_obj, source_agent)
-                if hash_obj.cracked_password:
-                    cracked_cred = Credential(
-                        username=hash_obj.username,
-                        password=hash_obj.cracked_password,
-                        domain=hash_obj.domain,
-                        source=f"hash:{task_id}",
-                        is_admin=False,
-                        parent_id=hash_obj.id,
-                        attack_step=hash_obj.attack_step + 1,
-                    )
-                    await self.publish_credential(cracked_cred, source_agent, task_queue=task_queue)
+                await self.publish_hash(hash_obj, source_agent, task_queue=task_queue)
+                # NOTE: Credential creation for cracked passwords is now handled by publish_hash()
+                # which calls publish_credential() with the cracked credential. This ensures
+                # immediate dispatch logic (delegation checks, secretsdump) is triggered.
 
         # NOTE: share/shares from JSON is NOT processed here.
         # LLM agents parse netexec output non-deterministically. Shares are
@@ -713,7 +723,7 @@ class ResultProcessingMixin:
             if parent_credential_id:
                 hash_obj.parent_id = parent_credential_id
                 hash_obj.attack_step = parent_attack_step + 1
-            await self.publish_hash(hash_obj, source_agent)
+            await self.publish_hash(hash_obj, source_agent, task_queue=task_queue)
 
         # Extract and auto-queue delegation vulnerabilities from findDelegation output
         # Always extract as a backup - dedup handled in _auto_queue_delegation_vulnerabilities

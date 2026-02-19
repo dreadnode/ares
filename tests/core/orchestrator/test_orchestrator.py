@@ -42,9 +42,11 @@ async def test_run_multi_agent_operation_skips_wait_when_completed(monkeypatch):
         exploited_vulnerabilities=[],
         completed_tasks=[],
         pending_tasks={},
+        processed_asrep_domains=set(),  # For immediate AS-REP dispatch
     )
 
     dispatcher = SimpleNamespace(shared_state=shared_state)
+    dispatcher.request_credential_access = AsyncMock(return_value="task-123")
     dispatcher.start = AsyncMock()
     dispatcher.recover_state = AsyncMock(return_value=None)
     dispatcher.register = AsyncMock()
@@ -78,6 +80,7 @@ async def test_run_multi_agent_operation_skips_wait_when_completed(monkeypatch):
     monkeypatch.setattr(orch, "_register_agents", AsyncMock())
     monkeypatch.setattr(orch, "_ensure_required_workers", AsyncMock())
     monkeypatch.setattr(orch, "_prime_operation", AsyncMock())
+    monkeypatch.setattr(orch, "_run_direct_nmap", AsyncMock())
     monkeypatch.setattr(orch, "_create_orchestrator_agent", AsyncMock(return_value=DummyAgent()))
     monkeypatch.setattr(orch, "_build_orchestrator_prompt", lambda **_kwargs: "prompt")
     monkeypatch.setattr(orch, "_log_orchestrator_result", lambda *_args, **_kwargs: None)

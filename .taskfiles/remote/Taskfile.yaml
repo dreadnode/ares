@@ -447,20 +447,20 @@ tasks:
       - |
         echo -e "{{.INFO}} Restarting deployments and statefulsets in {{.K8S_NAMESPACE}}..."
 
-        # Restart worker agents (deployments)
-        kubectl rollout restart deployment -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team 2>/dev/null || true
+        # Restart worker agents (deployments) - exclude orchestrator which has its own restart
+        kubectl rollout restart deployment -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team,ares.dreadnode.io/role!=orchestrator 2>/dev/null || true
 
-        # Restart worker agents (statefulsets)
-        kubectl rollout restart statefulset -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team 2>/dev/null || true
+        # Restart worker agents (statefulsets) - exclude orchestrator
+        kubectl rollout restart statefulset -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team,ares.dreadnode.io/role!=orchestrator 2>/dev/null || true
 
-        # Restart orchestrator (has different label)
+        # Restart orchestrator (separate to avoid double-restart)
         kubectl rollout restart deployment -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator 2>/dev/null || true
 
         echo -e "{{.SUCCESS}} Rollout initiated"
         echo -e "{{.INFO}} Checking worker status..."
 
-        kubectl rollout status deployment -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team --timeout=60s 2>/dev/null || true
-        kubectl rollout status statefulset -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team --timeout=60s 2>/dev/null || true
+        kubectl rollout status deployment -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team,ares.dreadnode.io/role!=orchestrator --timeout=60s 2>/dev/null || true
+        kubectl rollout status statefulset -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team,ares.dreadnode.io/role!=orchestrator --timeout=60s 2>/dev/null || true
 
         echo -e "{{.INFO}} Checking orchestrator status..."
         kubectl rollout status deployment -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator --timeout=60s 2>/dev/null || true

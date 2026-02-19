@@ -976,8 +976,8 @@ def _generate_constrained_delegation_prompt(
     if "/" in target_spn:
         target_hostname = target_spn.split("/", 1)[1]
 
-    # target contains the IP address from the task payload
-    target_ip = payload.get("target_ip", target)
+    # target_ip should be resolved from SPN; fallback to target_hostname (not 'target' which is username)
+    target_ip = payload.get("target_ip") or target_hostname or ""
 
     delegation_prompt = (
         f"**CONSTRAINED DELEGATION EXPLOITATION**\n\n"

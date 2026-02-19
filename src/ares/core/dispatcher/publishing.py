@@ -6,6 +6,10 @@ shared state. Includes MSSQL auto-detection and ADCS enumeration support.
 NOTE: When called from the threaded result consumer (non-main thread), dispatch
 operations are skipped because the task queue is bound to the main event loop.
 The main orchestrator loop handles dispatches through normal processing.
+
+IMPORTANT: Credentials and hashes are persisted directly to Redis when called
+from the threaded consumer (using task_queue.redis) to avoid waiting for the
+main-thread checkpoint which may be blocked by LLM API calls.
 """
 
 from __future__ import annotations
@@ -77,22 +81,35 @@ class PublishingMixin:
             is_main_thread = threading.current_thread() is threading.main_thread()
             if is_main_thread:
                 await self._checkpoint()
+            # CRITICAL: Persist directly to Redis using the threaded consumer's client.
+            # The main-thread checkpoint may be blocked by LLM API calls for minutes,
+            # causing credentials to be stuck in memory and not visible to CLI.
+            elif task_queue is not None:
+                try:
+                    from ares.core.state_backend import RedisStateBackend
+
+                    backend = RedisStateBackend(task_queue.redis, self.shared_state.operation_id)
+                    await backend.add_credential(credential)
+                    logger.info(
+                        f"✅ Credential persisted directly to Redis: "
+                        f"{credential.domain}\\{credential.username}"
+                    )
+                except Exception as e:
+                    # Fallback to checkpoint on failure
+                    logger.warning(f"Direct Redis persist failed, falling back to checkpoint: {e}")
+                    self._checkpoint_requested.set()
             else:
+                # No task_queue available, fall back to checkpoint request
                 self._checkpoint_requested.set()
                 logger.info(
-                    f"⚡ Checkpoint requested for credential: {credential.domain}\\{credential.username}"
+                    f"⚡ Checkpoint requested for credential: "
+                    f"{credential.domain}\\{credential.username}"
                 )
             logger.info(f"Credential published: {credential.domain}\\{credential.username}")
 
-            # Immediate delegation check for high-value credentials (cracked hashes)
-            # Cracked Kerberoast/AS-REP hashes may have constrained delegation rights
-            is_cracked = credential.source and (
-                "cracker" in credential.source.lower()
-                or "cracked" in credential.source.lower()
-                or "kerberoast" in credential.source.lower()
-                or "asrep" in credential.source.lower()
-            )
-            if is_cracked and credential.password and credential.domain:
+            # Immediate actions for ANY credential with password
+            # This includes cracked hashes AND credentials from username_as_password, etc.
+            if credential.password and credential.domain:
                 cred_key = f"{credential.domain.lower()}:{credential.username.lower()}"
                 if cred_key not in self.shared_state.processed_delegation_creds:
                     # Dispatch delegation check directly using effective task queue
@@ -103,7 +120,7 @@ class PublishingMixin:
                     )
                     if effective_task_queue:
                         logger.info(
-                            f"🚀 Immediate delegation check for cracked credential: "
+                            f"🚀 Immediate delegation check for credential: "
                             f"{credential.domain}\\{credential.username}"
                         )
                         try:
@@ -165,6 +182,58 @@ class PublishingMixin:
                             )
                         except Exception as e:
                             logger.warning(f"Error exploiting delegation with credential: {e}")
+
+                        # IMMEDIATE: Dispatch secretsdump against all DCs
+                        # This saves ~1 minute vs waiting for _auto_credential_access
+                        try:
+                            dc_ips = [h.ip for h in self.shared_state.all_hosts if h.is_dc and h.ip]
+                            if dc_ips:
+                                secretsdump_key = (
+                                    f"{credential.domain}:{credential.username}:secretsdump"
+                                )
+                                if (
+                                    secretsdump_key
+                                    not in self.shared_state.processed_cred_expansion
+                                ):
+                                    if is_threaded:
+                                        sd_task_id = await self.request_credential_access(
+                                            source_agent="orchestrator",
+                                            domain=credential.domain,
+                                            username=credential.username,
+                                            password=credential.password,
+                                            target_ips=dc_ips,
+                                            reason="secretsdump_immediate",
+                                            techniques=["secretsdump"],
+                                            task_queue=effective_task_queue,
+                                        )
+                                    else:
+                                        sd_task_id = await asyncio.wait_for(
+                                            self.request_credential_access(
+                                                source_agent="orchestrator",
+                                                domain=credential.domain,
+                                                username=credential.username,
+                                                password=credential.password,
+                                                target_ips=dc_ips,
+                                                reason="secretsdump_immediate",
+                                                techniques=["secretsdump"],
+                                                task_queue=effective_task_queue,
+                                            ),
+                                            timeout=30.0,
+                                        )
+                                    if sd_task_id:
+                                        self.shared_state.processed_cred_expansion.add(
+                                            secretsdump_key
+                                        )
+                                        logger.info(
+                                            f"🚀 Immediate secretsdump dispatched for "
+                                            f"{credential.domain}\\{credential.username} against {len(dc_ips)} DCs: {sd_task_id}"
+                                        )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                f"Timeout dispatching immediate secretsdump for {credential.domain}\\{credential.username}"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to dispatch immediate secretsdump: {e}")
                     else:
                         logger.warning(
                             f"Cannot dispatch delegation enum - no task_queue available: "
@@ -182,6 +251,7 @@ class PublishingMixin:
         hash_obj: Hash,
         source_agent: str,
         priority: int = 5,
+        task_queue: Any = None,
     ) -> bool:
         """
         Broadcast new hash to all agents.
@@ -190,6 +260,7 @@ class PublishingMixin:
             hash_obj: The discovered hash.
             source_agent: Agent that discovered it.
             priority: Priority for cracking (1=krbtgt, 2=admin, 5=normal).
+            task_queue: Optional task queue for threaded dispatch.
 
         Returns:
             True if hash was new and added.
@@ -198,7 +269,8 @@ class PublishingMixin:
 
         if added:
             # Signal credential access - use thread-safe event from non-main thread
-            if threading.current_thread() is threading.main_thread():
+            is_main_thread = threading.current_thread() is threading.main_thread()
+            if is_main_thread:
                 self.signal_credential_access()
             else:
                 # Thread-safe signal - maintenance loop will transfer to asyncio.Event
@@ -222,19 +294,142 @@ class PublishingMixin:
                     mitre_techniques=["T1003"],  # OS Credential Dumping
                 )
             )
-            if threading.current_thread() is threading.main_thread():
+            if is_main_thread:
                 await self._checkpoint()
+            # CRITICAL: Persist directly to Redis using the threaded consumer's client.
+            # The main-thread checkpoint may be blocked by LLM API calls for minutes,
+            # causing hashes to be stuck in memory and not visible to CLI.
+            elif task_queue is not None:
+                try:
+                    from ares.core.state_backend import RedisStateBackend
+
+                    backend = RedisStateBackend(task_queue.redis, self.shared_state.operation_id)
+                    await backend.add_hash(hash_obj)
+                    logger.debug(
+                        f"✅ Hash persisted directly to Redis: "
+                        f"{hash_obj.domain}\\{hash_obj.username}"
+                    )
+                except Exception as e:
+                    # Fallback to checkpoint on failure
+                    logger.warning(
+                        f"Direct Redis persist failed for hash, falling back to checkpoint: {e}"
+                    )
+                    self._checkpoint_requested.set()
             else:
+                # No task_queue available, fall back to checkpoint request
                 self._checkpoint_requested.set()
             logger.info(
                 f"Hash published: {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type})"
             )
+
+            # If hash has cracked password, create credential via publish_credential()
+            # This triggers immediate dispatch (delegation checks, secretsdump, etc.)
+            # IMPORTANT: This is the ONLY place credentials are created for cracked hashes.
+            # add_hash() no longer creates credentials to avoid duplicate detection issues.
+            if hash_obj.cracked_password:
+                cracked_cred = Credential(
+                    username=hash_obj.username,
+                    password=hash_obj.cracked_password,
+                    domain=hash_obj.domain,
+                    source=f"cracked:{hash_obj.hash_type or 'unknown'}",
+                    parent_id=hash_obj.id,
+                    attack_step=(hash_obj.attack_step or 0) + 1,
+                )
+                logger.info(
+                    f"🔓 Hash cracked, publishing credential: {hash_obj.domain}\\{hash_obj.username}"
+                )
+                await self.publish_credential(cracked_cred, source_agent, task_queue=task_queue)
+
+            # IMMEDIATE: Dispatch crack task for crackable hashes
+            # This saves ~30s vs waiting for _auto_crack_dispatch loop
+            if not hash_obj.cracked_password:
+                await self._immediate_crack_dispatch(
+                    hash_obj, source_agent, task_queue, is_main_thread
+                )
         else:
             logger.debug(
                 f"Hash not published (duplicate): {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type})"
             )
 
         return added
+
+    async def _immediate_crack_dispatch(
+        self: RedTeamDispatcher,
+        hash_obj: Hash,
+        source_agent: str,
+        task_queue: Any,
+        is_main_thread: bool,
+    ) -> None:
+        """Dispatch crack task immediately when a new hash is published."""
+        # Build crack key for deduplication (same as _auto_crack_dispatch)
+        crack_key = (
+            f"{(hash_obj.domain or '').lower()}:"
+            f"{hash_obj.username.lower()}:"
+            f"{hash_obj.hash_value[:32]}:"
+            f"{(hash_obj.hash_type or '').upper()}"
+        )
+
+        if crack_key in self.shared_state.processed_crack_requests:
+            return  # Already dispatched
+
+        # Determine priority based on hash type
+        hash_value_lower = hash_obj.hash_value.lower()
+        hash_type_upper = (hash_obj.hash_type or "").upper()
+
+        if "$krb5tgs$" in hash_value_lower or "KERBEROAST" in hash_type_upper:
+            crack_priority = 2  # High priority - service accounts
+        elif "$krb5asrep$" in hash_value_lower or "ASREP" in hash_type_upper:
+            crack_priority = 3  # Medium-high priority
+        else:
+            crack_priority = 5  # Normal priority
+
+        effective_task_queue = task_queue if task_queue is not None else self._task_queue
+        if not effective_task_queue:
+            logger.debug(
+                f"No task queue available for immediate crack dispatch: "
+                f"{hash_obj.domain}\\{hash_obj.username}"
+            )
+            return
+
+        try:
+            if is_main_thread:
+                crack_task_id = await asyncio.wait_for(
+                    self.request_crack(
+                        hash_value=hash_obj.hash_value,
+                        hash_type=hash_obj.hash_type or "unknown",
+                        source_agent="orchestrator",
+                        username=hash_obj.username,
+                        domain=hash_obj.domain or "",
+                        priority=crack_priority,
+                        task_queue=effective_task_queue,
+                    ),
+                    timeout=30.0,
+                )
+            else:
+                crack_task_id = await self.request_crack(
+                    hash_value=hash_obj.hash_value,
+                    hash_type=hash_obj.hash_type or "unknown",
+                    source_agent="orchestrator",
+                    username=hash_obj.username,
+                    domain=hash_obj.domain or "",
+                    priority=crack_priority,
+                    task_queue=effective_task_queue,
+                )
+
+            # Mark as processed to prevent duplicate dispatch from _auto_crack_dispatch
+            self.shared_state.processed_crack_requests.add(crack_key)
+
+            if crack_task_id:
+                logger.info(
+                    f"🔨 Immediate crack dispatched for "
+                    f"{hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type}): {crack_task_id}"
+                )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Timeout dispatching immediate crack for {hash_obj.domain}\\{hash_obj.username}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to dispatch immediate crack: {e}")
 
     async def publish_share(self: RedTeamDispatcher, share: Share, source_agent: str) -> bool:
         """

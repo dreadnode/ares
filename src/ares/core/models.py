@@ -1317,9 +1317,10 @@ class SharedRedTeamState:
 
         Resolution order (first match wins):
         1. Authoritative mapping from AD crossRef objects (netbios_to_fqdn dict)
-        2. Known domains that start with the NetBIOS name
-        3. Existing credentials with matching domain prefix
-        4. Target domain if it matches (fallback)
+        2. Domain controllers keys (FQDNs discovered early via DC enumeration)
+        3. Known domains that start with the NetBIOS name
+        4. Existing credentials with matching domain prefix
+        5. Target domain if it matches (fallback)
 
         Args:
             netbios_name: The NetBIOS domain name (e.g., 'CONTOSO')
@@ -1334,7 +1335,20 @@ class SharedRedTeamState:
         if netbios_lower in self.netbios_to_fqdn:
             return self.netbios_to_fqdn[netbios_lower]
 
-        # 2. Check known domains for a matching FQDN pattern
+        # 2. Check domain_controllers keys (FQDNs discovered early via DC enumeration)
+        # e.g., if netbios="north" and we have domain_controllers["north.sevenkingdoms.local"]
+        matching_dc_domains = [
+            d for d in self.domain_controllers if d.startswith(netbios_lower + ".")
+        ]
+        if matching_dc_domains:
+            # Return the most specific (longest) match
+            fqdn = max(matching_dc_domains, key=len)
+            # Cache this mapping for future lookups
+            self.netbios_to_fqdn[netbios_lower] = fqdn
+            logger.debug(f"NetBIOS resolved via DC: {netbios_lower} -> {fqdn}")
+            return fqdn
+
+        # 3. Check known domains for a matching FQDN pattern
         # Prefer more specific (longer) matches to avoid parent/child domain confusion
         matching_domains = [
             d.lower() for d in self.all_domains if d.lower().startswith(netbios_lower + ".")
@@ -1343,13 +1357,13 @@ class SharedRedTeamState:
             # Return the most specific (longest) match
             return max(matching_domains, key=len)
 
-        # 3. Check existing credentials for a matching FQDN pattern
+        # 4. Check existing credentials for a matching FQDN pattern
         for cred in self.all_credentials:
             cred_domain = (cred.domain or "").lower()
             if cred_domain.startswith(netbios_lower + "."):
                 return cred_domain
 
-        # 4. Check if target.domain starts with the NetBIOS name (least preferred)
+        # 5. Check if target.domain starts with the NetBIOS name (least preferred)
         # This can be wrong in multi-domain forests where target is root but cred is from child
         if self.target and self.target.domain:
             target_domain = self.target.domain.lower()
@@ -2077,17 +2091,14 @@ class SharedRedTeamState:
                         f"Hash updated with cracked password: {domain}\\{username} ({hash_type}) "
                         f"from {source_agent}"
                     )
-                    # Create a credential from the cracked password, linking to parent hash
-                    cracked_cred = Credential(
-                        username=username,
-                        password=hash_obj.cracked_password,
-                        domain=domain,
-                        source=f"cracked:{hash_type}",
-                        parent_id=existing.id,  # Link to the hash that was cracked
-                        attack_step=existing.attack_step + 1,
-                    )
-                    self.add_credential(cracked_cred, source_agent)
-                    # Signal credential access if dispatcher available
+                    # NOTE: Credential creation is handled by publish_hash() in publishing.py,
+                    # which calls publish_credential() to trigger immediate dispatch (delegation
+                    # checks, secretsdump, etc). We don't create credentials here because:
+                    # 1. add_credential() is state-layer only - no immediate dispatch
+                    # 2. The caller (publish_hash) will call publish_credential() which has dispatch logic
+                    # 3. Creating here + caller creating = duplicate, which skips dispatch entirely
+                    #
+                    # Signal credential access if dispatcher available so loops wake up
                     if self._dispatcher:
                         if threading.current_thread() is threading.main_thread():
                             self._dispatcher.signal_credential_access()

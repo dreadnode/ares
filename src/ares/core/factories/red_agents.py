@@ -336,13 +336,16 @@ def create_role_hooks(
     )
 
     async def context_aware_summarize(event: StepStart | GenerationEnd) -> Reaction | None:
-        """Wrap summarize_when_long with logging for observability."""
+        """Wrap summarize_when_long with logging and early warning for observability."""
+        from dreadnode.agent.reactions import RetryWithFeedback
+
         # Log token count on each step start
         if isinstance(event, StepStart):
             last_gen = event.get_latest_event_by_type(GenerationEnd)
             if last_gen and last_gen.usage:
                 tokens = last_gen.usage.input_tokens
                 pct = (tokens / max_tokens) * 100
+
                 if pct >= 80:
                     logger.warning(
                         f"📊 [{log_name}] Context: {tokens:,} / {max_tokens:,} tokens ({pct:.0f}%)"
@@ -350,6 +353,19 @@ def create_role_hooks(
                 elif pct >= 50:
                     logger.info(
                         f"📊 [{log_name}] Context: {tokens:,} / {max_tokens:,} tokens ({pct:.0f}%)"
+                    )
+                # Early warning at 40% - guide LLM to use summary tools
+                # Only apply to orchestrator to avoid disrupting worker task flows
+                elif pct >= 40 and role == AgentRole.ORCHESTRATOR:
+                    logger.info(f"📊 [{log_name}] Context at {pct:.0f}% - suggesting summary tools")
+                    return RetryWithFeedback(
+                        feedback=(
+                            "⚠️ Context usage approaching 50%. To conserve context space:\n"
+                            "• Use get_hash_summary() / get_credential_summary() for status checks\n"
+                            "• Use get_exploitation_status(include_details=False) for counts only\n"
+                            "• Use pagination (limit=30, offset=N) when you need full details\n"
+                            "• Use retrieve_task_output(task_id) to fetch specific offloaded outputs"
+                        )
                     )
 
         # Call the actual summarization hook
