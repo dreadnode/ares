@@ -7,11 +7,16 @@ Run with: uv run python -m ares [OPTIONS]
 import asyncio
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import cyclopts
 import dreadnode as dn
 from loguru import logger
+
+if TYPE_CHECKING:
+    from ares.core.models import InvestigationState
 
 app = cyclopts.App(
     name="ares",
@@ -192,8 +197,10 @@ async def main(
     alert_correlator = AlertCorrelator()
     logger.info("Alert correlation enabled - related alerts will be clustered")
 
-    # Track investigated alerts
+    # Track investigated alerts and states for consolidated report
     investigated_fingerprints: set[str] = set()
+    completed_investigations: list[InvestigationState] = []
+    operation_started_at = datetime.now(timezone.utc)
 
     if args.once:
         logger.info("Processing current alerts once and exiting...")
@@ -254,6 +261,10 @@ async def main(
                         logger.success(f"  Pyramid Level: {result['highest_pyramid_level']}/6")
                         logger.success(f"  Report: {result['report_path']}")
 
+                        # Capture state for consolidated report
+                        if result.get("state"):
+                            completed_investigations.append(result["state"])
+
                     except Exception as e:
                         logger.error(f"Investigation failed: {e}")
 
@@ -279,6 +290,44 @@ async def main(
                 await asyncio.sleep(args.poll_interval)
 
     finally:
+        # Generate consolidated operation report if we have completed investigations
+        if completed_investigations:
+            try:
+                from ares.reports import (
+                    create_operation_from_investigations,
+                    generate_operation_report,
+                )
+
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                operation_id = f"blue-op-{timestamp}"
+
+                operation = create_operation_from_investigations(
+                    investigations=completed_investigations,
+                    operation_id=operation_id,
+                )
+                operation.started_at = operation_started_at
+                operation.completed_at = datetime.now(timezone.utc)
+
+                report_content = generate_operation_report(operation)
+
+                report_filename = f"blueteam-{operation_id}.md"
+                report_path = report_dir / report_filename
+                report_path.write_text(report_content)
+
+                logger.info("")
+                logger.info("=" * 60)
+                logger.success("CONSOLIDATED OPERATION REPORT")
+                logger.success(f"  Operation ID: {operation_id}")
+                logger.success(f"  Investigations: {len(completed_investigations)}")
+                logger.success(f"  Evidence: {len(operation.all_evidence)}")
+                logger.success(f"  Techniques: {len(operation.all_techniques)}")
+                logger.success(f"  Pyramid Level: {operation.highest_pyramid_level}/6")
+                logger.success(f"  Report: {report_path}")
+                logger.info("=" * 60)
+
+            except Exception as e:
+                logger.error(f"Failed to generate consolidated report: {e}")
+
         # Clean up MCP connection on shutdown
         logger.info("Cleaning up connections...")
         await orchestrator._shutdown_mcp()
