@@ -234,10 +234,7 @@ def _optimize_logql_query(query: str) -> tuple[str, bool]:
     if _current_state and _current_state.alert:
         deployment = _current_state.alert.get("labels", {}).get("deployment")
 
-    if deployment:
-        replacement = f'{{deployment="{deployment}"}}'
-    else:
-        replacement = '{job="eventlog"}'
+    replacement = f'{{deployment="{deployment}"}}' if deployment else '{job="eventlog"}'
 
     # Auto-rewrite broad selectors to use specific label
     for pattern in _BROAD_SELECTOR_PATTERNS:
@@ -719,7 +716,7 @@ def create_rate_limited_mcp_tool(
     return rate_limited_wrapper
 
 
-def _compact_loki_result(result: Any) -> Any:
+def _compact_loki_result(result: Any) -> Any:  # noqa: PLR0912
     """Remove redundant data from Loki MCP responses to reduce token usage.
 
     Windows Security Event logs contain the same data three times:
@@ -774,9 +771,7 @@ def _compact_loki_result(result: Any) -> Any:
         event_data_xml = line.get("event_data", "")
         parsed_fields = {}
         if event_data_xml:
-            for match in re.finditer(
-                r"<Data Name='([^']+)'[^>]*>([^<]*)</Data>", event_data_xml
-            ):
+            for match in re.finditer(r"<Data Name='([^']+)'[^>]*>([^<]*)</Data>", event_data_xml):
                 parsed_fields[match.group(1)] = match.group(2)
 
         # Keep all fields EXCEPT the two redundant blobs
