@@ -591,6 +591,7 @@ class MonitoringMixin:
                 discovery_type = discovery.get("type", "")
                 data = discovery.get("data", {})
                 source_agent = discovery.get("source_agent", "unknown")
+                discovery_task_id = discovery.get("task_id")
 
                 if discovery_type == "delegation":
                     await self._process_realtime_delegation_discovery(data, source_agent)
@@ -599,7 +600,9 @@ class MonitoringMixin:
                         data, source_agent, task_queue=None
                     )
                 elif discovery_type == "hash":
-                    await self._process_realtime_hash_discovery(data, source_agent)
+                    await self._process_realtime_hash_discovery(
+                        data, source_agent, task_queue=None, task_id=discovery_task_id
+                    )
                 elif discovery_type == "vulnerability":
                     await self._process_realtime_vulnerability_discovery(data, source_agent)
                 else:
@@ -673,7 +676,11 @@ class MonitoringMixin:
         logger.info(f"📡 Real-time credential: {domain}\\{username}")
 
     async def _process_realtime_hash_discovery(
-        self: RedTeamDispatcher, data: dict, source_agent: str
+        self: RedTeamDispatcher,
+        data: dict,
+        source_agent: str,
+        task_queue: Any = None,
+        task_id: str | None = None,
     ) -> None:
         """Process a real-time hash discovery."""
         from ares.core.models import Hash
@@ -686,16 +693,32 @@ class MonitoringMixin:
         if not username or not hash_value:
             return
 
+        # Fallback to target domain if hash domain is empty
+        # (non-domain-prefixed secretsdump output: "user:rid:lmhash:nthash:::")
+        if not domain and self.shared_state.target and self.shared_state.target.domain:
+            domain = self.shared_state.target.domain
+
+        # Look up parent credential from task params for attack chain tracking
+        parent_credential_id: str | None = None
+        parent_attack_step: int = 0
+        if task_id and self._shared_state:
+            task_info = self._shared_state.pending_tasks.get(task_id)
+            if task_info and task_info.params:
+                parent_credential_id = task_info.params.get("parent_credential_id")
+                parent_attack_step = int(task_info.params.get("parent_attack_step", 0) or 0)
+
         hash_obj = Hash(
             username=username,
             hash_value=hash_value,
             hash_type=hash_type,
             domain=domain,
             source=f"realtime:{source_agent}",
+            parent_id=parent_credential_id,
+            attack_step=parent_attack_step + 1 if parent_credential_id else 0,
         )
 
-        # publish_hash handles deduplication and DA detection
-        await self.publish_hash(hash_obj, source_agent)
+        # publish_hash handles deduplication, DA detection, and immediate crack dispatch
+        await self.publish_hash(hash_obj, source_agent, task_queue=task_queue)
         logger.info(f"📡 Real-time hash: {domain}\\{username} ({hash_type})")
 
     async def _process_realtime_vulnerability_discovery(
@@ -779,8 +802,10 @@ class MonitoringMixin:
         consecutive_failures = 0
         checkpoint_interval = 10  # seconds
         health_log_interval = 30  # seconds
+        connection_check_interval = 15  # seconds - check Redis health frequently
         last_checkpoint = 0.0
         last_health_log = 0.0
+        last_connection_check = 0.0
 
         while self._running:
             try:
@@ -791,6 +816,17 @@ class MonitoringMixin:
                 await self._reconcile_tasks_with_workers()
 
                 now = time.monotonic()
+
+                # Check Redis connection health to detect stale Sentinel connections
+                # This catches issues when Sentinel pods restart with new IPs
+                if now - last_connection_check >= connection_check_interval and self._task_queue:
+                    try:
+                        ping_ok = await self._task_queue.ping_or_reconnect(timeout=5.0)
+                        if not ping_ok:
+                            logger.warning("Redis connection was stale, reconnected successfully")
+                    except Exception as e:
+                        logger.error(f"Redis connection health check failed: {e}")
+                    last_connection_check = now
 
                 # Log throttle health periodically (uses Redis, must run on main loop)
                 if now - last_health_log >= health_log_interval:
@@ -953,6 +989,8 @@ class MonitoringMixin:
                         params=payload,
                     )
                     if self._shared_state:
+                        # Write to Redis FIRST (source of truth), then cache in memory
+                        await self._persist_task_info_to_redis(task_id, task_info)
                         self._shared_state.pending_tasks[task_id] = task_info
                         logger.info(
                             f"Task {task_id} ({task_type}) submitted from pending dispatch, "
@@ -1307,6 +1345,7 @@ class MonitoringMixin:
                 discovery_type = discovery.get("type", "")
                 data = discovery.get("data", {})
                 source_agent = discovery.get("source_agent", "unknown")
+                discovery_task_id = discovery.get("task_id")
 
                 if discovery_type == "delegation":
                     await self._process_realtime_delegation_discovery(
@@ -1317,7 +1356,9 @@ class MonitoringMixin:
                         data, source_agent, task_queue=task_queue
                     )
                 elif discovery_type == "hash":
-                    await self._process_realtime_hash_discovery(data, source_agent)
+                    await self._process_realtime_hash_discovery(
+                        data, source_agent, task_queue=task_queue, task_id=discovery_task_id
+                    )
                 elif discovery_type == "vulnerability":
                     await self._process_realtime_vulnerability_discovery(
                         data, source_agent, task_queue=task_queue

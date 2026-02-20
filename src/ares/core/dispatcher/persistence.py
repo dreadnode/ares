@@ -46,6 +46,36 @@ class PersistenceMixin:
         pipe.expire(key, ttl)
         await pipe.execute()
 
+    async def _persist_credentials(
+        self: RedTeamDispatcher,
+        key: str,
+        credentials: list[Any],
+        serializer: Callable[[Any], str],
+        ttl: int,
+    ) -> None:
+        """Persist credentials to Redis HASH using HSET (additive, no delete).
+
+        Uses dedup key {domain}:{username}:{password_hash} to prevent duplicates.
+        HSET is idempotent so no DELETE needed - same credential overwrites itself.
+
+        CRITICAL: NO DELETE! Workers persist directly to Redis, orchestrator's
+        in-memory state may not have worker credentials yet. DELETE would wipe them.
+        """
+        if not credentials:
+            return
+
+        from ares.core.state_backend import RedisStateBackend
+
+        backend = RedisStateBackend(self._redis_client, self.shared_state.operation_id)
+
+        pipe = self._redis_client.pipeline()
+        # NO DELETE - additive HSET preserves worker-persisted credentials
+        for cred in credentials:
+            dedup_key = backend._build_credential_dedup_key(cred)
+            pipe.hset(key, dedup_key, serializer(cred))
+        pipe.expire(key, ttl)
+        await pipe.execute()
+
     async def _persist_hashes(
         self: RedTeamDispatcher,
         key: str,
@@ -53,7 +83,13 @@ class PersistenceMixin:
         serializer: Callable[[Any], str],
         ttl: int,
     ) -> None:
-        """Persist hashes to Redis HASH using clear-and-rewrite with dedup keys."""
+        """Persist hashes to Redis HASH using HSET (additive, no delete).
+
+        Uses dedup key to prevent duplicates. HSET is idempotent so no DELETE needed.
+
+        CRITICAL: NO DELETE! Workers persist directly to Redis, orchestrator's
+        in-memory state may not have worker hashes yet. DELETE would wipe them.
+        """
         if not hashes:
             return
 
@@ -63,7 +99,7 @@ class PersistenceMixin:
         backend = RedisStateBackend(self._redis_client, self.shared_state.operation_id)
 
         pipe = self._redis_client.pipeline()
-        pipe.delete(key)
+        # NO DELETE - additive HSET preserves worker-persisted hashes
         for h in hashes:
             hash_type = (h.hash_type or "").strip().lower()
             hash_value = h.hash_value or ""
@@ -98,27 +134,148 @@ class PersistenceMixin:
         pipe.expire(key, ttl)
         await pipe.execute()
 
-    async def _persist_pending_tasks(self: RedTeamDispatcher, op_id: str, ttl: int) -> None:
-        """Persist pending_tasks to Redis (clear-and-rewrite for consistency)."""
-        pending_key = f"ares:op:{op_id}:pending_tasks"
-        if not self.shared_state.pending_tasks:
-            await self._redis_client.delete(pending_key)
+    def _serialize_task_info(self: RedTeamDispatcher, task_info: TaskInfo) -> str:
+        """Serialize TaskInfo to JSON string for Redis storage."""
+        task_dict: dict[str, Any] = {
+            "task_id": task_info.task_id,
+            "task_type": task_info.task_type,
+            "assigned_agent": task_info.assigned_agent,
+            "status": task_info.status.value,
+            "created_at": task_info.created_at.isoformat(),
+            "last_activity_at": task_info.last_activity_at.isoformat(),
+            "retry_count": task_info.retry_count,
+        }
+        if task_info.started_at:
+            task_dict["started_at"] = task_info.started_at.isoformat()
+        if task_info.params:
+            task_dict["params"] = task_info.params
+        return json.dumps(task_dict)
+
+    async def _persist_task_info_to_redis(
+        self: RedTeamDispatcher,
+        task_id: str,
+        task_info: TaskInfo,
+        task_queue: Any = None,
+    ) -> None:
+        """Persist a single TaskInfo to Redis immediately on dispatch.
+
+        This is called when a task is dispatched to ensure Redis is the source of truth.
+        The in-memory pending_tasks dict becomes a cache.
+
+        Args:
+            task_id: The task ID.
+            task_info: The TaskInfo to persist.
+            task_queue: Optional task queue for threaded consumer (uses task_queue.redis).
+        """
+        if not self.shared_state:
             return
+
+        pending_key = f"ares:op:{self.shared_state.operation_id}:pending_tasks"
+        task_json = self._serialize_task_info(task_info)
+
+        # Determine which Redis client to use
+        redis_client = None
+        if task_queue is not None:
+            # Threaded consumer: use task_queue.redis
+            redis_client = task_queue.redis
+        elif self._redis_client is not None:
+            # Main thread: use dispatcher's Redis client
+            redis_client = self._redis_client
+
+        if redis_client is None:
+            logger.debug(f"No Redis client available to persist task {task_id}")
+            return
+
+        try:
+            await redis_client.hset(pending_key, task_id, task_json)
+            logger.debug(f"Persisted task {task_id} to Redis pending_tasks")
+        except Exception as e:
+            logger.warning(f"Failed to persist task {task_id} to Redis: {e}")
+
+    async def _get_task_info_from_redis(
+        self: RedTeamDispatcher,
+        task_id: str,
+        task_queue: Any = None,
+    ) -> TaskInfo | None:
+        """Retrieve TaskInfo from Redis (fallback when not in memory cache).
+
+        This is called by complete_task() when the task is not found in the
+        in-memory pending_tasks dict. Redis is the source of truth.
+
+        Args:
+            task_id: The task ID to retrieve.
+            task_queue: Optional task queue for threaded consumer (uses task_queue.redis).
+
+        Returns:
+            TaskInfo if found in Redis, None otherwise.
+        """
+        if not self.shared_state:
+            return None
+
+        pending_key = f"ares:op:{self.shared_state.operation_id}:pending_tasks"
+
+        # Determine which Redis client to use
+        redis_client = None
+        if task_queue is not None:
+            # Threaded consumer: use task_queue.redis
+            redis_client = task_queue.redis
+        elif self._redis_client is not None:
+            # Main thread: use dispatcher's Redis client
+            redis_client = self._redis_client
+
+        if redis_client is None:
+            return None
+
+        try:
+            task_data_raw = await redis_client.hget(pending_key, task_id)
+            if not task_data_raw:
+                return None
+
+            data = json.loads(task_data_raw)
+
+            # Parse datetimes
+            created_at = datetime.fromisoformat(data.get("created_at", ""))
+            last_activity_at = datetime.fromisoformat(
+                data.get("last_activity_at", data.get("created_at", ""))
+            )
+            started_at = None
+            if data.get("started_at"):
+                started_at = datetime.fromisoformat(data["started_at"])
+
+            task_info = TaskInfo(
+                task_id=task_id,
+                task_type=data.get("task_type", "unknown"),
+                assigned_agent=data.get("assigned_agent", "unknown"),
+                status=TaskStatus(data.get("status", "pending")),
+                created_at=created_at,
+                started_at=started_at,
+                last_activity_at=last_activity_at,
+                retry_count=data.get("retry_count", 0),
+                params=data.get("params", {}),
+            )
+
+            logger.debug(f"Retrieved task {task_id} from Redis (not in memory cache)")
+            return task_info
+
+        except Exception as e:
+            logger.warning(f"Failed to get task {task_id} from Redis: {e}")
+            return None
+
+    async def _persist_pending_tasks(self: RedTeamDispatcher, op_id: str, ttl: int) -> None:
+        """Persist pending_tasks to Redis (additive, no delete).
+
+        CRITICAL: NO DELETE! Tasks are written to Redis immediately on dispatch.
+        Checkpoint is additive to preserve tasks dispatched but not yet in memory.
+        Completed tasks are removed from Redis in complete_task().
+        """
+        if not self.shared_state.pending_tasks:
+            return
+
+        pending_key = f"ares:op:{op_id}:pending_tasks"
         pipe = self._redis_client.pipeline()
-        pipe.delete(pending_key)
+        # NO DELETE - additive HSET preserves tasks already in Redis
         for task_id, task_info in self.shared_state.pending_tasks.items():
-            task_dict = {
-                "task_id": task_info.task_id,
-                "task_type": task_info.task_type,
-                "assigned_agent": task_info.assigned_agent,
-                "status": task_info.status.value,
-                "created_at": task_info.created_at.isoformat(),
-                "last_activity_at": task_info.last_activity_at.isoformat(),
-                "retry_count": task_info.retry_count,
-            }
-            if task_info.started_at:
-                task_dict["started_at"] = task_info.started_at.isoformat()
-            pipe.hset(pending_key, task_id, json.dumps(task_dict))
+            pipe.hset(pending_key, task_id, self._serialize_task_info(task_info))
         pipe.expire(pending_key, ttl)
         await pipe.execute()
 
@@ -173,7 +330,9 @@ class PersistenceMixin:
             await self._persist_collection(
                 f"ares:op:{op_id}:shares", self.shared_state.all_shares, _serialize_share, ttl
             )
-            await self._persist_collection(
+
+            # Persist credentials using HASH (additive, no delete - preserves worker data)
+            await self._persist_credentials(
                 f"ares:op:{op_id}:credentials",
                 self.shared_state.all_credentials,
                 _serialize_credential,
@@ -208,10 +367,23 @@ class PersistenceMixin:
             # Persist DC map and meta flags
             for domain, dc_ip in self.shared_state.domain_controllers.items():
                 await backend.set_dc(domain, dc_ip)
-            await backend.set_meta("has_domain_admin", value=self.shared_state.has_domain_admin)
-            await backend.set_meta("has_golden_ticket", value=self.shared_state.has_golden_ticket)
+
+            # ADDITIVE pattern: only upgrade False→True, never downgrade
+            # Don't write False (it's the default and can't downgrade from True)
+            if self.shared_state.has_domain_admin:
+                current_da = await backend.get_meta("has_domain_admin", default=False)
+                if not current_da:
+                    await backend.set_meta("has_domain_admin", value=True)
+
+            if self.shared_state.has_golden_ticket:
+                current_gt = await backend.get_meta("has_golden_ticket", default=False)
+                if not current_gt:
+                    await backend.set_meta("has_golden_ticket", value=True)
             if self.shared_state.domain_admin_path:
                 await backend.set_meta("domain_admin_path", self.shared_state.domain_admin_path)
+            # Persist completed_at timestamp (set in-memory when DA achieved via add_hash)
+            if self.shared_state.completed_at:
+                await backend.set_meta("completed_at", self.shared_state.completed_at.isoformat())
 
             # Persist task tracking state
             await self._persist_pending_tasks(op_id, ttl)

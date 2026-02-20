@@ -47,6 +47,9 @@ class CredentialContext:
     impersonation_method: str = ""
     """Method used for impersonation (e.g., 's4u_attack', 'pass_the_ticket')."""
 
+    task_id: str = ""
+    """Current task ID for real-time discovery tracking."""
+
 
 # Thread-local credential context for the current operation
 # Tools can read this to determine parent_id for discoveries
@@ -65,6 +68,7 @@ def set_credential_context(
     source_domain: str = "",
     impersonated_user: str = "",
     impersonation_method: str = "",
+    task_id: str = "",
 ) -> None:
     """Set the current credential context for attack chain tracking.
 
@@ -78,6 +82,7 @@ def set_credential_context(
         source_domain: Domain of credential being used.
         impersonated_user: If impersonating, the target user.
         impersonation_method: Method of impersonation (s4u_attack, etc).
+        task_id: Current task ID for real-time discovery tracking.
     """
     global _credential_context
     _credential_context = CredentialContext(
@@ -87,6 +92,7 @@ def set_credential_context(
         source_domain=source_domain,
         impersonated_user=impersonated_user,
         impersonation_method=impersonation_method,
+        task_id=task_id,
     )
 
 

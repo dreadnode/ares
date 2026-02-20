@@ -11,7 +11,9 @@ import pytest
 
 from ares.core.redis_client import (
     _resolve_sentinel_hosts,
+    _verify_redis_role,
     create_redis_client,
+    create_verified_redis_client,
     get_redis_sentinel_config,
 )
 
@@ -162,7 +164,7 @@ async def test_create_redis_client_uses_sentinel(monkeypatch: pytest.MonkeyPatch
         "password": "redis-pass",  # pragma: allowlist secret
         "db": 1,
         "decode_responses": True,
-        "socket_timeout": 30.0,  # Always 30s to prevent hangs during failover
+        "socket_timeout": 10.0,  # Lowered from 30s for faster detection of stale connections
         "socket_connect_timeout": 5.0,
         "health_check_interval": 10.0,
     }
@@ -181,3 +183,69 @@ async def test_create_redis_client_uses_url(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert client == "url-client"
     asyncio_module.from_url.assert_called_once()
+
+
+class MockRedisClient:
+    """Mock Redis client for testing ROLE verification."""
+
+    def __init__(self, role_response: list[Any] | Exception):
+        self.role_response = role_response
+        self.closed = False
+
+    async def execute_command(self, cmd: str) -> list[Any]:
+        if isinstance(self.role_response, Exception):
+            raise self.role_response
+        return self.role_response
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_verify_redis_role_master() -> None:
+    """Test ROLE verification passes for master."""
+    client = MockRedisClient(["master", 12345, []])
+    assert await _verify_redis_role(client, expected_role="master") is True
+
+
+@pytest.mark.asyncio
+async def test_verify_redis_role_slave() -> None:
+    """Test ROLE verification fails when connected to slave instead of master."""
+    client = MockRedisClient(["slave", "192.168.58.10", 6379, "connected", 12345])
+    assert await _verify_redis_role(client, expected_role="master") is False
+
+
+@pytest.mark.asyncio
+async def test_verify_redis_role_bytes_response() -> None:
+    """Test ROLE verification handles bytes response."""
+    client = MockRedisClient([b"master", 12345, []])
+    assert await _verify_redis_role(client, expected_role="master") is True
+
+
+@pytest.mark.asyncio
+async def test_verify_redis_role_slave_expected() -> None:
+    """Test ROLE verification for slave role."""
+    client = MockRedisClient(["slave", "192.168.58.10", 6379, "connected", 12345])
+    assert await _verify_redis_role(client, expected_role="slave") is True
+
+
+@pytest.mark.asyncio
+async def test_verify_redis_role_error() -> None:
+    """Test ROLE verification handles errors gracefully."""
+    client = MockRedisClient(Exception("Connection error"))
+    assert await _verify_redis_role(client, expected_role="master") is False
+
+
+@pytest.mark.asyncio
+async def test_create_verified_redis_client_no_sentinel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test verified client falls back to regular client when no Sentinel."""
+    asyncio_module = install_dummy_redis(monkeypatch)
+    asyncio_module.Sentinel = DummySentinel
+    asyncio_module.from_url = MagicMock(return_value="url-client")
+
+    monkeypatch.delenv("REDIS_SENTINEL_HOST", raising=False)
+    monkeypatch.delenv("REDIS_SENTINEL_MASTER", raising=False)
+
+    client = await create_verified_redis_client("redis://localhost", decode_responses=True)
+
+    assert client == "url-client"

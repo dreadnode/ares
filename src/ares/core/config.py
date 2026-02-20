@@ -111,12 +111,15 @@ class OperationConfig:
 
     # Context management settings
     # max_context_tokens: Trigger summarization when orchestrator exceeds this
-    # (set to ~85% of model context window to leave room for response)
-    max_context_tokens: int = 100_000
+    # Lowered from 100k to 50k to prevent 3.6M+ token accumulation over operations
+    # Earlier summarization preserves more recent context quality
+    max_context_tokens: int = 50_000
     # min_messages_to_keep: Keep this many recent messages after summarization
-    min_messages_to_keep: int = 10
+    # Increased from 10 to 15 to retain more context when summarizing earlier
+    min_messages_to_keep: int = 15
     # max_output_chars: Truncate task outputs to this size in broadcasts
-    max_output_chars: int = 2000
+    # Increased from 2000 to 3000 for better output visibility
+    max_output_chars: int = 3000
 
     def __post_init__(self) -> None:
         """Derive redis_url from namespace if not explicitly set."""
@@ -387,9 +390,9 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         ),
         min_slots_per_role=phase_detection.get("min_slots_per_role", 1),
         # Context management
-        max_context_tokens=context_management.get("max_context_tokens", 100_000),
-        min_messages_to_keep=context_management.get("min_messages_to_keep", 10),
-        max_output_chars=context_management.get("max_output_chars", 2000),
+        max_context_tokens=context_management.get("max_context_tokens", 50_000),
+        min_messages_to_keep=context_management.get("min_messages_to_keep", 15),
+        max_output_chars=context_management.get("max_output_chars", 3000),
         offload_threshold=context_management.get("offload_threshold", 5000),
         offload_ttl=context_management.get("offload_ttl", 14400),
         # Evidence validation (blue team)

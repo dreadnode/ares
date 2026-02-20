@@ -1062,23 +1062,33 @@ class OrchestratorTools(Toolset):
         return "\n".join(lines)
 
     @dn.tool_method
-    def get_all_credentials(self) -> str:
+    def get_all_credentials(self, limit: int = 30, offset: int = 0) -> str:
         """
-        Get all credentials discovered by any agent.
+        Get all credentials discovered by any agent with pagination.
 
         Returns credentials from the shared state, showing
         which agent discovered each credential.
 
+        For a quick count overview, use get_credential_summary() instead.
+
+        Args:
+            limit: Max credentials to return (default 30)
+            offset: Starting index for pagination
+
         Returns:
             Formatted list of discovered credentials
         """
-        creds = self.shared_state.all_credentials
+        creds = list(self.shared_state.all_credentials)
+        total = len(creds)
 
         if not creds:
             return "No credentials discovered yet"
 
+        # Apply pagination
+        page = creds[offset : offset + limit]
+
         lines = ["🔑 Discovered Credentials:"]
-        for cred in creds:
+        for cred in page:
             username = cred.username.strip()
             if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
                 continue
@@ -1087,29 +1097,81 @@ class OrchestratorTools(Toolset):
             lines.append(f"  • {cred.domain}\\{cred.username}: {auth[:20]}...{admin_tag}")
             lines.append(f"    Source: {cred.source}")
 
-        return "\n".join(lines) if len(lines) > 1 else "No credentials discovered yet"
+        if len(lines) <= 1:
+            return "No credentials discovered yet"
+
+        # Add pagination info
+        if total > offset + limit:
+            lines.append(f"\n[Showing {len(page)}/{total} - use offset={offset + limit} for more]")
+        elif offset > 0:
+            lines.append(f"\n[Showing {len(page)}/{total} from offset {offset}]")
+
+        return "\n".join(lines)
 
     @dn.tool_method
-    def get_all_hashes(self) -> str:
+    def get_credential_summary(self) -> str:
         """
-        Get all hashes discovered by any agent.
+        Get quick summary of credentials (no details shown).
+
+        Use this for status checks. Use get_all_credentials() when you need full details.
+
+        Returns:
+            Brief credential summary with counts
+        """
+        creds = self.shared_state.all_credentials
+
+        if not creds:
+            return "No credentials discovered yet"
+
+        by_domain: dict[str, int] = {}
+        admin_count = 0
+        with_password = 0
+
+        for c in creds:
+            domain = c.domain or "(no domain)"
+            by_domain[domain] = by_domain.get(domain, 0) + 1
+            if c.is_admin:
+                admin_count += 1
+            if c.password:
+                with_password += 1
+
+        domain_str = ", ".join(f"{d}: {n}" for d, n in sorted(by_domain.items()))
+        return (
+            f"Credentials: {len(creds)} total ({with_password} with password, {admin_count} admin)\n"
+            f"By domain: {domain_str}"
+        )
+
+    @dn.tool_method
+    def get_all_hashes(self, limit: int = 30, offset: int = 0) -> str:
+        """
+        Get all hashes discovered by any agent with pagination.
 
         Useful for tracking which hashes need cracking.
         Note: Background automation handles hash cracking automatically.
 
+        For a quick count overview, use get_hash_summary() instead.
+
+        Args:
+            limit: Max hashes to return (default 30)
+            offset: Starting index for pagination
+
         Returns:
             Formatted list of discovered hashes with full hash values
         """
-        hashes = self.shared_state.all_hashes
+        hashes = list(self.shared_state.all_hashes)
+        total = len(hashes)
 
         if not hashes:
             return "No hashes discovered yet"
+
+        # Apply pagination
+        page = hashes[offset : offset + limit]
 
         lines = ["#️⃣ Discovered Hashes:"]
         cracked = 0
         uncracked = 0
 
-        for h in hashes:
+        for h in page:
             status = "✓ CRACKED" if h.cracked_password else "⏳ pending"
             lines.append(f"  • {h.domain}\\{h.username} ({h.hash_type}) [{status}]")
             lines.append(f"    hash_value: {h.hash_value}")
@@ -1119,9 +1181,52 @@ class OrchestratorTools(Toolset):
             else:
                 uncracked += 1
 
-        lines.append(f"\nSummary: {cracked} cracked, {uncracked} pending")
+        # Count totals from full list for accurate summary
+        total_cracked = sum(1 for h in hashes if h.cracked_password)
+        total_uncracked = total - total_cracked
+
+        lines.append(
+            f"\nSummary: {total_cracked} cracked, {total_uncracked} pending (total: {total})"
+        )
+
+        # Add pagination info
+        if total > offset + limit:
+            lines.append(f"[Showing {len(page)}/{total} - use offset={offset + limit} for more]")
+        elif offset > 0:
+            lines.append(f"[Showing {len(page)}/{total} from offset {offset}]")
+
         lines.append("\nNote: Background automation handles cracking automatically.")
         return "\n".join(lines)
+
+    @dn.tool_method
+    def get_hash_summary(self) -> str:
+        """
+        Get quick summary of hash collection status (no hash values shown).
+
+        Use this for status checks. Use get_all_hashes() when you need full details.
+
+        Returns:
+            Brief hash summary with counts by type
+        """
+        hashes = self.shared_state.all_hashes
+
+        if not hashes:
+            return "No hashes discovered yet"
+
+        cracked = 0
+        by_type: dict[str, int] = {}
+
+        for h in hashes:
+            hash_type = h.hash_type or "Unknown"
+            by_type[hash_type] = by_type.get(hash_type, 0) + 1
+            if h.cracked_password:
+                cracked += 1
+
+        type_str = ", ".join(f"{t}: {n}" for t, n in sorted(by_type.items()))
+        return (
+            f"Hashes: {len(hashes)} total, {cracked} cracked, {len(hashes) - cracked} pending\n"
+            f"By type: {type_str}"
+        )
 
     @dn.tool_method
     def get_hash_value(self, username: str, domain: str, hash_type: str = "") -> str:
@@ -1172,7 +1277,7 @@ class OrchestratorTools(Toolset):
         return "\n".join(lines)
 
     @dn.tool_method
-    async def get_exploitation_status(self) -> str:
+    async def get_exploitation_status(self, include_details: bool = True) -> str:
         """
         Get status of discovered vs exploited vulnerabilities.
 
@@ -1180,6 +1285,9 @@ class OrchestratorTools(Toolset):
 
         Note: Results are cached for 30 seconds to prevent polling loops.
         Take action before checking again.
+
+        Args:
+            include_details: If False, return counts only (saves context space)
 
         Returns:
             Formatted vulnerability status
@@ -1195,6 +1303,21 @@ class OrchestratorTools(Toolset):
 
         discovered = self.shared_state.discovered_vulnerabilities
         status = await self.dispatcher.get_exploitation_status()
+
+        # Summary-only mode for context efficiency
+        if not include_details:
+            total_discovered = len(discovered)
+            total_succeeded = status.get("total_succeeded", 0)
+            total_failed = status.get("total_failed", 0)
+            total_pending = total_discovered - total_succeeded - total_failed
+
+            result = (
+                f"🎯 Vulnerability Status: {total_discovered} discovered, "
+                f"{total_succeeded} exploited, {total_failed} failed, {total_pending} pending"
+            )
+            self._exploitation_status_last_check = now
+            self._exploitation_status_cache = result
+            return result
 
         lines = ["🎯 Vulnerability Status:"]
 

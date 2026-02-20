@@ -1027,6 +1027,34 @@ class TestResolveNetBIOSToFQDN:
         # Should prefer the longest match
         assert result == "corp.contoso.local"
 
+    def test_resolves_netbios_from_domain_controllers(self) -> None:
+        """Test that NetBIOS name is resolved using domain_controllers keys."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        # DC discovered early - this is the common case
+        state.domain_controllers = {"north.sevenkingdoms.local": "192.168.58.240"}
+
+        # Should resolve "north" to "north.sevenkingdoms.local"
+        result = state._resolve_netbios_to_fqdn("north")
+        assert result == "north.sevenkingdoms.local"
+        # Should also cache the mapping for future lookups
+        assert state.netbios_to_fqdn["north"] == "north.sevenkingdoms.local"
+
+    def test_domain_controllers_priority_over_target(self) -> None:
+        """Test that domain_controllers takes priority over target.domain."""
+        from ares.core.models import SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        # Target is parent domain
+        state.target = Target(ip="192.168.58.1", domain="sevenkingdoms.local")
+        # But DC for child domain is known
+        state.domain_controllers = {"north.sevenkingdoms.local": "192.168.58.240"}
+
+        # Should prefer domain_controllers over target.domain
+        result = state._resolve_netbios_to_fqdn("north")
+        assert result == "north.sevenkingdoms.local"
+
 
 class TestAddNetBIOSMapping:
     """Tests for SharedRedTeamState.add_netbios_mapping."""

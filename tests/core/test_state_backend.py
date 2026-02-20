@@ -244,7 +244,7 @@ class TestRedisStateBackend:
 
     @pytest.mark.asyncio
     async def test_add_credential(self, backend, mock_redis):
-        """Test adding a credential to Redis."""
+        """Test adding a credential to Redis HASH with HSETNX for deduplication."""
         cred = Credential(
             username="admin",
             password="P@ssw0rd!",  # pragma: allowlist secret
@@ -254,29 +254,78 @@ class TestRedisStateBackend:
         result = await backend.add_credential(cred)
 
         assert result is True
-        mock_redis.rpush.assert_called_once()
-        call_args = mock_redis.rpush.call_args
+        # Credentials now use HSETNX for O(1) deduplication
+        mock_redis.hsetnx.assert_called_once()
+        call_args = mock_redis.hsetnx.call_args
         assert call_args[0][0] == "ares:op:op-test-123:credentials"
-        # Verify it's valid JSON
-        data = json.loads(call_args[0][1])
+        # Second arg is dedup key, third is JSON data
+        data = json.loads(call_args[0][2])
         assert data["username"] == "admin"
 
     @pytest.mark.asyncio
+    async def test_add_credential_duplicate(self, backend, mock_redis):
+        """Test adding a duplicate credential returns False."""
+        mock_redis.hsetnx.return_value = 0  # Already exists
+        cred = Credential(
+            username="admin",
+            password="P@ssw0rd!",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+
+        result = await backend.add_credential(cred)
+
+        assert result is False
+
+    @pytest.mark.asyncio
     async def test_get_credentials(self, backend, mock_redis):
-        """Test getting credentials from Redis."""
-        # Setup mock to return serialized credentials
+        """Test getting credentials from Redis HASH."""
+        # Setup mock to return serialized credentials as HASH values
         cred1 = Credential(username="admin", password="pass1", domain="contoso.local")
         cred2 = Credential(username="svc_sql", password="pass2", domain="contoso.local")
+        # HGETALL returns {field: value, ...}
+        mock_redis.hgetall.return_value = {
+            "cred:contoso.local:admin:abc123": _serialize_credential(cred1),
+            "cred:contoso.local:svc_sql:def456": _serialize_credential(cred2),
+        }
+
+        result = await backend.get_credentials()
+
+        assert len(result) == 2
+        usernames = {r.username for r in result}
+        assert "admin" in usernames
+        assert "svc_sql" in usernames
+
+    @pytest.mark.asyncio
+    async def test_get_credentials_migrates_legacy_list(self, backend, mock_redis):
+        """Test that legacy LIST credentials are migrated to HASH format."""
+        cred1 = Credential(username="admin", password="pass1", domain="contoso.local")
+        cred2 = Credential(username="svc_sql", password="pass2", domain="contoso.local")
+
+        # HASH is empty (no new format data)
+        mock_redis.hgetall.return_value = {}
+        # Key type is LIST (legacy format)
+        mock_redis.type.return_value = "list"
+        # Legacy LIST has credentials
         mock_redis.lrange.return_value = [
             _serialize_credential(cred1),
             _serialize_credential(cred2),
         ]
 
+        # Setup pipeline mock
+        mock_pipe = MagicMock()
+        mock_pipe.delete = MagicMock()
+        mock_pipe.hset = MagicMock()
+        mock_pipe.expire = MagicMock()
+        mock_pipe.execute = AsyncMock()
+        mock_redis.pipeline.return_value = mock_pipe
+
         result = await backend.get_credentials()
 
+        # Should return both credentials
         assert len(result) == 2
-        assert result[0].username == "admin"
-        assert result[1].username == "svc_sql"
+        # Should have migrated (deleted LIST, wrote HASH)
+        mock_pipe.delete.assert_called_once()
+        assert mock_pipe.hset.call_count == 2
 
     @pytest.mark.asyncio
     async def test_add_hash(self, backend, mock_redis):
@@ -467,10 +516,36 @@ class TestRedisStateBackend:
 
         assert result is False
 
+    def test_credential_dedup_key_is_case_insensitive(self, backend):
+        """Test that credential dedup keys are case-insensitive.
+
+        This is important for avoiding duplicate credentials with different casing.
+        """
+        cred1 = Credential(username="Admin", password="pass1", domain="CONTOSO.LOCAL")
+        cred2 = Credential(username="admin", password="pass1", domain="contoso.local")
+
+        key1 = backend._build_credential_dedup_key(cred1)
+        key2 = backend._build_credential_dedup_key(cred2)
+
+        assert key1 == key2  # Same credential regardless of casing
+
+    def test_credential_dedup_key_distinguishes_passwords(self, backend):
+        """Test that credential dedup keys distinguish different passwords.
+
+        Same user with different password is a distinct credential.
+        """
+        cred1 = Credential(username="admin", password="pass1", domain="contoso.local")
+        cred2 = Credential(username="admin", password="pass2", domain="contoso.local")
+
+        key1 = backend._build_credential_dedup_key(cred1)
+        key2 = backend._build_credential_dedup_key(cred2)
+
+        assert key1 != key2  # Different passwords = different credentials
+
     @pytest.mark.asyncio
     async def test_error_handling(self, backend, mock_redis):
         """Test that Redis errors are handled gracefully."""
-        mock_redis.rpush.side_effect = Exception("Connection refused")
+        mock_redis.hsetnx.side_effect = Exception("Connection refused")
 
         cred = Credential(username="admin", password="pass", domain="contoso.local")
         result = await backend.add_credential(cred)

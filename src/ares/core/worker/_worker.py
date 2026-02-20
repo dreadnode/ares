@@ -402,6 +402,13 @@ class RedisWorkerAgent:
                     logger.warning(
                         f"State subscriber thread for {self.agent_name} did not stop gracefully"
                     )
+            # Close state refresh client if it was created
+            if self._state_refresh_client:
+                try:
+                    await self._state_refresh_client.aclose()
+                except Exception:
+                    pass
+                self._state_refresh_client = None
 
     async def stop(self) -> None:
         """Stop the worker loop."""
@@ -529,10 +536,11 @@ class RedisWorkerAgent:
                     attack_step=parent_step,
                     source_username=source_user,
                     source_domain=source_domain,
+                    task_id=task.task_id,
                 )
                 logger.debug(
                     f"Credential context set: parent_id={parent_cred_id}, "
-                    f"step={parent_step}, user={source_domain}\\{source_user}"
+                    f"step={parent_step}, user={source_domain}\\{source_user}, task={task.task_id}"
                 )
 
         try:
@@ -1576,9 +1584,13 @@ class RedisWorkerAgent:
 
                     if is_connection_error:
                         logger.warning(f"Heartbeat connection error, will retry: {e}")
-                        # Mark queue as disconnected to force reconnection
+                        # Close the TaskQueue's internal Redis client before creating new one
                         if heartbeat_queue:
-                            heartbeat_queue._connected = False
+                            try:
+                                loop.run_until_complete(heartbeat_queue.disconnect())
+                            except Exception:
+                                pass
+                            heartbeat_queue = None
                         # Wait with exponential backoff before retry
                         self._heartbeat_stop_event.wait(retry_delay)
                         retry_delay = min(retry_delay * 2, max_retry_delay)
@@ -1675,9 +1687,7 @@ class RedisWorkerAgent:
 
                     if is_connection_error:
                         logger.warning(f"State subscriber connection error, will retry: {e}")
-                        # Mark as disconnected to force reconnection
-                        if subscriber_queue:
-                            subscriber_queue._connected = False
+                        # Close all clients to avoid resource leaks on reconnect
                         if pubsub:
                             try:
                                 loop.run_until_complete(pubsub.aclose())
@@ -1690,6 +1700,13 @@ class RedisWorkerAgent:
                             except Exception:
                                 pass
                             state_client = None
+                        # Close the TaskQueue's internal Redis client before creating new one
+                        if subscriber_queue:
+                            try:
+                                loop.run_until_complete(subscriber_queue.disconnect())
+                            except Exception:
+                                pass
+                            subscriber_queue = None
                         # Wait with exponential backoff before retry
                         self._state_subscriber_stop_event.wait(retry_delay)
                         retry_delay = min(retry_delay * 2, max_retry_delay)

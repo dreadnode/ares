@@ -22,6 +22,7 @@ from ares.core.litellm_env import configure_litellm_env
 from ares.core.models import Credential
 from ares.core.orchestrator import run_multi_agent_operation
 from ares.core.recovery import OperationRecoveryManager
+from ares.core.redis_client import invalidate_sentinel_client
 from ares.core.task_queue import RedisTaskQueue
 
 
@@ -350,21 +351,62 @@ class OrchestratorService:
 
     async def _run_service_loop(self) -> None:
         """Main service loop - poll for operations."""
+        import time
+
+        last_successful_poll = time.monotonic()
+        # If no successful poll for this many seconds, force reconnect
+        # This handles stale Sentinel connections after pod restarts
+        stale_connection_threshold = 30.0
+
         while self.running:
             try:
                 # Block for up to 5 seconds waiting for an operation request
                 # Using BLPOP for blocking pop from list
                 result = await asyncio.wait_for(self._pop_operation_request(), timeout=5.0)
 
+                # Reset the last successful poll time - BLPOP returned (even if None)
+                last_successful_poll = time.monotonic()
+
                 if result:
                     await self._process_operation_request(result)
 
             except asyncio.TimeoutError:
-                # No operation in queue, continue polling
+                # asyncio.wait_for timed out - BLPOP didn't return in time
+                # This could mean the connection is stale (Sentinel pod restarted)
+                elapsed = time.monotonic() - last_successful_poll
+                if elapsed > stale_connection_threshold:
+                    logger.warning(
+                        f"No successful Redis poll for {elapsed:.1f}s, "
+                        f"forcing reconnection (possible Sentinel pod restart)"
+                    )
+                    await self._force_reconnect()
+                    last_successful_poll = time.monotonic()
                 continue
             except Exception as e:
                 logger.error(f"Error in service loop: {e}")
+                # On Redis errors, invalidate Sentinel client and reconnect
+                if "ConnectionError" in str(type(e).__name__) or "Redis" in str(type(e).__name__):
+                    logger.warning("Redis connection error, forcing reconnection")
+                    await self._force_reconnect()
+                    last_successful_poll = time.monotonic()
                 await asyncio.sleep(5)  # Back off on error
+
+    async def _force_reconnect(self) -> None:
+        """Force reconnection to Redis by invalidating cached clients."""
+        # Invalidate the thread-local Sentinel client to force fresh DNS resolution
+        invalidate_sentinel_client()
+
+        # Disconnect and reconnect the task queue
+        if self.task_queue:
+            try:
+                await self.task_queue.disconnect()
+            except Exception as e:
+                logger.debug(f"Error disconnecting task queue: {e}")
+            try:
+                await self.task_queue.connect()
+                logger.info("Reconnected to Redis after forced reconnection")
+            except Exception as e:
+                logger.error(f"Failed to reconnect to Redis: {e}")
 
     async def _pop_operation_request(self) -> dict[str, Any] | None:
         """Pop an operation request from Redis queue.
