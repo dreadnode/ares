@@ -799,6 +799,44 @@ class RedisStateBackend:
         """Get golden ticket status."""
         return await self.get_meta("has_golden_ticket", default=False)
 
+    async def set_golden_ticket_capable_creds(self, creds: dict[str, list[dict]]) -> bool:
+        """Set golden ticket capable credentials.
+
+        Args:
+            creds: Dict mapping "domain:username" to list of capability dicts
+
+        Returns:
+            True if set successfully
+        """
+        return await self.set_meta("golden_ticket_capable_creds", creds)
+
+    async def get_golden_ticket_capable_creds(self) -> dict[str, list[dict]]:
+        """Get golden ticket capable credentials.
+
+        Returns:
+            Dict mapping "domain:username" to list of capability dicts
+        """
+        result = await self.get_meta("golden_ticket_capable_creds", default={})
+        return result if isinstance(result, dict) else {}
+
+    async def add_golden_ticket_capable_cred(self, cred_key: str, capabilities: list[dict]) -> bool:
+        """Add or update a credential's golden ticket capabilities.
+
+        Args:
+            cred_key: "domain:username" key
+            capabilities: List of capability dicts
+
+        Returns:
+            True if updated successfully
+        """
+        try:
+            current = await self.get_golden_ticket_capable_creds()
+            current[cred_key] = capabilities
+            return await self.set_golden_ticket_capable_creds(current)
+        except Exception as e:
+            logger.warning(f"Failed to add golden ticket capable cred {cred_key}: {e}")
+            return False
+
     async def set_completed(self, completed: bool) -> None:
         """Set operation completion status."""
         await self.set_meta("completed", completed)

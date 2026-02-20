@@ -567,8 +567,18 @@ class TestStopOnExternalDomainAdmin:
         return event
 
     @pytest.mark.asyncio
-    async def test_returns_finish_on_step_start_when_da_achieved(self):
+    async def test_returns_finish_on_step_start_when_da_achieved(self, monkeypatch):
         """Test that hook returns Finish on StepStart when has_domain_admin=True."""
+        # Enable stop_on_domain_admin config (required for DA hook to fire)
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_domain_admin",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_golden_ticket",
+            lambda: False,
+        )
+
         shared_state = SharedRedTeamState(operation_id="test-op")
         shared_state.has_domain_admin = True
         shared_state.domain_admin_path = "kerberoast -> secretsdump -> krbtgt"
@@ -594,12 +604,22 @@ class TestStopOnExternalDomainAdmin:
         assert "Domain Admin achieved" in finish_results[0].reason
 
     @pytest.mark.asyncio
-    async def test_returns_finish_on_tool_end_when_da_achieved(self):
+    async def test_returns_finish_on_tool_end_when_da_achieved(self, monkeypatch):
         """Test that hook returns Finish on ToolEnd when has_domain_admin=True.
 
         This is critical for reducing latency - we check DA after every tool
         execution, not just at step boundaries.
         """
+        # Enable stop_on_domain_admin config (required for DA hook to fire)
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_domain_admin",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_golden_ticket",
+            lambda: False,
+        )
+
         shared_state = SharedRedTeamState(operation_id="test-op")
         shared_state.has_domain_admin = True
         shared_state.domain_admin_path = "secretsdump -> krbtgt"
@@ -624,8 +644,18 @@ class TestStopOnExternalDomainAdmin:
         assert "Domain Admin achieved" in finish_results[0].reason
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_da_not_achieved(self):
+    async def test_returns_none_when_da_not_achieved(self, monkeypatch):
         """Test that hook returns None when has_domain_admin=False."""
+        # Enable stop_on_domain_admin config
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_domain_admin",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_golden_ticket",
+            lambda: False,
+        )
+
         shared_state = SharedRedTeamState(operation_id="test-op")
         shared_state.has_domain_admin = False
 
@@ -647,8 +677,18 @@ class TestStopOnExternalDomainAdmin:
                     pass
 
     @pytest.mark.asyncio
-    async def test_only_orchestrator_has_da_stop_hook(self):
+    async def test_only_orchestrator_has_da_stop_hook(self, monkeypatch):
         """Test that only ORCHESTRATOR role has the stop_on_external_domain_admin hook."""
+        # Enable stop_on_domain_admin config
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_domain_admin",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_golden_ticket",
+            lambda: False,
+        )
+
         shared_state = SharedRedTeamState(operation_id="test-op")
         shared_state.has_domain_admin = True
 
@@ -677,3 +717,230 @@ class TestStopOnExternalDomainAdmin:
                     pass
 
             assert finish_count == 0, f"Worker role {role} should not have DA stop hook"
+
+
+class TestStopOnExternalGoldenTicket:
+    """Tests for stop_on_external_golden_ticket hook.
+
+    This hook stops the orchestrator when a Golden Ticket is forged externally
+    (by a worker agent), but only when stop_on_golden_ticket=True in config.
+    """
+
+    def _make_step_start_event(self) -> MagicMock:
+        """Helper to create a mock StepStart event."""
+        return MagicMock(spec=StepStart)
+
+    def _make_tool_end_event(self, tool_name: str = "get_status") -> MagicMock:
+        """Helper to create a mock ToolEnd event."""
+        event = MagicMock(spec=ToolEnd)
+        event.tool_call = MagicMock()
+        event.tool_call.name = tool_name
+        event.message = MagicMock()
+        event.message.content = "OK"
+        return event
+
+    @pytest.mark.asyncio
+    async def test_returns_finish_when_golden_ticket_forged_and_config_enabled(self, monkeypatch):
+        """Test hook returns Finish when has_golden_ticket=True and config enabled."""
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_golden_ticket",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_domain_admin",
+            lambda: False,
+        )
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        shared_state.has_golden_ticket = True
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+        event = self._make_step_start_event()
+
+        finish_results = []
+        for hook in hooks:
+            try:
+                result = await hook(event)
+                if isinstance(result, Finish):
+                    finish_results.append(result)
+            except TypeError:
+                pass
+
+        assert len(finish_results) >= 1, "Should return Finish when GT forged"
+        assert "Golden Ticket" in finish_results[0].reason
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_config_disabled(self, monkeypatch):
+        """Test hook returns None when stop_on_golden_ticket=False."""
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_golden_ticket",
+            lambda: False,
+        )
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_domain_admin",
+            lambda: False,
+        )
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        shared_state.has_golden_ticket = True
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+        event = self._make_step_start_event()
+
+        for hook in hooks:
+            try:
+                result = await hook(event)
+                if isinstance(result, Finish) and "Golden Ticket" in str(result.reason):
+                    pytest.fail("Should not return Finish when config disabled")
+            except TypeError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_golden_ticket(self, monkeypatch):
+        """Test hook returns None when has_golden_ticket=False."""
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_golden_ticket",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_domain_admin",
+            lambda: False,
+        )
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        shared_state.has_golden_ticket = False
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+        event = self._make_step_start_event()
+
+        for hook in hooks:
+            try:
+                result = await hook(event)
+                assert not isinstance(result, Finish), "Should not Finish without GT"
+            except TypeError:
+                pass
+
+
+class TestStopOnDomainAdminConfigRespect:
+    """Tests that stop_on_external_domain_admin respects config setting.
+
+    The DA hook should only fire when stop_on_domain_admin=True.
+    When stop_on_golden_ticket=True, we continue past DA to forge golden ticket.
+    """
+
+    def _make_step_start_event(self) -> MagicMock:
+        """Helper to create a mock StepStart event."""
+        return MagicMock(spec=StepStart)
+
+    @pytest.mark.asyncio
+    async def test_da_hook_fires_when_stop_on_da_enabled(self, monkeypatch):
+        """Test DA hook fires when stop_on_domain_admin=True."""
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_domain_admin",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_golden_ticket",
+            lambda: False,
+        )
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        shared_state.has_domain_admin = True
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+        event = self._make_step_start_event()
+
+        finish_results = []
+        for hook in hooks:
+            try:
+                result = await hook(event)
+                if isinstance(result, Finish) and "Domain Admin" in str(result.reason):
+                    finish_results.append(result)
+            except TypeError:
+                pass
+
+        assert len(finish_results) >= 1, "DA hook should fire when config enabled"
+
+    @pytest.mark.asyncio
+    async def test_da_hook_does_not_fire_when_disabled(self, monkeypatch):
+        """Test DA hook does NOT fire when stop_on_domain_admin=False.
+
+        This is critical for forest escalation: we need to continue past DA
+        to forge the golden ticket with ExtraSid.
+        """
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_domain_admin",
+            lambda: False,
+        )
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_golden_ticket",
+            lambda: True,
+        )
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        shared_state.has_domain_admin = True
+        shared_state.has_golden_ticket = False  # Not forged yet
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+        event = self._make_step_start_event()
+
+        for hook in hooks:
+            try:
+                result = await hook(event)
+                if isinstance(result, Finish) and "Domain Admin" in str(result.reason):
+                    pytest.fail("DA hook should NOT fire when stop_on_domain_admin=False")
+            except TypeError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_golden_ticket_stops_after_da_when_configured(self, monkeypatch):
+        """Test that when stop_on_golden_ticket=True, we stop on GT not DA."""
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_domain_admin",
+            lambda: False,
+        )
+        monkeypatch.setattr(
+            "ares.core.factories.red_agents.get_stop_on_golden_ticket",
+            lambda: True,
+        )
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        shared_state.has_domain_admin = True
+        shared_state.has_golden_ticket = True
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+        event = self._make_step_start_event()
+
+        finish_reasons = []
+        for hook in hooks:
+            try:
+                result = await hook(event)
+                if isinstance(result, Finish):
+                    finish_reasons.append(result.reason)
+            except TypeError:
+                pass
+
+        # Should have Golden Ticket finish, not Domain Admin
+        gt_finishes = [r for r in finish_reasons if "Golden Ticket" in r]
+        da_finishes = [r for r in finish_reasons if "Domain Admin" in r]
+
+        assert len(gt_finishes) >= 1, "Should stop on Golden Ticket"
+        assert len(da_finishes) == 0, "Should NOT stop on Domain Admin"

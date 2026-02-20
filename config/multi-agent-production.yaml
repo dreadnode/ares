@@ -15,7 +15,11 @@ operation:
   rate_limit_backoff: 15.0
   rate_limit_threshold: 2
   # Stop operation immediately when domain admin is achieved (default: false)
-  stop_on_domain_admin: true
+  # NOTE: stop_on_domain_admin and stop_on_golden_ticket are mutually exclusive
+  # stop_on_domain_admin: true
+  # Stop operation when golden ticket is forged (for child→parent forest escalation)
+  # When true, operation continues past DA to forge golden ticket with ExtraSid
+  stop_on_golden_ticket: true
 
 # Agent configurations
 agents:

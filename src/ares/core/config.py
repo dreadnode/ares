@@ -216,6 +216,9 @@ class OperationConfig:
     crack_task_grace_period: float = 300.0
     # Stop operation immediately when domain admin is achieved
     stop_on_domain_admin: bool = False
+    # Stop operation immediately when golden ticket is forged (for forest escalation)
+    # NOTE: stop_on_domain_admin and stop_on_golden_ticket are mutually exclusive
+    stop_on_golden_ticket: bool = False
 
     # Rate limit retry settings (for worker agents)
     # Delays between retries when rate limited (list of seconds)
@@ -323,6 +326,10 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return {}
 
 
+class ConfigValidationError(Exception):
+    """Raised when configuration validation fails."""
+
+
 def _build_config(data: dict[str, Any]) -> OperationConfig:
     """Build OperationConfig from loaded data."""
     operation = data.get("operation", {})
@@ -348,7 +355,7 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
     # Only use explicit redis_url from config, otherwise derive from namespace
     redis_url = operation.get("redis_url") or derive_redis_url(namespace)
 
-    return OperationConfig(
+    config = OperationConfig(
         name=operation.get("name", "ares-multi-agent"),
         namespace=namespace,
         redis_url=redis_url,
@@ -411,6 +418,7 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         max_runtime=operation.get("max_runtime", 3600.0),
         crack_task_grace_period=operation.get("crack_task_grace_period", 300.0),
         stop_on_domain_admin=operation.get("stop_on_domain_admin", False),
+        stop_on_golden_ticket=operation.get("stop_on_golden_ticket", False),
         # Rate limit retry settings
         rate_limit_backoff_delays=operation.get(
             "rate_limit_backoff_delays", [5.0, 10.0, 20.0, 40.0, 60.0, 60.0]
@@ -421,6 +429,27 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
             {"triage": 8, "causation": 14, "lateral": 20, "synthesis": 20},
         ),
     )
+
+    # Validate mutual exclusion of stop conditions
+    _validate_stop_conditions(config)
+
+    return config
+
+
+def _validate_stop_conditions(config: OperationConfig) -> None:
+    """Validate that stop_on_domain_admin and stop_on_golden_ticket are mutually exclusive.
+
+    Raises:
+        ConfigValidationError: If both flags are True.
+    """
+    if config.stop_on_domain_admin and config.stop_on_golden_ticket:
+        raise ConfigValidationError(
+            "stop_on_domain_admin and stop_on_golden_ticket are mutually exclusive. "
+            "Set only one to true:\n"
+            "  - stop_on_domain_admin: Stop when krbtgt hash is obtained (child domain DA)\n"
+            "  - stop_on_golden_ticket: Stop after golden ticket with ExtraSid is forged "
+            "(forest escalation)"
+        )
 
 
 def _resolve_env(value: str) -> str:
@@ -623,6 +652,8 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:
             pass
     if stop_on_da := os.environ.get("ARES_STOP_ON_DOMAIN_ADMIN"):
         config.stop_on_domain_admin = stop_on_da.lower() in ("true", "1", "yes")
+    if stop_on_gt := os.environ.get("ARES_STOP_ON_GOLDEN_TICKET"):
+        config.stop_on_golden_ticket = stop_on_gt.lower() in ("true", "1", "yes")
 
     # Replay overrides
     if replay_mode := os.environ.get("ARES_REPLAY_MODE"):
@@ -678,6 +709,9 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:
                 "configured capabilities/tools."
             )
             config.agents[role] = AgentConfig(model=value)
+
+    # Validate after env overrides (may have changed stop conditions)
+    _validate_stop_conditions(config)
 
     return config
 
@@ -948,6 +982,11 @@ def get_stop_on_domain_admin() -> bool:
     return load_config().stop_on_domain_admin
 
 
+def get_stop_on_golden_ticket() -> bool:
+    """Get whether to stop operation immediately when golden ticket is forged."""
+    return load_config().stop_on_golden_ticket
+
+
 def get_rate_limit_backoff_delays() -> list[float]:
     """Get list of delays (seconds) between rate limit retries."""
     return load_config().rate_limit_backoff_delays
@@ -993,6 +1032,7 @@ __all__ = [
     "DEFAULT_NAMESPACE",
     "DEFAULT_VULNERABILITY_PRIORITIES",
     "AgentConfig",
+    "ConfigValidationError",
     "OperationConfig",
     "clear_config_cache",
     "derive_redis_url",
@@ -1041,6 +1081,7 @@ __all__ = [
     "get_replay_seed",
     "get_stale_task_timeout",
     "get_stop_on_domain_admin",
+    "get_stop_on_golden_ticket",
     "get_task_dispatch_delay",
     "get_unvalidated_confidence_penalty",
     "get_vulnerability_priorities",
