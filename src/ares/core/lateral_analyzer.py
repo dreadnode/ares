@@ -350,7 +350,7 @@ class LateralMovementAnalyzer:
                     "priority": len(conns),  # More connections = higher priority
                     "suggested_queries": [
                         f'{{hostname=~".*{host}.*"}} |~ "(?i)4624|4625|logon"',
-                        f'{{job=~".+"}} |~ "(?i){host}"',
+                        f'{{job="windows-security"}} |~ "(?i){host}"',
                     ],
                     "suggested_actions": [
                         f"Call track_host_investigation('{host}')",

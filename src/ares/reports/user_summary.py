@@ -6,10 +6,12 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from ares.core.models import Credential
+
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from ares.core.models import Credential, Hash, SharedRedTeamState
+    from ares.core.models import Hash, SharedRedTeamState
 
 
 @dataclass
@@ -122,7 +124,7 @@ def trace_attack_chain(
         visited.add(item_id)
 
         # Determine item type
-        item_type = "credential" if hasattr(current, "password") else "hash"
+        item_type = "credential" if isinstance(current, Credential) else "hash"
 
         step = AttackChainStep(
             step_number=current.attack_step,
@@ -217,8 +219,11 @@ def generate_user_summaries(state: SharedRedTeamState) -> list[UserSummary]:
             if h.source:
                 sources.add(h.source)
 
-        # Find earliest discovery time
+        # Find earliest discovery time (check both credentials and hashes)
         first_discovered: datetime | None = None
+        for c in creds:
+            if c.discovered_at and (first_discovered is None or c.discovered_at < first_discovered):
+                first_discovered = c.discovered_at
         for h in hashes:
             if h.discovered_at and (first_discovered is None or h.discovered_at < first_discovered):
                 first_discovered = h.discovered_at

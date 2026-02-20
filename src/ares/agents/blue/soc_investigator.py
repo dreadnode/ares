@@ -218,25 +218,18 @@ class InvestigationOrchestrator:
             logger.warning("Continuing without MCP tools")
             self._mcp_tools = None
 
-    async def _shutdown_mcp(self, close_pool: bool = True) -> None:
-        """Shutdown MCP connections.
+    async def _shutdown_mcp(self) -> None:
+        """Clear local MCP references without closing the pooled connection.
 
-        Args:
-            close_pool: If True, close the shared connection pool (use at program exit).
-                       If False, just clear local references (use between investigations).
+        The connection pool manages the actual connection lifecycle.
+        We only clear local references here so subsequent investigations
+        can get fresh references from the pool.
         """
-        from ares.tools.blue.grafana import MCPConnectionPool
-
-        # Clear local references
+        # Do NOT close the client - it's managed by MCPConnectionPool
+        # Just clear our local references
         self._mcp_client = None
         self._mcp_tools = None
-
-        # Close the pool if requested (typically at program exit)
-        if close_pool:
-            await MCPConnectionPool.close()
-            logger.info("MCP connection pool closed")
-        else:
-            logger.debug("Cleared local MCP references (pool connection preserved)")
+        logger.debug("Cleared local MCP references (pool connection preserved)")
 
     def _extract_mitre_technique(self, alert: dict, state: InvestigationState) -> None:
         """Extract MITRE technique ID from alert labels or annotations."""
@@ -449,6 +442,8 @@ class InvestigationOrchestrator:
         finally:
             # Always cancel the watchdog on normal completion
             watchdog.cancel()
+            # Clear local MCP references (pool connection preserved for next investigation)
+            await self._shutdown_mcp()
 
     async def _post_started_annotation(self, investigation_id: str, alert: dict) -> None:
         """Post investigation started annotation to Grafana.

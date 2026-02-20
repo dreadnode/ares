@@ -1,6 +1,7 @@
 """Grafana alerting and MCP tools."""
 
 import asyncio
+import atexit
 import os
 import shutil
 import subprocess  # nosec B404
@@ -13,6 +14,42 @@ from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
 from ares.core.exceptions import AuthenticationError, ConfigurationError
+
+
+def _cleanup_mcp_pool() -> None:
+    """Atexit handler to clean up the MCP connection pool.
+
+    Called automatically when the process exits. Handles the async
+    cleanup in a synchronous context.
+    """
+    from ares.tools.blue.grafana import MCPConnectionPool
+
+    if not MCPConnectionPool.is_connected():
+        return
+
+    try:
+        # Try to get the running event loop
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            # Event loop is running - schedule cleanup as task
+            # This can happen in interactive environments
+            loop.create_task(MCPConnectionPool.close())
+            logger.debug("Scheduled MCP pool cleanup task")
+        else:
+            # No running loop - create one for cleanup
+            asyncio.run(MCPConnectionPool.close())
+            logger.debug("MCP pool cleaned up via asyncio.run")
+    except Exception as e:
+        # Don't raise during atexit - just log
+        logger.debug(f"MCP pool cleanup error (expected during shutdown): {e}")
+
+
+# Register cleanup on module load
+atexit.register(_cleanup_mcp_pool)
 
 
 class MCPConnectionPool:
@@ -31,7 +68,8 @@ class MCPConnectionPool:
     def __new__(cls) -> Self:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._lock = asyncio.Lock()
+            # Don't create asyncio.Lock here - it's event-loop-specific
+            # and must be created in the async context where it's used
         return cast("Self", cls._instance)
 
     @classmethod
@@ -51,12 +89,11 @@ class MCPConnectionPool:
         Returns:
             Connected MCPClient with Grafana tools
         """
-        instance = cls()
+        # Create lock lazily in async context to bind to current event loop
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
 
-        if instance._lock is None:
-            instance._lock = asyncio.Lock()
-
-        async with instance._lock:
+        async with cls._lock:
             # Check if credentials changed
             creds_changed = (grafana_url and grafana_url != cls._grafana_url) or (
                 grafana_api_key and grafana_api_key != cls._grafana_api_key
@@ -598,6 +635,7 @@ async def _connect_grafana_mcp_internal(
     import rigging as rg
 
     grafana_url = grafana_url or os.getenv("GRAFANA_URL", "")
+    # Prefer GRAFANA_SERVICE_ACCOUNT_TOKEN, fallback to GRAFANA_API_KEY for compatibility
     grafana_api_key = (
         grafana_api_key
         or os.getenv("GRAFANA_SERVICE_ACCOUNT_TOKEN", "")
@@ -612,45 +650,36 @@ async def _connect_grafana_mcp_internal(
         msg = "GRAFANA_SERVICE_ACCOUNT_TOKEN (or GRAFANA_API_KEY) must be provided or set in environment"
         raise ValueError(msg)
 
+    # Find mcp-grafana binary
     mcp_grafana_path = find_mcp_grafana()
     logger.info(f"Found mcp-grafana at: {mcp_grafana_path}")
 
+    # Increase rigging's MCP initialize timeout from the default 5s.
+    # mcp-grafana spends ~6s on datasource discovery before it's ready,
+    # so the default 5s timeout causes a BrokenResourceError in the TaskGroup.
+    # Note: must use importlib because `rigging.tools.mcp` is shadowed by the
+    # `mcp` function re-export in rigging.tools.__init__.
     import importlib
 
     _rg_mcp_mod = importlib.import_module("rigging.tools.mcp")
     _rg_mcp_mod.INITIALIZE_TIMEOUT = 30
 
-    mcp_args = [
-        "--disable-admin",
-        "--disable-alerting",
-        "--disable-annotations",
-        "--disable-asserts",
-        "--disable-dashboard",
-        "--disable-folder",
-        "--disable-incident",
-        "--disable-navigation",
-        "--disable-oncall",
-        "--disable-proxied",
-        "--disable-pyroscope",
-        "--disable-rendering",
-        "--disable-search",
-        "--disable-sift",
-        "--disable-write",
-    ]
-    logger.info(f"Starting mcp-grafana with args: {' '.join(mcp_args)}")
-
+    # Connect to MCP server
     client = rg.mcp(
         "stdio",
         command=mcp_grafana_path,
-        args=mcp_args,
+        args=[],
         env={
             "GRAFANA_URL": grafana_url,
             "GRAFANA_SERVICE_ACCOUNT_TOKEN": grafana_api_key,
         },
     )
 
+    # Enter the async context to initialize connection
     await client.__aenter__()
+
     logger.success(f"Connected to Grafana MCP server ({len(client.tools)} tools loaded)")
+
     return client
 
 
@@ -658,8 +687,7 @@ async def connect_grafana_mcp(
     grafana_url: str | None = None,
     grafana_api_key: str | None = None,
 ) -> Any:
-    """
-    Connect to Grafana MCP server via Rigging with connection pooling.
+    """Connect to Grafana MCP server via Rigging with connection pooling.
 
     This function reuses existing MCP connections across investigations,
     eliminating the ~60 second connection overhead per investigation.

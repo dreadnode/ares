@@ -1,6 +1,8 @@
 """Factory for creating investigation agents with presets."""
 
 import functools
+import json as json_mod
+import re
 import uuid
 from typing import Any
 
@@ -28,7 +30,6 @@ from ares.core.evidence_validation import (
 from ares.core.models import Evidence, InvestigationState, PyramidLevel
 from ares.core.query_resilience import QueryResilientExecutor, get_resilient_executor
 from ares.core.templates import get_template_loader
-from ares.core.tool_retrieval import filter_tools_for_alert
 from ares.integrations.mitre import MITREAttackClient
 from ares.tools.blue import (
     CompletionTools,
@@ -215,6 +216,9 @@ def _optimize_logql_query(query: str) -> tuple[str, bool]:
     - Avoid {job=~".+"} which scans all streams
     - Put selective filters (event IDs) before regex patterns
 
+    Uses the deployment label from the current alert context when available,
+    falling back to {job="windows-security"} if no deployment context exists.
+
     Args:
         query: The original LogQL query string.
 
@@ -224,14 +228,21 @@ def _optimize_logql_query(query: str) -> tuple[str, bool]:
     was_modified = False
     optimized = query
 
+    # Determine best replacement from alert context
+    deployment = None
+    if _current_state and _current_state.alert:
+        deployment = _current_state.alert.get("labels", {}).get("deployment")
+
+    replacement = f'{{deployment="{deployment}"}}' if deployment else '{job="windows-security"}'
+
     # Auto-rewrite broad selectors to use specific label
     for pattern in _BROAD_SELECTOR_PATTERNS:
         if pattern in query:
             logger.warning(
                 f"Query contains broad selector '{pattern}' - auto-rewriting to "
-                '{{job="windows-security"}} to prevent timeout.'
+                f"'{replacement}' to prevent timeout."
             )
-            optimized = optimized.replace(pattern, '{job="windows-security"}')
+            optimized = optimized.replace(pattern, replacement)
             was_modified = True
             # Continue checking for other broad patterns
 
@@ -655,7 +666,7 @@ def create_rate_limited_mcp_tool(
                     if meta.get("retry_count", 0) > 0:
                         logger.info(f"Query succeeded after {meta['retry_count']} retries")
 
-                return result
+                return _compact_loki_result(result)
 
             except Exception as e:
                 logger.error(f"Resilient execution failed: {e}")
@@ -676,7 +687,7 @@ def create_rate_limited_mcp_tool(
             _record_query(tool_name, kwargs, result_count, result_data=result)
             # Only count successful queries against the limit
             _count_successful_query(result_count)
-            return result
+            return _compact_loki_result(result)
         except Exception as e:
             error_str = str(e)
             # Handle gRPC timeout from mcp-grafana (10s default timeout)
@@ -704,6 +715,89 @@ def create_rate_limited_mcp_tool(
     return rate_limited_wrapper
 
 
+def _compact_loki_result(result: Any) -> Any:
+    """Remove redundant data from Loki MCP responses to reduce token usage.
+
+    Windows Security Event logs contain the same data three times:
+    1. event_data: raw XML fields (<Data Name='X'>val</Data>)
+    2. message: human-readable prose with the same fields
+    3. JSON metadata (event_id, computer, etc.)
+
+    This function parses event_data XML into a clean dict and drops
+    the redundant 'message' and raw XML, cutting ~60-70% of tokens
+    while keeping all security-relevant fields.
+    """
+    # MCP tools return list[ContentText] — extract the text payload
+    if isinstance(result, list) and len(result) > 0:
+        item = result[0]
+        text = getattr(item, "text", None)
+        if text is None:
+            return result
+    elif isinstance(result, str):
+        text = result
+    else:
+        return result
+
+    try:
+        data = json_mod.loads(text)
+    except (json_mod.JSONDecodeError, TypeError):
+        return result
+
+    if not isinstance(data, dict) or "data" not in data:
+        return result
+
+    entries = data.get("data", [])
+    if not isinstance(entries, list):
+        return result
+
+    compacted = []
+    for entry in entries:
+        line_str = entry.get("line", "")
+        timestamp = entry.get("timestamp", "")
+
+        # Parse the log line JSON
+        try:
+            line = json_mod.loads(line_str) if isinstance(line_str, str) else line_str
+        except (json_mod.JSONDecodeError, TypeError):
+            compacted.append(entry)
+            continue
+
+        if not isinstance(line, dict):
+            compacted.append(entry)
+            continue
+
+        # Parse event_data XML into clean key-value pairs
+        event_data_xml = line.get("event_data", "")
+        parsed_fields = {}
+        if event_data_xml:
+            for match in re.finditer(r"<Data Name='([^']+)'[^>]*>([^<]*)</Data>", event_data_xml):
+                parsed_fields[match.group(1)] = match.group(2)
+
+        # Keep all fields EXCEPT the two redundant blobs
+        # "message" = prose rendering of event_data (duplicate)
+        # "event_data" = raw XML (replaced by parsed key-value "fields")
+        compact_line = {k: v for k, v in line.items() if k not in ("message", "event_data")}
+        if parsed_fields:
+            compact_line["fields"] = parsed_fields
+
+        compacted.append({"timestamp": timestamp, "line": compact_line})
+
+    original_chars = len(text)
+    compact_json = json_mod.dumps({"data": compacted, "count": len(compacted)})
+    saved_pct = (1 - len(compact_json) / original_chars) * 100 if original_chars else 0
+    logger.info(
+        f"📦 Compacted Loki result: {original_chars:,} → {len(compact_json):,} chars "
+        f"({saved_pct:.0f}% reduction, {len(compacted)} entries)"
+    )
+
+    # Return in the same format the SDK expects
+    if isinstance(result, list) and hasattr(result[0], "text"):
+        # Reconstruct ContentText
+        result[0].text = compact_json
+        return result
+    return compact_json
+
+
 def _extract_result_count(result: Any) -> int | None:
     """Extract result count from various result formats."""
     if isinstance(result, list):
@@ -726,66 +820,72 @@ def _extract_result_count(result: Any) -> int | None:
     return None
 
 
-# Essential MCP tool patterns to keep (query-related only)
-# Other tools (dashboards, alerts, annotations) are handled by internal GrafanaTools
-_ESSENTIAL_MCP_PATTERNS = [
-    "query_loki",
+# MCP tools essential for SOC investigation - everything else is bloat
+# (dashboard mgmt, alert mgmt, user mgmt, org mgmt, etc.)
+_ESSENTIAL_MCP_TOOLS = {
+    # Loki log queries
+    "query_loki_logs",
+    "query_loki_patterns",
+    "query_loki_stats",
+    # Loki label discovery
+    "list_loki_label_names",
+    "list_loki_label_values",
+    # Prometheus metrics
     "query_prometheus",
-    "list_datasources",  # Needed to discover datasource UIDs
-]
+    "query_prometheus_histogram",
+    # Datasource discovery
+    "list_datasources",
+    "get_datasource_by_name",
+    "get_datasource_by_uid",
+}
 
 
-def filter_mcp_tools(mcp_tools: list) -> list:
-    """
-    Filter MCP tools to only include essential ones.
+def filter_essential_mcp_tools(mcp_tools: list) -> list:
+    """Filter MCP tools to only those essential for SOC investigation.
 
-    This prevents hitting the OpenAI 128-tool limit by excluding
-    tools that are either:
-    - Redundant with internal tools (GrafanaTools handles annotations, alerts)
-    - Not needed for investigation (dashboard management, etc.)
+    Reduces context window usage by removing ~47 unnecessary tools
+    (dashboard management, alert management, user management, etc.)
+    that consume ~35K+ tokens of tool schema definitions.
 
     Args:
-        mcp_tools: Full list of MCP tools from Grafana MCPClient
+        mcp_tools: All MCP tools from Grafana MCPClient
 
     Returns:
-        Filtered list containing only essential query tools
+        Filtered list containing only investigation-essential tools
     """
     filtered = []
-    excluded = []
-
+    removed = []
     for tool in mcp_tools:
         tool_name = getattr(tool, "name", "") or getattr(tool, "__name__", str(tool))
-
-        # Only keep tools matching essential patterns
-        if any(pattern in tool_name for pattern in _ESSENTIAL_MCP_PATTERNS):
+        if tool_name in _ESSENTIAL_MCP_TOOLS:
             filtered.append(tool)
         else:
-            excluded.append(tool_name)
+            removed.append(tool_name)
 
-    if excluded:
-        logger.info(
-            f"Filtered out {len(excluded)} non-essential MCP tools: "
-            f"{', '.join(excluded[:5])}{'...' if len(excluded) > 5 else ''}"
-        )
-
-    logger.info(f"Keeping {len(filtered)} essential MCP tools")
+    logger.info(
+        f"Filtered MCP tools: kept {len(filtered)}/{len(mcp_tools)} essential tools, "
+        f"removed {len(removed)}: {removed[:5]}{'...' if len(removed) > 5 else ''}"
+    )
     return filtered
 
 
 def wrap_mcp_query_tools(mcp_tools: list) -> list:
     """
-    Wrap all query-related MCP tools with rate limiting.
+    Filter to essential tools, then wrap query tools with rate limiting.
 
     Args:
         mcp_tools: List of MCP tools from Grafana MCPClient
 
     Returns:
-        List of tools with query tools wrapped for rate limiting
+        Filtered list with query tools wrapped for rate limiting
     """
+    # First filter to essential tools only
+    essential_tools = filter_essential_mcp_tools(mcp_tools)
+
     wrapped = []
     wrapped_count = 0
 
-    for tool in mcp_tools:
+    for tool in essential_tools:
         tool_name = getattr(tool, "name", "") or getattr(tool, "__name__", str(tool))
 
         if "query_loki" in tool_name or "query_prometheus" in tool_name:
@@ -960,26 +1060,18 @@ def create_investigation_agent(
     completion_tools.set_state(state)
 
     loki_url = grafana_url.rstrip("/")
-    # QueryTemplateTools now supports optimized queries:
-    # - default_label_selector: Override with specific labels like '{job="windows-security"}'
-    #   for better performance instead of scanning all streams
-    # - default_hours_back: Defaults to 1 hour (reduced from 4) for faster queries
-    # - mcp_query_fn: MCP query function for authenticated Loki queries
-    # Example: QueryTemplateTools(loki_url=loki_url, default_label_selector='{job="windows"}')
-
     # Extract MCP query_loki_logs function if available (fixes auth issues with direct HTTP)
     mcp_query_fn = None
     if grafana_mcp_tools:
         for tool in grafana_mcp_tools:
             tool_name = getattr(tool, "name", "") or getattr(tool, "__name__", "")
             if "query_loki_logs" in tool_name:
-                # Extract the underlying function from the MCP tool
                 tool_fn = getattr(tool, "fn", None)
                 if tool_fn is None and callable(tool):
                     tool_fn = tool
 
                 if tool_fn:
-                    # Create a wrapper that matches our expected signature
+
                     async def mcp_loki_wrapper(
                         datasource_uid: str,
                         logql: str,
@@ -1002,51 +1094,55 @@ def create_investigation_agent(
                     )
                 break
 
-    query_template_tools = QueryTemplateTools(loki_url=loki_url, mcp_query_fn=mcp_query_fn)
+    # Derive label selector from alert context for scoped queries
+    deployment = state.alert.get("labels", {}).get("deployment", "")
+    default_selector = (
+        f'{{deployment="{deployment}"}}' if deployment else '{job="windows-security"}'
+    )
+    query_template_tools = QueryTemplateTools(
+        loki_url=loki_url, default_label_selector=default_selector, mcp_query_fn=mcp_query_fn
+    )
 
     learning_tools = LearningTools()
 
-    # Core tools that are always needed
-    core_tools: list = [
+    # Pass specific QueryTemplateTools methods instead of the whole toolset
+    # to reduce context window usage (~35 tools → 4 tools).
+    # The dispatcher run_detection_query() internally calls any detect_* method,
+    # preserving dn.log_metric() observability on each detection query.
+    tools: list = [
         grafana_tools,
         investigation_tools,
         question_tools,
         mitre_tools,
         completion_tools,
+        query_template_tools.run_detection_query,
+        query_template_tools.list_query_templates,
+        query_template_tools.get_host_activity,
+        query_template_tools.get_user_activity,
         learning_tools,
         escalate_investigation,
     ]
 
-    # Filter query template tools based on alert context (42 -> ~10 tools)
-    # This significantly reduces LLM token overhead and improves response time
-    alert = state.alert if state else {}
-    filtered_query_tools = filter_tools_for_alert(
-        alert=alert,
-        all_tools=query_template_tools.tools() if hasattr(query_template_tools, "tools") else [],
-        use_semantic=True,
-        top_k=10,
-    )
-
-    if filtered_query_tools:
-        logger.info(f"Using {len(filtered_query_tools)} filtered query template tools")
-        tools: list = core_tools + filtered_query_tools
-    else:
-        # Fallback to all query templates if filtering fails
-        logger.warning("Tool filtering failed, using all query template tools")
-        tools = core_tools + [query_template_tools]
-
     if grafana_mcp_tools:
         logger.info(f"Received {len(grafana_mcp_tools)} Grafana MCP tools")
-        # Filter to essential tools only (prevents OpenAI 128-tool limit)
-        filtered_tools = filter_mcp_tools(grafana_mcp_tools)
-        # Wrap query tools with rate limiting to prevent infinite query loops
-        wrapped_tools = wrap_mcp_query_tools(filtered_tools)
+        # Filter to essential tools and wrap query tools with rate limiting
+        # (filter_essential_mcp_tools is called inside wrap_mcp_query_tools)
+        wrapped_tools = wrap_mcp_query_tools(grafana_mcp_tools)
         tools.extend(wrapped_tools)
         logger.info(f"Final tool count: {len(tools)}")
     else:
         logger.warning(
             "No Grafana MCP tools available - agent will have limited query capabilities"
         )
+
+    # Log total tool count for context window debugging
+    tool_count = 0
+    for t in tools:
+        if hasattr(t, "get_tools"):
+            tool_count += len(t.get_tools())
+        else:
+            tool_count += 1
+    logger.info(f"📊 Total tools for agent: {tool_count} (from {len(tools)} entries)")
 
     return dn.Agent(
         name="Ares SOC Investigator",

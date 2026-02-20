@@ -29,7 +29,7 @@ from ares.core.factories.blue_factory import (
     _record_query,
     create_investigation_agent,
     create_rate_limited_mcp_tool,
-    filter_mcp_tools,
+    filter_essential_mcp_tools,
     log_tool_result,
     log_tool_usage,
     max_queries_stop,
@@ -555,7 +555,7 @@ class TestWrapMcpQueryTools:
     """Tests for wrap_mcp_query_tools function."""
 
     def test_wraps_query_tools(self):
-        """Test only query tools are wrapped."""
+        """Test that wrap_mcp_query_tools filters to essential tools and wraps query tools."""
 
         class MockTool:
             def __init__(self, name):
@@ -570,10 +570,11 @@ class TestWrapMcpQueryTools:
 
         wrapped = wrap_mcp_query_tools(tools)
 
-        assert len(wrapped) == 4
-        # Non-query tools should be unchanged
-        assert wrapped[0] == tools[0]
-        assert wrapped[2] == tools[2]
+        # Only essential tools survive filtering (query_loki_logs, query_prometheus)
+        assert len(wrapped) == 2
+        names = [t.name for t in wrapped]
+        assert "query_loki_logs" in names
+        assert "query_prometheus" in names
 
 
 class TestLogToolUsage:
@@ -817,7 +818,7 @@ class TestOptimizeLogqlQuery:
 
     def test_optimize_query_normal_query(self):
         """Test normal query without issues."""
-        query = '{job="eventlog"} |= "4688"'
+        query = '{job="windows-security"} |= "4688"'
         optimized, was_modified = _optimize_logql_query(query)
         assert was_modified is False
         assert optimized == query
@@ -1168,8 +1169,8 @@ class TestInvestigationStateQueueFields:
         assert len(investigation_state.executed_query_types) == 0
 
 
-class TestFilterMcpTools:
-    """Tests for filter_mcp_tools function to prevent 128-tool limit."""
+class TestFilterEssentialMcpTools:
+    """Tests for filter_essential_mcp_tools function to prevent 128-tool limit."""
 
     def test_keeps_query_loki_tools(self):
         """Test that query_loki tools are kept."""
@@ -1182,7 +1183,7 @@ class TestFilterMcpTools:
         for t in mock_tools:
             t.name = t._mock_name
 
-        filtered = filter_mcp_tools(mock_tools)
+        filtered = filter_essential_mcp_tools(mock_tools)
         names = [t.name for t in filtered]
 
         assert "query_loki_logs" in names
@@ -1199,7 +1200,7 @@ class TestFilterMcpTools:
         for t in mock_tools:
             t.name = t._mock_name
 
-        filtered = filter_mcp_tools(mock_tools)
+        filtered = filter_essential_mcp_tools(mock_tools)
         names = [t.name for t in filtered]
 
         assert "query_prometheus" in names
@@ -1215,7 +1216,7 @@ class TestFilterMcpTools:
         for t in mock_tools:
             t.name = t._mock_name
 
-        filtered = filter_mcp_tools(mock_tools)
+        filtered = filter_essential_mcp_tools(mock_tools)
         names = [t.name for t in filtered]
 
         assert "list_datasources" in names
@@ -1235,7 +1236,7 @@ class TestFilterMcpTools:
         for t in mock_tools:
             t.name = t._mock_name
 
-        filtered = filter_mcp_tools(mock_tools)
+        filtered = filter_essential_mcp_tools(mock_tools)
 
         assert len(filtered) == 1
         assert filtered[0].name == "query_loki_logs"
@@ -1243,5 +1244,5 @@ class TestFilterMcpTools:
     def test_empty_input_returns_empty(self):
         """Test that empty input returns empty list."""
 
-        filtered = filter_mcp_tools([])
+        filtered = filter_essential_mcp_tools([])
         assert filtered == []
