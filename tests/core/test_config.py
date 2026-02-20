@@ -476,5 +476,145 @@ class TestContextManagementSettings:
             assert config.max_output_chars == 3000
 
 
+class TestStopConditionsValidation:
+    """Tests for stop_on_domain_admin and stop_on_golden_ticket mutual exclusion."""
+
+    def test_stop_on_golden_ticket_default_false(self):
+        """Test stop_on_golden_ticket defaults to False."""
+        from ares.core.config import OperationConfig
+
+        config = OperationConfig()
+        assert config.stop_on_golden_ticket is False
+
+    def test_stop_on_domain_admin_and_golden_ticket_mutually_exclusive(self):
+        """Test that both stop conditions cannot be enabled simultaneously."""
+        from ares.core.config import ConfigValidationError, _build_config
+
+        config_data = {
+            "operation": {
+                "stop_on_domain_admin": True,
+                "stop_on_golden_ticket": True,
+            }
+        }
+
+        with pytest.raises(ConfigValidationError) as exc_info:
+            _build_config(config_data)
+
+        assert "mutually exclusive" in str(exc_info.value)
+        assert "stop_on_domain_admin" in str(exc_info.value)
+        assert "stop_on_golden_ticket" in str(exc_info.value)
+
+    def test_stop_on_domain_admin_alone_valid(self):
+        """Test that stop_on_domain_admin alone is valid."""
+        from ares.core.config import _build_config
+
+        config_data = {
+            "operation": {
+                "stop_on_domain_admin": True,
+                "stop_on_golden_ticket": False,
+            }
+        }
+
+        config = _build_config(config_data)
+        assert config.stop_on_domain_admin is True
+        assert config.stop_on_golden_ticket is False
+
+    def test_stop_on_golden_ticket_alone_valid(self):
+        """Test that stop_on_golden_ticket alone is valid."""
+        from ares.core.config import _build_config
+
+        config_data = {
+            "operation": {
+                "stop_on_domain_admin": False,
+                "stop_on_golden_ticket": True,
+            }
+        }
+
+        config = _build_config(config_data)
+        assert config.stop_on_domain_admin is False
+        assert config.stop_on_golden_ticket is True
+
+    def test_both_false_valid(self):
+        """Test that both conditions disabled is valid."""
+        from ares.core.config import _build_config
+
+        config_data = {
+            "operation": {
+                "stop_on_domain_admin": False,
+                "stop_on_golden_ticket": False,
+            }
+        }
+
+        config = _build_config(config_data)
+        assert config.stop_on_domain_admin is False
+        assert config.stop_on_golden_ticket is False
+
+    def test_env_override_stop_on_golden_ticket(self):
+        """Test ARES_STOP_ON_GOLDEN_TICKET environment override."""
+        config_data = {"agents": {}}
+
+        with patch.dict(
+            os.environ,
+            {"ARES_STOP_ON_GOLDEN_TICKET": "true"},
+            clear=False,
+        ):
+            from ares.core.config import _build_config
+
+            config = _build_config(config_data)
+            config = _apply_env_overrides(config)
+
+            assert config.stop_on_golden_ticket is True
+
+    def test_env_override_mutual_exclusion_validation(self):
+        """Test that env overrides also validate mutual exclusion."""
+        config_data = {
+            "operation": {
+                "stop_on_domain_admin": True,
+            }
+        }
+
+        with patch.dict(
+            os.environ,
+            {"ARES_STOP_ON_GOLDEN_TICKET": "true"},
+            clear=False,
+        ):
+            from ares.core.config import ConfigValidationError, _build_config
+
+            config = _build_config(config_data)
+
+            with pytest.raises(ConfigValidationError):
+                _apply_env_overrides(config)
+
+    def test_get_stop_on_golden_ticket_function(self):
+        """Test get_stop_on_golden_ticket helper function."""
+        from ares.core.config import clear_config_cache, get_stop_on_golden_ticket
+
+        clear_config_cache()
+
+        # Override both to ensure a clean slate (config file may have either set)
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("ARES_")}
+        clean_env["ARES_STOP_ON_GOLDEN_TICKET"] = "false"
+        clean_env["ARES_STOP_ON_DOMAIN_ADMIN"] = "false"
+        with patch.dict(os.environ, clean_env, clear=True):
+            clear_config_cache()
+            result = get_stop_on_golden_ticket()
+            assert result is False
+
+    def test_get_stop_on_golden_ticket_with_env(self):
+        """Test get_stop_on_golden_ticket with env variable set."""
+        from ares.core.config import clear_config_cache, get_stop_on_golden_ticket
+
+        # Clear any existing config, and also disable stop_on_domain_admin
+        # since the two are mutually exclusive
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("ARES_")}
+        clean_env["ARES_STOP_ON_GOLDEN_TICKET"] = "true"
+        clean_env["ARES_STOP_ON_DOMAIN_ADMIN"] = "false"
+
+        with patch.dict(os.environ, clean_env, clear=True):
+            clear_config_cache()
+            result = get_stop_on_golden_ticket()
+            assert result is True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

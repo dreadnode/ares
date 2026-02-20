@@ -108,6 +108,13 @@ class PublishingMixin:
                 )
             logger.info(f"Credential published: {credential.domain}\\{credential.username}")
 
+            # Check if this credential has golden ticket capability
+            # (e.g., is local admin on a DC we already know about)
+            if credential.domain:
+                self.shared_state.update_golden_ticket_capability(
+                    credential.username, credential.domain, source_agent
+                )
+
             # Immediate actions for ANY credential with password
             # This includes cracked hashes AND credentials from username_as_password, etc.
             if credential.password and credential.domain:
@@ -459,6 +466,11 @@ class PublishingMixin:
 
             # Auto-detect MSSQL and queue vulnerability for exploitation
             await self._auto_detect_mssql(host, source_agent)
+
+            # If this is a DC, re-check all credentials for golden ticket capability
+            # A credential with local_admin on this DC can now dump NTDS.dit
+            if host.is_dc:
+                await self._recheck_golden_ticket_on_dc_discovery(host, source_agent)
         else:
             logger.debug(f"Host unchanged (exact duplicate): {host.ip} ({host.hostname})")
 
@@ -652,6 +664,51 @@ class PublishingMixin:
         # Sort to prioritize SQL accounts
         sql_creds.sort(key=lambda x: x.get("is_sql_account", "False") != "True")
         return sql_creds[:5]  # Return top 5 candidates
+
+    async def _recheck_golden_ticket_on_dc_discovery(
+        self: RedTeamDispatcher,
+        host: Host,
+        source_agent: str,
+    ) -> None:
+        """Re-check all credentials for golden ticket capability when a DC is discovered.
+
+        When a new DC is identified, any existing credential with local_admin on that
+        DC now has golden ticket capability (can dump NTDS.dit to get krbtgt hash).
+
+        Args:
+            host: The newly discovered DC host.
+            source_agent: Agent that discovered the DC.
+        """
+        # Only process if this is a DC
+        if not host.is_dc:
+            return
+
+        found_capable = False
+
+        # Check all credentials to see if they have admin access on this DC
+        for cred in self.shared_state.all_credentials:
+            if cred.domain and self.shared_state.update_golden_ticket_capability(
+                cred.username, cred.domain, source_agent
+            ):
+                found_capable = True
+
+        # Also check cracked hashes that have passwords
+        for hash_obj in self.shared_state.all_hashes:
+            if (
+                hash_obj.cracked_password
+                and hash_obj.domain
+                and self.shared_state.update_golden_ticket_capability(
+                    hash_obj.username, hash_obj.domain, source_agent
+                )
+            ):
+                found_capable = True
+
+        # Checkpoint if we found new capabilities
+        if found_capable:
+            if threading.current_thread() is threading.main_thread():
+                await self._checkpoint()
+            else:
+                self._checkpoint_requested.set()
 
     def _ensure_credential_in_state(
         self: RedTeamDispatcher,
@@ -920,7 +977,40 @@ class PublishingMixin:
                 self._checkpoint_requested.set()
             logger.info(f"Vulnerability published: {vuln.vuln_type} on {vuln.target}")
 
+            # Check for golden ticket capability when local_admin vuln is discovered
+            if vuln.vuln_type == "local_admin":
+                await self._check_golden_ticket_on_local_admin(vuln, source_agent)
+
         return added
+
+    async def _check_golden_ticket_on_local_admin(
+        self: RedTeamDispatcher,
+        vuln: VulnerabilityInfo,
+        source_agent: str,
+    ) -> None:
+        """Check if a local_admin vulnerability enables golden ticket capability.
+
+        When a user has local admin on a DC, they can dump NTDS.dit to get krbtgt hash.
+
+        Args:
+            vuln: The local_admin vulnerability.
+            source_agent: Agent that discovered it.
+        """
+        # Extract principal info from the vulnerability
+        details = vuln.details if isinstance(vuln.details, dict) else {}
+        username = details.get("username", "")
+        domain = details.get("domain", "")
+
+        if not username:
+            return
+
+        # Check if this grants golden ticket capability
+        if self.shared_state.update_golden_ticket_capability(username, domain, source_agent):
+            # Checkpoint to persist the updated capability tracking
+            if threading.current_thread() is threading.main_thread():
+                await self._checkpoint()
+            else:
+                self._checkpoint_requested.set()
 
     async def _exploit_delegation_with_credential(
         self: RedTeamDispatcher,

@@ -17,7 +17,13 @@ from dreadnode.agent.stop import tool_use
 from loguru import logger
 
 from ares.core.capability_registry import FilteredToolset, get_enabled_tools
-from ares.core.config import get_agent_config, get_max_context_tokens, get_min_messages_to_keep
+from ares.core.config import (
+    get_agent_config,
+    get_max_context_tokens,
+    get_min_messages_to_keep,
+    get_stop_on_domain_admin,
+    get_stop_on_golden_ticket,
+)
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.models import AgentInfo, AgentRole, SharedRedTeamState
 from ares.core.templates import get_template_loader
@@ -412,9 +418,16 @@ def create_role_hooks(
         # NOTE: We check on BOTH StepStart AND ToolEnd to minimize latency.
         # StepStart only fires at the beginning of steps (after LLM generation),
         # but ToolEnd fires after every tool execution, catching DA sooner.
+        # IMPORTANT: Only fires if stop_on_domain_admin=True in config. If
+        # stop_on_golden_ticket=True, we continue past DA to forge golden ticket.
         async def stop_on_external_domain_admin(event: StepStart | ToolEnd) -> Finish | None:
             """Stop orchestrator when Domain Admin is achieved by worker agents."""
             if not isinstance(event, (StepStart, ToolEnd)):
+                return None
+
+            # Only stop on DA if stop_on_domain_admin is enabled
+            # If stop_on_golden_ticket is enabled, we continue past DA
+            if not get_stop_on_domain_admin():
                 return None
 
             if shared_state.has_domain_admin:
@@ -428,6 +441,29 @@ def create_role_hooks(
             return None
 
         hooks.append(stop_on_external_domain_admin)
+
+        # Stop orchestrator when Golden Ticket is forged (for forest escalation)
+        # This fires when stop_on_golden_ticket=True and has_golden_ticket is set
+        async def stop_on_external_golden_ticket(event: StepStart | ToolEnd) -> Finish | None:
+            """Stop orchestrator when Golden Ticket is forged by worker agents."""
+            if not isinstance(event, (StepStart, ToolEnd)):
+                return None
+
+            # Only stop on golden ticket if stop_on_golden_ticket is enabled
+            if not get_stop_on_golden_ticket():
+                return None
+
+            if shared_state.has_golden_ticket:
+                event_type = "StepStart" if isinstance(event, StepStart) else "ToolEnd"
+                logger.success(
+                    f"🎫 Golden Ticket detected (forged externally, {event_type}) - "
+                    "stopping orchestrator agent"
+                )
+                return Finish(reason="Golden Ticket forged by worker agent")
+
+            return None
+
+        hooks.append(stop_on_external_golden_ticket)
 
     elif role == AgentRole.CRACKER:
         # Cracker broadcasts cracked credentials

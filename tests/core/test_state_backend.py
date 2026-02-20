@@ -1226,3 +1226,207 @@ class TestEvidenceValidationRedis:
         # Access via module to get the current deque (not the snapshot from import)
         assert len(ev_module._recent_results) == 1
         assert ev_module._recent_results[0].query_id == "q-0005"
+
+
+# ============================================================================
+# Golden Ticket Capability Backend Tests
+# ============================================================================
+
+
+class TestGoldenTicketCapabilityBackend:
+    """Tests for golden ticket capability credential persistence."""
+
+    @pytest.fixture
+    def mock_redis(self):
+        """Create a mock Redis client."""
+        mock = MagicMock()
+        mock.hset = AsyncMock(return_value=1)
+        mock.hget = AsyncMock(return_value=None)
+        mock.expire = AsyncMock()
+        return mock
+
+    @pytest.fixture
+    def backend(self, mock_redis):
+        """Create a backend instance with mocked Redis."""
+        return RedisStateBackend(mock_redis, "op-test-123")
+
+    @pytest.mark.asyncio
+    async def test_set_golden_ticket_capable_creds(self, backend, mock_redis):
+        """Test storing golden ticket capable credentials."""
+        creds = {
+            "contoso.local:admin": [
+                {
+                    "domain": "contoso.local",
+                    "reason": "local_admin_on_dc",
+                    "dc_host": "dc01.contoso.local",
+                    "dc_ip": "192.168.58.10",
+                }
+            ]
+        }
+
+        result = await backend.set_golden_ticket_capable_creds(creds)
+
+        assert result is True
+        mock_redis.hset.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_get_golden_ticket_capable_creds_empty(self, backend, mock_redis):
+        """Test getting golden ticket capable creds when empty."""
+        mock_redis.hget.return_value = None
+
+        result = await backend.get_golden_ticket_capable_creds()
+
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_get_golden_ticket_capable_creds_with_data(self, backend, mock_redis):
+        """Test getting golden ticket capable creds with stored data."""
+        stored_data = json.dumps(
+            {
+                "contoso.local:admin": [
+                    {
+                        "domain": "contoso.local",
+                        "reason": "local_admin_on_dc",
+                        "dc_host": "dc01",
+                        "dc_ip": "192.168.58.10",
+                    }
+                ]
+            }
+        )
+        mock_redis.hget.return_value = stored_data
+
+        result = await backend.get_golden_ticket_capable_creds()
+
+        assert "contoso.local:admin" in result
+        assert result["contoso.local:admin"][0]["reason"] == "local_admin_on_dc"
+
+    @pytest.mark.asyncio
+    async def test_add_golden_ticket_capable_cred(self, backend, mock_redis):
+        """Test adding a single golden ticket capable credential."""
+        # Mock existing empty state
+        mock_redis.hget.return_value = json.dumps({})
+
+        capabilities = [
+            {
+                "domain": "contoso.local",
+                "reason": "local_admin_on_dc",
+                "dc_host": "dc01",
+                "dc_ip": "192.168.58.10",
+            }
+        ]
+
+        result = await backend.add_golden_ticket_capable_cred("contoso.local:admin", capabilities)
+
+        assert result is True
+        mock_redis.hset.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_add_golden_ticket_capable_cred_to_existing(self, backend, mock_redis):
+        """Test adding to existing golden ticket capable credentials."""
+        # Mock existing data
+        existing = {
+            "contoso.local:admin": [
+                {
+                    "domain": "contoso.local",
+                    "reason": "local_admin_on_dc",
+                    "dc_host": "dc01",
+                    "dc_ip": "192.168.58.10",
+                }
+            ]
+        }
+        mock_redis.hget.return_value = json.dumps(existing)
+
+        new_capabilities = [
+            {
+                "domain": "fabrikam.local",
+                "reason": "local_admin_on_dc",
+                "dc_host": "dc02",
+                "dc_ip": "192.168.58.20",
+            }
+        ]
+
+        result = await backend.add_golden_ticket_capable_cred(
+            "fabrikam.local:svc_backup", new_capabilities
+        )
+
+        assert result is True
+        # Verify hset was called with both credentials
+        mock_redis.hset.assert_called()
+
+
+class TestSharedStateGoldenTicketCapabilityLoading:
+    """Tests for loading golden ticket capabilities from Redis backend."""
+
+    @pytest.mark.asyncio
+    async def test_load_golden_ticket_capable_creds_from_backend(self):
+        """Test loading golden ticket capable credentials from backend."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="op-test")
+
+        mock_backend = AsyncMock()
+        mock_backend.get_golden_tickets = AsyncMock(return_value=[])
+        mock_backend.get_adminsd_backdoors = AsyncMock(return_value=[])
+        mock_backend.get_acl_chains = AsyncMock(return_value=[])
+        mock_backend.get_gmsa_accounts = AsyncMock(return_value=[])
+        mock_backend.get_golden_ticket_capable_creds = AsyncMock(
+            return_value={
+                "contoso.local:admin": [
+                    {
+                        "domain": "contoso.local",
+                        "reason": "local_admin_on_dc",
+                        "dc_host": "dc01",
+                        "dc_ip": "192.168.58.10",
+                    }
+                ]
+            }
+        )
+
+        state.set_backend(mock_backend)
+        await state.load_persistence_tracking_from_backend()
+
+        assert "contoso.local:admin" in state.golden_ticket_capable_creds
+        assert len(state.golden_ticket_capable_creds["contoso.local:admin"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_load_golden_ticket_capable_creds_merges_existing(self):
+        """Test that loading merges with existing in-memory capabilities."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="op-test")
+
+        # Pre-populate with existing capability
+        state.golden_ticket_capable_creds = {
+            "contoso.local:admin": [
+                {
+                    "domain": "contoso.local",
+                    "reason": "local_admin_on_dc",
+                    "dc_host": "dc01",
+                    "dc_ip": "192.168.58.10",
+                }
+            ]
+        }
+
+        mock_backend = AsyncMock()
+        mock_backend.get_golden_tickets = AsyncMock(return_value=[])
+        mock_backend.get_adminsd_backdoors = AsyncMock(return_value=[])
+        mock_backend.get_acl_chains = AsyncMock(return_value=[])
+        mock_backend.get_gmsa_accounts = AsyncMock(return_value=[])
+        mock_backend.get_golden_ticket_capable_creds = AsyncMock(
+            return_value={
+                "contoso.local:admin": [
+                    {
+                        "domain": "contoso.local",
+                        "reason": "local_admin_on_dc",
+                        "dc_host": "dc02",  # Different DC
+                        "dc_ip": "192.168.58.11",
+                    }
+                ]
+            }
+        )
+
+        state.set_backend(mock_backend)
+        await state.load_persistence_tracking_from_backend()
+
+        # Should have both capabilities merged
+        assert len(state.golden_ticket_capable_creds["contoso.local:admin"]) == 2
