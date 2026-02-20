@@ -30,7 +30,6 @@ from ares.core.evidence_validation import (
 from ares.core.models import Evidence, InvestigationState, PyramidLevel
 from ares.core.query_resilience import QueryResilientExecutor, get_resilient_executor
 from ares.core.templates import get_template_loader
-from ares.core.tool_retrieval import filter_tools_for_alert
 from ares.integrations.mitre import MITREAttackClient
 from ares.tools.blue import (
     CompletionTools,
@@ -716,7 +715,7 @@ def create_rate_limited_mcp_tool(
     return rate_limited_wrapper
 
 
-def _compact_loki_result(result: Any) -> Any:  # noqa: PLR0912
+def _compact_loki_result(result: Any) -> Any:
     """Remove redundant data from Loki MCP responses to reduce token usage.
 
     Windows Security Event logs contain the same data three times:
@@ -1072,6 +1071,7 @@ def create_investigation_agent(
                     tool_fn = tool
 
                 if tool_fn:
+
                     async def mcp_loki_wrapper(
                         datasource_uid: str,
                         logql: str,
