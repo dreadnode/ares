@@ -36,7 +36,7 @@ from ares.core.orchestrator_client import (  # noqa: E402
     submit_operation,
     wait_for_operation_completion,
 )
-from ares.core.redis_client import create_redis_client  # noqa: E402
+from ares.core.redis_client import create_verified_redis_client  # noqa: E402
 
 
 def _get_vuln_priorities() -> dict[str, int]:
@@ -82,7 +82,8 @@ async def _generate_local_report(
     from ares.core.state_backend import RedisStateBackend
     from ares.reports import generate_comprehensive_report
 
-    client = await create_redis_client(redis_url, decode_responses=False)
+    # Use verified client to avoid stale reads from demoted masters
+    client = await create_verified_redis_client(redis_url, decode_responses=False)
     try:
         # Check for cached report first (stored by orchestrator on completion)
         if not force_regenerate:
@@ -939,7 +940,8 @@ async def _resolve_latest_operation(redis_url: str) -> str | None:
     """Resolve the latest operation ID (preferring running operations)."""
     from ares.core.task_queue import RedisTaskQueue
 
-    client = await create_redis_client(redis_url, decode_responses=True)
+    # Use verified client to avoid stale reads from demoted masters
+    client = await create_verified_redis_client(redis_url, decode_responses=True)
 
     all_ops: list[tuple[datetime | None, str, bool]] = []
 
@@ -1145,9 +1147,8 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
 
 async def _loot_once(operation_id: str, redis_url: str, json_output: bool) -> None:
     """Single-shot loot dump."""
-    from ares.core.redis_client import create_redis_client
-
-    client = await create_redis_client(redis_url, decode_responses=False)
+    # Use verified client to avoid stale reads from demoted masters
+    client = await create_verified_redis_client(redis_url, decode_responses=False)
     state = await _load_state_from_redis(client, operation_id)
     await client.aclose()
 
@@ -1166,10 +1167,9 @@ async def _loot_watch(
     json_output: bool,
 ) -> None:
     """Watch mode: continuously poll Redis and display loot."""
-    from ares.core.redis_client import create_redis_client
-
     prev_snapshot: dict | None = None
-    client = await create_redis_client(redis_url, decode_responses=False)
+    # Use verified client to avoid stale reads from demoted masters
+    client = await create_verified_redis_client(redis_url, decode_responses=False)
 
     try:
         while True:
@@ -1182,7 +1182,7 @@ async def _loot_watch(
                 except Exception:
                     pass
                 await asyncio.sleep(interval)
-                client = await create_redis_client(redis_url, decode_responses=False)
+                client = await create_verified_redis_client(redis_url, decode_responses=False)
                 continue
 
             if not state:
@@ -1324,7 +1324,8 @@ async def export_detection(
         sys.exit(1)
 
     try:
-        client = await create_redis_client(resolved_redis_url, decode_responses=False)
+        # Use verified client to avoid stale reads from demoted masters
+        client = await create_verified_redis_client(resolved_redis_url, decode_responses=False)
         state = await _load_state_from_redis(client, operation_id)
         await client.aclose()
 
@@ -1416,7 +1417,8 @@ async def tasks(
         sys.exit(1)
 
     try:
-        client = await create_redis_client(resolved_redis_url, decode_responses=True)
+        # Use verified client to avoid stale reads from demoted masters
+        client = await create_verified_redis_client(resolved_redis_url, decode_responses=True)
         found_tasks = []
 
         # Use KEYS instead of SCAN for reliability - SCAN can miss keys
@@ -1515,7 +1517,8 @@ async def list_operations(
 
     try:
         # Use decode_responses=False so we can read both state (bytes) and strings
-        client = await create_redis_client(resolved_redis_url, decode_responses=False)
+        # Use verified client to avoid stale reads from demoted masters
+        client = await create_verified_redis_client(resolved_redis_url, decode_responses=False)
         await client.ping()
 
         # Gather all operations with their checkpoint times, running status, and start time
@@ -1639,7 +1642,8 @@ async def runtime(
         sys.exit(1)
 
     try:
-        client = await create_redis_client(resolved_redis_url, decode_responses=False)
+        # Use verified client to avoid stale reads from demoted masters
+        client = await create_verified_redis_client(resolved_redis_url, decode_responses=False)
 
         # Get state using redis-native format
         state = await _load_state_from_redis(client, operation_id)
@@ -1714,7 +1718,8 @@ async def queue(
     resolved_redis_url = redis_url or get_redis_url()
 
     try:
-        client = await create_redis_client(resolved_redis_url, decode_responses=False)
+        # Use verified client to avoid stale reads from demoted masters
+        client = await create_verified_redis_client(resolved_redis_url, decode_responses=False)
         await client.ping()
 
         operations = []
@@ -1829,7 +1834,8 @@ async def delete(
     resolved_redis_url = redis_url or get_redis_url()
 
     try:
-        client = await create_redis_client(resolved_redis_url, decode_responses=True)
+        # Use verified client to ensure we're deleting from master
+        client = await create_verified_redis_client(resolved_redis_url, decode_responses=True)
 
         # Check if operation exists (redis-native format)
         meta_key = f"ares:op:{operation_id}:meta"
@@ -1901,7 +1907,6 @@ async def backfill_domains(
         ares-ops backfill-domains op-20250128-123456
     """
     from ares.core.models import SharedRedTeamState
-    from ares.core.redis_client import create_redis_client
     from ares.core.state_backend import RedisStateBackend
 
     resolved_redis_url = redis_url or get_redis_url()
@@ -1938,7 +1943,8 @@ async def backfill_domains(
         return sorted(domains)
 
     try:
-        client = await create_redis_client(resolved_redis_url, decode_responses=False)
+        # Use verified client to ensure we're reading/writing to master
+        client = await create_verified_redis_client(resolved_redis_url, decode_responses=False)
         state = await _load_state_from_redis(client, operation_id)
 
         if not state:
@@ -2006,7 +2012,8 @@ async def inject_credential(
     resolved_redis_url = redis_url or get_redis_url()
 
     try:
-        client = await create_redis_client(resolved_redis_url, decode_responses=False)
+        # Use verified client to ensure we're reading/writing to master
+        client = await create_verified_redis_client(resolved_redis_url, decode_responses=False)
         state = await _load_state_from_redis(client, operation_id)
 
         if not state:
@@ -2082,7 +2089,8 @@ async def inject_vulnerability(
     resolved_redis_url = redis_url or get_redis_url()
 
     try:
-        client = await create_redis_client(resolved_redis_url, decode_responses=False)
+        # Use verified client to ensure we're reading/writing to master
+        client = await create_verified_redis_client(resolved_redis_url, decode_responses=False)
         state = await _load_state_from_redis(client, operation_id)
 
         if not state:

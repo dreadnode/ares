@@ -609,6 +609,11 @@ class ResultProcessingMixin:
         # Calculate attack_step for discoveries (parent + 1)
         discovery_step = parent_attack_step + 1 if parent_credential_id else 0
 
+        # Get target domain for fallback when hash domain is empty
+        target_domain = ""
+        if self.shared_state.target and self.shared_state.target.domain:
+            target_domain = self.shared_state.target.domain
+
         cred_data = result.get("credential")
         if isinstance(cred_data, dict):
             self._add_user(cred_data.get("username", ""), cred_data.get("domain", ""), source_agent)
@@ -642,11 +647,13 @@ class ResultProcessingMixin:
 
         hash_data = result.get("hash")
         if isinstance(hash_data, dict):
+            # Use target_domain as fallback when hash domain is empty
+            hash_domain = hash_data.get("domain", "") or target_domain
             hash_obj = Hash(
                 username=hash_data.get("username", ""),
                 hash_value=hash_data.get("hash_value", ""),
                 hash_type=hash_data.get("hash_type", "NTLM"),
-                domain=hash_data.get("domain", ""),
+                domain=hash_domain,
                 cracked_password=hash_data.get("cracked_password", ""),
                 parent_id=parent_credential_id,
                 attack_step=discovery_step,
@@ -661,11 +668,13 @@ class ResultProcessingMixin:
             for h in hashes_data:
                 if not isinstance(h, dict):
                     continue
+                # Use target_domain as fallback when hash domain is empty
+                hash_domain = h.get("domain", "") or target_domain
                 hash_obj = Hash(
                     username=h.get("username", ""),
                     hash_value=h.get("hash_value", ""),
                     hash_type=h.get("hash_type", "NTLM"),
-                    domain=h.get("domain", ""),
+                    domain=hash_domain,
                     cracked_password=h.get("cracked_password", ""),
                     parent_id=parent_credential_id,
                     attack_step=discovery_step,
@@ -762,6 +771,9 @@ class ResultProcessingMixin:
         # Always extract as a backup - real-time hooks may fail silently or not complete
         # before worker crash. Duplicates are handled by dedup logic in add_hash().
         for hash_obj in self._extract_hashes_from_output(output):
+            # Fill in empty domain from target (non-domain-prefixed secretsdump output)
+            if not hash_obj.domain and domain:
+                hash_obj.domain = domain
             # Track attack chain
             if parent_credential_id:
                 hash_obj.parent_id = parent_credential_id

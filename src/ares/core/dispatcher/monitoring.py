@@ -591,6 +591,7 @@ class MonitoringMixin:
                 discovery_type = discovery.get("type", "")
                 data = discovery.get("data", {})
                 source_agent = discovery.get("source_agent", "unknown")
+                discovery_task_id = discovery.get("task_id")
 
                 if discovery_type == "delegation":
                     await self._process_realtime_delegation_discovery(data, source_agent)
@@ -599,7 +600,9 @@ class MonitoringMixin:
                         data, source_agent, task_queue=None
                     )
                 elif discovery_type == "hash":
-                    await self._process_realtime_hash_discovery(data, source_agent, task_queue=None)
+                    await self._process_realtime_hash_discovery(
+                        data, source_agent, task_queue=None, task_id=discovery_task_id
+                    )
                 elif discovery_type == "vulnerability":
                     await self._process_realtime_vulnerability_discovery(data, source_agent)
                 else:
@@ -673,7 +676,11 @@ class MonitoringMixin:
         logger.info(f"📡 Real-time credential: {domain}\\{username}")
 
     async def _process_realtime_hash_discovery(
-        self: RedTeamDispatcher, data: dict, source_agent: str, task_queue: Any = None
+        self: RedTeamDispatcher,
+        data: dict,
+        source_agent: str,
+        task_queue: Any = None,
+        task_id: str | None = None,
     ) -> None:
         """Process a real-time hash discovery."""
         from ares.core.models import Hash
@@ -686,12 +693,28 @@ class MonitoringMixin:
         if not username or not hash_value:
             return
 
+        # Fallback to target domain if hash domain is empty
+        # (non-domain-prefixed secretsdump output: "user:rid:lmhash:nthash:::")
+        if not domain and self.shared_state.target and self.shared_state.target.domain:
+            domain = self.shared_state.target.domain
+
+        # Look up parent credential from task params for attack chain tracking
+        parent_credential_id: str | None = None
+        parent_attack_step: int = 0
+        if task_id and self._shared_state:
+            task_info = self._shared_state.pending_tasks.get(task_id)
+            if task_info and task_info.params:
+                parent_credential_id = task_info.params.get("parent_credential_id")
+                parent_attack_step = int(task_info.params.get("parent_attack_step", 0) or 0)
+
         hash_obj = Hash(
             username=username,
             hash_value=hash_value,
             hash_type=hash_type,
             domain=domain,
             source=f"realtime:{source_agent}",
+            parent_id=parent_credential_id,
+            attack_step=parent_attack_step + 1 if parent_credential_id else 0,
         )
 
         # publish_hash handles deduplication, DA detection, and immediate crack dispatch
@@ -1322,6 +1345,7 @@ class MonitoringMixin:
                 discovery_type = discovery.get("type", "")
                 data = discovery.get("data", {})
                 source_agent = discovery.get("source_agent", "unknown")
+                discovery_task_id = discovery.get("task_id")
 
                 if discovery_type == "delegation":
                     await self._process_realtime_delegation_discovery(
@@ -1333,7 +1357,7 @@ class MonitoringMixin:
                     )
                 elif discovery_type == "hash":
                     await self._process_realtime_hash_discovery(
-                        data, source_agent, task_queue=task_queue
+                        data, source_agent, task_queue=task_queue, task_id=discovery_task_id
                     )
                 elif discovery_type == "vulnerability":
                     await self._process_realtime_vulnerability_discovery(

@@ -394,7 +394,8 @@ async def _run_direct_nmap(
 
     dc_count = sum(1 for h in hosts if h.is_dc)
     logger.success(
-        f"[DIRECT NMAP] Discovered {len(hosts)} hosts ({dc_count} DCs) from {len(unscanned)} targets"
+        f"[DIRECT NMAP] Discovered {len(hosts)} hosts ({dc_count} DCs) "
+        f"from {len(unscanned)} targets"
     )
 
 
@@ -769,7 +770,8 @@ async def run_multi_agent_operation(
                                 delay_idx = min(rate_limit_count - 1, len(rate_limit_delays) - 1)
                                 delay = rate_limit_delays[delay_idx]
                                 logger.warning(
-                                    f"⏳ Rate limit in result (attempt {rate_limit_count}/{rate_limit_max_retries}), "
+                                    f"⏳ Rate limit in result "
+                                    f"(attempt {rate_limit_count}/{rate_limit_max_retries}), "
                                     f"backing off {delay}s: {error_msg}"
                                 )
                                 await asyncio.sleep(delay)
@@ -2958,22 +2960,9 @@ async def _auto_golden_ticket(
                     )
                     continue
 
-                # Find DC IP for this domain
-                dc_ip = None
-                for host in state.all_hosts:
-                    hostname = (host.hostname or "").lower()
-                    if domain.lower() in hostname and any(
-                        role.lower() in ("dc", "domain controller") for role in host.roles
-                    ):
-                        dc_ip = host.ip
-                        break
-
-                # Fallback to any DC
-                if not dc_ip:
-                    for host in state.all_hosts:
-                        if any(role.lower() in ("dc", "domain controller") for role in host.roles):
-                            dc_ip = host.ip
-                            break
+                # Find DC IP for this domain using dispatcher's robust lookup
+                # This handles child domains, forest DCs, DNS SRV, etc.
+                dc_ip = dispatcher._find_domain_controller_ip(domain)
 
                 if not dc_ip:
                     logger.warning(f"🎫 Auto-golden-ticket: No DC IP found for {domain}, skipping")

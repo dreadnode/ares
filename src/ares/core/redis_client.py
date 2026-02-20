@@ -14,10 +14,16 @@ Read Replicas:
     Use create_redis_replica_client() for read-only operations to distribute
     load across replicas. The replica client automatically handles replica
     discovery via Sentinel.
+
+ROLE Verification:
+    Use create_verified_redis_client() for CLI and read operations where stale
+    data from a demoted master would be problematic. This follows the official
+    Redis Sentinel client spec: https://redis.io/docs/latest/develop/reference/sentinel-clients/
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import threading
@@ -302,7 +308,16 @@ async def create_redis_client(
                 socket_timeout=socket_timeout,
                 socket_connect_timeout=socket_connect_timeout,
             )
-            master_addr = await fresh_sentinel.discover_master(sentinel_config["master"])
+            try:
+                master_addr = await fresh_sentinel.discover_master(sentinel_config["master"])
+            finally:
+                # Close the Sentinel's internal Redis clients to avoid leaking connections.
+                # We only needed it to find the master address.
+                for sentinel_client in fresh_sentinel.sentinels:
+                    try:
+                        await sentinel_client.aclose()
+                    except Exception:
+                        pass
             logger.info(
                 f"Creating direct Redis connection for thread '{thread_name}' "
                 f"to {master_addr[0]}:{master_addr[1]} (fresh Sentinel discovery)"
@@ -395,3 +410,124 @@ async def create_redis_replica_client(*, decode_responses: bool = False):
         socket_connect_timeout=socket_connect_timeout,
         health_check_interval=health_check_interval,
     )
+
+
+async def _verify_redis_role(client, expected_role: str = "master") -> bool:
+    """
+    Verify Redis instance role using ROLE command.
+
+    Per the Redis Sentinel client spec, clients should verify the instance role
+    after connecting via Sentinel to detect stale Sentinel data:
+    https://redis.io/docs/latest/develop/reference/sentinel-clients/
+
+    The ROLE command returns:
+    - Master: ['master', replication_offset, [[replica_ip, port, offset], ...]]
+    - Slave:  ['slave', master_ip, master_port, state, replication_offset]
+
+    Args:
+        client: Redis client to verify
+        expected_role: Expected role ('master' or 'slave')
+
+    Returns:
+        True if role matches expected, False otherwise
+    """
+    try:
+        role_info = await client.execute_command("ROLE")
+        actual_role = role_info[0]
+        # Handle both bytes and string responses
+        if isinstance(actual_role, bytes):
+            actual_role = actual_role.decode()
+        return actual_role == expected_role
+    except Exception as e:
+        logger.warning(f"ROLE command failed: {e}")
+        return False
+
+
+async def create_verified_redis_client(
+    redis_url: str | None = None,
+    *,
+    decode_responses: bool = False,
+    verify_role: bool = True,
+    max_retries: int = 3,
+    retry_delay: float = 0.5,
+):
+    """
+    Create a Redis client with ROLE verification per Redis Sentinel client spec.
+
+    This follows the official Redis Sentinel client specification:
+    https://redis.io/docs/latest/develop/reference/sentinel-clients/
+
+    After connecting via Sentinel, the ROLE command verifies the instance is
+    actually a master. This prevents reading stale data from a demoted master
+    (now slave) that has broken replication.
+
+    Use this for:
+    - CLI operations reading state (loot, runtime, report)
+    - Any read operation where stale data would be problematic
+    - Operations after suspected failover
+
+    For write-heavy workloads, use create_redis_client() instead - redis-py's
+    ReadOnlyError detection will catch writes to replicas.
+
+    Args:
+        redis_url: Direct Redis URL (used when Sentinel not configured)
+        decode_responses: Whether to decode responses to strings
+        verify_role: If True, verify connected to master using ROLE command
+        max_retries: Maximum retry attempts if connected to wrong instance
+        retry_delay: Seconds to wait between retries (allows Sentinel to update)
+
+    Returns:
+        Async Redis client verified to be connected to master
+
+    Raises:
+        RuntimeError: If unable to connect to verified master after retries
+    """
+    sentinel_config = get_redis_sentinel_config()
+
+    # No Sentinel = no verification needed (direct connection)
+    if not sentinel_config or not verify_role:
+        return await create_redis_client(redis_url, decode_responses=decode_responses)
+
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        client = None
+        try:
+            client = await create_redis_client(redis_url, decode_responses=decode_responses)
+
+            # Verify we're connected to master using ROLE command
+            if await _verify_redis_role(client, expected_role="master"):
+                logger.debug(f"ROLE verification passed (attempt {attempt})")
+                return client
+
+            # Connected to wrong instance type (likely demoted master with stale data)
+            logger.warning(
+                f"ROLE verification failed: not connected to master (attempt {attempt}/{max_retries}). "
+                "Sentinel may have stale data or failover in progress."
+            )
+            await client.aclose()
+            client = None
+
+            # Invalidate Sentinel client to force fresh discovery
+            invalidate_sentinel_client()
+
+            if attempt < max_retries:
+                # Wait for Sentinel to potentially update its view
+                await asyncio.sleep(retry_delay)
+
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Redis connection attempt {attempt} failed: {e}")
+            if client:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+            invalidate_sentinel_client()
+            if attempt < max_retries:
+                await asyncio.sleep(retry_delay)
+
+    error_msg = f"Failed to connect to verified Redis master after {max_retries} attempts"
+    if last_error:
+        error_msg += f": {last_error}"
+    raise RuntimeError(error_msg)

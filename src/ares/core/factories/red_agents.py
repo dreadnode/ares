@@ -684,6 +684,7 @@ def create_role_hooks(
 
     if role in extraction_roles:
         from ares.core.dispatcher.extraction import extract_plaintext_passwords_from_output
+        from ares.tools.red.common import get_credential_context
 
         async def publish_hash_and_credential_discoveries(event: ToolEnd) -> None:
             """Extract and publish hashes/credentials from tool output."""
@@ -713,11 +714,18 @@ def create_role_hooks(
                 )
                 return
 
+            # Get credential context for task_id (for attack chain tracking on orchestrator)
+            cred_ctx = get_credential_context()
+            current_task_id = cred_ctx.task_id if cred_ctx else ""
+
             # Extract and publish hashes
             if tool_name in HASH_EXTRACTION_TOOLS:
                 hashes = dispatcher._extract_hashes_from_output(output)
                 for h in hashes:
                     try:
+                        # Use extracted domain, fallback to target domain (same as credentials)
+                        # Non-domain-prefixed hashes like "user:rid:lmhash:nthash:::" have empty domain
+                        hash_domain = h.domain or shared_state.target_domain or ""
                         await task_queue.publish_discovery(
                             operation_id=operation_id,
                             discovery_type="hash",
@@ -725,12 +733,13 @@ def create_role_hooks(
                                 "username": h.username,
                                 "hash_value": h.hash_value,
                                 "hash_type": h.hash_type,
-                                "domain": h.domain,
+                                "domain": hash_domain,
                             },
                             source_agent=log_name,
+                            task_id=current_task_id,
                         )
                         logger.info(
-                            f"📡 [{log_name}] Published hash: {h.domain}\\{h.username} ({h.hash_type})"
+                            f"📡 [{log_name}] Published hash: {hash_domain}\\{h.username} ({h.hash_type})"
                         )
                     except Exception as e:
                         logger.warning(f"Failed to publish hash discovery: {e}")
