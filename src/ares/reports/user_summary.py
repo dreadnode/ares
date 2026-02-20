@@ -6,12 +6,10 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ares.core.models import Credential
-
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from ares.core.models import Hash, SharedRedTeamState
+    from ares.core.models import Credential, Hash, SharedRedTeamState
 
 
 @dataclass
