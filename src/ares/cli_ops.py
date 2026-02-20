@@ -2157,6 +2157,216 @@ async def inject_vulnerability(
         sys.exit(1)
 
 
+@app.command(name="loot-users")
+async def loot_users(
+    operation_id: Annotated[str | None, cyclopts.Parameter(help="Operation ID")] = None,
+    *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Use the latest operation (prefer running)")
+    ] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+    json_output: Annotated[bool, cyclopts.Parameter(help="Output as JSON")] = False,
+    admin_only: Annotated[
+        bool, cyclopts.Parameter(help="Only show users with admin credentials")
+    ] = False,
+    show_chains: Annotated[
+        bool, cyclopts.Parameter(help="Show attack chains for each credential/hash")
+    ] = False,
+    domain: Annotated[str, cyclopts.Parameter(help="Filter by domain (case-insensitive)")] = "",
+) -> None:
+    """Display user summaries with credentials, hashes, and attack paths.
+
+    Shows a user-centric view of discovered credentials and hashes, including
+    how each credential was obtained (attack chain) and aggregated privilege info.
+
+    Examples:
+        ares-ops loot-users op-20250128-123456
+        ares-ops loot-users --latest
+        ares-ops loot-users --latest --admin-only
+        ares-ops loot-users --latest --show-chains
+        ares-ops loot-users --latest --domain contoso.local
+    """
+    from ares.reports.user_summary import generate_user_summaries
+
+    resolved_redis_url = redis_url or get_redis_url()
+
+    # Resolve operation ID
+    if latest and not operation_id:
+        operation_id = await _resolve_latest_operation(resolved_redis_url)
+        if not operation_id:
+            logger.error("No operations found")
+            sys.exit(1)
+        logger.info(f"Using latest operation: {operation_id}")
+    elif not operation_id:
+        logger.error("Either operation_id or --latest is required")
+        sys.exit(1)
+
+    try:
+        client = await create_verified_redis_client(resolved_redis_url)
+        state = await _load_state_from_redis(client, operation_id)
+        await client.aclose()
+
+        if state is None:
+            logger.error(f"Operation {operation_id} not found")
+            sys.exit(1)
+
+        # Generate user summaries
+        summaries = generate_user_summaries(state)
+
+        # Apply filters
+        if admin_only:
+            summaries = [s for s in summaries if s.is_admin]
+
+        if domain:
+            domain_lower = domain.lower()
+            summaries = [s for s in summaries if s.domain.lower() == domain_lower]
+
+        if json_output:
+            _print_user_summaries_json(summaries, operation_id, state)
+        else:
+            _print_user_summaries(summaries, operation_id, state, show_chains=show_chains)
+
+    except Exception as e:
+        logger.error(f"Failed to generate user summaries: {e}")
+        sys.exit(1)
+
+
+def _print_user_summaries_json(
+    summaries: list,
+    operation_id: str,
+    state,
+) -> None:
+    """Print user summaries as JSON."""
+    import json as json_module
+
+    output = {
+        "operation_id": operation_id,
+        "has_domain_admin": state.has_domain_admin,
+        "domain_admin_path": state.domain_admin_path,
+        "user_count": len(summaries),
+        "users": [],
+    }
+
+    for s in summaries:
+        user_data = {
+            "username": s.username,
+            "domain": s.domain,
+            "is_admin": s.is_admin,
+            "description": s.description,
+            "discovery_sources": list(s.discovery_sources),
+            "max_attack_depth": s.max_attack_depth,
+            "credentials": [
+                {
+                    "id": c.id,
+                    "password": c.password,
+                    "source": c.source,
+                    "is_admin": c.is_admin,
+                    "attack_step": c.attack_step,
+                    "parent_id": c.parent_id,
+                }
+                for c in s.credentials
+            ],
+            "hashes": [
+                {
+                    "id": h.id,
+                    "hash_type": h.hash_type,
+                    "hash_value": h.hash_value,
+                    "cracked_password": h.cracked_password,
+                    "source": h.source,
+                    "attack_step": h.attack_step,
+                    "parent_id": h.parent_id,
+                }
+                for h in s.hashes
+            ],
+            "attack_chains": {
+                item_id: [
+                    {
+                        "step": step.step_number,
+                        "type": step.item_type,
+                        "username": step.username,
+                        "domain": step.domain,
+                        "source": step.source,
+                    }
+                    for step in chain
+                ]
+                for item_id, chain in s.attack_chains.items()
+            },
+        }
+        if s.first_discovered_at:
+            user_data["first_discovered_at"] = s.first_discovered_at.isoformat()
+        output["users"].append(user_data)
+
+    print(json_module.dumps(output, indent=2, default=str))
+
+
+def _print_user_summaries(
+    summaries: list,
+    operation_id: str,
+    state,
+    *,
+    show_chains: bool = False,
+) -> None:
+    """Print user summaries in human-readable format."""
+    from ares.reports.user_summary import format_attack_chain
+
+    print(f"Operation: {operation_id}")
+    if state.has_domain_admin:
+        print("*** DOMAIN ADMIN ACHIEVED ***")
+        if state.domain_admin_path:
+            print(f"  Path: {state.domain_admin_path}")
+    print()
+
+    admin_count = sum(1 for s in summaries if s.is_admin)
+    print(f"User Summaries ({len(summaries)} users, {admin_count} admins)")
+    print("=" * 60)
+    print()
+
+    for s in summaries:
+        # User header
+        admin_marker = " [ADMIN]" if s.is_admin else ""
+        print(f"{s.display_name}{admin_marker}")
+        if s.description:
+            print(f"  Description: {s.description}")
+
+        # Sources
+        if s.discovery_sources:
+            sources_str = ", ".join(
+                _normalize_source_label(src) for src in sorted(s.discovery_sources)
+            )
+            print(f"  Discovered via: {sources_str}")
+
+        # Attack depth
+        if s.max_attack_depth > 0:
+            print(f"  Max attack depth: {s.max_attack_depth}")
+
+        # Credentials
+        if s.credentials:
+            print(f"  Credentials ({len(s.credentials)}):")
+            for c in s.credentials:
+                admin_str = " (admin)" if c.is_admin else ""
+                source_str = f" [{_normalize_source_label(c.source)}]" if c.source else ""
+                print(f"    - {c.password}{admin_str}{source_str}")
+                if show_chains and c.id in s.attack_chains:
+                    chain = s.attack_chains[c.id]
+                    chain_str = format_attack_chain(chain, compact=True)
+                    print(f"      Chain: {chain_str}")
+
+        # Hashes
+        if s.hashes:
+            print(f"  Hashes ({len(s.hashes)}):")
+            for h in s.hashes:
+                cracked_str = f" (cracked: {h.cracked_password})" if h.cracked_password else ""
+                source_str = f" [{_normalize_source_label(h.source)}]" if h.source else ""
+                hash_display = h.hash_value[:32] + "..." if len(h.hash_value) > 32 else h.hash_value
+                print(f"    - {h.hash_type}:{hash_display}{cracked_str}{source_str}")
+                if show_chains and h.id in s.attack_chains:
+                    chain = s.attack_chains[h.id]
+                    chain_str = format_attack_chain(chain, compact=True)
+                    print(f"      Chain: {chain_str}")
+
+        print()  # Blank line between users
+
+
 def main() -> None:
     """Entry point for ares-ops CLI."""
     try:
