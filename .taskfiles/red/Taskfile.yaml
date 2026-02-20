@@ -190,6 +190,34 @@ tasks:
           kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | tee -a "{{.LOGFILE}}"
         silent: false
 
+      # Auto-fetch report when operation completes
+      - cmd: |
+          echo ""
+          echo "Checking operation status and fetching report..."
+          mkdir -p ./reports
+
+          # Check if operation completed
+          STATUS=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops status "{{.OPERATION_ID_COMPUTED}}" 2>/dev/null | grep -i "status:" | head -1 || true)
+
+          if echo "$STATUS" | grep -qi "completed"; then
+            echo "Operation completed - generating report..."
+            kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops report "{{.OPERATION_ID_COMPUTED}}" --output-dir /tmp/reports 2>/dev/null || true
+
+            # Copy report from pod
+            ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -o jsonpath='{.items[0].metadata.name}')
+            kubectl cp "{{.K8S_NAMESPACE}}/${ORCH_POD}:/tmp/reports/{{.OPERATION_ID_COMPUTED}}_report.md" "./reports/{{.OPERATION_ID_COMPUTED}}_report.md" 2>/dev/null || true
+
+            if [ -f "./reports/{{.OPERATION_ID_COMPUTED}}_report.md" ]; then
+              echo "Report saved: ./reports/{{.OPERATION_ID_COMPUTED}}_report.md"
+            else
+              echo "Warning: Could not fetch report file"
+            fi
+          else
+            echo "Operation not yet completed. Run 'task red:multi:report LATEST=true' to fetch report later."
+          fi
+        silent: false
+        ignore_error: true
+
   # ===========================================================================
   # Python CLI wrappers - these call the new cli_ops commands
   # ===========================================================================
@@ -288,6 +316,51 @@ tasks:
           OP_ID_ARG="{{.OPERATION_ID}}"
         fi
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops runtime $OP_ID_ARG $LATEST_FLAG
+
+  multi:report:
+    desc: "Generate markdown report for an operation (usage: task red:multi:report [OPERATION_ID=op-xxx] [LATEST=true] [REGENERATE=true])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+      REGENERATE: '{{.REGENERATE | default "false"}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required. Usage: task red:multi:report OPERATION_ID=op-xxx  OR  task red:multi:report LATEST=true"
+    cmds:
+      - cmd: mkdir -p "{{.OUTPUT_DIR}}"
+        silent: true
+      - |
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        OP_ID_ARG=""
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ID_ARG="{{.OPERATION_ID}}"
+        fi
+        REGEN_FLAG=""
+        if [ "{{.REGENERATE}}" = "true" ]; then
+          REGEN_FLAG="--regenerate"
+        fi
+        # Generate report via CLI (outputs to pod's /tmp, we retrieve from Redis)
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops report $OP_ID_ARG $LATEST_FLAG $REGEN_FLAG --output-dir /tmp/reports
+
+        # Get the operation ID if we used --latest
+        if [ -n "$LATEST_FLAG" ]; then
+          RESOLVED_OP_ID=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops list --latest 2>/dev/null | tr -d '\n')
+        else
+          RESOLVED_OP_ID="{{.OPERATION_ID}}"
+        fi
+
+        # Copy report from pod to local machine
+        if [ -n "$RESOLVED_OP_ID" ]; then
+          kubectl cp "{{.K8S_NAMESPACE}}/$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -o jsonpath='{.items[0].metadata.name}'):/tmp/reports/${RESOLVED_OP_ID}_report.md" "{{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_report.md" 2>/dev/null || true
+          if [ -f "{{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_report.md" ]; then
+            echo "Report saved to: {{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_report.md"
+          fi
+        fi
 
   multi:list:
     desc: "List multi-agent operations and their state"
@@ -589,6 +662,34 @@ tasks:
           kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | tee -a "{{.LOGFILE}}"
         silent: false
 
+      # Auto-fetch report when operation completes
+      - cmd: |
+          echo ""
+          echo "Checking operation status and fetching report..."
+          mkdir -p ./reports
+
+          # Check if operation completed
+          STATUS=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops status "{{.OPERATION_ID_COMPUTED}}" 2>/dev/null | grep -i "status:" | head -1 || true)
+
+          if echo "$STATUS" | grep -qi "completed"; then
+            echo "Operation completed - generating report..."
+            kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops report "{{.OPERATION_ID_COMPUTED}}" --output-dir /tmp/reports 2>/dev/null || true
+
+            # Copy report from pod
+            ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -o jsonpath='{.items[0].metadata.name}')
+            kubectl cp "{{.K8S_NAMESPACE}}/${ORCH_POD}:/tmp/reports/{{.OPERATION_ID_COMPUTED}}_report.md" "./reports/{{.OPERATION_ID_COMPUTED}}_report.md" 2>/dev/null || true
+
+            if [ -f "./reports/{{.OPERATION_ID_COMPUTED}}_report.md" ]; then
+              echo "Report saved: ./reports/{{.OPERATION_ID_COMPUTED}}_report.md"
+            else
+              echo "Warning: Could not fetch report file"
+            fi
+          else
+            echo "Operation not yet completed. Run 'task red:multi:report LATEST=true' to fetch report later."
+          fi
+        silent: false
+        ignore_error: true
+
   multi:resume:
     desc: "Resume a multi-agent operation from checkpoint (usage: task red:multi:resume OPERATION_ID=op-xxx DOMAIN=target.local TARGETS=192.168.56.10)"
     silent: true
@@ -645,7 +746,11 @@ tasks:
 
         ORCH_DEPLOY=ares-orchestrator
         CURRENT_REPLICAS=$(kubectl get deploy -n {{.K8S_NAMESPACE}} $ORCH_DEPLOY -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "1")
-        echo "Scaling $ORCH_DEPLOY to 0 replicas (was $CURRENT_REPLICAS)"
+        # Ensure we restore to at least 1 replica (protects against previous failed runs leaving it at 0)
+        if [ "$CURRENT_REPLICAS" -lt 1 ] 2>/dev/null; then
+          CURRENT_REPLICAS=1
+        fi
+        echo "Scaling $ORCH_DEPLOY to 0 replicas (will restore to $CURRENT_REPLICAS)"
         kubectl scale -n {{.K8S_NAMESPACE}} deploy/$ORCH_DEPLOY --replicas=0
         kubectl rollout status -n {{.K8S_NAMESPACE}} deploy/$ORCH_DEPLOY || true
 

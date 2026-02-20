@@ -4,7 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from dreadnode.agent.events import ToolEnd
+from dreadnode.agent.events import StepStart, ToolEnd
+from dreadnode.agent.reactions import Finish
 
 from ares.core.config import AgentConfig
 from ares.core.dispatcher import RedTeamDispatcher
@@ -543,3 +544,136 @@ class TestContextManagementHooks:
         result = get_min_messages_to_keep()
         assert result >= 5  # At least 5 messages
         assert result <= 50  # But not more than 50
+
+
+class TestStopOnExternalDomainAdmin:
+    """Tests for stop_on_external_domain_admin hook.
+
+    This hook stops the orchestrator when Domain Admin is achieved externally
+    (by a worker agent discovering krbtgt hash via secretsdump).
+    """
+
+    def _make_step_start_event(self) -> MagicMock:
+        """Helper to create a mock StepStart event."""
+        return MagicMock(spec=StepStart)
+
+    def _make_tool_end_event(self, tool_name: str = "get_status") -> MagicMock:
+        """Helper to create a mock ToolEnd event."""
+        event = MagicMock(spec=ToolEnd)
+        event.tool_call = MagicMock()
+        event.tool_call.name = tool_name
+        event.message = MagicMock()
+        event.message.content = "OK"
+        return event
+
+    @pytest.mark.asyncio
+    async def test_returns_finish_on_step_start_when_da_achieved(self):
+        """Test that hook returns Finish on StepStart when has_domain_admin=True."""
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        shared_state.has_domain_admin = True
+        shared_state.domain_admin_path = "kerberoast -> secretsdump -> krbtgt"
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+        event = self._make_step_start_event()
+
+        # Find and invoke hooks that accept StepStart
+        finish_results = []
+        for hook in hooks:
+            try:
+                result = await hook(event)
+                if isinstance(result, Finish):
+                    finish_results.append(result)
+            except TypeError:
+                # Hook doesn't accept this event type
+                pass
+
+        assert len(finish_results) >= 1, "Should return Finish when DA achieved on StepStart"
+        assert "Domain Admin achieved" in finish_results[0].reason
+
+    @pytest.mark.asyncio
+    async def test_returns_finish_on_tool_end_when_da_achieved(self):
+        """Test that hook returns Finish on ToolEnd when has_domain_admin=True.
+
+        This is critical for reducing latency - we check DA after every tool
+        execution, not just at step boundaries.
+        """
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        shared_state.has_domain_admin = True
+        shared_state.domain_admin_path = "secretsdump -> krbtgt"
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+        event = self._make_tool_end_event("get_operation_summary")
+
+        # Find and invoke hooks that accept ToolEnd
+        finish_results = []
+        for hook in hooks:
+            try:
+                result = await hook(event)
+                if isinstance(result, Finish):
+                    finish_results.append(result)
+            except TypeError:
+                pass
+
+        assert len(finish_results) >= 1, "Should return Finish when DA achieved on ToolEnd"
+        assert "Domain Admin achieved" in finish_results[0].reason
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_da_not_achieved(self):
+        """Test that hook returns None when has_domain_admin=False."""
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        shared_state.has_domain_admin = False
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
+
+        # Test both event types
+        for event in [self._make_step_start_event(), self._make_tool_end_event()]:
+            for hook in hooks:
+                try:
+                    result = await hook(event)
+                    # Should not return Finish when DA not achieved
+                    assert not isinstance(result, Finish), (
+                        f"Should not return Finish when DA not achieved, got {result}"
+                    )
+                except TypeError:
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_only_orchestrator_has_da_stop_hook(self):
+        """Test that only ORCHESTRATOR role has the stop_on_external_domain_admin hook."""
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        shared_state.has_domain_admin = True
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        # Worker roles should NOT have the DA stop hook
+        worker_roles = [
+            AgentRole.RECON,
+            AgentRole.CREDENTIAL_ACCESS,
+            AgentRole.CRACKER,
+            AgentRole.LATERAL,
+        ]
+
+        for role in worker_roles:
+            hooks = create_role_hooks(role, dispatcher, shared_state)
+            event = self._make_step_start_event()
+
+            finish_count = 0
+            for hook in hooks:
+                try:
+                    result = await hook(event)
+                    if isinstance(result, Finish) and "Domain Admin" in str(result.reason):
+                        finish_count += 1
+                except TypeError:
+                    pass
+
+            assert finish_count == 0, f"Worker role {role} should not have DA stop hook"

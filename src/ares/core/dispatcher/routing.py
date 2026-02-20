@@ -660,6 +660,7 @@ class RoutingMixin:
         domain: str = "",
         priority: int = 5,
         wordlist: str = "rockyou.txt",
+        task_queue: Any = None,
     ) -> str:
         """
         Route hash to CrackerAgent for cracking.
@@ -675,6 +676,7 @@ class RoutingMixin:
             domain: Associated domain.
             priority: 1=urgent (krbtgt), 5=normal, 10=low.
             wordlist: Wordlist to use.
+            task_queue: Optional task queue for threaded dispatch.
 
         Returns:
             Task ID for tracking.
@@ -685,6 +687,8 @@ class RoutingMixin:
             return ""
         # Normalize domain to FQDN format
         domain = self._normalize_domain(domain)
+        # Use provided task_queue or fall back to instance queue
+        effective_task_queue = task_queue if task_queue is not None else self._task_queue
         # Find the hash object to get its ID for attack chain tracking
         parent_hash_id = None
         parent_attack_step = 0
@@ -710,13 +714,14 @@ class RoutingMixin:
             "parent_attack_step": parent_attack_step,
         }
 
-        if self._task_queue:
+        if effective_task_queue:
             task_id = await self._throttled_submit_task(
                 task_type="crack",
                 target_role="cracker",
                 payload=payload,
                 source_agent=source_agent,
                 priority=priority,
+                task_queue=effective_task_queue,
             )
             if not task_id:
                 return ""
@@ -732,6 +737,10 @@ class RoutingMixin:
                 task_type="crack",
                 assigned_agent="cracker",
                 params=payload,
+            )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(
+                task_id, task_info, task_queue=effective_task_queue
             )
             self.shared_state.pending_tasks[task_id] = task_info
 
@@ -874,6 +883,8 @@ class RoutingMixin:
                 assigned_agent="lateral",
                 params=payload,
             )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(task_id, task_info)
             self.shared_state.pending_tasks[task_id] = task_info
 
             logger.info(f"Lateral movement task {task_id} submitted to Redis queue")
@@ -983,6 +994,8 @@ class RoutingMixin:
                 assigned_agent="acl",
                 params=payload,
             )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(task_id, task_info)
             self.shared_state.pending_tasks[task_id] = task_info
 
             logger.info(f"ACL analysis task {task_id} submitted to Redis queue")
@@ -1115,6 +1128,8 @@ class RoutingMixin:
                 assigned_agent="recon",
                 params=payload,
             )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(task_id, task_info)
             self.shared_state.pending_tasks[task_id] = task_info
 
             cred_label = username or "unauthenticated"
@@ -1229,6 +1244,10 @@ class RoutingMixin:
                 assigned_agent="credential_access",
                 params=payload,
             )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(
+                task_id, task_info, task_queue=effective_task_queue
+            )
             self.shared_state.pending_tasks[task_id] = task_info
 
             cred_label = username or "no-cred"
@@ -1251,20 +1270,36 @@ class RoutingMixin:
     def _enrich_delegation_payload(
         self: RedTeamDispatcher, payload: dict[str, Any], vuln_type: str
     ) -> None:
-        """Enrich delegation exploit payload with credentials from state if missing."""
+        """Enrich delegation exploit payload with credentials and target_ip from state."""
         if vuln_type not in ("constrained_delegation", "unconstrained_delegation"):
             return
-        if payload.get("password"):
-            return
-        account = payload.get("account_name") or payload.get("account", payload.get("target", ""))
-        account_lower = account.lower().rstrip("$") if account else ""
-        for cred in self.shared_state.all_credentials:
-            if cred.username.lower() == account_lower and cred.password:
-                payload["password"] = cred.password
-                if not payload.get("domain") and cred.domain:
-                    payload["domain"] = cred.domain
-                logger.info(f"Enriched {vuln_type} payload with credential for {account}")
-                break
+
+        # Enrich credentials if missing
+        if not payload.get("password"):
+            account = payload.get("account_name") or payload.get(
+                "account", payload.get("target", "")
+            )
+            account_lower = account.lower().rstrip("$") if account else ""
+            for cred in self.shared_state.all_credentials:
+                if cred.username.lower() == account_lower and cred.password:
+                    payload["password"] = cred.password
+                    if not payload.get("domain") and cred.domain:
+                        payload["domain"] = cred.domain
+                    logger.info(f"Enriched {vuln_type} payload with credential for {account}")
+                    break
+
+        # Resolve target_ip from target_spn if not already set
+        # This prevents the prompt from falling back to 'target' (which is the username)
+        if not payload.get("target_ip"):
+            target_spn = payload.get("target_spn", "")
+            target_host = self._extract_host_from_spn(target_spn) if target_spn else None
+            if target_host:
+                target_host_lower = target_host.lower()
+                for host in self.shared_state.all_hosts:
+                    if host.hostname and target_host_lower in host.hostname.lower():
+                        payload["target_ip"] = host.ip
+                        logger.info(f"Resolved target_ip={host.ip} from SPN {target_spn}")
+                        break
 
     def _resolve_dc_ip_for_payload(
         self: RedTeamDispatcher, payload: dict[str, Any], vuln_type: str
@@ -1336,6 +1371,8 @@ class RoutingMixin:
         task_info = TaskInfo(
             task_id=task_id, task_type="exploit", assigned_agent="privesc", params=payload
         )
+        # Write to Redis FIRST (source of truth), then cache in memory
+        await self._persist_task_info_to_redis(task_id, task_info, task_queue=effective_task_queue)
         self.shared_state.pending_tasks[task_id] = task_info
         logger.info(f"Exploit task {task_id} for {vuln_type} submitted to Redis queue")
         self._record_exploit_weakness(vuln_type, target, payload)
@@ -1449,6 +1486,10 @@ class RoutingMixin:
                 assigned_agent="privesc",
                 params=payload,
             )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(
+                task_id, task_info, task_queue=effective_task_queue
+            )
             self.shared_state.pending_tasks[task_id] = task_info
 
             logger.info(
@@ -1527,6 +1568,8 @@ class RoutingMixin:
                 assigned_agent="coercion",
                 params=payload,
             )
+            # Write to Redis FIRST (source of truth), then cache in memory
+            await self._persist_task_info_to_redis(task_id, task_info)
             self.shared_state.pending_tasks[task_id] = task_info
 
             logger.info(f"Coercion task {task_id} submitted to Redis queue")

@@ -7,6 +7,7 @@ red team operations in a Kubernetes environment.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 from datetime import datetime, timezone
@@ -393,7 +394,8 @@ async def _run_direct_nmap(
 
     dc_count = sum(1 for h in hosts if h.is_dc)
     logger.success(
-        f"[DIRECT NMAP] Discovered {len(hosts)} hosts ({dc_count} DCs) from {len(unscanned)} targets"
+        f"[DIRECT NMAP] Discovered {len(hosts)} hosts ({dc_count} DCs) "
+        f"from {len(unscanned)} targets"
     )
 
 
@@ -436,11 +438,8 @@ async def _prime_operation(
     else:
         logger.warning("No state backend configured - operation may not be discoverable")
 
-    # Run nmap directly BEFORE the orchestrator LLM starts.
-    # This ensures host discovery doesn't get stuck behind slow LLM-guided tasks.
-    if target_ips:
-        namespace = get_namespace()
-        await _run_direct_nmap(state, target_ips, namespace)
+    # NOTE: NMAP and immediate AS-REP dispatch moved to run_multi_agent_operation()
+    # before background tasks are created, to prevent race conditions
 
 
 def _is_rate_limit_error(error: Exception | str) -> bool:
@@ -667,8 +666,15 @@ async def run_multi_agent_operation(
     # Wait for required workers before starting
     await _ensure_required_workers(dispatcher, ["recon"], timeout=120.0)
 
+    # Run NMAP to discover hosts before background tasks start
+    state = dispatcher.shared_state
+    if target_ips:
+        namespace = get_namespace()
+        await _run_direct_nmap(state, target_ips, namespace)
+
     # Start background tasks
-    # Note: No periodic checkpoint task needed - state persists directly to Redis via RedisStateBackend
+    # - Credential access (AS-REP, password spray, etc.) handled by _auto_credential_access
+    # - No periodic checkpoint needed - state persists directly to Redis via RedisStateBackend
     tasks = [
         asyncio.create_task(_monitor_agent_health(dispatcher), name="health_monitor"),
         asyncio.create_task(exploitation_workflow(dispatcher), name="exploitation_workflow"),
@@ -764,7 +770,8 @@ async def run_multi_agent_operation(
                                 delay_idx = min(rate_limit_count - 1, len(rate_limit_delays) - 1)
                                 delay = rate_limit_delays[delay_idx]
                                 logger.warning(
-                                    f"⏳ Rate limit in result (attempt {rate_limit_count}/{rate_limit_max_retries}), "
+                                    f"⏳ Rate limit in result "
+                                    f"(attempt {rate_limit_count}/{rate_limit_max_retries}), "
                                     f"backing off {delay}s: {error_msg}"
                                 )
                                 await asyncio.sleep(delay)
@@ -914,6 +921,12 @@ async def run_multi_agent_operation(
                         )
 
         if dispatcher.shared_state.completed:
+            # Log DA status if achieved before the wait loop
+            if dispatcher.shared_state.has_domain_admin:
+                logger.success(
+                    f"Domain Admin achieved! (detected before wait loop) "
+                    f"Path: {dispatcher.shared_state.domain_admin_path or 'unknown'}"
+                )
             logger.info("Operation marked complete; skipping post-run wait")
             # Still wait for running crack tasks to complete
             await _wait_for_crack_tasks(dispatcher)
@@ -940,6 +953,15 @@ async def run_multi_agent_operation(
                 await final_state._backend.store_report(report_markdown)
         except Exception as e:
             logger.warning(f"Failed to generate report for {operation_id}: {e}")
+
+        # Final summary log before return
+        duration = (end_time - start_time).total_seconds()
+        da_status = "✅ DA ACHIEVED" if final_state.has_domain_admin else "❌ No DA"
+        logger.success(
+            f"Operation {operation_id} finished: {da_status} | "
+            f"{len(final_state.all_credentials)} creds | {len(final_state.all_hashes)} hashes | "
+            f"{duration:.0f}s runtime"
+        )
 
         return {
             "operation_id": operation_id,
@@ -1221,7 +1243,7 @@ async def _extend_operation_lock(
 
 async def _auto_credential_expansion(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 30.0,
+    check_interval: float = 10.0,  # Reduced from 30s for faster lateral testing
     min_hosts: int = 1,
 ) -> None:
     """
@@ -1742,8 +1764,14 @@ async def _auto_bloodhound(
 
 
 def _make_cred_key(username: str, domain: str, password: str) -> str:
-    """Generate consistent key for credential expansion tracking."""
-    return f"{domain.lower()}:{username.lower()}:{hash(password)}"
+    """Generate consistent key for credential expansion tracking.
+
+    Uses hashlib.md5 instead of Python's hash() because hash() returns
+    different values across Python sessions (randomized since Python 3.3).
+    This caused duplicate dispatches after orchestrator restarts.
+    """
+    pw_hash = hashlib.md5(password.encode(), usedforsecurity=False).hexdigest()[:8]
+    return f"{domain.lower()}:{username.lower()}:{pw_hash}"
 
 
 def _make_hash_key(username: str, domain: str, hash_value: str) -> str:
@@ -1816,7 +1844,7 @@ def _is_likely_privileged_credential(username: str, source: str | None) -> bool:
 
 async def _auto_credential_access(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 60.0,
+    check_interval: float = 15.0,  # Reduced from 60s for faster reaction
     min_hosts: int = 1,
 ) -> None:
     """
@@ -2932,22 +2960,9 @@ async def _auto_golden_ticket(
                     )
                     continue
 
-                # Find DC IP for this domain
-                dc_ip = None
-                for host in state.all_hosts:
-                    hostname = (host.hostname or "").lower()
-                    if domain.lower() in hostname and any(
-                        role.lower() in ("dc", "domain controller") for role in host.roles
-                    ):
-                        dc_ip = host.ip
-                        break
-
-                # Fallback to any DC
-                if not dc_ip:
-                    for host in state.all_hosts:
-                        if any(role.lower() in ("dc", "domain controller") for role in host.roles):
-                            dc_ip = host.ip
-                            break
+                # Find DC IP for this domain using dispatcher's robust lookup
+                # This handles child domains, forest DCs, DNS SRV, etc.
+                dc_ip = dispatcher._find_domain_controller_ip(domain)
 
                 if not dc_ip:
                     logger.warning(f"🎫 Auto-golden-ticket: No DC IP found for {domain}, skipping")
@@ -3280,6 +3295,7 @@ async def _wait_for_crack_tasks(
     crack_tasks = _get_running_crack_tasks(dispatcher)
 
     if not crack_tasks:
+        logger.debug("No running crack tasks to wait for")
         return
 
     logger.info(

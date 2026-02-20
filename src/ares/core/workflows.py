@@ -150,6 +150,11 @@ async def credential_expansion_loop(
     while iterations < max_iterations:
         state = dispatcher.shared_state
 
+        # Short-circuit if Domain Admin achieved
+        if state.has_domain_admin:
+            logger.info("Domain Admin achieved - stopping credential expansion early")
+            break
+
         credentials = state.all_credentials
         hosts = state.all_hosts
         candidate_domains = _collect_candidate_domains(state)
@@ -238,6 +243,13 @@ async def credential_expansion_loop(
         logger.info(f"Waiting for {len(tasks_dispatched)} lateral movement tasks...")
 
         for task_id in tasks_dispatched:
+            # Short-circuit if DA achieved while waiting for tasks
+            if dispatcher.shared_state.has_domain_admin:
+                logger.info(
+                    f"Domain Admin achieved - skipping {len(tasks_dispatched) - tasks_dispatched.index(task_id)} remaining tasks"
+                )
+                break
+
             try:
                 result = await dispatcher.wait_for_task(task_id, timeout=45.0)
                 if result.get("success"):

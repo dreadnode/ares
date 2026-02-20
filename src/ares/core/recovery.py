@@ -122,6 +122,12 @@ class OperationRecoveryManager:
             return True
         except Exception as e:
             logger.warning(f"Failed to connect to Redis: {e}")
+            # Close the client if it was created before setting to None
+            if self._redis_client:
+                try:
+                    await self._redis_client.aclose()
+                except Exception:
+                    pass
             self._redis_client = None
             self._connected = False
             return False
@@ -136,6 +142,13 @@ class OperationRecoveryManager:
                 logger.info(f"Recovery manager connected to Redis: {self._redis_url}")
             except Exception as e:
                 logger.warning(f"Failed to connect to Redis: {e}")
+                # Close the client if it was created
+                if self._redis_client:
+                    try:
+                        await self._redis_client.aclose()
+                    except Exception:
+                        pass
+                    self._redis_client = None
 
     async def stop(self) -> None:
         """Cleanup resources."""

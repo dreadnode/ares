@@ -336,13 +336,16 @@ def create_role_hooks(
     )
 
     async def context_aware_summarize(event: StepStart | GenerationEnd) -> Reaction | None:
-        """Wrap summarize_when_long with logging for observability."""
+        """Wrap summarize_when_long with logging and early warning for observability."""
+        from dreadnode.agent.reactions import RetryWithFeedback
+
         # Log token count on each step start
         if isinstance(event, StepStart):
             last_gen = event.get_latest_event_by_type(GenerationEnd)
             if last_gen and last_gen.usage:
                 tokens = last_gen.usage.input_tokens
                 pct = (tokens / max_tokens) * 100
+
                 if pct >= 80:
                     logger.warning(
                         f"📊 [{log_name}] Context: {tokens:,} / {max_tokens:,} tokens ({pct:.0f}%)"
@@ -350,6 +353,19 @@ def create_role_hooks(
                 elif pct >= 50:
                     logger.info(
                         f"📊 [{log_name}] Context: {tokens:,} / {max_tokens:,} tokens ({pct:.0f}%)"
+                    )
+                # Early warning at 40% - guide LLM to use summary tools
+                # Only apply to orchestrator to avoid disrupting worker task flows
+                elif pct >= 40 and role == AgentRole.ORCHESTRATOR:
+                    logger.info(f"📊 [{log_name}] Context at {pct:.0f}% - suggesting summary tools")
+                    return RetryWithFeedback(
+                        feedback=(
+                            "⚠️ Context usage approaching 50%. To conserve context space:\n"
+                            "• Use get_hash_summary() / get_credential_summary() for status checks\n"
+                            "• Use get_exploitation_status(include_details=False) for counts only\n"
+                            "• Use pagination (limit=30, offset=N) when you need full details\n"
+                            "• Use retrieve_task_output(task_id) to fetch specific offloaded outputs"
+                        )
                     )
 
         # Call the actual summarization hook
@@ -393,14 +409,19 @@ def create_role_hooks(
         # Stop orchestrator when DA is achieved externally (by worker agents)
         # This handles the case where a worker discovers krbtgt hash via secretsdump
         # and sets has_domain_admin=True, but the orchestrator LLM doesn't know to stop
-        async def stop_on_external_domain_admin(event: StepStart) -> Finish | None:
+        # NOTE: We check on BOTH StepStart AND ToolEnd to minimize latency.
+        # StepStart only fires at the beginning of steps (after LLM generation),
+        # but ToolEnd fires after every tool execution, catching DA sooner.
+        async def stop_on_external_domain_admin(event: StepStart | ToolEnd) -> Finish | None:
             """Stop orchestrator when Domain Admin is achieved by worker agents."""
-            if not isinstance(event, StepStart):
+            if not isinstance(event, (StepStart, ToolEnd)):
                 return None
 
             if shared_state.has_domain_admin:
+                event_type = "StepStart" if isinstance(event, StepStart) else "ToolEnd"
                 logger.success(
-                    "🎯 Domain Admin detected (achieved externally) - stopping orchestrator agent"
+                    f"🎯 Domain Admin detected (achieved externally, {event_type}) - "
+                    "stopping orchestrator agent"
                 )
                 return Finish(reason="Domain Admin achieved by worker agent")
 
@@ -663,6 +684,7 @@ def create_role_hooks(
 
     if role in extraction_roles:
         from ares.core.dispatcher.extraction import extract_plaintext_passwords_from_output
+        from ares.tools.red.common import get_credential_context
 
         async def publish_hash_and_credential_discoveries(event: ToolEnd) -> None:
             """Extract and publish hashes/credentials from tool output."""
@@ -692,11 +714,18 @@ def create_role_hooks(
                 )
                 return
 
+            # Get credential context for task_id (for attack chain tracking on orchestrator)
+            cred_ctx = get_credential_context()
+            current_task_id = cred_ctx.task_id if cred_ctx else ""
+
             # Extract and publish hashes
             if tool_name in HASH_EXTRACTION_TOOLS:
                 hashes = dispatcher._extract_hashes_from_output(output)
                 for h in hashes:
                     try:
+                        # Use extracted domain, fallback to target domain (same as credentials)
+                        # Non-domain-prefixed hashes like "user:rid:lmhash:nthash:::" have empty domain
+                        hash_domain = h.domain or shared_state.target_domain or ""
                         await task_queue.publish_discovery(
                             operation_id=operation_id,
                             discovery_type="hash",
@@ -704,12 +733,13 @@ def create_role_hooks(
                                 "username": h.username,
                                 "hash_value": h.hash_value,
                                 "hash_type": h.hash_type,
-                                "domain": h.domain,
+                                "domain": hash_domain,
                             },
                             source_agent=log_name,
+                            task_id=current_task_id,
                         )
                         logger.info(
-                            f"📡 [{log_name}] Published hash: {h.domain}\\{h.username} ({h.hash_type})"
+                            f"📡 [{log_name}] Published hash: {hash_domain}\\{h.username} ({h.hash_type})"
                         )
                     except Exception as e:
                         logger.warning(f"Failed to publish hash discovery: {e}")

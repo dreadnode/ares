@@ -27,8 +27,10 @@ from loguru import logger
 
 from ares.core.config import (
     get_agent_heartbeat_timeout,
+    get_offload_threshold,
     get_vulnerability_priorities,
 )
+from ares.core.context_manager import ContextOffloader
 
 # Import all mixins
 from ares.core.dispatcher.agents import AgentMixin
@@ -170,6 +172,9 @@ class RedTeamDispatcher(
         self._dispatch_requested = threading.Event()
         self._pending_dispatch_lock = threading.Lock()
 
+        # Context offloader for large task outputs (initialized in start())
+        self._context_offloader: ContextOffloader | None = None
+
     async def start(self, operation_id: str) -> None:
         """
         Start the dispatcher for an operation.
@@ -201,6 +206,14 @@ class RedTeamDispatcher(
         backend = RedisStateBackend(self._redis_client, operation_id)
         self._shared_state.set_backend(backend)
         logger.info("Redis-native state backend initialized")
+
+        # Initialize context offloader for large task outputs
+        self._context_offloader = ContextOffloader(
+            redis=self._redis_client,
+            operation_id=operation_id,
+            offload_threshold=get_offload_threshold(),
+        )
+        logger.info(f"Context offloader initialized (threshold: {get_offload_threshold()} chars)")
 
         # Load processed sets from Redis into memory for sync access
         await self._shared_state.load_processed_sets_from_backend()
@@ -264,6 +277,16 @@ class RedTeamDispatcher(
         """Stop the dispatcher and cleanup resources."""
         self._running = False
 
+        # Final checkpoint to persist any pending state (especially exploited_vulnerabilities)
+        # This MUST happen BEFORE canceling the maintenance task, as checkpoint_requested
+        # may have been set by the threaded consumer but not yet processed
+        if self._checkpoint_requested.is_set() or self._shared_state:
+            try:
+                logger.info("Final checkpoint: persisting pending state before stop")
+                await self._checkpoint()
+            except Exception as e:
+                logger.warning(f"Final checkpoint failed: {e}")
+
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
             try:
@@ -312,6 +335,11 @@ class RedTeamDispatcher(
     def task_queue(self) -> RedisTaskQueue | None:
         """Get the Redis task queue for direct access if needed."""
         return self._task_queue
+
+    @property
+    def context_offloader(self) -> ContextOffloader | None:
+        """Get the context offloader for large output management."""
+        return self._context_offloader
 
     # Task Completion Waiting
 

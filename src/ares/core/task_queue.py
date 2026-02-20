@@ -5,6 +5,7 @@ Replaces in-memory asyncio.Queue with Redis Lists for cross-pod messaging.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import uuid
@@ -15,7 +16,11 @@ from loguru import logger
 from pydantic import BaseModel
 
 from ares.core.config import get_agent_heartbeat_timeout, get_redis_url
-from ares.core.redis_client import create_redis_client, get_redis_sentinel_config
+from ares.core.redis_client import (
+    create_redis_client,
+    get_redis_sentinel_config,
+    invalidate_sentinel_client,
+)
 
 
 class TaskMessage(BaseModel):
@@ -149,6 +154,44 @@ class RedisTaskQueue:
             await self._client.aclose()
             self._connected = False
             logger.info("TaskQueue disconnected")
+
+    async def ping_or_reconnect(self, timeout: float = 5.0) -> bool:
+        """Ping Redis and reconnect if the connection is stale.
+
+        This should be called periodically to detect stale connections caused by
+        Sentinel pod restarts. When a Sentinel pod restarts with a new IP, existing
+        connections may hang indefinitely.
+
+        Args:
+            timeout: Max seconds to wait for ping response
+
+        Returns:
+            True if ping succeeded, False if reconnection was needed
+        """
+        if not self._client:
+            await self.connect()
+            return False
+
+        try:
+            import asyncio
+
+            await asyncio.wait_for(self._client.ping(), timeout=timeout)
+            return True
+        except Exception as e:
+            logger.warning(f"Redis ping failed ({type(e).__name__}: {e}), forcing reconnection")
+            # Invalidate Sentinel client to force fresh DNS resolution
+            invalidate_sentinel_client()
+            self._connected = False
+            try:
+                if self._client:
+                    await self._client.aclose()
+            except Exception:
+                pass
+            self._client = None
+            # Reconnect with fresh Sentinel IPs
+            await self.connect()
+            logger.info("Reconnected to Redis after ping failure")
+            return False
 
     def _handle_connection_error(self, error: Exception) -> None:
         """
@@ -401,13 +444,32 @@ class RedisTaskQueue:
 
         try:
             # BRPOP from right for FIFO order
-            result = await self._client.brpop(queue_key, timeout=int(timeout))
+            # Wrap in asyncio.wait_for to catch hung connections.
+            # The Redis timeout parameter only works if the request reaches the server.
+            # On a stale/dead TCP connection, the await hangs forever without this.
+            result = await asyncio.wait_for(
+                self._client.brpop(queue_key, timeout=int(timeout)),
+                timeout=timeout + 2.0,  # Extra margin for network latency
+            )
 
             if result is None:
                 return None
 
             _, data = result
             return TaskMessage.model_validate_json(data)
+
+        except asyncio.TimeoutError:
+            # asyncio.wait_for timed out but Redis BRPOP didn't return
+            # This indicates a stale connection (e.g., Sentinel pod restarted)
+            logger.warning(
+                f"BRPOP hung for {timeout + 2.0}s on queue {queue_key} - "
+                "possible stale Sentinel connection, forcing reconnection"
+            )
+            invalidate_sentinel_client()
+            self._handle_connection_error(
+                TimeoutError("BRPOP hung - possible stale Sentinel connection")
+            )
+            return None
 
         except Exception as e:
             # Check if it's a connection error

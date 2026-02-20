@@ -59,8 +59,12 @@ class ResultProcessingMixin:
         # Use atomic pop to avoid TOCTOU race with _cleanup_stale_tasks()
         task_info = self.shared_state.pending_tasks.pop(task_id, None)
         if task_info is None:
-            logger.warning(f"Unknown task: {task_id}")
-            return
+            # Not in memory cache? Read from Redis (source of truth)
+            task_info = await self._get_task_info_from_redis(task_id, task_queue=task_queue)
+            if task_info is None:
+                logger.warning(f"Unknown task: {task_id}")
+                return
+            logger.debug(f"Task {task_id} retrieved from Redis (not in memory cache)")
         was_retry = task_info.status == TaskStatus.RETRYING
 
         # Remove from Redis pending_tasks HASH for immediate consistency
@@ -71,6 +75,15 @@ class ResultProcessingMixin:
                 await self._redis_client.hdel(pending_key, task_id)
             except Exception as e:
                 logger.warning(f"Failed to remove {task_id} from Redis pending_tasks: {e}")
+        elif task_queue is not None:
+            # CRITICAL: Direct Redis removal from threaded consumer using task_queue.redis
+            # The main-thread Redis client is bound to a different event loop
+            try:
+                pending_key = f"ares:op:{self.shared_state.operation_id}:pending_tasks"
+                await task_queue.redis.hdel(pending_key, task_id)
+                logger.debug(f"Removed pending task {task_id} via threaded Redis client")
+            except Exception as e:
+                logger.warning(f"Failed to remove {task_id} from Redis (threaded): {e}")
 
         task_info.status = TaskStatus.COMPLETED if success else TaskStatus.FAILED
         task_info.completed_at = datetime.now(timezone.utc)
@@ -83,23 +96,49 @@ class ResultProcessingMixin:
                 f"success={success}"
             )
 
+        # Offload large outputs to Redis to prevent context bloat
+        # This processes the result dict, truncating large outputs and storing full content
+        # in Redis for later retrieval via retrieve_task_output()
+        processed_result = result
+        if (
+            self._context_offloader is not None
+            and isinstance(result, dict)
+            and not skip_checkpoint  # Skip when in threaded consumer (different event loop)
+        ):
+            try:
+                task_type = task_info.task_type or ""
+                processed_result = await self._context_offloader.process_task_result(
+                    task_id=task_id,
+                    result=result,
+                    task_type=task_type,
+                )
+                if processed_result.get("_full_output_available"):
+                    logger.debug(
+                        f"Offloaded large output for task {task_id} "
+                        f"(threshold: {self._context_offloader.offload_threshold} chars)"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to offload task {task_id} output: {e}")
+                processed_result = result  # Fall back to original
+
         task_result = TaskResult(
             task_id=task_id,
             success=success,
-            result=result,
+            result=processed_result,
             error=error,
         )
         self.shared_state.completed_tasks[task_id] = task_result
 
         # Persist completed task to Redis immediately for deduplication
         # This ensures completed_tasks is available even before next checkpoint
+        # Note: We store processed_result (with large outputs offloaded) to save Redis space
         if self._redis_client is not None and not skip_checkpoint:
             try:
                 completed_key = f"ares:op:{self.shared_state.operation_id}:completed_tasks"
                 result_dict = {
                     "task_id": task_id,
                     "success": success,
-                    "result": result,
+                    "result": processed_result,
                     "error": error,
                     "completed_at": task_result.completed_at.isoformat(),
                 }
@@ -110,6 +149,34 @@ class ResultProcessingMixin:
                 )
             except Exception as e:
                 logger.warning(f"Failed to persist completed task {task_id} to Redis: {e}")
+        elif task_queue is not None:
+            # CRITICAL: Direct Redis persistence from threaded consumer using task_queue.redis
+            # The main-thread Redis client is bound to a different event loop, so we use
+            # task_queue.redis which is owned by the threaded consumer's event loop.
+            # This ensures completed tasks are visible to CLI immediately, not blocked
+            # by LLM API calls on the main thread.
+            try:
+                import json
+
+                completed_key = f"ares:op:{self.shared_state.operation_id}:completed_tasks"
+                result_dict = {
+                    "task_id": task_id,
+                    "success": success,
+                    "result": processed_result,
+                    "error": error,
+                    "completed_at": task_result.completed_at.isoformat(),
+                }
+                await task_queue.redis.hset(
+                    completed_key, task_id, json.dumps(result_dict, default=str)
+                )
+                logger.debug(f"✅ Completed task {task_id} persisted via threaded Redis client")
+            except Exception as e:
+                # Fallback: request checkpoint on main thread
+                logger.warning(
+                    f"Direct Redis persist failed for completed task {task_id}, "
+                    f"falling back to checkpoint: {e}"
+                )
+                self._checkpoint_requested.set()
 
         # Mark targets as scanned after successful nmap recon
         if success and task_info.task_type == "recon":
@@ -200,7 +267,9 @@ class ResultProcessingMixin:
             vuln_id = task_params.get("vuln_id", "")
             if vuln_id:
                 result_dict = result if isinstance(result, dict) else {"output": str(result)}
-                await self.mark_vulnerability_exploited(vuln_id, success, result_dict)
+                await self.mark_vulnerability_exploited(
+                    vuln_id, success, result_dict, task_queue=task_queue
+                )
                 if success:
                     logger.info(f"✅ Marked vulnerability {vuln_id} as exploited")
 
@@ -287,7 +356,7 @@ class ResultProcessingMixin:
                     parent_id=parent_credential_id,  # Track attack chain
                     attack_step=parent_attack_step + 1 if parent_credential_id else 0,
                 )
-                await self.publish_hash(hash_obj, source_agent)
+                await self.publish_hash(hash_obj, source_agent, task_queue=task_queue)
                 if hash_obj.cracked_password:
                     logger.debug(
                         f"Creating credential from cracked hash: {hash_obj.domain}\\{hash_obj.username}"
@@ -540,6 +609,11 @@ class ResultProcessingMixin:
         # Calculate attack_step for discoveries (parent + 1)
         discovery_step = parent_attack_step + 1 if parent_credential_id else 0
 
+        # Get target domain for fallback when hash domain is empty
+        target_domain = ""
+        if self.shared_state.target and self.shared_state.target.domain:
+            target_domain = self.shared_state.target.domain
+
         cred_data = result.get("credential")
         if isinstance(cred_data, dict):
             self._add_user(cred_data.get("username", ""), cred_data.get("domain", ""), source_agent)
@@ -573,54 +647,42 @@ class ResultProcessingMixin:
 
         hash_data = result.get("hash")
         if isinstance(hash_data, dict):
+            # Use target_domain as fallback when hash domain is empty
+            hash_domain = hash_data.get("domain", "") or target_domain
             hash_obj = Hash(
                 username=hash_data.get("username", ""),
                 hash_value=hash_data.get("hash_value", ""),
                 hash_type=hash_data.get("hash_type", "NTLM"),
-                domain=hash_data.get("domain", ""),
+                domain=hash_domain,
                 cracked_password=hash_data.get("cracked_password", ""),
                 parent_id=parent_credential_id,
                 attack_step=discovery_step,
             )
-            await self.publish_hash(hash_obj, source_agent)
-            if hash_obj.cracked_password:
-                cracked_cred = Credential(
-                    username=hash_obj.username,
-                    password=hash_obj.cracked_password,
-                    domain=hash_obj.domain,
-                    source=f"hash:{task_id}",
-                    is_admin=False,
-                    parent_id=hash_obj.id,
-                    attack_step=hash_obj.attack_step + 1,
-                )
-                await self.publish_credential(cracked_cred, source_agent, task_queue=task_queue)
+            await self.publish_hash(hash_obj, source_agent, task_queue=task_queue)
+            # NOTE: Credential creation for cracked passwords is now handled by publish_hash()
+            # which calls publish_credential() with the cracked credential. This ensures
+            # immediate dispatch logic (delegation checks, secretsdump) is triggered.
 
         hashes_data = result.get("hashes")
         if isinstance(hashes_data, list):
             for h in hashes_data:
                 if not isinstance(h, dict):
                     continue
+                # Use target_domain as fallback when hash domain is empty
+                hash_domain = h.get("domain", "") or target_domain
                 hash_obj = Hash(
                     username=h.get("username", ""),
                     hash_value=h.get("hash_value", ""),
                     hash_type=h.get("hash_type", "NTLM"),
-                    domain=h.get("domain", ""),
+                    domain=hash_domain,
                     cracked_password=h.get("cracked_password", ""),
                     parent_id=parent_credential_id,
                     attack_step=discovery_step,
                 )
-                await self.publish_hash(hash_obj, source_agent)
-                if hash_obj.cracked_password:
-                    cracked_cred = Credential(
-                        username=hash_obj.username,
-                        password=hash_obj.cracked_password,
-                        domain=hash_obj.domain,
-                        source=f"hash:{task_id}",
-                        is_admin=False,
-                        parent_id=hash_obj.id,
-                        attack_step=hash_obj.attack_step + 1,
-                    )
-                    await self.publish_credential(cracked_cred, source_agent, task_queue=task_queue)
+                await self.publish_hash(hash_obj, source_agent, task_queue=task_queue)
+                # NOTE: Credential creation for cracked passwords is now handled by publish_hash()
+                # which calls publish_credential() with the cracked credential. This ensures
+                # immediate dispatch logic (delegation checks, secretsdump) is triggered.
 
         # NOTE: share/shares from JSON is NOT processed here.
         # LLM agents parse netexec output non-deterministically. Shares are
@@ -709,11 +771,14 @@ class ResultProcessingMixin:
         # Always extract as a backup - real-time hooks may fail silently or not complete
         # before worker crash. Duplicates are handled by dedup logic in add_hash().
         for hash_obj in self._extract_hashes_from_output(output):
+            # Fill in empty domain from target (non-domain-prefixed secretsdump output)
+            if not hash_obj.domain and domain:
+                hash_obj.domain = domain
             # Track attack chain
             if parent_credential_id:
                 hash_obj.parent_id = parent_credential_id
                 hash_obj.attack_step = parent_attack_step + 1
-            await self.publish_hash(hash_obj, source_agent)
+            await self.publish_hash(hash_obj, source_agent, task_queue=task_queue)
 
         # Extract and auto-queue delegation vulnerabilities from findDelegation output
         # Always extract as a backup - dedup handled in _auto_queue_delegation_vulnerabilities

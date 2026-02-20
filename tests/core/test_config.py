@@ -356,14 +356,18 @@ class TestContextManagementSettings:
     """Tests for context management configuration."""
 
     def test_context_management_defaults(self):
-        """Test default values for context management settings."""
+        """Test default values for context management settings.
+
+        Values lowered from 100k/10/2000 to 50k/15/3000 to prevent context bloat
+        and trigger earlier summarization.
+        """
         from ares.core.config import OperationConfig
 
         config = OperationConfig()
 
-        assert config.max_context_tokens == 100_000
-        assert config.min_messages_to_keep == 10
-        assert config.max_output_chars == 2000
+        assert config.max_context_tokens == 50_000
+        assert config.min_messages_to_keep == 15
+        assert config.max_output_chars == 3000
 
     def test_context_management_env_overrides(self):
         """Test environment variable overrides for context management."""
@@ -406,9 +410,9 @@ class TestContextManagementSettings:
             config = _apply_env_overrides(config)
 
             # Should keep defaults when values are invalid
-            assert config.max_context_tokens == 100_000
-            assert config.min_messages_to_keep == 10
-            assert config.max_output_chars == 2000
+            assert config.max_context_tokens == 50_000
+            assert config.min_messages_to_keep == 15
+            assert config.max_output_chars == 3000
 
     def test_get_max_context_tokens_function(self):
         """Test get_max_context_tokens helper function."""
@@ -420,7 +424,7 @@ class TestContextManagementSettings:
         with patch.dict(os.environ, clean_env, clear=True):
             clear_config_cache()
             result = get_max_context_tokens()
-            assert result == 100_000
+            assert result == 50_000
 
     def test_get_min_messages_to_keep_function(self):
         """Test get_min_messages_to_keep helper function."""
@@ -432,7 +436,7 @@ class TestContextManagementSettings:
         with patch.dict(os.environ, clean_env, clear=True):
             clear_config_cache()
             result = get_min_messages_to_keep()
-            assert result == 10
+            assert result == 15
 
     def test_get_max_output_chars_function(self):
         """Test get_max_output_chars helper function."""
@@ -444,7 +448,7 @@ class TestContextManagementSettings:
         with patch.dict(os.environ, clean_env, clear=True):
             clear_config_cache()
             result = get_max_output_chars()
-            assert result == 2000
+            assert result == 3000
 
     def test_context_management_env_override_with_existing_config(self):
         """Test env overrides work even when config has other values set."""
@@ -468,8 +472,8 @@ class TestContextManagementSettings:
             # Should use env override value
             assert config.max_context_tokens == 75000
             # Other settings should use defaults
-            assert config.min_messages_to_keep == 10
-            assert config.max_output_chars == 2000
+            assert config.min_messages_to_keep == 15
+            assert config.max_output_chars == 3000
 
 
 if __name__ == "__main__":
