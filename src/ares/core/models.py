@@ -508,6 +508,7 @@ class Credential(Model):
         password: The password.
         domain: The domain.
         source: Tool/method that discovered this credential.
+        discovered_at: When the credential was discovered.
         is_admin: Whether this is an admin credential.
         parent_id: ID of the credential/hash that enabled this discovery (for attack chain).
         attack_step: Position in the attack chain (0 = initial access).
@@ -518,6 +519,7 @@ class Credential(Model):
     password: str
     domain: str = ""
     source: str = ""  # where it was found
+    discovered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_admin: bool = False
     parent_id: str | None = None  # ID of credential/hash that enabled this discovery
     attack_step: int = 0  # Position in attack chain
