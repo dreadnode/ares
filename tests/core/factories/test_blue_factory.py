@@ -29,7 +29,7 @@ from ares.core.factories.blue_factory import (
     _record_query,
     create_investigation_agent,
     create_rate_limited_mcp_tool,
-    filter_mcp_tools,
+    filter_essential_mcp_tools,
     log_tool_result,
     log_tool_usage,
     max_queries_stop,
@@ -1168,8 +1168,8 @@ class TestInvestigationStateQueueFields:
         assert len(investigation_state.executed_query_types) == 0
 
 
-class TestFilterMcpTools:
-    """Tests for filter_mcp_tools function to prevent 128-tool limit."""
+class TestFilterEssentialMcpTools:
+    """Tests for filter_essential_mcp_tools function to prevent 128-tool limit."""
 
     def test_keeps_query_loki_tools(self):
         """Test that query_loki tools are kept."""
@@ -1182,7 +1182,7 @@ class TestFilterMcpTools:
         for t in mock_tools:
             t.name = t._mock_name
 
-        filtered = filter_mcp_tools(mock_tools)
+        filtered = filter_essential_mcp_tools(mock_tools)
         names = [t.name for t in filtered]
 
         assert "query_loki_logs" in names
@@ -1199,7 +1199,7 @@ class TestFilterMcpTools:
         for t in mock_tools:
             t.name = t._mock_name
 
-        filtered = filter_mcp_tools(mock_tools)
+        filtered = filter_essential_mcp_tools(mock_tools)
         names = [t.name for t in filtered]
 
         assert "query_prometheus" in names
@@ -1215,7 +1215,7 @@ class TestFilterMcpTools:
         for t in mock_tools:
             t.name = t._mock_name
 
-        filtered = filter_mcp_tools(mock_tools)
+        filtered = filter_essential_mcp_tools(mock_tools)
         names = [t.name for t in filtered]
 
         assert "list_datasources" in names
@@ -1235,7 +1235,7 @@ class TestFilterMcpTools:
         for t in mock_tools:
             t.name = t._mock_name
 
-        filtered = filter_mcp_tools(mock_tools)
+        filtered = filter_essential_mcp_tools(mock_tools)
 
         assert len(filtered) == 1
         assert filtered[0].name == "query_loki_logs"
@@ -1243,5 +1243,5 @@ class TestFilterMcpTools:
     def test_empty_input_returns_empty(self):
         """Test that empty input returns empty list."""
 
-        filtered = filter_mcp_tools([])
+        filtered = filter_essential_mcp_tools([])
         assert filtered == []

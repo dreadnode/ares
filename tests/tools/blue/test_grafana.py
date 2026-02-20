@@ -10,7 +10,6 @@ import pytest
 from ares.core.exceptions import AuthenticationError, ConfigurationError
 from ares.tools.blue.grafana import (
     GrafanaTools,
-    MCPConnectionPool,
     connect_grafana_mcp,
     find_mcp_grafana,
 )
@@ -712,11 +711,6 @@ class TestConnectGrafanaMcp:
     @pytest.mark.asyncio
     async def test_connect_prefers_service_account_token(self):
         """Test SERVICE_ACCOUNT_TOKEN is preferred over API_KEY."""
-        # Reset connection pool state to force new connection
-        MCPConnectionPool._client = None
-        MCPConnectionPool._grafana_url = None
-        MCPConnectionPool._grafana_api_key = None
-
         with (
             patch.dict(
                 os.environ,
@@ -727,31 +721,22 @@ class TestConnectGrafanaMcp:
                 },
             ),
             patch("ares.tools.blue.grafana.find_mcp_grafana") as mock_find,
-            patch("ares.tools.blue.grafana._connect_grafana_mcp_internal") as mock_internal,
+            patch("rigging.mcp") as mock_mcp,
         ):
             mock_find.return_value = "/usr/bin/mcp-grafana"
             mock_client = AsyncMock()
             mock_client.tools = []
-            mock_internal.return_value = mock_client
+            mock_mcp.return_value = mock_client
 
             await connect_grafana_mcp()
-            # Check that the preferred token was passed to internal function
-            mock_internal.assert_called_once()
-            # The internal function receives the resolved token via pool
-            # SERVICE_ACCOUNT_TOKEN takes precedence, passed as grafana_api_key
-            call_kwargs = mock_internal.call_args.kwargs
-            assert (
-                call_kwargs.get("grafana_api_key") is None
-            )  # Pool passes None, internal resolves from env
+            # Verify mcp was called with SERVICE_ACCOUNT_TOKEN (preferred)
+            mock_mcp.assert_called_once()
+            call_kwargs = mock_mcp.call_args.kwargs
+            assert call_kwargs["env"]["GRAFANA_SERVICE_ACCOUNT_TOKEN"] == "preferred-token"
 
     @pytest.mark.asyncio
     async def test_connect_falls_back_to_api_key(self):
         """Test fallback to GRAFANA_API_KEY."""
-        # Reset connection pool state to force new connection
-        MCPConnectionPool._client = None
-        MCPConnectionPool._grafana_url = None
-        MCPConnectionPool._grafana_api_key = None
-
         with (
             patch.dict(
                 os.environ,
@@ -762,13 +747,15 @@ class TestConnectGrafanaMcp:
                 },
             ),
             patch("ares.tools.blue.grafana.find_mcp_grafana") as mock_find,
-            patch("ares.tools.blue.grafana._connect_grafana_mcp_internal") as mock_internal,
+            patch("rigging.mcp") as mock_mcp,
         ):
             mock_find.return_value = "/usr/bin/mcp-grafana"
             mock_client = AsyncMock()
             mock_client.tools = []
-            mock_internal.return_value = mock_client
+            mock_mcp.return_value = mock_client
 
             await connect_grafana_mcp()
-            # Verify internal function was called (it handles env var resolution)
-            mock_internal.assert_called_once()
+            # Verify mcp was called with fallback API_KEY
+            mock_mcp.assert_called_once()
+            call_kwargs = mock_mcp.call_args.kwargs
+            assert call_kwargs["env"]["GRAFANA_SERVICE_ACCOUNT_TOKEN"] == "fallback-key"
