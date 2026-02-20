@@ -782,6 +782,12 @@ class SharedRedTeamState:
         default_factory=set
     )  # "domain:user:pwdhash" - expansion loop triggered
 
+    # Golden ticket capability tracking
+    # Key: "domain:username" (lowercase), Value: list of capability info dicts
+    # Each dict: {domain, reason, dc_host, dc_ip}
+    # reason: "local_admin_on_dc" (has admin on a DC, can dump NTDS.dit)
+    golden_ticket_capable_creds: dict[str, list[dict]] = field(default_factory=dict)
+
     # Agent registry
     registered_agents: dict[str, AgentInfo] = field(default_factory=dict)
 
@@ -1207,12 +1213,29 @@ class SharedRedTeamState:
                 if gmsa.get("account", "").lower() not in existing_accounts:
                     self.gmsa_accounts.append(gmsa)
 
+            # Load golden ticket capable credentials
+            gt_capable = await self._backend.get_golden_ticket_capable_creds()
+            for cred_key, capabilities in gt_capable.items():
+                if cred_key not in self.golden_ticket_capable_creds:
+                    self.golden_ticket_capable_creds[cred_key] = capabilities
+                else:
+                    # Merge capabilities
+                    existing_keys = {
+                        f"{c.get('dc_ip')}:{c.get('reason')}"
+                        for c in self.golden_ticket_capable_creds[cred_key]
+                    }
+                    for cap in capabilities:
+                        cap_key = f"{cap.get('dc_ip')}:{cap.get('reason')}"
+                        if cap_key not in existing_keys:
+                            self.golden_ticket_capable_creds[cred_key].append(cap)
+
             logger.info(
                 f"Loaded persistence tracking from Redis: "
                 f"{len(self.golden_tickets)} golden tickets, "
                 f"{len(self.adminsd_holder_backdoors)} backdoors, "
                 f"{len(self.acl_chains)} ACL chains, "
-                f"{len(self.gmsa_accounts)} gMSA accounts"
+                f"{len(self.gmsa_accounts)} gMSA accounts, "
+                f"{len(self.golden_ticket_capable_creds)} golden ticket capable creds"
             )
         except Exception as e:
             logger.warning(f"Failed to load persistence tracking from backend: {e}")
@@ -2694,6 +2717,214 @@ class SharedRedTeamState:
             for vid, v in self.discovered_vulnerabilities.items()
             if vid not in self.exploited_vulnerabilities
         ]
+
+    # =========================================================================
+    # Golden Ticket Capability Detection
+    # =========================================================================
+
+    def check_golden_ticket_capability(self, username: str, domain: str) -> list[dict[str, str]]:
+        """Check if a credential can obtain krbtgt hash (golden ticket capability).
+
+        A credential can forge a golden ticket if it has local admin access on a
+        Domain Controller. This allows dumping NTDS.dit to extract the krbtgt hash.
+
+        ACCURACY NOTE: We ONLY return True for verified conditions:
+        1. The credential has a local_admin vulnerability on a host
+        2. That host is confirmed as a DC (is_dc=True in all_hosts)
+        3. The DC's domain matches the credential's domain (or is resolvable)
+
+        We do NOT assume golden ticket capability based on:
+        - Generic "admin" flags without confirmed DC access
+        - Membership in groups without verified DC admin rights
+        - Untested/unverified access claims
+
+        Args:
+            username: The username to check.
+            domain: The domain of the credential.
+
+        Returns:
+            List of capability dicts, each with:
+            - domain: The domain where krbtgt can be obtained
+            - reason: "local_admin_on_dc"
+            - dc_host: DC hostname
+            - dc_ip: DC IP address
+        """
+        capabilities: list[dict[str, str]] = []
+        username_lower = username.lower()
+        domain_lower = domain.lower()
+
+        # Build a map of DC hosts: hostname -> Host, ip -> Host
+        dc_hosts_by_name: dict[str, Host] = {}
+        dc_hosts_by_ip: dict[str, Host] = {}
+        for host in self.all_hosts:
+            if host.is_dc:
+                if host.hostname:
+                    # Store by short name and FQDN
+                    dc_hosts_by_name[host.hostname.lower()] = host
+                    short_name = host.hostname.split(".")[0].lower()
+                    dc_hosts_by_name[short_name] = host
+                if host.ip:
+                    dc_hosts_by_ip[host.ip] = host
+
+        # Check all local_admin vulnerabilities for this user
+        for vuln in self.discovered_vulnerabilities.values():
+            if vuln.vuln_type != "local_admin":
+                continue
+
+            # Get the principal from the vulnerability
+            principal = vuln.details.get("username", "").lower()
+            principal_domain = vuln.details.get("domain", "").lower()
+
+            # Also check the principal field directly (may include domain)
+            vuln_principal = str(vuln.details.get("principal", "")).lower()
+            if "@" in vuln_principal:
+                parts = vuln_principal.split("@")
+                if len(parts) == 2:
+                    principal = parts[0]
+                    principal_domain = parts[1]
+            elif "\\" in vuln_principal:
+                parts = vuln_principal.split("\\")
+                if len(parts) == 2:
+                    principal_domain = parts[0]
+                    principal = parts[1]
+
+            # Match username (case-insensitive)
+            if principal != username_lower:
+                continue
+
+            # Match domain if specified (handle NetBIOS vs FQDN)
+            if (
+                principal_domain
+                and domain_lower
+                and not self._domains_match(principal_domain, domain_lower)
+            ):
+                continue
+
+            # Get the target host from the vulnerability
+            target = vuln.target.lower()
+
+            # Check if target is a DC
+            dc_host = dc_hosts_by_name.get(target) or dc_hosts_by_ip.get(target)
+            if not dc_host:
+                # Try matching by partial hostname
+                for name, host in dc_hosts_by_name.items():
+                    if target in name or name in target:
+                        dc_host = host
+                        break
+
+            if dc_host:
+                # Determine the domain of this DC
+                dc_domain = ""
+                if dc_host.hostname and "." in dc_host.hostname:
+                    # Extract domain from FQDN: winterfell.north.sevenkingdoms.local -> north.sevenkingdoms.local
+                    parts = dc_host.hostname.lower().split(".", 1)
+                    if len(parts) > 1:
+                        dc_domain = parts[1]
+
+                # Also check domain_controllers cache
+                for cached_domain, cached_ip in self.domain_controllers.items():
+                    if cached_ip == dc_host.ip:
+                        dc_domain = cached_domain
+                        break
+
+                capabilities.append(
+                    {
+                        "domain": dc_domain or domain_lower,
+                        "reason": "local_admin_on_dc",
+                        "dc_host": dc_host.hostname or dc_host.ip,
+                        "dc_ip": dc_host.ip,
+                    }
+                )
+
+        return capabilities
+
+    def _domains_match(self, domain1: str, domain2: str) -> bool:
+        """Check if two domain identifiers refer to the same domain.
+
+        Handles NetBIOS name vs FQDN comparison using netbios_to_fqdn mapping.
+        """
+        d1 = domain1.lower()
+        d2 = domain2.lower()
+
+        if d1 == d2:
+            return True
+
+        # Check if one is NetBIOS and maps to the other
+        d1_fqdn = self.netbios_to_fqdn.get(d1, d1)
+        d2_fqdn = self.netbios_to_fqdn.get(d2, d2)
+
+        if d1_fqdn == d2_fqdn:
+            return True
+
+        # Check if one is a prefix of the other (north vs north.sevenkingdoms.local)
+        return d1_fqdn.startswith(d2 + ".") or d2_fqdn.startswith(d1 + ".")
+
+    def update_golden_ticket_capability(
+        self, username: str, domain: str, source_agent: str = ""
+    ) -> bool:
+        """Update golden ticket capability tracking for a credential.
+
+        Should be called when:
+        1. A new credential is published
+        2. A new local_admin vulnerability is discovered
+        3. A new DC host is identified
+
+        Args:
+            username: The username to check.
+            domain: The domain of the credential.
+            source_agent: Agent that triggered the check.
+
+        Returns:
+            True if new capability was detected, False otherwise.
+        """
+        cred_key = f"{domain.lower()}:{username.lower()}"
+
+        # Check current capabilities
+        capabilities = self.check_golden_ticket_capability(username, domain)
+
+        if not capabilities:
+            return False
+
+        # Check if this is new capability
+        existing = self.golden_ticket_capable_creds.get(cred_key, [])
+        existing_keys = {f"{c.get('dc_ip')}:{c.get('reason')}" for c in existing}
+
+        new_capabilities = []
+        for cap in capabilities:
+            cap_key = f"{cap.get('dc_ip')}:{cap.get('reason')}"
+            if cap_key not in existing_keys:
+                new_capabilities.append(cap)
+
+        if new_capabilities:
+            updated_capabilities = existing + new_capabilities
+            self.golden_ticket_capable_creds[cred_key] = updated_capabilities
+            logger.info(
+                f"🎫 GOLDEN TICKET CAPABILITY: {domain}\\{username} can obtain krbtgt "
+                f"via {new_capabilities[0].get('reason')} on {new_capabilities[0].get('dc_host')}"
+            )
+
+            # Persist to Redis backend if available
+            if self._can_persist_to_backend():
+                import asyncio
+
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(
+                    self._backend.add_golden_ticket_capable_cred(cred_key, updated_capabilities)
+                )
+                self._track_background_task(task, f"add_golden_ticket_capable_cred({cred_key})")
+
+            return True
+
+        return False
+
+    def get_golden_ticket_capable_credentials(self) -> list[tuple[str, list[dict]]]:
+        """Get all credentials with golden ticket capability.
+
+        Returns:
+            List of (cred_key, capabilities) tuples where cred_key is "domain:username"
+            and capabilities is the list of ways they can obtain krbtgt.
+        """
+        return list(self.golden_ticket_capable_creds.items())
 
     def get_agent_credentials(self, agent_name: str) -> list[Credential]:
         """Get credentials discovered by a specific agent."""

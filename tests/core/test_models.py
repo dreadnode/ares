@@ -1733,3 +1733,278 @@ class TestDomainAdminAutoDetection:
         state.add_hash(hash_obj, "secretsdump")
 
         assert state.has_domain_admin is False
+
+
+class TestGoldenTicketCapabilityDetection:
+    """Tests for golden ticket capability detection.
+
+    Golden ticket capability is detected when a credential has local_admin
+    access on a Domain Controller (can dump NTDS.dit to get krbtgt hash).
+    """
+
+    def test_check_golden_ticket_capability_empty_state(self) -> None:
+        """Test that empty state returns no capabilities."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        capabilities = state.check_golden_ticket_capability("admin", "contoso.local")
+
+        assert capabilities == []
+
+    def test_check_golden_ticket_capability_with_dc_admin(self) -> None:
+        """Test that local_admin on DC grants golden ticket capability."""
+        from ares.core.models import Host, SharedRedTeamState, VulnerabilityInfo
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Add a DC host
+        dc_host = Host(
+            ip="192.168.58.10",
+            hostname="dc01.contoso.local",
+            is_dc=True,
+        )
+        state.all_hosts.append(dc_host)
+
+        # Add local_admin vulnerability on that DC
+        vuln = VulnerabilityInfo(
+            vuln_id="vuln-001",
+            vuln_type="local_admin",
+            target="dc01.contoso.local",
+            discovered_by="recon",
+            details={"username": "admin", "domain": "contoso.local"},
+        )
+        state.discovered_vulnerabilities["vuln-001"] = vuln
+
+        capabilities = state.check_golden_ticket_capability("admin", "contoso.local")
+
+        assert len(capabilities) == 1
+        assert capabilities[0]["reason"] == "local_admin_on_dc"
+        assert capabilities[0]["dc_host"] == "dc01.contoso.local"
+        assert capabilities[0]["dc_ip"] == "192.168.58.10"
+
+    def test_check_golden_ticket_capability_no_dc_access(self) -> None:
+        """Test that local_admin on non-DC doesn't grant capability."""
+        from ares.core.models import Host, SharedRedTeamState, VulnerabilityInfo
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Add a non-DC host
+        host = Host(
+            ip="192.168.58.20",
+            hostname="ws01.contoso.local",
+            is_dc=False,
+        )
+        state.all_hosts.append(host)
+
+        # Add local_admin vulnerability on that host
+        vuln = VulnerabilityInfo(
+            vuln_id="vuln-001",
+            vuln_type="local_admin",
+            target="ws01.contoso.local",
+            discovered_by="recon",
+            details={"username": "admin", "domain": "contoso.local"},
+        )
+        state.discovered_vulnerabilities["vuln-001"] = vuln
+
+        capabilities = state.check_golden_ticket_capability("admin", "contoso.local")
+
+        assert capabilities == []
+
+    def test_check_golden_ticket_capability_wrong_user(self) -> None:
+        """Test that capability is only returned for matching user."""
+        from ares.core.models import Host, SharedRedTeamState, VulnerabilityInfo
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Add DC
+        dc_host = Host(
+            ip="192.168.58.10",
+            hostname="dc01.contoso.local",
+            is_dc=True,
+        )
+        state.all_hosts.append(dc_host)
+
+        # Add local_admin for different user
+        vuln = VulnerabilityInfo(
+            vuln_id="vuln-001",
+            vuln_type="local_admin",
+            target="dc01.contoso.local",
+            discovered_by="recon",
+            details={"username": "other_user", "domain": "contoso.local"},
+        )
+        state.discovered_vulnerabilities["vuln-001"] = vuln
+
+        # Check for admin (different user)
+        capabilities = state.check_golden_ticket_capability("admin", "contoso.local")
+
+        assert capabilities == []
+
+    def test_update_golden_ticket_capability_new(self) -> None:
+        """Test that update_golden_ticket_capability detects new capability."""
+        from ares.core.models import Host, SharedRedTeamState, VulnerabilityInfo
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Add DC
+        dc_host = Host(
+            ip="192.168.58.10",
+            hostname="dc01.contoso.local",
+            is_dc=True,
+        )
+        state.all_hosts.append(dc_host)
+
+        # Add local_admin vulnerability
+        vuln = VulnerabilityInfo(
+            vuln_id="vuln-001",
+            vuln_type="local_admin",
+            target="dc01.contoso.local",
+            discovered_by="recon",
+            details={"username": "admin", "domain": "contoso.local"},
+        )
+        state.discovered_vulnerabilities["vuln-001"] = vuln
+
+        result = state.update_golden_ticket_capability("admin", "contoso.local", "recon")
+
+        assert result is True
+        assert "contoso.local:admin" in state.golden_ticket_capable_creds
+        assert len(state.golden_ticket_capable_creds["contoso.local:admin"]) == 1
+
+    def test_update_golden_ticket_capability_duplicate(self) -> None:
+        """Test that duplicate capability returns False."""
+        from ares.core.models import Host, SharedRedTeamState, VulnerabilityInfo
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Add DC
+        dc_host = Host(
+            ip="192.168.58.10",
+            hostname="dc01.contoso.local",
+            is_dc=True,
+        )
+        state.all_hosts.append(dc_host)
+
+        # Add local_admin vulnerability
+        vuln = VulnerabilityInfo(
+            vuln_id="vuln-001",
+            vuln_type="local_admin",
+            target="dc01.contoso.local",
+            discovered_by="recon",
+            details={"username": "admin", "domain": "contoso.local"},
+        )
+        state.discovered_vulnerabilities["vuln-001"] = vuln
+
+        # First call - should return True
+        result1 = state.update_golden_ticket_capability("admin", "contoso.local", "recon")
+        assert result1 is True
+
+        # Second call - should return False (already tracked)
+        result2 = state.update_golden_ticket_capability("admin", "contoso.local", "recon")
+        assert result2 is False
+
+    def test_get_golden_ticket_capable_credentials(self) -> None:
+        """Test retrieving all golden ticket capable credentials."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Manually add some capabilities
+        state.golden_ticket_capable_creds = {
+            "contoso.local:admin": [
+                {
+                    "domain": "contoso.local",
+                    "reason": "local_admin_on_dc",
+                    "dc_host": "dc01",
+                    "dc_ip": "192.168.58.10",
+                }
+            ],
+            "fabrikam.local:svc_backup": [
+                {
+                    "domain": "fabrikam.local",
+                    "reason": "local_admin_on_dc",
+                    "dc_host": "dc02",
+                    "dc_ip": "192.168.58.20",
+                }
+            ],
+        }
+
+        result = state.get_golden_ticket_capable_credentials()
+
+        assert len(result) == 2
+        cred_keys = [r[0] for r in result]
+        assert "contoso.local:admin" in cred_keys
+        assert "fabrikam.local:svc_backup" in cred_keys
+
+    def test_domains_match_exact(self) -> None:
+        """Test _domains_match with exact match."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        assert state._domains_match("contoso.local", "contoso.local") is True
+        assert state._domains_match("contoso.local", "fabrikam.local") is False
+
+    def test_domains_match_netbios_to_fqdn(self) -> None:
+        """Test _domains_match resolves NetBIOS to FQDN."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.netbios_to_fqdn = {"contoso": "contoso.local"}
+
+        assert state._domains_match("contoso", "contoso.local") is True
+        assert state._domains_match("CONTOSO", "contoso.local") is True
+
+    def test_domains_match_prefix(self) -> None:
+        """Test _domains_match handles prefix matching."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # "north" should match "north.sevenkingdoms.local"
+        assert state._domains_match("north", "north.sevenkingdoms.local") is True
+        # But "north" should not match "south.sevenkingdoms.local"
+        assert state._domains_match("north", "south.sevenkingdoms.local") is False
+
+    def test_golden_ticket_capable_creds_field_default(self) -> None:
+        """Test golden_ticket_capable_creds field has empty dict default."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        assert state.golden_ticket_capable_creds == {}
+
+    def test_multiple_dc_capabilities(self) -> None:
+        """Test user with admin on multiple DCs gets multiple capabilities."""
+        from ares.core.models import Host, SharedRedTeamState, VulnerabilityInfo
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Add two DCs
+        dc1 = Host(ip="192.168.58.10", hostname="dc01.contoso.local", is_dc=True)
+        dc2 = Host(ip="192.168.58.11", hostname="dc02.contoso.local", is_dc=True)
+        state.all_hosts.extend([dc1, dc2])
+
+        # Add local_admin on both DCs for same user
+        vuln1 = VulnerabilityInfo(
+            vuln_id="vuln-001",
+            vuln_type="local_admin",
+            target="dc01.contoso.local",
+            discovered_by="recon",
+            details={"username": "admin", "domain": "contoso.local"},
+        )
+        vuln2 = VulnerabilityInfo(
+            vuln_id="vuln-002",
+            vuln_type="local_admin",
+            target="dc02.contoso.local",
+            discovered_by="recon",
+            details={"username": "admin", "domain": "contoso.local"},
+        )
+        state.discovered_vulnerabilities["vuln-001"] = vuln1
+        state.discovered_vulnerabilities["vuln-002"] = vuln2
+
+        capabilities = state.check_golden_ticket_capability("admin", "contoso.local")
+
+        assert len(capabilities) == 2
+        dc_ips = {cap["dc_ip"] for cap in capabilities}
+        assert "192.168.58.10" in dc_ips
+        assert "192.168.58.11" in dc_ips

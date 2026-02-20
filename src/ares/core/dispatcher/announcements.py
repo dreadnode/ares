@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from ares.core.config import get_stop_on_domain_admin
+from ares.core.config import get_stop_on_domain_admin, get_stop_on_golden_ticket
 
 if TYPE_CHECKING:
     from ares.core.dispatcher._dispatcher import RedTeamDispatcher
@@ -62,20 +62,33 @@ class AnnouncementMixin:
         krbtgt_hash: str,
         ticket_path: str,
         source_agent: str,
+        target_domain: str | None = None,
     ) -> None:
         """
         Record that golden ticket has been forged.
 
         Args:
-            domain: The domain.
+            domain: The source domain (where krbtgt was obtained).
             krbtgt_hash: The krbtgt hash used.
             ticket_path: Path to the ticket file.
             source_agent: Agent that forged it.
+            target_domain: The target domain for escalation (parent/forest root).
         """
         self.shared_state.has_golden_ticket = True
+        # Record completion time for accurate report duration
+        if not self.shared_state.completed_at:
+            self.shared_state.completed_at = datetime.now(timezone.utc)
+
+        # Check if we should stop immediately on golden ticket
+        if get_stop_on_golden_ticket():
+            self.shared_state.completed = True
+            logger.info("ARES_STOP_ON_GOLDEN_TICKET enabled - marking operation complete")
 
         await self._checkpoint()
-        logger.success(f"GOLDEN TICKET FORGED for {domain}")
+        if target_domain:
+            logger.success(f"GOLDEN TICKET FORGED: {domain} → {target_domain} (forest escalation)")
+        else:
+            logger.success(f"GOLDEN TICKET FORGED for {domain}")
 
     async def announce_operation_complete(
         self: RedTeamDispatcher,
