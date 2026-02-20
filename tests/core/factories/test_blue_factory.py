@@ -555,7 +555,7 @@ class TestWrapMcpQueryTools:
     """Tests for wrap_mcp_query_tools function."""
 
     def test_wraps_query_tools(self):
-        """Test only query tools are wrapped."""
+        """Test that wrap_mcp_query_tools filters to essential tools and wraps query tools."""
 
         class MockTool:
             def __init__(self, name):
@@ -570,10 +570,11 @@ class TestWrapMcpQueryTools:
 
         wrapped = wrap_mcp_query_tools(tools)
 
-        assert len(wrapped) == 4
-        # Non-query tools should be unchanged
-        assert wrapped[0] == tools[0]
-        assert wrapped[2] == tools[2]
+        # Only essential tools survive filtering (query_loki_logs, query_prometheus)
+        assert len(wrapped) == 2
+        names = [t.name for t in wrapped]
+        assert "query_loki_logs" in names
+        assert "query_prometheus" in names
 
 
 class TestLogToolUsage:
