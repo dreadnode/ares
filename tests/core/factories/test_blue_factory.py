@@ -818,7 +818,7 @@ class TestOptimizeLogqlQuery:
 
     def test_optimize_query_normal_query(self):
         """Test normal query without issues."""
-        query = '{job="eventlog"} |= "4688"'
+        query = '{job="windows-security"} |= "4688"'
         optimized, was_modified = _optimize_logql_query(query)
         assert was_modified is False
         assert optimized == query

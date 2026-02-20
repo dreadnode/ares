@@ -660,6 +660,21 @@ class TestFindMcpGrafana:
 class TestConnectGrafanaMcp:
     """Tests for connect_grafana_mcp function."""
 
+    @pytest.fixture(autouse=True)
+    def reset_connection_pool(self):
+        """Reset the MCPConnectionPool singleton before each test."""
+        from ares.tools.blue.grafana import MCPConnectionPool
+
+        # Reset singleton state
+        MCPConnectionPool._client = None
+        MCPConnectionPool._grafana_url = None
+        MCPConnectionPool._grafana_api_key = None
+        yield
+        # Cleanup after test
+        MCPConnectionPool._client = None
+        MCPConnectionPool._grafana_url = None
+        MCPConnectionPool._grafana_api_key = None
+
     @pytest.mark.asyncio
     async def test_connect_requires_url(self):
         """Test connection requires URL."""
@@ -759,3 +774,93 @@ class TestConnectGrafanaMcp:
             mock_mcp.assert_called_once()
             call_kwargs = mock_mcp.call_args.kwargs
             assert call_kwargs["env"]["GRAFANA_SERVICE_ACCOUNT_TOKEN"] == "fallback-key"
+
+    @pytest.mark.asyncio
+    async def test_pool_reuses_connection(self):
+        """Test that pool reuses existing connection on second call."""
+        from ares.tools.blue.grafana import MCPConnectionPool
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GRAFANA_URL": "http://grafana:3000",
+                    "GRAFANA_SERVICE_ACCOUNT_TOKEN": "test-token",
+                },
+            ),
+            patch("ares.tools.blue.grafana.find_mcp_grafana") as mock_find,
+            patch("rigging.mcp") as mock_mcp,
+        ):
+            mock_find.return_value = "/usr/bin/mcp-grafana"
+            mock_client = AsyncMock()
+            mock_client.tools = []
+            mock_mcp.return_value = mock_client
+
+            # First call creates connection
+            client1 = await connect_grafana_mcp()
+            assert mock_mcp.call_count == 1
+
+            # Second call reuses connection
+            client2 = await connect_grafana_mcp()
+            assert mock_mcp.call_count == 1  # Still 1, not 2
+            assert client1 is client2
+            assert MCPConnectionPool.is_connected()
+
+    @pytest.mark.asyncio
+    async def test_pool_reconnects_on_credential_change(self):
+        """Test that pool creates new connection when credentials change."""
+
+        with (
+            patch("ares.tools.blue.grafana.find_mcp_grafana") as mock_find,
+            patch("rigging.mcp") as mock_mcp,
+        ):
+            mock_find.return_value = "/usr/bin/mcp-grafana"
+            mock_client1 = AsyncMock()
+            mock_client1.tools = []
+            mock_client2 = AsyncMock()
+            mock_client2.tools = []
+            mock_mcp.side_effect = [mock_client1, mock_client2]
+
+            # First call with one URL
+            await connect_grafana_mcp(
+                grafana_url="http://grafana1:3000",
+                grafana_api_key="token1",  # pragma: allowlist secret
+            )
+            assert mock_mcp.call_count == 1
+
+            # Second call with different URL triggers reconnect
+            await connect_grafana_mcp(
+                grafana_url="http://grafana2:3000",
+                grafana_api_key="token1",  # pragma: allowlist secret
+            )
+            assert mock_mcp.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_pool_close(self):
+        """Test MCPConnectionPool.close() method."""
+        from ares.tools.blue.grafana import MCPConnectionPool
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GRAFANA_URL": "http://grafana:3000",
+                    "GRAFANA_SERVICE_ACCOUNT_TOKEN": "test-token",
+                },
+            ),
+            patch("ares.tools.blue.grafana.find_mcp_grafana") as mock_find,
+            patch("rigging.mcp") as mock_mcp,
+        ):
+            mock_find.return_value = "/usr/bin/mcp-grafana"
+            mock_client = AsyncMock()
+            mock_client.tools = []
+            mock_mcp.return_value = mock_client
+
+            # Create connection
+            await connect_grafana_mcp()
+            assert MCPConnectionPool.is_connected()
+
+            # Close pool
+            await MCPConnectionPool.close()
+            assert not MCPConnectionPool.is_connected()
+            mock_client.__aexit__.assert_called_once()

@@ -217,7 +217,7 @@ def _optimize_logql_query(query: str) -> tuple[str, bool]:
     - Put selective filters (event IDs) before regex patterns
 
     Uses the deployment label from the current alert context when available,
-    falling back to {job="eventlog"} if no deployment context exists.
+    falling back to {job="windows-security"} if no deployment context exists.
 
     Args:
         query: The original LogQL query string.
@@ -233,7 +233,7 @@ def _optimize_logql_query(query: str) -> tuple[str, bool]:
     if _current_state and _current_state.alert:
         deployment = _current_state.alert.get("labels", {}).get("deployment")
 
-    replacement = f'{{deployment="{deployment}"}}' if deployment else '{job="eventlog"}'
+    replacement = f'{{deployment="{deployment}"}}' if deployment else '{job="windows-security"}'
 
     # Auto-rewrite broad selectors to use specific label
     for pattern in _BROAD_SELECTOR_PATTERNS:
@@ -1096,7 +1096,9 @@ def create_investigation_agent(
 
     # Derive label selector from alert context for scoped queries
     deployment = state.alert.get("labels", {}).get("deployment", "")
-    default_selector = f'{{deployment="{deployment}"}}' if deployment else '{job="eventlog"}'
+    default_selector = (
+        f'{{deployment="{deployment}"}}' if deployment else '{job="windows-security"}'
+    )
     query_template_tools = QueryTemplateTools(
         loki_url=loki_url, default_label_selector=default_selector, mcp_query_fn=mcp_query_fn
     )
@@ -1123,10 +1125,9 @@ def create_investigation_agent(
 
     if grafana_mcp_tools:
         logger.info(f"Received {len(grafana_mcp_tools)} Grafana MCP tools")
-        # Filter to essential tools only (prevents context window overflow)
-        filtered_tools = filter_essential_mcp_tools(grafana_mcp_tools)
-        # Wrap query tools with rate limiting to prevent infinite query loops
-        wrapped_tools = wrap_mcp_query_tools(filtered_tools)
+        # Filter to essential tools and wrap query tools with rate limiting
+        # (filter_essential_mcp_tools is called inside wrap_mcp_query_tools)
+        wrapped_tools = wrap_mcp_query_tools(grafana_mcp_tools)
         tools.extend(wrapped_tools)
         logger.info(f"Final tool count: {len(tools)}")
     else:

@@ -217,8 +217,11 @@ def generate_user_summaries(state: SharedRedTeamState) -> list[UserSummary]:
             if h.source:
                 sources.add(h.source)
 
-        # Find earliest discovery time
+        # Find earliest discovery time (check both credentials and hashes)
         first_discovered: datetime | None = None
+        for c in creds:
+            if c.discovered_at and (first_discovered is None or c.discovered_at < first_discovered):
+                first_discovered = c.discovered_at
         for h in hashes:
             if h.discovered_at and (first_discovered is None or h.discovered_at < first_discovered):
                 first_discovered = h.discovered_at

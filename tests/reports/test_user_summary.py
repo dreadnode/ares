@@ -153,6 +153,41 @@ class TestUserSummaryGeneration:
         assert admin_user is not None
         assert admin_user.max_attack_depth >= 1  # At least depth 1 from secretsdump
 
+    def test_first_discovered_uses_credential_timestamp(self, sample_target: Target) -> None:
+        """Test first_discovered uses credential discovered_at when earlier than hash."""
+        state = SharedRedTeamState(operation_id="op-test")
+        state.target = sample_target
+
+        # Credential discovered first
+        earlier_time = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+        later_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+        cred = Credential(
+            id="cred-001",
+            username="testuser",
+            password="P@ssw0rd!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="manual",
+            discovered_at=earlier_time,
+        )
+        hash_obj = Hash(
+            id="hash-001",
+            username="testuser",
+            hash_value="abc123",
+            hash_type="NTLM",
+            domain="contoso.local",
+            source="secretsdump",  # pragma: allowlist secret
+            discovered_at=later_time,
+        )
+
+        state.all_credentials = [cred]
+        state.all_hashes = [hash_obj]
+        state.all_users = [User(username="testuser", domain="contoso.local")]
+
+        summaries = generate_user_summaries(state)
+        assert len(summaries) == 1
+        assert summaries[0].first_discovered_at == earlier_time
+
 
 class TestTraceAttackChain:
     """Tests for attack chain tracing."""

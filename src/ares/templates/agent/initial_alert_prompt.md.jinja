@@ -94,7 +94,7 @@ query_loki_logs(
 {% if labels.deployment %}
     logql="{deployment=\"{{ labels.deployment }}\"} |= \"{{ search_term }}\"",
 {% else %}
-    logql="{job=\"<get from list_loki_label_values>\"} |= \"{{ search_term }}\"",
+    logql="{job=\"windows-security\"} |= \"{{ search_term }}\"",
 {% endif %}
     startRfc3339="{{ current_time_minus_2h }}",
     endRfc3339="{{ current_time }}",
