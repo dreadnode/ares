@@ -769,12 +769,21 @@ class RedisStateBackend:
     # Convenience methods for common meta fields
 
     async def set_domain_admin(self, achieved: bool, path: str | None = None) -> None:
-        """Set domain admin achievement status."""
+        """Set domain admin achievement status.
+
+        This method is idempotent - subsequent calls after DA is achieved won't
+        overwrite completed_at. This prevents multiple krbtgt hashes (e.g., from
+        child domains or history objects) from updating the timestamp.
+        """
         await self.set_meta("has_domain_admin", achieved)
         if path:
             await self.set_meta("domain_admin_path", path)
         if achieved:
-            await self.set_meta("completed_at", datetime.now(timezone.utc).isoformat())
+            # Only set completed_at if not already set (idempotent)
+            # This preserves the original DA achievement time
+            existing = await self.get_meta("completed_at")
+            if not existing:
+                await self.set_meta("completed_at", datetime.now(timezone.utc).isoformat())
 
     async def get_domain_admin(self) -> tuple[bool, str | None]:
         """Get domain admin status and path."""

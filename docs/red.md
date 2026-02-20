@@ -456,6 +456,27 @@ INFO | Operation phase transition: enumeration → privilege_escalation
 
 ## State Management
 
+### Pattern: Write-Through Cache
+
+Redis is the **durable store**. In-memory dicts are **write-through caches**.
+
+#### Pattern
+
+- **Write**: Persist to Redis (immediately or via background task), update memory
+- **Read**: Read from memory (assumes write-through keeps it in sync)
+- **Recovery**: Hydrate all state from Redis before any decisions
+
+#### Assumptions
+
+1. Single orchestrator instance per operation
+2. No external mutations to Redis during operation
+3. Recovery path (`recover_operation()`) always runs before resuming
+
+#### Known Gaps
+
+- `SharedRedTeamState.add_*()` methods are memory-first with async persist
+- If Redis write fails, state diverges (logged, checkpoint is safety net)
+
 ### Shared State Objects
 
 All agents access shared state via Redis:

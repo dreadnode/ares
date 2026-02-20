@@ -367,8 +367,18 @@ class PersistenceMixin:
             # Persist DC map and meta flags
             for domain, dc_ip in self.shared_state.domain_controllers.items():
                 await backend.set_dc(domain, dc_ip)
-            await backend.set_meta("has_domain_admin", value=self.shared_state.has_domain_admin)
-            await backend.set_meta("has_golden_ticket", value=self.shared_state.has_golden_ticket)
+
+            # ADDITIVE pattern: only upgrade False→True, never downgrade
+            # Don't write False (it's the default and can't downgrade from True)
+            if self.shared_state.has_domain_admin:
+                current_da = await backend.get_meta("has_domain_admin", default=False)
+                if not current_da:
+                    await backend.set_meta("has_domain_admin", value=True)
+
+            if self.shared_state.has_golden_ticket:
+                current_gt = await backend.get_meta("has_golden_ticket", default=False)
+                if not current_gt:
+                    await backend.set_meta("has_golden_ticket", value=True)
             if self.shared_state.domain_admin_path:
                 await backend.set_meta("domain_admin_path", self.shared_state.domain_admin_path)
             # Persist completed_at timestamp (set in-memory when DA achieved via add_hash)

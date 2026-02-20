@@ -886,6 +886,31 @@ class SharedRedTeamState:
         # Only persist if we're in the same loop where backend was created
         return current_loop is self._backend_loop
 
+    def _track_background_task(self, task, description: str = "") -> None:
+        """Track a background Redis persist task with proper error handling.
+
+        This ensures Redis persist failures are logged instead of silently ignored.
+        The task is tracked in _background_tasks and removed on completion.
+
+        Args:
+            task: asyncio.Task to track
+            description: Human-readable description for error logging (e.g., "add_credential")
+        """
+
+        def done_callback(t):
+            self._background_tasks.discard(t)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc:
+                logger.warning(
+                    f"Background Redis persist failed ({description}): {exc!r}. "
+                    f"State may diverge - checkpoint will reconcile."
+                )
+
+        self._background_tasks.add(task)
+        task.add_done_callback(done_callback)
+
     # =========================================================================
     # Processed Set Helpers (with Redis persistence)
     # =========================================================================
@@ -930,8 +955,7 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.mark_processed(redis_set_name, key))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, f"mark_processed({redis_set_name})")
 
     def is_processed(self, set_name: str, key: str) -> bool:
         """Check if a key has been processed.
@@ -1032,8 +1056,7 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.add_golden_ticket(ticket))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, "add_golden_ticket")
 
         return True
 
@@ -1059,8 +1082,7 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.add_adminsd_backdoor(backdoor_key))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, "add_adminsd_backdoor")
 
         return True
 
@@ -1088,8 +1110,7 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.add_acl_chain(chain))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, "add_acl_chain")
 
         return True
 
@@ -1114,8 +1135,7 @@ class SharedRedTeamState:
 
                     loop = asyncio.get_running_loop()
                     task = loop.create_task(self._backend.update_acl_chain(chain_id, chain))
-                    self._background_tasks.add(task)
-                    task.add_done_callback(self._background_tasks.discard)
+                    self._track_background_task(task, f"update_acl_chain({chain_id})")
 
                 return True
 
@@ -1146,8 +1166,7 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.add_gmsa_account(gmsa))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, "add_gmsa_account")
 
         return True
 
@@ -1236,8 +1255,7 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.store_artifact(key, encoded))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, f"store_artifact({key})")
 
         return True
 
@@ -1639,8 +1657,9 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.add_credential(credential))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(
+                task, f"add_credential({credential.domain}\\{credential.username})"
+            )
 
         return True
 
@@ -1801,8 +1820,7 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.add_user(user))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, f"add_user({user.domain}\\{user.username})")
 
         return True
 
@@ -1849,8 +1867,7 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.add_domain(normalized))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, f"add_domain({normalized})")
 
         # If this is an FQDN (has a dot), retroactively normalize any
         # credentials/users/hashes with matching NetBIOS domain
@@ -1897,8 +1914,7 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.set_netbios_mapping(netbios_lower, fqdn_lower))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, f"set_netbios_mapping({netbios_lower})")
 
         # Also add the FQDN to all_domains if not already present
         self.add_domain(fqdn_lower)
@@ -2204,15 +2220,13 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.add_hash(hash_obj))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, f"add_hash({domain}\\{username})")
             # Also persist DA status if achieved
             if hash_type == "ntlm" and username == "krbtgt":
                 task2 = loop.create_task(
                     self._backend.set_domain_admin(achieved=True, path=self.domain_admin_path)
                 )
-                self._background_tasks.add(task2)
-                task2.add_done_callback(self._background_tasks.discard)
+                self._track_background_task(task2, "set_domain_admin")
 
         return True
 
@@ -2402,16 +2416,14 @@ class SharedRedTeamState:
 
                     loop = asyncio.get_running_loop()
                     task = loop.create_task(self._backend.update_host(existing.ip, existing))
-                    self._background_tasks.add(task)
-                    task.add_done_callback(self._background_tasks.discard)
+                    self._track_background_task(task, f"update_host({existing.ip})")
                     # Also persist DC mapping if merge revealed it's a DC
                     if existing.is_dc and existing.hostname and "." in existing.hostname:
                         parts = existing.hostname.lower().split(".")
                         if len(parts) > 1:
                             dc_domain = ".".join(parts[1:])
                             task2 = loop.create_task(self._backend.set_dc(dc_domain, existing.ip))
-                            self._background_tasks.add(task2)
-                            task2.add_done_callback(self._background_tasks.discard)
+                            self._track_background_task(task2, f"set_dc({dc_domain})")
                 # Return True if data changed so caller can trigger checkpoint
                 return data_changed
         # Set DC status before adding (preserve incoming is_dc=True from worker)
@@ -2443,16 +2455,14 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.add_host(host))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, f"add_host({host.ip})")
             # Also persist DC mapping if this is a DC
             if host.is_dc and host.hostname and "." in host.hostname:
                 parts = host.hostname.lower().split(".")
                 if len(parts) > 1:
                     dc_domain = ".".join(parts[1:])
                     task2 = loop.create_task(self._backend.set_dc(dc_domain, host.ip))
-                    self._background_tasks.add(task2)
-                    task2.add_done_callback(self._background_tasks.discard)
+                    self._track_background_task(task2, f"set_dc({dc_domain})")
 
         return True
 
@@ -2503,8 +2513,7 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.add_share(share))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, f"add_share({share.host}/{share.name})")
 
         return True
 
@@ -2638,8 +2647,7 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.add_weakness(block))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, "add_weakness")
 
         return True
 
@@ -2663,8 +2671,7 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.add_vulnerability(vuln))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, f"add_vulnerability({vuln.vuln_type})")
 
         return True
 
@@ -2678,8 +2685,7 @@ class SharedRedTeamState:
 
             loop = asyncio.get_running_loop()
             task = loop.create_task(self._backend.mark_exploited(vuln_id))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._track_background_task(task, f"mark_exploited({vuln_id})")
 
     def get_unexploited_vulnerabilities(self) -> list[VulnerabilityInfo]:
         """Get vulnerabilities that haven't been exploited yet."""
