@@ -298,6 +298,7 @@ def _recommend_for_ioc(ioc: ExpectedIOC) -> DetectionRecommendation | None:
 def _recommend_for_technique(tech: ExpectedTechnique) -> DetectionRecommendation | None:
     """Generate recommendation for a missed technique."""
     # Map technique IDs to specific recommendations
+    # Include both parent techniques and specific sub-techniques
     technique_recommendations = {
         "T1003": {
             "title": "Improve credential dumping detection",
@@ -308,6 +309,17 @@ def _recommend_for_technique(tech: ExpectedTechnique) -> DetectionRecommendation
             "hint": (
                 "Enable Sysmon Event ID 10 (process access), monitor LSASS access, "
                 "and alert on known credential dumping tools."
+            ),
+        },
+        "T1003.006": {
+            "title": "Detect DCSync attacks",
+            "description": (
+                "DCSync (T1003.006) enables attackers to replicate AD credentials. "
+                "This is a high-priority detection gap."
+            ),
+            "hint": (
+                "Alert on Event ID 4662 with DS-Replication-Get-Changes rights "
+                "from non-DC sources. Monitor GetNCChanges RPC calls."
             ),
         },
         "T1078": {
@@ -330,6 +342,64 @@ def _recommend_for_technique(tech: ExpectedTechnique) -> DetectionRecommendation
             "hint": (
                 "Monitor Event ID 4768/4769, detect TGT anomalies, and alert on "
                 "encryption downgrade attacks."
+            ),
+        },
+        "T1558.003": {
+            "title": "Detect Kerberoasting attacks",
+            "description": (
+                "Kerberoasting (T1558.003) was not detected. Attackers request "
+                "TGS tickets for service accounts to crack offline."
+            ),
+            "hint": (
+                "Alert on Event ID 4769 with encryption type 0x17 (RC4). "
+                "Monitor unusual TGS requests for SPNs. Create Grafana alert: "
+                '|= "4769" |~ "TicketEncryptionType.*0x17"'
+            ),
+        },
+        "T1558.004": {
+            "title": "Detect AS-REP Roasting attacks",
+            "description": (
+                "AS-REP Roasting (T1558.004) was not detected. Targets accounts "
+                "with Kerberos pre-authentication disabled."
+            ),
+            "hint": (
+                "Alert on Event ID 4768 for accounts with pre-auth disabled. "
+                "Audit accounts with DONT_REQUIRE_PREAUTH flag. Create alert: "
+                '|= "4768" |~ "PreAuthType.*0"'
+            ),
+        },
+        "T1558.001": {
+            "title": "Detect Golden Ticket attacks",
+            "description": (
+                "Golden Ticket (T1558.001) was not detected. Attackers forge TGTs "
+                "using the krbtgt hash for persistent access."
+            ),
+            "hint": (
+                "Alert on TGS requests (4769) without corresponding TGT request (4768). "
+                "Monitor for TGTs with abnormal lifetimes or missing account correlation."
+            ),
+        },
+        "T1550": {
+            "title": "Detect alternate authentication abuse",
+            "description": (
+                "Use Alternate Authentication Material (T1550) was not detected. "
+                "Includes Pass-the-Hash and Pass-the-Ticket."
+            ),
+            "hint": (
+                "Monitor for NTLM authentication from unusual sources. "
+                "Detect ticket reuse across different client IPs."
+            ),
+        },
+        "T1550.003": {
+            "title": "Detect Constrained Delegation abuse",
+            "description": (
+                "Pass the Ticket via Constrained Delegation (T1550.003) was not detected. "
+                "Attackers abuse S4U protocol to impersonate users."
+            ),
+            "hint": (
+                "Alert on Event ID 4769 with TransitedServices field populated. "
+                "Monitor S4U2Self/S4U2Proxy operations. Audit msDS-AllowedToDelegateTo "
+                "attribute changes."
             ),
         },
         "T1021": {
@@ -366,18 +436,19 @@ def _recommend_for_technique(tech: ExpectedTechnique) -> DetectionRecommendation
         },
     }
 
-    # Find matching recommendation
+    # Find matching recommendation - check exact match first, then parent
     tech_base = tech.technique_id.split(".")[0]
-    if tech_base in technique_recommendations:
-        rec_info = technique_recommendations[tech_base]
-        return DetectionRecommendation(
-            category="rule",
-            priority="critical" if tech.required else "high",
-            title=rec_info["title"],
-            description=rec_info["description"],
-            techniques=[tech.technique_id],
-            implementation_hint=rec_info["hint"],
-        )
+    for key in [tech.technique_id, tech_base]:
+        if key in technique_recommendations:
+            rec_info = technique_recommendations[key]
+            return DetectionRecommendation(
+                category="rule",
+                priority="critical" if tech.required else "high",
+                title=rec_info["title"],
+                description=rec_info["description"],
+                techniques=[tech.technique_id],
+                implementation_hint=rec_info["hint"],
+            )
 
     # Generic recommendation for unknown techniques
     return DetectionRecommendation(

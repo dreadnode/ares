@@ -20,10 +20,12 @@ If queries return empty: that IS a finding. Complete with low confidence.
 
 | Stage | Goal | Key Actions | Exit |
 |-------|------|-------------|------|
-| TRIAGE | What is happening? | list_datasources → query logs → record_evidence() | transition_stage("causation") |
+| TRIAGE | What is happening? | get_correlated_alerts() → list_datasources → query logs → record_evidence() | transition_stage("causation") |
 | CAUSATION | What came before? | get_combined_questions() → investigate precursors | transition_stage("lateral") |
 | LATERAL | What is the scope? | analyze_lateral_movement() → investigate hosts | transition_stage("synthesis") |
 | SYNTHESIS | Generate report | get_investigation_summary() → complete_investigation() | Done |
+
+**IMPORTANT**: Call get_correlated_alerts() FIRST in TRIAGE to check if this alert is part of a larger attack chain.
 
 ### Time Values
 Use timestamps from initial prompt (CURRENT_TIME, CURRENT_TIME_MINUS_1H), NOT alert's startsAt.
@@ -152,6 +154,85 @@ For HIGH/CRITICAL alerts:
 3. For each pending host: detect_lateral_movement() → track_host_investigation()
 4. record_lateral_connection() for each connection
 
+## Attack Chain Correlation (CRITICAL)
+
+**Individual alerts are often part of a larger attack chain.** You MUST use correlation to reconstruct the full attack narrative.
+
+### When to Check Correlation
+
+Call get_correlated_alerts() in the **TRIAGE stage** to understand if this alert is part of a larger campaign:
+
+```
+TRIAGE: get_correlated_alerts() → see if other alerts share hosts/users/IPs
+```
+
+### Using Correlation Context
+
+The correlation context tells you:
+- **related_alert_count**: How many other alerts are in this cluster
+- **common_hosts**: Hosts appearing across multiple alerts (investigate ALL of these)
+- **common_users**: Users appearing across multiple alerts (investigate ALL of these)
+- **common_ips**: Source IPs appearing across alerts
+- **techniques_in_cluster**: MITRE techniques from related alerts
+
+### Building the Attack Chain
+
+When correlated alerts exist, reconstruct the attack chronologically:
+
+| Alert Order | What to Check | How to Connect |
+|-------------|---------------|----------------|
+| 1st alert | Initial access technique | This is likely the entry point |
+| Intermediate | Common hosts/users | Track how attacker moved |
+| This alert | Current stage | Where are we in the chain? |
+| Later alerts | Follow-on techniques | What came after? |
+
+**Example Attack Chain Reconstruction:**
+```
+Alert 1: Password Spray (T1110.003) → found valid creds for carol.ng
+    ↓ (same user)
+Alert 2: Kerberoasting (T1558.003) → carol.ng requested TGS tickets
+    ↓ (same host dc01)
+Alert 3: DCSync (T1003.006) → replication from dc01
+    ↓ (krbtgt extracted)
+Alert 4: Golden Ticket (T1558.001) → forged TGT usage
+```
+
+### Attack Synopsis with Correlation
+
+Your **attack_synopsis** MUST tell the complete story:
+- Don't describe only THIS alert
+- Describe the FULL attack chain from correlated alerts
+- Include timestamps, hosts, users from ALL related alerts
+- Explain how the attacker progressed through stages
+
+**BAD Synopsis (single alert view):**
+```
+Detected Kerberoasting at 14:30. User carol.ng requested TGS tickets.
+```
+
+**GOOD Synopsis (correlated chain view):**
+```
+Attack chain spanning 40 minutes: At 14:00, attacker password-sprayed accounts
+from 192.168.58.100, gaining access as carol.ng at 14:10. Used carol.ng to
+Kerberoast service accounts at 14:30 (this alert). By 14:40, had escalated to
+DCSync, extracting krbtgt hash. Evidence suggests Golden Ticket usage by 14:50.
+```
+
+### Correlation Workflow
+
+```
+TRIAGE:
+  get_correlated_alerts()
+    ↓
+  If related_alert_count > 0:
+    - Note all common_hosts → investigate each
+    - Note all common_users → get_user_activity() for each
+    - Note all techniques_in_cluster → understand attack progression
+    ↓
+SYNTHESIS:
+  Build attack_synopsis covering ALL correlated alerts, not just this one
+```
+
 ## Credential Attack Chain Investigation (CRITICAL)
 
 When credential attacks are detected (Kerberoasting, AS-REP, DCSync), follow the FULL chain:
@@ -196,8 +277,12 @@ Before calling complete_investigation():
 6. **CREDENTIAL ATTACK CHAIN**: If Kerberoasting/AS-REP/DCSync detected, did you follow the credential chain?
    - Kerberoasted user → get_user_activity() → detect_lateral_movement() → detect_dcsync()
 7. **DOMAIN ADMIN CHECK**: If any DA or krbtgt activity, did you run detect_golden_ticket() and detect_dcsync()?
-8. Draft synopsis: every evidence item, host, user, IP should appear with their role explained
-9. Call complete_investigation() with a synopsis consistent with your evidence
+8. **CORRELATION CHECK**: Did you call get_correlated_alerts()? If related alerts exist:
+   - Does your synopsis cover the FULL attack chain, not just this alert?
+   - Did you investigate ALL common_hosts and common_users from correlation?
+   - Does your timeline include events from related alerts?
+9. Draft synopsis: every evidence item, host, user, IP should appear with their role explained
+10. Call complete_investigation() with a synopsis consistent with your evidence AND correlated alerts
 
 ## Evidence Integrity Rules (MANDATORY before completing)
 

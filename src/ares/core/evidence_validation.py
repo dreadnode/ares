@@ -242,7 +242,7 @@ def _extract_searchable_values(data: Any, depth: int = 0) -> set[str]:
     Extracts IPs, hostnames, usernames, and other IOC-like values.
 
     Args:
-        data: Data to extract from (dict, list, or primitive)
+        data: Data to extract from (dict, list, primitive, or MCP ContentText)
         depth: Current recursion depth (to prevent infinite recursion)
 
     Returns:
@@ -258,16 +258,38 @@ def _extract_searchable_values(data: Any, depth: int = 0) -> set[str]:
             values.add(data.lower())
             # Also extract embedded patterns
             values.update(_extract_patterns_from_string(data))
+        # Handle JSON strings embedded in results
+        if data.startswith(("{", "[")):
+            try:
+                parsed = json.loads(data)
+                values.update(_extract_searchable_values(parsed, depth + 1))
+            except (json.JSONDecodeError, TypeError):
+                pass
     elif isinstance(data, dict):
         for val in data.values():
             if isinstance(val, str) and val:
-                values.add(val.lower())
+                # Skip JSON-looking strings - they'll be parsed recursively below
+                # Also skip very long strings (likely log messages, not IOCs)
+                if not val.startswith(("{", "[")) and len(val) < 200:
+                    values.add(val.lower())
                 values.update(_extract_patterns_from_string(val))
+                # Parse embedded JSON strings
+                if val.startswith(("{", "[")):
+                    try:
+                        parsed = json.loads(val)
+                        values.update(_extract_searchable_values(parsed, depth + 1))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
             elif isinstance(val, (dict, list)):
                 values.update(_extract_searchable_values(val, depth + 1))
     elif isinstance(data, list):
         for item in data:
             values.update(_extract_searchable_values(item, depth + 1))
+    else:
+        # Handle MCP ContentText objects (have .text attribute with JSON content)
+        text = getattr(data, "text", None)
+        if text and isinstance(text, str):
+            values.update(_extract_searchable_values(text, depth + 1))
 
     return values
 
@@ -295,13 +317,14 @@ def _extract_patterns_from_string(text: str) -> set[str]:
             patterns.add(match.lower())
 
     # Windows usernames (multiple formats)
+    # Require at least 2 chars for domain and user to avoid matching JSON escapes like n\t
     user_patterns = [
-        r"\b([a-zA-Z0-9_-]+\\[a-zA-Z0-9_.-]+)\b",  # domain\user
-        r"\b([a-zA-Z0-9_.-]+@[a-zA-Z0-9.-]+)\b",  # user@domain
+        r"\b([a-zA-Z0-9_-]{2,}\\[a-zA-Z0-9_.-]{2,})\b",  # domain\user (2+ chars each)
+        r"\b([a-zA-Z0-9_.-]{2,}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b",  # user@domain.tld
     ]
     for pattern in user_patterns:
         for match in re.findall(pattern, text):
-            if match and len(match) > 2:
+            if match and len(match) > 5:  # Minimum realistic username length
                 patterns.add(match.lower())
 
     # Usernames from JSON fields (expanded list)
@@ -446,8 +469,12 @@ def _classify_ioc(value: str) -> str | None:
     if re.match(r"^[a-z0-9][-a-z0-9]*\.[a-z0-9][-a-z0-9.]+$", value) and not value[0].isdigit():
         return "hostname"
 
-    # Username patterns
-    if "\\" in value or "@" in value:
+    # Username patterns - must be proper format with minimum lengths
+    # DOMAIN\user format: require 2+ chars each side to avoid JSON escape matches like n\t
+    if re.match(r"^[a-z0-9_.-]{2,}\\[a-z0-9_.-]{2,}$", value, re.IGNORECASE):
+        return "user"
+    # user@domain.tld format: proper email-like with valid TLD
+    if re.match(r"^[a-z0-9_.-]{2,}@[a-z0-9.-]+\.[a-z]{2,}$", value, re.IGNORECASE):
         return "user"
 
     # Hash patterns

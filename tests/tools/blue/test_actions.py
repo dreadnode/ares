@@ -479,3 +479,112 @@ class TestCompletionToolsEdgeCases:
         )
         assert "completed" in result.lower()
         assert investigation_state.attack_synopsis == long_synopsis
+
+
+class TestTechniqueRecommendations:
+    """Tests for _generate_technique_recommendations method."""
+
+    @pytest.fixture
+    def completion_tools(self) -> CompletionTools:
+        return CompletionTools()
+
+    @pytest.fixture
+    def state_with_kerberos_techniques(self, sample_alert: dict) -> InvestigationState:
+        """Create state with Kerberos-related techniques."""
+        return InvestigationState(
+            investigation_id="test-kerb",
+            alert=sample_alert,
+            started_at=datetime.now(timezone.utc),
+            stage=InvestigationStage.LATERAL,
+            evidence=[
+                Evidence(
+                    id="ev-1",
+                    type="user",
+                    value="svc_backup@contoso.local",
+                    source="Query",
+                    timestamp=datetime.now(timezone.utc),
+                    pyramid_level=PyramidLevel.NETWORK_HOST_ARTIFACTS,
+                    mitre_techniques=["T1558.003"],
+                    confidence=0.9,
+                    validated=True,
+                ),
+            ],
+            timeline=[],
+            questions=[],
+            identified_techniques={"T1558.003", "T1558.001"},  # Kerberoasting, Golden Ticket
+            identified_tactics={"TA0006"},
+            technique_names={"T1558.003": "Kerberoasting", "T1558.001": "Golden Ticket"},
+            technique_to_tactic={},
+            queried_hosts=set(),
+            queried_users=set(),
+            executed_queries=[],
+            escalated=False,
+            escalation_reason=None,
+            attack_synopsis=None,
+            recommendations=[],
+            lateral_graph=LateralGraph(),
+        )
+
+    def test_generates_kerberoasting_recommendations(
+        self, completion_tools: CompletionTools, state_with_kerberos_techniques: InvestigationState
+    ):
+        """Test that Kerberoasting techniques generate appropriate recommendations."""
+        completion_tools.set_state(state_with_kerberos_techniques)
+        completion_tools._generate_technique_recommendations()
+
+        recs = state_with_kerberos_techniques.recommendations
+        assert len(recs) > 0
+
+        # Should have Kerberoasting-specific recommendations
+        rec_text = " ".join(recs)
+        assert any(
+            term in rec_text.lower()
+            for term in ["service account", "kerberos", "aes", "password", "krbtgt"]
+        )
+
+    def test_generates_golden_ticket_recommendations(
+        self, completion_tools: CompletionTools, state_with_kerberos_techniques: InvestigationState
+    ):
+        """Test Golden Ticket technique generates krbtgt reset recommendation."""
+        completion_tools.set_state(state_with_kerberos_techniques)
+        completion_tools._generate_technique_recommendations()
+
+        recs = state_with_kerberos_techniques.recommendations
+        rec_text = " ".join(recs).lower()
+
+        # Should recommend krbtgt password reset
+        assert "krbtgt" in rec_text
+
+    def test_no_state_does_not_raise(self, completion_tools: CompletionTools):
+        """Test that calling without state doesn't raise."""
+        completion_tools._generate_technique_recommendations()
+        # Should not raise
+
+    def test_no_duplicate_recommendations(
+        self, completion_tools: CompletionTools, state_with_kerberos_techniques: InvestigationState
+    ):
+        """Test that recommendations are deduplicated."""
+        completion_tools.set_state(state_with_kerberos_techniques)
+        completion_tools._generate_technique_recommendations()
+
+        recs = state_with_kerberos_techniques.recommendations
+        # No exact duplicates
+        assert len(recs) == len(set(recs))
+
+    @pytest.mark.asyncio
+    async def test_technique_recs_on_complete_without_manual_recs(
+        self, completion_tools: CompletionTools, state_with_kerberos_techniques: InvestigationState
+    ):
+        """Test complete_investigation generates technique recs when none provided."""
+        # Remove response annotation so alert extraction doesn't work
+        state_with_kerberos_techniques.alert = {"labels": {"alertname": "test"}, "annotations": {}}
+        completion_tools.set_state(state_with_kerberos_techniques)
+
+        await completion_tools.complete_investigation(
+            summary="Test investigation",
+            attack_synopsis="Test synopsis",
+            recommendations=None,  # No manual recommendations
+        )
+
+        recs = state_with_kerberos_techniques.recommendations
+        assert len(recs) > 0  # Should have auto-generated recommendations

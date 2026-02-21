@@ -152,6 +152,55 @@ class TestExtractSearchableValues:
         values = _extract_searchable_values(long_string)
         assert long_string.lower() not in values
 
+    def test_extract_from_content_text_object(self):
+        """Test extracting from MCP ContentText-like objects with .text attribute."""
+
+        class MockContentText:
+            """Mock MCP ContentText object."""
+
+            def __init__(self, text: str):
+                self.text = text
+
+        # Simulate MCP result format: list of ContentText with JSON in .text
+        json_content = '{"data": [{"ip": "192.168.58.100", "user": "testuser@contoso.local"}]}'
+        content_text = MockContentText(json_content)
+
+        values = _extract_searchable_values([content_text])
+        assert "192.168.58.100" in values
+        assert "testuser@contoso.local" in values
+
+    def test_extract_from_embedded_json_string(self):
+        """Test extracting from JSON strings embedded in results."""
+        # Common format from Loki - JSON as string value
+        data = '{"TargetUserName": "admin", "IpAddress": "192.168.58.50"}'
+        values = _extract_searchable_values(data)
+        assert "admin" in values
+        assert "192.168.58.50" in values
+
+    def test_extract_from_loki_style_result(self):
+        """Test extracting from Loki-style result structure."""
+        # Simulates compact Loki result after _compact_loki_result processing
+        result = {
+            "data": [
+                {
+                    "timestamp": "2024-01-01T00:00:00Z",
+                    "line": {
+                        "event_id": 4624,
+                        "computer": "dc01.contoso.local",
+                        "fields": {
+                            "TargetUserName": "administrator",
+                            "IpAddress": "192.168.58.100",
+                        },
+                    },
+                }
+            ],
+            "count": 1,
+        }
+        values = _extract_searchable_values(result)
+        assert "dc01.contoso.local" in values
+        assert "administrator" in values
+        assert "192.168.58.100" in values
+
 
 class TestExtractPatternsFromString:
     """Tests for _extract_patterns_from_string function."""

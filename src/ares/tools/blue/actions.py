@@ -204,6 +204,10 @@ class CompletionTools(Toolset):  # type: ignore[misc]
                     self.state.recommendations.extend(extracted_recs)
                     logger.info(f"Auto-extracted {len(extracted_recs)} recommendations from alert")
 
+        # Generate technique-based recommendations if still none
+        if not self.state.recommendations:
+            self._generate_technique_recommendations()
+
         # Auto-generate synopsis if not provided and we have evidence
         if not self.state.attack_synopsis and self.state.evidence:
             self._generate_fallback_synopsis()
@@ -424,3 +428,87 @@ class CompletionTools(Toolset):  # type: ignore[misc]
             parts.append(f"  - Validated evidence: {validated_count}/{len(self.state.evidence)}")
 
         self.state.attack_synopsis = "\n".join(parts)
+
+    def _generate_technique_recommendations(self) -> None:
+        """Generate recommendations based on identified MITRE techniques.
+
+        Provides actionable response recommendations for common attack techniques.
+        """
+        if not self.state:
+            return
+
+        # Technique-specific recommendations
+        technique_recs: dict[str, list[str]] = {
+            "T1003": [  # Credential Dumping
+                "Reset passwords for all compromised accounts",
+                "Enable Credential Guard on Windows endpoints",
+                "Review LSASS protection settings",
+            ],
+            "T1558": [  # Kerberos attacks (Kerberoasting, Golden Ticket, etc.)
+                "Reset service account passwords (especially those with weak passwords)",
+                "Enable AES-only Kerberos encryption (disable RC4)",
+                "Review service account permissions and reduce to minimum required",
+                "Implement Group Managed Service Accounts (gMSA) where possible",
+            ],
+            "T1558.003": [  # Kerberoasting
+                "Reset passwords for all Kerberoasted service accounts",
+                "Audit SPN configurations and remove unnecessary SPNs",
+                "Enforce 25+ character passwords for service accounts",
+            ],
+            "T1558.004": [  # AS-REP Roasting
+                "Enable Kerberos pre-authentication for all accounts",
+                "Reset passwords for accounts with pre-auth disabled",
+            ],
+            "T1558.001": [  # Golden Ticket
+                "Reset krbtgt password TWICE (with replication delay between)",
+                "Invalidate all existing Kerberos tickets",
+                "Review Domain Admin group membership",
+            ],
+            "T1550.003": [  # Pass the Ticket / Constrained Delegation abuse
+                "Review and audit constrained delegation configurations",
+                "Remove unnecessary delegation rights",
+                "Consider Resource-Based Constrained Delegation (RBCD) instead",
+            ],
+            "T1021": [  # Lateral Movement via Remote Services
+                "Review and restrict SMB/RDP access between workstations",
+                "Implement network segmentation",
+                "Enable Windows Firewall rules to block lateral SMB",
+            ],
+            "T1110": [  # Brute Force
+                "Lock out compromised accounts",
+                "Implement account lockout policies",
+                "Enable MFA for all user accounts",
+            ],
+            "T1078": [  # Valid Accounts
+                "Reset credentials for all compromised accounts",
+                "Review account activity for indicators of misuse",
+                "Implement privileged access management (PAM)",
+            ],
+        }
+
+        added: set[str] = set()  # Track to avoid duplicates
+
+        for tech_id in self.state.identified_techniques:
+            # Check exact match first, then parent technique
+            for key in [tech_id, tech_id.split(".")[0]]:
+                if key in technique_recs:
+                    for rec in technique_recs[key]:
+                        if rec not in added:
+                            self.state.recommendations.append(rec)
+                            added.add(rec)
+                    break
+
+        # Generic recommendations if we have evidence but no technique-specific ones
+        if not self.state.recommendations and self.state.evidence:
+            self.state.recommendations.extend(
+                [
+                    "Review all identified IOCs and block malicious indicators",
+                    "Investigate affected hosts for signs of compromise",
+                    "Review affected user accounts for unauthorized activity",
+                ]
+            )
+
+        if self.state.recommendations:
+            logger.info(
+                f"Generated {len(self.state.recommendations)} technique-based recommendations"
+            )
