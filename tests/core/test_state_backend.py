@@ -428,11 +428,15 @@ class TestRedisStateBackend:
 
     @pytest.mark.asyncio
     async def test_set_domain_admin(self, backend, mock_redis):
-        """Test setting domain admin status."""
+        """Test setting domain admin status.
+
+        Note: set_domain_admin does NOT set completed_at. That is handled by
+        announce_domain_admin() based on stop_on_domain_admin config.
+        """
         await backend.set_domain_admin(achieved=True, path="kerberoast -> secretsdump")
 
-        # Should set has_domain_admin, domain_admin_path, and completed_at
-        assert mock_redis.hset.call_count >= 2
+        # Should set has_domain_admin and domain_admin_path only (not completed_at)
+        assert mock_redis.hset.call_count == 2
 
     @pytest.mark.asyncio
     async def test_get_domain_admin(self, backend, mock_redis):
