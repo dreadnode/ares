@@ -12,7 +12,7 @@ from ares.core.models import (
     PyramidLevel,
     TimelineEvent,
 )
-from ares.tools.blue.actions import CompletionTools, escalate_investigation
+from ares.tools.blue.actions import CompletionTools
 
 
 class TestCompletionTools:
@@ -318,12 +318,35 @@ class TestGenerateFallbackSynopsis:
 
 
 class TestEscalateInvestigation:
-    """Tests for escalate_investigation function."""
+    """Tests for escalate_investigation method on CompletionTools."""
+
+    @pytest.fixture
+    def completion_tools_with_state(
+        self, investigation_state: InvestigationState
+    ) -> CompletionTools:
+        """Create CompletionTools instance with state set."""
+        tools = CompletionTools()
+        tools.set_state(investigation_state)
+        return tools
 
     @pytest.mark.asyncio
-    async def test_escalate_basic(self):
+    async def test_escalate_no_state(self):
+        """Test escalation without state returns error."""
+        tools = CompletionTools()
+        result = await tools.escalate_investigation(
+            reason="Test",
+            severity="high",
+            current_findings="Test",
+            immediate_actions=[],
+        )
+        assert "ERROR" in result
+
+    @pytest.mark.asyncio
+    async def test_escalate_basic(
+        self, completion_tools_with_state: CompletionTools, investigation_state: InvestigationState
+    ):
         """Test basic escalation."""
-        result = await escalate_investigation(
+        result = await completion_tools_with_state.escalate_investigation(
             reason="Active attack in progress",
             severity="critical",
             current_findings="Attacker has domain admin access",
@@ -331,11 +354,16 @@ class TestEscalateInvestigation:
         )
         assert "escalated" in result.lower()
         assert "critical" in result.lower()
+        # Verify state was updated
+        assert investigation_state.escalated is True
+        assert investigation_state.escalation_reason == "Active attack in progress"
 
     @pytest.mark.asyncio
-    async def test_escalate_high_severity(self):
+    async def test_escalate_high_severity(
+        self, completion_tools_with_state: CompletionTools, investigation_state: InvestigationState
+    ):
         """Test high severity escalation."""
-        result = await escalate_investigation(
+        result = await completion_tools_with_state.escalate_investigation(
             reason="Suspicious activity detected",
             severity="high",
             current_findings="Multiple failed login attempts",
@@ -343,11 +371,14 @@ class TestEscalateInvestigation:
         )
         assert "escalated" in result.lower()
         assert "high" in result.lower()
+        assert investigation_state.escalated is True
 
     @pytest.mark.asyncio
-    async def test_escalate_medium_severity(self):
+    async def test_escalate_medium_severity(
+        self, completion_tools_with_state: CompletionTools, investigation_state: InvestigationState
+    ):
         """Test medium severity escalation."""
-        result = await escalate_investigation(
+        result = await completion_tools_with_state.escalate_investigation(
             reason="Needs human review",
             severity="medium",
             current_findings="Uncertain about scope",
@@ -355,17 +386,35 @@ class TestEscalateInvestigation:
         )
         assert "escalated" in result.lower()
         assert "medium" in result.lower()
+        assert investigation_state.escalated is True
 
     @pytest.mark.asyncio
-    async def test_escalate_with_empty_actions(self):
+    async def test_escalate_with_empty_actions(
+        self, completion_tools_with_state: CompletionTools, investigation_state: InvestigationState
+    ):
         """Test escalation with empty actions list."""
-        result = await escalate_investigation(
+        result = await completion_tools_with_state.escalate_investigation(
             reason="Need help",
             severity="high",
             current_findings="Complex situation",
             immediate_actions=[],
         )
         assert "escalated" in result.lower()
+        assert investigation_state.escalated is True
+
+    @pytest.mark.asyncio
+    async def test_escalate_adds_immediate_actions_to_recommendations(
+        self, completion_tools_with_state: CompletionTools, investigation_state: InvestigationState
+    ):
+        """Test that immediate actions are added to recommendations."""
+        await completion_tools_with_state.escalate_investigation(
+            reason="DA detected",
+            severity="critical",
+            current_findings="krbtgt hash extracted",
+            immediate_actions=["Isolate DC", "Reset krbtgt twice"],
+        )
+        assert "Isolate DC" in investigation_state.recommendations
+        assert "Reset krbtgt twice" in investigation_state.recommendations
 
 
 class TestCompletionToolsEdgeCases:
