@@ -771,19 +771,16 @@ class RedisStateBackend:
     async def set_domain_admin(self, achieved: bool, path: str | None = None) -> None:
         """Set domain admin achievement status.
 
-        This method is idempotent - subsequent calls after DA is achieved won't
-        overwrite completed_at. This prevents multiple krbtgt hashes (e.g., from
-        child domains or history objects) from updating the timestamp.
+        This method only persists the DA flag and path. It does NOT set completed_at,
+        as that should only be set when the operation actually completes (controlled
+        by stop_on_domain_admin or stop_on_golden_ticket config).
+
+        Note: completed_at is set by announce_domain_admin() or announce_golden_ticket()
+        in announcements.py when the appropriate stop condition is met.
         """
         await self.set_meta("has_domain_admin", achieved)
         if path:
             await self.set_meta("domain_admin_path", path)
-        if achieved:
-            # Only set completed_at if not already set (idempotent)
-            # This preserves the original DA achievement time
-            existing = await self.get_meta("completed_at")
-            if not existing:
-                await self.set_meta("completed_at", datetime.now(timezone.utc).isoformat())
 
     async def get_domain_admin(self) -> tuple[bool, str | None]:
         """Get domain admin status and path."""
