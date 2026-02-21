@@ -190,6 +190,42 @@ class RedBlueCorrelator:
         r"T\d{4}(?:\.\d{3})?",  # T1234 or T1234.001
     ]
 
+    @staticmethod
+    def _techniques_match(red_technique: str | None, blue_technique: str | None) -> bool:
+        """Check if MITRE techniques match, supporting hierarchical matching.
+
+        Supports:
+        - Exact match: T1003 == T1003
+        - Parent matches child: T1003 matches T1003.006 (blue detected parent, red used sub-technique)
+        - Child matches parent: T1003.006 matches T1003 (blue detected sub-technique, red logged parent)
+
+        Args:
+            red_technique: Red team technique ID (e.g., T1003.006)
+            blue_technique: Blue team detected technique ID (e.g., T1003)
+
+        Returns:
+            True if techniques match hierarchically
+        """
+        if red_technique is None or blue_technique is None:
+            return False
+
+        # Normalize to uppercase for comparison
+        red = red_technique.upper().strip()
+        blue = blue_technique.upper().strip()
+
+        # Exact match
+        if red == blue:
+            return True
+
+        # Extract parent technique (T1003 from T1003.006)
+        red_parent = red.split(".")[0] if "." in red else red
+        blue_parent = blue.split(".")[0] if "." in blue else blue
+
+        # Parent techniques must match for any hierarchical relationship
+        # T1003 matches T1003.006 (parent matches child)
+        # T1003.006 matches T1003 (child matches parent)
+        return red_parent == blue_parent
+
     def __init__(
         self,
         reports_dir: Path,
@@ -478,10 +514,8 @@ class RedBlueCorrelator:
                 if abs(time_delta) > self.time_window.total_seconds():
                     continue
 
-                technique_match = (
-                    red_activity.technique_id is not None
-                    and detection.technique_id is not None
-                    and red_activity.technique_id == detection.technique_id
+                technique_match = self._techniques_match(
+                    red_activity.technique_id, detection.technique_id
                 )
 
                 target_match = (
@@ -579,7 +613,10 @@ class RedBlueCorrelator:
         if not activity.technique_id:
             return "Activity has no associated MITRE technique"
 
-        technique_alerts = [d for d in detections if d.technique_id == activity.technique_id]
+        # Check for any technique match (including hierarchical)
+        technique_alerts = [
+            d for d in detections if self._techniques_match(activity.technique_id, d.technique_id)
+        ]
         if not technique_alerts:
             return f"No alert rules configured for technique {activity.technique_id}"
 

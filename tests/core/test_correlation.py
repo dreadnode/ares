@@ -708,6 +708,95 @@ Technique: T1059.001
         assert len(blue_detections) >= 0  # May or may not parse depending on format
 
 
+class TestHierarchicalTechniqueMatching:
+    """Tests for hierarchical MITRE technique matching."""
+
+    def test_exact_match(self, temp_reports_dir: Path) -> None:
+        """Test exact technique match (T1003 == T1003)."""
+        correlator = RedBlueCorrelator(temp_reports_dir)
+        assert correlator._techniques_match("T1003", "T1003") is True
+
+    def test_parent_matches_child(self, temp_reports_dir: Path) -> None:
+        """Test parent technique matches child (T1003 matches T1003.006)."""
+        correlator = RedBlueCorrelator(temp_reports_dir)
+        # Blue detected parent, red used sub-technique
+        assert correlator._techniques_match("T1003.006", "T1003") is True
+
+    def test_child_matches_parent(self, temp_reports_dir: Path) -> None:
+        """Test child technique matches parent (T1003.006 matches T1003)."""
+        correlator = RedBlueCorrelator(temp_reports_dir)
+        # Blue detected sub-technique, red logged parent
+        assert correlator._techniques_match("T1003", "T1003.006") is True
+
+    def test_same_family_sub_techniques(self, temp_reports_dir: Path) -> None:
+        """Test sub-techniques from same parent match (T1003.001 and T1003.006)."""
+        correlator = RedBlueCorrelator(temp_reports_dir)
+        # Both from T1003 family - should match
+        assert correlator._techniques_match("T1003.001", "T1003.006") is True
+        assert correlator._techniques_match("T1003.006", "T1003.001") is True
+
+    def test_different_techniques_no_match(self, temp_reports_dir: Path) -> None:
+        """Test different technique families don't match."""
+        correlator = RedBlueCorrelator(temp_reports_dir)
+        assert correlator._techniques_match("T1003", "T1059") is False
+        assert correlator._techniques_match("T1003.006", "T1059.001") is False
+
+    def test_none_techniques_no_match(self, temp_reports_dir: Path) -> None:
+        """Test None techniques don't match."""
+        correlator = RedBlueCorrelator(temp_reports_dir)
+        assert correlator._techniques_match(None, "T1003") is False
+        assert correlator._techniques_match("T1003", None) is False
+        assert correlator._techniques_match(None, None) is False
+
+    def test_case_insensitive(self, temp_reports_dir: Path) -> None:
+        """Test matching is case insensitive."""
+        correlator = RedBlueCorrelator(temp_reports_dir)
+        assert correlator._techniques_match("t1003.006", "T1003") is True
+        assert correlator._techniques_match("T1003", "t1003.006") is True
+
+    def test_hierarchical_matching_in_correlation(self, temp_reports_dir: Path) -> None:
+        """Test hierarchical matching is used in actual correlation."""
+        correlator = RedBlueCorrelator(temp_reports_dir)
+        base_time = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+
+        # Red team uses sub-technique T1003.006 (DCSync)
+        red_activity = RedTeamActivity(
+            timestamp=base_time,
+            technique_id="T1003.006",  # Sub-technique
+            technique_name="DCSync",
+            action="DCSync attack on DC",
+            target_ip="192.168.58.100",
+            target_host="dc01",
+            credential_used=None,
+            success=True,
+        )
+
+        # Blue team detects parent technique T1003
+        blue_detection = BlueTeamDetection(
+            timestamp=base_time + timedelta(minutes=2),
+            alert_name="Credential Dumping",
+            technique_id="T1003",  # Parent technique
+            severity="high",
+            target_ip="192.168.58.100",
+            target_host="dc01",
+            investigation_id="inv-001",
+            status="completed",
+            evidence_count=5,
+            highest_pyramid_level=4,
+        )
+
+        report = correlator.correlate(
+            red_activities=[red_activity],
+            blue_detections=[blue_detection],
+            operation_id="test-op",
+        )
+
+        # Should match due to hierarchical matching
+        assert report.matched_activities == 1
+        assert len(report.matches) == 1
+        assert report.matches[0].technique_match is True
+
+
 class TestDetectionGap:
     """Tests for DetectionGap dataclass."""
 

@@ -254,7 +254,7 @@ def _extract_searchable_values(data: Any, depth: int = 0) -> set[str]:
     values: set[str] = set()
 
     if isinstance(data, str):
-        if data and len(data) < 500:
+        if data and len(data) < 500 and not _is_garbled_value(data):
             values.add(data.lower())
             # Also extract embedded patterns
             values.update(_extract_patterns_from_string(data))
@@ -294,6 +294,107 @@ def _extract_searchable_values(data: Any, depth: int = 0) -> set[str]:
     return values
 
 
+# Target domain scope for filtering (set via set_target_domains)
+# When set, only domains matching these will be extracted as IOCs
+_target_domains: set[str] = set()
+
+
+def set_target_domains(domains: list[str] | set[str]) -> None:
+    """Set target domains for scope-based filtering.
+
+    When target domains are set, evidence extraction will only include
+    hostnames/domains that are part of the target scope. This prevents
+    noise from unrelated alerts/logs polluting the investigation.
+
+    Call this with domains from the red team operation when correlating.
+
+    Args:
+        domains: List of target domain FQDNs (e.g., ["contoso.local", "fabrikam.local"])
+    """
+    global _target_domains
+    _target_domains = {d.lower().strip() for d in domains if d}
+    if _target_domains:
+        logger.info(f"Evidence validation scope set to domains: {_target_domains}")
+
+
+def clear_target_domains() -> None:
+    """Clear target domain scope (allow all domains)."""
+    global _target_domains
+    _target_domains = set()
+
+
+def get_target_domains() -> set[str]:
+    """Get current target domain scope."""
+    return _target_domains.copy()
+
+
+def _is_in_target_scope(hostname: str) -> bool:
+    """Check if a hostname/domain is within target scope.
+
+    If no target domains are set, all domains are allowed (returns True).
+    If target domains are set, hostname must match one of them.
+
+    A hostname matches if:
+    - It equals a target domain (e.g., "contoso.local" matches "contoso.local")
+    - It ends with a target domain (e.g., "dc01.contoso.local" matches "contoso.local")
+
+    Args:
+        hostname: The hostname/FQDN to check
+
+    Returns:
+        True if hostname is in scope (or no scope is set)
+    """
+    if not _target_domains:
+        return True  # No scope set, allow all
+
+    if not hostname:
+        return False
+
+    normalized = hostname.lower().strip()
+
+    for target in _target_domains:
+        # Exact match
+        if normalized == target:
+            return True
+        # Subdomain match (hostname ends with .target)
+        if normalized.endswith(f".{target}"):
+            return True
+
+    return False
+
+
+def _is_garbled_value(value: str) -> bool:
+    """Check if a value contains garbled/escaped content that shouldn't be IOCs.
+
+    Filters out:
+    - Unicode escape sequences like \\u003e, \\u003c
+    - JSON escape patterns
+    - Hex-heavy strings that are likely encoded data
+    - Values that are mostly non-alphanumeric
+
+    Args:
+        value: The value to check
+
+    Returns:
+        True if the value appears garbled/invalid
+    """
+    # Unicode escape patterns (e.g., \u003e, \u003c)
+    if re.search(r"\\u[0-9a-fA-F]{4}", value):
+        return True
+
+    # HTML entity-style escapes (e.g., u003e without backslash from decoded JSON)
+    if re.search(r"u00[0-9a-fA-F]{2}", value):
+        return True
+
+    # Hex-heavy strings (more than 50% hex chars in a row, not a valid hash)
+    if re.search(r"0x[0-9a-fA-F]{6,}", value):
+        return True
+
+    # Values that are mostly special characters or escaped
+    alphanumeric = sum(1 for c in value if c.isalnum())
+    return len(value) > 5 and alphanumeric / len(value) < 0.4
+
+
 def _extract_patterns_from_string(text: str) -> set[str]:
     """Extract IOC patterns from a string.
 
@@ -310,10 +411,10 @@ def _extract_patterns_from_string(text: str) -> set[str]:
     for match in re.findall(ip_pattern, text):
         patterns.add(match.lower())
 
-    # Hostnames/FQDNs
+    # Hostnames/FQDNs (filter by target scope if set)
     hostname_pattern = r"\b([a-zA-Z0-9][-a-zA-Z0-9]*\.[-a-zA-Z0-9.]+)\b"
     for match in re.findall(hostname_pattern, text):
-        if "." in match and not match[0].isdigit():
+        if "." in match and not match[0].isdigit() and _is_in_target_scope(match):
             patterns.add(match.lower())
 
     # Windows usernames (multiple formats)
@@ -337,14 +438,14 @@ def _extract_patterns_from_string(text: str) -> set[str]:
             if match and len(match) > 1 and match not in ("-", "SYSTEM", "LOCAL SERVICE"):
                 patterns.add(match.lower())
 
-    # Computer names from Windows events
+    # Computer names from Windows events (filter by target scope if set)
     computer_patterns = [
         r'"(?:Computer|WorkstationName|Workstation|ComputerName|HostName)":\s*"([^"]+)"',
         r"(?:Computer|WorkstationName|HostName)=([^\s,;}\]]+)",
     ]
     for pattern in computer_patterns:
         for match in re.findall(pattern, text, re.IGNORECASE):
-            if match and len(match) > 1:
+            if match and len(match) > 1 and _is_in_target_scope(match):
                 patterns.add(match.lower())
 
     process_patterns = [
@@ -376,7 +477,8 @@ def _extract_patterns_from_string(text: str) -> set[str]:
         for match in re.findall(pattern, text):
             patterns.add(match.lower())
 
-    return patterns
+    # Filter out garbled values
+    return {p for p in patterns if not _is_garbled_value(p)}
 
 
 def _is_mitre_technique_description(value: str) -> bool:
@@ -461,12 +563,18 @@ def _classify_ioc(value: str) -> str | None:
     Returns:
         IOC type or None if not classifiable
     """
+    # Skip garbled values
+    if _is_garbled_value(value):
+        return None
+
     # IP address
     if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", value):
         return "ip"
 
-    # Domain/hostname
+    # Domain/hostname (filter by target scope if set)
     if re.match(r"^[a-z0-9][-a-z0-9]*\.[a-z0-9][-a-z0-9.]+$", value) and not value[0].isdigit():
+        if not _is_in_target_scope(value):
+            return None
         return "hostname"
 
     # Username patterns - must be proper format with minimum lengths

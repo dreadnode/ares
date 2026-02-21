@@ -6,12 +6,16 @@ from ares.core.evidence_validation import (
     _classify_ioc,
     _extract_patterns_from_string,
     _extract_searchable_values,
+    _is_garbled_value,
+    _is_in_target_scope,
     adjust_confidence_for_validation,
     auto_extract_evidence_from_query,
     boost_confidence_for_quality,
+    clear_target_domains,
     get_recent_query_ids,
     get_suggested_iocs,
     reset_evidence_validation,
+    set_target_domains,
     store_query_result,
     validate_evidence_value,
 )
@@ -579,3 +583,182 @@ class TestAutoExtractEvidenceFromQuery:
         evidence = auto_extract_evidence_from_query(result, "Loki query for auth logs")
 
         assert any("Loki query" in e["source"] for e in evidence)
+
+
+class TestIsGarbledValue:
+    """Tests for _is_garbled_value function."""
+
+    def test_unicode_escape_is_garbled(self):
+        """Test Unicode escape sequences are detected as garbled."""
+        assert _is_garbled_value("\\u003e0x21993862\\u003c") is True
+        assert _is_garbled_value("test\\u003evalue") is True
+
+    def test_html_entity_style_is_garbled(self):
+        """Test HTML entity-style escapes are detected."""
+        assert _is_garbled_value("u003e0x21993862u003c") is True
+        assert _is_garbled_value("valueu003emore") is True
+
+    def test_hex_heavy_is_garbled(self):
+        """Test hex-heavy strings are detected."""
+        assert _is_garbled_value("0x2199386293847") is True
+
+    def test_mostly_special_chars_is_garbled(self):
+        """Test strings with mostly special characters are detected."""
+        assert _is_garbled_value("!@#$%^&*()") is True
+        assert _is_garbled_value(">>><<<:::") is True
+
+    def test_valid_ip_not_garbled(self):
+        """Test valid IP addresses are not garbled."""
+        assert _is_garbled_value("192.168.58.100") is False
+
+    def test_valid_hostname_not_garbled(self):
+        """Test valid hostnames are not garbled."""
+        assert _is_garbled_value("dc01.contoso.local") is False
+
+    def test_valid_username_not_garbled(self):
+        """Test valid usernames are not garbled."""
+        assert _is_garbled_value("admin@contoso.local") is False
+        assert _is_garbled_value("DOMAIN\\admin") is False
+
+    def test_short_values_not_garbled(self):
+        """Test short values are not flagged by special char ratio."""
+        assert _is_garbled_value("test") is False
+        assert _is_garbled_value("ab.cd") is False
+
+
+class TestTargetDomainScope:
+    """Tests for target domain scope filtering."""
+
+    def setup_method(self):
+        """Clear target domains before each test."""
+        clear_target_domains()
+
+    def teardown_method(self):
+        """Clear target domains after each test."""
+        clear_target_domains()
+
+    def test_no_scope_allows_all(self):
+        """Test that without scope set, all domains are allowed."""
+        assert _is_in_target_scope("dc01.contoso.local") is True
+        assert _is_in_target_scope("server.random.com") is True
+        assert _is_in_target_scope("anything.example.org") is True
+
+    def test_empty_hostname_not_in_scope(self):
+        """Test empty hostname returns False."""
+        set_target_domains(["contoso.local"])
+        assert _is_in_target_scope("") is False
+
+    def test_exact_domain_match(self):
+        """Test exact domain match is in scope."""
+        set_target_domains(["contoso.local", "fabrikam.local"])
+        assert _is_in_target_scope("contoso.local") is True
+        assert _is_in_target_scope("fabrikam.local") is True
+
+    def test_subdomain_match(self):
+        """Test subdomain of target domain is in scope."""
+        set_target_domains(["contoso.local"])
+        assert _is_in_target_scope("dc01.contoso.local") is True
+        assert _is_in_target_scope("sql01.corp.contoso.local") is True
+        assert _is_in_target_scope("web.app.contoso.local") is True
+
+    def test_unrelated_domain_not_in_scope(self):
+        """Test unrelated domains are filtered out when scope is set."""
+        set_target_domains(["contoso.local"])
+        assert _is_in_target_scope("dc01.fabrikam.local") is False
+        assert _is_in_target_scope("random.example.com") is False
+        assert _is_in_target_scope("vortexindustries.local") is False
+
+    def test_case_insensitive(self):
+        """Test scope matching is case insensitive."""
+        set_target_domains(["Contoso.Local"])
+        assert _is_in_target_scope("DC01.CONTOSO.LOCAL") is True
+        assert _is_in_target_scope("dc01.contoso.local") is True
+
+    def test_multiple_target_domains(self):
+        """Test multiple target domains all work."""
+        set_target_domains(["sevenkingdoms.local", "north.sevenkingdoms.local", "essos.local"])
+        assert _is_in_target_scope("winterfell.north.sevenkingdoms.local") is True
+        assert _is_in_target_scope("kingslanding.sevenkingdoms.local") is True
+        assert _is_in_target_scope("meereen.essos.local") is True
+        assert _is_in_target_scope("unrelated.domain.com") is False
+
+    def test_clear_domains_resets_scope(self):
+        """Test clear_target_domains resets to allow-all mode."""
+        set_target_domains(["contoso.local"])
+        assert _is_in_target_scope("random.com") is False
+
+        clear_target_domains()
+        assert _is_in_target_scope("random.com") is True
+
+
+class TestFilteringIntegration:
+    """Integration tests for filtering in IOC extraction."""
+
+    def setup_method(self):
+        """Clear target domains before each test."""
+        clear_target_domains()
+
+    def teardown_method(self):
+        """Clear target domains after each test."""
+        clear_target_domains()
+
+    def test_garbled_values_filtered_from_extraction(self):
+        """Test garbled values are filtered from pattern extraction."""
+        text = "User: \\u003e0x21993862\\u003c logged in from 192.168.58.100"
+        patterns = _extract_patterns_from_string(text)
+
+        # Should have IP but not the garbled value
+        assert "192.168.58.100" in patterns
+        assert "\\u003e0x21993862\\u003c" not in patterns
+
+    def test_scope_based_filtering_from_extraction(self):
+        """Test domains outside target scope are filtered from extraction."""
+        # Set target scope to contoso.local only
+        set_target_domains(["contoso.local"])
+
+        text = "Host: dc01.contoso.local connected to server.otherdomain.local"
+        patterns = _extract_patterns_from_string(text)
+
+        # Should have target domain but not out-of-scope domain
+        assert "dc01.contoso.local" in patterns
+        assert "server.otherdomain.local" not in patterns
+
+    def test_no_scope_allows_all_domains(self):
+        """Test without scope, all domains are extracted."""
+        # No scope set
+        text = "Host: dc01.contoso.local connected to server.random.local"
+        patterns = _extract_patterns_from_string(text)
+
+        # Both domains should be extracted
+        assert "dc01.contoso.local" in patterns
+        assert "server.random.local" in patterns
+
+    def test_scope_based_filtering_from_classification(self):
+        """Test out-of-scope domains return None from classification."""
+        set_target_domains(["contoso.local"])
+
+        assert _classify_ioc("dc01.contoso.local") == "hostname"
+        assert _classify_ioc("server.otherdomain.local") is None  # Out of scope
+
+    def test_garbled_values_filtered_from_classification(self):
+        """Test garbled values return None from classification."""
+        assert _classify_ioc("\\u003e0x21993862\\u003c") is None
+        assert _classify_ioc("u003etest") is None
+
+    def test_auto_extract_with_scope(self):
+        """Test auto_extract_evidence_from_query respects target scope."""
+        set_target_domains(["contoso.local"])
+
+        result = {
+            "valid_host": "dc01.contoso.local",
+            "out_of_scope": "server.otherdomain.local",
+            "valid_ip": "192.168.58.100",
+            "garbled": "\\u003e0x21993862\\u003c",
+        }
+        evidence = auto_extract_evidence_from_query(result, "test query")
+
+        values = [e["value"] for e in evidence]
+        assert "dc01.contoso.local" in values
+        assert "192.168.58.100" in values  # IPs not filtered by domain scope
+        assert "server.otherdomain.local" not in values
+        assert "\\u003e0x21993862\\u003c" not in values

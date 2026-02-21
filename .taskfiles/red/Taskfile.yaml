@@ -362,6 +362,45 @@ tasks:
           fi
         fi
 
+  multi:watch:
+    desc: "Watch for completed operations and auto-fetch reports (usage: task red:multi:watch [POLL_INTERVAL=30] [ONCE=true])"
+    silent: true
+    vars:
+      POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+      ONCE: '{{.ONCE | default "false"}}'
+      REDIS_PASSWORD:
+        sh: kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo ""
+    cmds:
+      - cmd: mkdir -p "{{.OUTPUT_DIR}}"
+        silent: true
+      - |
+        # Start port-forward in background
+        kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 6379:6379 &
+        PF_PID=$!
+        sleep 2  # Wait for port-forward to establish
+
+        cleanup() {
+          kill $PF_PID 2>/dev/null || true
+          exit 0
+        }
+        trap cleanup INT TERM EXIT
+
+        # Build Redis URL with password if available
+        if [ -n "{{.REDIS_PASSWORD}}" ]; then
+          export ARES_REDIS_URL="redis://:{{.REDIS_PASSWORD}}@localhost:6379"
+        else
+          export ARES_REDIS_URL="redis://localhost:6379"
+        fi
+
+        ONCE_FLAG=""
+        if [ "{{.ONCE}}" = "true" ]; then
+          ONCE_FLAG="--once"
+        fi
+
+        # Run watch locally - fetches reports from Redis to local ./reports
+        python -m ares.cli_ops watch --poll-interval {{.POLL_INTERVAL}} --output-dir "{{.OUTPUT_DIR}}" $ONCE_FLAG
+
   multi:list:
     desc: "List multi-agent operations and their state"
     silent: true

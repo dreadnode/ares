@@ -2367,6 +2367,163 @@ def _print_user_summaries(
         print()  # Blank line between users
 
 
+async def _get_all_operations_with_status(
+    redis_url: str,
+) -> list[tuple[str, str, datetime | None]]:
+    """Get all operations with their status and completion time.
+
+    Returns:
+        List of (operation_id, status, completed_at) tuples.
+    """
+    import json as json_module
+
+    from ares.core.task_queue import RedisTaskQueue
+
+    client = await create_verified_redis_client(redis_url, decode_responses=True)
+
+    results: list[tuple[str, str, datetime | None]] = []
+
+    # Check for running operations (have locks)
+    running_ops: set[str] = set()
+    lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
+    for key in lock_keys:
+        parts = key.split(":", 2)
+        if len(parts) >= 3:
+            running_ops.add(parts[2])
+
+    # Get all operations with meta keys
+    meta_keys = await client.keys("ares:op:*:meta")
+    seen_ops: set[str] = set()
+
+    for key in meta_keys:
+        parts = key.split(":")
+        if len(parts) < 3:
+            continue
+        op_id = parts[2]
+        if op_id in seen_ops:
+            continue
+        seen_ops.add(op_id)
+
+        # Get status from status key
+        status_key = f"ares:op:{op_id}:status"
+        status_json = await client.get(status_key)
+        status = "unknown"
+        completed_at = None
+
+        if status_json:
+            try:
+                status_data = json_module.loads(status_json)
+                status = status_data.get("status", "unknown")
+                if status == "completed" and status_data.get("completed_at"):
+                    try:
+                        completed_at = datetime.fromisoformat(status_data["completed_at"])
+                    except Exception:
+                        pass
+            except json_module.JSONDecodeError:
+                pass
+
+        # Override status if running (has lock)
+        if op_id in running_ops:
+            status = "running"
+
+        results.append((op_id, status, completed_at))
+
+    await client.aclose()
+    return results
+
+
+@app.command
+async def watch(
+    *,
+    poll_interval: Annotated[int, cyclopts.Parameter(help="Seconds between polls")] = 30,
+    output_dir: Annotated[
+        str, cyclopts.Parameter(help="Directory for reports (default: ./reports)")
+    ] = "./reports",
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+    once: Annotated[
+        bool, cyclopts.Parameter(help="Run once and exit (check all completed ops)")
+    ] = False,
+) -> None:
+    """Watch for completed operations and auto-fetch their reports.
+
+    Polls Redis for completed operations and automatically downloads
+    reports for any that don't have local reports yet.
+
+    Examples:
+        ares-ops watch                    # Poll every 30s
+        ares-ops watch --poll-interval 60 # Poll every 60s
+        ares-ops watch --once             # Check once and exit
+    """
+    resolved_redis_url = redis_url or get_redis_url()
+    report_dir = Path(output_dir).resolve()
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    # Track operations we've already processed this session
+    processed_ops: set[str] = set()
+
+    # Pre-populate with operations that already have local reports
+    for report_file in report_dir.glob("op-*_report.md"):
+        # Extract operation ID from filename: op-YYYYMMDD-HHMMSS_report.md
+        op_id = report_file.stem.replace("_report", "")
+        processed_ops.add(op_id)
+
+    logger.info(f"Watching for completed operations (poll interval: {poll_interval}s)")
+    logger.info(f"Reports directory: {report_dir}")
+    logger.info(f"Already have reports for {len(processed_ops)} operations")
+
+    try:
+        while True:
+            try:
+                operations = await _get_all_operations_with_status(resolved_redis_url)
+
+                new_reports = 0
+                for op_id, status, _completed_at in operations:
+                    if op_id in processed_ops:
+                        continue
+
+                    if status == "completed":
+                        # Auto-fetch the report
+                        logger.info(f"Fetching report for completed operation: {op_id}")
+                        try:
+                            report_path = await _generate_local_report(
+                                op_id,
+                                resolved_redis_url,
+                                report_dir=report_dir,
+                            )
+                            if report_path:
+                                logger.success(f"Report saved: {report_path}")
+                                new_reports += 1
+                            processed_ops.add(op_id)
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch report for {op_id}: {e}")
+                            # Don't add to processed_ops - retry next poll
+
+                    elif status == "failed":
+                        # Mark as processed but don't fetch report
+                        logger.warning(f"Operation {op_id} failed - skipping report")
+                        processed_ops.add(op_id)
+
+                if new_reports > 0:
+                    logger.success(f"Fetched {new_reports} new report(s)")
+
+                if once:
+                    logger.info("Single check complete (--once mode)")
+                    break
+
+                await asyncio.sleep(poll_interval)
+
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                logger.error(f"Poll error: {e}")
+                if once:
+                    sys.exit(1)
+                await asyncio.sleep(poll_interval)
+
+    except KeyboardInterrupt:
+        logger.info("Watch stopped")
+
+
 def main() -> None:
     """Entry point for ares-ops CLI."""
     try:
