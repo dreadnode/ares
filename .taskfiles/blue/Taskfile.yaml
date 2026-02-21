@@ -106,9 +106,11 @@ tasks:
           2>&1 | tee -a "$LOGFILE"
 
   once:
-    desc: "Run blue team agent once and exit (uses 1Password for API keys)"
+    desc: "Run blue team agent once and exit (usage: task blue:once [OPERATION_ID=op-xxx] [LATEST=true])"
     silent: true
     vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
       ANTHROPIC_API_KEY:
         sh: op item get "Dreadnode Claude" --fields api-key --reveal 2>/dev/null || echo ""
       DREADNODE_API_KEY:
@@ -142,6 +144,14 @@ tasks:
         LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
         echo "Logging to: $LOGFILE"
 
+        # Build operation context args
+        OP_ARGS=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          OP_ARGS="--args.latest"
+        elif [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ARGS="--args.operation-id {{.OPERATION_ID}}"
+        fi
+
         uv run python -m ares \
           --args.model "{{.MODEL_ARG}}" \
           --args.grafana-url {{.GRAFANA_URL}} \
@@ -149,6 +159,7 @@ tasks:
           --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --args.once \
+          $OP_ARGS \
           --dn-args.server {{.DREADNODE_SERVER_URL}} \
           --dn-args.token "$DREADNODE_API_KEY" \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
@@ -157,9 +168,11 @@ tasks:
           2>&1 | tee -a "$LOGFILE"
 
   once:local:
-    desc: "Run blue team agent once and exit using .env file"
+    desc: "Run blue team agent once and exit using .env file (usage: task blue:once:local [OPERATION_ID=op-xxx] [LATEST=true])"
     silent: true
     vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
       MODEL_ARG:
         sh: |
           if [ -n "{{.MODEL_ALL}}" ]; then
@@ -187,6 +200,14 @@ tasks:
         LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
         echo "Logging to: $LOGFILE"
 
+        # Build operation context args
+        OP_ARGS=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          OP_ARGS="--args.latest"
+        elif [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ARGS="--args.operation-id {{.OPERATION_ID}}"
+        fi
+
         uv run python -m ares \
           --args.model "{{.MODEL_ARG}}" \
           --args.grafana-url {{.GRAFANA_URL}} \
@@ -194,6 +215,7 @@ tasks:
           --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
           --args.report-dir {{.REPORT_DIR}} \
           --args.once \
+          $OP_ARGS \
           --dn-args.server {{.DREADNODE_SERVER_URL}} \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
@@ -280,6 +302,88 @@ tasks:
         else
           echo "No reports found in {{.REPORT_DIR}}"
         fi
+
+  playbook:
+    desc: "Export detection playbook from red team operation (usage: task blue:playbook [OPERATION_ID=op-xxx] [LATEST=true])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+      JSON: '{{.JSON | default "false"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required. Usage: task blue:playbook OPERATION_ID=op-xxx  OR  task blue:playbook LATEST=true"
+    cmds:
+      - cmd: mkdir -p "{{.OUTPUT_DIR}}"
+        silent: true
+      - |
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        OP_ID_ARG=""
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ID_ARG="{{.OPERATION_ID}}"
+        fi
+        JSON_FLAG=""
+        if [ "{{.JSON}}" = "true" ]; then
+          JSON_FLAG="--json-output"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops export-detection $OP_ID_ARG $LATEST_FLAG $JSON_FLAG --output-dir /tmp/reports
+
+        # Get the operation ID if we used --latest
+        if [ -n "$LATEST_FLAG" ]; then
+          RESOLVED_OP_ID=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops list --latest 2>/dev/null | tr -d '\n')
+        else
+          RESOLVED_OP_ID="{{.OPERATION_ID}}"
+        fi
+
+        # Copy playbook files from pod to local machine
+        if [ -n "$RESOLVED_OP_ID" ]; then
+          ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -o jsonpath='{.items[0].metadata.name}')
+          kubectl cp "{{.K8S_NAMESPACE}}/${ORCH_POD}:/tmp/reports/${RESOLVED_OP_ID}_detection_playbook.json" "{{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_detection_playbook.json" 2>/dev/null || true
+          kubectl cp "{{.K8S_NAMESPACE}}/${ORCH_POD}:/tmp/reports/${RESOLVED_OP_ID}_detection_playbook.md" "{{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_detection_playbook.md" 2>/dev/null || true
+          if [ -f "{{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_detection_playbook.json" ]; then
+            echo "Detection playbook saved to: {{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_detection_playbook.json"
+            echo "Detection playbook saved to: {{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_detection_playbook.md"
+          fi
+        fi
+
+  playbook:local:
+    desc: "Export detection playbook locally using .env file (usage: task blue:playbook:local [OPERATION_ID=op-xxx] [LATEST=true])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+      JSON: '{{.JSON | default "false"}}'
+    preconditions:
+      - sh: test -f .env
+        msg: ".env file not found"
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required. Usage: task blue:playbook:local OPERATION_ID=op-xxx  OR  task blue:playbook:local LATEST=true"
+    cmds:
+      - cmd: mkdir -p "{{.OUTPUT_DIR}}"
+        silent: true
+      - |
+        set -a
+        . ./.env
+        set +a
+
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        OP_ID_ARG=""
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ID_ARG="{{.OPERATION_ID}}"
+        fi
+        JSON_FLAG=""
+        if [ "{{.JSON}}" = "true" ]; then
+          JSON_FLAG="--json-output"
+        fi
+        uv run python -m ares.cli_ops export-detection $OP_ID_ARG $LATEST_FLAG $JSON_FLAG --output-dir "{{.OUTPUT_DIR}}"
 
   reports:consolidate:
     desc: Generate a consolidated report from all investigation reports in a directory

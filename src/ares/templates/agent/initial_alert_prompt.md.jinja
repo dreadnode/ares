@@ -72,6 +72,43 @@ These are HIGH PRIORITY and must be investigated to understand the full attack c
 
 ## 🚨 CRITICAL: USE THESE EXACT TIME VALUES 🚨
 
+{% if attack_window_start and attack_window_end %}
+## 🎯 RED TEAM OPERATION CONTEXT - FOCUSED HUNTING MODE 🎯
+
+**You are investigating a KNOWN red team operation: {{ operation_id }}**
+
+**ATTACK WINDOW**: {{ attack_window_start }} to {{ attack_window_end }}
+**FOCUS YOUR QUERIES ON THIS WINDOW** - The red team was active during this time.
+
+{% if techniques_used %}
+### Known Techniques Used by Red Team
+The following MITRE ATT&CK techniques were used in this operation:
+{% for tech in techniques_used %}
+- **{{ tech }}**
+{% endfor %}
+
+**HUNT FOR EVIDENCE OF THESE SPECIFIC TECHNIQUES**
+{% endif %}
+
+{% if priority_queries %}
+### Priority Detection Queries
+These queries are tailored to detect the specific attack activity:
+{% for q in priority_queries[:5] %}
+**[{{ q.priority | upper }}] {{ q.technique_id }}**: {{ q.description }}
+```
+{{ q.query }}
+```
+{% endfor %}
+{% endif %}
+
+**Investigation Strategy:**
+1. Focus queries on the attack window: {{ attack_window_start }} to {{ attack_window_end }}
+2. Look for evidence of the known techniques listed above
+3. Use the priority queries as starting points
+4. Correlate findings with expected red team activity
+
+---
+{% else %}
 **CURRENT TIME**: {{ current_time }}
 **QUERY START (1h ago)**: {{ current_time_minus_1h }}
 **QUERY START (2h ago)**: {{ current_time_minus_2h }}
@@ -79,6 +116,7 @@ These are HIGH PRIORITY and must be investigated to understand the full attack c
 The alert's `startsAt` ({{ starts_at }}) may be HOURS or DAYS old.
 **DO NOT** query around the alert timestamp.
 **DO** query from {{ current_time_minus_2h }} to {{ current_time }}.
+{% endif %}
 
 ---
 

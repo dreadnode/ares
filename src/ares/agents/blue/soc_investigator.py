@@ -84,11 +84,13 @@ class WatchdogTimer:
         logger.debug("Watchdog cancelled")
 
 
-def build_initial_prompt(alert: dict) -> str:
+def build_initial_prompt(alert: dict, attack_context: dict | None = None) -> str:
     """Build the initial prompt with alert context.
 
     Args:
         alert: Alert dictionary from Grafana Alertmanager.
+        attack_context: Optional red team operation context for focused hunting.
+            Contains attack_window_start, attack_window_end, techniques_used, etc.
 
     Returns:
         Formatted prompt string for agent initialization.
@@ -120,6 +122,35 @@ def build_initial_prompt(alert: dict) -> str:
     # Current time for reference
     current_time = datetime.now(timezone.utc)
 
+    # Build attack context for template
+    attack_window_start = None
+    attack_window_end = None
+    techniques_used = []
+    priority_queries = []
+    operation_id = None
+
+    if attack_context:
+        operation_id = attack_context.get("operation_id")
+        if attack_context.get("attack_window_start"):
+            attack_window_start = (
+                attack_context["attack_window_start"].isoformat().replace("+00:00", "Z")
+            )
+        if attack_context.get("attack_window_end"):
+            attack_window_end = (
+                attack_context["attack_window_end"].isoformat().replace("+00:00", "Z")
+            )
+        techniques_used = attack_context.get("techniques_used", [])
+        # Convert priority queries to serializable format
+        priority_queries = [
+            {
+                "technique_id": q.technique_id,
+                "description": q.description,
+                "query": q.logql,
+                "priority": q.priority,
+            }
+            for q in attack_context.get("priority_queries", [])
+        ]
+
     loader = get_template_loader()
     return loader.render(
         "agent/initial_alert_prompt.md.jinja",
@@ -139,6 +170,12 @@ def build_initial_prompt(alert: dict) -> str:
         current_time_minus_2h=(current_time - timedelta(hours=2))
         .isoformat()
         .replace("+00:00", "Z"),
+        # Red team operation context
+        operation_id=operation_id,
+        attack_window_start=attack_window_start,
+        attack_window_end=attack_window_end,
+        techniques_used=techniques_used,
+        priority_queries=priority_queries,
     )
 
 
@@ -154,6 +191,7 @@ class InvestigationOrchestrator:
         mitre_client: Client for MITRE ATT&CK data lookups.
         report_dir: Directory path for generated reports.
         max_steps: Maximum number of agent steps per investigation.
+        attack_context: Optional red team operation context for focused hunting.
     """
 
     def __init__(
@@ -164,6 +202,7 @@ class InvestigationOrchestrator:
         mitre_client: MITREAttackClient,
         report_dir: Path,
         max_steps: int = 30,
+        attack_context: dict | None = None,
     ):
         self.model = model
         self.grafana_url = grafana_url
@@ -171,6 +210,7 @@ class InvestigationOrchestrator:
         self.mitre_client = mitre_client
         self.report_dir = report_dir
         self.max_steps = max_steps
+        self.attack_context = attack_context
         self._mcp_client = None
         self._mcp_tools = None
         # Grafana tools for annotations
@@ -310,7 +350,7 @@ class InvestigationOrchestrator:
 
             self._create_alert_timeline_event(state, alert)
 
-            initial_prompt = build_initial_prompt(alert)
+            initial_prompt = build_initial_prompt(alert, self.attack_context)
 
             with dn.run(tags=["soc-investigation", alert_name]):
                 dn.log_params(
