@@ -304,10 +304,10 @@ class InvestigationOrchestrator:
             A dict containing:
                 - investigation_id: Unique identifier for this investigation
                 - status: "completed" or "escalated"
-                - report_path: Path to the generated markdown report
                 - evidence_count: Number of evidence items collected
                 - techniques_identified: List of MITRE ATT&CK technique IDs
                 - highest_pyramid_level: Highest Pyramid of Pain level reached (1-6)
+                - state: Full InvestigationState for consolidated reporting
 
         Raises:
             InvestigationTimeoutError: If investigation exceeds the hard timeout.
@@ -401,9 +401,6 @@ class InvestigationOrchestrator:
                             f"Agent reached max_steps ({self.max_steps}) without completion"
                         )
 
-                    # Generate report
-                    report_path = self._generate_report(state, result)
-
                     # Persist investigation for learning
                     self._persist_investigation(state, status)
 
@@ -412,13 +409,11 @@ class InvestigationOrchestrator:
                         investigation_id, alert_name, status, state
                     )
 
-                    dn.log_output("report_path", str(report_path))
                     dn.log_metric("investigation_success", 1)
 
                     return {
                         "investigation_id": investigation_id,
                         "status": status,
-                        "report_path": str(report_path),
                         "evidence_count": len(state.evidence),
                         "techniques_identified": list(state.identified_techniques),
                         "highest_pyramid_level": state.highest_pyramid_level,
@@ -433,9 +428,6 @@ class InvestigationOrchestrator:
                     )
                     dn.log_metric("investigation_timeout", 1)
 
-                    # Still generate a partial report on timeout
-                    report_path = self._generate_report(state, None)
-
                     # Persist investigation for learning (even on timeout)
                     self._persist_investigation(state, "timeout")
 
@@ -447,7 +439,6 @@ class InvestigationOrchestrator:
                     return {
                         "investigation_id": investigation_id,
                         "status": "timeout",
-                        "report_path": str(report_path),
                         "evidence_count": len(state.evidence),
                         "techniques_identified": list(state.identified_techniques),
                         "highest_pyramid_level": state.highest_pyramid_level,

@@ -7,6 +7,7 @@ similar to the red team comprehensive report format.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -263,6 +264,31 @@ class BlueTeamReportGenerator:
             level.value: count for level, count in operation.get_pyramid_distribution().items()
         }
 
+        # Build per-investigation details for appendix
+        investigation_details = []
+        for inv in operation.investigations:
+            alert = inv.alert if isinstance(inv.alert, dict) else {}
+            labels = alert.get("labels", {})
+
+            detail = {
+                "investigation_id": inv.investigation_id,
+                "alert_name": labels.get("alertname", "Unknown"),
+                "severity": labels.get("severity", "unknown"),
+                "status": "ESCALATED" if inv.escalated else "Completed",
+                "evidence_count": len(inv.evidence),
+                "techniques": list(inv.identified_techniques),
+                "alert_payload": json.dumps(alert, indent=2, default=str) if alert else None,
+                "queries": [
+                    {
+                        "type": q.get("type", "unknown"),
+                        "query": q.get("query", "N/A"),
+                        "result_count": q.get("result_count", 0),
+                    }
+                    for q in inv.executed_queries
+                ],
+            }
+            investigation_details.append(detail)
+
         # Render the comprehensive report
         return self.loader.render(
             "reports/blueteam/comprehensive_report.md.jinja",
@@ -292,6 +318,8 @@ class BlueTeamReportGenerator:
             recommendations=operation.all_recommendations,
             attack_synopses=operation.attack_synopses,
             pyramid_distribution=pyramid_dist,
+            # Per-investigation appendix
+            investigation_details=investigation_details,
             # Metadata
             generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         )

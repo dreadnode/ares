@@ -328,7 +328,6 @@ async def main(
                         logger.success(f"  Evidence: {result['evidence_count']} items")
                         logger.success(f"  Techniques: {len(result['techniques_identified'])}")
                         logger.success(f"  Pyramid Level: {result['highest_pyramid_level']}/6")
-                        logger.success(f"  Report: {result['report_path']}")
 
                         # Capture state for consolidated report
                         if result.get("state"):
@@ -477,7 +476,10 @@ async def investigate_alert(
 
     logger.success("")
     logger.success("INVESTIGATION COMPLETE")
-    logger.success(f"  Report: {result['report_path']}")
+    logger.success(f"  Status: {result['status']}")
+    logger.success(f"  Evidence: {result['evidence_count']} items")
+    logger.success(f"  Techniques: {len(result['techniques_identified'])}")
+    logger.success(f"  Pyramid Level: {result['highest_pyramid_level']}/6")
 
 
 @dataclass
