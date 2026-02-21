@@ -38,7 +38,6 @@ from ares.tools.blue import (
     LearningTools,
     QueryTemplateTools,
     QuestionEngineTools,
-    escalate_investigation,
 )
 from ares.tools.shared import MITRELookupTools
 
@@ -539,6 +538,74 @@ def _check_credential_dumping_evidence(state: "InvestigationState", result_data:
         )
 
 
+def _extract_tool_evidence(state: "InvestigationState", result_data: dict) -> None:
+    """Extract attacker tool evidence from query metadata (Pyramid Level 5).
+
+    Query templates set `_red_team_tool` or `_red_team_tools` metadata when
+    they detect specific attacker tools. This function extracts those tools
+    and records them as evidence at Pyramid Level 5 (Tools).
+
+    Args:
+        state: Current investigation state
+        result_data: Query result containing tool metadata
+    """
+    if not state or not result_data:
+        return
+
+    # Get tool(s) from metadata
+    tools: list[str] = []
+    if result_data.get("_red_team_tool"):
+        tools.append(result_data["_red_team_tool"])
+    if result_data.get("_red_team_tools"):
+        tools.extend(result_data["_red_team_tools"])
+
+    if not tools:
+        return
+
+    # Get MITRE technique for association
+    mitre_technique = result_data.get("_mitre_technique", "")
+    mitre_techniques_list = result_data.get("_mitre_techniques", [])
+    if mitre_technique and mitre_technique not in mitre_techniques_list:
+        mitre_techniques_list = [mitre_technique] + mitre_techniques_list
+
+    query_template = result_data.get("_query_template", "unknown_detection")
+
+    # Check existing tool evidence to avoid duplicates
+    existing_tools = {
+        e.value for e in state.evidence if e.type == "tool" and e.pyramid_level.value == 5
+    }
+
+    added_count = 0
+    for tool_name in tools:
+        if tool_name in existing_tools:
+            continue
+
+        evidence = Evidence(
+            id=f"tool-{uuid.uuid4().hex[:8]}",
+            type="tool",
+            value=tool_name,
+            source=f"Auto-extracted from {query_template} detection",
+            timestamp=None,
+            pyramid_level=PyramidLevel(5),  # Tools are Level 5
+            mitre_techniques=mitre_techniques_list[:3],  # Limit to top 3
+            confidence=0.85,  # High confidence since detected by query template
+            validated=True,
+        )
+        state.evidence.append(evidence)
+        existing_tools.add(tool_name)
+        added_count += 1
+
+        # Track techniques from tool detection
+        for tech in mitre_techniques_list[:3]:
+            state.identified_techniques.add(tech)
+
+    if added_count > 0:
+        logger.info(
+            f"🔧 Auto-extracted {added_count} tool(s) from query metadata: "
+            f"{', '.join(tools)} (Pyramid Level 5)"
+        )
+
+
 def _optimize_logql_query(query: str) -> tuple[str, bool]:
     """Optimize a LogQL query by rewriting broad selectors to prevent timeouts.
 
@@ -886,6 +953,10 @@ def _record_query(
             # T1003 CREDENTIAL DUMPING ORCHESTRATION: When any T1003 detected, check all variants
             if result_data and isinstance(result_data, dict):
                 _check_credential_dumping_evidence(_current_state, result_data)
+
+            # TOOL EXTRACTION: Auto-extract attacker tools from query metadata (Pyramid Level 5)
+            if result_data and isinstance(result_data, dict):
+                _extract_tool_evidence(_current_state, result_data)
 
             # Track executed query type for deduplication
             _current_state.executed_query_types.add(tool_name)
@@ -1452,6 +1523,7 @@ def create_investigation_agent(
     # to reduce context window usage (~35 tools → 4 tools).
     # The dispatcher run_detection_query() internally calls any detect_* method,
     # preserving dn.log_metric() observability on each detection query.
+    # Note: escalate_investigation is now a method on CompletionTools (completion_tools).
     tools: list = [
         grafana_tools,
         investigation_tools,
@@ -1463,7 +1535,6 @@ def create_investigation_agent(
         query_template_tools.get_host_activity,
         query_template_tools.get_user_activity,
         learning_tools,
-        escalate_investigation,
     ]
 
     if grafana_mcp_tools:

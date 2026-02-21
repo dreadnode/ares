@@ -29,6 +29,105 @@ class CompletionTools(Toolset):  # type: ignore[misc]
         self.state = state
 
     @dn.tool_method  # type: ignore[untyped-decorator]
+    async def escalate_investigation(
+        self,
+        reason: str,
+        severity: str,
+        current_findings: str,
+        immediate_actions: list[str],
+    ) -> str:
+        """Escalate the investigation for human analyst review.
+
+        Call this if:
+        - You identify an active, ongoing attack
+        - The scope exceeds investigation capacity
+        - You need human analyst intervention
+        - Critical infrastructure is at risk
+        - Domain Admin or Golden Ticket activity detected
+
+        Args:
+            reason: Why escalation is needed.
+            severity: critical, high, or medium.
+            current_findings: Summary of what you've found so far.
+            immediate_actions: Actions that should be taken immediately.
+
+        Returns:
+            Confirmation message.
+
+        Example:
+            >>> await escalate_investigation(
+            ...     reason="Active lateral movement detected across 15+ hosts",
+            ...     severity="critical",
+            ...     current_findings="Attacker has Domain Admin credentials and is actively "
+            ...                      "exfiltrating data from file servers.",
+            ...     immediate_actions=[
+            ...         "Isolate compromised domain controller",
+            ...         "Reset all privileged account passwords",
+            ...         "Block C2 IP addresses at firewall"
+            ...     ]
+            ... )
+            'Investigation escalated with severity=critical. Human analyst notified.'
+
+        See Also:
+            complete_investigation: For normal investigation completion.
+        """
+        if not self.state:
+            return "ERROR: No investigation state. Cannot escalate."
+
+        # Set escalation flags on state - THIS IS CRITICAL for report status
+        self.state.escalated = True
+        self.state.escalation_reason = reason
+
+        # Add immediate actions as recommendations
+        if immediate_actions:
+            self.state.recommendations.extend(immediate_actions)
+
+        dn.log_metric("investigation_escalated", 1)
+        dn.tag(f"escalation:{severity}")
+        dn.tag("needs_human_review")
+
+        dn.log_output(
+            "escalation",
+            {
+                "reason": reason,
+                "severity": severity,
+                "findings": current_findings,
+                "immediate_actions": immediate_actions,
+                "escalated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+        logger.warning(f"Investigation ESCALATED: {reason}")
+
+        # Build formatted escalation output
+        severity_upper = severity.upper()
+        severity_tag = f"[{severity_upper}]"
+
+        lines = [
+            f"⚠️ INVESTIGATION ESCALATED {severity_tag}",
+            SECTION_SEPARATOR,
+            "",
+            "🚨 Escalation Details:",
+            f"  Reason: {reason}",
+            f"  Severity: {severity}",
+            "",
+            "📋 Current Findings:",
+            f"  {current_findings[:200]}{'...' if len(current_findings) > 200 else ''}",
+            "",
+        ]
+
+        if immediate_actions:
+            lines.append("🔥 Immediate Actions Required:")
+            for i, action in enumerate(immediate_actions[:5], 1):
+                lines.append(f"  {i}. {action}")
+            lines.append("")
+
+        lines.append("→ Human analyst has been notified.")
+        lines.append("→ Investigation marked as ESCALATED.")
+
+        return "\n".join(lines)
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
     async def complete_investigation(
         self,
         summary: str,
@@ -325,89 +424,3 @@ class CompletionTools(Toolset):  # type: ignore[misc]
             parts.append(f"  - Validated evidence: {validated_count}/{len(self.state.evidence)}")
 
         self.state.attack_synopsis = "\n".join(parts)
-
-
-@dn.tool  # type: ignore[untyped-decorator]
-async def escalate_investigation(
-    reason: str,
-    severity: str,
-    current_findings: str,
-    immediate_actions: list[str],
-) -> str:
-    """Escalate the investigation for human analyst review.
-
-    Call this if:
-    - You identify an active, ongoing attack
-    - The scope exceeds investigation capacity
-    - You need human analyst intervention
-    - Critical infrastructure is at risk
-
-    Args:
-        reason: Why escalation is needed.
-        severity: critical, high, or medium.
-        current_findings: Summary of what you've found so far.
-        immediate_actions: Actions that should be taken immediately.
-
-    Returns:
-        Confirmation message.
-
-    Example:
-        >>> await escalate_investigation(
-        ...     reason="Active lateral movement detected across 15+ hosts",
-        ...     severity="critical",
-        ...     current_findings="Attacker has Domain Admin credentials and is actively "
-        ...                      "exfiltrating data from file servers.",
-        ...     immediate_actions=[
-        ...         "Isolate compromised domain controller",
-        ...         "Reset all privileged account passwords",
-        ...         "Block C2 IP addresses at firewall"
-        ...     ]
-        ... )
-        'Investigation escalated with severity=critical. Human analyst notified.'
-
-    See Also:
-        complete_investigation: For normal investigation completion.
-    """
-    dn.log_metric("investigation_escalated", 1)
-    dn.tag(f"escalation:{severity}")
-    dn.tag("needs_human_review")
-
-    dn.log_output(
-        "escalation",
-        {
-            "reason": reason,
-            "severity": severity,
-            "findings": current_findings,
-            "immediate_actions": immediate_actions,
-            "escalated_at": datetime.now(timezone.utc).isoformat(),
-        },
-    )
-
-    logger.info(f"Investigation escalated: {reason}")
-
-    # Build formatted escalation output
-    severity_upper = severity.upper()
-    severity_tag = f"[{severity_upper}]"
-
-    lines = [
-        f"⚠️ INVESTIGATION ESCALATED {severity_tag}",
-        SECTION_SEPARATOR,
-        "",
-        "🚨 Escalation Details:",
-        f"  Reason: {reason}",
-        f"  Severity: {severity}",
-        "",
-        "📋 Current Findings:",
-        f"  {current_findings[:200]}{'...' if len(current_findings) > 200 else ''}",
-        "",
-    ]
-
-    if immediate_actions:
-        lines.append("🔥 Immediate Actions Required:")
-        for i, action in enumerate(immediate_actions[:5], 1):
-            lines.append(f"  {i}. {action}")
-        lines.append("")
-
-    lines.append("→ Human analyst has been notified.")
-
-    return "\n".join(lines)

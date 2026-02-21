@@ -13,12 +13,10 @@ __all__ = [
     "QueryTemplateTools",
     "QuestionEngineTools",
     "connect_grafana_mcp",
-    "escalate_investigation",
 ]
 
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "CompletionTools": ("ares.tools.blue.actions", "CompletionTools"),
-    "escalate_investigation": ("ares.tools.blue.actions", "escalate_investigation"),
     "GrafanaTools": ("ares.tools.blue.grafana", "GrafanaTools"),
     "connect_grafana_mcp": ("ares.tools.blue.grafana", "connect_grafana_mcp"),
     "InvestigationTools": ("ares.tools.blue.investigation", "InvestigationTools"),
