@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from loguru import logger
@@ -250,13 +250,13 @@ class OperationConfig:
 
     # Replay settings (for deterministic runs)
     # Mode: "record" to capture, "replay" to use cached, "" for off
-    replay_mode: str = ""
+    replay_mode: Literal["record", "replay", "off", ""] = ""
     # Path to JSONL file for recording/replay
     replay_file: str = ""
     # Seed for deterministic value generation (UUIDs, timestamps)
     replay_seed: int = 42
     # Behavior on cache miss in replay: "error", "live", "skip"
-    replay_fallback: str = "error"
+    replay_fallback: Literal["error", "live", "skip"] = "error"
 
 
 # Default config file locations (searched in order)
@@ -657,7 +657,7 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:
 
     # Replay overrides
     if replay_mode := os.environ.get("ARES_REPLAY_MODE"):
-        config.replay_mode = replay_mode.lower()
+        config.replay_mode = replay_mode.lower()  # type: ignore[assignment]
     if replay_file := os.environ.get("ARES_REPLAY_FILE"):
         config.replay_file = replay_file
     if replay_seed := os.environ.get("ARES_REPLAY_SEED"):
@@ -670,7 +670,7 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:
         "live",
         "skip",
     ):
-        config.replay_fallback = replay_fallback.lower()
+        config.replay_fallback = replay_fallback.lower()  # type: ignore[assignment]
 
     # Model overrides (Viper-style precedence: role-specific > orchestrator/worker > global)
     global_model = os.environ.get("ARES_MODEL")
@@ -1002,7 +1002,7 @@ def get_query_limits_by_stage() -> dict[str, int]:
     return load_config().query_limits_by_stage
 
 
-def get_replay_mode() -> str:
+def get_replay_mode() -> Literal["record", "replay", "off", ""]:
     """Get replay mode (record/replay/empty for off)."""
     return load_config().replay_mode
 
@@ -1017,7 +1017,7 @@ def get_replay_seed() -> int:
     return load_config().replay_seed
 
 
-def get_replay_fallback() -> str:
+def get_replay_fallback() -> Literal["error", "live", "skip"]:
     """Get replay fallback behavior (error/live/skip)."""
     return load_config().replay_fallback
 

@@ -610,6 +610,32 @@ async def run_multi_agent_operation(
 
     apply_rigging_patches()
 
+    # Initialize replay system if configured
+    from ares.core.config import (
+        get_replay_fallback,
+        get_replay_file,
+        get_replay_mode,
+        get_replay_seed,
+    )
+    from ares.core.replay import initialize_replay
+
+    replay_mode = get_replay_mode()
+    if replay_mode:
+        replay_file = get_replay_file()
+        if replay_file:
+            from pathlib import Path
+
+            base_path = Path(replay_file).parent
+            base_path.mkdir(parents=True, exist_ok=True)
+            replay_file = str(base_path / "orchestrator.jsonl")
+
+        initialize_replay(
+            mode=replay_mode,
+            path=replay_file,
+            seed=get_replay_seed(),
+            fallback=get_replay_fallback(),
+        )
+
     # Resolve max runtime from parameter, env, or default
     resolved_max_runtime = max_runtime if max_runtime is not None else get_max_runtime()
     # Resolve config defaults
@@ -993,6 +1019,10 @@ async def run_multi_agent_operation(
         raise
 
     finally:
+        from ares.core.replay import shutdown_replay
+
+        shutdown_replay()
+
         # Cleanup - cancel all tasks and suppress CancelledError
         for task in tasks:
             task.cancel()

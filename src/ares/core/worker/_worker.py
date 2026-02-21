@@ -2132,6 +2132,33 @@ async def run_worker(
 
     configure_litellm_env()
 
+    # Initialize replay system if configured
+    from ares.core.config import (
+        get_replay_fallback,
+        get_replay_file,
+        get_replay_mode,
+        get_replay_seed,
+    )
+    from ares.core.replay import initialize_replay
+
+    replay_mode = get_replay_mode()
+    if replay_mode:
+        replay_file = get_replay_file()
+        if replay_file:
+            from pathlib import Path
+
+            base_path = Path(replay_file).parent
+            base_path.mkdir(parents=True, exist_ok=True)
+            # Per-role file to avoid conflicts between worker pods
+            replay_file = str(base_path / f"{role.value}.jsonl")
+
+        initialize_replay(
+            mode=replay_mode,
+            path=replay_file,
+            seed=get_replay_seed(),
+            fallback=get_replay_fallback(),
+        )
+
     # Resolve config defaults
     redis_url = redis_url or get_redis_url()
     resolved_model = (
@@ -2291,6 +2318,10 @@ async def run_worker(
             await worker.start()
             pointer_switched = worker.pointer_switched
         finally:
+            from ares.core.replay import shutdown_replay
+
+            shutdown_replay()
+
             if task_queue:
                 await task_queue.disconnect()
             await dispatcher.stop()
@@ -2306,6 +2337,10 @@ async def run_worker(
             )
             await asyncio.sleep(delay)
             operation_id = None
+            # Reset replay normalization context for new operation
+            from ares.core.replay.wrappers import reset_normalization_context
+
+            reset_normalization_context()
             continue
 
         break
