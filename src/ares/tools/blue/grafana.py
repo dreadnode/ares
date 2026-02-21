@@ -6,7 +6,7 @@ import os
 import shutil
 import subprocess  # nosec B404
 from pathlib import Path
-from typing import Any, Self, cast
+from typing import Any
 
 import dreadnode as dn
 import httpx
@@ -53,24 +53,16 @@ atexit.register(_cleanup_mcp_pool)
 
 
 class MCPConnectionPool:
-    """Singleton connection pool for MCP client reuse across investigations.
+    """Connection pool for MCP client reuse across investigations.
 
     This eliminates the 60-second connection overhead per investigation
-    by reusing the same MCP client connection.
+    by reusing the same MCP client connection. All state is class-level.
     """
 
-    _instance: "MCPConnectionPool | None" = None
     _client: Any = None
     _lock: asyncio.Lock | None = None
     _grafana_url: str | None = None
     _grafana_api_key: str | None = None
-
-    def __new__(cls) -> Self:
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            # Don't create asyncio.Lock here - it's event-loop-specific
-            # and must be created in the async context where it's used
-        return cast("Self", cls._instance)
 
     @classmethod
     async def get_client(

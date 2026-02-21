@@ -43,6 +43,9 @@ class Args:
         max_steps: Maximum agent steps per investigation.
         report_dir: Directory for markdown reports.
         once: Process current alerts once and exit (default: run forever).
+        operation_id: Red team operation ID to focus investigation on.
+        latest: Use the latest red team operation (prefer running).
+        redis_url: Redis URL for loading red team operation state.
     """
 
     model: str = ""
@@ -52,6 +55,9 @@ class Args:
     max_steps: int = 150
     report_dir: str = "./reports"  # Relative to CWD
     once: bool = False  # Process current alerts once and exit
+    operation_id: str = ""  # Red team operation to focus on
+    latest: bool = False  # Use latest red team operation
+    redis_url: str = ""  # Redis URL for red team state
 
 
 @dataclass
@@ -176,6 +182,68 @@ async def main(
     tactics_count = len(mitre_client._tactics)
     logger.success(f"Loaded {techniques_count} techniques, {tactics_count} tactics")
 
+    # Load red team operation context if specified
+    attack_context = None
+    if args.operation_id or args.latest:
+        from ares.core.config import get_redis_url
+        from ares.core.redis_client import create_verified_redis_client
+        from ares.eval.detection_playbook import create_detection_playbook
+
+        redis_url = args.redis_url or get_redis_url()
+        logger.info("Loading red team operation context from Redis...")
+
+        try:
+            client = await create_verified_redis_client(redis_url, decode_responses=False)
+
+            # Resolve operation ID
+            operation_id = args.operation_id
+            if args.latest and not operation_id:
+                # Find latest operation
+                meta_keys = await client.keys("ares:op:*:meta")
+                if meta_keys:
+                    latest_op = None
+                    for key in meta_keys:
+                        key_str = key.decode() if isinstance(key, bytes) else key
+                        parts = key_str.split(":")
+                        if len(parts) >= 3:
+                            op_id = parts[2]
+                            if not latest_op or op_id > latest_op:
+                                latest_op = op_id
+                    if latest_op:
+                        operation_id = latest_op
+
+            if operation_id:
+                from ares.cli_ops import _load_state_from_redis
+
+                state = await _load_state_from_redis(client, operation_id)
+                if state:
+                    playbook = create_detection_playbook(state)
+                    attack_context = {
+                        "operation_id": operation_id,
+                        "playbook": playbook,
+                        "attack_window_start": playbook.attack_window_start,
+                        "attack_window_end": playbook.attack_window_end,
+                        "techniques_used": playbook.techniques_used,
+                        "priority_queries": playbook.priority_queries[:10],
+                        "detection_targets": playbook.detection_targets[:20],
+                    }
+                    logger.success(f"Loaded red team operation: {operation_id}")
+                    logger.info(
+                        f"Attack window: {playbook.attack_window_start.strftime('%Y-%m-%d %H:%M')} "
+                        f"to {playbook.attack_window_end.strftime('%Y-%m-%d %H:%M')}"
+                    )
+                    logger.info(f"Techniques used: {len(playbook.techniques_used)}")
+                    logger.info(f"Priority queries: {len(playbook.priority_queries)}")
+                else:
+                    logger.warning(f"No state found for operation: {operation_id}")
+            else:
+                logger.warning("No red team operations found in Redis")
+
+            await client.aclose()
+        except Exception as e:
+            logger.warning(f"Failed to load red team operation: {e}")
+            logger.warning("Continuing without attack context")
+
     report_dir = Path(args.report_dir).resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Reports: {report_dir}")
@@ -187,6 +255,7 @@ async def main(
         mitre_client=mitre_client,
         report_dir=report_dir,
         max_steps=args.max_steps,
+        attack_context=attack_context,
     )
 
     grafana = GrafanaTools(
