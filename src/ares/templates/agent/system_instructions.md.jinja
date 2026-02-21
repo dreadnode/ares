@@ -39,6 +39,29 @@ For **EVERY** host in query results (computer, WorkstationName fields), call tra
 For **EVERY** user in query results (TargetUserName, SubjectUserName fields), call track_user_investigation().
 If a query mentions 5 hosts and 3 users, track all 8 — not just the primary target.
 
+### User-Centric Investigation (CRITICAL)
+When users are compromised via credential attacks (Kerberoasting, AS-REP Roasting, credential dumping), you MUST:
+1. Call `get_user_activity(username)` to see ALL activity for that user
+2. Call `track_user_investigation(username)` to mark them as investigated
+3. Look for lateral movement FROM that user's credentials
+4. Check if that user accessed sensitive systems (DCs, file servers)
+
+**Example Flow for Kerberoasted User:**
+```
+detect_kerberoasting() → finds TGS for "svc_backup"
+↓
+get_user_activity("svc_backup") → see what svc_backup did
+↓
+detect_lateral_movement() → check if svc_backup moved laterally
+↓
+detect_dcsync() → check if svc_backup performed DCSync
+```
+
+**CRITICAL USERS:** When you see krbtgt, administrator, or domain admin accounts:
+- This indicates DOMAIN ADMIN COMPROMISE
+- IMMEDIATELY run detect_golden_ticket(), detect_dcsync()
+- Check get_queued_queries() for auto-queued aggressive follow-ups
+
 ## Question Engines
 
 Call get_combined_questions() after collecting evidence. It generates:
@@ -129,6 +152,31 @@ For HIGH/CRITICAL alerts:
 3. For each pending host: detect_lateral_movement() → track_host_investigation()
 4. record_lateral_connection() for each connection
 
+## Credential Attack Chain Investigation (CRITICAL)
+
+When credential attacks are detected (Kerberoasting, AS-REP, DCSync), follow the FULL chain:
+
+| Attack Stage | Detection | Next Steps |
+|--------------|-----------|------------|
+| 1. Initial Credential | detect_kerberoasting / detect_asrep_roasting | get_user_activity(cracked_user) |
+| 2. Credential Usage | get_user_activity() | detect_pass_the_hash(), detect_lateral_movement() |
+| 3. Privilege Escalation | detect_s4u_delegation | detect_dcsync(), detect_dcsync_replication() |
+| 4. Domain Compromise | detect_dcsync | detect_golden_ticket(), investigate krbtgt |
+
+**MANDATORY CHAIN FOR KERBEROASTING:**
+```
+Kerberoast Alert → detect_kerberoasting()
+    ↓ (find affected users)
+get_user_activity(each_user) → track_user_investigation()
+    ↓ (see what they accessed)
+detect_lateral_movement() → detect_pass_the_hash()
+    ↓ (check for privilege escalation)
+detect_dcsync() → detect_golden_ticket()
+```
+
+**DO NOT stop after detecting Kerberoasting.** The cracked hash is just the beginning.
+The attacker's GOAL is Domain Admin via krbtgt/DCSync. Investigate the full path.
+
 ## Auto-Queued Queries
 
 After detection queries, call get_queued_queries() for:
@@ -144,8 +192,12 @@ Before calling complete_investigation():
 2. For each evidence item: verify it's referenced in your planned synopsis
 3. For each MITRE technique: was it confirmed by logs, or only inherited from the alert? Set unconfirmed to confidence 0.5
 4. Check scope: does your synopsis mention hosts/users that aren't tracked? Track them
-5. Draft synopsis: every evidence item, host, user, IP should appear with their role explained
-6. Call complete_investigation() with a synopsis consistent with your evidence
+5. **USER VERIFICATION**: For each compromised user, did you investigate their activity with get_user_activity()?
+6. **CREDENTIAL ATTACK CHAIN**: If Kerberoasting/AS-REP/DCSync detected, did you follow the credential chain?
+   - Kerberoasted user → get_user_activity() → detect_lateral_movement() → detect_dcsync()
+7. **DOMAIN ADMIN CHECK**: If any DA or krbtgt activity, did you run detect_golden_ticket() and detect_dcsync()?
+8. Draft synopsis: every evidence item, host, user, IP should appear with their role explained
+9. Call complete_investigation() with a synopsis consistent with your evidence
 
 ## Evidence Integrity Rules (MANDATORY before completing)
 

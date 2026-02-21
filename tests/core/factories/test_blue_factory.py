@@ -1246,3 +1246,281 @@ class TestFilterEssentialMcpTools:
 
         filtered = filter_essential_mcp_tools([])
         assert filtered == []
+
+
+class TestExtractUsersFromResults:
+    """Tests for _extract_users_from_results function."""
+
+    def test_extracts_target_user_name(self):
+        """Test extraction of TargetUserName field."""
+        from ares.core.factories.blue_factory import _extract_users_from_results
+
+        result_data = {
+            "results": [
+                {"TargetUserName": "jon.snow"},
+                {"TargetUserName": "samwell.tarly"},
+            ]
+        }
+        users = _extract_users_from_results(result_data)
+        assert "jon.snow" in users
+        assert "samwell.tarly" in users
+
+    def test_extracts_subject_user_name(self):
+        """Test extraction of SubjectUserName field."""
+        from ares.core.factories.blue_factory import _extract_users_from_results
+
+        result_data = {
+            "results": [
+                {"SubjectUserName": "admin"},
+            ]
+        }
+        users = _extract_users_from_results(result_data)
+        assert "admin" in users
+
+    def test_extracts_from_event_data(self):
+        """Test extraction from nested event_data."""
+        from ares.core.factories.blue_factory import _extract_users_from_results
+
+        result_data = {
+            "results": [
+                {"event_data": {"TargetUserName": "svc_backup"}},
+            ]
+        }
+        users = _extract_users_from_results(result_data)
+        assert "svc_backup" in users
+
+    def test_extracts_from_fields(self):
+        """Test extraction from nested fields dict."""
+        from ares.core.factories.blue_factory import _extract_users_from_results
+
+        result_data = {
+            "results": [
+                {"fields": {"User": "testuser"}},
+            ]
+        }
+        users = _extract_users_from_results(result_data)
+        assert "testuser" in users
+
+    def test_filters_system_accounts(self):
+        """Test that system accounts are filtered out."""
+        from ares.core.factories.blue_factory import _extract_users_from_results
+
+        result_data = {
+            "results": [
+                {"TargetUserName": "SYSTEM"},
+                {"TargetUserName": "LOCAL SERVICE"},
+                {"TargetUserName": "NETWORK SERVICE"},
+                {"TargetUserName": "-"},
+                {"TargetUserName": "COMPUTER$"},  # Machine accounts
+                {"TargetUserName": "realuser"},
+            ]
+        }
+        users = _extract_users_from_results(result_data)
+        assert "system" not in users
+        assert "local service" not in users
+        assert "network service" not in users
+        assert "-" not in users
+        assert "computer$" not in users
+        assert "realuser" in users
+
+    def test_normalizes_to_lowercase(self):
+        """Test that usernames are normalized to lowercase."""
+        from ares.core.factories.blue_factory import _extract_users_from_results
+
+        result_data = {
+            "results": [
+                {"TargetUserName": "Jon.Snow"},
+            ]
+        }
+        users = _extract_users_from_results(result_data)
+        assert "jon.snow" in users
+
+    def test_empty_results(self):
+        """Test handling of empty results."""
+        from ares.core.factories.blue_factory import _extract_users_from_results
+
+        users = _extract_users_from_results({})
+        assert len(users) == 0
+
+        users = _extract_users_from_results({"results": []})
+        assert len(users) == 0
+
+
+class TestQueueUserInvestigation:
+    """Tests for _queue_user_investigation function."""
+
+    def test_queues_user_investigation(self, investigation_state: InvestigationState):
+        """Test that user investigation is queued."""
+        from ares.core.factories.blue_factory import _queue_user_investigation
+
+        result_data = {
+            "results": [
+                {"TargetUserName": "jon.snow"},
+            ]
+        }
+        _queue_user_investigation(investigation_state, result_data)
+
+        # Should have a queued pivot query for user investigation
+        user_queries = [
+            q
+            for q in investigation_state.queued_pivot_queries
+            if q.get("type") == "user_investigation"
+        ]
+        assert len(user_queries) == 1
+        assert user_queries[0]["user"] == "jon.snow"
+
+    def test_skips_already_investigated_users(self, investigation_state: InvestigationState):
+        """Test that already investigated users are skipped."""
+        from ares.core.factories.blue_factory import _queue_user_investigation
+
+        investigation_state.queried_users.add("jon.snow")
+        result_data = {
+            "results": [
+                {"TargetUserName": "jon.snow"},
+            ]
+        }
+        _queue_user_investigation(investigation_state, result_data)
+
+        # Should not have a queued pivot query since user is already investigated
+        user_queries = [
+            q for q in investigation_state.queued_pivot_queries if q.get("user") == "jon.snow"
+        ]
+        assert len(user_queries) == 0
+
+    def test_no_duplicates(self, investigation_state: InvestigationState):
+        """Test that duplicate user queries are not added."""
+        from ares.core.factories.blue_factory import _queue_user_investigation
+
+        result_data = {
+            "results": [
+                {"TargetUserName": "jon.snow"},
+            ]
+        }
+        _queue_user_investigation(investigation_state, result_data)
+        _queue_user_investigation(investigation_state, result_data)
+
+        user_queries = [
+            q for q in investigation_state.queued_pivot_queries if q.get("user") == "jon.snow"
+        ]
+        assert len(user_queries) == 1
+
+
+class TestCheckCriticalUsers:
+    """Tests for _check_critical_users function."""
+
+    def test_detects_krbtgt(self, investigation_state: InvestigationState):
+        """Test that krbtgt triggers aggressive investigation."""
+        from ares.core.factories.blue_factory import _check_critical_users
+
+        result_data = {
+            "results": [
+                {"TargetUserName": "krbtgt"},
+            ]
+        }
+        _check_critical_users(investigation_state, result_data)
+
+        # Should have queued golden ticket and dcsync detection
+        assert "detect_golden_ticket" in investigation_state.queued_chain_queries
+        assert "detect_dcsync" in investigation_state.queued_chain_queries
+
+    def test_detects_administrator(self, investigation_state: InvestigationState):
+        """Test that administrator triggers investigation."""
+        from ares.core.factories.blue_factory import _check_critical_users
+
+        result_data = {
+            "results": [
+                {"TargetUserName": "administrator"},
+            ]
+        }
+        _check_critical_users(investigation_state, result_data)
+
+        # Should have queued lateral movement detection
+        assert "detect_lateral_movement" in investigation_state.queued_chain_queries
+
+    def test_does_not_trigger_for_normal_users(self, investigation_state: InvestigationState):
+        """Test that normal users don't trigger critical alerts."""
+        from ares.core.factories.blue_factory import _check_critical_users
+
+        result_data = {
+            "results": [
+                {"TargetUserName": "jon.snow"},
+            ]
+        }
+        _check_critical_users(investigation_state, result_data)
+
+        # Should not have queued any critical investigation
+        assert len(investigation_state.queued_chain_queries) == 0
+
+
+class TestCheckCredentialDumpingEvidence:
+    """Tests for _check_credential_dumping_evidence function."""
+
+    def test_detects_t1003(self, investigation_state: InvestigationState):
+        """Test that T1003 technique triggers comprehensive investigation."""
+        from ares.core.factories.blue_factory import _check_credential_dumping_evidence
+
+        result_data = {
+            "_mitre_technique": "T1003.006",
+            "_query_template": "dcsync",
+        }
+        _check_credential_dumping_evidence(investigation_state, result_data)
+
+        # Should have queued multiple T1003 variants
+        assert len(investigation_state.queued_chain_queries) > 0
+
+    def test_detects_secretsdump(self, investigation_state: InvestigationState):
+        """Test that secretsdump triggers comprehensive investigation."""
+        from ares.core.factories.blue_factory import _check_credential_dumping_evidence
+
+        result_data = {
+            "_query_template": "secretsdump",
+        }
+        _check_credential_dumping_evidence(investigation_state, result_data)
+
+        assert len(investigation_state.queued_chain_queries) > 0
+
+    def test_does_not_trigger_for_non_t1003(self, investigation_state: InvestigationState):
+        """Test that non-T1003 techniques don't trigger orchestration."""
+        from ares.core.factories.blue_factory import _check_credential_dumping_evidence
+
+        result_data = {
+            "_mitre_technique": "T1046",  # Network service discovery
+            "_query_template": "port_scanning",
+        }
+        _check_credential_dumping_evidence(investigation_state, result_data)
+
+        assert len(investigation_state.queued_chain_queries) == 0
+
+
+class TestCriticalUsers:
+    """Tests for CRITICAL_USERS set."""
+
+    def test_critical_users_contains_krbtgt(self):
+        """Test that krbtgt is in critical users."""
+        from ares.core.factories.blue_factory import CRITICAL_USERS
+
+        assert "krbtgt" in CRITICAL_USERS
+
+    def test_critical_users_contains_administrator(self):
+        """Test that administrator is in critical users."""
+        from ares.core.factories.blue_factory import CRITICAL_USERS
+
+        assert "administrator" in CRITICAL_USERS
+
+
+class TestUserChainMap:
+    """Tests for USER_CHAIN_MAP."""
+
+    def test_krbtgt_has_golden_ticket_chain(self):
+        """Test that krbtgt chains to golden ticket detection."""
+        from ares.core.factories.blue_factory import USER_CHAIN_MAP
+
+        assert "krbtgt" in USER_CHAIN_MAP
+        assert "detect_golden_ticket" in USER_CHAIN_MAP["krbtgt"]
+
+    def test_administrator_has_lateral_movement_chain(self):
+        """Test that administrator chains to lateral movement detection."""
+        from ares.core.factories.blue_factory import USER_CHAIN_MAP
+
+        assert "administrator" in USER_CHAIN_MAP
+        assert "detect_lateral_movement" in USER_CHAIN_MAP["administrator"]

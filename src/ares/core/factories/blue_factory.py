@@ -69,6 +69,52 @@ EVIDENCE_CHAIN_MAP: dict[str, list[str]] = {
     "psexec": ["detect_service_creation", "detect_lateral_movement"],
     "wmiexec": ["detect_lateral_movement", "detect_service_creation"],
     "smbexec": ["detect_service_creation", "detect_lateral_movement"],
+    # T1003 credential dumping orchestration - when any T1003 detected, investigate all variants
+    "t1003": [
+        "detect_dcsync",
+        "detect_dcsync_replication",
+        "detect_secretsdump",
+        "detect_impacket_secretsdump_sam",
+        "detect_impacket_secretsdump_lsa",
+        "detect_golden_ticket",
+    ],
+    "t1003_006": ["detect_golden_ticket", "detect_lateral_movement", "detect_dcsync"],
+    "t1003_002": ["detect_dcsync", "detect_secretsdump", "detect_lateral_movement"],
+    "t1003_004": ["detect_dcsync", "detect_secretsdump", "detect_lateral_movement"],
+    "secretsdump": ["detect_dcsync", "detect_golden_ticket", "detect_lateral_movement"],
+    # Kerberoasting → investigate cracked user's activity across all hosts
+    "kerberoasting": ["detect_pass_the_hash", "detect_lateral_movement", "detect_dcsync"],
+    "t1558_003": ["detect_pass_the_hash", "detect_lateral_movement", "detect_s4u_delegation"],
+    # Domain Admin / Valid Accounts abuse
+    "t1078": ["detect_lateral_movement", "detect_dcsync", "detect_golden_ticket"],
+    "t1078_002": [
+        "detect_lateral_movement",
+        "detect_dcsync",
+        "detect_golden_ticket",
+        "detect_secretsdump",
+    ],
+    "domain_admin": ["detect_dcsync", "detect_golden_ticket", "detect_lateral_movement"],
+    # Hash extraction specifically
+    "hash": ["detect_pass_the_hash", "detect_lateral_movement", "detect_golden_ticket"],
+    "ntlm_hash": ["detect_pass_the_hash", "detect_lateral_movement", "detect_dcsync"],
+}
+
+# Critical users that require immediate elevated investigation
+# When these accounts are compromised, escalate investigation aggressively
+CRITICAL_USERS: set[str] = {
+    "krbtgt",  # Golden ticket capability
+    "administrator",  # Domain admin
+    "admin",  # Common admin account
+    "domain admins",  # DA group
+    "enterprise admins",  # EA group
+}
+
+# User evidence chain map - queue user activity investigation when users discovered
+USER_CHAIN_MAP: dict[str, list[str]] = {
+    # User type → follow-up detection methods
+    "krbtgt": ["detect_golden_ticket", "detect_dcsync", "detect_dcsync_replication"],
+    "administrator": ["detect_lateral_movement", "detect_pass_the_hash", "detect_dcsync"],
+    "service_account": ["detect_kerberoasting", "detect_s4u_delegation"],
 }
 
 # LogQL optimization patterns - broad selectors that cause timeouts
@@ -204,6 +250,291 @@ def _queue_chained_queries(evidence_type: str, state: "InvestigationState") -> N
     if new_methods:
         logger.info(
             f"🔗 Auto-queued {len(new_methods)} chained queries for {evidence_type}: "
+            f"{', '.join(new_methods)}"
+        )
+
+
+def _extract_users_from_results(result_data: dict) -> set[str]:
+    """Extract usernames from query results.
+
+    Looks for common Windows event log user fields to identify
+    compromised or involved user accounts.
+
+    Args:
+        result_data: Query result containing log entries
+
+    Returns:
+        Set of lowercase usernames discovered in the results
+    """
+    users: set[str] = set()
+    results = result_data.get("results", [])
+    if not isinstance(results, list):
+        # Try other common result formats
+        results = result_data.get("data", [])
+        if isinstance(results, dict):
+            results = results.get("result", [])
+    if not isinstance(results, list):
+        return users
+
+    user_fields = [
+        "TargetUserName",
+        "SubjectUserName",
+        "User",
+        "Account",
+        "AccountName",
+        "UserName",
+        "target_user",
+        "TargetUser",
+        "user",
+    ]
+
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+
+        # Check top-level fields
+        for field in user_fields:
+            if item.get(field):
+                username = str(item[field]).lower().strip()
+                # Filter out system accounts and empty values
+                if (
+                    username
+                    and len(username) > 1
+                    and username not in ("-", "system", "local service", "network service", "$")
+                    and not username.endswith("$")
+                ):
+                    users.add(username)
+
+        # Check nested event_data
+        event_data = item.get("event_data", {})
+        if isinstance(event_data, dict):
+            for field in user_fields:
+                if event_data.get(field):
+                    username = str(event_data[field]).lower().strip()
+                    if (
+                        username
+                        and len(username) > 1
+                        and username not in ("-", "system", "local service", "network service", "$")
+                        and not username.endswith("$")
+                    ):
+                        users.add(username)
+
+        # Check nested fields dict (from compacted results)
+        fields = item.get("fields", {})
+        if isinstance(fields, dict):
+            for field in user_fields:
+                if fields.get(field):
+                    username = str(fields[field]).lower().strip()
+                    if (
+                        username
+                        and len(username) > 1
+                        and username not in ("-", "system", "local service", "network service", "$")
+                        and not username.endswith("$")
+                    ):
+                        users.add(username)
+
+        # Check line field (raw log line)
+        line = item.get("line", {})
+        if isinstance(line, dict):
+            for field in user_fields:
+                if line.get(field):
+                    username = str(line[field]).lower().strip()
+                    if (
+                        username
+                        and len(username) > 1
+                        and username not in ("-", "system", "local service", "network service", "$")
+                        and not username.endswith("$")
+                    ):
+                        users.add(username)
+            # Also check nested fields in line
+            nested_fields = line.get("fields", {})
+            if isinstance(nested_fields, dict):
+                for field in user_fields:
+                    if nested_fields.get(field):
+                        username = str(nested_fields[field]).lower().strip()
+                        if (
+                            username
+                            and len(username) > 1
+                            and username
+                            not in ("-", "system", "local service", "network service", "$")
+                            and not username.endswith("$")
+                        ):
+                            users.add(username)
+
+    return users
+
+
+def _queue_user_investigation(state: "InvestigationState", result_data: dict) -> None:
+    """Queue user activity investigations for discovered users.
+
+    When users are found in query results, this function queues
+    follow-up investigations to understand their activity across all hosts.
+
+    Args:
+        state: Current investigation state
+        result_data: Query result containing user references
+    """
+    if not state or not result_data:
+        return
+
+    # Extract users from query results
+    users_found = _extract_users_from_results(result_data)
+
+    # Also check extracted evidence for user type
+    for evidence in state.evidence:
+        if evidence.type == "user" and evidence.value:
+            users_found.add(evidence.value.lower())
+
+    # Remove already-investigated users
+    users_found -= state.queried_users
+
+    if not users_found:
+        return
+
+    # Queue user investigation queries
+    new_users = []
+    for username in users_found:
+        # Queue user activity investigation
+        user_query = {
+            "type": "user_investigation",
+            "user": username,
+            "reason": "Discovered in query results",
+            "suggested_methods": ["get_user_activity"],
+            "priority": 2 if username in CRITICAL_USERS else 1,
+        }
+
+        # Check if already queued
+        already_queued = any(
+            q.get("user") == username and q.get("type") == "user_investigation"
+            for q in state.queued_pivot_queries
+        )
+        if not already_queued:
+            state.queued_pivot_queries.append(user_query)
+            new_users.append(username)
+
+    if new_users:
+        logger.info(
+            f"👤 Auto-queued user investigation for {len(new_users)} users: "
+            f"{', '.join(list(new_users)[:5])}{'...' if len(new_users) > 5 else ''}"
+        )
+
+
+def _check_critical_users(state: "InvestigationState", result_data: dict) -> None:
+    """Check for critical users and trigger aggressive investigation.
+
+    When high-value accounts like krbtgt or administrator are found,
+    this triggers immediate escalated detection queries.
+
+    Args:
+        state: Current investigation state
+        result_data: Query result to check for critical users
+    """
+    if not state or not result_data:
+        return
+
+    users_found = _extract_users_from_results(result_data)
+
+    # Check for critical users
+    critical_found = users_found & CRITICAL_USERS
+
+    if not critical_found:
+        return
+
+    for username in critical_found:
+        logger.warning(f"🚨 CRITICAL USER DETECTED: {username}")
+
+        # Queue aggressive follow-up based on user type
+        chain = USER_CHAIN_MAP.get(username, [])
+        if chain:
+            new_methods = []
+            for method_name in chain:
+                if (
+                    method_name not in state.executed_query_types
+                    and method_name not in state.queued_chain_queries
+                ):
+                    # Insert at front for priority
+                    state.queued_chain_queries.insert(0, method_name)
+                    new_methods.append(method_name)
+
+            if new_methods:
+                logger.warning(
+                    f"🚨 CRITICAL: Queued {len(new_methods)} aggressive follow-ups for {username}: "
+                    f"{', '.join(new_methods)}"
+                )
+
+        # krbtgt specifically indicates DA/golden ticket capability
+        if username == "krbtgt":
+            logger.critical(
+                "🔥 KRBTGT DETECTED! Potential Domain Admin compromise / Golden Ticket. "
+                "Escalating investigation priority."
+            )
+            # Always queue golden ticket detection when krbtgt is seen
+            if (
+                "detect_golden_ticket" not in state.executed_query_types
+                and "detect_golden_ticket" not in state.queued_chain_queries
+            ):
+                state.queued_chain_queries.insert(0, "detect_golden_ticket")
+            if (
+                "detect_dcsync" not in state.executed_query_types
+                and "detect_dcsync" not in state.queued_chain_queries
+            ):
+                state.queued_chain_queries.insert(0, "detect_dcsync")
+
+
+def _check_credential_dumping_evidence(state: "InvestigationState", result_data: dict) -> None:
+    """Check for T1003 credential dumping indicators and trigger comprehensive investigation.
+
+    When any credential dumping technique is detected, this queues all T1003
+    sub-technique detections to ensure comprehensive coverage.
+
+    Args:
+        state: Current investigation state
+        result_data: Query result to check for T1003 indicators
+    """
+    if not state or not result_data:
+        return
+
+    # Check if result contains T1003 indicators
+    is_credential_dump = False
+    mitre_technique = result_data.get("_mitre_technique", "")
+    query_template = result_data.get("_query_template", "")
+
+    t1003_indicators = [
+        "t1003",
+        "secretsdump",
+        "dcsync",
+        "sam",
+        "lsa",
+        "ntds",
+        "credential_dump",
+        "hash_extraction",
+    ]
+
+    if (mitre_technique and mitre_technique.lower().startswith("t1003")) or any(
+        ind in query_template.lower() for ind in t1003_indicators
+    ):
+        is_credential_dump = True
+
+    if not is_credential_dump:
+        return
+
+    logger.warning(f"🔓 Credential dumping detected (T1003): {query_template or mitre_technique}")
+
+    # Queue all T1003 variants for comprehensive investigation
+    t1003_chain = EVIDENCE_CHAIN_MAP.get("t1003", [])
+    new_methods = []
+
+    for method_name in t1003_chain:
+        if (
+            method_name not in state.executed_query_types
+            and method_name not in state.queued_chain_queries
+        ):
+            state.queued_chain_queries.append(method_name)
+            new_methods.append(method_name)
+
+    if new_methods:
+        logger.warning(
+            f"🔓 T1003 Orchestration: Queued {len(new_methods)} credential dumping checks: "
             f"{', '.join(new_methods)}"
         )
 
@@ -543,6 +874,18 @@ def _record_query(
             # AUTO-PIVOT: Queue pivot queries for lateral movement detections
             if result_data and isinstance(result_data, dict) and result_data.get("_auto_pivot"):
                 _queue_pivot_queries(_current_state, result_data)
+
+            # USER-CENTRIC INVESTIGATION: Extract users and queue activity investigation
+            if result_data and isinstance(result_data, dict):
+                _queue_user_investigation(_current_state, result_data)
+
+            # CRITICAL USER DETECTION: Check for krbtgt, administrator, etc.
+            if result_data and isinstance(result_data, dict):
+                _check_critical_users(_current_state, result_data)
+
+            # T1003 CREDENTIAL DUMPING ORCHESTRATION: When any T1003 detected, check all variants
+            if result_data and isinstance(result_data, dict):
+                _check_credential_dumping_evidence(_current_state, result_data)
 
             # Track executed query type for deduplication
             _current_state.executed_query_types.add(tool_name)
