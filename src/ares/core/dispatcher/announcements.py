@@ -44,13 +44,13 @@ class AnnouncementMixin:
         """
         self.shared_state.has_domain_admin = True
         self.shared_state.domain_admin_path = attack_path
-        # Record completion time for accurate report duration
-        if not self.shared_state.completed_at:
-            self.shared_state.completed_at = datetime.now(timezone.utc)
 
-        # Check if we should stop immediately on DA
+        # Only mark complete if stop_on_domain_admin is enabled
+        # If stop_on_golden_ticket is enabled, we continue past DA to forge golden ticket
         if get_stop_on_domain_admin():
             self.shared_state.completed = True
+            if not self.shared_state.completed_at:
+                self.shared_state.completed_at = datetime.now(timezone.utc)
             logger.info("ARES_STOP_ON_DOMAIN_ADMIN enabled - marking operation complete")
 
         await self._checkpoint()
@@ -75,13 +75,12 @@ class AnnouncementMixin:
             target_domain: The target domain for escalation (parent/forest root).
         """
         self.shared_state.has_golden_ticket = True
-        # Record completion time for accurate report duration
-        if not self.shared_state.completed_at:
-            self.shared_state.completed_at = datetime.now(timezone.utc)
 
-        # Check if we should stop immediately on golden ticket
+        # Only mark complete if stop_on_golden_ticket is enabled
         if get_stop_on_golden_ticket():
             self.shared_state.completed = True
+            if not self.shared_state.completed_at:
+                self.shared_state.completed_at = datetime.now(timezone.utc)
             logger.info("ARES_STOP_ON_GOLDEN_TICKET enabled - marking operation complete")
 
         await self._checkpoint()
