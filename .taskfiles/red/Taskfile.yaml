@@ -362,6 +362,37 @@ tasks:
           fi
         fi
 
+  reports:list:
+    desc: List saved red team reports
+    silent: true
+    vars:
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+    cmds:
+      - |
+        echo "Red Team Reports:"
+        echo "================="
+        if [ -d {{.OUTPUT_DIR}} ]; then
+          ls -lht {{.OUTPUT_DIR}}/*_report.md 2>/dev/null || echo "No reports found"
+        else
+          echo "Report directory not found: {{.OUTPUT_DIR}}"
+        fi
+
+  reports:latest:
+    desc: Show the latest red team report
+    silent: true
+    vars:
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+    cmds:
+      - |
+        LATEST=$(ls -t {{.OUTPUT_DIR}}/*_report.md 2>/dev/null | head -1)
+        if [ -n "$LATEST" ]; then
+          echo "Latest report: $LATEST"
+          echo "===================="
+          cat "$LATEST"
+        else
+          echo "No reports found in {{.OUTPUT_DIR}}"
+        fi
+
   multi:watch:
     desc: "Watch for completed operations and auto-fetch reports (usage: task red:multi:watch [POLL_INTERVAL=30] [ONCE=true])"
     silent: true
