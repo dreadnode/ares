@@ -609,7 +609,8 @@ class OperationResumeHelper:
         """
         interrupted = []
 
-        for task_id, task in self.state.pending_tasks.items():
+        # Snapshot to avoid "dict changed size during iteration"
+        for task_id, task in list(self.state.pending_tasks.items()):
             # Only return permanently failed tasks (max retries exceeded)
             if task.status == TaskStatus.FAILED and task.error and "Pod restart" in task.error:
                 interrupted.append(
@@ -634,7 +635,8 @@ class OperationResumeHelper:
         """
         retrying = []
 
-        for task_id, task in self.state.pending_tasks.items():
+        # Snapshot to avoid "dict changed size during iteration"
+        for task_id, task in list(self.state.pending_tasks.items()):
             if task.status == TaskStatus.RETRYING:
                 retrying.append(
                     {

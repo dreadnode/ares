@@ -71,7 +71,9 @@ def _has_admin_access(state: SharedRedTeamState, host: Host) -> bool:
             return True
 
     # Check completed tasks for successful secretsdump on this host
-    for result in state.completed_tasks.values():
+    # Take snapshot to avoid "dict changed size during iteration" - result processor
+    # adds to completed_tasks concurrently from background consumer thread
+    for result in list(state.completed_tasks.values()):
         if result.success and result.result:
             result_data = result.result
             if (

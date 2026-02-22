@@ -3248,7 +3248,8 @@ async def _auto_acl_chain_follow(
 def _get_running_crack_tasks(dispatcher: RedTeamDispatcher) -> list[str]:
     """Get task IDs for crack tasks that are still pending (running)."""
     crack_task_ids = []
-    for task_id, task_info in dispatcher.shared_state.pending_tasks.items():
+    # Snapshot to avoid "dict changed size during iteration"
+    for task_id, task_info in list(dispatcher.shared_state.pending_tasks.items()):
         if task_info.task_type == "crack":
             crack_task_ids.append(task_id)
     return crack_task_ids
