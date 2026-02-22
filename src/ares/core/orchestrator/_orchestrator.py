@@ -3080,11 +3080,12 @@ async def _auto_golden_ticket(
 
                         state.operation_timeline.append(
                             TimelineEvent(
+                                id=f"golden-ticket-{domain.replace('.', '-')}",
                                 timestamp=datetime.now(timezone.utc),
                                 source="auto_golden_ticket",
-                                event_type="golden_ticket_forged",
                                 description=f"Golden ticket generated for {domain} Administrator",
-                                mitre_technique="T1558.001",
+                                mitre_techniques=["T1558.001"],
+                                confidence=1.0,
                             )
                         )
                     else:
@@ -3248,8 +3249,7 @@ async def _auto_acl_chain_follow(
 def _get_running_crack_tasks(dispatcher: RedTeamDispatcher) -> list[str]:
     """Get task IDs for crack tasks that are still pending (running)."""
     crack_task_ids = []
-    # Snapshot to avoid "dict changed size during iteration"
-    for task_id, task_info in list(dispatcher.shared_state.pending_tasks.items()):
+    for task_id, task_info in dispatcher.shared_state.pending_tasks.items():
         if task_info.task_type == "crack":
             crack_task_ids.append(task_id)
     return crack_task_ids
