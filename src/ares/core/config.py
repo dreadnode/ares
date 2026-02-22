@@ -236,6 +236,24 @@ class OperationConfig:
         }
     )
 
+    # Blue team context compaction settings
+    # Maximum result entries to return from Loki queries (head + tail)
+    max_result_entries: int = 40
+    # Steps between context compaction (0 = disabled)
+    context_compaction_interval: int = 5
+    # Max evidence items before compaction triggers
+    max_evidence_before_compaction: int = 50
+    # Max timeline events before compaction triggers
+    max_timeline_before_compaction: int = 30
+
+    # Early exit for LOW/MEDIUM severity
+    # Minimum steps before early exit is allowed
+    low_medium_early_exit_min_steps: int = 8
+    # Minimum evidence count to allow early exit (if not met, need more queries)
+    low_medium_early_exit_min_evidence: int = 2
+    # Minimum queries for early exit when evidence is sparse
+    low_medium_early_exit_min_queries: int = 4
+
     # Phase detection thresholds (see PRIORITY.md)
     lateral_movement_admin_creds_threshold: int = 3
     lateral_movement_owned_hosts_threshold: int = 5
@@ -1002,6 +1020,41 @@ def get_query_limits_by_stage() -> dict[str, int]:
     return load_config().query_limits_by_stage
 
 
+def get_max_result_entries() -> int:
+    """Get max Loki result entries to return (head + tail entries kept)."""
+    return load_config().max_result_entries
+
+
+def get_context_compaction_interval() -> int:
+    """Get steps between context compaction (0 = disabled)."""
+    return load_config().context_compaction_interval
+
+
+def get_max_evidence_before_compaction() -> int:
+    """Get max evidence items before compaction triggers."""
+    return load_config().max_evidence_before_compaction
+
+
+def get_max_timeline_before_compaction() -> int:
+    """Get max timeline events before compaction triggers."""
+    return load_config().max_timeline_before_compaction
+
+
+def get_low_medium_early_exit_min_steps() -> int:
+    """Get minimum steps before early exit is allowed for LOW/MEDIUM severity."""
+    return load_config().low_medium_early_exit_min_steps
+
+
+def get_low_medium_early_exit_min_evidence() -> int:
+    """Get minimum evidence count to allow early exit for LOW/MEDIUM severity."""
+    return load_config().low_medium_early_exit_min_evidence
+
+
+def get_low_medium_early_exit_min_queries() -> int:
+    """Get minimum queries for early exit when evidence is sparse."""
+    return load_config().low_medium_early_exit_min_queries
+
+
 def get_replay_mode() -> Literal["record", "replay", "off", ""]:
     """Get replay mode (record/replay/empty for off)."""
     return load_config().replay_mode
@@ -1041,6 +1094,7 @@ __all__ = [
     "get_agent_task_timeout",
     "get_bonus_queries_for_evidence",
     "get_bonus_queries_for_pyramid_l4",
+    "get_context_compaction_interval",
     "get_crack_task_grace_period",
     "get_critical_priority_threshold",
     "get_default_max_retries",
@@ -1049,17 +1103,23 @@ __all__ = [
     "get_deferred_task_max_age",
     "get_lateral_movement_admin_creds_threshold",
     "get_lateral_movement_owned_hosts_threshold",
+    "get_low_medium_early_exit_min_evidence",
+    "get_low_medium_early_exit_min_queries",
+    "get_low_medium_early_exit_min_steps",
     "get_max_concurrent_tasks",
     "get_max_context_tokens",
     "get_max_deferred_per_type",
     "get_max_deferred_total",
     "get_max_duplicate_queries",
+    "get_max_evidence_before_compaction",
     "get_max_output_chars",
     "get_max_queries_critical",
     "get_max_queries_per_investigation",
     "get_max_redis_consecutive_failures",
+    "get_max_result_entries",
     "get_max_runtime",
     "get_max_stored_results",
+    "get_max_timeline_before_compaction",
     "get_max_total_queries",
     "get_max_vulnerability_failures",
     "get_min_messages_to_keep",
