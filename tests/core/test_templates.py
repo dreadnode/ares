@@ -44,7 +44,7 @@ class TestTemplateLoader:
     def test_list_templates_with_pattern(self) -> None:
         """Test listing templates with specific pattern."""
         loader = TemplateLoader()
-        agent_templates = loader.list_templates("agent/*.jinja")
+        agent_templates = loader.list_templates("blueteam/agents/*.jinja")
 
         assert len(agent_templates) >= 2
         assert any("system_instructions" in t for t in agent_templates)
@@ -94,7 +94,7 @@ class TestAgentTemplates:
     def test_system_instructions_template(self) -> None:
         """Test system instructions template renders without errors."""
         loader = get_template_loader()
-        result = loader.render("agent/system_instructions.md.jinja")
+        result = loader.render("blueteam/agents/system_instructions.md.jinja")
 
         assert len(result) > 0
         assert "Ares" in result or "SOC" in result or "investigation" in result.lower()
@@ -103,7 +103,7 @@ class TestAgentTemplates:
         """Test initial alert prompt template with all variables."""
         loader = get_template_loader()
         result = loader.render(
-            "agent/initial_alert_prompt.md.jinja",
+            "blueteam/agents/initial_alert_prompt.md.jinja",
             alert_name="HighCPU",
             severity="warning",
             instance="web-01",
@@ -124,7 +124,7 @@ class TestAgentTemplates:
         loader = get_template_loader()
         # Should not raise error with basic variables
         result = loader.render(
-            "agent/initial_alert_prompt.md.jinja",
+            "blueteam/agents/initial_alert_prompt.md.jinja",
             alert_name="TestAlert",
             severity="info",
             instance="test-01",
