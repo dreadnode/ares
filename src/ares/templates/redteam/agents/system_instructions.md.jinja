@@ -203,20 +203,11 @@ IF you discover share access (READ/WRITE):
 4. Report ALL users and shares
 
 ### Phase 1.1: Pre-Creds Enumeration (Required)
-If you have no credentials yet, you MUST attempt these:
-1. **SMB null session banner + shares**
-   - `netexec smb <target> -u '' -p '' --users`
-   - `netexec smb <target> -u '' -p '' --shares`
-   - `smbclient -L //<target> -N`
-2. **RPC null session (if allowed)**
-   - `rpcclient -U '' -N <target> -c 'lsaquery; enumdomusers; querydispinfo; enumdomgroups'`
-3. **SYSVOL/NETLOGON anonymous access**
-   - `smbclient //<dc>/SYSVOL -N -c ls`
-   - `smbclient //<dc>/NETLOGON -N -c ls`
-4. **Kerberos user enumeration (pre-auth)**
-   - Build a small user list to `/tmp/users.txt`
-   - Run `kerberos_user_enum_noauth` with the users file
-   - `impacket-GetNPUsers <domain>/ -usersfile /tmp/users.txt -dc-ip <dc_ip> -no-pass`
+If you have no credentials yet, attempt null session enumeration:
+1. **SMB null session** - enumerate users and shares with empty credentials
+2. **RPC null session** - query domain info if SMB is blocked
+3. **SYSVOL/NETLOGON anonymous access** - check for readable shares
+4. **Kerberos user enumeration** - use `kerberos_user_enum_noauth` with a users file
 5. If user enumeration is blocked, pivot to share file hunting and Kerberos user enum.
 
 ### Phase 2: Early Privilege Escalation Checks (Run with FIRST valid credentials)

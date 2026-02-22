@@ -153,7 +153,7 @@ def build_initial_prompt(alert: dict, attack_context: dict | None = None) -> str
 
     loader = get_template_loader()
     return loader.render(
-        "agent/initial_alert_prompt.md.jinja",
+        "blueteam/agents/initial_alert_prompt.md.jinja",
         alert_name=labels.get("alertname", "Unknown"),
         severity=labels.get("severity", "unknown"),
         instance=labels.get("instance", "unknown"),

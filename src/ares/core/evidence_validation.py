@@ -328,6 +328,52 @@ def get_target_domains() -> set[str]:
     return _target_domains.copy()
 
 
+def extract_domains_from_red_team_state(state: Any) -> set[str]:
+    """Extract all unique domains from a red team operation state.
+
+    Collects domains from:
+    - state.target.domain (primary target)
+    - state.all_domains (discovered domains)
+    - state.all_credentials[].domain (credential domains)
+    - state.trusted_domains (AD trust relationships)
+
+    Args:
+        state: SharedRedTeamState object (or duck-typed equivalent)
+
+    Returns:
+        Set of unique domain FQDNs (lowercase)
+    """
+    domains: set[str] = set()
+
+    # Primary target domain
+    target = getattr(state, "target", None)
+    if target:
+        target_domain = getattr(target, "domain", "")
+        if target_domain:
+            domains.add(target_domain.lower().strip())
+
+    # Discovered domains list
+    all_domains = getattr(state, "all_domains", [])
+    for d in all_domains:
+        if d:
+            domains.add(d.lower().strip())
+
+    # Domains from credentials
+    all_creds = getattr(state, "all_credentials", [])
+    for cred in all_creds:
+        cred_domain = getattr(cred, "domain", "")
+        if cred_domain:
+            domains.add(cred_domain.lower().strip())
+
+    # Trusted domains
+    trusted = getattr(state, "trusted_domains", [])
+    for d in trusted:
+        if d:
+            domains.add(d.lower().strip())
+
+    return domains
+
+
 def _is_in_target_scope(hostname: str) -> bool:
     """Check if a hostname/domain is within target scope.
 
@@ -361,6 +407,52 @@ def _is_in_target_scope(hostname: str) -> bool:
             return True
 
     return False
+
+
+def _is_user_in_target_scope(user: str) -> bool:
+    """Check if a user value is within target domain scope.
+
+    Filters users by their domain component. Supports:
+    - DOMAIN\\user format: extracts DOMAIN and checks against target domains
+    - user@domain.tld format: extracts domain.tld and checks
+
+    If no target domains are set, all users are allowed (returns True).
+
+    Args:
+        user: The user value (e.g., "CONTOSO\\admin" or "admin@contoso.local")
+
+    Returns:
+        True if user's domain is in scope (or no scope is set)
+    """
+    if not _target_domains:
+        return True  # No scope set, allow all
+
+    if not user:
+        return False
+
+    normalized = user.lower().strip()
+
+    # Handle DOMAIN\user format
+    if "\\" in normalized:
+        domain_part = normalized.split("\\")[0]
+        # Check if domain_part matches any target domain or its NetBIOS name
+        for target in _target_domains:
+            # Exact match (e.g., "contoso" matches "contoso")
+            if domain_part == target:
+                return True
+            # NetBIOS is first part of FQDN (e.g., "contoso" from "contoso.local")
+            target_netbios = target.split(".")[0] if "." in target else target
+            if domain_part == target_netbios:
+                return True
+        return False
+
+    # Handle user@domain.tld format
+    if "@" in normalized:
+        domain_part = normalized.split("@")[1]
+        return _is_in_target_scope(domain_part)
+
+    # Plain username with no domain - allow if we have scope (could be local account)
+    return True
 
 
 def _is_garbled_value(value: str) -> bool:
@@ -412,23 +504,68 @@ def _extract_patterns_from_string(text: str) -> set[str]:
         patterns.add(match.lower())
 
     # Hostnames/FQDNs (filter by target scope if set)
+    # Exclude file extensions that look like hostnames (e.g., svchost.exe)
+    file_extensions = (
+        ".exe",
+        ".dll",
+        ".sys",
+        ".msi",
+        ".bat",
+        ".cmd",
+        ".ps1",
+        ".vbs",
+        ".js",
+        ".log",
+        ".txt",
+        ".xml",
+        ".json",
+        ".ini",
+        ".cfg",
+        ".tmp",
+    )
     hostname_pattern = r"\b([a-zA-Z0-9][-a-zA-Z0-9]*\.[-a-zA-Z0-9.]+)\b"
     for match in re.findall(hostname_pattern, text):
-        if "." in match and not match[0].isdigit() and _is_in_target_scope(match):
-            patterns.add(match.lower())
+        match_lower = match.lower()
+        if "." in match and not match[0].isdigit():
+            # Skip file extensions
+            if any(match_lower.endswith(ext) for ext in file_extensions):
+                continue
+            if _is_in_target_scope(match):
+                patterns.add(match_lower)
 
-    # Windows usernames (multiple formats)
+    # Windows usernames (multiple formats) - filter by target domain scope
     # Require at least 2 chars for domain and user to avoid matching JSON escapes like n\t
+    # Exclude Windows paths that look like DOMAIN\user (e.g., windows\system32)
+    windows_path_prefixes = (
+        "windows\\",
+        "system32\\",
+        "syswow64\\",
+        "program files\\",
+        "programdata\\",
+        "users\\",
+        "temp\\",
+        "appdata\\",
+        "c:\\",
+        "d:\\",
+        "e:\\",
+        "microsoft\\",
+        "nt authority\\",
+    )
     user_patterns = [
         r"\b([a-zA-Z0-9_-]{2,}\\[a-zA-Z0-9_.-]{2,})\b",  # domain\user (2+ chars each)
         r"\b([a-zA-Z0-9_.-]{2,}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b",  # user@domain.tld
     ]
     for pattern in user_patterns:
         for match in re.findall(pattern, text):
-            if match and len(match) > 5:  # Minimum realistic username length
-                patterns.add(match.lower())
+            if match and len(match) > 5:
+                match_lower = match.lower()
+                # Skip Windows paths
+                if any(match_lower.startswith(prefix) for prefix in windows_path_prefixes):
+                    continue
+                if _is_user_in_target_scope(match):
+                    patterns.add(match_lower)
 
-    # Usernames from JSON fields (expanded list)
+    # Usernames from JSON fields (expanded list) - filter by target domain scope if in domain\user format
     user_json_patterns = [
         r'"(?:TargetUserName|SubjectUserName|User|Account|AccountName|UserName)":\s*"([^"]+)"',
         r"(?:TargetUserName|SubjectUserName|User|Account)=([^\s,;}\]]+)",
@@ -436,7 +573,13 @@ def _extract_patterns_from_string(text: str) -> set[str]:
     for pattern in user_json_patterns:
         for match in re.findall(pattern, text, re.IGNORECASE):
             if match and len(match) > 1 and match not in ("-", "SYSTEM", "LOCAL SERVICE"):
-                patterns.add(match.lower())
+                # Apply domain scope filtering if user has domain component
+                if "\\" in match or "@" in match:
+                    if _is_user_in_target_scope(match):
+                        patterns.add(match.lower())
+                else:
+                    # Plain username - allow (could be local account)
+                    patterns.add(match.lower())
 
     # Computer names from Windows events (filter by target scope if set)
     computer_patterns = [
@@ -572,17 +715,60 @@ def _classify_ioc(value: str) -> str | None:
         return "ip"
 
     # Domain/hostname (filter by target scope if set)
+    # IMPORTANT: Exclude file extensions that look like TLDs (.exe, .dll, .sys, etc.)
     if re.match(r"^[a-z0-9][-a-z0-9]*\.[a-z0-9][-a-z0-9.]+$", value) and not value[0].isdigit():
+        # Exclude common file extensions that match the hostname pattern
+        file_extensions = (
+            ".exe",
+            ".dll",
+            ".sys",
+            ".msi",
+            ".bat",
+            ".cmd",
+            ".ps1",
+            ".vbs",
+            ".js",
+            ".log",
+            ".txt",
+            ".xml",
+            ".json",
+            ".ini",
+            ".cfg",
+            ".tmp",
+        )
+        if any(value.endswith(ext) for ext in file_extensions):
+            return None
         if not _is_in_target_scope(value):
             return None
         return "hostname"
 
     # Username patterns - must be proper format with minimum lengths
+    # Filter by target domain scope if set
     # DOMAIN\user format: require 2+ chars each side to avoid JSON escape matches like n\t
     if re.match(r"^[a-z0-9_.-]{2,}\\[a-z0-9_.-]{2,}$", value, re.IGNORECASE):
+        # Exclude Windows paths that look like DOMAIN\user
+        windows_path_prefixes = (
+            "windows\\",
+            "system32\\",
+            "syswow64\\",
+            "program files\\",
+            "programdata\\",
+            "users\\",
+            "temp\\",
+            "appdata\\",
+            "c:\\",
+            "d:\\",
+            "e:\\",
+        )
+        if any(value.lower().startswith(prefix) for prefix in windows_path_prefixes):
+            return None
+        if not _is_user_in_target_scope(value):
+            return None
         return "user"
     # user@domain.tld format: proper email-like with valid TLD
     if re.match(r"^[a-z0-9_.-]{2,}@[a-z0-9.-]+\.[a-z]{2,}$", value, re.IGNORECASE):
+        if not _is_user_in_target_scope(value):
+            return None
         return "user"
 
     # Hash patterns

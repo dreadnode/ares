@@ -214,10 +214,21 @@ async def main(
 
             if operation_id:
                 from ares.cli_ops import _load_state_from_redis
+                from ares.core.evidence_validation import (
+                    extract_domains_from_red_team_state,
+                    set_target_domains,
+                )
 
                 state = await _load_state_from_redis(client, operation_id)
                 if state:
                     playbook = create_detection_playbook(state)
+
+                    # Extract and set target domain scope for evidence filtering
+                    target_domains = extract_domains_from_red_team_state(state)
+                    if target_domains:
+                        set_target_domains(target_domains)
+                        logger.info(f"Evidence scope set to domains: {target_domains}")
+
                     attack_context = {
                         "operation_id": operation_id,
                         "playbook": playbook,
@@ -226,6 +237,7 @@ async def main(
                         "techniques_used": playbook.techniques_used,
                         "priority_queries": playbook.priority_queries[:10],
                         "detection_targets": playbook.detection_targets[:20],
+                        "target_domains": list(target_domains),
                     }
                     logger.success(f"Loaded red team operation: {operation_id}")
                     logger.info(

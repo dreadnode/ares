@@ -8,10 +8,12 @@ from ares.core.evidence_validation import (
     _extract_searchable_values,
     _is_garbled_value,
     _is_in_target_scope,
+    _is_user_in_target_scope,
     adjust_confidence_for_validation,
     auto_extract_evidence_from_query,
     boost_confidence_for_quality,
     clear_target_domains,
+    extract_domains_from_red_team_state,
     get_recent_query_ids,
     get_suggested_iocs,
     reset_evidence_validation,
@@ -409,6 +411,46 @@ class TestClassifyIOC:
         assert _classify_ioc("random_string") is None
         assert _classify_ioc("123") is None
 
+    def test_classify_file_extensions_not_hostnames(self):
+        """Test that file extensions are NOT classified as hostnames.
+
+        Files like svchost.exe look like hostnames but should be rejected.
+        This was a real bug where the blue team report showed svchost.exe
+        as a hostname evidence item.
+        """
+        # Common Windows executables that match hostname pattern
+        assert _classify_ioc("svchost.exe") is None
+        assert _classify_ioc("lsass.exe") is None
+        assert _classify_ioc("dfsrs.exe") is None
+        assert _classify_ioc("winlogon.exe") is None
+        assert _classify_ioc("services.exe") is None
+        # Other file extensions
+        assert _classify_ioc("config.dll") is None
+        assert _classify_ioc("script.ps1") is None
+        assert _classify_ioc("malware.sys") is None
+        assert _classify_ioc("setup.msi") is None
+        assert _classify_ioc("debug.log") is None
+
+    def test_classify_windows_paths_not_users(self):
+        """Test that Windows paths are NOT classified as users.
+
+        Paths like windows\\system32 match the DOMAIN\\user pattern but
+        should be rejected. This was a real bug where the blue team report
+        showed windows\\system32 as a user evidence item.
+        """
+        # Common Windows paths that match domain\\user pattern
+        assert _classify_ioc("windows\\system32") is None
+        assert _classify_ioc("windows\\sysvol") is None
+        assert _classify_ioc("system32\\drivers") is None
+        assert _classify_ioc("programdata\\microsoft") is None
+        assert _classify_ioc("users\\administrator") is None
+        # Drive letters
+        assert _classify_ioc("c:\\windows") is None
+        assert _classify_ioc("d:\\data") is None
+        # But valid domain users should still work
+        assert _classify_ioc("contoso\\admin") == "user"
+        assert _classify_ioc("north\\robb.stark") == "user"
+
 
 class TestAdjustConfidenceForValidation:
     """Tests for adjust_confidence_for_validation function."""
@@ -689,6 +731,167 @@ class TestTargetDomainScope:
 
         clear_target_domains()
         assert _is_in_target_scope("random.com") is True
+
+
+class TestUserDomainScope:
+    """Tests for user domain scope filtering."""
+
+    def setup_method(self):
+        """Clear target domains before each test."""
+        clear_target_domains()
+
+    def teardown_method(self):
+        """Clear target domains after each test."""
+        clear_target_domains()
+
+    def test_no_scope_allows_all_users(self):
+        """Test without scope, all users pass."""
+        assert _is_user_in_target_scope("CONTOSO\\admin") is True
+        assert _is_user_in_target_scope("RANDOM\\user") is True
+        assert _is_user_in_target_scope("user@random.com") is True
+
+    def test_empty_user_not_in_scope(self):
+        """Test empty user returns False when scope is set."""
+        set_target_domains(["contoso.local"])
+        assert _is_user_in_target_scope("") is False
+        assert _is_user_in_target_scope(None) is False  # type: ignore[arg-type]
+
+    def test_domain_backslash_format_matches_netbios(self):
+        """Test DOMAIN\\user format matches NetBIOS name from FQDN."""
+        set_target_domains(["contoso.local"])
+        # "contoso" is NetBIOS of "contoso.local"
+        assert _is_user_in_target_scope("CONTOSO\\admin") is True
+        assert _is_user_in_target_scope("contoso\\admin") is True
+        assert _is_user_in_target_scope("FABRIKAM\\admin") is False
+
+    def test_domain_backslash_format_exact_match(self):
+        """Test DOMAIN\\user format with exact domain match."""
+        set_target_domains(["contoso"])  # Short name only
+        assert _is_user_in_target_scope("contoso\\admin") is True
+        assert _is_user_in_target_scope("fabrikam\\admin") is False
+
+    def test_upn_format_matches_domain(self):
+        """Test user@domain.tld format matches target domains."""
+        set_target_domains(["contoso.local"])
+        assert _is_user_in_target_scope("admin@contoso.local") is True
+        assert _is_user_in_target_scope("admin@dc01.contoso.local") is True
+        assert _is_user_in_target_scope("admin@fabrikam.local") is False
+
+    def test_plain_username_allowed(self):
+        """Test plain username (no domain) is allowed when scope set."""
+        set_target_domains(["contoso.local"])
+        # Plain usernames could be local accounts, so allow them
+        assert _is_user_in_target_scope("administrator") is True
+        assert _is_user_in_target_scope("localuser") is True
+
+    def test_multiple_target_domains(self):
+        """Test multiple target domains all work for users."""
+        set_target_domains(["contoso.local", "fabrikam.local"])
+        assert _is_user_in_target_scope("CONTOSO\\admin") is True
+        assert _is_user_in_target_scope("FABRIKAM\\admin") is True
+        assert _is_user_in_target_scope("OTHERDOMAIN\\admin") is False
+
+    def test_case_insensitive(self):
+        """Test user scope matching is case insensitive."""
+        set_target_domains(["Contoso.Local"])
+        assert _is_user_in_target_scope("CONTOSO\\ADMIN") is True
+        assert _is_user_in_target_scope("contoso\\admin") is True
+        assert _is_user_in_target_scope("admin@CONTOSO.LOCAL") is True
+
+    def test_filters_out_of_scope_users_from_extraction(self):
+        """Test user extraction respects domain scope."""
+        set_target_domains(["contoso.local"])
+        text = "User CONTOSO\\admin logged in. Also saw RANDOM\\attacker and admin@fabrikam.local"
+        patterns = _extract_patterns_from_string(text)
+
+        # Should have in-scope user but not out-of-scope
+        assert "contoso\\admin" in patterns
+        assert "random\\attacker" not in patterns
+        assert "admin@fabrikam.local" not in patterns
+
+    def test_filters_out_of_scope_users_from_classification(self):
+        """Test user classification respects domain scope."""
+        set_target_domains(["contoso.local"])
+
+        assert _classify_ioc("contoso\\admin") == "user"
+        assert _classify_ioc("random\\attacker") is None
+        assert _classify_ioc("admin@fabrikam.local") is None
+
+
+class TestExtractDomainsFromRedTeamState:
+    """Tests for extract_domains_from_red_team_state helper."""
+
+    def test_extracts_from_target(self):
+        """Test extraction from target.domain."""
+
+        class MockTarget:
+            domain = "contoso.local"
+
+        class MockState:
+            target = MockTarget()
+            all_domains = ()
+            all_credentials = ()
+            trusted_domains = ()
+
+        domains = extract_domains_from_red_team_state(MockState())
+        assert "contoso.local" in domains
+
+    def test_extracts_from_all_domains(self):
+        """Test extraction from all_domains list."""
+
+        class MockState:
+            target = None
+            all_domains = ("contoso.local", "fabrikam.local")
+            all_credentials = ()
+            trusted_domains = ()
+
+        domains = extract_domains_from_red_team_state(MockState())
+        assert "contoso.local" in domains
+        assert "fabrikam.local" in domains
+
+    def test_extracts_from_credentials(self):
+        """Test extraction from credential domains."""
+
+        class MockCred:
+            domain = "contoso.local"
+
+        class MockState:
+            target = None
+            all_domains = ()
+            all_credentials = (MockCred(),)
+            trusted_domains = ()
+
+        domains = extract_domains_from_red_team_state(MockState())
+        assert "contoso.local" in domains
+
+    def test_extracts_from_trusted_domains(self):
+        """Test extraction from trusted_domains."""
+
+        class MockState:
+            target = None
+            all_domains = ()
+            all_credentials = ()
+            trusted_domains = ("fabrikam.local",)
+
+        domains = extract_domains_from_red_team_state(MockState())
+        assert "fabrikam.local" in domains
+
+    def test_deduplicates_and_lowercases(self):
+        """Test domains are deduplicated and lowercased."""
+
+        class MockTarget:
+            domain = "CONTOSO.LOCAL"
+
+        class MockState:
+            target = MockTarget()
+            all_domains = ("Contoso.Local", "FABRIKAM.local")
+            all_credentials = ()
+            trusted_domains = ("fabrikam.local",)
+
+        domains = extract_domains_from_red_team_state(MockState())
+        assert len(domains) == 2
+        assert "contoso.local" in domains
+        assert "fabrikam.local" in domains
 
 
 class TestFilteringIntegration:

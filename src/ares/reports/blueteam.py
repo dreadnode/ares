@@ -291,7 +291,7 @@ class BlueTeamReportGenerator:
 
         # Render the comprehensive report
         return self.loader.render(
-            "reports/blueteam/comprehensive_report.md.jinja",
+            "blueteam/reports/comprehensive_report.md.jinja",
             operation_id=operation.operation_id,
             started_at=operation.started_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
             completed_at=completed_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
