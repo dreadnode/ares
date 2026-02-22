@@ -1421,7 +1421,8 @@ class RoutingMixin:
             return ""
 
         # Skip if there's already a pending task for same credential + techniques
-        for task in self.shared_state.pending_tasks.values():
+        # Snapshot to avoid "dict changed size during iteration"
+        for task in list(self.shared_state.pending_tasks.values()):
             if task.task_type != "privesc_enumeration":
                 continue
             task_domain = (task.params.get("domain") or "").lower()

@@ -271,9 +271,10 @@ class MonitoringMixin:
         stale_task_ids: list[str] = []
 
         # Count active LLM tasks for deadlock detection
+        # Snapshot to avoid "dict changed size during iteration"
         llm_count = sum(
             1
-            for t in self._shared_state.pending_tasks.values()
+            for t in list(self._shared_state.pending_tasks.values())
             if t.task_type not in ("crack", "command")
             and t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
         )
@@ -366,9 +367,10 @@ class MonitoringMixin:
         stale_task_ids: list[str] = []
 
         # Count LLM tasks to determine if we're at hard cap
+        # Snapshot to avoid "dict changed size during iteration"
         llm_count = sum(
             1
-            for t in self._shared_state.pending_tasks.values()
+            for t in list(self._shared_state.pending_tasks.values())
             if t.task_type not in ("crack", "command")
             and t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
         )
@@ -1015,7 +1017,8 @@ class MonitoringMixin:
         oldest_task_age = 0.0
         now = datetime.now(timezone.utc)
 
-        for task_info in self._shared_state.pending_tasks.values():
+        # Snapshot to avoid "dict changed size during iteration"
+        for task_info in list(self._shared_state.pending_tasks.values()):
             if task_info.status == TaskStatus.PENDING:
                 pending_count += 1
             elif task_info.status == TaskStatus.IN_PROGRESS:

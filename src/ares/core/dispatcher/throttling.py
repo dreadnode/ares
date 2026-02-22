@@ -89,9 +89,10 @@ class ThrottlingMixin:
         # Clean up phantom empty-string task from throttle drops
         self._shared_state.pending_tasks.pop("", None)
         pending = len(self._shared_state.pending_tasks)
+        # Snapshot to avoid "dict changed size during iteration"
         in_progress = sum(
             1
-            for t in self._shared_state.pending_tasks.values()
+            for t in list(self._shared_state.pending_tasks.values())
             if t.status == TaskStatus.IN_PROGRESS
         )
         return pending + in_progress
@@ -100,9 +101,10 @@ class ThrottlingMixin:
         """Get pending/in-progress task count for a specific role."""
         if not self._shared_state:
             return 0
+        # Snapshot to avoid "dict changed size during iteration"
         return sum(
             1
-            for t in self._shared_state.pending_tasks.values()
+            for t in list(self._shared_state.pending_tasks.values())
             if t.assigned_agent == role and t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
         )
 
@@ -128,9 +130,10 @@ class ThrottlingMixin:
         """Get count of pending LLM-using tasks (excludes crack, command)."""
         if not self._shared_state:
             return 0
+        # Snapshot to avoid "dict changed size during iteration"
         return sum(
             1
-            for t in self._shared_state.pending_tasks.values()
+            for t in list(self._shared_state.pending_tasks.values())
             if t.task_type not in self.NON_LLM_TASK_TYPES
             and t.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
         )

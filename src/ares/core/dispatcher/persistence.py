@@ -274,7 +274,8 @@ class PersistenceMixin:
         pending_key = f"ares:op:{op_id}:pending_tasks"
         pipe = self._redis_client.pipeline()
         # NO DELETE - additive HSET preserves tasks already in Redis
-        for task_id, task_info in self.shared_state.pending_tasks.items():
+        # Snapshot to avoid "dict changed size during iteration"
+        for task_id, task_info in list(self.shared_state.pending_tasks.items()):
             pipe.hset(pending_key, task_id, self._serialize_task_info(task_info))
         pipe.expire(pending_key, ttl)
         await pipe.execute()
@@ -285,7 +286,8 @@ class PersistenceMixin:
             return
         completed_key = f"ares:op:{op_id}:completed_tasks"
         pipe = self._redis_client.pipeline()
-        for task_id, task_result in self.shared_state.completed_tasks.items():
+        # Snapshot to avoid "dict changed size during iteration"
+        for task_id, task_result in list(self.shared_state.completed_tasks.items()):
             result_dict = {
                 "task_id": task_result.task_id,
                 "success": task_result.success,

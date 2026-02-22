@@ -3080,11 +3080,12 @@ async def _auto_golden_ticket(
 
                         state.operation_timeline.append(
                             TimelineEvent(
+                                id=f"golden-ticket-{domain.replace('.', '-')}",
                                 timestamp=datetime.now(timezone.utc),
                                 source="auto_golden_ticket",
-                                event_type="golden_ticket_forged",
                                 description=f"Golden ticket generated for {domain} Administrator",
-                                mitre_technique="T1558.001",
+                                mitre_techniques=["T1558.001"],
+                                confidence=1.0,
                             )
                         )
                     else:
