@@ -16,9 +16,16 @@ from loguru import logger
 from ares.core.config import (
     get_bonus_queries_for_evidence,
     get_bonus_queries_for_pyramid_l4,
+    get_context_compaction_interval,
+    get_low_medium_early_exit_min_evidence,
+    get_low_medium_early_exit_min_queries,
+    get_low_medium_early_exit_min_steps,
     get_max_duplicate_queries,
+    get_max_evidence_before_compaction,
     get_max_queries_critical,
     get_max_queries_per_investigation,
+    get_max_result_entries,
+    get_max_timeline_before_compaction,
     get_max_total_queries,
     get_query_limits_by_stage,
 )
@@ -53,6 +60,8 @@ _seen_queries: dict[str, int] = {}  # Track query -> count to detect loops
 _current_state: "InvestigationState | None" = None
 _bonus_queries_granted = 0  # Track bonus queries granted
 _in_resilient_execution = False  # Flag to bypass duplicate check during retries/chunks
+_compaction_step_count = 0  # Track steps for periodic compaction
+_last_compaction_step = 0  # Last step when compaction ran
 
 # Evidence type to follow-up detection methods mapping for auto-chaining
 EVIDENCE_CHAIN_MAP: dict[str, list[str]] = {
@@ -667,7 +676,9 @@ def reset_query_tracking():
         _seen_queries, \
         _current_state, \
         _bonus_queries_granted, \
-        _in_resilient_execution
+        _in_resilient_execution, \
+        _compaction_step_count, \
+        _last_compaction_step
     _total_queries = 0
     _total_queries_attempted = 0
     _consecutive_queries = []
@@ -677,6 +688,8 @@ def reset_query_tracking():
     _current_state = None
     _bonus_queries_granted = 0
     _in_resilient_execution = False
+    _compaction_step_count = 0
+    _last_compaction_step = 0
     reset_resilient_executor()
     reset_evidence_validation()  # Reset evidence validation state
 
@@ -1140,6 +1153,9 @@ def _compact_loki_result(result: Any) -> Any:
     This function parses event_data XML into a clean dict and drops
     the redundant 'message' and raw XML, cutting ~60-70% of tokens
     while keeping all security-relevant fields.
+
+    Additionally, truncates results to max_result_entries (default 40)
+    to prevent context window overflow.
     """
     # MCP tools return list[ContentText] — extract the text payload
     if isinstance(result, list) and len(result) > 0:
@@ -1196,13 +1212,55 @@ def _compact_loki_result(result: Any) -> Any:
 
         compacted.append({"timestamp": timestamp, "line": compact_line})
 
+    # TRUNCATE to max_result_entries to prevent context overflow
+    # Keep first 75% (head) + last 25% (tail) for temporal coverage
+    max_entries = get_max_result_entries()
+    total_entries = len(compacted)
+    truncated = False
+
+    if total_entries > max_entries:
+        head_count = int(max_entries * 0.75)  # 30 for default 40
+        tail_count = max_entries - head_count  # 10 for default 40
+
+        head = compacted[:head_count]
+        tail = compacted[-tail_count:]
+        dropped_count = total_entries - max_entries
+
+        # Add a truncation marker
+        truncation_marker = {
+            "timestamp": "",
+            "line": {
+                "_truncated": True,
+                "_message": f"[{dropped_count} entries omitted - showing first {head_count} + last {tail_count} of {total_entries}]",
+            },
+        }
+        compacted = head + [truncation_marker] + tail
+        truncated = True
+
     original_chars = len(text)
-    compact_json = json_mod.dumps({"data": compacted, "count": len(compacted)})
+    output_data = {
+        "data": compacted,
+        "count": len(compacted),
+        "total_entries": total_entries,
+    }
+    if truncated:
+        output_data["truncated"] = True
+        output_data["dropped_count"] = total_entries - max_entries
+
+    compact_json = json_mod.dumps(output_data)
     saved_pct = (1 - len(compact_json) / original_chars) * 100 if original_chars else 0
-    logger.info(
-        f"📦 Compacted Loki result: {original_chars:,} → {len(compact_json):,} chars "
-        f"({saved_pct:.0f}% reduction, {len(compacted)} entries)"
-    )
+
+    if truncated:
+        logger.info(
+            f"📦 Compacted Loki result: {original_chars:,} → {len(compact_json):,} chars "
+            f"({saved_pct:.0f}% reduction, {total_entries} → {len(compacted)} entries, "
+            f"⚠️ {total_entries - max_entries} entries truncated)"
+        )
+    else:
+        logger.info(
+            f"📦 Compacted Loki result: {original_chars:,} → {len(compact_json):,} chars "
+            f"({saved_pct:.0f}% reduction, {len(compacted)} entries)"
+        )
 
     # Return in the same format the SDK expects
     if isinstance(result, list) and hasattr(result[0], "text"):
@@ -1341,6 +1399,146 @@ async def log_tool_result(event: ToolEnd):
             logger.info(f"✅ Tool {tool_name} completed")
 
 
+def _compact_evidence(state: "InvestigationState") -> int:
+    """Deduplicate and compact evidence items.
+
+    Returns number of items removed.
+    """
+    if not state.evidence:
+        return 0
+
+    seen_values: dict[str, Evidence] = {}
+    to_remove = []
+
+    for evidence in state.evidence:
+        key = f"{evidence.type}:{evidence.value.lower()}"
+        if key in seen_values:
+            existing = seen_values[key]
+            # Keep the one with higher confidence or more MITRE techniques
+            if evidence.confidence > existing.confidence or len(evidence.mitre_techniques) > len(
+                existing.mitre_techniques
+            ):
+                to_remove.append(existing)
+                seen_values[key] = evidence
+            else:
+                to_remove.append(evidence)
+        else:
+            seen_values[key] = evidence
+
+    for item in to_remove:
+        if item in state.evidence:
+            state.evidence.remove(item)
+
+    return len(to_remove)
+
+
+def _compact_timeline(state: "InvestigationState", max_events: int = 30) -> int:
+    """Compact timeline by summarizing middle events.
+
+    Keeps first 5 and last 10 events, summarizes middle.
+    Returns number of events compacted.
+    """
+    from ares.core.models import TimelineEvent
+
+    if len(state.timeline) <= max_events:
+        return 0
+
+    head_count = 5
+    tail_count = 10
+    keep_count = head_count + tail_count
+
+    if len(state.timeline) <= keep_count:
+        return 0
+
+    head = state.timeline[:head_count]
+    tail = state.timeline[-tail_count:]
+    middle = state.timeline[head_count:-tail_count]
+    compacted_count = len(middle)
+
+    # Create a summary event for the middle section
+    if middle:
+        # Extract unique techniques and hosts from middle events
+        techniques = set()
+        evidence_ids = set()
+        for event in middle:
+            techniques.update(event.mitre_techniques)
+            evidence_ids.update(event.evidence_ids)
+
+        summary_event = TimelineEvent(
+            id="tl-compact-summary",
+            timestamp=middle[0].timestamp,
+            description=f"[{compacted_count} events compacted: {middle[0].description[:50]}... to ...{middle[-1].description[:50]}]",
+            evidence_ids=list(evidence_ids)[:10],  # Limit to avoid bloat
+            mitre_techniques=list(techniques)[:5],
+            confidence=0.8,
+            source="compaction",
+        )
+
+        state.timeline = head + [summary_event] + tail
+        return compacted_count
+
+    return 0
+
+
+async def periodic_context_compaction(event: ToolEnd):
+    """Periodically compact investigation context to manage token usage.
+
+    Runs every N steps (configurable) and performs:
+    1. Evidence deduplication
+    2. Timeline compaction (summarize middle events)
+
+    This prevents context window overflow during long investigations.
+    """
+    global _compaction_step_count, _last_compaction_step
+
+    if not _current_state:
+        return
+
+    _compaction_step_count += 1
+
+    interval = get_context_compaction_interval()
+    if interval <= 0:
+        return  # Disabled
+
+    # Check if we should run compaction
+    steps_since_last = _compaction_step_count - _last_compaction_step
+    if steps_since_last < interval:
+        return
+
+    # Check thresholds
+    evidence_threshold = get_max_evidence_before_compaction()
+    timeline_threshold = get_max_timeline_before_compaction()
+
+    evidence_count = len(_current_state.evidence)
+    timeline_count = len(_current_state.timeline)
+
+    needs_compaction = evidence_count > evidence_threshold or timeline_count > timeline_threshold
+
+    if not needs_compaction:
+        return
+
+    logger.info(
+        f"🗜️ Context compaction triggered at step {_compaction_step_count} "
+        f"(evidence: {evidence_count}, timeline: {timeline_count})"
+    )
+
+    # Compact evidence
+    evidence_removed = _compact_evidence(_current_state)
+    if evidence_removed > 0:
+        logger.info(f"🗜️ Removed {evidence_removed} duplicate evidence items")
+
+    # Compact timeline
+    timeline_compacted = _compact_timeline(_current_state, max_events=timeline_threshold)
+    if timeline_compacted > 0:
+        logger.info(f"🗜️ Compacted {timeline_compacted} timeline events into summary")
+
+    _last_compaction_step = _compaction_step_count
+
+    dn.log_metric("context_compaction_runs", 1, mode="count")
+    dn.log_metric("evidence_compacted", evidence_removed, mode="count")
+    dn.log_metric("timeline_compacted", timeline_compacted, mode="count")
+
+
 unstall_hook = retry_with_feedback(
     event_type=AgentStalled,
     feedback=(
@@ -1427,6 +1625,60 @@ def max_tool_calls_stop(max_calls: int = 20) -> StopCondition:
         return False
 
     return StopCondition(stop, name="stop_on_max_tool_calls")
+
+
+def low_medium_severity_early_exit_stop() -> StopCondition:
+    """Stop condition for early exit on LOW/MEDIUM severity alerts.
+
+    For lower-severity alerts, we don't need exhaustive investigation.
+    Exit early if:
+    - Severity is LOW or MEDIUM
+    - Minimum steps reached (default 8)
+    - Either sufficient evidence found OR minimum queries executed
+
+    This prevents wasting cycles on low-priority alerts while still
+    ensuring basic investigation coverage.
+    """
+    from collections.abc import Sequence
+
+    def stop(events: Sequence[AgentEvent]) -> bool:
+        if not _current_state:
+            return False
+
+        # Only apply to LOW/MEDIUM severity
+        severity = _current_state.alert.get("labels", {}).get("severity", "").lower()
+        if severity not in ("low", "medium", "warning", "info"):
+            return False
+
+        # Count steps (ToolEnd events)
+        step_count = sum(
+            1 for e in events if isinstance(e, ToolEnd) and hasattr(e, "tool_call") and e.tool_call
+        )
+
+        min_steps = get_low_medium_early_exit_min_steps()
+        min_evidence = get_low_medium_early_exit_min_evidence()
+        min_queries = get_low_medium_early_exit_min_queries()
+
+        if step_count < min_steps:
+            return False
+
+        evidence_count = len(_current_state.evidence) if _current_state else 0
+        queries_run = _total_queries
+
+        # Early exit if:
+        # - Enough evidence found, OR
+        # - Enough queries run (even if no evidence - that's a finding too)
+        if evidence_count >= min_evidence or queries_run >= min_queries:
+            logger.info(
+                f"⏱️ EARLY EXIT: {severity.upper()} severity, {step_count} steps, "
+                f"{evidence_count} evidence, {queries_run} queries - "
+                "sufficient investigation for this severity level"
+            )
+            return True
+
+        return False
+
+    return StopCondition(stop, name="stop_on_low_medium_early_exit")
 
 
 def create_investigation_agent(
@@ -1567,11 +1819,13 @@ def create_investigation_agent(
         hooks=[
             log_tool_usage,
             log_tool_result,
+            periodic_context_compaction,  # Compact evidence/timeline periodically
             unstall_hook,
         ],
         stop_conditions=[
             tool_use("complete_investigation"),
             tool_use("escalate_investigation"),
+            low_medium_severity_early_exit_stop(),  # Early exit for LOW/MEDIUM severity
             query_limit_hit_stop(),  # Stop immediately when query limit is hit
             max_queries_stop(max_queries=12),  # Was 5 - force stop after 12 queries
             max_tool_calls_stop(max_calls=50),  # Was 20 - force stop after 50 total tool calls

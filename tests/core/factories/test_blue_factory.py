@@ -19,6 +19,9 @@ from ares.core.factories.blue_factory import (
     _calculate_bonus_queries,
     _check_duplicate_query,
     _check_query_limit,
+    _compact_evidence,
+    _compact_loki_result,
+    _compact_timeline,
     _count_successful_query,
     _extract_result_count,
     _get_query_limit,
@@ -32,8 +35,10 @@ from ares.core.factories.blue_factory import (
     filter_essential_mcp_tools,
     log_tool_result,
     log_tool_usage,
+    low_medium_severity_early_exit_stop,
     max_queries_stop,
     max_tool_calls_stop,
+    periodic_context_compaction,
     query_limit_hit_stop,
     reset_query_tracking,
     set_investigation_state,
@@ -1524,3 +1529,889 @@ class TestUserChainMap:
 
         assert "administrator" in USER_CHAIN_MAP
         assert "detect_lateral_movement" in USER_CHAIN_MAP["administrator"]
+
+
+# ============================================================================
+# Context Compaction Tests (new blue-compaction feature)
+# ============================================================================
+
+
+class TestCompactEvidence:
+    """Tests for _compact_evidence function."""
+
+    def test_empty_evidence_returns_zero(self, investigation_state: InvestigationState):
+        """Test that empty evidence list returns 0."""
+
+        investigation_state.evidence = []
+        removed = _compact_evidence(investigation_state)
+        assert removed == 0
+
+    def test_no_duplicates_returns_zero(self, investigation_state: InvestigationState):
+        """Test that no duplicates means nothing removed."""
+
+        investigation_state.evidence = [
+            Evidence(
+                id="ev-1",
+                type="ip",
+                value="192.168.1.1",
+                source="test",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=[],
+                confidence=0.8,
+            ),
+            Evidence(
+                id="ev-2",
+                type="ip",
+                value="192.168.1.2",
+                source="test",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=[],
+                confidence=0.8,
+            ),
+        ]
+        removed = _compact_evidence(investigation_state)
+        assert removed == 0
+        assert len(investigation_state.evidence) == 2
+
+    def test_removes_duplicate_by_type_value(self, investigation_state: InvestigationState):
+        """Test that duplicates are detected by type:value key."""
+
+        investigation_state.evidence = [
+            Evidence(
+                id="ev-1",
+                type="ip",
+                value="192.168.1.1",
+                source="test1",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=[],
+                confidence=0.8,
+            ),
+            Evidence(
+                id="ev-2",
+                type="ip",
+                value="192.168.1.1",  # Same value
+                source="test2",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=[],
+                confidence=0.7,
+            ),
+        ]
+        removed = _compact_evidence(investigation_state)
+        assert removed == 1
+        assert len(investigation_state.evidence) == 1
+
+    def test_keeps_higher_confidence(self, investigation_state: InvestigationState):
+        """Test that higher confidence evidence is kept."""
+
+        investigation_state.evidence = [
+            Evidence(
+                id="ev-1",
+                type="ip",
+                value="192.168.1.1",
+                source="test1",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=[],
+                confidence=0.5,  # Lower confidence
+            ),
+            Evidence(
+                id="ev-2",
+                type="ip",
+                value="192.168.1.1",
+                source="test2",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=[],
+                confidence=0.9,  # Higher confidence - should be kept
+            ),
+        ]
+        removed = _compact_evidence(investigation_state)
+        assert removed == 1
+        assert investigation_state.evidence[0].id == "ev-2"
+        assert investigation_state.evidence[0].confidence == 0.9
+
+    def test_keeps_more_mitre_techniques(self, investigation_state: InvestigationState):
+        """Test that evidence with more MITRE techniques is kept when confidence is equal."""
+
+        investigation_state.evidence = [
+            Evidence(
+                id="ev-1",
+                type="hash",
+                value="abc123",
+                source="test1",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.HASH_VALUES,
+                mitre_techniques=["T1003"],  # Fewer techniques
+                confidence=0.8,
+            ),
+            Evidence(
+                id="ev-2",
+                type="hash",
+                value="ABC123",  # Same (case-insensitive)
+                source="test2",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.HASH_VALUES,
+                mitre_techniques=["T1003", "T1059", "T1078"],  # More techniques - should be kept
+                confidence=0.8,
+            ),
+        ]
+        removed = _compact_evidence(investigation_state)
+        assert removed == 1
+        assert investigation_state.evidence[0].id == "ev-2"
+        assert len(investigation_state.evidence[0].mitre_techniques) == 3
+
+    def test_case_insensitive_value_comparison(self, investigation_state: InvestigationState):
+        """Test that value comparison is case-insensitive."""
+
+        investigation_state.evidence = [
+            Evidence(
+                id="ev-1",
+                type="user",
+                value="JOHN.DOE",
+                source="test1",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.NETWORK_HOST_ARTIFACTS,
+                mitre_techniques=[],
+                confidence=0.8,
+            ),
+            Evidence(
+                id="ev-2",
+                type="user",
+                value="john.doe",  # Same user, different case
+                source="test2",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.NETWORK_HOST_ARTIFACTS,
+                mitre_techniques=[],
+                confidence=0.7,
+            ),
+        ]
+        removed = _compact_evidence(investigation_state)
+        assert removed == 1
+        assert len(investigation_state.evidence) == 1
+
+    def test_different_types_not_deduplicated(self, investigation_state: InvestigationState):
+        """Test that same value with different types are not considered duplicates."""
+
+        investigation_state.evidence = [
+            Evidence(
+                id="ev-1",
+                type="ip",
+                value="192.168.1.1",
+                source="test1",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=[],
+                confidence=0.8,
+            ),
+            Evidence(
+                id="ev-2",
+                type="host",  # Different type
+                value="192.168.1.1",
+                source="test2",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=[],
+                confidence=0.8,
+            ),
+        ]
+        removed = _compact_evidence(investigation_state)
+        assert removed == 0
+        assert len(investigation_state.evidence) == 2
+
+
+class TestCompactTimeline:
+    """Tests for _compact_timeline function."""
+
+    def test_no_compaction_under_threshold(self, investigation_state: InvestigationState):
+        """Test that no compaction happens when under threshold."""
+        from ares.core.models import TimelineEvent
+
+        investigation_state.timeline = [
+            TimelineEvent(
+                id=f"tl-{i}",
+                timestamp=datetime.now(timezone.utc),
+                description=f"Event {i}",
+                mitre_techniques=[],
+                confidence=0.8,
+                source="test",
+            )
+            for i in range(10)
+        ]
+        compacted = _compact_timeline(investigation_state, max_events=30)
+        assert compacted == 0
+        assert len(investigation_state.timeline) == 10
+
+    def test_no_compaction_at_keep_count(self, investigation_state: InvestigationState):
+        """Test no compaction when timeline equals head+tail count (15)."""
+        from ares.core.models import TimelineEvent
+
+        # head_count=5, tail_count=10, so 15 events won't trigger compaction
+        investigation_state.timeline = [
+            TimelineEvent(
+                id=f"tl-{i}",
+                timestamp=datetime.now(timezone.utc),
+                description=f"Event {i}",
+                mitre_techniques=[],
+                confidence=0.8,
+                source="test",
+            )
+            for i in range(15)
+        ]
+        compacted = _compact_timeline(investigation_state, max_events=10)
+        assert compacted == 0
+
+    def test_compacts_middle_events(self, investigation_state: InvestigationState):
+        """Test that middle events are compacted into a summary."""
+        from ares.core.models import TimelineEvent
+
+        # Create 25 events - should compact middle (events 5-14)
+        investigation_state.timeline = [
+            TimelineEvent(
+                id=f"tl-{i}",
+                timestamp=datetime.now(timezone.utc),
+                description=f"Event {i} happened here with details",
+                evidence_ids=[f"ev-{i}"],
+                mitre_techniques=[f"T100{i % 10}"],
+                confidence=0.8,
+                source="test",
+            )
+            for i in range(25)
+        ]
+        compacted = _compact_timeline(investigation_state, max_events=20)
+        assert compacted == 10  # Middle 10 events compacted
+
+        # Should have: 5 head + 1 summary + 10 tail = 16 events
+        assert len(investigation_state.timeline) == 16
+
+        # Verify summary event exists
+        summary = investigation_state.timeline[5]
+        assert summary.id == "tl-compact-summary"
+        assert summary.source == "compaction"
+        assert "10 events compacted" in summary.description
+
+    def test_preserves_head_and_tail(self, investigation_state: InvestigationState):
+        """Test that head and tail events are preserved."""
+        from ares.core.models import TimelineEvent
+
+        investigation_state.timeline = [
+            TimelineEvent(
+                id=f"tl-{i}",
+                timestamp=datetime.now(timezone.utc),
+                description=f"Event {i}",
+                mitre_techniques=[],
+                confidence=0.8,
+                source="test",
+            )
+            for i in range(30)
+        ]
+        _compact_timeline(investigation_state, max_events=20)
+
+        # First 5 should be preserved
+        for i in range(5):
+            assert investigation_state.timeline[i].id == f"tl-{i}"
+
+        # Last 10 should be preserved (indices 20-29 from original)
+        for i, orig_idx in enumerate(range(20, 30)):
+            # Account for summary event at index 5
+            timeline_idx = 6 + i
+            assert investigation_state.timeline[timeline_idx].id == f"tl-{orig_idx}"
+
+    def test_summary_aggregates_techniques(self, investigation_state: InvestigationState):
+        """Test that summary event aggregates MITRE techniques."""
+        from ares.core.models import TimelineEvent
+
+        investigation_state.timeline = [
+            TimelineEvent(
+                id=f"tl-{i}",
+                timestamp=datetime.now(timezone.utc),
+                description=f"Event {i}",
+                mitre_techniques=[f"T100{i}"] if i >= 5 and i < 15 else [],
+                confidence=0.8,
+                source="test",
+            )
+            for i in range(25)
+        ]
+        _compact_timeline(investigation_state, max_events=20)
+
+        summary = investigation_state.timeline[5]
+        # Should have aggregated techniques from middle events (capped at 5)
+        assert len(summary.mitre_techniques) <= 5
+        assert len(summary.mitre_techniques) > 0
+
+    def test_summary_aggregates_evidence_ids(self, investigation_state: InvestigationState):
+        """Test that summary event aggregates evidence IDs."""
+        from ares.core.models import TimelineEvent
+
+        investigation_state.timeline = [
+            TimelineEvent(
+                id=f"tl-{i}",
+                timestamp=datetime.now(timezone.utc),
+                description=f"Event {i}",
+                evidence_ids=[f"ev-{i}"],
+                mitre_techniques=[],
+                confidence=0.8,
+                source="test",
+            )
+            for i in range(25)
+        ]
+        _compact_timeline(investigation_state, max_events=20)
+
+        summary = investigation_state.timeline[5]
+        # Should have aggregated evidence IDs from middle events (capped at 10)
+        assert len(summary.evidence_ids) <= 10
+        assert len(summary.evidence_ids) > 0
+
+
+class TestCompactLokiResultTruncation:
+    """Tests for _compact_loki_result truncation logic."""
+
+    def test_no_truncation_under_limit(self):
+        """Test that results under the limit are not truncated."""
+        import json
+
+        # Create result with 10 entries (under default 40)
+        entries = [
+            {"timestamp": f"2024-01-01T{i:02d}:00:00Z", "line": f'{{"event_id": 4624, "idx": {i}}}'}
+            for i in range(10)
+        ]
+        result_text = json.dumps({"data": entries})
+
+        # Mock ContentText-like object
+        mock_content = MagicMock()
+        mock_content.text = result_text
+
+        compacted = _compact_loki_result([mock_content])
+        compacted_data = json.loads(compacted[0].text)
+
+        assert compacted_data.get("truncated") is None
+        assert "dropped_count" not in compacted_data
+
+    def test_truncation_over_limit(self, monkeypatch):
+        """Test that results over the limit are truncated with head+tail."""
+        import json
+
+        # Mock config to use a smaller limit for testing
+        monkeypatch.setattr("ares.core.factories.blue_factory.get_max_result_entries", lambda: 10)
+
+        # Create result with 25 entries (over limit of 10)
+        entries = [
+            {"timestamp": f"2024-01-01T{i:02d}:00:00Z", "line": f'{{"event_id": 4624, "idx": {i}}}'}
+            for i in range(25)
+        ]
+        result_text = json.dumps({"data": entries})
+
+        mock_content = MagicMock()
+        mock_content.text = result_text
+
+        compacted = _compact_loki_result([mock_content])
+        compacted_data = json.loads(compacted[0].text)
+
+        assert compacted_data["truncated"] is True
+        assert compacted_data["total_entries"] == 25
+        assert compacted_data["dropped_count"] == 15  # 25 - 10
+
+    def test_truncation_preserves_head_and_tail(self, monkeypatch):
+        """Test that truncation keeps head (75%) and tail (25%) entries."""
+        import json
+
+        monkeypatch.setattr("ares.core.factories.blue_factory.get_max_result_entries", lambda: 8)
+
+        # Create 20 entries with unique identifiers
+        entries = [
+            {"timestamp": f"2024-01-01T{i:02d}:00:00Z", "line": f'{{"idx": {i}}}'}
+            for i in range(20)
+        ]
+        result_text = json.dumps({"data": entries})
+
+        mock_content = MagicMock()
+        mock_content.text = result_text
+
+        compacted = _compact_loki_result([mock_content])
+        compacted_data = json.loads(compacted[0].text)
+
+        # With limit 8: head=6 (75%), tail=2 (25%)
+        data = compacted_data["data"]
+        # Should have 6 head + 1 truncation marker + 2 tail = 9 entries
+        assert len(data) == 9
+
+        # Verify head entries (indices 0-5)
+        for i in range(6):
+            assert data[i]["line"]["idx"] == i
+
+        # Verify truncation marker
+        assert data[6]["line"]["_truncated"] is True
+        assert "entries omitted" in data[6]["line"]["_message"]
+
+        # Verify tail entries (indices 18, 19 from original)
+        assert data[7]["line"]["idx"] == 18
+        assert data[8]["line"]["idx"] == 19
+
+    def test_returns_original_for_non_json(self):
+        """Test that non-JSON results are returned unchanged."""
+
+        result = "not json data"
+        compacted = _compact_loki_result(result)
+        assert compacted == result
+
+    def test_returns_original_for_empty_list(self):
+        """Test that empty list is returned unchanged."""
+
+        result = []
+        compacted = _compact_loki_result(result)
+        assert compacted == result
+
+
+class TestLowMediumSeverityEarlyExitStop:
+    """Tests for low_medium_severity_early_exit_stop stop condition."""
+
+    def test_returns_stop_condition(self):
+        """Test that a StopCondition is returned."""
+        from dreadnode.agent.stop import StopCondition
+
+        stop_condition = low_medium_severity_early_exit_stop()
+        assert isinstance(stop_condition, StopCondition)
+        assert callable(stop_condition.func)
+        assert stop_condition.name == "stop_on_low_medium_early_exit"
+
+    def test_does_not_stop_without_state(self):
+        """Test does not stop when no investigation state is set."""
+        import ares.core.factories.blue_factory as factory
+        from ares.core.factories.blue_factory import (
+            reset_query_tracking,
+        )
+
+        reset_query_tracking()
+        factory._current_state = None
+
+        stop_condition = low_medium_severity_early_exit_stop()
+        result = stop_condition.func([])
+        assert result is False
+
+    def test_does_not_stop_for_critical_severity(self, investigation_state: InvestigationState):
+        """Test does not stop for CRITICAL severity alerts."""
+        from dreadnode.agent.events import ToolEnd
+
+        from ares.core.factories.blue_factory import (
+            reset_query_tracking,
+            set_investigation_state,
+        )
+
+        reset_query_tracking()
+        investigation_state.alert["labels"]["severity"] = "critical"
+        set_investigation_state(investigation_state)
+
+        # Create mock tool end events
+        events = []
+        for i in range(15):
+            mock_event = MagicMock(spec=ToolEnd)
+            mock_tool_call = MagicMock()
+            mock_tool_call.name = f"tool_{i}"
+            mock_event.tool_call = mock_tool_call
+            events.append(mock_event)
+
+        stop_condition = low_medium_severity_early_exit_stop()
+        result = stop_condition.func(events)
+        assert result is False
+
+    def test_does_not_stop_for_high_severity(self, investigation_state: InvestigationState):
+        """Test does not stop for HIGH severity alerts."""
+        from dreadnode.agent.events import ToolEnd
+
+        from ares.core.factories.blue_factory import (
+            reset_query_tracking,
+            set_investigation_state,
+        )
+
+        reset_query_tracking()
+        investigation_state.alert["labels"]["severity"] = "high"
+        set_investigation_state(investigation_state)
+
+        events = [MagicMock(spec=ToolEnd) for _ in range(15)]
+        for e in events:
+            e.tool_call = MagicMock()
+            e.tool_call.name = "test"
+
+        stop_condition = low_medium_severity_early_exit_stop()
+        result = stop_condition.func(events)
+        assert result is False
+
+    def test_stops_for_low_severity_with_evidence(self, investigation_state: InvestigationState):
+        """Test stops for LOW severity when min steps and evidence reached."""
+        from dreadnode.agent.events import ToolEnd
+
+        from ares.core.factories.blue_factory import (
+            reset_query_tracking,
+            set_investigation_state,
+        )
+
+        reset_query_tracking()
+        investigation_state.alert["labels"]["severity"] = "low"
+        investigation_state.evidence = [
+            Evidence(
+                id="ev-1",
+                type="ip",
+                value="192.168.1.1",
+                source="test",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=[],
+                confidence=0.8,
+            ),
+            Evidence(
+                id="ev-2",
+                type="ip",
+                value="192.168.1.2",
+                source="test",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=[],
+                confidence=0.8,
+            ),
+        ]
+        set_investigation_state(investigation_state)
+
+        # Create 10 mock tool end events (above min_steps=8)
+        events = []
+        for i in range(10):
+            mock_event = MagicMock(spec=ToolEnd)
+            mock_event.tool_call = MagicMock()
+            mock_event.tool_call.name = f"tool_{i}"
+            events.append(mock_event)
+
+        stop_condition = low_medium_severity_early_exit_stop()
+        result = stop_condition.func(events)
+        assert result is True
+
+    def test_stops_for_medium_severity_with_queries(self, investigation_state: InvestigationState):
+        """Test stops for MEDIUM severity when min queries reached."""
+        from dreadnode.agent.events import ToolEnd
+
+        import ares.core.factories.blue_factory as factory
+        from ares.core.factories.blue_factory import (
+            reset_query_tracking,
+            set_investigation_state,
+        )
+
+        reset_query_tracking()
+        investigation_state.alert["labels"]["severity"] = "medium"
+        investigation_state.evidence = []  # No evidence
+        set_investigation_state(investigation_state)
+
+        # Set _total_queries to meet threshold
+        factory._total_queries = 5  # Above min_queries=4
+
+        events = [MagicMock(spec=ToolEnd) for _ in range(10)]
+        for e in events:
+            e.tool_call = MagicMock()
+            e.tool_call.name = "test"
+
+        stop_condition = low_medium_severity_early_exit_stop()
+        result = stop_condition.func(events)
+        assert result is True
+
+    def test_does_not_stop_under_min_steps(self, investigation_state: InvestigationState):
+        """Test does not stop when under minimum steps."""
+        from dreadnode.agent.events import ToolEnd
+
+        from ares.core.factories.blue_factory import (
+            reset_query_tracking,
+            set_investigation_state,
+        )
+
+        reset_query_tracking()
+        investigation_state.alert["labels"]["severity"] = "low"
+        investigation_state.evidence = [
+            Evidence(
+                id="ev-1",
+                type="ip",
+                value="192.168.1.1",
+                source="test",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=[],
+                confidence=0.8,
+            ),
+        ] * 5  # Plenty of evidence
+        set_investigation_state(investigation_state)
+
+        # Only 3 steps (under min_steps=8)
+        events = [MagicMock(spec=ToolEnd) for _ in range(3)]
+        for e in events:
+            e.tool_call = MagicMock()
+            e.tool_call.name = "test"
+
+        stop_condition = low_medium_severity_early_exit_stop()
+        result = stop_condition.func(events)
+        assert result is False
+
+    def test_stops_for_warning_severity(self, investigation_state: InvestigationState):
+        """Test stops for WARNING severity (treated like LOW/MEDIUM)."""
+        from dreadnode.agent.events import ToolEnd
+
+        import ares.core.factories.blue_factory as factory
+        from ares.core.factories.blue_factory import (
+            reset_query_tracking,
+            set_investigation_state,
+        )
+
+        reset_query_tracking()
+        investigation_state.alert["labels"]["severity"] = "warning"
+        factory._total_queries = 5
+        set_investigation_state(investigation_state)
+
+        events = [MagicMock(spec=ToolEnd) for _ in range(10)]
+        for e in events:
+            e.tool_call = MagicMock()
+            e.tool_call.name = "test"
+
+        stop_condition = low_medium_severity_early_exit_stop()
+        result = stop_condition.func(events)
+        assert result is True
+
+    def test_stops_for_info_severity(self, investigation_state: InvestigationState):
+        """Test stops for INFO severity (treated like LOW/MEDIUM)."""
+        from dreadnode.agent.events import ToolEnd
+
+        import ares.core.factories.blue_factory as factory
+        from ares.core.factories.blue_factory import (
+            reset_query_tracking,
+            set_investigation_state,
+        )
+
+        reset_query_tracking()
+        investigation_state.alert["labels"]["severity"] = "info"
+        factory._total_queries = 5
+        set_investigation_state(investigation_state)
+
+        events = [MagicMock(spec=ToolEnd) for _ in range(10)]
+        for e in events:
+            e.tool_call = MagicMock()
+            e.tool_call.name = "test"
+
+        stop_condition = low_medium_severity_early_exit_stop()
+        result = stop_condition.func(events)
+        assert result is True
+
+
+class TestPeriodicContextCompaction:
+    """Tests for periodic_context_compaction hook."""
+
+    @pytest.mark.asyncio
+    async def test_increments_step_count(self, investigation_state: InvestigationState):
+        """Test that step count is incremented on each call."""
+        import ares.core.factories.blue_factory as factory
+        from ares.core.factories.blue_factory import (
+            reset_query_tracking,
+            set_investigation_state,
+        )
+
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+
+        mock_event = MagicMock()
+        mock_event.tool_call = MagicMock()
+
+        initial_count = factory._compaction_step_count
+
+        await periodic_context_compaction(mock_event)
+
+        assert factory._compaction_step_count == initial_count + 1
+
+    @pytest.mark.asyncio
+    async def test_no_compaction_without_state(self):
+        """Test that compaction doesn't happen without investigation state."""
+        import ares.core.factories.blue_factory as factory
+        from ares.core.factories.blue_factory import (
+            reset_query_tracking,
+        )
+
+        reset_query_tracking()
+        factory._current_state = None
+
+        mock_event = MagicMock()
+        await periodic_context_compaction(mock_event)
+        # Should not raise
+
+    @pytest.mark.asyncio
+    async def test_no_compaction_when_disabled(
+        self, investigation_state: InvestigationState, monkeypatch
+    ):
+        """Test that compaction is skipped when interval is 0."""
+        from ares.core.factories.blue_factory import (
+            reset_query_tracking,
+            set_investigation_state,
+        )
+
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+        monkeypatch.setattr(
+            "ares.core.factories.blue_factory.get_context_compaction_interval", lambda: 0
+        )
+
+        mock_event = MagicMock()
+        await periodic_context_compaction(mock_event)
+        # Should not raise, compaction disabled
+
+    @pytest.mark.asyncio
+    async def test_no_compaction_before_interval(
+        self, investigation_state: InvestigationState, monkeypatch
+    ):
+        """Test that compaction doesn't happen before interval steps."""
+        from ares.core.factories.blue_factory import (
+            reset_query_tracking,
+            set_investigation_state,
+        )
+
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+        monkeypatch.setattr(
+            "ares.core.factories.blue_factory.get_context_compaction_interval", lambda: 10
+        )
+
+        # Add lots of evidence to trigger compaction if interval was met
+        investigation_state.evidence = [
+            Evidence(
+                id=f"ev-{i}",
+                type="ip",
+                value=f"192.168.1.{i}",
+                source="test",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=[],
+                confidence=0.8,
+            )
+            for i in range(100)
+        ]
+
+        mock_event = MagicMock()
+        # Only 3 steps - under interval of 10
+        for _ in range(3):
+            await periodic_context_compaction(mock_event)
+
+        # Evidence should not be compacted yet
+        assert len(investigation_state.evidence) == 100
+
+    @pytest.mark.asyncio
+    async def test_no_compaction_under_threshold(
+        self, investigation_state: InvestigationState, monkeypatch
+    ):
+        """Test that compaction doesn't happen when under thresholds."""
+        from ares.core.factories.blue_factory import (
+            reset_query_tracking,
+            set_investigation_state,
+        )
+
+        reset_query_tracking()
+        set_investigation_state(investigation_state)
+        monkeypatch.setattr(
+            "ares.core.factories.blue_factory.get_context_compaction_interval", lambda: 1
+        )
+        monkeypatch.setattr(
+            "ares.core.factories.blue_factory.get_max_evidence_before_compaction", lambda: 100
+        )
+        monkeypatch.setattr(
+            "ares.core.factories.blue_factory.get_max_timeline_before_compaction", lambda: 100
+        )
+
+        # Add small amount of evidence (under threshold)
+        investigation_state.evidence = [
+            Evidence(
+                id=f"ev-{i}",
+                type="ip",
+                value=f"192.168.1.{i}",
+                source="test",
+                timestamp=datetime.now(timezone.utc),
+                pyramid_level=PyramidLevel.IP_ADDRESSES,
+                mitre_techniques=[],
+                confidence=0.8,
+            )
+            for i in range(10)
+        ]
+
+        mock_event = MagicMock()
+        await periodic_context_compaction(mock_event)
+
+        # No compaction should have happened
+        assert len(investigation_state.evidence) == 10
+
+
+class TestCompactionStateReset:
+    """Tests for compaction state reset in reset_query_tracking."""
+
+    def test_reset_clears_compaction_counters(self):
+        """Test that reset_query_tracking clears compaction counters."""
+        import ares.core.factories.blue_factory as factory
+        from ares.core.factories.blue_factory import reset_query_tracking
+
+        # Set some compaction state
+        factory._compaction_step_count = 50
+        factory._last_compaction_step = 45
+
+        reset_query_tracking()
+
+        assert factory._compaction_step_count == 0
+        assert factory._last_compaction_step == 0
+
+
+class TestCompactionConfigGetters:
+    """Tests for new config getter functions."""
+
+    def test_get_max_result_entries(self):
+        """Test get_max_result_entries returns positive integer."""
+        from ares.core.config import get_max_result_entries
+
+        value = get_max_result_entries()
+        assert isinstance(value, int)
+        assert value > 0
+
+    def test_get_context_compaction_interval(self):
+        """Test get_context_compaction_interval returns non-negative integer."""
+        from ares.core.config import get_context_compaction_interval
+
+        value = get_context_compaction_interval()
+        assert isinstance(value, int)
+        assert value >= 0
+
+    def test_get_max_evidence_before_compaction(self):
+        """Test get_max_evidence_before_compaction returns positive integer."""
+        from ares.core.config import get_max_evidence_before_compaction
+
+        value = get_max_evidence_before_compaction()
+        assert isinstance(value, int)
+        assert value > 0
+
+    def test_get_max_timeline_before_compaction(self):
+        """Test get_max_timeline_before_compaction returns positive integer."""
+        from ares.core.config import get_max_timeline_before_compaction
+
+        value = get_max_timeline_before_compaction()
+        assert isinstance(value, int)
+        assert value > 0
+
+    def test_get_low_medium_early_exit_min_steps(self):
+        """Test get_low_medium_early_exit_min_steps returns positive integer."""
+        from ares.core.config import get_low_medium_early_exit_min_steps
+
+        value = get_low_medium_early_exit_min_steps()
+        assert isinstance(value, int)
+        assert value > 0
+
+    def test_get_low_medium_early_exit_min_evidence(self):
+        """Test get_low_medium_early_exit_min_evidence returns positive integer."""
+        from ares.core.config import get_low_medium_early_exit_min_evidence
+
+        value = get_low_medium_early_exit_min_evidence()
+        assert isinstance(value, int)
+        assert value > 0
+
+    def test_get_low_medium_early_exit_min_queries(self):
+        """Test get_low_medium_early_exit_min_queries returns positive integer."""
+        from ares.core.config import get_low_medium_early_exit_min_queries
+
+        value = get_low_medium_early_exit_min_queries()
+        assert isinstance(value, int)
+        assert value > 0
