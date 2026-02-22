@@ -41,7 +41,7 @@ from ares.tools.blue import (
 )
 from ares.tools.shared import MITRELookupTools
 
-SYSTEM_INSTRUCTIONS = get_template_loader().render("agent/system_instructions.md.jinja")
+SYSTEM_INSTRUCTIONS = get_template_loader().render("blueteam/agents/system_instructions.md.jinja")
 
 # Track query calls - reset per investigation via reset_query_tracking()
 _total_queries = 0  # Only counts queries that returned results

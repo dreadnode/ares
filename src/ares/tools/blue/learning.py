@@ -419,6 +419,18 @@ class LearningTools(Toolset):  # type: ignore[misc]
                     "error": f"No state found for operation: {operation_id}",
                 }
 
+            # Set target domains for evidence validation scoping
+            # This filters extracted IOCs to only include domains/users from the attack
+            from ares.core.evidence_validation import (
+                extract_domains_from_red_team_state,
+                set_target_domains,
+            )
+
+            target_domains = extract_domains_from_red_team_state(state)
+            if target_domains:
+                set_target_domains(target_domains)
+                logger.info(f"Set evidence scope to target domains: {target_domains}")
+
             # Generate the detection playbook
             from ares.eval.detection_playbook import create_detection_playbook
 
@@ -428,6 +440,7 @@ class LearningTools(Toolset):  # type: ignore[misc]
             return {
                 "found": True,
                 "operation_id": playbook.operation_id,
+                "target_domains": sorted(target_domains),  # Domains used for evidence scoping
                 "attack_window": {
                     "start": playbook.attack_window_start.isoformat(),
                     "end": playbook.attack_window_end.isoformat(),

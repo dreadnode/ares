@@ -6,12 +6,18 @@ from ares.core.evidence_validation import (
     _classify_ioc,
     _extract_patterns_from_string,
     _extract_searchable_values,
+    _is_garbled_value,
+    _is_in_target_scope,
+    _is_user_in_target_scope,
     adjust_confidence_for_validation,
     auto_extract_evidence_from_query,
     boost_confidence_for_quality,
+    clear_target_domains,
+    extract_domains_from_red_team_state,
     get_recent_query_ids,
     get_suggested_iocs,
     reset_evidence_validation,
+    set_target_domains,
     store_query_result,
     validate_evidence_value,
 )
@@ -151,6 +157,55 @@ class TestExtractSearchableValues:
         long_string = "x" * 1000
         values = _extract_searchable_values(long_string)
         assert long_string.lower() not in values
+
+    def test_extract_from_content_text_object(self):
+        """Test extracting from MCP ContentText-like objects with .text attribute."""
+
+        class MockContentText:
+            """Mock MCP ContentText object."""
+
+            def __init__(self, text: str):
+                self.text = text
+
+        # Simulate MCP result format: list of ContentText with JSON in .text
+        json_content = '{"data": [{"ip": "192.168.58.100", "user": "testuser@contoso.local"}]}'
+        content_text = MockContentText(json_content)
+
+        values = _extract_searchable_values([content_text])
+        assert "192.168.58.100" in values
+        assert "testuser@contoso.local" in values
+
+    def test_extract_from_embedded_json_string(self):
+        """Test extracting from JSON strings embedded in results."""
+        # Common format from Loki - JSON as string value
+        data = '{"TargetUserName": "admin", "IpAddress": "192.168.58.50"}'
+        values = _extract_searchable_values(data)
+        assert "admin" in values
+        assert "192.168.58.50" in values
+
+    def test_extract_from_loki_style_result(self):
+        """Test extracting from Loki-style result structure."""
+        # Simulates compact Loki result after _compact_loki_result processing
+        result = {
+            "data": [
+                {
+                    "timestamp": "2024-01-01T00:00:00Z",
+                    "line": {
+                        "event_id": 4624,
+                        "computer": "dc01.contoso.local",
+                        "fields": {
+                            "TargetUserName": "administrator",
+                            "IpAddress": "192.168.58.100",
+                        },
+                    },
+                }
+            ],
+            "count": 1,
+        }
+        values = _extract_searchable_values(result)
+        assert "dc01.contoso.local" in values
+        assert "administrator" in values
+        assert "192.168.58.100" in values
 
 
 class TestExtractPatternsFromString:
@@ -356,6 +411,46 @@ class TestClassifyIOC:
         assert _classify_ioc("random_string") is None
         assert _classify_ioc("123") is None
 
+    def test_classify_file_extensions_not_hostnames(self):
+        """Test that file extensions are NOT classified as hostnames.
+
+        Files like svchost.exe look like hostnames but should be rejected.
+        This was a real bug where the blue team report showed svchost.exe
+        as a hostname evidence item.
+        """
+        # Common Windows executables that match hostname pattern
+        assert _classify_ioc("svchost.exe") is None
+        assert _classify_ioc("lsass.exe") is None
+        assert _classify_ioc("dfsrs.exe") is None
+        assert _classify_ioc("winlogon.exe") is None
+        assert _classify_ioc("services.exe") is None
+        # Other file extensions
+        assert _classify_ioc("config.dll") is None
+        assert _classify_ioc("script.ps1") is None
+        assert _classify_ioc("malware.sys") is None
+        assert _classify_ioc("setup.msi") is None
+        assert _classify_ioc("debug.log") is None
+
+    def test_classify_windows_paths_not_users(self):
+        """Test that Windows paths are NOT classified as users.
+
+        Paths like windows\\system32 match the DOMAIN\\user pattern but
+        should be rejected. This was a real bug where the blue team report
+        showed windows\\system32 as a user evidence item.
+        """
+        # Common Windows paths that match domain\\user pattern
+        assert _classify_ioc("windows\\system32") is None
+        assert _classify_ioc("windows\\sysvol") is None
+        assert _classify_ioc("system32\\drivers") is None
+        assert _classify_ioc("programdata\\microsoft") is None
+        assert _classify_ioc("users\\administrator") is None
+        # Drive letters
+        assert _classify_ioc("c:\\windows") is None
+        assert _classify_ioc("d:\\data") is None
+        # But valid domain users should still work
+        assert _classify_ioc("contoso\\admin") == "user"
+        assert _classify_ioc("north\\robb.stark") == "user"
+
 
 class TestAdjustConfidenceForValidation:
     """Tests for adjust_confidence_for_validation function."""
@@ -530,3 +625,343 @@ class TestAutoExtractEvidenceFromQuery:
         evidence = auto_extract_evidence_from_query(result, "Loki query for auth logs")
 
         assert any("Loki query" in e["source"] for e in evidence)
+
+
+class TestIsGarbledValue:
+    """Tests for _is_garbled_value function."""
+
+    def test_unicode_escape_is_garbled(self):
+        """Test Unicode escape sequences are detected as garbled."""
+        assert _is_garbled_value("\\u003e0x21993862\\u003c") is True
+        assert _is_garbled_value("test\\u003evalue") is True
+
+    def test_html_entity_style_is_garbled(self):
+        """Test HTML entity-style escapes are detected."""
+        assert _is_garbled_value("u003e0x21993862u003c") is True
+        assert _is_garbled_value("valueu003emore") is True
+
+    def test_hex_heavy_is_garbled(self):
+        """Test hex-heavy strings are detected."""
+        assert _is_garbled_value("0x2199386293847") is True
+
+    def test_mostly_special_chars_is_garbled(self):
+        """Test strings with mostly special characters are detected."""
+        assert _is_garbled_value("!@#$%^&*()") is True
+        assert _is_garbled_value(">>><<<:::") is True
+
+    def test_valid_ip_not_garbled(self):
+        """Test valid IP addresses are not garbled."""
+        assert _is_garbled_value("192.168.58.100") is False
+
+    def test_valid_hostname_not_garbled(self):
+        """Test valid hostnames are not garbled."""
+        assert _is_garbled_value("dc01.contoso.local") is False
+
+    def test_valid_username_not_garbled(self):
+        """Test valid usernames are not garbled."""
+        assert _is_garbled_value("admin@contoso.local") is False
+        assert _is_garbled_value("DOMAIN\\admin") is False
+
+    def test_short_values_not_garbled(self):
+        """Test short values are not flagged by special char ratio."""
+        assert _is_garbled_value("test") is False
+        assert _is_garbled_value("ab.cd") is False
+
+
+class TestTargetDomainScope:
+    """Tests for target domain scope filtering."""
+
+    def setup_method(self):
+        """Clear target domains before each test."""
+        clear_target_domains()
+
+    def teardown_method(self):
+        """Clear target domains after each test."""
+        clear_target_domains()
+
+    def test_no_scope_allows_all(self):
+        """Test that without scope set, all domains are allowed."""
+        assert _is_in_target_scope("dc01.contoso.local") is True
+        assert _is_in_target_scope("server.random.com") is True
+        assert _is_in_target_scope("anything.example.org") is True
+
+    def test_empty_hostname_not_in_scope(self):
+        """Test empty hostname returns False."""
+        set_target_domains(["contoso.local"])
+        assert _is_in_target_scope("") is False
+
+    def test_exact_domain_match(self):
+        """Test exact domain match is in scope."""
+        set_target_domains(["contoso.local", "fabrikam.local"])
+        assert _is_in_target_scope("contoso.local") is True
+        assert _is_in_target_scope("fabrikam.local") is True
+
+    def test_subdomain_match(self):
+        """Test subdomain of target domain is in scope."""
+        set_target_domains(["contoso.local"])
+        assert _is_in_target_scope("dc01.contoso.local") is True
+        assert _is_in_target_scope("sql01.corp.contoso.local") is True
+        assert _is_in_target_scope("web.app.contoso.local") is True
+
+    def test_unrelated_domain_not_in_scope(self):
+        """Test unrelated domains are filtered out when scope is set."""
+        set_target_domains(["contoso.local"])
+        assert _is_in_target_scope("dc01.fabrikam.local") is False
+        assert _is_in_target_scope("random.example.com") is False
+        assert _is_in_target_scope("vortexindustries.local") is False
+
+    def test_case_insensitive(self):
+        """Test scope matching is case insensitive."""
+        set_target_domains(["Contoso.Local"])
+        assert _is_in_target_scope("DC01.CONTOSO.LOCAL") is True
+        assert _is_in_target_scope("dc01.contoso.local") is True
+
+    def test_multiple_target_domains(self):
+        """Test multiple target domains all work."""
+        set_target_domains(["sevenkingdoms.local", "north.sevenkingdoms.local", "essos.local"])
+        assert _is_in_target_scope("winterfell.north.sevenkingdoms.local") is True
+        assert _is_in_target_scope("kingslanding.sevenkingdoms.local") is True
+        assert _is_in_target_scope("meereen.essos.local") is True
+        assert _is_in_target_scope("unrelated.domain.com") is False
+
+    def test_clear_domains_resets_scope(self):
+        """Test clear_target_domains resets to allow-all mode."""
+        set_target_domains(["contoso.local"])
+        assert _is_in_target_scope("random.com") is False
+
+        clear_target_domains()
+        assert _is_in_target_scope("random.com") is True
+
+
+class TestUserDomainScope:
+    """Tests for user domain scope filtering."""
+
+    def setup_method(self):
+        """Clear target domains before each test."""
+        clear_target_domains()
+
+    def teardown_method(self):
+        """Clear target domains after each test."""
+        clear_target_domains()
+
+    def test_no_scope_allows_all_users(self):
+        """Test without scope, all users pass."""
+        assert _is_user_in_target_scope("CONTOSO\\admin") is True
+        assert _is_user_in_target_scope("RANDOM\\user") is True
+        assert _is_user_in_target_scope("user@random.com") is True
+
+    def test_empty_user_not_in_scope(self):
+        """Test empty user returns False when scope is set."""
+        set_target_domains(["contoso.local"])
+        assert _is_user_in_target_scope("") is False
+        assert _is_user_in_target_scope(None) is False  # type: ignore[arg-type]
+
+    def test_domain_backslash_format_matches_netbios(self):
+        """Test DOMAIN\\user format matches NetBIOS name from FQDN."""
+        set_target_domains(["contoso.local"])
+        # "contoso" is NetBIOS of "contoso.local"
+        assert _is_user_in_target_scope("CONTOSO\\admin") is True
+        assert _is_user_in_target_scope("contoso\\admin") is True
+        assert _is_user_in_target_scope("FABRIKAM\\admin") is False
+
+    def test_domain_backslash_format_exact_match(self):
+        """Test DOMAIN\\user format with exact domain match."""
+        set_target_domains(["contoso"])  # Short name only
+        assert _is_user_in_target_scope("contoso\\admin") is True
+        assert _is_user_in_target_scope("fabrikam\\admin") is False
+
+    def test_upn_format_matches_domain(self):
+        """Test user@domain.tld format matches target domains."""
+        set_target_domains(["contoso.local"])
+        assert _is_user_in_target_scope("admin@contoso.local") is True
+        assert _is_user_in_target_scope("admin@dc01.contoso.local") is True
+        assert _is_user_in_target_scope("admin@fabrikam.local") is False
+
+    def test_plain_username_allowed(self):
+        """Test plain username (no domain) is allowed when scope set."""
+        set_target_domains(["contoso.local"])
+        # Plain usernames could be local accounts, so allow them
+        assert _is_user_in_target_scope("administrator") is True
+        assert _is_user_in_target_scope("localuser") is True
+
+    def test_multiple_target_domains(self):
+        """Test multiple target domains all work for users."""
+        set_target_domains(["contoso.local", "fabrikam.local"])
+        assert _is_user_in_target_scope("CONTOSO\\admin") is True
+        assert _is_user_in_target_scope("FABRIKAM\\admin") is True
+        assert _is_user_in_target_scope("OTHERDOMAIN\\admin") is False
+
+    def test_case_insensitive(self):
+        """Test user scope matching is case insensitive."""
+        set_target_domains(["Contoso.Local"])
+        assert _is_user_in_target_scope("CONTOSO\\ADMIN") is True
+        assert _is_user_in_target_scope("contoso\\admin") is True
+        assert _is_user_in_target_scope("admin@CONTOSO.LOCAL") is True
+
+    def test_filters_out_of_scope_users_from_extraction(self):
+        """Test user extraction respects domain scope."""
+        set_target_domains(["contoso.local"])
+        text = "User CONTOSO\\admin logged in. Also saw RANDOM\\attacker and admin@fabrikam.local"
+        patterns = _extract_patterns_from_string(text)
+
+        # Should have in-scope user but not out-of-scope
+        assert "contoso\\admin" in patterns
+        assert "random\\attacker" not in patterns
+        assert "admin@fabrikam.local" not in patterns
+
+    def test_filters_out_of_scope_users_from_classification(self):
+        """Test user classification respects domain scope."""
+        set_target_domains(["contoso.local"])
+
+        assert _classify_ioc("contoso\\admin") == "user"
+        assert _classify_ioc("random\\attacker") is None
+        assert _classify_ioc("admin@fabrikam.local") is None
+
+
+class TestExtractDomainsFromRedTeamState:
+    """Tests for extract_domains_from_red_team_state helper."""
+
+    def test_extracts_from_target(self):
+        """Test extraction from target.domain."""
+
+        class MockTarget:
+            domain = "contoso.local"
+
+        class MockState:
+            target = MockTarget()
+            all_domains = ()
+            all_credentials = ()
+            trusted_domains = ()
+
+        domains = extract_domains_from_red_team_state(MockState())
+        assert "contoso.local" in domains
+
+    def test_extracts_from_all_domains(self):
+        """Test extraction from all_domains list."""
+
+        class MockState:
+            target = None
+            all_domains = ("contoso.local", "fabrikam.local")
+            all_credentials = ()
+            trusted_domains = ()
+
+        domains = extract_domains_from_red_team_state(MockState())
+        assert "contoso.local" in domains
+        assert "fabrikam.local" in domains
+
+    def test_extracts_from_credentials(self):
+        """Test extraction from credential domains."""
+
+        class MockCred:
+            domain = "contoso.local"
+
+        class MockState:
+            target = None
+            all_domains = ()
+            all_credentials = (MockCred(),)
+            trusted_domains = ()
+
+        domains = extract_domains_from_red_team_state(MockState())
+        assert "contoso.local" in domains
+
+    def test_extracts_from_trusted_domains(self):
+        """Test extraction from trusted_domains."""
+
+        class MockState:
+            target = None
+            all_domains = ()
+            all_credentials = ()
+            trusted_domains = ("fabrikam.local",)
+
+        domains = extract_domains_from_red_team_state(MockState())
+        assert "fabrikam.local" in domains
+
+    def test_deduplicates_and_lowercases(self):
+        """Test domains are deduplicated and lowercased."""
+
+        class MockTarget:
+            domain = "CONTOSO.LOCAL"
+
+        class MockState:
+            target = MockTarget()
+            all_domains = ("Contoso.Local", "FABRIKAM.local")
+            all_credentials = ()
+            trusted_domains = ("fabrikam.local",)
+
+        domains = extract_domains_from_red_team_state(MockState())
+        assert len(domains) == 2
+        assert "contoso.local" in domains
+        assert "fabrikam.local" in domains
+
+
+class TestFilteringIntegration:
+    """Integration tests for filtering in IOC extraction."""
+
+    def setup_method(self):
+        """Clear target domains before each test."""
+        clear_target_domains()
+
+    def teardown_method(self):
+        """Clear target domains after each test."""
+        clear_target_domains()
+
+    def test_garbled_values_filtered_from_extraction(self):
+        """Test garbled values are filtered from pattern extraction."""
+        text = "User: \\u003e0x21993862\\u003c logged in from 192.168.58.100"
+        patterns = _extract_patterns_from_string(text)
+
+        # Should have IP but not the garbled value
+        assert "192.168.58.100" in patterns
+        assert "\\u003e0x21993862\\u003c" not in patterns
+
+    def test_scope_based_filtering_from_extraction(self):
+        """Test domains outside target scope are filtered from extraction."""
+        # Set target scope to contoso.local only
+        set_target_domains(["contoso.local"])
+
+        text = "Host: dc01.contoso.local connected to server.otherdomain.local"
+        patterns = _extract_patterns_from_string(text)
+
+        # Should have target domain but not out-of-scope domain
+        assert "dc01.contoso.local" in patterns
+        assert "server.otherdomain.local" not in patterns
+
+    def test_no_scope_allows_all_domains(self):
+        """Test without scope, all domains are extracted."""
+        # No scope set
+        text = "Host: dc01.contoso.local connected to server.random.local"
+        patterns = _extract_patterns_from_string(text)
+
+        # Both domains should be extracted
+        assert "dc01.contoso.local" in patterns
+        assert "server.random.local" in patterns
+
+    def test_scope_based_filtering_from_classification(self):
+        """Test out-of-scope domains return None from classification."""
+        set_target_domains(["contoso.local"])
+
+        assert _classify_ioc("dc01.contoso.local") == "hostname"
+        assert _classify_ioc("server.otherdomain.local") is None  # Out of scope
+
+    def test_garbled_values_filtered_from_classification(self):
+        """Test garbled values return None from classification."""
+        assert _classify_ioc("\\u003e0x21993862\\u003c") is None
+        assert _classify_ioc("u003etest") is None
+
+    def test_auto_extract_with_scope(self):
+        """Test auto_extract_evidence_from_query respects target scope."""
+        set_target_domains(["contoso.local"])
+
+        result = {
+            "valid_host": "dc01.contoso.local",
+            "out_of_scope": "server.otherdomain.local",
+            "valid_ip": "192.168.58.100",
+            "garbled": "\\u003e0x21993862\\u003c",
+        }
+        evidence = auto_extract_evidence_from_query(result, "test query")
+
+        values = [e["value"] for e in evidence]
+        assert "dc01.contoso.local" in values
+        assert "192.168.58.100" in values  # IPs not filtered by domain scope
+        assert "server.otherdomain.local" not in values
+        assert "\\u003e0x21993862\\u003c" not in values

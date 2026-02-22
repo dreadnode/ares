@@ -27,7 +27,7 @@ def _has_redteam_templates(path: Path) -> bool:
 def _templates_exist(path: Path) -> bool:
     if not path.exists():
         return False
-    sentinel_paths = [path / "agent" / "system_instructions.md.jinja"]
+    sentinel_paths = [path / "blueteam" / "agents" / "system_instructions.md.jinja"]
     if any(p.exists() for p in sentinel_paths):
         return True
     return any(path.glob("**/*.jinja"))
@@ -93,7 +93,7 @@ class TemplateLoader:
     Example:
         >>> loader = TemplateLoader()
         >>> prompt = loader.render(
-        ...     "agent/initial_alert_prompt.md.jinja",
+        ...     "blueteam/agents/initial_alert_prompt.md.jinja",
         ...     alert_name="HighCPU",
         ...     severity="warning"
         ... )
@@ -128,7 +128,7 @@ class TemplateLoader:
 
         Args:
             template_path: Relative path to template from templates/ directory.
-                          Example: "agent/system_instructions.md.jinja"
+                          Example: "blueteam/agents/system_instructions.md.jinja"
             **context: Keyword arguments to pass as template variables.
 
         Returns:
@@ -141,8 +141,7 @@ class TemplateLoader:
         Example:
             >>> loader = TemplateLoader()
             >>> result = loader.render(
-            ...     "tools/host_queries.md.jinja",
-            ...     hostname="web-01"
+            ...     "blueteam/agents/system_instructions.md.jinja",
             ... )
         """
         template = self.env.get_template(template_path)
@@ -159,8 +158,8 @@ class TemplateLoader:
 
         Example:
             >>> loader = TemplateLoader()
-            >>> loader.list_templates("agent/*.jinja")
-            ['agent/system_instructions.md.jinja', 'agent/initial_alert_prompt.md.jinja']
+            >>> loader.list_templates("blueteam/agents/*.jinja")
+            ['blueteam/agents/system_instructions.md.jinja', 'blueteam/agents/initial_alert_prompt.md.jinja']
         """
         return [
             str(p.relative_to(self.template_dir))
@@ -182,7 +181,7 @@ def get_template_loader() -> TemplateLoader:
     Example:
         >>> from ares.core.templates import get_template_loader
         >>> loader = get_template_loader()
-        >>> prompt = loader.render("agent/initial_alert_prompt.md.jinja", ...)
+        >>> prompt = loader.render("blueteam/agents/initial_alert_prompt.md.jinja", ...)
     """
     global _loader
     if _loader is None:

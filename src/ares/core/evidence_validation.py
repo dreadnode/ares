@@ -242,7 +242,7 @@ def _extract_searchable_values(data: Any, depth: int = 0) -> set[str]:
     Extracts IPs, hostnames, usernames, and other IOC-like values.
 
     Args:
-        data: Data to extract from (dict, list, or primitive)
+        data: Data to extract from (dict, list, primitive, or MCP ContentText)
         depth: Current recursion depth (to prevent infinite recursion)
 
     Returns:
@@ -254,22 +254,237 @@ def _extract_searchable_values(data: Any, depth: int = 0) -> set[str]:
     values: set[str] = set()
 
     if isinstance(data, str):
-        if data and len(data) < 500:
+        if data and len(data) < 500 and not _is_garbled_value(data):
             values.add(data.lower())
             # Also extract embedded patterns
             values.update(_extract_patterns_from_string(data))
+        # Handle JSON strings embedded in results
+        if data.startswith(("{", "[")):
+            try:
+                parsed = json.loads(data)
+                values.update(_extract_searchable_values(parsed, depth + 1))
+            except (json.JSONDecodeError, TypeError):
+                pass
     elif isinstance(data, dict):
         for val in data.values():
             if isinstance(val, str) and val:
-                values.add(val.lower())
+                # Skip JSON-looking strings - they'll be parsed recursively below
+                # Also skip very long strings (likely log messages, not IOCs)
+                if not val.startswith(("{", "[")) and len(val) < 200:
+                    values.add(val.lower())
                 values.update(_extract_patterns_from_string(val))
+                # Parse embedded JSON strings
+                if val.startswith(("{", "[")):
+                    try:
+                        parsed = json.loads(val)
+                        values.update(_extract_searchable_values(parsed, depth + 1))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
             elif isinstance(val, (dict, list)):
                 values.update(_extract_searchable_values(val, depth + 1))
     elif isinstance(data, list):
         for item in data:
             values.update(_extract_searchable_values(item, depth + 1))
+    else:
+        # Handle MCP ContentText objects (have .text attribute with JSON content)
+        text = getattr(data, "text", None)
+        if text and isinstance(text, str):
+            values.update(_extract_searchable_values(text, depth + 1))
 
     return values
+
+
+# Target domain scope for filtering (set via set_target_domains)
+# When set, only domains matching these will be extracted as IOCs
+_target_domains: set[str] = set()
+
+
+def set_target_domains(domains: list[str] | set[str]) -> None:
+    """Set target domains for scope-based filtering.
+
+    When target domains are set, evidence extraction will only include
+    hostnames/domains that are part of the target scope. This prevents
+    noise from unrelated alerts/logs polluting the investigation.
+
+    Call this with domains from the red team operation when correlating.
+
+    Args:
+        domains: List of target domain FQDNs (e.g., ["contoso.local", "fabrikam.local"])
+    """
+    global _target_domains
+    _target_domains = {d.lower().strip() for d in domains if d}
+    if _target_domains:
+        logger.info(f"Evidence validation scope set to domains: {_target_domains}")
+
+
+def clear_target_domains() -> None:
+    """Clear target domain scope (allow all domains)."""
+    global _target_domains
+    _target_domains = set()
+
+
+def get_target_domains() -> set[str]:
+    """Get current target domain scope."""
+    return _target_domains.copy()
+
+
+def extract_domains_from_red_team_state(state: Any) -> set[str]:
+    """Extract all unique domains from a red team operation state.
+
+    Collects domains from:
+    - state.target.domain (primary target)
+    - state.all_domains (discovered domains)
+    - state.all_credentials[].domain (credential domains)
+    - state.trusted_domains (AD trust relationships)
+
+    Args:
+        state: SharedRedTeamState object (or duck-typed equivalent)
+
+    Returns:
+        Set of unique domain FQDNs (lowercase)
+    """
+    domains: set[str] = set()
+
+    # Primary target domain
+    target = getattr(state, "target", None)
+    if target:
+        target_domain = getattr(target, "domain", "")
+        if target_domain:
+            domains.add(target_domain.lower().strip())
+
+    # Discovered domains list
+    all_domains = getattr(state, "all_domains", [])
+    for d in all_domains:
+        if d:
+            domains.add(d.lower().strip())
+
+    # Domains from credentials
+    all_creds = getattr(state, "all_credentials", [])
+    for cred in all_creds:
+        cred_domain = getattr(cred, "domain", "")
+        if cred_domain:
+            domains.add(cred_domain.lower().strip())
+
+    # Trusted domains
+    trusted = getattr(state, "trusted_domains", [])
+    for d in trusted:
+        if d:
+            domains.add(d.lower().strip())
+
+    return domains
+
+
+def _is_in_target_scope(hostname: str) -> bool:
+    """Check if a hostname/domain is within target scope.
+
+    If no target domains are set, all domains are allowed (returns True).
+    If target domains are set, hostname must match one of them.
+
+    A hostname matches if:
+    - It equals a target domain (e.g., "contoso.local" matches "contoso.local")
+    - It ends with a target domain (e.g., "dc01.contoso.local" matches "contoso.local")
+
+    Args:
+        hostname: The hostname/FQDN to check
+
+    Returns:
+        True if hostname is in scope (or no scope is set)
+    """
+    if not _target_domains:
+        return True  # No scope set, allow all
+
+    if not hostname:
+        return False
+
+    normalized = hostname.lower().strip()
+
+    for target in _target_domains:
+        # Exact match
+        if normalized == target:
+            return True
+        # Subdomain match (hostname ends with .target)
+        if normalized.endswith(f".{target}"):
+            return True
+
+    return False
+
+
+def _is_user_in_target_scope(user: str) -> bool:
+    """Check if a user value is within target domain scope.
+
+    Filters users by their domain component. Supports:
+    - DOMAIN\\user format: extracts DOMAIN and checks against target domains
+    - user@domain.tld format: extracts domain.tld and checks
+
+    If no target domains are set, all users are allowed (returns True).
+
+    Args:
+        user: The user value (e.g., "CONTOSO\\admin" or "admin@contoso.local")
+
+    Returns:
+        True if user's domain is in scope (or no scope is set)
+    """
+    if not _target_domains:
+        return True  # No scope set, allow all
+
+    if not user:
+        return False
+
+    normalized = user.lower().strip()
+
+    # Handle DOMAIN\user format
+    if "\\" in normalized:
+        domain_part = normalized.split("\\")[0]
+        # Check if domain_part matches any target domain or its NetBIOS name
+        for target in _target_domains:
+            # Exact match (e.g., "contoso" matches "contoso")
+            if domain_part == target:
+                return True
+            # NetBIOS is first part of FQDN (e.g., "contoso" from "contoso.local")
+            target_netbios = target.split(".")[0] if "." in target else target
+            if domain_part == target_netbios:
+                return True
+        return False
+
+    # Handle user@domain.tld format
+    if "@" in normalized:
+        domain_part = normalized.split("@")[1]
+        return _is_in_target_scope(domain_part)
+
+    # Plain username with no domain - allow if we have scope (could be local account)
+    return True
+
+
+def _is_garbled_value(value: str) -> bool:
+    """Check if a value contains garbled/escaped content that shouldn't be IOCs.
+
+    Filters out:
+    - Unicode escape sequences like \\u003e, \\u003c
+    - JSON escape patterns
+    - Hex-heavy strings that are likely encoded data
+    - Values that are mostly non-alphanumeric
+
+    Args:
+        value: The value to check
+
+    Returns:
+        True if the value appears garbled/invalid
+    """
+    # Unicode escape patterns (e.g., \u003e, \u003c)
+    if re.search(r"\\u[0-9a-fA-F]{4}", value):
+        return True
+
+    # HTML entity-style escapes (e.g., u003e without backslash from decoded JSON)
+    if re.search(r"u00[0-9a-fA-F]{2}", value):
+        return True
+
+    # Hex-heavy strings (more than 50% hex chars in a row, not a valid hash)
+    if re.search(r"0x[0-9a-fA-F]{6,}", value):
+        return True
+
+    # Values that are mostly special characters or escaped
+    alphanumeric = sum(1 for c in value if c.isalnum())
+    return len(value) > 5 and alphanumeric / len(value) < 0.4
 
 
 def _extract_patterns_from_string(text: str) -> set[str]:
@@ -288,23 +503,69 @@ def _extract_patterns_from_string(text: str) -> set[str]:
     for match in re.findall(ip_pattern, text):
         patterns.add(match.lower())
 
-    # Hostnames/FQDNs
+    # Hostnames/FQDNs (filter by target scope if set)
+    # Exclude file extensions that look like hostnames (e.g., svchost.exe)
+    file_extensions = (
+        ".exe",
+        ".dll",
+        ".sys",
+        ".msi",
+        ".bat",
+        ".cmd",
+        ".ps1",
+        ".vbs",
+        ".js",
+        ".log",
+        ".txt",
+        ".xml",
+        ".json",
+        ".ini",
+        ".cfg",
+        ".tmp",
+    )
     hostname_pattern = r"\b([a-zA-Z0-9][-a-zA-Z0-9]*\.[-a-zA-Z0-9.]+)\b"
     for match in re.findall(hostname_pattern, text):
+        match_lower = match.lower()
         if "." in match and not match[0].isdigit():
-            patterns.add(match.lower())
+            # Skip file extensions
+            if any(match_lower.endswith(ext) for ext in file_extensions):
+                continue
+            if _is_in_target_scope(match):
+                patterns.add(match_lower)
 
-    # Windows usernames (multiple formats)
+    # Windows usernames (multiple formats) - filter by target domain scope
+    # Require at least 2 chars for domain and user to avoid matching JSON escapes like n\t
+    # Exclude Windows paths that look like DOMAIN\user (e.g., windows\system32)
+    windows_path_prefixes = (
+        "windows\\",
+        "system32\\",
+        "syswow64\\",
+        "program files\\",
+        "programdata\\",
+        "users\\",
+        "temp\\",
+        "appdata\\",
+        "c:\\",
+        "d:\\",
+        "e:\\",
+        "microsoft\\",
+        "nt authority\\",
+    )
     user_patterns = [
-        r"\b([a-zA-Z0-9_-]+\\[a-zA-Z0-9_.-]+)\b",  # domain\user
-        r"\b([a-zA-Z0-9_.-]+@[a-zA-Z0-9.-]+)\b",  # user@domain
+        r"\b([a-zA-Z0-9_-]{2,}\\[a-zA-Z0-9_.-]{2,})\b",  # domain\user (2+ chars each)
+        r"\b([a-zA-Z0-9_.-]{2,}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b",  # user@domain.tld
     ]
     for pattern in user_patterns:
         for match in re.findall(pattern, text):
-            if match and len(match) > 2:
-                patterns.add(match.lower())
+            if match and len(match) > 5:
+                match_lower = match.lower()
+                # Skip Windows paths
+                if any(match_lower.startswith(prefix) for prefix in windows_path_prefixes):
+                    continue
+                if _is_user_in_target_scope(match):
+                    patterns.add(match_lower)
 
-    # Usernames from JSON fields (expanded list)
+    # Usernames from JSON fields (expanded list) - filter by target domain scope if in domain\user format
     user_json_patterns = [
         r'"(?:TargetUserName|SubjectUserName|User|Account|AccountName|UserName)":\s*"([^"]+)"',
         r"(?:TargetUserName|SubjectUserName|User|Account)=([^\s,;}\]]+)",
@@ -312,16 +573,22 @@ def _extract_patterns_from_string(text: str) -> set[str]:
     for pattern in user_json_patterns:
         for match in re.findall(pattern, text, re.IGNORECASE):
             if match and len(match) > 1 and match not in ("-", "SYSTEM", "LOCAL SERVICE"):
-                patterns.add(match.lower())
+                # Apply domain scope filtering if user has domain component
+                if "\\" in match or "@" in match:
+                    if _is_user_in_target_scope(match):
+                        patterns.add(match.lower())
+                else:
+                    # Plain username - allow (could be local account)
+                    patterns.add(match.lower())
 
-    # Computer names from Windows events
+    # Computer names from Windows events (filter by target scope if set)
     computer_patterns = [
         r'"(?:Computer|WorkstationName|Workstation|ComputerName|HostName)":\s*"([^"]+)"',
         r"(?:Computer|WorkstationName|HostName)=([^\s,;}\]]+)",
     ]
     for pattern in computer_patterns:
         for match in re.findall(pattern, text, re.IGNORECASE):
-            if match and len(match) > 1:
+            if match and len(match) > 1 and _is_in_target_scope(match):
                 patterns.add(match.lower())
 
     process_patterns = [
@@ -353,7 +620,8 @@ def _extract_patterns_from_string(text: str) -> set[str]:
         for match in re.findall(pattern, text):
             patterns.add(match.lower())
 
-    return patterns
+    # Filter out garbled values
+    return {p for p in patterns if not _is_garbled_value(p)}
 
 
 def _is_mitre_technique_description(value: str) -> bool:
@@ -438,16 +706,69 @@ def _classify_ioc(value: str) -> str | None:
     Returns:
         IOC type or None if not classifiable
     """
+    # Skip garbled values
+    if _is_garbled_value(value):
+        return None
+
     # IP address
     if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", value):
         return "ip"
 
-    # Domain/hostname
+    # Domain/hostname (filter by target scope if set)
+    # IMPORTANT: Exclude file extensions that look like TLDs (.exe, .dll, .sys, etc.)
     if re.match(r"^[a-z0-9][-a-z0-9]*\.[a-z0-9][-a-z0-9.]+$", value) and not value[0].isdigit():
+        # Exclude common file extensions that match the hostname pattern
+        file_extensions = (
+            ".exe",
+            ".dll",
+            ".sys",
+            ".msi",
+            ".bat",
+            ".cmd",
+            ".ps1",
+            ".vbs",
+            ".js",
+            ".log",
+            ".txt",
+            ".xml",
+            ".json",
+            ".ini",
+            ".cfg",
+            ".tmp",
+        )
+        if any(value.endswith(ext) for ext in file_extensions):
+            return None
+        if not _is_in_target_scope(value):
+            return None
         return "hostname"
 
-    # Username patterns
-    if "\\" in value or "@" in value:
+    # Username patterns - must be proper format with minimum lengths
+    # Filter by target domain scope if set
+    # DOMAIN\user format: require 2+ chars each side to avoid JSON escape matches like n\t
+    if re.match(r"^[a-z0-9_.-]{2,}\\[a-z0-9_.-]{2,}$", value, re.IGNORECASE):
+        # Exclude Windows paths that look like DOMAIN\user
+        windows_path_prefixes = (
+            "windows\\",
+            "system32\\",
+            "syswow64\\",
+            "program files\\",
+            "programdata\\",
+            "users\\",
+            "temp\\",
+            "appdata\\",
+            "c:\\",
+            "d:\\",
+            "e:\\",
+        )
+        if any(value.lower().startswith(prefix) for prefix in windows_path_prefixes):
+            return None
+        if not _is_user_in_target_scope(value):
+            return None
+        return "user"
+    # user@domain.tld format: proper email-like with valid TLD
+    if re.match(r"^[a-z0-9_.-]{2,}@[a-z0-9.-]+\.[a-z]{2,}$", value, re.IGNORECASE):
+        if not _is_user_in_target_scope(value):
+            return None
         return "user"
 
     # Hash patterns

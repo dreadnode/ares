@@ -197,7 +197,6 @@ class TestMainFunction:
                     "evidence_count": 5,
                     "techniques_identified": ["T1003"],
                     "highest_pyramid_level": 4,
-                    "report_path": str(tmp_path / "report.md"),
                 }
             )
             mock_orchestrator_class.return_value = mock_orchestrator
@@ -284,7 +283,9 @@ class TestInvestigateAlertCommand:
             mock_orchestrator.investigate = AsyncMock(
                 return_value={
                     "status": "completed",
-                    "report_path": str(tmp_path / "report.md"),
+                    "evidence_count": 5,
+                    "techniques_identified": ["T1003"],
+                    "highest_pyramid_level": 4,
                 }
             )
             mock_orchestrator_class.return_value = mock_orchestrator
@@ -317,7 +318,9 @@ class TestInvestigateAlertCommand:
             mock_orchestrator.investigate = AsyncMock(
                 return_value={
                     "status": "completed",
-                    "report_path": str(tmp_path / "report.md"),
+                    "evidence_count": 5,
+                    "techniques_identified": ["T1003"],
+                    "highest_pyramid_level": 4,
                 }
             )
             mock_orchestrator_class.return_value = mock_orchestrator
