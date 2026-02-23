@@ -7,6 +7,26 @@ vars:
   PROFILE: '{{.PROFILE | default "infrastructure"}}'
   REGION: '{{.REGION | default "us-west-2"}}'
 
+  # 1Password API keys (shared across tasks)
+  ANTHROPIC_API_KEY:
+    sh: op item get "Dreadnode Claude" --fields api-key --reveal 2>/dev/null || echo ""
+  DREADNODE_API_KEY:
+    sh: op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo ""
+  GRAFANA_SERVICE_ACCOUNT_TOKEN:
+    sh: op item get "Ares Grafana MCP" --fields api-token --reveal 2>/dev/null || echo ""
+  OPENAI_API_KEY:
+    sh: op item get "Openai" --fields dreadnode-jayson-api-key --reveal 2>/dev/null || echo ""
+    # sh: op item get "Openai" --fields dreadnode-personal-api-key --reveal 2>/dev/null || echo ""
+
+  # Model selection (MODEL_ALL takes precedence over MODEL)
+  MODEL_ARG:
+    sh: |
+      if [ -n "{{.MODEL_ALL}}" ]; then
+        echo "{{.MODEL_ALL}}"
+      else
+        echo "{{.MODEL}}"
+      fi
+
 tasks:
   # ===========================================================================
   # Blue Team Agent Tasks
@@ -15,22 +35,6 @@ tasks:
   poll:
     desc: "Run blue team agent in poll mode (uses 1Password for API keys)"
     silent: true
-    vars:
-      ANTHROPIC_API_KEY:
-        sh: op item get "Dreadnode Claude" --fields api-key --reveal 2>/dev/null || echo ""
-      DREADNODE_API_KEY:
-        sh: op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo ""
-      GRAFANA_SERVICE_ACCOUNT_TOKEN:
-        sh: op item get "Ares Grafana MCP" --fields api-token --reveal 2>/dev/null || echo ""
-      OPENAI_API_KEY:
-        sh: op item get "Openai" --fields dreadnode-personal-api-key --reveal 2>/dev/null || echo ""
-      MODEL_ARG:
-        sh: |
-          if [ -n "{{.MODEL_ALL}}" ]; then
-            echo "{{.MODEL_ALL}}"
-          else
-            echo "{{.MODEL}}"
-          fi
     cmds:
       - |
         # Verify AWS auth
@@ -65,14 +69,6 @@ tasks:
   poll:local:
     desc: "Run blue team agent in poll mode using .env file"
     silent: true
-    vars:
-      MODEL_ARG:
-        sh: |
-          if [ -n "{{.MODEL_ALL}}" ]; then
-            echo "{{.MODEL_ALL}}"
-          else
-            echo "{{.MODEL}}"
-          fi
     preconditions:
       - sh: test -f .env
         msg: ".env file not found"
@@ -111,21 +107,6 @@ tasks:
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       LATEST: '{{.LATEST | default ""}}'
-      ANTHROPIC_API_KEY:
-        sh: op item get "Dreadnode Claude" --fields api-key --reveal 2>/dev/null || echo ""
-      DREADNODE_API_KEY:
-        sh: op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo ""
-      GRAFANA_SERVICE_ACCOUNT_TOKEN:
-        sh: op item get "Ares Grafana MCP" --fields api-token --reveal 2>/dev/null || echo ""
-      OPENAI_API_KEY:
-        sh: op item get "Openai" --fields dreadnode-personal-api-key --reveal 2>/dev/null || echo ""
-      MODEL_ARG:
-        sh: |
-          if [ -n "{{.MODEL_ALL}}" ]; then
-            echo "{{.MODEL_ALL}}"
-          else
-            echo "{{.MODEL}}"
-          fi
     cmds:
       - |
         # Verify AWS auth
@@ -173,13 +154,6 @@ tasks:
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       LATEST: '{{.LATEST | default ""}}'
-      MODEL_ARG:
-        sh: |
-          if [ -n "{{.MODEL_ALL}}" ]; then
-            echo "{{.MODEL_ALL}}"
-          else
-            echo "{{.MODEL}}"
-          fi
     preconditions:
       - sh: test -f .env
         msg: ".env file not found"
@@ -227,21 +201,6 @@ tasks:
     silent: true
     vars:
       ALERT: '{{.ALERT | default ""}}'
-      ANTHROPIC_API_KEY:
-        sh: op item get "Dreadnode Claude" --fields api-key --reveal 2>/dev/null || echo ""
-      DREADNODE_API_KEY:
-        sh: op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo ""
-      GRAFANA_SERVICE_ACCOUNT_TOKEN:
-        sh: op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo ""
-      OPENAI_API_KEY:
-        sh: op item get "Openai" --fields dreadnode-personal-api-key --reveal 2>/dev/null || echo ""
-      MODEL_ARG:
-        sh: |
-          if [ -n "{{.MODEL_ALL}}" ]; then
-            echo "{{.MODEL_ALL}}"
-          else
-            echo "{{.MODEL}}"
-          fi
     preconditions:
       - sh: test -n "{{.ALERT}}"
         msg: "ALERT variable is required. Usage: task blue:investigate ALERT=alert.json"
