@@ -1,0 +1,49 @@
+# Lateral Movement Analysis Task
+
+## Focus Targets
+
+{% if focus_host %}
+- **Primary Host**: {{ focus_host }}
+{% endif %}
+{% if focus_user %}
+- **Primary User**: {{ focus_user }}
+{% endif %}
+
+## Context
+
+{{ context }}
+
+## Known Lateral Connections
+
+{% if known_lateral_connections and known_lateral_connections | length > 0 %}
+The following lateral movement paths have already been identified. Use these as starting points to expand the scope.
+
+{% for conn in known_lateral_connections %}
+- **{{ conn.get('source', '?') }}** -> **{{ conn.get('destination', '?') }}** via {{ conn.get('method', 'unknown') }} (user: {{ conn.get('user', 'unknown') }}{% if conn.get('timestamp') %}, at {{ conn['timestamp'] }}{% endif %})
+{% endfor %}
+{% else %}
+No lateral connections identified yet. Start by analyzing the focus host and user activity.
+{% endif %}
+
+## Your Task
+
+{% if focus_host %}
+1. **Analyze host activity**: Call `get_host_activity("{{ focus_host }}")` to see all logon events, process creation, and share access
+{% endif %}
+{% if focus_user %}
+2. **Analyze user activity**: Call `get_user_activity("{{ focus_user }}")` to see all authentication events across hosts
+{% endif %}
+3. **Map movement paths**: For every authentication from one host to another, record a lateral connection with `record_lateral_connection()`
+4. **Expand scope**: For each newly discovered host or user, investigate their activity
+5. **Track everything**: Call `track_host_investigation()` and `track_user_investigation()` for every entity found
+6. **Record evidence**: After EVERY query, call `record_evidence()` for each finding AND `add_timeline_event()` for significant events
+7. **Determine containment**: Based on the movement scope, recommend which hosts to isolate and which users to disable
+8. **MUST call `lateral_complete()`**: You MUST call this with all investigated hosts, users, lateral paths, and containment recommendations
+
+**IMPORTANT: You have limited steps. After each query, immediately record evidence. Call `lateral_complete()` by step 5 at the latest.**
+
+{% if focus_host %}
+**Start by analyzing activity on {{ focus_host }}.**
+{% elif focus_user %}
+**Start by analyzing activity for {{ focus_user }}.**
+{% endif %}

@@ -1,0 +1,52 @@
+# Host Investigation Task: {{ hostname }}
+
+## Target Host
+
+- **Hostname**: {{ hostname }}
+
+## Known Activity
+
+{{ known_activity }}
+
+## Context
+
+{{ context }}
+
+## Your Task
+
+1. **Get full host activity**: Call `get_host_activity("{{ hostname }}")` to retrieve all logon events, process creation, share access, and service creation for this host
+
+2. **Identify all users**: Extract every user who authenticated to `{{ hostname }}`. For each user:
+   - What logon type was used?
+   - What was the source IP/workstation?
+   - Was this a legitimate admin logon or potential lateral movement?
+   - Call `track_user_investigation()` for each user
+
+3. **Check for compromise indicators**:
+   - Service creation (Event 7045): PsExec, remote execution frameworks
+   - Admin share access (Event 5140 for ADMIN$, C$): Remote admin activity
+   - Multiple authentication sources: Different IPs/workstations authenticating as the same user
+   - Unusual process execution (Event 4688): Suspicious binaries, PowerShell, cmd.exe chains
+   - Scheduled task creation (Event 4698): Persistence mechanisms
+
+4. **Identify inbound connections**: For every authentication TO this host:
+   - Record the source with `record_lateral_connection(source_host=<source>, destination_host="{{ hostname }}", ...)`
+   - Investigate the source host if not already investigated
+
+5. **Identify outbound connections**: For every authentication FROM this host:
+   - Record the destination with `record_lateral_connection(source_host="{{ hostname }}", destination_host=<dest>, ...)`
+   - Investigate the destination host if not already investigated
+
+6. **Record all evidence**: Every finding must be recorded with `record_evidence()`:
+   - Users seen: evidence_type="user", pyramid_level=4
+   - Source IPs: evidence_type="ip", pyramid_level=2
+   - Processes: evidence_type="process", pyramid_level=4
+   - Services created: evidence_type="artifact", pyramid_level=4
+   - Techniques observed: evidence_type="technique", pyramid_level=6
+
+7. **Report results**: Call `lateral_complete()` with:
+   - All users who accessed this host
+   - All hosts connected to/from this host
+   - Containment recommendation (isolate host, block network segment, forensic image)
+
+**Start by calling `get_host_activity("{{ hostname }}")`.**

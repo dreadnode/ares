@@ -7,12 +7,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ares.main import (
+    HIGH_SEVERITY_LEVELS,
     Args,
     DreadnodeArgs,
+    EvalArgs,
     _resolve_model,
     app,
     investigate_alert,
     main,
+    should_use_multi_agent,
     version,
 )
 
@@ -166,7 +169,7 @@ class TestMainFunction:
 
     @pytest.mark.asyncio
     async def test_main_processes_alerts(self, tmp_path: Path):
-        """Test main processes alerts in --once mode."""
+        """Test main processes alerts in --once mode with monolithic orchestrator."""
         with (
             patch("ares.main.dn.configure"),
             patch("ares.agents.blue.InvestigationOrchestrator") as mock_orchestrator_class,
@@ -208,10 +211,12 @@ class TestMainFunction:
             mock_correlator.get_cluster_context.return_value = {"related_alerts": 0}
             mock_correlator_class.return_value = mock_correlator
 
+            # Disable auto_route to test monolithic path
             args = Args(
                 model="test-model",
                 once=True,
                 report_dir=str(tmp_path),
+                auto_route=False,
             )
 
             await main(args=args)
@@ -343,3 +348,94 @@ class TestAppObject:
     def test_app_help_text(self):
         """Test app has help text."""
         assert "Autonomous SOC Investigation Agent" in app.help
+
+
+class TestEvalArgsDataclass:
+    """Tests for EvalArgs dataclass with multi-agent support."""
+
+    def test_default_values(self):
+        """Test EvalArgs has correct default values."""
+        eval_args = EvalArgs()
+        assert eval_args.output_dir == "./eval_results"
+        assert eval_args.poll_timeout == 60
+        assert eval_args.ci is False
+        assert eval_args.synthetic is False
+        assert eval_args.min_score == 0.5
+        assert eval_args.min_ioc_rate == 0.5
+        assert eval_args.min_technique_rate == 0.5
+        assert eval_args.parallel == 1
+        # New multi-agent fields
+        assert eval_args.multi_agent is False
+        assert eval_args.redis_url == ""
+
+    def test_multi_agent_values(self):
+        """Test EvalArgs accepts multi-agent configuration."""
+        eval_args = EvalArgs(
+            multi_agent=True,
+            redis_url="redis://localhost:6379",
+        )
+        assert eval_args.multi_agent is True
+        assert eval_args.redis_url == "redis://localhost:6379"
+
+
+class TestShouldUseMultiAgent:
+    """Tests for severity-based multi-agent routing."""
+
+    def test_critical_severity_uses_multi_agent(self):
+        """Critical severity should use multi-agent."""
+        assert should_use_multi_agent("critical") is True
+        assert should_use_multi_agent("CRITICAL") is True
+        assert should_use_multi_agent("Critical") is True
+
+    def test_high_severity_uses_multi_agent(self):
+        """High severity should use multi-agent."""
+        assert should_use_multi_agent("high") is True
+        assert should_use_multi_agent("HIGH") is True
+        assert should_use_multi_agent("High") is True
+
+    def test_medium_severity_uses_monolithic(self):
+        """Medium severity should use monolithic."""
+        assert should_use_multi_agent("medium") is False
+        assert should_use_multi_agent("MEDIUM") is False
+
+    def test_low_severity_uses_monolithic(self):
+        """Low severity should use monolithic."""
+        assert should_use_multi_agent("low") is False
+        assert should_use_multi_agent("LOW") is False
+
+    def test_unknown_severity_uses_monolithic(self):
+        """Unknown severity should use monolithic."""
+        assert should_use_multi_agent("warning") is False
+        assert should_use_multi_agent("info") is False
+        assert should_use_multi_agent("") is False
+
+    def test_force_multi_agent_overrides_severity(self):
+        """force_multi_agent=True should always use multi-agent."""
+        assert should_use_multi_agent("low", force_multi_agent=True) is True
+        assert should_use_multi_agent("medium", force_multi_agent=True) is True
+        assert should_use_multi_agent("high", force_multi_agent=True) is True
+        assert should_use_multi_agent("critical", force_multi_agent=True) is True
+
+
+class TestHighSeverityLevels:
+    """Tests for HIGH_SEVERITY_LEVELS constant."""
+
+    def test_contains_critical(self):
+        """HIGH_SEVERITY_LEVELS should contain 'critical'."""
+        assert "critical" in HIGH_SEVERITY_LEVELS
+
+    def test_contains_high(self):
+        """HIGH_SEVERITY_LEVELS should contain 'high'."""
+        assert "high" in HIGH_SEVERITY_LEVELS
+
+    def test_does_not_contain_medium(self):
+        """HIGH_SEVERITY_LEVELS should not contain 'medium'."""
+        assert "medium" not in HIGH_SEVERITY_LEVELS
+
+    def test_does_not_contain_low(self):
+        """HIGH_SEVERITY_LEVELS should not contain 'low'."""
+        assert "low" not in HIGH_SEVERITY_LEVELS
+
+    def test_is_frozenset(self):
+        """HIGH_SEVERITY_LEVELS should be a frozenset for immutability."""
+        assert isinstance(HIGH_SEVERITY_LEVELS, frozenset)

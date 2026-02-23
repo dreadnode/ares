@@ -53,13 +53,13 @@ def _get_uuid() -> str:
 DEFAULT_MAX_RETRIES = 3
 
 __all__ = [
-    # Constants
     "DEFAULT_MAX_RETRIES",
-    # Multi-Agent Models
     "AgentInfo",
     "AgentLocalState",
     "AgentRole",
-    # Core Models
+    "BlueRole",
+    "BlueTaskInfo",
+    "BlueTaskType",
     "Credential",
     "Evidence",
     "Hash",
@@ -72,6 +72,7 @@ __all__ = [
     "QuestionSource",
     "QuestionState",
     "Share",
+    "SharedBlueTeamState",
     "SharedRedTeamState",
     "Target",
     "TaskInfo",
@@ -80,7 +81,6 @@ __all__ = [
     "TimelineEvent",
     "User",
     "VulnerabilityInfo",
-    # Parsing utilities
     "parse",
     "parse_many",
     "parse_set",
@@ -3127,3 +3127,206 @@ class AgentLocalState:
     def record_error(self, error: str) -> None:
         """Record an error."""
         self.errors_encountered.append(error)
+
+
+# =============================================================================
+# Blue Team Multi-Agent Models
+# =============================================================================
+
+
+class BlueRole(Enum):
+    """Specialized roles for multi-agent blue team operations."""
+
+    ORCHESTRATOR = "orchestrator"
+    TRIAGE = "triage"
+    THREAT_HUNTER = "threat_hunter"
+    LATERAL_ANALYST = "lateral_analyst"
+
+
+class BlueTaskType(Enum):
+    """Types of tasks dispatched to blue team workers."""
+
+    TRIAGE_ALERT = "triage_alert"
+    THREAT_HUNT = "threat_hunt"
+    LATERAL_ANALYSIS = "lateral_analysis"
+    USER_INVESTIGATION = "user_investigation"
+    HOST_INVESTIGATION = "host_investigation"
+
+
+@dataclass
+class BlueTaskInfo:
+    """Information about a dispatched blue team task."""
+
+    task_id: str
+    task_type: BlueTaskType
+    investigation_id: str
+    status: TaskStatus = TaskStatus.PENDING
+    assigned_role: BlueRole = BlueRole.TRIAGE
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    params: dict[str, Any] = field(default_factory=dict)
+    result: Any = None
+    error: str | None = None
+    retry_count: int = 0
+
+
+@dataclass
+class SharedBlueTeamState:
+    """Cluster-wide state shared across all blue team agents.
+
+    Stored in Redis for multi-agent coordination. Each field maps to
+    a Redis key under ares:blue:inv:{investigation_id}:*.
+
+    Attributes:
+        investigation_id: Unique identifier for this investigation.
+        alert: The original alert that triggered investigation.
+        stage: Current investigation stage.
+        started_at: When the investigation began.
+        evidence: List of all evidence collected across agents.
+        timeline: Timeline events in chronological order.
+        identified_techniques: MITRE ATT&CK technique IDs found.
+        identified_tactics: MITRE ATT&CK tactic IDs found.
+        queried_hosts: Hosts that have been investigated.
+        queried_users: Users that have been investigated.
+        executed_query_types: Query method names already executed.
+        executed_queries: Log of all queries executed.
+        technique_names: Mapping of technique IDs to names.
+        lateral_connections: Lateral movement connections discovered.
+        queued_pivot_queries: Auto-generated pivot queries.
+        queued_chain_queries: Auto-generated follow-up detection methods.
+        escalated: Whether investigation was escalated.
+        escalation_reason: Reason for escalation.
+        attack_synopsis: Summary of the attack.
+        recommendations: Recommended actions.
+        correlation_context: Alert correlation context.
+        pending_tasks: Tasks dispatched but not completed.
+        completed_tasks: Results of completed tasks.
+    """
+
+    investigation_id: str
+    alert: dict[str, Any] = field(default_factory=dict)
+    stage: InvestigationStage = InvestigationStage.TRIAGE
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # Evidence and timeline (aggregated from all agents)
+    evidence: list[Evidence] = field(default_factory=list)
+    timeline: list[TimelineEvent] = field(default_factory=list)
+
+    # MITRE tracking
+    identified_techniques: set[str] = field(default_factory=set)
+    identified_tactics: set[str] = field(default_factory=set)
+    technique_names: dict[str, str] = field(default_factory=dict)
+
+    # Investigation scope
+    queried_hosts: set[str] = field(default_factory=set)
+    queried_users: set[str] = field(default_factory=set)
+    executed_query_types: set[str] = field(default_factory=set)
+    executed_queries: list[dict] = field(default_factory=list)
+
+    # Lateral movement
+    lateral_connections: list[dict] = field(default_factory=list)
+
+    # Auto-pivot and detection chaining
+    queued_pivot_queries: list[dict] = field(default_factory=list)
+    queued_chain_queries: list[str] = field(default_factory=list)
+
+    # Completion
+    escalated: bool = False
+    escalation_reason: str | None = None
+    attack_synopsis: str | None = None
+    recommendations: list[str] = field(default_factory=list)
+
+    # Alert correlation
+    correlation_context: dict[str, Any] | None = None
+
+    # Task tracking
+    pending_tasks: dict[str, BlueTaskInfo] = field(default_factory=dict)
+    completed_tasks: dict[str, BlueTaskInfo] = field(default_factory=dict)
+
+    # Evidence dedup keys (in-memory for fast checking)
+    _evidence_dedup_keys: set[str] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+
+    # Backend reference (NOT serialized)
+    _backend: Any = field(default=None, init=False, repr=False, compare=False)
+
+    @property
+    def evidence_count(self) -> int:
+        return len(self.evidence)
+
+    @property
+    def highest_pyramid_level(self) -> int:
+        if not self.evidence:
+            return 0
+        return max(e.pyramid_level.value for e in self.evidence)
+
+    @property
+    def ttp_count(self) -> int:
+        return len([e for e in self.evidence if e.pyramid_level == PyramidLevel.TTPS])
+
+    def set_backend(self, backend) -> None:
+        """Set Redis state backend."""
+        object.__setattr__(self, "_backend", backend)
+
+    def to_investigation_state(self) -> InvestigationState:
+        """Convert to InvestigationState for report generation and eval scoring.
+
+        This is the backward-compatibility bridge: MarkdownReportGenerator.generate()
+        and eval scorers operate on InvestigationState regardless of source.
+        """
+        from ares.core.lateral_analyzer import LateralGraph
+
+        state = InvestigationState(
+            investigation_id=self.investigation_id,
+            alert=self.alert,
+            stage=self.stage,
+            started_at=self.started_at,
+            evidence=list(self.evidence),
+            timeline=sorted(self.timeline, key=lambda e: e.timestamp),
+            executed_queries=list(self.executed_queries),
+            identified_techniques=set(self.identified_techniques),
+            identified_tactics=set(self.identified_tactics),
+            queried_hosts=set(self.queried_hosts),
+            queried_users=set(self.queried_users),
+            technique_names=dict(self.technique_names),
+            escalated=self.escalated,
+            escalation_reason=self.escalation_reason,
+            attack_synopsis=self.attack_synopsis,
+            recommendations=list(self.recommendations),
+            correlation_context=self.correlation_context,
+            queued_pivot_queries=list(self.queued_pivot_queries),
+            queued_chain_queries=list(self.queued_chain_queries),
+            executed_query_types=set(self.executed_query_types),
+        )
+
+        # Rebuild lateral graph from connections
+        graph = LateralGraph()
+        for conn in self.lateral_connections:
+            graph.add_connection(
+                source=conn.get("source", ""),
+                destination=conn.get("destination", ""),
+                connection_type=conn.get("connection_type", ""),
+                user=conn.get("user", ""),
+                mitre_technique=conn.get("mitre_technique", ""),
+            )
+        state.lateral_graph = graph
+
+        return state
+
+    def to_summary(self) -> dict:
+        """Return a summary dict of the investigation state."""
+        return {
+            "investigation_id": self.investigation_id,
+            "stage": self.stage.value,
+            "evidence_count": self.evidence_count,
+            "timeline_events": len(self.timeline),
+            "techniques_identified": list(self.identified_techniques),
+            "highest_pyramid_level": self.highest_pyramid_level,
+            "ttp_count": self.ttp_count,
+            "hosts_investigated": list(self.queried_hosts),
+            "users_investigated": list(self.queried_users),
+            "pending_tasks": len(self.pending_tasks),
+            "completed_tasks": len(self.completed_tasks),
+        }
