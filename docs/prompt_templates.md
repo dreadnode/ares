@@ -36,10 +36,10 @@ result = loader.render(
 
 | Category | Purpose | Status |
 | -------- | ------- | ------ |
-| `agent/` | Blue team system instructions & alert prompts | ✅ Complete |
+| `blueteam/` | Blue team system instructions & prompts | ✅ Complete |
 | `engines/` | Question generation & attack chain templates | ✅ Complete |
 | `tools/` | Investigation query suggestions | ✅ Complete |
-| `reports/` | Report section templates | ⚠️ Partial |
+| `reports/` | Report section templates | ✅ Complete |
 | `redteam/` | Red team agent templates | ✅ Complete |
 
 ## API Reference
@@ -55,12 +55,25 @@ templates = loader.list_templates()
 
 ## Template Variables
 
-### Agent Templates
+### Blue Team Templates
 
 | Template | Required Variables | Purpose |
 | -------- | ------------------ | ------- |
-| `agent/system_instructions.md.jinja` | None | Agent system instructions |
-| `agent/initial_alert_prompt.md.jinja` | `alert_name`, `severity`, `instance`, `job`, `starts_at`, `summary`, `description`, `labels` | Alert investigation context |
+| `blueteam/*.md.jinja` | Varies | Blue team agent instructions |
+
+### Red Team Templates
+
+| Template | Required Variables | Purpose |
+| -------- | ------------------ | ------- |
+| `redteam/agents/orchestrator.md.jinja` | `state`, `credentials`, etc. | Orchestrator system prompt |
+| `redteam/agents/recon.md.jinja` | `task`, `state` | Recon agent instructions |
+| `redteam/agents/credential_access.md.jinja` | `task`, `state` | Credential access agent |
+| `redteam/agents/cracker.md.jinja` | `task`, `state` | Cracker agent instructions |
+| `redteam/agents/acl.md.jinja` | `task`, `state` | ACL agent instructions |
+| `redteam/agents/privesc.md.jinja` | `task`, `state` | PrivEsc agent instructions |
+| `redteam/agents/lateral.md.jinja` | `task`, `state` | Lateral movement agent |
+| `redteam/agents/coercion.md.jinja` | `task`, `state` | Coercion agent instructions |
+| `redteam/agents/system_instructions.md.jinja` | `state` | Shared system instructions |
 
 ### Engine Templates
 
@@ -137,13 +150,14 @@ except Exception as e:
 | File | Status | Notes |
 | ---- | ------ | ----- |
 | `src/ares/agents/blue/soc_investigator.py` | ✅ Complete | Uses template loader |
-| `src/ares/agents/red/pentester.py` | ✅ Complete | Uses template loader |
 | `src/ares/core/factories/blue_factory.py` | ✅ Complete | System instructions from template |
-| `src/ares/core/factories/red_factory.py` | ✅ Complete | System instructions from template |
+| `src/ares/core/factories/red_agents.py` | ✅ Complete | Red team agent templates |
+| `src/ares/core/worker/prompts.py` | ✅ Complete | Worker prompt generation |
 | `src/ares/core/engines.py` | ✅ Complete | All questions templated |
 | `src/ares/tools/blue/investigation.py` | ✅ Complete | Query suggestions templated |
 | `src/ares/reports/investigation.py` | ⚠️ Partial | Templates exist, integration incomplete |
 | `src/ares/reports/redteam.py` | ✅ Complete | Red team reports templated |
+| `src/ares/reports/blueteam.py` | ✅ Complete | Blue team reports templated |
 
 ## Troubleshooting
 

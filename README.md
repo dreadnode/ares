@@ -48,7 +48,27 @@ Agent SDK and MITRE ATT&CK framework.
 - CI-compatible with JSON output, exit codes, and configurable pass thresholds
 - Dataset evaluation for batch scoring across multiple scenarios
 
-### Red Team - Penetration Testing
+### Red Team - Multi-Agent Penetration Testing
+
+**Multi-Agent Architecture:**
+
+- Orchestrator coordinates 7 specialized worker agents via Redis
+- Each agent runs in its own Kubernetes pod with role-specific tools
+- Shared state enables credential/hash broadcasting across agents
+- Phase-aware task prioritization
+  (initial access → enumeration → privesc → lateral → DA)
+
+**Agent Roles:**
+
+- **RECON**: Network scanning, BloodHound, user/share enumeration
+- **CREDENTIAL_ACCESS**: secretsdump, kerberoasting, AS-REP roasting, password spray
+- **CRACKER**: Offline hash cracking with hashcat/john
+- **ACL**: BloodHound path analysis, ACL abuse (shadow credentials, WriteDACL)
+- **PRIVESC**: ADCS (ESC1-8), delegation attacks, MSSQL exploitation
+- **LATERAL**: PSExec/WMI/WinRM, credential harvesting from compromised hosts
+- **COERCION**: Responder, ntlmrelayx, PetitPotam
+
+**Attack Capabilities:**
 
 - Autonomous Active Directory enumeration
 - Credential harvesting (secretsdump, kerberoasting, AS-REP roasting)
@@ -96,7 +116,7 @@ task blue:poll
 ```bash
 # Confirm installation
 uv run python -m ares --help
-# Should display available commands: investigate-alert, evaluate
+# Should display available commands: investigate-alert, multi-agent, worker, evaluate, evaluate-dataset, version
 ```
 
 **Without 1Password:**
@@ -149,6 +169,18 @@ task blue:reports:latest      # Show latest report
 | `task blue:reports:clean`            | Delete all reports (asks for confirmation)                   |
 | `task blue:mitre:test`               | Test MITRE ATT&CK data loading                               |
 
+**Red Team Tasks (Multi-Agent):**
+
+| Command                                | Description                                                  |
+| -------------------------------------- | ------------------------------------------------------------ |
+| `task red:multi TARGET=<name>`         | Run multi-agent red team operation                           |
+| `task red:multi:status LATEST=true`    | Check operation status                                       |
+| `task red:multi:loot LATEST=true`      | Show discovered credentials, hashes, hosts                   |
+| `task red:multi:list`                  | List all operations                                          |
+| `task remote:logs ROLE=orchestrator`   | Tail orchestrator logs                                       |
+| `task remote:sync:full`                | Sync local code to K8s pods                                  |
+| `task red:multi:sync:align`            | Full sync + Redis clear + pod rollout                        |
+
 See [Taskfile Usage Guide](docs/taskfile_usage.md) for detailed documentation.
 
 ### Direct CLI Usage (Advanced)
@@ -184,6 +216,21 @@ uv run python -m ares investigate-alert test-alerts/example-alert.json \
   --args.model claude-sonnet-4-20250514 \
   --args.grafana-url https://grafana.example.com \
   --args.max-steps 30
+```
+
+#### Red Team - Multi-Agent Operation
+
+Run a coordinated multi-agent penetration test:
+
+```bash
+# Run multi-agent operation
+uv run ares multi-agent contoso.local "192.168.58.10,192.168.58.11" \
+  --args.model gpt-4o \
+  --multi-args.redis-url redis://redis:6379
+
+# Run a worker agent (typically started by K8s, but can be run manually)
+uv run ares worker lateral op-12345678 \
+  --worker-args.redis-url redis://redis:6379
 ```
 
 ### Command-Line Options
@@ -304,34 +351,55 @@ Example report location: `reports/inv-<id>-<timestamp>.md`
 
 ## Red Team Operation Workflow
 
-The red team agent follows a priority-driven attack workflow:
+The multi-agent red team system follows a phase-driven attack workflow:
 
-### Priority 0: ADCS Vulnerabilities
+### Phase 1: Initial Access
 
-When certificate template vulnerabilities (ESC1-15) are discovered, immediately
-exploit them for potential direct path to Domain Admin.
+- RECON scans networks, enumerates hosts/users/shares
+- COERCION starts Responder for LLMNR/NBT-NS poisoning
+- CREDENTIAL_ACCESS attempts password spraying
 
-### Priority 1: KRBTGT Hash
+### Phase 2: Enumeration (First Credentials)
 
-When a krbtgt hash is found, generate golden tickets for persistent domain
-access and cross-domain escalation.
+- RECON runs BloodHound collection for attack path analysis
+- CREDENTIAL_ACCESS performs Kerberoasting, AS-REP roasting
+- CRACKER cracks discovered hashes
+- Orchestrator queues vulnerabilities for exploitation
 
-### Priority 2: Administrator Hash
+### Phase 3: Privilege Escalation
 
-When Administrator hashes are found, immediately use domain_admin_checker on
-all targets and run secretsdump across the environment.
+- PRIVESC exploits ADCS vulnerabilities (ESC1-8), delegation attacks
+- ACL exploits WriteDACL, shadow credentials, targeted Kerberoast
+- Credential expansion loop continues
 
-### Priority 3: Credential Expansion
+### Phase 4: Lateral Movement
 
-For each new credential discovered:
+- LATERAL moves to new hosts with discovered credentials
+- CREDENTIAL_ACCESS runs secretsdump on each compromised host
+- CRACKER processes new hashes
 
-1. Check for privilege escalation paths (BloodHound ACL abuse, ADCS, delegation)
-2. Enumerate users and shares on all targets
-3. Pilfer accessible shares for embedded credentials
-4. Kerberoast and AS-REP roast with new credentials
-5. Crack discovered hashes and loop back
+### Phase 5: Domain Dominance
+
+- DCSync to extract all domain hashes
+- Golden ticket generation for persistence
+- Operation completion with full report
+
+### Running Multi-Agent Operations
+
+```bash
+# Run multi-agent operation (requires K8s cluster with agents deployed)
+task red:multi TARGET=dreadgoad DOMAIN=contoso.local
+
+# Monitor operation progress
+task red:multi:loot LATEST=true WATCH=10
+
+# View orchestrator logs
+task remote:logs ROLE=orchestrator FOLLOW=true
+```
 
 Example report location: `reports/redteam-<operation-id>_report.md`
+
+See [Red Team Architecture](docs/red.md) for detailed multi-agent documentation.
 
 ## Blue Team Evaluation
 

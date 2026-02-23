@@ -63,18 +63,24 @@ ares/
 │   │   ├── blue/                # SOC investigation agent
 │   │   └── red/                 # Penetration testing agent
 │   ├── core/                    # Core models and engines
-│   │   └── factories/           # Agent factories
+│   │   ├── dispatcher/          # Task dispatch and routing
+│   │   ├── worker/              # Worker agent implementation
+│   │   ├── orchestrator/        # Orchestrator implementation
+│   │   ├── factories/           # Agent factories
+│   │   └── replay/              # Deterministic replay
+│   ├── eval/                    # Evaluation framework
 │   ├── integrations/            # External integrations (MITRE)
 │   ├── reports/                 # Report generators
+│   ├── templates/               # Jinja2 prompt templates
+│   │   ├── blueteam/            # Blue team templates
+│   │   ├── engines/             # Question engine templates
+│   │   ├── redteam/             # Red team agent templates
+│   │   └── reports/             # Report templates
 │   └── tools/                   # Agent toolsets
 │       ├── blue/                # Blue team tools
 │       ├── red/                 # Red team tools
 │       └── shared/              # Shared tools (MITRE)
-├── templates/                   # Jinja2 prompt templates
-│   ├── agent/                   # Blue team agent templates
-│   ├── engines/                 # Question engine templates
-│   ├── redteam/                 # Red team agent templates
-│   └── reports/                 # Report templates
+├── config/                      # Configuration files
 ├── tests/                       # Test suite
 ├── docs/                        # Documentation
 └── reports/                     # Generated reports
