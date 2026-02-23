@@ -12,13 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import dreadnode as dn
-from dreadnode.agent import Agent, Thread
-from dreadnode.agent.stop import tool_use
+from dreadnode.agent import Thread
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
@@ -29,19 +26,16 @@ from ares.core.factories.blue_agents import (
     create_blue_agent,
     get_blue_stop_conditions,
     load_blue_instructions,
-    max_tool_calls_stop,
 )
 from ares.core.models import (
     BlueRole,
-    BlueTaskInfo,
-    BlueTaskType,
     InvestigationState,
-    SharedBlueTeamState,
 )
-from ares.core.templates import get_template_loader
 from ares.reports.investigation import MarkdownReportGenerator
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from ares.integrations.mitre import MITREAttackClient
 
 
@@ -53,7 +47,10 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
     """
 
     _dispatcher: BlueTeamDispatcher | None = None
-    _workers: dict[BlueRole, BlueWorkerAgent] = {}
+    _workers: dict[BlueRole, BlueWorkerAgent]
+
+    def __init__(self) -> None:
+        self._workers = {}
 
     def set_dispatcher(self, dispatcher: BlueTeamDispatcher) -> None:
         self._dispatcher = dispatcher
@@ -96,9 +93,9 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             worker.start_task(task)
             result = await self._dispatcher.wait_for_result(task.task_id, timeout=600)
             return _format_task_result("Triage", task.task_id, result)
-        else:
-            worker.start_task(task)
-            return f"[+] Triage dispatched: task_id={task.task_id}. Use get_task_result() to check."
+
+        worker.start_task(task)
+        return f"[+] Triage dispatched: task_id={task.task_id}. Use get_task_result() to check."
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def dispatch_threat_hunt(
@@ -145,9 +142,9 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             worker.start_task(task)
             result = await self._dispatcher.wait_for_result(task.task_id, timeout=600)
             return _format_task_result("Threat Hunt", task.task_id, result)
-        else:
-            worker.start_task(task)
-            return f"[+] Threat hunt dispatched: task_id={task.task_id}."
+
+        worker.start_task(task)
+        return f"[+] Threat hunt dispatched: task_id={task.task_id}."
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def dispatch_lateral_analysis(
@@ -188,9 +185,9 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             worker.start_task(task)
             result = await self._dispatcher.wait_for_result(task.task_id, timeout=600)
             return _format_task_result("Lateral Analysis", task.task_id, result)
-        else:
-            worker.start_task(task)
-            return f"[+] Lateral analysis dispatched: task_id={task.task_id}."
+
+        worker.start_task(task)
+        return f"[+] Lateral analysis dispatched: task_id={task.task_id}."
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def get_investigation_status(self) -> str:
@@ -285,7 +282,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
                 await backend.add_recommendation(rec)
 
         logger.info(f"Investigation completed: {summary[:100]}...")
-        return f"[+] Investigation complete. Summary recorded. Report will be generated."
+        return "[+] Investigation complete. Summary recorded. Report will be generated."
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def escalate_investigation(
@@ -313,7 +310,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             return "ERROR: No dispatcher configured"
 
         backend = self._dispatcher.backend
-        await backend.set_meta("escalated", True)
+        await backend.set_meta("escalated", value=True)
         await backend.set_meta("escalation_reason", reason)
 
         if attack_synopsis:
@@ -332,16 +329,18 @@ def _format_task_result(task_type: str, task_id: str, result: dict[str, Any]) ->
     lines = [f"=== {task_type} Result (task_id={task_id}) ==="]
 
     if result.get("error"):
-        lines.append(f"Status: FAILED")
+        lines.append("Status: FAILED")
         lines.append(f"Error: {result['error']}")
     else:
-        lines.append(f"Status: SUCCESS")
+        lines.append("Status: SUCCESS")
 
     inner = result.get("result", {})
     if isinstance(inner, dict):
         # Format known result fields
         if inner.get("summary") or inner.get("findings_summary") or inner.get("scope_summary"):
-            summary = inner.get("summary") or inner.get("findings_summary") or inner.get("scope_summary")
+            summary = (
+                inner.get("summary") or inner.get("findings_summary") or inner.get("scope_summary")
+            )
             lines.append(f"Summary: {summary}")
 
         if inner.get("severity_assessment"):
