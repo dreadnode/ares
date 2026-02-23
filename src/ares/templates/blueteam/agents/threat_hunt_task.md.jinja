@@ -40,7 +40,9 @@ No prior evidence available. Start detection from scratch.
 {% if hostname %}
 5. **Follow the host**: Check what other activity occurred on `{{ hostname }}` around the same time
 {% endif %}
-6. **Record all evidence**: Every finding must be recorded with `record_evidence()` at the appropriate pyramid level
-7. **Report results**: Call `hunt_complete()` with confirmed techniques, evidence highlights, and detection gaps
+6. **Record all evidence**: After EVERY query, call `record_evidence()` for each finding AND `add_timeline_event()` for significant events
+7. **MUST call `hunt_complete()`**: You MUST call this with confirmed techniques, evidence highlights, and detection gaps
+
+**IMPORTANT: You have limited steps. After each query, immediately record evidence. Call `hunt_complete()` by step 7 at the latest.**
 
 **Start by running the detection query for {{ technique_id }}.**

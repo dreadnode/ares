@@ -94,7 +94,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
         if wait_for_result:
             worker.start_task(task)
-            result = await self._dispatcher.wait_for_result(task.task_id, timeout=300)
+            result = await self._dispatcher.wait_for_result(task.task_id, timeout=600)
             return _format_task_result("Triage", task.task_id, result)
         else:
             worker.start_task(task)
@@ -143,7 +143,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
         if wait_for_result:
             worker.start_task(task)
-            result = await self._dispatcher.wait_for_result(task.task_id, timeout=300)
+            result = await self._dispatcher.wait_for_result(task.task_id, timeout=600)
             return _format_task_result("Threat Hunt", task.task_id, result)
         else:
             worker.start_task(task)
@@ -186,7 +186,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
         if wait_for_result:
             worker.start_task(task)
-            result = await self._dispatcher.wait_for_result(task.task_id, timeout=300)
+            result = await self._dispatcher.wait_for_result(task.task_id, timeout=600)
             return _format_task_result("Lateral Analysis", task.task_id, result)
         else:
             worker.start_task(task)
@@ -292,6 +292,8 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         self,
         reason: str,
         severity: str,
+        attack_synopsis: str = "",
+        recommendations: list[str] | None = None,
     ) -> str:
         """Escalate the investigation for human analyst review.
 
@@ -301,6 +303,8 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         Args:
             reason: Why escalation is needed.
             severity: Escalation severity: critical, high, medium.
+            attack_synopsis: Narrative of the attack chain discovered so far.
+            recommendations: List of recommended containment/remediation actions.
 
         Returns:
             Confirmation message.
@@ -311,6 +315,13 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         backend = self._dispatcher.backend
         await backend.set_meta("escalated", True)
         await backend.set_meta("escalation_reason", reason)
+
+        if attack_synopsis:
+            await backend.set_meta("attack_synopsis", attack_synopsis)
+
+        if recommendations:
+            for rec in recommendations:
+                await backend.add_recommendation(rec)
 
         logger.warning(f"Investigation ESCALATED: {reason} (severity={severity})")
         return f"[!] Investigation ESCALATED. Reason: {reason}. Severity: {severity}."
@@ -477,7 +488,7 @@ class BlueTeamOrchestrator:
         # Connect to Redis
         from ares.core.redis_client import create_redis_client
 
-        redis_client = create_redis_client(self.redis_url)
+        redis_client = await create_redis_client(self.redis_url)
         await redis_client.ping()
 
         # Create dispatcher
@@ -491,9 +502,9 @@ class BlueTeamOrchestrator:
         workers: dict[BlueRole, BlueWorkerAgent] = {}
 
         for role, max_steps in [
-            (BlueRole.TRIAGE, 20),
-            (BlueRole.THREAT_HUNTER, 30),
-            (BlueRole.LATERAL_ANALYST, 25),
+            (BlueRole.TRIAGE, 8),
+            (BlueRole.THREAT_HUNTER, 20),
+            (BlueRole.LATERAL_ANALYST, 15),
         ]:
             agent, callback_tools = create_blue_agent(
                 role=role,
@@ -503,6 +514,8 @@ class BlueTeamOrchestrator:
                 mitre_client=self.mitre_client,
                 mcp_tools=self._mcp_tools,
                 max_steps=max_steps,
+                grafana_url=self.grafana_url,
+                alert=alert,
             )
             worker = BlueWorkerAgent(
                 role=role,

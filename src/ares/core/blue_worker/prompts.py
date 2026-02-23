@@ -46,8 +46,8 @@ def generate_blue_task_prompt(
         return _generate_fallback_prompt(task_type, params)
 
     try:
-        template = loader.get_template(template_name)
-        rendered = template.render(
+        rendered = loader.render(
+            template_name,
             current_time=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             state_summary=shared_state_summary or {},
             **params,

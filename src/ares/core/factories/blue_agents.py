@@ -56,6 +56,8 @@ def create_blue_agent(
     mitre_client: MITREAttackClient,
     mcp_tools: list | None = None,
     max_steps: int = 20,
+    grafana_url: str = "",
+    alert: dict | None = None,
 ) -> tuple[Agent, BlueWorkerCallbackTools]:
     """Create a role-specific blue team agent.
 
@@ -67,12 +69,17 @@ def create_blue_agent(
         mitre_client: MITRE ATT&CK client.
         mcp_tools: Optional list of MCP tools from Grafana.
         max_steps: Maximum agent steps.
+        grafana_url: Grafana/Loki URL for QueryTemplateTools.
+        alert: Alert dict for deriving label selectors.
 
     Returns:
         Tuple of (Agent, BlueWorkerCallbackTools).
     """
     instructions = load_blue_instructions(role)
-    tools = _build_tools_for_role(role, backend, dispatcher, mitre_client, mcp_tools)
+    tools = _build_tools_for_role(
+        role, backend, dispatcher, mitre_client, mcp_tools,
+        grafana_url=grafana_url, alert=alert,
+    )
     callback_tools = tools[-1]  # Last tool is always the callback
     stop_conditions = get_blue_stop_conditions(role)
     hooks = create_blue_hooks(role)
@@ -127,6 +134,8 @@ def _build_tools_for_role(
     dispatcher: BlueTeamDispatcher,
     mitre_client: MITREAttackClient,
     mcp_tools: list | None = None,
+    grafana_url: str = "",
+    alert: dict | None = None,
 ) -> list:
     """Build the tool list for a specific role.
 
@@ -141,12 +150,28 @@ def _build_tools_for_role(
     shared_tools.set_shared_state(dispatcher.shared_state)
     shared_tools.set_mitre_client(mitre_client)
 
+    # Extract MCP query function and build QueryTemplateTools config
+    loki_url = grafana_url.rstrip("/") if grafana_url else "http://localhost:3100"
+    mcp_query_fn = _extract_mcp_query_fn(mcp_tools)
+    deployment = (alert or {}).get("labels", {}).get("deployment", "")
+    default_selector = (
+        f'{{deployment="{deployment}"}}' if deployment else '{job="windows-security"}'
+    )
+
     if role == BlueRole.TRIAGE:
         tools = _build_triage_tools(shared_tools, mitre_client, mcp_tools)
     elif role == BlueRole.THREAT_HUNTER:
-        tools = _build_hunter_tools(shared_tools, mitre_client, mcp_tools)
+        tools = _build_hunter_tools(
+            shared_tools, mitre_client, mcp_tools,
+            loki_url=loki_url, mcp_query_fn=mcp_query_fn,
+            default_selector=default_selector,
+        )
     elif role == BlueRole.LATERAL_ANALYST:
-        tools = _build_lateral_tools(shared_tools, mitre_client, mcp_tools)
+        tools = _build_lateral_tools(
+            shared_tools, mitre_client, mcp_tools,
+            loki_url=loki_url, mcp_query_fn=mcp_query_fn,
+            default_selector=default_selector,
+        )
     else:
         tools = [shared_tools]
 
@@ -186,6 +211,9 @@ def _build_hunter_tools(
     shared_tools: SharedInvestigationTools,
     mitre_client: MITREAttackClient,
     mcp_tools: list | None,
+    loki_url: str = "http://localhost:3100",
+    mcp_query_fn: Any = None,
+    default_selector: str = '{job="windows-security"}',
 ) -> list:
     """Build tools for threat hunter: detection queries + MCP + MITRE."""
     from ares.tools.blue import QueryTemplateTools
@@ -193,9 +221,17 @@ def _build_hunter_tools(
 
     tools: list = [shared_tools]
 
-    # QueryTemplateTools for detection queries
-    query_tools = QueryTemplateTools()
-    tools.append(query_tools)
+    # Pass specific QueryTemplateTools methods instead of whole toolset
+    # (39 detect_* methods → 4 selective methods = massive context reduction)
+    query_tools = QueryTemplateTools(
+        loki_url=loki_url,
+        default_label_selector=default_selector,
+        mcp_query_fn=mcp_query_fn,
+    )
+    tools.append(query_tools.run_detection_query)
+    tools.append(query_tools.list_query_templates)
+    tools.append(query_tools.get_host_activity)
+    tools.append(query_tools.get_user_activity)
 
     # MITRE lookup tools
     mitre_tools = MITRELookupTools()
@@ -214,15 +250,24 @@ def _build_lateral_tools(
     shared_tools: SharedInvestigationTools,
     mitre_client: MITREAttackClient,
     mcp_tools: list | None,
+    loki_url: str = "http://localhost:3100",
+    mcp_query_fn: Any = None,
+    default_selector: str = '{job="windows-security"}',
 ) -> list:
     """Build tools for lateral analyst: host/user activity + MCP."""
     from ares.tools.blue import QueryTemplateTools
 
     tools: list = [shared_tools]
 
-    # QueryTemplateTools for host/user activity queries
-    query_tools = QueryTemplateTools()
-    tools.append(query_tools)
+    # Pass specific QueryTemplateTools methods for lateral analysis
+    query_tools = QueryTemplateTools(
+        loki_url=loki_url,
+        default_label_selector=default_selector,
+        mcp_query_fn=mcp_query_fn,
+    )
+    tools.append(query_tools.run_detection_query)
+    tools.append(query_tools.get_host_activity)
+    tools.append(query_tools.get_user_activity)
 
     # Add filtered MCP tools
     if mcp_tools:
@@ -230,6 +275,47 @@ def _build_lateral_tools(
         tools.extend(filtered)
 
     return tools
+
+
+def _extract_mcp_query_fn(mcp_tools: list | None) -> Any:
+    """Extract MCP query_loki_logs function from MCP tools.
+
+    Returns a wrapper function compatible with QueryTemplateTools.mcp_query_fn,
+    or None if no query_loki_logs tool found.
+    """
+    if not mcp_tools:
+        return None
+
+    for tool in mcp_tools:
+        tool_name = getattr(tool, "name", "") or getattr(tool, "__name__", "")
+        if "query_loki_logs" in tool_name:
+            tool_fn = getattr(tool, "fn", None)
+            if tool_fn is None and callable(tool):
+                tool_fn = tool
+
+            if tool_fn:
+
+                async def mcp_loki_wrapper(
+                    datasource_uid: str,
+                    logql: str,
+                    start_time: str,
+                    end_time: str,
+                    limit: int,
+                    _fn=tool_fn,
+                ):
+                    return await _fn(
+                        datasourceUid=datasource_uid,
+                        logql=logql,
+                        startRfc3339=start_time,
+                        endRfc3339=end_time,
+                        limit=limit,
+                    )
+
+                logger.info(
+                    "QueryTemplateTools will use MCP query_loki_logs for authenticated queries"
+                )
+                return mcp_loki_wrapper
+    return None
 
 
 def _filter_mcp_for_role(mcp_tools: list, allowed_names: set[str]) -> list:
@@ -287,14 +373,18 @@ def create_blue_hooks(role: BlueRole) -> list:
 
     async def log_tool_usage(event: ToolStart):
         """Log tool calls for observability."""
-        tool_name = event.tool_call.name if event.tool_call else "unknown"
+        if not hasattr(event, "tool_call") or not event.tool_call:
+            return
+        tool_name = event.tool_call.name
         dn.log_metric(f"blue_{role.value}_tool_calls", 1, mode="count")
         logger.debug(f"[{role.value}] Tool call: {tool_name}")
 
     async def log_tool_result(event: ToolEnd):
         """Log tool results for observability."""
-        tool_name = event.tool_call.name if event.tool_call else "unknown"
-        result_len = len(str(event.tool_result)) if event.tool_result else 0
+        if not hasattr(event, "tool_call") or not event.tool_call:
+            return
+        tool_name = event.tool_call.name
+        result_len = len(str(event.tool_result)) if hasattr(event, "tool_result") and event.tool_result else 0
         logger.debug(f"[{role.value}] Tool result: {tool_name} ({result_len} chars)")
 
     return [log_tool_usage, log_tool_result]

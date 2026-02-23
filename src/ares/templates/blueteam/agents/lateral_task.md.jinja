@@ -36,8 +36,11 @@ No lateral connections identified yet. Start by analyzing the focus host and use
 3. **Map movement paths**: For every authentication from one host to another, record a lateral connection with `record_lateral_connection()`
 4. **Expand scope**: For each newly discovered host or user, investigate their activity
 5. **Track everything**: Call `track_host_investigation()` and `track_user_investigation()` for every entity found
-6. **Determine containment**: Based on the movement scope, recommend which hosts to isolate and which users to disable
-7. **Report results**: Call `lateral_complete()` with all investigated hosts, users, lateral paths, and containment recommendations
+6. **Record evidence**: After EVERY query, call `record_evidence()` for each finding AND `add_timeline_event()` for significant events
+7. **Determine containment**: Based on the movement scope, recommend which hosts to isolate and which users to disable
+8. **MUST call `lateral_complete()`**: You MUST call this with all investigated hosts, users, lateral paths, and containment recommendations
+
+**IMPORTANT: You have limited steps. After each query, immediately record evidence. Call `lateral_complete()` by step 5 at the latest.**
 
 {% if focus_host %}
 **Start by analyzing activity on {{ focus_host }}.**
