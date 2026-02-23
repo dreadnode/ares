@@ -122,8 +122,15 @@ When adding new features, follow the project structure:
 
 ```bash
 .
+├── src/ares/          # Main package
+│   ├── core/          # Core framework
+│   ├── tools/         # Tool implementations
+│   ├── agents/        # Agent orchestrators
+│   ├── eval/          # Evaluation framework
+│   ├── reports/       # Report generators
+│   └── templates/     # Jinja2 templates
+├── config/            # Configuration files
 ├── docs/              # Documentation
-├── examples/          # Usage examples
 ├── tests/             # Test suite
 └── pyproject.toml     # Project configuration
 ```
