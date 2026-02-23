@@ -48,6 +48,14 @@ class MockRedisClient:
         self.calls.append(("expire", key, seconds))
         return True
 
+    async def rpush(self, key: str, value: str) -> int:
+        """Append value to a list."""
+        self.calls.append(("rpush", key, value))
+        if key not in self.data:
+            self.data[key] = []
+        self.data[key].append(value)
+        return len(self.data[key])
+
 
 class MockTaskQueue:
     """Mock task queue with Redis client for threaded consumer tests."""
@@ -220,3 +228,154 @@ class TestPublishHashDAPersistence:
         # Main thread should use checkpoint
         assert checkpoint_called, "Main thread should call _checkpoint()"
         assert dispatcher.shared_state.has_domain_admin is True
+
+
+class TestPublishSharePersistence:
+    """Tests for Share persistence to Redis from threaded consumers.
+
+    When the threaded result consumer discovers shares, it must
+    persist them directly to Redis using task_queue.redis.
+    """
+
+    @pytest.fixture
+    def dispatcher(self):
+        """Create a dispatcher with mocked internals."""
+        d = RedTeamDispatcher()
+        d._shared_state = SharedRedTeamState(operation_id="test-op-share")
+        d._checkpoint_requested = MagicMock()
+        return d
+
+    @pytest.mark.asyncio
+    async def test_share_persists_to_redis_from_threaded_consumer(self, dispatcher, monkeypatch):
+        """Test that share discovery triggers direct Redis persistence from threaded consumer."""
+        from ares.core.models import Share
+
+        task_queue = MockTaskQueue()
+
+        share = Share(
+            host="dc01.contoso.local",
+            name="SYSVOL",
+            permissions="READ",
+        )
+
+        # Mock threading to simulate threaded consumer context
+        monkeypatch.setattr(
+            "ares.core.dispatcher.publishing.threading.current_thread",
+            lambda: MagicMock(name="ResultConsumer"),
+        )
+        monkeypatch.setattr(
+            "ares.core.dispatcher.publishing.threading.main_thread",
+            lambda: MagicMock(name="MainThread"),
+        )
+
+        result = await dispatcher.publish_share(share, "ares-recon", task_queue=task_queue)
+
+        assert result is True
+        assert share in dispatcher.shared_state.all_shares
+
+        # Verify Redis calls include share persistence (shares use rpush to LIST)
+        redis_calls = task_queue.redis.calls
+        rpush_calls = [c for c in redis_calls if c[0] == "rpush" and "share" in c[1].lower()]
+        assert len(rpush_calls) >= 1, (
+            f"Should persist share to Redis via rpush, got calls: {redis_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_share_without_task_queue_sets_checkpoint_requested(
+        self, dispatcher, monkeypatch
+    ):
+        """Test that share discovery without task_queue sets checkpoint_requested flag."""
+        from ares.core.models import Share
+
+        share = Share(
+            host="dc01.contoso.local",
+            name="C$",
+            permissions="READ,WRITE",
+        )
+
+        # Mock threading to simulate threaded consumer context (no main thread)
+        monkeypatch.setattr(
+            "ares.core.dispatcher.publishing.threading.current_thread",
+            lambda: MagicMock(name="ResultConsumer"),
+        )
+        monkeypatch.setattr(
+            "ares.core.dispatcher.publishing.threading.main_thread",
+            lambda: MagicMock(name="MainThread"),
+        )
+
+        result = await dispatcher.publish_share(share, "ares-recon", task_queue=None)
+
+        assert result is True
+        assert share in dispatcher.shared_state.all_shares
+        # Should request checkpoint since no task_queue for direct persist
+        dispatcher._checkpoint_requested.set.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_main_thread_uses_checkpoint_for_share(self, dispatcher, monkeypatch):
+        """Test that main thread uses checkpoint (not direct Redis) for share persistence."""
+        from ares.core.models import Share
+
+        checkpoint_called = False
+
+        async def mock_checkpoint():
+            nonlocal checkpoint_called
+            checkpoint_called = True
+
+        dispatcher._checkpoint = mock_checkpoint
+
+        share = Share(
+            host="sql01.contoso.local",
+            name="SQLData",
+            permissions="READ",
+        )
+
+        # Simulate main thread context
+        main_thread = MagicMock(name="MainThread")
+        monkeypatch.setattr(
+            "ares.core.dispatcher.publishing.threading.current_thread",
+            lambda: main_thread,
+        )
+        monkeypatch.setattr(
+            "ares.core.dispatcher.publishing.threading.main_thread",
+            lambda: main_thread,
+        )
+
+        result = await dispatcher.publish_share(share, "ares-recon", task_queue=None)
+
+        assert result is True
+        assert checkpoint_called, "Main thread should call _checkpoint()"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_share_not_added(self, dispatcher, monkeypatch):
+        """Test that duplicate shares are not re-added."""
+        from ares.core.models import Share
+
+        share = Share(
+            host="dc01.contoso.local",
+            name="NETLOGON",
+            permissions="READ",
+        )
+
+        # Simulate main thread
+        main_thread = MagicMock(name="MainThread")
+        monkeypatch.setattr(
+            "ares.core.dispatcher.publishing.threading.current_thread",
+            lambda: main_thread,
+        )
+        monkeypatch.setattr(
+            "ares.core.dispatcher.publishing.threading.main_thread",
+            lambda: main_thread,
+        )
+
+        async def mock_checkpoint():
+            pass
+
+        dispatcher._checkpoint = mock_checkpoint
+
+        # Add share first time
+        result1 = await dispatcher.publish_share(share, "ares-recon")
+        assert result1 is True
+
+        # Add same share again
+        result2 = await dispatcher.publish_share(share, "ares-recon")
+        assert result2 is False  # Duplicate should return False

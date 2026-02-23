@@ -765,7 +765,7 @@ class ResultProcessingMixin:
 
         # Extract shares from netexec --shares output
         for share in self._extract_shares_from_output(output):
-            await self.publish_share(share, source_agent)
+            await self.publish_share(share, source_agent, task_queue=task_queue)
 
         # Extract hashes (Kerberoast, AS-REP, NTLM) from tool output
         # Always extract as a backup - real-time hooks may fail silently or not complete
