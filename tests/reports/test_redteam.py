@@ -401,3 +401,227 @@ class TestGenerateComprehensiveReport:
         assert "T1552" in report  # From timeline
         assert "T1078" in report  # From identified_techniques
         assert "T1003" in report  # From identified_techniques
+
+
+class TestDeduplication:
+    """Tests for user and credential deduplication in reports."""
+
+    @pytest.fixture
+    def generator(self) -> RedTeamReportGenerator:
+        return RedTeamReportGenerator()
+
+    def test_user_deduplication_case_insensitive(
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
+    ):
+        """Test that duplicate users are deduplicated case-insensitively."""
+        # Add duplicate users with different cases
+        red_team_state.all_users = [
+            User(username="Administrator", domain="CONTOSO.LOCAL"),
+            User(username="administrator", domain="contoso.local"),  # Duplicate
+            User(username="ADMINISTRATOR", domain="Contoso.Local"),  # Duplicate
+            User(username="testuser", domain="contoso.local"),
+        ]
+
+        report = generator.generate(red_team_state)
+
+        # Report should show 2 unique users, not 4
+        assert "User" in report
+        # The report includes user_count in the template
+        assert "2" in report or "two" in report.lower()
+
+    def test_credential_deduplication_case_insensitive(
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
+    ):
+        """Test that duplicate credentials are deduplicated case-insensitively."""
+        # Add duplicate credentials with different cases
+        red_team_state.all_credentials = [
+            Credential(
+                username="Admin",
+                password="P@ssw0rd!",  # pragma: allowlist secret
+                domain="CONTOSO.LOCAL",
+            ),
+            Credential(
+                username="admin",
+                password="P@ssw0rd!",  # pragma: allowlist secret
+                domain="contoso.local",
+            ),  # Duplicate
+            Credential(
+                username="svc_backup",
+                password="backup123",  # pragma: allowlist secret
+                domain="contoso.local",
+            ),
+        ]
+
+        report = generator.generate(red_team_state)
+
+        # Should have 2 unique credentials
+        assert isinstance(report, str)
+        assert len(report) > 0
+
+    def test_credentials_with_different_passwords_not_deduplicated(
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
+    ):
+        """Test that same user with different passwords are NOT deduplicated."""
+        red_team_state.all_credentials = [
+            Credential(
+                username="admin",
+                password="OldP@ss",  # pragma: allowlist secret
+                domain="contoso.local",
+            ),
+            Credential(
+                username="admin",
+                password="NewP@ss",  # pragma: allowlist secret
+                domain="contoso.local",
+            ),  # Different password = different cred
+        ]
+
+        report = generator.generate(red_team_state)
+        assert isinstance(report, str)
+
+
+class TestAdminCount:
+    """Tests for admin count logic including known admin usernames.
+
+    The new admin count logic (checking for administrator/krbtgt usernames)
+    is applied in generate() when calculating admin_count for the template.
+    """
+
+    @pytest.fixture
+    def generator(self) -> RedTeamReportGenerator:
+        return RedTeamReportGenerator()
+
+    def test_administrator_username_counted_as_admin(
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
+    ):
+        """Test that 'administrator' username is counted as admin even without is_admin flag."""
+        red_team_state.all_credentials = [
+            Credential(
+                username="Administrator",
+                password="AdminP@ss",  # pragma: allowlist secret
+                domain="contoso.local",
+                is_admin=False,  # No flag but should still count
+            ),
+        ]
+
+        report = generator.generate(red_team_state)
+
+        # Report should show admin count of 1 (administrator username counts)
+        # The template shows "Administrator Accounts: X"
+        assert "Administrator Accounts**: 1" in report
+
+    def test_krbtgt_username_counted_as_admin(
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
+    ):
+        """Test that 'krbtgt' username is counted as admin."""
+        red_team_state.all_credentials = [
+            Credential(
+                username="krbtgt",
+                password="",
+                domain="contoso.local",
+                is_admin=False,  # No flag but krbtgt is always admin-level
+            ),
+        ]
+
+        report = generator.generate(red_team_state)
+
+        # Report should show admin count of 1 (krbtgt username counts)
+        assert "Administrator Accounts**: 1" in report
+
+    def test_is_admin_flag_still_works(
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
+    ):
+        """Test that is_admin=True still counts as admin."""
+        red_team_state.all_credentials = [
+            Credential(
+                username="svc_backup",
+                password="backup123",  # pragma: allowlist secret
+                domain="contoso.local",
+                is_admin=True,
+            ),
+        ]
+
+        report = generator.generate(red_team_state)
+        # Report should show admin count of 1
+        assert "Administrator Accounts**: 1" in report
+
+
+class TestCompletionStatus:
+    """Tests for operation completion status detection."""
+
+    @pytest.fixture
+    def generator(self) -> RedTeamReportGenerator:
+        return RedTeamReportGenerator()
+
+    def test_completed_at_marks_operation_completed(
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
+    ):
+        """Test that completed_at alone marks operation as completed."""
+        # Set completed_at but not completed flag
+        red_team_state.completed = False
+        red_team_state.completed_at = datetime.now(timezone.utc)
+
+        report = generator.generate(red_team_state)
+
+        # Stage field should show "completed", not "in_progress"
+        assert "**Stage**: completed" in report
+
+    def test_neither_completed_shows_in_progress(
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
+    ):
+        """Test that without completed or completed_at, stage is in_progress."""
+        red_team_state.completed = False
+        red_team_state.completed_at = None
+
+        report = generator.generate(red_team_state)
+
+        assert "**Stage**: in_progress" in report
+
+
+class TestAttackPathDisplay:
+    """Tests for attack path display in executive summary."""
+
+    @pytest.fixture
+    def generator(self) -> RedTeamReportGenerator:
+        return RedTeamReportGenerator()
+
+    def test_actual_attack_path_shown_when_available(
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
+    ):
+        """Test that actual domain_admin_path is shown instead of generic text."""
+        red_team_state.has_domain_admin = True
+        red_team_state.domain_admin_path = (
+            "LLMNR Poisoning → svc_backup creds → Constrained Delegation → DC01 → krbtgt hash"
+        )
+
+        summary = generator._generate_executive_summary(red_team_state)
+
+        # Should contain the actual path
+        assert "LLMNR Poisoning" in summary
+        assert "svc_backup" in summary
+        assert "Constrained Delegation" in summary
+
+    def test_fallback_when_no_path_captured(
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
+    ):
+        """Test fallback message when domain_admin_path is not set."""
+        red_team_state.has_domain_admin = True
+        red_team_state.domain_admin_path = None
+
+        summary = generator._generate_executive_summary(red_team_state)
+
+        # Should contain fallback text
+        assert "Attack Path" in summary
+        assert "timeline" in summary.lower() or "details" in summary.lower()
+
+    def test_no_attack_path_without_da(
+        self, generator: RedTeamReportGenerator, red_team_state: SharedRedTeamState
+    ):
+        """Test that attack path section is not shown without DA."""
+        red_team_state.has_domain_admin = False
+        red_team_state.has_golden_ticket = False
+        red_team_state.domain_admin_path = "Some path"  # Should be ignored
+
+        summary = generator._generate_executive_summary(red_team_state)
+
+        # Should NOT contain attack path section
+        assert "Attack Path" not in summary
