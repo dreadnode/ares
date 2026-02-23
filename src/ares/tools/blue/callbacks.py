@@ -7,12 +7,14 @@ so the worker loop knows the agent is done and can extract the result.
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
+
+if TYPE_CHECKING:
+    import asyncio
 
 
 class BlueWorkerCallbackTools(Toolset):  # type: ignore[misc]
@@ -28,7 +30,10 @@ class BlueWorkerCallbackTools(Toolset):  # type: ignore[misc]
     """
 
     _completion_event: asyncio.Event | None = None
-    _result_data: dict[str, Any] = {}
+    _result_data: dict[str, Any]
+
+    def __init__(self) -> None:
+        self._result_data = {}
 
     def set_completion_event(self, event: asyncio.Event) -> None:
         """Set the completion event (called by worker before agent.run)."""
@@ -70,15 +75,19 @@ class BlueWorkerCallbackTools(Toolset):  # type: ignore[misc]
         Returns:
             Confirmation message.
         """
-        logger.info(f"Triage complete: severity={severity_assessment}, deep={needs_deep_investigation}")
-        self._signal_completion({
-            "type": "triage",
-            "summary": summary,
-            "severity_assessment": severity_assessment,
-            "initial_techniques": initial_techniques or [],
-            "recommended_next_steps": recommended_next_steps or [],
-            "needs_deep_investigation": needs_deep_investigation,
-        })
+        logger.info(
+            f"Triage complete: severity={severity_assessment}, deep={needs_deep_investigation}"
+        )
+        self._signal_completion(
+            {
+                "type": "triage",
+                "summary": summary,
+                "severity_assessment": severity_assessment,
+                "initial_techniques": initial_techniques or [],
+                "recommended_next_steps": recommended_next_steps or [],
+                "needs_deep_investigation": needs_deep_investigation,
+            }
+        )
         return f"[+] Triage complete. Severity: {severity_assessment}. Findings reported to orchestrator."
 
     @dn.tool_method  # type: ignore[untyped-decorator]
@@ -106,14 +115,16 @@ class BlueWorkerCallbackTools(Toolset):  # type: ignore[misc]
             Confirmation message.
         """
         logger.info(f"Hunt complete: techniques={len(techniques_found or [])}")
-        self._signal_completion({
-            "type": "hunt",
-            "findings_summary": findings_summary,
-            "techniques_found": techniques_found or [],
-            "evidence_highlights": evidence_highlights or [],
-            "detection_gaps": detection_gaps or [],
-            "recommended_pivots": recommended_pivots or [],
-        })
+        self._signal_completion(
+            {
+                "type": "hunt",
+                "findings_summary": findings_summary,
+                "techniques_found": techniques_found or [],
+                "evidence_highlights": evidence_highlights or [],
+                "detection_gaps": detection_gaps or [],
+                "recommended_pivots": recommended_pivots or [],
+            }
+        )
         return f"[+] Threat hunt complete. {len(techniques_found or [])} techniques confirmed."
 
     @dn.tool_method  # type: ignore[untyped-decorator]
@@ -144,14 +155,16 @@ class BlueWorkerCallbackTools(Toolset):  # type: ignore[misc]
             f"Lateral analysis complete: "
             f"hosts={len(hosts_investigated or [])}, users={len(users_investigated or [])}"
         )
-        self._signal_completion({
-            "type": "lateral",
-            "scope_summary": scope_summary,
-            "hosts_investigated": hosts_investigated or [],
-            "users_investigated": users_investigated or [],
-            "lateral_paths": lateral_paths or [],
-            "containment_recommendations": containment_recommendations or [],
-        })
+        self._signal_completion(
+            {
+                "type": "lateral",
+                "scope_summary": scope_summary,
+                "hosts_investigated": hosts_investigated or [],
+                "users_investigated": users_investigated or [],
+                "lateral_paths": lateral_paths or [],
+                "containment_recommendations": containment_recommendations or [],
+            }
+        )
         return (
             f"[+] Lateral analysis complete. "
             f"{len(hosts_investigated or [])} hosts, {len(users_investigated or [])} users analyzed."

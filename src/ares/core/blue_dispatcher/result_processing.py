@@ -6,13 +6,10 @@ auto-chaining follow-up tasks based on evidence.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
-
-from ares.core.models import BlueTaskInfo, BlueTaskType, TaskStatus
 
 if TYPE_CHECKING:
     from ares.core.blue_state_backend import BlueStateBackend
@@ -83,8 +80,6 @@ class BlueResultProcessingMixin:
         Examines the result for evidence types that should trigger
         additional detection queries.
         """
-        result_type = result.get("type", "")
-
         # Check for techniques that should trigger chains
         techniques = result.get("techniques_found", [])
         for technique in techniques:

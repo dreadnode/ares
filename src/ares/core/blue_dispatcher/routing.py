@@ -26,7 +26,7 @@ class BlueRoutingMixin:
         params: dict[str, Any],
     ) -> BlueTaskInfo:
         """Create a task and register it as pending."""
-        task = BlueTaskInfo(
+        return BlueTaskInfo(
             task_id=str(uuid.uuid4())[:8],
             task_type=task_type,
             investigation_id=self._investigation_id,
@@ -34,7 +34,6 @@ class BlueRoutingMixin:
             assigned_role=role,
             params=params,
         )
-        return task
 
     async def dispatch_triage(
         self,
@@ -126,7 +125,9 @@ class BlueRoutingMixin:
             },
         )
         await self._register_pending_task(task)
-        logger.info(f"Dispatched lateral analysis task {task.task_id}: host={focus_host}, user={focus_user}")
+        logger.info(
+            f"Dispatched lateral analysis task {task.task_id}: host={focus_host}, user={focus_user}"
+        )
         return task
 
     async def dispatch_host_investigation(self, hostname: str, context: str = "") -> BlueTaskInfo:
@@ -169,7 +170,6 @@ class BlueRoutingMixin:
 
     async def _register_pending_task(self, task: BlueTaskInfo) -> None:
         """Register a task as pending in the backend."""
-        import json
         from datetime import datetime, timezone
 
         task_dict = {

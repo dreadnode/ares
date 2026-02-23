@@ -10,21 +10,18 @@ from typing import TYPE_CHECKING, Any
 
 import dreadnode as dn
 from dreadnode.agent import Agent, Thread
-from dreadnode.agent.events import ToolEnd, ToolStart
 from dreadnode.agent.stop import StopCondition, tool_use
 from loguru import logger
 
-from ares.core.factories.blue_factory import (
-    filter_essential_mcp_tools,
-    max_tool_calls_stop,
-    wrap_mcp_query_tools,
-)
+from ares.core.factories.blue_factory import max_tool_calls_stop
 from ares.core.models import BlueRole
 from ares.core.templates import get_template_loader
 from ares.tools.blue.callbacks import BlueWorkerCallbackTools
 from ares.tools.blue.shared_wrappers import SharedInvestigationTools
 
 if TYPE_CHECKING:
+    from dreadnode.agent.events import ToolEnd, ToolStart
+
     from ares.core.blue_dispatcher import BlueTeamDispatcher
     from ares.core.blue_state_backend import BlueStateBackend
     from ares.integrations.mitre import MITREAttackClient
@@ -77,8 +74,13 @@ def create_blue_agent(
     """
     instructions = load_blue_instructions(role)
     tools = _build_tools_for_role(
-        role, backend, dispatcher, mitre_client, mcp_tools,
-        grafana_url=grafana_url, alert=alert,
+        role,
+        backend,
+        dispatcher,
+        mitre_client,
+        mcp_tools,
+        grafana_url=grafana_url,
+        alert=alert,
     )
     callback_tools = tools[-1]  # Last tool is always the callback
     stop_conditions = get_blue_stop_conditions(role)
@@ -162,14 +164,20 @@ def _build_tools_for_role(
         tools = _build_triage_tools(shared_tools, mitre_client, mcp_tools)
     elif role == BlueRole.THREAT_HUNTER:
         tools = _build_hunter_tools(
-            shared_tools, mitre_client, mcp_tools,
-            loki_url=loki_url, mcp_query_fn=mcp_query_fn,
+            shared_tools,
+            mitre_client,
+            mcp_tools,
+            loki_url=loki_url,
+            mcp_query_fn=mcp_query_fn,
             default_selector=default_selector,
         )
     elif role == BlueRole.LATERAL_ANALYST:
         tools = _build_lateral_tools(
-            shared_tools, mitre_client, mcp_tools,
-            loki_url=loki_url, mcp_query_fn=mcp_query_fn,
+            shared_tools,
+            mitre_client,
+            mcp_tools,
+            loki_url=loki_url,
+            mcp_query_fn=mcp_query_fn,
             default_selector=default_selector,
         )
     else:
@@ -342,17 +350,17 @@ def get_blue_stop_conditions(role: BlueRole) -> list[StopCondition]:
             tool_use("triage_complete"),
             max_tool_calls_stop(max_calls=30),
         ]
-    elif role == BlueRole.THREAT_HUNTER:
+    if role == BlueRole.THREAT_HUNTER:
         return [
             tool_use("hunt_complete"),
             max_tool_calls_stop(max_calls=40),
         ]
-    elif role == BlueRole.LATERAL_ANALYST:
+    if role == BlueRole.LATERAL_ANALYST:
         return [
             tool_use("lateral_complete"),
             max_tool_calls_stop(max_calls=35),
         ]
-    elif role == BlueRole.ORCHESTRATOR:
+    if role == BlueRole.ORCHESTRATOR:
         return [
             tool_use("complete_investigation"),
             tool_use("escalate_investigation"),
@@ -384,7 +392,11 @@ def create_blue_hooks(role: BlueRole) -> list:
         if not hasattr(event, "tool_call") or not event.tool_call:
             return
         tool_name = event.tool_call.name
-        result_len = len(str(event.tool_result)) if hasattr(event, "tool_result") and event.tool_result else 0
+        result_len = (
+            len(str(event.tool_result))
+            if hasattr(event, "tool_result") and event.tool_result
+            else 0
+        )
         logger.debug(f"[{role.value}] Tool result: {tool_name} ({result_len} chars)")
 
     return [log_tool_usage, log_tool_result]

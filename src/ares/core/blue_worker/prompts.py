@@ -46,13 +46,12 @@ def generate_blue_task_prompt(
         return _generate_fallback_prompt(task_type, params)
 
     try:
-        rendered = loader.render(
+        return loader.render(
             template_name,
             current_time=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             state_summary=shared_state_summary or {},
             **params,
         )
-        return rendered
     except Exception as e:
         logger.warning(f"Failed to render template {template_name}: {e}")
         return _generate_fallback_prompt(task_type, params)
@@ -70,7 +69,9 @@ def _generate_fallback_prompt(task_type: BlueTaskType, params: dict[str, Any]) -
         lines.append(f"Triage alert: {alert_name}")
         lines.append(f"Alert data: {json.dumps(alert, indent=2, default=str)[:2000]}")
         lines.append("")
-        lines.append("Assess severity and record initial evidence. Call triage_complete() when done.")
+        lines.append(
+            "Assess severity and record initial evidence. Call triage_complete() when done."
+        )
 
     elif task_type == BlueTaskType.THREAT_HUNT:
         lines.append(f"Hunt for technique: {params.get('technique_id', 'N/A')}")
@@ -83,7 +84,7 @@ def _generate_fallback_prompt(task_type: BlueTaskType, params: dict[str, Any]) -
         lines.append("Run detection queries, record evidence, call hunt_complete() when done.")
 
     elif task_type == BlueTaskType.LATERAL_ANALYSIS:
-        lines.append(f"Analyze lateral movement scope")
+        lines.append("Analyze lateral movement scope")
         if params.get("focus_host"):
             lines.append(f"Focus host: {params['focus_host']}")
         if params.get("focus_user"):

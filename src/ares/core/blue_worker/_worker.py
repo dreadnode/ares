@@ -13,12 +13,12 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from ares.core.blue_worker.prompts import generate_blue_task_prompt
-from ares.core.models import BlueRole, BlueTaskInfo, BlueTaskType, TaskStatus
 
 if TYPE_CHECKING:
     from dreadnode.agent import Agent
 
     from ares.core.blue_dispatcher import BlueTeamDispatcher
+    from ares.core.models import BlueRole, BlueTaskInfo
     from ares.tools.blue.callbacks import BlueWorkerCallbackTools
 
 
@@ -74,10 +74,7 @@ class BlueWorkerAgent:
         Returns:
             Result dict from the worker's completion callback.
         """
-        logger.info(
-            f"[{self.agent_name}] Processing task {task.task_id}: "
-            f"{task.task_type.value}"
-        )
+        logger.info(f"[{self.agent_name}] Processing task {task.task_id}: {task.task_type.value}")
 
         # Get current state summary for context
         state_summary = None
@@ -105,20 +102,18 @@ class BlueWorkerAgent:
             # Check if the agent called a completion callback
             if completion_event.is_set():
                 result = self.callback_tools.result_data
-                logger.info(
-                    f"[{self.agent_name}] Task {task.task_id} completed via callback"
-                )
+                logger.info(f"[{self.agent_name}] Task {task.task_id} completed via callback")
                 return result
-            else:
-                # Agent finished without calling callback (hit max_steps or stop condition)
-                logger.warning(
-                    f"[{self.agent_name}] Task {task.task_id} ended without completion callback"
-                )
-                return {
-                    "type": self.role.value,
-                    "summary": "Agent completed without explicit completion signal",
-                    "partial": True,
-                }
+
+            # Agent finished without calling callback (hit max_steps or stop condition)
+            logger.warning(
+                f"[{self.agent_name}] Task {task.task_id} ended without completion callback"
+            )
+            return {
+                "type": self.role.value,
+                "summary": "Agent completed without explicit completion signal",
+                "partial": True,
+            }
 
         except asyncio.CancelledError:
             logger.info(f"[{self.agent_name}] Task {task.task_id} cancelled")

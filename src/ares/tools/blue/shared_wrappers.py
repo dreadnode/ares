@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import contextlib
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import dreadnode as dn
 from loguru import logger
@@ -162,7 +162,9 @@ class SharedInvestigationTools(InvestigationTools):
         value_preview = value[:60] + "..." if len(value) > 60 else value
 
         if not added:
-            return f"{STATUS_INFO} Evidence already recorded (dedup): {evidence_type}={value_preview}"
+            return (
+                f"{STATUS_INFO} Evidence already recorded (dedup): {evidence_type}={value_preview}"
+            )
 
         lines = [
             f"{STATUS_SUCCESS} Recorded evidence: {evidence_id}",
