@@ -115,10 +115,10 @@ No NTLM hashes captured.
 ### Key Events
 
 {% if timeline %}
+| Time (UTC) | Event | MITRE |
+|------------|-------|-------|
 {% for event in timeline %}
-**{{ event.timestamp }}** - {{ event.description }}
-{% if event.mitre_techniques %}- MITRE ATT&CK: {{ event.mitre_techniques|join(', ') }}{% endif %}
-
+| {{ event.timestamp }} | {{ event.description }} | {{ event.mitre_techniques|join(', ') if event.mitre_techniques else '-' }} |
 {% endfor %}
 {% else %}
 No timeline events recorded.

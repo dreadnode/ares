@@ -62,9 +62,11 @@
 ## Attack Path
 
 ### Timeline of Key Events
+
+| Time (UTC) | Event | MITRE |
+|------------|-------|-------|
 {% for event in timeline %}
-**{{ event.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}** - {{ event.description }}
-{% if event.mitre_techniques %}  - MITRE ATT&CK: {{ event.mitre_techniques|join(', ') }}{% endif %}
+| {{ event.timestamp.strftime('%Y-%m-%d %H:%M:%S') }} | {{ event.description }} | {{ event.mitre_techniques|join(', ') if event.mitre_techniques else '-' }} |
 {% endfor %}
 
 ---

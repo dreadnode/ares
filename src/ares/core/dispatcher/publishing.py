@@ -406,21 +406,39 @@ class PublishingMixin:
         except Exception as e:
             logger.warning(f"Failed to dispatch immediate crack: {e}")
 
-    async def publish_share(self: RedTeamDispatcher, share: Share, source_agent: str) -> bool:
+    async def publish_share(
+        self: RedTeamDispatcher,
+        share: Share,
+        source_agent: str,
+        task_queue: Any = None,
+    ) -> bool:
         """
         Record share discovery in shared state.
 
         Args:
             share: The discovered share.
             source_agent: Agent that discovered it.
+            task_queue: Task queue for direct Redis persistence from threaded consumers.
 
         Returns:
             True if share was new and added.
         """
         added = self.shared_state.add_share(share)
         if added:
-            if threading.current_thread() is threading.main_thread():
+            is_main_thread = threading.current_thread() is threading.main_thread()
+            if is_main_thread:
                 await self._checkpoint()
+            elif task_queue is not None:
+                # Persist directly to Redis using the threaded consumer's client
+                try:
+                    from ares.core.state_backend import RedisStateBackend
+
+                    backend = RedisStateBackend(task_queue.redis, self.shared_state.operation_id)
+                    await backend.add_share(share)
+                    logger.debug(f"Share persisted directly to Redis: {share.host}/{share.name}")
+                except Exception as e:
+                    logger.warning(f"Direct Redis persist failed for share: {e}")
+                    self._checkpoint_requested.set()
             else:
                 self._checkpoint_requested.set()
             logger.info(f"Share recorded: {share.host}/{share.name}")

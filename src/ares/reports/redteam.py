@@ -44,10 +44,34 @@ class RedTeamReportGenerator:
         vulnerability_count = len(state.discovered_vulnerabilities)
         exploited_count = len(state.exploited_vulnerabilities)
 
+        # Deduplicate users (case-insensitive on domain+username)
+        seen_users: set[tuple[str, str]] = set()
+        unique_users = []
+        for user in state.all_users:
+            user_key = (user.domain.lower(), user.username.lower())
+            if user_key not in seen_users:
+                seen_users.add(user_key)
+                unique_users.append(user)
+
+        # Deduplicate credentials (case-insensitive on domain+username+password)
+        seen_creds: set[tuple[str, str, str]] = set()
+        unique_creds = []
+        for cred in state.all_credentials:
+            cred_key = (cred.domain.lower(), cred.username.lower(), cred.password)
+            if cred_key not in seen_creds:
+                seen_creds.add(cred_key)
+                unique_creds.append(cred)
+
         # Calculate counts from SharedRedTeamState
         host_count = len(state.all_hosts)
-        credential_count = len(state.all_credentials)
-        admin_count = sum(1 for c in state.all_credentials if c.is_admin)
+        credential_count = len(unique_creds)
+
+        # Count admins - check is_admin flag OR known admin usernames
+        admin_count = sum(
+            1
+            for c in unique_creds
+            if c.is_admin or c.username.lower() in ("administrator", "krbtgt")
+        )
 
         # Render the report using the template
         return self.loader.render(
@@ -57,20 +81,20 @@ class RedTeamReportGenerator:
             started_at=state.started_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
             completed_at=completed_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
             duration=duration_str,
-            stage="completed" if state.completed else "in_progress",
+            stage="completed" if (state.completed or state.completed_at) else "in_progress",
             executive_summary=executive_summary,
             has_domain_admin=state.has_domain_admin,
             has_golden_ticket=state.has_golden_ticket,
             host_count=host_count,
-            user_count=len(state.all_users),
+            user_count=len(unique_users),
             credential_count=credential_count,
             admin_count=admin_count,
             vulnerability_count=vulnerability_count,
             exploited_count=exploited_count,
             share_count=len(state.all_shares),
             hosts=state.all_hosts,
-            users=state.all_users,
-            credentials=state.all_credentials,
+            users=unique_users,
+            credentials=unique_creds,
             shares=state.all_shares,
             weaknesses=state.all_weaknesses,
             timeline=state.operation_timeline,
@@ -130,14 +154,15 @@ class RedTeamReportGenerator:
             f"- Vulnerabilities Exploited: {exploited_count}"
         )
 
-        # Attack path summary
+        # Attack path summary - use actual captured path, not generic text
         if state.has_domain_admin or state.has_golden_ticket:
-            summary_parts.append(
-                "\n\n**Attack Path:**\n"
-                "The operation successfully achieved privileged access through systematic "
-                "recon, credential harvesting, and lateral movement techniques. "
-                "Detailed attack timeline is provided below."
-            )
+            if state.domain_admin_path:
+                summary_parts.append(f"\n\n**Attack Path:**\n{state.domain_admin_path}")
+            else:
+                # Fallback only if no path was captured
+                summary_parts.append(
+                    "\n\n**Attack Path:**\nDomain admin achieved. See timeline below for details."
+                )
 
         # Security posture assessment
         if state.has_domain_admin or state.has_golden_ticket:
