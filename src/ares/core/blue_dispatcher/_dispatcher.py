@@ -9,7 +9,6 @@ Uses Redis (via BlueStateBackend) for shared state and task tracking.
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -20,10 +19,8 @@ from ares.core.blue_dispatcher.routing import BlueRoutingMixin
 from ares.core.blue_dispatcher.status import BlueStatusMixin
 from ares.core.blue_state_backend import BlueStateBackend
 from ares.core.models import (
-    BlueTaskInfo,
     InvestigationStage,
     SharedBlueTeamState,
-    TaskStatus,
 )
 
 if TYPE_CHECKING:
@@ -61,7 +58,7 @@ class BlueTeamDispatcher(
             redis_client: Connected async Redis client.
         """
         self._redis = redis_client
-        self._backend: BlueStateBackend | None = None
+        self._backend: BlueStateBackend | None = None  # type: ignore[assignment]
         self._shared_state: SharedBlueTeamState | None = None
         self._investigation_id: str = ""
         self._task_events: dict[str, asyncio.Event] = {}
@@ -112,7 +109,7 @@ class BlueTeamDispatcher(
         # Store alert and meta in Redis
         await self._backend.set_meta("alert", alert)
         await self._backend.set_meta("stage", InvestigationStage.TRIAGE.value)
-        await self._backend.set_meta("escalated", False)
+        await self._backend.set_meta("escalated", value=False)
         if correlation_context:
             await self._backend.set_meta("correlation_context", correlation_context)
 
@@ -180,11 +177,14 @@ class BlueTeamDispatcher(
 
         try:
             await asyncio.wait_for(event.wait(), timeout=timeout)
-            return self._task_result_data.get(task_id, {
-                "success": False,
-                "result": {},
-                "error": "Result not found after notification",
-            })
+            return self._task_result_data.get(
+                task_id,
+                {
+                    "success": False,
+                    "result": {},
+                    "error": "Result not found after notification",
+                },
+            )
         except asyncio.TimeoutError:
             logger.warning(f"Task {task_id} timed out after {timeout}s")
             return {
@@ -203,7 +203,7 @@ class BlueTeamDispatcher(
         """
         from ares.core.models import Evidence, PyramidLevel, TimelineEvent
 
-        snapshot = await self._backend.snapshot()
+        snapshot = await self.backend.snapshot()
         meta = snapshot.get("meta", {})
 
         state = self._shared_state
@@ -250,7 +250,7 @@ class BlueTeamDispatcher(
         state.timeline = []
         for tl_dict in snapshot.get("timeline", []):
             try:
-                from datetime import datetime, timezone as tz
+                from datetime import datetime
 
                 ts = datetime.fromisoformat(str(tl_dict["timestamp"]))
                 event = TimelineEvent(

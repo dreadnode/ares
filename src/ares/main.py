@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import cyclopts
 import dreadnode as dn
@@ -17,6 +17,38 @@ from loguru import logger
 
 if TYPE_CHECKING:
     from ares.core.models import InvestigationState
+
+
+# Severity levels that trigger multi-agent routing
+HIGH_SEVERITY_LEVELS = frozenset({"critical", "high"})
+
+
+class InvestigationOrchestratorProtocol(Protocol):
+    """Protocol for investigation orchestrators (single and multi-agent)."""
+
+    async def investigate(self, alert: dict, *, correlation_context: dict | None = None) -> dict:
+        """Run an investigation on an alert."""
+        ...
+
+    async def _shutdown_mcp(self) -> None:
+        """Shutdown MCP connections."""
+        ...
+
+
+def should_use_multi_agent(severity: str, *, force_multi_agent: bool = False) -> bool:
+    """Determine if an alert should use multi-agent based on severity.
+
+    Args:
+        severity: Alert severity level (critical, high, medium, low, etc.)
+        force_multi_agent: If True, always use multi-agent regardless of severity.
+
+    Returns:
+        True if multi-agent should be used for this alert.
+    """
+    if force_multi_agent:
+        return True
+    return severity.lower() in HIGH_SEVERITY_LEVELS
+
 
 app = cyclopts.App(
     name="ares",
@@ -46,7 +78,8 @@ class Args:
         operation_id: Red team operation ID to focus investigation on.
         latest: Use the latest red team operation (prefer running).
         redis_url: Redis URL for loading red team operation state.
-        multi_agent: Use multi-agent orchestrator (requires Redis).
+        multi_agent: Force multi-agent for ALL alerts (requires Redis).
+        auto_route: Enable severity-based routing (multi-agent for HIGH/CRITICAL).
     """
 
     model: str = ""
@@ -59,7 +92,8 @@ class Args:
     operation_id: str = ""  # Red team operation to focus on
     latest: bool = False  # Use latest red team operation
     redis_url: str = ""  # Redis URL for red team state
-    multi_agent: bool = False  # Use multi-agent blue team orchestrator
+    multi_agent: bool = False  # Force multi-agent for ALL alerts
+    auto_route: bool = True  # Enable severity-based auto-routing
 
 
 @dataclass
@@ -262,11 +296,17 @@ async def main(
     report_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Reports: {report_dir}")
 
-    if args.multi_agent:
-        from ares.agents.blue.multi_agent_orchestrator import BlueTeamOrchestrator
-        from ares.core.config import get_redis_url
+    # Determine Redis availability for multi-agent support
+    from ares.core.config import get_redis_url
 
-        blue_redis_url = args.redis_url or os.getenv("ARES_REDIS_URL", "") or get_redis_url()
+    blue_redis_url = args.redis_url or os.getenv("ARES_REDIS_URL", "") or get_redis_url()
+
+    # Create orchestrators based on configuration
+    single_agent_orchestrator: InvestigationOrchestratorProtocol | None = None
+    multi_agent_orchestrator: InvestigationOrchestratorProtocol | None = None
+
+    if args.multi_agent:
+        # Force multi-agent mode for ALL alerts
         if not blue_redis_url:
             logger.error(
                 "Multi-agent mode requires Redis. "
@@ -274,8 +314,37 @@ async def main(
             )
             return
 
+        from ares.agents.blue.multi_agent_orchestrator import BlueTeamOrchestrator
+
         logger.info(f"Mode: MULTI-AGENT (Redis: {blue_redis_url})")
-        orchestrator = BlueTeamOrchestrator(
+        multi_agent_orchestrator = BlueTeamOrchestrator(
+            model=model,
+            grafana_url=args.grafana_url,
+            grafana_api_key=grafana_api_key,
+            mitre_client=mitre_client,
+            report_dir=report_dir,
+            max_steps=args.max_steps,
+            redis_url=blue_redis_url,
+            attack_context=attack_context,
+        )
+    elif args.auto_route and blue_redis_url:
+        # Auto-routing mode: create both orchestrators
+        from ares.agents.blue.multi_agent_orchestrator import BlueTeamOrchestrator
+
+        logger.info(f"Mode: AUTO-ROUTE (Redis: {blue_redis_url})")
+        logger.info("  HIGH/CRITICAL alerts -> multi-agent")
+        logger.info("  Other alerts -> single-agent")
+
+        single_agent_orchestrator = InvestigationOrchestrator(
+            model=model,
+            grafana_url=args.grafana_url,
+            grafana_api_key=grafana_api_key,
+            mitre_client=mitre_client,
+            report_dir=report_dir,
+            max_steps=args.max_steps,
+            attack_context=attack_context,
+        )
+        multi_agent_orchestrator = BlueTeamOrchestrator(
             model=model,
             grafana_url=args.grafana_url,
             grafana_api_key=grafana_api_key,
@@ -286,7 +355,15 @@ async def main(
             attack_context=attack_context,
         )
     else:
-        orchestrator = InvestigationOrchestrator(
+        # Single-agent mode only
+        if args.auto_route and not blue_redis_url:
+            logger.warning(
+                "Auto-routing enabled but Redis unavailable. "
+                "Using single-agent for all alerts. "
+                "Set ARES_REDIS_URL to enable multi-agent for HIGH/CRITICAL alerts."
+            )
+        logger.info("Mode: SINGLE-AGENT")
+        single_agent_orchestrator = InvestigationOrchestrator(
             model=model,
             grafana_url=args.grafana_url,
             grafana_api_key=grafana_api_key,
@@ -295,6 +372,33 @@ async def main(
             max_steps=args.max_steps,
             attack_context=attack_context,
         )
+
+    # Helper to get the appropriate orchestrator for an alert
+    def get_orchestrator_for_alert(
+        alert_severity: str,
+    ) -> tuple[InvestigationOrchestratorProtocol, str]:
+        """Get the appropriate orchestrator based on alert severity.
+
+        Returns:
+            Tuple of (orchestrator, mode_name) for logging.
+        """
+        if args.multi_agent and multi_agent_orchestrator is not None:
+            # Force multi-agent mode
+            return multi_agent_orchestrator, "multi-agent"
+
+        if (
+            args.auto_route
+            and should_use_multi_agent(alert_severity)
+            and multi_agent_orchestrator is not None
+        ):
+            return multi_agent_orchestrator, "multi-agent (auto-routed)"
+
+        # Fallback to single-agent
+        if single_agent_orchestrator is not None:
+            return single_agent_orchestrator, "single-agent"
+
+        # This should never happen - at least one orchestrator should exist
+        raise RuntimeError("No orchestrator available")
 
     grafana = GrafanaTools(
         base_url=args.grafana_url,
@@ -353,6 +457,10 @@ async def main(
                             f"Alert correlation: {related_count} related alerts in cluster "
                             f"{cluster.cluster_id}"
                         )
+
+                    # Route alert to appropriate orchestrator based on severity
+                    orchestrator, orchestrator_mode = get_orchestrator_for_alert(severity)
+                    logger.info(f"Investigation mode: {orchestrator_mode}")
 
                     # Run investigation with correlation context
                     try:
@@ -434,9 +542,12 @@ async def main(
             except Exception as e:
                 logger.error(f"Failed to generate consolidated report: {e}")
 
-        # Clean up MCP connection on shutdown
+        # Clean up MCP connections on shutdown
         logger.info("Cleaning up connections...")
-        await orchestrator._shutdown_mcp()
+        if single_agent_orchestrator is not None:
+            await single_agent_orchestrator._shutdown_mcp()
+        if multi_agent_orchestrator is not None:
+            await multi_agent_orchestrator._shutdown_mcp()
         logger.success("Shutdown complete")
 
 
@@ -497,15 +608,32 @@ async def investigate_alert(
     report_dir = Path(args.report_dir).resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.multi_agent:
-        from ares.agents.blue.multi_agent_orchestrator import BlueTeamOrchestrator
-        from ares.core.config import get_redis_url
+    # Determine Redis availability and routing mode
+    from ares.core.config import get_redis_url
 
-        blue_redis_url = args.redis_url or os.getenv("ARES_REDIS_URL", "") or get_redis_url()
+    blue_redis_url = args.redis_url or os.getenv("ARES_REDIS_URL", "") or get_redis_url()
+
+    # Extract severity for routing
+    severity = alert.get("labels", {}).get("severity", "unknown")
+    alert_name = alert.get("labels", {}).get("alertname", "unknown")
+
+    # Determine which orchestrator to use
+    use_multi = args.multi_agent or (
+        args.auto_route and should_use_multi_agent(severity) and blue_redis_url
+    )
+
+    # Create orchestrator based on routing decision
+    # Use InvestigationOrchestratorProtocol type to handle both orchestrator types
+    orchestrator: InvestigationOrchestratorProtocol
+    if use_multi:
         if not blue_redis_url:
             logger.error("Multi-agent mode requires Redis. Set --args.redis-url or ARES_REDIS_URL.")
             return
 
+        from ares.agents.blue.multi_agent_orchestrator import BlueTeamOrchestrator
+
+        orchestrator_mode = "multi-agent" if args.multi_agent else "multi-agent (auto-routed)"
+        logger.info(f"Mode: {orchestrator_mode} (severity: {severity})")
         orchestrator = BlueTeamOrchestrator(
             model=model,
             grafana_url=args.grafana_url,
@@ -518,6 +646,7 @@ async def investigate_alert(
     else:
         from ares.agents.blue import InvestigationOrchestrator
 
+        logger.info(f"Mode: single-agent (severity: {severity})")
         orchestrator = InvestigationOrchestrator(
             model=model,
             grafana_url=args.grafana_url,
@@ -528,7 +657,7 @@ async def investigate_alert(
         )
 
     # Run investigation
-    logger.info(f"Investigating alert: {alert.get('labels', {}).get('alertname', 'unknown')}")
+    logger.info(f"Investigating alert: {alert_name}")
 
     result = await orchestrator.investigate(alert)
 
@@ -892,6 +1021,9 @@ class EvalArgs:
         min_ioc_rate: Minimum IOC detection rate to pass (0.0-1.0, CI mode only).
         min_technique_rate: Minimum technique coverage to pass (0.0-1.0, CI mode only).
         parallel: Number of scenarios to run in parallel (dataset only).
+        multi_agent: Force multi-agent for ALL alerts.
+        auto_route: Enable severity-based routing (multi-agent for HIGH/CRITICAL).
+        redis_url: Redis URL for multi-agent state (required for multi_agent/auto_route).
     """
 
     output_dir: str = "./eval_results"
@@ -902,6 +1034,9 @@ class EvalArgs:
     min_ioc_rate: float = 0.5
     min_technique_rate: float = 0.5
     parallel: int = 1
+    multi_agent: bool = False
+    auto_route: bool = True
+    redis_url: str = ""
 
 
 # Cyclopts decorator typing not yet fully supported by type checkers
@@ -964,6 +1099,31 @@ async def evaluate(
         logger.error(f"Red team state file not found: {state_path}")
         return
 
+    from ares.eval import EvaluationRunner, EvaluationScenario
+
+    # Resolve redis_url for multi-agent/auto-route mode
+    eval_redis_url = eval_args.redis_url
+    if (eval_args.multi_agent or eval_args.auto_route) and not eval_redis_url:
+        from ares.core.config import get_redis_url
+
+        eval_redis_url = os.getenv("ARES_REDIS_URL", "") or get_redis_url()
+
+    # Only fail if multi_agent is explicitly set and no Redis
+    if eval_args.multi_agent and not eval_redis_url:
+        logger.error(
+            "Multi-agent mode requires Redis. "
+            "Set --eval-args.redis-url or ARES_REDIS_URL environment variable."
+        )
+        return
+
+    # Determine routing mode for logging
+    if eval_args.multi_agent:
+        mode_str = "multi-agent (forced)"
+    elif eval_args.auto_route and eval_redis_url:
+        mode_str = "auto-route (HIGH/CRITICAL -> multi-agent)"
+    else:
+        mode_str = "single-agent"
+
     # Log startup
     logger.info("=" * 60)
     logger.info("ARES BLUE TEAM EVALUATION")
@@ -973,9 +1133,8 @@ async def evaluate(
     logger.info(f"Grafana: {args.grafana_url}")
     logger.info(f"Poll Timeout: {eval_args.poll_timeout}s")
     logger.info(f"Output Dir: {eval_args.output_dir}")
+    logger.info(f"Mode: {mode_str}")
     logger.info("=" * 60)
-
-    from ares.eval import EvaluationRunner, EvaluationScenario
 
     runner = EvaluationRunner(
         model=model,
@@ -983,6 +1142,9 @@ async def evaluate(
         grafana_api_key=grafana_api_key,
         max_steps=args.max_steps,
         output_dir=eval_args.output_dir,
+        multi_agent=eval_args.multi_agent,
+        auto_route=eval_args.auto_route,
+        redis_url=eval_redis_url,
     )
 
     scenario = EvaluationScenario(
@@ -1102,6 +1264,29 @@ async def evaluate_dataset(
         logger.error("No scenarios found in dataset")
         return
 
+    # Resolve redis_url for multi-agent/auto-route mode
+    eval_redis_url = eval_args.redis_url
+    if (eval_args.multi_agent or eval_args.auto_route) and not eval_redis_url:
+        from ares.core.config import get_redis_url
+
+        eval_redis_url = os.getenv("ARES_REDIS_URL", "") or get_redis_url()
+
+    # Only fail if multi_agent is explicitly set and no Redis
+    if eval_args.multi_agent and not eval_redis_url:
+        logger.error(
+            "Multi-agent mode requires Redis. "
+            "Set --eval-args.redis-url or ARES_REDIS_URL environment variable."
+        )
+        return
+
+    # Determine routing mode for logging
+    if eval_args.multi_agent:
+        mode_str = "multi-agent (forced)"
+    elif eval_args.auto_route and eval_redis_url:
+        mode_str = "auto-route (HIGH/CRITICAL -> multi-agent)"
+    else:
+        mode_str = "single-agent"
+
     # Log startup
     logger.info("=" * 60)
     logger.info("ARES BLUE TEAM DATASET EVALUATION")
@@ -1112,6 +1297,7 @@ async def evaluate_dataset(
     logger.info(f"Grafana: {args.grafana_url}")
     logger.info(f"Poll Timeout: {eval_args.poll_timeout}s")
     logger.info(f"Output Dir: {eval_args.output_dir}")
+    logger.info(f"Mode: {mode_str}")
     logger.info("=" * 60)
 
     runner = EvaluationRunner(
@@ -1121,6 +1307,9 @@ async def evaluate_dataset(
         max_steps=args.max_steps,
         output_dir=eval_args.output_dir,
         inject_synthetic_alerts=eval_args.synthetic,
+        multi_agent=eval_args.multi_agent,
+        auto_route=eval_args.auto_route,
+        redis_url=eval_redis_url,
     )
 
     result = await runner.evaluate_dataset(

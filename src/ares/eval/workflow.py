@@ -409,7 +409,13 @@ class EvaluationRunner:
         output_dir: Directory for evaluation results.
         inject_synthetic_alerts: If True, create synthetic alerts instead of polling.
         default_matching_rules: Default alert matching rules.
+        multi_agent: If True, force multi-agent for ALL alerts.
+        auto_route: If True, use multi-agent for HIGH/CRITICAL severity.
+        redis_url: Redis URL for multi-agent state (required if multi_agent or auto_route).
     """
+
+    # Severity levels that trigger multi-agent routing
+    HIGH_SEVERITY_LEVELS = frozenset({"critical", "high"})
 
     def __init__(
         self,
@@ -420,6 +426,9 @@ class EvaluationRunner:
         output_dir: Path | str = "./eval_results",
         inject_synthetic_alerts: bool = False,
         default_matching_rules: AlertMatchingRules | None = None,
+        multi_agent: bool = False,
+        auto_route: bool = True,
+        redis_url: str = "",
     ):
         self.model = model
         self.grafana_url = grafana_url
@@ -429,6 +438,9 @@ class EvaluationRunner:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.inject_synthetic_alerts = inject_synthetic_alerts
         self.default_matching_rules = default_matching_rules or AlertMatchingRules()
+        self.multi_agent = multi_agent
+        self.auto_route = auto_route
+        self.redis_url = redis_url
 
         # Cached MITRE client
         self._mitre_client: MITREAttackClient | None = None
@@ -911,6 +923,21 @@ class EvaluationRunner:
 
         return False
 
+    def _should_use_multi_agent(self, severity: str) -> bool:
+        """Determine if an alert should use multi-agent based on severity.
+
+        Args:
+            severity: Alert severity level.
+
+        Returns:
+            True if multi-agent should be used for this alert.
+        """
+        if self.multi_agent:
+            return True
+        if self.auto_route and severity.lower() in self.HIGH_SEVERITY_LEVELS:
+            return bool(self.redis_url)
+        return False
+
     async def _run_investigation(self, alert: dict[str, Any]) -> tuple[InvestigationState, Any]:
         """Run a blue team investigation for an alert.
 
@@ -920,20 +947,48 @@ class EvaluationRunner:
         Returns:
             Tuple of (InvestigationState, orchestrator) for cleanup.
         """
-        from ares.agents.blue import InvestigationOrchestrator
-
         # Use cached MITRE client
         mitre_client = await self._get_mitre_client()
 
-        # Create orchestrator
-        orchestrator = InvestigationOrchestrator(
-            model=self.model,
-            grafana_url=self.grafana_url,
-            grafana_api_key=self.grafana_api_key,
-            mitre_client=mitre_client,
-            report_dir=self.output_dir / "reports",
-            max_steps=self.max_steps,
-        )
+        # Extract severity for routing
+        severity = alert.get("labels", {}).get("severity", "unknown")
+        use_multi = self._should_use_multi_agent(severity)
+
+        # Create orchestrator (multi-agent or monolithic) based on routing
+        # Use Any type to handle both orchestrator types uniformly
+        orchestrator: Any
+        if use_multi:
+            from ares.agents.blue.multi_agent_orchestrator import BlueTeamOrchestrator
+
+            if not self.redis_url:
+                raise RuntimeError(
+                    "Multi-agent mode requires redis_url - "
+                    "set redis_url parameter or use multi_agent=False"
+                )
+
+            mode = "multi-agent" if self.multi_agent else "multi-agent (auto-routed)"
+            logger.info(f"Investigation mode: {mode} (severity: {severity})")
+            orchestrator = BlueTeamOrchestrator(
+                model=self.model,
+                grafana_url=self.grafana_url,
+                grafana_api_key=self.grafana_api_key,
+                mitre_client=mitre_client,
+                report_dir=self.output_dir / "reports",
+                max_steps=self.max_steps,
+                redis_url=self.redis_url,
+            )
+        else:
+            from ares.agents.blue import InvestigationOrchestrator
+
+            logger.info(f"Investigation mode: single-agent (severity: {severity})")
+            orchestrator = InvestigationOrchestrator(
+                model=self.model,
+                grafana_url=self.grafana_url,
+                grafana_api_key=self.grafana_api_key,
+                mitre_client=mitre_client,
+                report_dir=self.output_dir / "reports",
+                max_steps=self.max_steps,
+            )
 
         # Run investigation
         result = await orchestrator.investigate(alert)
