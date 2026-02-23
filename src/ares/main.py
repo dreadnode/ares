@@ -46,6 +46,7 @@ class Args:
         operation_id: Red team operation ID to focus investigation on.
         latest: Use the latest red team operation (prefer running).
         redis_url: Redis URL for loading red team operation state.
+        multi_agent: Use multi-agent orchestrator (requires Redis).
     """
 
     model: str = ""
@@ -58,6 +59,7 @@ class Args:
     operation_id: str = ""  # Red team operation to focus on
     latest: bool = False  # Use latest red team operation
     redis_url: str = ""  # Redis URL for red team state
+    multi_agent: bool = False  # Use multi-agent blue team orchestrator
 
 
 @dataclass
@@ -260,15 +262,39 @@ async def main(
     report_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Reports: {report_dir}")
 
-    orchestrator = InvestigationOrchestrator(
-        model=model,
-        grafana_url=args.grafana_url,
-        grafana_api_key=grafana_api_key,
-        mitre_client=mitre_client,
-        report_dir=report_dir,
-        max_steps=args.max_steps,
-        attack_context=attack_context,
-    )
+    if args.multi_agent:
+        from ares.agents.blue.multi_agent_orchestrator import BlueTeamOrchestrator
+        from ares.core.config import get_redis_url
+
+        blue_redis_url = args.redis_url or os.getenv("ARES_REDIS_URL", "") or get_redis_url()
+        if not blue_redis_url:
+            logger.error(
+                "Multi-agent mode requires Redis. "
+                "Set --args.redis-url or ARES_REDIS_URL environment variable."
+            )
+            return
+
+        logger.info(f"Mode: MULTI-AGENT (Redis: {blue_redis_url})")
+        orchestrator = BlueTeamOrchestrator(
+            model=model,
+            grafana_url=args.grafana_url,
+            grafana_api_key=grafana_api_key,
+            mitre_client=mitre_client,
+            report_dir=report_dir,
+            max_steps=args.max_steps,
+            redis_url=blue_redis_url,
+            attack_context=attack_context,
+        )
+    else:
+        orchestrator = InvestigationOrchestrator(
+            model=model,
+            grafana_url=args.grafana_url,
+            grafana_api_key=grafana_api_key,
+            mitre_client=mitre_client,
+            report_dir=report_dir,
+            max_steps=args.max_steps,
+            attack_context=attack_context,
+        )
 
     grafana = GrafanaTools(
         base_url=args.grafana_url,
@@ -462,7 +488,6 @@ async def investigate_alert(
         console=dn_args.console,
     )
 
-    from ares.agents.blue import InvestigationOrchestrator
     from ares.integrations.mitre import MITREAttackClient
 
     logger.info("Loading MITRE ATT&CK data...")
@@ -472,14 +497,35 @@ async def investigate_alert(
     report_dir = Path(args.report_dir).resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
 
-    orchestrator = InvestigationOrchestrator(
-        model=model,
-        grafana_url=args.grafana_url,
-        grafana_api_key=grafana_api_key,
-        mitre_client=mitre_client,
-        report_dir=report_dir,
-        max_steps=args.max_steps,
-    )
+    if args.multi_agent:
+        from ares.agents.blue.multi_agent_orchestrator import BlueTeamOrchestrator
+        from ares.core.config import get_redis_url
+
+        blue_redis_url = args.redis_url or os.getenv("ARES_REDIS_URL", "") or get_redis_url()
+        if not blue_redis_url:
+            logger.error("Multi-agent mode requires Redis. Set --args.redis-url or ARES_REDIS_URL.")
+            return
+
+        orchestrator = BlueTeamOrchestrator(
+            model=model,
+            grafana_url=args.grafana_url,
+            grafana_api_key=grafana_api_key,
+            mitre_client=mitre_client,
+            report_dir=report_dir,
+            max_steps=args.max_steps,
+            redis_url=blue_redis_url,
+        )
+    else:
+        from ares.agents.blue import InvestigationOrchestrator
+
+        orchestrator = InvestigationOrchestrator(
+            model=model,
+            grafana_url=args.grafana_url,
+            grafana_api_key=grafana_api_key,
+            mitre_client=mitre_client,
+            report_dir=report_dir,
+            max_steps=args.max_steps,
+        )
 
     # Run investigation
     logger.info(f"Investigating alert: {alert.get('labels', {}).get('alertname', 'unknown')}")

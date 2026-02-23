@@ -1,0 +1,46 @@
+# User Investigation Task: {{ username }}
+
+## Target User
+
+- **Username**: {{ username }}
+
+## Known Activity
+
+{{ known_activity }}
+
+## Context
+
+{{ context }}
+
+## Your Task
+
+1. **Get full user activity**: Call `get_user_activity("{{ username }}")` to retrieve all authentication events, share access, and process execution for this user
+
+2. **Identify all hosts**: Extract every host where `{{ username }}` authenticated. For each host:
+   - What logon type was used? (Type 3=network, Type 10=RDP, Type 2=interactive)
+   - Was the logon successful or failed?
+   - What was the source IP/workstation?
+   - Call `track_host_investigation()` for each host
+
+3. **Check for credential abuse patterns**:
+   - Multiple failed logons followed by success (brute force / password spray)
+   - Network logons from unusual source hosts (lateral movement)
+   - Access to ADMIN$, C$, or IPC$ shares (remote admin activity)
+   - Kerberos TGS requests with RC4 encryption (pass-the-hash indicator)
+
+4. **Map the user's movement**:
+   - Record each host-to-host connection with `record_lateral_connection()`
+   - Identify the first and last hosts in the movement chain
+   - Determine the direction of movement (inward toward DCs, or outward toward workstations)
+
+5. **Record all evidence**: Every finding must be recorded with `record_evidence()`:
+   - Hosts accessed: evidence_type="hostname", pyramid_level=4
+   - Source IPs: evidence_type="ip", pyramid_level=2
+   - Techniques observed: evidence_type="technique", pyramid_level=6
+
+6. **Report results**: Call `lateral_complete()` with:
+   - All hosts this user accessed
+   - All lateral paths involving this user
+   - Containment recommendation (disable account, reset password, monitor)
+
+**Start by calling `get_user_activity("{{ username }}")`.**
