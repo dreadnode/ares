@@ -35,7 +35,9 @@ class BluePublishingMixin:
             )
         return added
 
-    async def publish_timeline_event(self, event_dict: dict[str, Any], source_agent: str = "") -> None:
+    async def publish_timeline_event(
+        self, event_dict: dict[str, Any], source_agent: str = ""
+    ) -> None:
         """Publish a timeline event to shared state.
 
         Args:
@@ -47,9 +49,7 @@ class BluePublishingMixin:
         await self._backend.add_timeline_event(event_dict)
         logger.debug(f"Published timeline event: {str(event_dict.get('description', ''))[:50]}")
 
-    async def publish_technique(
-        self, technique_id: str, name: str = "", tactic: str = ""
-    ) -> None:
+    async def publish_technique(self, technique_id: str, name: str = "", tactic: str = "") -> None:
         """Publish a MITRE technique to shared state.
 
         Args:

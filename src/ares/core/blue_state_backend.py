@@ -317,9 +317,7 @@ class BlueStateBackend:
         """
         key = self._key(self.KEY_META)
         try:
-            await self._redis.hset(
-                key, k, json.dumps(v, separators=(",", ":"), default=str)
-            )
+            await self._redis.hset(key, k, json.dumps(v, separators=(",", ":"), default=str))
             await self._set_ttl(key)
         except Exception as e:
             logger.warning(f"Failed to set meta field {k}: {e}")
@@ -355,9 +353,7 @@ class BlueStateBackend:
         """
         key = self._key(self.KEY_PIVOT_QUEUE)
         try:
-            await self._redis.rpush(
-                key, json.dumps(data, separators=(",", ":"), default=str)
-            )
+            await self._redis.rpush(key, json.dumps(data, separators=(",", ":"), default=str))
             await self._set_ttl(key)
         except Exception as e:
             logger.warning(f"Failed to queue pivot in Redis: {e}")
@@ -386,10 +382,7 @@ class BlueStateBackend:
             items = await self._redis.lrange(key, 0, -1)
             if items:
                 await self._redis.delete(key)
-            return [
-                json.loads(item if isinstance(item, str) else item.decode())
-                for item in items
-            ]
+            return [json.loads(item if isinstance(item, str) else item.decode()) for item in items]
         except Exception as e:
             logger.warning(f"Failed to pop pivot queue from Redis: {e}")
             return []
@@ -405,9 +398,7 @@ class BlueStateBackend:
             items = await self._redis.lrange(key, 0, -1)
             if items:
                 await self._redis.delete(key)
-            return [
-                item if isinstance(item, str) else item.decode() for item in items
-            ]
+            return [item if isinstance(item, str) else item.decode() for item in items]
         except Exception as e:
             logger.warning(f"Failed to pop chain queue from Redis: {e}")
             return []
@@ -486,10 +477,7 @@ class BlueStateBackend:
         key = self._key(self.KEY_LATERAL)
         try:
             items = await self._redis.lrange(key, 0, -1)
-            return [
-                json.loads(item if isinstance(item, str) else item.decode())
-                for item in items
-            ]
+            return [json.loads(item if isinstance(item, str) else item.decode()) for item in items]
         except Exception as e:
             logger.warning(f"Failed to get lateral connections from Redis: {e}")
             return []
@@ -520,9 +508,7 @@ class BlueStateBackend:
         key = self._key(self.KEY_RECOMMENDATIONS)
         try:
             items = await self._redis.lrange(key, 0, -1)
-            return [
-                item if isinstance(item, str) else item.decode() for item in items
-            ]
+            return [item if isinstance(item, str) else item.decode() for item in items]
         except Exception as e:
             logger.warning(f"Failed to get recommendations from Redis: {e}")
             return []
@@ -670,9 +656,7 @@ class BlueStateBackend:
             ev_raw = await self._redis.hgetall(ev_key)
             for v in ev_raw.values():
                 try:
-                    result["evidence"].append(
-                        json.loads(v if isinstance(v, str) else v.decode())
-                    )
+                    result["evidence"].append(json.loads(v if isinstance(v, str) else v.decode()))
                 except json.JSONDecodeError:
                     logger.warning("Invalid JSON in evidence hash value")
         except Exception as e:
@@ -709,9 +693,7 @@ class BlueStateBackend:
             tn_key = self._key(self.KEY_TECHNIQUE_NAMES)
             tn_raw = await self._redis.hgetall(tn_key)
             result["technique_names"] = {
-                (k if isinstance(k, str) else k.decode()): (
-                    v if isinstance(v, str) else v.decode()
-                )
+                (k if isinstance(k, str) else k.decode()): (v if isinstance(v, str) else v.decode())
                 for k, v in tn_raw.items()
             }
         except Exception as e:
@@ -790,9 +772,7 @@ class BlueStateBackend:
             for k, v in meta_raw.items():
                 field = k if isinstance(k, str) else k.decode()
                 try:
-                    result["meta"][field] = json.loads(
-                        v if isinstance(v, str) else v.decode()
-                    )
+                    result["meta"][field] = json.loads(v if isinstance(v, str) else v.decode())
                 except json.JSONDecodeError:
                     logger.warning(f"Invalid JSON in meta field {field}")
         except Exception as e:

@@ -99,8 +99,7 @@ class BlueStatusMixin:
             "by_type": by_type,
             "by_pyramid_level": by_level,
             "techniques": {
-                tid: technique_names.get(tid, tid)
-                for tid in snapshot.get("techniques", set())
+                tid: technique_names.get(tid, tid) for tid in snapshot.get("techniques", set())
             },
             "lateral_connections": len(snapshot.get("lateral_connections", [])),
         }
