@@ -26,7 +26,8 @@ tasks:
       GRAFANA_SERVICE_ACCOUNT_TOKEN:
         sh: op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo ""
       OPENAI_API_KEY:
-        sh: op item get "Openai" --fields dreadnode-personal-api-key --reveal 2>/dev/null || echo ""
+        sh: op item get "Openai" --fields dreadnode-ares-api-key --reveal 2>/dev/null || echo ""
+        # sh: op item get "Openai" --fields dreadnode-jayson-api-key --reveal 2>/dev/null || echo ""
       ARES_MODEL:
         sh: |
           if [ -n "{{.MODEL_ALL}}" ]; then
