@@ -12,6 +12,13 @@ vars:
   PARALLELISM: '{{.PARALLELISM | default "10"}}'
   PVC_PATH: '/ares'
   VERIFY_PVC_DIFF: '{{.VERIFY_PVC_DIFF | default "true"}}'
+  # Team selector: red, blue, or all (default: all)
+  TEAM: '{{.TEAM | default "all"}}'
+  # Pod labels by team
+  RED_COMPONENT_LABEL: 'ares.dreadnode.io/component=red-team'
+  BLUE_COMPONENT_LABEL: 'ares.dreadnode.io/component=blue-team'
+  RED_ORCH_LABEL: 'app.kubernetes.io/name=ares-orchestrator'
+  BLUE_ORCH_LABEL: 'app.kubernetes.io/name=ares-blue-orchestrator'
 
 tasks:
   # ============================================================================
@@ -160,28 +167,57 @@ tasks:
   # SYNC: Copy files to pods
   # ============================================================================
   sync:
-    desc: "Sync local code to pods (usage: task remote:sync [FILES=src/ares/core/worker.py])"
+    desc: "Sync local code to pods (usage: task remote:sync [FILES=src/ares/core/worker.py] [TEAM=red|blue|all])"
     silent: true
     vars:
       FILES: '{{.FILES | default ""}}'
     cmds:
       - |
-        echo -e "{{.INFO}} Syncing code to pods in {{.K8S_NAMESPACE}}"
+        echo -e "{{.INFO}} Syncing code to pods in {{.K8S_NAMESPACE}} (team={{.TEAM}})"
 
-        # Get orchestrator pod first (so we can exclude it from workers)
-        ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-          -l app.kubernetes.io/name=ares-orchestrator \
-          --field-selector=status.phase=Running \
-          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+        ORCH_PODS=""
+        WORKER_PODS=""
 
-        # Get worker pods, excluding atomic role and orchestrator (orchestrator synced separately below)
-        PODS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-          -l ares.dreadnode.io/component=red-team \
-          --field-selector=status.phase=Running \
-          -o json | jq -r --arg orch "$ORCH_POD" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
+        # Get red team pods if TEAM=red or TEAM=all
+        if [ "{{.TEAM}}" = "red" ] || [ "{{.TEAM}}" = "all" ]; then
+          RED_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.RED_ORCH_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -n "$RED_ORCH" ]; then
+            ORCH_PODS="$ORCH_PODS $RED_ORCH"
+          fi
 
-        if [ -z "$PODS" ] && [ -z "$ORCH_POD" ]; then
-          echo -e "{{.ERROR}} No running pods found"
+          RED_WORKERS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.RED_COMPONENT_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o json | jq -r --arg orch "$RED_ORCH" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
+          WORKER_PODS="$WORKER_PODS $RED_WORKERS"
+        fi
+
+        # Get blue team pods if TEAM=blue or TEAM=all
+        if [ "{{.TEAM}}" = "blue" ] || [ "{{.TEAM}}" = "all" ]; then
+          BLUE_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.BLUE_ORCH_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -n "$BLUE_ORCH" ]; then
+            ORCH_PODS="$ORCH_PODS $BLUE_ORCH"
+          fi
+
+          BLUE_WORKERS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.BLUE_COMPONENT_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o json | jq -r --arg orch "$BLUE_ORCH" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
+          WORKER_PODS="$WORKER_PODS $BLUE_WORKERS"
+        fi
+
+        # Trim whitespace
+        ORCH_PODS=$(echo "$ORCH_PODS" | xargs)
+        PODS=$(echo "$WORKER_PODS" | xargs)
+
+        if [ -z "$PODS" ] && [ -z "$ORCH_PODS" ]; then
+          echo -e "{{.ERROR}} No running pods found for team={{.TEAM}}"
           exit 1
         fi
 
@@ -249,8 +285,8 @@ tasks:
             ' _ {} "$f" "$relative_path"
           fi
 
-          # Sync to orchestrator (PVC only)
-          if [ -n "$ORCH_POD" ]; then
+          # Sync to orchestrator(s) (PVC only)
+          for ORCH_POD in $ORCH_PODS; do
             if kubectl cp "$f" "$ORCH_POD:{{.PVC_PATH}}/src/ares/$relative_path" \
                 -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
               echo -e "{{.SUCCESS}}   -> $ORCH_POD"
@@ -274,7 +310,7 @@ tasks:
                 echo -e "{{.WARN}}   x $ORCH_POD (pvc differs)"
               fi
             fi
-          fi
+          done
         done
 
         echo ""
@@ -284,34 +320,64 @@ tasks:
   # SYNC:FULL: Copy full src/ares tree to pods
   # ============================================================================
   sync:full:
-    desc: "Sync full src/ares tree to pods"
+    desc: "Sync full src/ares tree to pods (usage: task remote:sync:full [TEAM=red|blue|all])"
     silent: true
     cmds:
       - |
-        echo -e "{{.INFO}} Full sync to pods in {{.K8S_NAMESPACE}}"
+        echo -e "{{.INFO}} Full sync to pods in {{.K8S_NAMESPACE}} (team={{.TEAM}})"
 
-        # Get orchestrator pod first (so we can exclude it from workers)
-        ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-          -l app.kubernetes.io/name=ares-orchestrator \
-          --field-selector=status.phase=Running \
-          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+        ORCH_PODS=""
+        WORKER_PODS=""
 
-        # Get worker pods, excluding atomic role and orchestrator (orchestrator synced separately below)
-        PODS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-          -l ares.dreadnode.io/component=red-team \
-          --field-selector=status.phase=Running \
-          -o json | jq -r --arg orch "$ORCH_POD" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
+        # Get red team pods if TEAM=red or TEAM=all
+        if [ "{{.TEAM}}" = "red" ] || [ "{{.TEAM}}" = "all" ]; then
+          RED_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.RED_ORCH_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -n "$RED_ORCH" ]; then
+            ORCH_PODS="$ORCH_PODS $RED_ORCH"
+          fi
 
-        if [ -z "$PODS" ] && [ -z "$ORCH_POD" ]; then
-          echo -e "{{.ERROR}} No running pods found"
+          RED_WORKERS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.RED_COMPONENT_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o json | jq -r --arg orch "$RED_ORCH" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
+          WORKER_PODS="$WORKER_PODS $RED_WORKERS"
+        fi
+
+        # Get blue team pods if TEAM=blue or TEAM=all
+        if [ "{{.TEAM}}" = "blue" ] || [ "{{.TEAM}}" = "all" ]; then
+          BLUE_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.BLUE_ORCH_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -n "$BLUE_ORCH" ]; then
+            ORCH_PODS="$ORCH_PODS $BLUE_ORCH"
+          fi
+
+          BLUE_WORKERS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.BLUE_COMPONENT_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o json | jq -r --arg orch "$BLUE_ORCH" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
+          WORKER_PODS="$WORKER_PODS $BLUE_WORKERS"
+        fi
+
+        # Trim whitespace
+        ORCH_PODS=$(echo "$ORCH_PODS" | xargs)
+        PODS=$(echo "$WORKER_PODS" | xargs)
+
+        if [ -z "$PODS" ] && [ -z "$ORCH_PODS" ]; then
+          echo -e "{{.ERROR}} No running pods found for team={{.TEAM}}"
           exit 1
         fi
 
         # Show what we found
         POD_COUNT=$(echo $PODS | wc -w | tr -d ' ')
+        ORCH_COUNT=$(echo $ORCH_PODS | wc -w | tr -d ' ')
         ORCH_MSG=""
-        if [ -n "$ORCH_POD" ]; then
-          ORCH_MSG=" + orchestrator"
+        if [ -n "$ORCH_PODS" ]; then
+          ORCH_MSG=" + $ORCH_COUNT orchestrator(s)"
         fi
         echo -e "{{.INFO}} Found $POD_COUNT worker pods${ORCH_MSG}, syncing..."
 
@@ -385,8 +451,8 @@ tasks:
           ' _ {} "$MANIFEST"
         fi
 
-        # Sync to orchestrator
-        if [ -n "$ORCH_POD" ]; then
+        # Sync to orchestrator(s)
+        for ORCH_POD in $ORCH_PODS; do
           sync_ok="false"
           if kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
               mkdir -p {{.PVC_PATH}}/src/ares 2>/dev/null && \
@@ -429,7 +495,7 @@ tasks:
               echo -e "{{.WARN}}   x $ORCH_POD (sync failed)"
             fi
           fi
-        fi
+        done
 
         echo ""
         echo -e "{{.SUCCESS}} Full sync complete"
@@ -441,29 +507,44 @@ tasks:
   # ROLLOUT: Restart pods
   # ============================================================================
   rollout:
-    desc: "Restart pods to pick up code changes"
+    desc: "Restart pods to pick up code changes (usage: task remote:rollout [TEAM=red|blue|all])"
     silent: true
     cmds:
       - |
-        echo -e "{{.INFO}} Restarting deployments and statefulsets in {{.K8S_NAMESPACE}}..."
+        echo -e "{{.INFO}} Restarting deployments and statefulsets in {{.K8S_NAMESPACE}} (team={{.TEAM}})..."
 
-        # Restart worker agents (deployments) - exclude orchestrator which has its own restart
-        kubectl rollout restart deployment -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team,ares.dreadnode.io/role!=orchestrator 2>/dev/null || true
+        # Restart red team pods if TEAM=red or TEAM=all
+        if [ "{{.TEAM}}" = "red" ] || [ "{{.TEAM}}" = "all" ]; then
+          echo -e "{{.INFO}} Restarting red team agents..."
+          kubectl rollout restart deployment -n {{.K8S_NAMESPACE}} -l {{.RED_COMPONENT_LABEL}},ares.dreadnode.io/role!=orchestrator 2>/dev/null || true
+          kubectl rollout restart statefulset -n {{.K8S_NAMESPACE}} -l {{.RED_COMPONENT_LABEL}},ares.dreadnode.io/role!=orchestrator 2>/dev/null || true
+          kubectl rollout restart deployment -n {{.K8S_NAMESPACE}} -l {{.RED_ORCH_LABEL}} 2>/dev/null || true
+        fi
 
-        # Restart worker agents (statefulsets) - exclude orchestrator
-        kubectl rollout restart statefulset -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team,ares.dreadnode.io/role!=orchestrator 2>/dev/null || true
-
-        # Restart orchestrator (separate to avoid double-restart)
-        kubectl rollout restart deployment -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator 2>/dev/null || true
+        # Restart blue team pods if TEAM=blue or TEAM=all
+        if [ "{{.TEAM}}" = "blue" ] || [ "{{.TEAM}}" = "all" ]; then
+          echo -e "{{.INFO}} Restarting blue team agents..."
+          kubectl rollout restart deployment -n {{.K8S_NAMESPACE}} -l {{.BLUE_COMPONENT_LABEL}},ares.dreadnode.io/role!=orchestrator 2>/dev/null || true
+          kubectl rollout restart statefulset -n {{.K8S_NAMESPACE}} -l {{.BLUE_COMPONENT_LABEL}},ares.dreadnode.io/role!=orchestrator 2>/dev/null || true
+          kubectl rollout restart deployment -n {{.K8S_NAMESPACE}} -l {{.BLUE_ORCH_LABEL}} 2>/dev/null || true
+        fi
 
         echo -e "{{.SUCCESS}} Rollout initiated"
-        echo -e "{{.INFO}} Checking worker status..."
+        echo -e "{{.INFO}} Checking status..."
 
-        kubectl rollout status deployment -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team,ares.dreadnode.io/role!=orchestrator --timeout=60s 2>/dev/null || true
-        kubectl rollout status statefulset -n {{.K8S_NAMESPACE}} -l ares.dreadnode.io/component=red-team,ares.dreadnode.io/role!=orchestrator --timeout=60s 2>/dev/null || true
+        # Check red team status if TEAM=red or TEAM=all
+        if [ "{{.TEAM}}" = "red" ] || [ "{{.TEAM}}" = "all" ]; then
+          kubectl rollout status deployment -n {{.K8S_NAMESPACE}} -l {{.RED_COMPONENT_LABEL}},ares.dreadnode.io/role!=orchestrator --timeout=60s 2>/dev/null || true
+          kubectl rollout status statefulset -n {{.K8S_NAMESPACE}} -l {{.RED_COMPONENT_LABEL}},ares.dreadnode.io/role!=orchestrator --timeout=60s 2>/dev/null || true
+          kubectl rollout status deployment -n {{.K8S_NAMESPACE}} -l {{.RED_ORCH_LABEL}} --timeout=60s 2>/dev/null || true
+        fi
 
-        echo -e "{{.INFO}} Checking orchestrator status..."
-        kubectl rollout status deployment -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator --timeout=60s 2>/dev/null || true
+        # Check blue team status if TEAM=blue or TEAM=all
+        if [ "{{.TEAM}}" = "blue" ] || [ "{{.TEAM}}" = "all" ]; then
+          kubectl rollout status deployment -n {{.K8S_NAMESPACE}} -l {{.BLUE_COMPONENT_LABEL}},ares.dreadnode.io/role!=orchestrator --timeout=60s 2>/dev/null || true
+          kubectl rollout status statefulset -n {{.K8S_NAMESPACE}} -l {{.BLUE_COMPONENT_LABEL}},ares.dreadnode.io/role!=orchestrator --timeout=60s 2>/dev/null || true
+          kubectl rollout status deployment -n {{.K8S_NAMESPACE}} -l {{.BLUE_ORCH_LABEL}} --timeout=60s 2>/dev/null || true
+        fi
 
         echo ""
         echo -e "{{.SUCCESS}} All pods restarted"

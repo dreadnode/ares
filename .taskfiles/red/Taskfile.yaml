@@ -940,7 +940,9 @@ tasks:
         kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" redis-cli --scan --pattern "ares:lock:*" || true
 
   multi:sync:align:
-    desc: "Sync code changes to PVCs, clear Redis cache, and align cluster pods"
+    desc: "Sync code changes to PVCs, clear Redis cache, and align cluster pods (usage: task red:multi:sync:align [TEAM=red|blue|all])"
+    vars:
+      TEAM: '{{.TEAM | default "red"}}'
     cmds:
       - cmd: |
           # Kill any running red:multi:local processes to prevent them from
@@ -964,16 +966,16 @@ tasks:
             done
             echo "Local CLI sessions stopped"
           fi
-      - cmd: echo "=== SYNCING CODE ==="
+      - cmd: echo "=== SYNCING CODE (team={{.TEAM}}) ==="
       - task: :remote:sync:full
-        vars: { NAMESPACE: "{{.K8S_NAMESPACE}}" }
+        vars: { NAMESPACE: "{{.K8S_NAMESPACE}}", TEAM: "{{.TEAM}}" }
       - cmd: echo "=== SYNCING CONFIG ==="
       - task: multi:sync:config
       - cmd: echo "=== CLEARING REDIS CACHE ==="
       - task: multi:redis:clear
-      - cmd: echo "=== ROLLING OUT ==="
+      - cmd: echo "=== ROLLING OUT (team={{.TEAM}}) ==="
       - task: :remote:rollout
-        vars: { NAMESPACE: "{{.K8S_NAMESPACE}}" }
+        vars: { NAMESPACE: "{{.K8S_NAMESPACE}}", TEAM: "{{.TEAM}}" }
 
   multi:sync:config:
     desc: "Sync config/multi-agent-production.yaml to all pods"
