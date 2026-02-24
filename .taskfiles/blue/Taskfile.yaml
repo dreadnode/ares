@@ -15,8 +15,7 @@ vars:
   GRAFANA_SERVICE_ACCOUNT_TOKEN:
     sh: op item get "Ares Grafana MCP" --fields api-token --reveal 2>/dev/null || echo ""
   OPENAI_API_KEY:
-    sh: op item get "Openai" --fields dreadnode-jayson-api-key --reveal 2>/dev/null || echo ""
-    # sh: op item get "Openai" --fields dreadnode-personal-api-key --reveal 2>/dev/null || echo ""
+    sh: op item get "Openai" --fields dreadnode-ares-api-key --reveal 2>/dev/null || echo ""
 
   # Model selection (MODEL_ALL takes precedence over MODEL)
   MODEL_ARG:
@@ -147,6 +146,52 @@ tasks:
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
           --dn-args.project {{.DREADNODE_PROJECT}} \
           2>&1 | tee -a "$LOGFILE"
+
+  once:remote:
+    desc: "Run blue team agent once on K8s cluster (usage: task blue:once:remote [OPERATION_ID=op-xxx] [LATEST=true])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required. Usage: task blue:once:remote OPERATION_ID=op-xxx  OR  task blue:once:remote LATEST=true"
+    cmds:
+      - |
+        echo "Running blue team agent on K8s cluster..."
+        echo "K8s namespace: {{.K8S_NAMESPACE}}"
+        echo ""
+
+        # Build operation context args
+        OP_ARGS=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          OP_ARGS="--args.latest"
+        elif [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ARGS="--args.operation-id {{.OPERATION_ID}}"
+        fi
+
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
+          env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
+          ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
+          DREADNODE_API_KEY="{{.DREADNODE_API_KEY}}" \
+          DREADNODE_SERVER_URL="{{.DREADNODE_SERVER_URL}}" \
+          DREADNODE_ORGANIZATION="{{.DREADNODE_ORGANIZATION}}" \
+          DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
+          DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
+          GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
+          GRAFANA_URL="{{.GRAFANA_URL}}" \
+          /usr/bin/python3 -m ares \
+          --args.model "{{.MODEL_ARG}}" \
+          --args.grafana-url "{{.GRAFANA_URL}}" \
+          --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
+          --args.report-dir /tmp/reports \
+          --args.once \
+          $OP_ARGS \
+          --dn-args.server "{{.DREADNODE_SERVER_URL}}" \
+          --dn-args.token "$DREADNODE_API_KEY" \
+          --dn-args.organization "{{.DREADNODE_ORGANIZATION}}" \
+          --dn-args.workspace "{{.DREADNODE_WORKSPACE}}" \
+          --dn-args.project "{{.DREADNODE_PROJECT}}"
 
   once:local:
     desc: "Run blue team agent once and exit using .env file (usage: task blue:once:local [OPERATION_ID=op-xxx] [LATEST=true])"
