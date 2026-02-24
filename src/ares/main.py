@@ -50,6 +50,202 @@ def should_use_multi_agent(severity: str, *, force_multi_agent: bool = False) ->
     return severity.lower() in HIGH_SEVERITY_LEVELS
 
 
+async def discover_running_operation(redis_url: str) -> str | None:
+    """Discover an active running operation from Redis.
+
+    Args:
+        redis_url: Redis connection URL
+
+    Returns:
+        Operation ID if found, None otherwise
+    """
+    from ares.core.redis_client import create_verified_redis_client
+    from ares.core.task_queue import RedisTaskQueue
+
+    try:
+        client = await create_verified_redis_client(redis_url, decode_responses=True)
+        lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
+        await client.aclose()
+
+        if lock_keys:
+            # Return the first running operation (or latest if multiple)
+            for key in lock_keys:
+                parts = key.split(":", 2)
+                if len(parts) >= 3:
+                    return parts[2]
+    except Exception as e:
+        logger.debug(f"Failed to discover running operation: {e}")
+    return None
+
+
+async def discover_recent_completed_operation(
+    redis_url: str,
+    max_age_hours: int = 24,
+) -> str | None:
+    """Discover the most recently completed operation within time window.
+
+    Args:
+        redis_url: Redis connection URL
+        max_age_hours: Maximum age of operation to consider (default: 24 hours)
+
+    Returns:
+        Operation ID if found, None otherwise
+    """
+    from datetime import timedelta
+
+    from ares.core.redis_client import create_verified_redis_client
+    from ares.core.task_queue import RedisTaskQueue
+
+    try:
+        client = await create_verified_redis_client(redis_url, decode_responses=True)
+
+        # Get running operations to exclude
+        running_ops: set[str] = set()
+        lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
+        for key in lock_keys:
+            parts = key.split(":", 2)
+            if len(parts) >= 3:
+                running_ops.add(parts[2])
+
+        # Find completed operations
+        meta_keys = await client.keys("ares:op:*:meta")
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=max_age_hours)
+
+        candidates: list[tuple[datetime, str]] = []
+        for key in meta_keys:
+            parts = key.split(":")
+            if len(parts) < 3:
+                continue
+            op_id = parts[2]
+
+            # Skip running operations
+            if op_id in running_ops:
+                continue
+
+            # Get started_at and completed_at from meta
+            meta_data = await client.hgetall(f"ares:op:{op_id}:meta")
+            if not meta_data:
+                continue
+
+            started_raw = meta_data.get("started_at")
+            if not started_raw:
+                continue
+
+            try:
+                started_at = datetime.fromisoformat(started_raw)
+            except (ValueError, TypeError):
+                continue
+
+            # Check if within time window
+            if started_at < cutoff:
+                continue
+
+            candidates.append((started_at, op_id))
+
+        await client.aclose()
+
+        if candidates:
+            # Return most recent
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            return candidates[0][1]
+
+    except Exception as e:
+        logger.debug(f"Failed to discover recent operation: {e}")
+    return None
+
+
+async def get_operation_time_window(
+    redis_url: str,
+    operation_id: str,
+) -> tuple[datetime, datetime, bool] | None:
+    """Get operation time window from Redis.
+
+    Args:
+        redis_url: Redis connection URL
+        operation_id: Operation ID to look up
+
+    Returns:
+        Tuple of (started_at, completed_at_or_now, is_running) or None if not found
+    """
+    from ares.core.redis_client import create_verified_redis_client
+    from ares.core.task_queue import RedisTaskQueue
+
+    try:
+        client = await create_verified_redis_client(redis_url, decode_responses=True)
+
+        # Check if running
+        lock_key = f"{RedisTaskQueue.LOCK_PREFIX}:{operation_id}"
+        is_running = await client.exists(lock_key)
+
+        # Get timestamps from meta
+        meta_data = await client.hgetall(f"ares:op:{operation_id}:meta")
+        await client.aclose()
+
+        if not meta_data:
+            return None
+
+        started_raw = meta_data.get("started_at")
+        if not started_raw:
+            return None
+
+        try:
+            started_at = datetime.fromisoformat(started_raw)
+        except Exception:
+            return None
+
+        # Get end time
+        if is_running:
+            end_time = datetime.now(timezone.utc)
+        else:
+            completed_raw = meta_data.get("completed_at")
+            if completed_raw:
+                try:
+                    end_time = datetime.fromisoformat(completed_raw)
+                except Exception:
+                    end_time = datetime.now(timezone.utc)
+            else:
+                end_time = datetime.now(timezone.utc)
+
+        return (started_at, end_time, bool(is_running))
+
+    except Exception as e:
+        logger.debug(f"Failed to get operation time window: {e}")
+    return None
+
+
+def merge_alerts(firing: list[dict], historical: list[dict]) -> list[dict]:
+    """Merge firing and historical alerts, deduplicating by fingerprint.
+
+    Firing alerts take priority as they are more current.
+
+    Args:
+        firing: Currently firing alerts
+        historical: Historical alerts from annotations
+
+    Returns:
+        Merged list with duplicates removed
+    """
+    seen_fingerprints: set[str] = set()
+    merged = []
+
+    # Firing alerts take priority
+    for alert in firing:
+        fp = alert.get("fingerprint", "")
+        if fp and fp not in seen_fingerprints:
+            seen_fingerprints.add(fp)
+            merged.append(alert)
+
+    # Add historical alerts not already present
+    for alert in historical:
+        fp = alert.get("fingerprint", "")
+        if fp and fp not in seen_fingerprints:
+            seen_fingerprints.add(fp)
+            merged.append(alert)
+
+    return merged
+
+
 app = cyclopts.App(
     name="ares",
     help="Autonomous SOC Investigation Agent - Question-driven threat investigation",
@@ -218,7 +414,30 @@ async def main(
     tactics_count = len(mitre_client._tactics)
     logger.success(f"Loaded {techniques_count} techniques, {tactics_count} tactics")
 
-    # Load red team operation context if specified
+    # Track if the operation is currently running (for alert retrieval strategy)
+    operation_is_running = False
+
+    # Auto-discover operations if none explicitly specified
+    # This makes operation-awareness the default behavior
+    if not args.operation_id and not args.latest:
+        from ares.core.config import get_redis_url
+
+        auto_redis_url = args.redis_url or get_redis_url()
+        if auto_redis_url:
+            # First check for running operations
+            running_op = await discover_running_operation(auto_redis_url)
+            if running_op:
+                logger.info(f"Auto-discovered running operation: {running_op}")
+                args.operation_id = running_op
+                operation_is_running = True
+            else:
+                # Check for recently completed operations
+                recent_op = await discover_recent_completed_operation(auto_redis_url)
+                if recent_op:
+                    logger.info(f"Auto-discovered recent operation: {recent_op}")
+                    args.operation_id = recent_op
+
+    # Load red team operation context if specified or discovered
     attack_context = None
     if args.operation_id or args.latest:
         from ares.core.config import get_redis_url
@@ -234,10 +453,21 @@ async def main(
             # Resolve operation ID
             operation_id = args.operation_id
             if args.latest and not operation_id:
-                # Find latest operation
+                # Find latest operation (prefer running)
+                from ares.core.task_queue import RedisTaskQueue
+
+                lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
+                running_ops: set[str] = set()
+                for key in lock_keys:
+                    key_str = key.decode() if isinstance(key, bytes) else key
+                    parts = key_str.split(":", 2)
+                    if len(parts) >= 3:
+                        running_ops.add(parts[2])
+
                 meta_keys = await client.keys("ares:op:*:meta")
                 if meta_keys:
                     latest_op = None
+                    latest_running_op = None
                     for key in meta_keys:
                         key_str = key.decode() if isinstance(key, bytes) else key
                         parts = key_str.split(":")
@@ -245,8 +475,24 @@ async def main(
                             op_id = parts[2]
                             if not latest_op or op_id > latest_op:
                                 latest_op = op_id
-                    if latest_op:
+                            if op_id in running_ops and (
+                                not latest_running_op or op_id > latest_running_op
+                            ):
+                                latest_running_op = op_id
+                    # Prefer running operation
+                    if latest_running_op:
+                        operation_id = latest_running_op
+                        operation_is_running = True
+                    elif latest_op:
                         operation_id = latest_op
+
+            # Check if operation is running (if not already determined)
+            if operation_id and not operation_is_running:
+                from ares.core.task_queue import RedisTaskQueue
+
+                lock_key = f"{RedisTaskQueue.LOCK_PREFIX}:{operation_id}"
+                lock_exists = await client.exists(lock_key)
+                operation_is_running = bool(lock_exists)
 
             if operation_id:
                 from ares.cli_ops import _load_state_from_redis
@@ -423,7 +669,39 @@ async def main(
     try:
         while True:
             try:
-                alerts = await grafana.get_firing_alerts()
+                # Retrieve alerts using operation-aware strategy
+                if attack_context:
+                    window_start = attack_context["attack_window_start"]
+                    window_end = attack_context["attack_window_end"]
+
+                    if operation_is_running:
+                        # Running operation: combine firing + historical alerts
+                        firing_alerts = await grafana.get_firing_alerts()
+                        historical_alerts = await grafana.get_alerts_in_time_range(
+                            window_start, window_end
+                        )
+                        alerts = merge_alerts(firing_alerts, historical_alerts)
+                        logger.debug(
+                            f"Operation-aware alerts: {len(firing_alerts)} firing + "
+                            f"{len(historical_alerts)} historical = {len(alerts)} total"
+                        )
+                    else:
+                        # Completed operation: historical alerts only
+                        alerts = await grafana.get_alerts_in_time_range(window_start, window_end)
+                        if not alerts:
+                            # Fallback to firing alerts if no historical found
+                            logger.info(
+                                "No historical alerts found in operation window, "
+                                "checking currently firing alerts"
+                            )
+                            alerts = await grafana.get_firing_alerts()
+                        else:
+                            logger.info(
+                                f"Retrieved {len(alerts)} alerts from operation time window"
+                            )
+                else:
+                    # No operation context: current behavior
+                    alerts = await grafana.get_firing_alerts()
 
                 for alert in alerts:
                     fingerprint = alert.get("fingerprint", "")

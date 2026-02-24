@@ -56,6 +56,8 @@ dev = [
 
 [project.scripts]
 ares = "ares.__main__:run"
+ares-ops = "ares.cli_ops:main"
+ares-blue-ops = "ares.cli_blue_ops:main"
 
 [tool.poetry.plugins."pipx.run"]
 ares = 'ares.__main__:run'
@@ -271,6 +273,10 @@ skip-magic-trailing-comma = false
     "DTZ003",  # datetime without tz is fine for examples
 ]
 "src/ares/cli_ops.py" = [
+    "T201",    # printing is fine for CLI commands
+    "PLR0912", # too many branches is acceptable for CLI command functions
+]
+"src/ares/cli_blue_ops.py" = [
     "T201",    # printing is fine for CLI commands
     "PLR0912", # too many branches is acceptable for CLI command functions
 ]

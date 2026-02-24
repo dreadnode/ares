@@ -18,6 +18,27 @@ from loguru import logger
 from ares.core.redis_client import create_redis_client
 
 
+def _unwrap_json_string(value: str) -> str:
+    """Unwrap a potentially double-encoded JSON string.
+
+    Some Redis values may be double-encoded (json.dumps called twice),
+    resulting in values like '"\"2026-02-22T21:32:56\""'. This function
+    repeatedly decodes until we get a non-JSON-string result.
+    """
+    result = value
+    for _ in range(3):  # Max 3 levels of encoding
+        try:
+            decoded = json.loads(result)
+            if isinstance(decoded, str):
+                result = decoded
+            else:
+                # Not a string, return as-is
+                return result
+        except (json.JSONDecodeError, TypeError):
+            break
+    return result
+
+
 async def discover_active_operation(
     redis_url: str, max_wait: int | None = None, max_operation_age: int = 300
 ) -> str | None:
@@ -171,8 +192,8 @@ async def discover_active_operation(
                         started_at_raw = await client.hget(meta_key, "started_at")
                         if started_at_raw:
                             try:
-                                # Decode JSON since set_meta uses json.dumps()
-                                started_at = json.loads(str(started_at_raw))
+                                # Decode JSON, handling potentially double-encoded strings
+                                started_at = _unwrap_json_string(str(started_at_raw))
                                 checkpoint_time = datetime.fromisoformat(started_at)
                                 if checkpoint_time.tzinfo is None:
                                     checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
@@ -345,11 +366,8 @@ async def get_active_operation_pointer(redis_url: str, max_operation_age: int = 
         started_at_raw = await client.hget(meta_key, "started_at")
         if not started_at_raw:
             return op_id
-        # Decode JSON since set_meta uses json.dumps()
-        try:
-            started_at = json.loads(str(started_at_raw))
-        except json.JSONDecodeError:
-            started_at = str(started_at_raw)
+        # Decode JSON, handling potentially double-encoded strings
+        started_at = _unwrap_json_string(str(started_at_raw))
         checkpoint_time = datetime.fromisoformat(started_at)
         if checkpoint_time.tzinfo is None:
             checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)

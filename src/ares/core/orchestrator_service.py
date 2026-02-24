@@ -114,6 +114,27 @@ class OrchestratorService:
     def _decode_redis_value(value: str | bytes) -> str:
         return value.decode() if isinstance(value, bytes) else str(value)
 
+    @staticmethod
+    def _unwrap_json_string(value: str) -> str:
+        """Unwrap a potentially double-encoded JSON string.
+
+        Some Redis values may be double-encoded (json.dumps called twice),
+        resulting in values like '"\"2026-02-22T21:32:56\""'. This function
+        repeatedly decodes until we get a non-JSON-string result.
+        """
+        result = value
+        for _ in range(3):  # Max 3 levels of encoding
+            try:
+                decoded = json.loads(result)
+                if isinstance(decoded, str):
+                    result = decoded
+                else:
+                    # Not a string, return as-is
+                    return result
+            except (json.JSONDecodeError, TypeError):
+                break
+        return result
+
     async def _get_checkpoint_time(self, op_id: str) -> datetime | None:
         if self.task_queue is None:
             return None
@@ -126,10 +147,8 @@ class OrchestratorService:
 
         checkpoint_str = self._decode_redis_value(started_at)
         # Decode JSON since set_meta uses json.dumps()
-        try:
-            checkpoint_str = json.loads(checkpoint_str)
-        except json.JSONDecodeError:
-            pass
+        # Handle potentially double-encoded strings from old data
+        checkpoint_str = self._unwrap_json_string(checkpoint_str)
         checkpoint_time = datetime.fromisoformat(checkpoint_str)
         if checkpoint_time.tzinfo is None:
             checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)

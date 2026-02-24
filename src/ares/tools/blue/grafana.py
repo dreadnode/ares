@@ -5,6 +5,7 @@ import atexit
 import os
 import shutil
 import subprocess  # nosec B404
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -225,6 +226,148 @@ class GrafanaTools(Toolset):  # type: ignore[misc]
 
         logger.warning("Could not find Grafana alerts endpoint. Using empty alerts list.")
         return []
+
+    async def get_alerts_in_time_range(
+        self,
+        from_time: datetime,
+        to_time: datetime,
+        buffer_minutes: int = 30,
+    ) -> list[dict]:
+        """Get alerts that fired within a time range using annotations API.
+
+        Uses Grafana's annotations API which captures alert state changes.
+        Adds buffer before/after the window to catch edge cases.
+
+        Args:
+            from_time: Start of time window (UTC)
+            to_time: End of time window (UTC)
+            buffer_minutes: Extra minutes before/after window (default: 30)
+
+        Returns:
+            List of alert annotations transformed to match firing alert format.
+        """
+        from datetime import timedelta
+
+        # Apply buffer to window
+        buffered_from = from_time - timedelta(minutes=buffer_minutes)
+        buffered_to = to_time + timedelta(minutes=buffer_minutes)
+
+        # Convert to epoch milliseconds
+        from_ms = int(buffered_from.timestamp() * 1000)
+        to_ms = int(buffered_to.timestamp() * 1000)
+
+        try:
+            headers = self._headers()
+        except ConfigurationError:
+            return []
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(
+                    f"{self.base_url}/api/annotations",
+                    headers=headers,
+                    params={
+                        "from": from_ms,
+                        "to": to_ms,
+                        "type": "alert",
+                    },
+                )
+                if response.status_code == 200:
+                    annotations = response.json()
+                    logger.info(
+                        f"Retrieved {len(annotations)} alert annotations from "
+                        f"{buffered_from.isoformat()} to {buffered_to.isoformat()}"
+                    )
+                    return self._transform_annotations_to_alerts(annotations)
+                if response.status_code in (401, 403):
+                    msg = f"Authentication failed for Grafana: {response.text}"
+                    logger.error(msg)
+                    raise AuthenticationError(
+                        msg, service="grafana", status_code=response.status_code
+                    )
+                logger.warning(f"Failed to get annotations: {response.status_code}")
+                return []
+
+        except AuthenticationError:
+            raise
+        except ConfigurationError:
+            return []
+        except httpx.HTTPError as e:
+            logger.warning(f"Failed to get alert annotations: {e}")
+            return []
+
+    def _transform_annotations_to_alerts(self, annotations: list[dict]) -> list[dict]:
+        """Transform Grafana annotations to match firing alert format.
+
+        Args:
+            annotations: List of annotation objects from /api/annotations
+
+        Returns:
+            List of alert-like dicts with labels, annotations, fingerprint, etc.
+        """
+        alerts = []
+        seen_fingerprints: set[str] = set()
+
+        for ann in annotations:
+            # Skip non-alert annotations
+            if ann.get("alertId", 0) == 0:
+                continue
+
+            # Generate a fingerprint from alert ID and panel/dashboard
+            fingerprint = f"ann-{ann.get('alertId', 0)}-{ann.get('panelId', 0)}"
+            if fingerprint in seen_fingerprints:
+                continue
+            seen_fingerprints.add(fingerprint)
+
+            # Extract tags as labels
+            tags = ann.get("tags", [])
+            labels = {}
+            for tag in tags:
+                if ":" in tag:
+                    k, v = tag.split(":", 1)
+                    labels[k] = v
+                elif "=" in tag:
+                    k, v = tag.split("=", 1)
+                    labels[k] = v
+                elif "alertname" not in labels:
+                    # Treat as alertname if not key:value format
+                    labels["alertname"] = tag
+
+            # Use annotation text as summary if no alertname extracted
+            if "alertname" not in labels and ann.get("alertName"):
+                labels["alertname"] = ann.get("alertName", "unknown")
+
+            # Convert epoch ms to ISO datetime strings (matching firing alert format)
+            start_ms = ann.get("time", 0)
+            end_ms = ann.get("timeEnd", 0)
+            starts_at = (
+                datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).isoformat()
+                if start_ms
+                else ""
+            )
+            ends_at = (
+                datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).isoformat() if end_ms else ""
+            )
+
+            alert = {
+                "fingerprint": fingerprint,
+                "labels": labels,
+                "annotations": {
+                    "summary": ann.get("text", ""),
+                    "description": ann.get("text", ""),
+                },
+                "startsAt": starts_at,
+                "endsAt": ends_at,
+                "status": {
+                    "state": "resolved" if ann.get("timeEnd") else "firing",
+                },
+                # Include original annotation for debugging
+                "_annotation_id": ann.get("id"),
+                "_alert_id": ann.get("alertId"),
+            }
+            alerts.append(alert)
+
+        return alerts
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def get_alert_history(

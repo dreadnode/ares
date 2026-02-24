@@ -1,0 +1,602 @@
+"""CLI for submitting investigations to the blue orchestrator service."""
+
+import asyncio
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Annotated, Any
+
+import cyclopts
+from loguru import logger
+
+
+# Suppress DEBUG/INFO logs from noisy modules in CLI output.
+def _cli_log_filter(record):
+    """Filter out DEBUG/INFO from noisy modules, keep all from cli_blue_ops."""
+    module = record["name"]
+    level = record["level"].no
+    if module in {"ares.cli_blue_ops", "__main__"}:
+        return True
+    return level >= 30
+
+
+logger.remove()
+logger.add(sys.stderr, filter=_cli_log_filter)
+
+from ares.core.blue_orchestrator_client import (  # noqa: E402
+    get_investigation_status,
+    submit_investigation,
+)
+from ares.core.config import get_redis_url  # noqa: E402
+from ares.core.redis_client import create_verified_redis_client  # noqa: E402
+
+app = cyclopts.App(
+    name="ares-blue-ops",
+    help="Submit and manage investigations with the Ares blue team orchestrator service",
+)
+
+
+@app.command
+async def submit(
+    alert_json: Annotated[str, cyclopts.Parameter(help="Alert JSON string or path to JSON file")],
+    *,
+    investigation_id: Annotated[
+        str, cyclopts.Parameter(help="Investigation ID (auto-generated if not provided)")
+    ] = "",
+    model: Annotated[str, cyclopts.Parameter(help="LLM model to use")] = "",
+    max_steps: Annotated[int, cyclopts.Parameter(help="Maximum agent steps")] = 50,
+    multi_agent: Annotated[bool, cyclopts.Parameter(help="Force multi-agent mode")] = False,
+    auto_route: Annotated[
+        bool, cyclopts.Parameter(help="Auto-route HIGH/CRITICAL to multi-agent")
+    ] = True,
+    report_dir: Annotated[str, cyclopts.Parameter(help="Report output directory")] = "",
+    grafana_url: Annotated[str, cyclopts.Parameter(help="Grafana URL")] = "",
+    grafana_api_key: Annotated[str, cyclopts.Parameter(help="Grafana API key")] = "",
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+    wait: Annotated[bool, cyclopts.Parameter(help="Wait for investigation to complete")] = False,
+    follow_logs: Annotated[bool, cyclopts.Parameter(help="Follow orchestrator logs")] = False,
+) -> None:
+    """Submit an investigation to the blue team orchestrator service."""
+    # Parse alert JSON
+    alert_path = Path(alert_json)
+    if alert_path.is_file():
+        alert = json.loads(alert_path.read_text())
+    else:
+        try:
+            alert = json.loads(alert_json)
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON: {e}")
+            sys.exit(1)
+
+    # Resolve model
+    resolved_model = (
+        model or os.environ.get("ARES_ORCHESTRATOR_MODEL") or os.environ.get("ARES_MODEL")
+    )
+    if not resolved_model:
+        logger.error("No model specified. Use --model or set ARES_ORCHESTRATOR_MODEL/ARES_MODEL")
+        sys.exit(1)
+
+    # Collect env vars to pass
+    env_vars = {}
+    for key in [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GRAFANA_SERVICE_ACCOUNT_TOKEN",
+        "GRAFANA_API_KEY",
+        "GRAFANA_URL",
+        "DREADNODE_API_KEY",
+        "DREADNODE_SERVER_URL",
+        "DREADNODE_ORGANIZATION",
+        "DREADNODE_WORKSPACE",
+        "DREADNODE_PROJECT",
+        "ARES_MODEL",
+        "ARES_ORCHESTRATOR_MODEL",
+    ]:
+        if os.environ.get(key):
+            env_vars[key] = os.environ[key]
+
+    result = await submit_investigation(
+        alert=alert,
+        investigation_id=investigation_id or None,
+        model=resolved_model,
+        max_steps=max_steps,
+        multi_agent=multi_agent,
+        auto_route=auto_route,
+        report_dir=report_dir or None,
+        grafana_url=grafana_url or os.environ.get("GRAFANA_URL"),
+        grafana_api_key=grafana_api_key or os.environ.get("GRAFANA_SERVICE_ACCOUNT_TOKEN"),
+        redis_url=redis_url or None,
+        wait_for_completion=wait,
+        env_vars=env_vars,
+    )
+
+    inv_id = result["investigation_id"]
+    print(f"Investigation submitted: {inv_id}")
+    print(f"Status: {result['status']}")
+
+    if wait and result.get("status") in ("completed", "failed"):
+        print(f"Final status: {result['status']}")
+        if result.get("completed_at"):
+            print(f"Completed at: {result['completed_at']}")
+        if result.get("result"):
+            print(f"Result: {json.dumps(result['result'], indent=2)}")
+
+
+@app.command
+async def status(
+    investigation_id: Annotated[str, cyclopts.Parameter(help="Investigation ID")] = "",
+    *,
+    latest: Annotated[bool, cyclopts.Parameter(help="Get status of latest investigation")] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Get the status of an investigation."""
+    redis_url = redis_url or get_redis_url()
+
+    if latest:
+        # Find latest investigation
+        inv_id = await _get_latest_investigation_id(redis_url)
+        if not inv_id:
+            print("No investigations found")
+            return
+        investigation_id = inv_id
+
+    if not investigation_id:
+        logger.error("Either investigation_id or --latest is required")
+        sys.exit(1)
+
+    result = await get_investigation_status(investigation_id, redis_url)
+
+    if result is None:
+        print(f"Investigation not found: {investigation_id}")
+        return
+
+    print(f"Investigation: {investigation_id}")
+    print(f"Status: {result.get('status', 'unknown')}")
+    if result.get("started_at"):
+        print(f"Started: {result['started_at']}")
+    if result.get("completed_at"):
+        print(f"Completed: {result['completed_at']}")
+    if result.get("failed_at"):
+        print(f"Failed: {result['failed_at']}")
+    if result.get("error"):
+        print(f"Error: {result['error']}")
+    if result.get("result"):
+        print(f"Result: {json.dumps(result['result'], indent=2)}")
+
+
+@app.command(name="list")
+async def list_investigations(
+    *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Only print the latest investigation ID")
+    ] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """List all investigations."""
+    redis_url = redis_url or get_redis_url()
+    client = await create_verified_redis_client(redis_url, decode_responses=True)
+
+    try:
+        investigations: list[dict[str, Any]] = []
+
+        # Get investigations from status keys (ares:blue:inv:*:status)
+        status_keys = await client.keys("ares:blue:inv:*:status")
+        for key in status_keys:
+            key_str = key if isinstance(key, str) else key.decode()
+            parts = key_str.split(":")
+            if len(parts) < 4:
+                continue
+            inv_id = parts[3]
+
+            status_data = await client.get(key_str)
+            if status_data:
+                status = json.loads(status_data)
+                investigations.append(
+                    {
+                        "investigation_id": inv_id,
+                        "status": status.get("status", "unknown"),
+                        "started_at": status.get("started_at"),
+                        "completed_at": status.get("completed_at"),
+                        "failed_at": status.get("failed_at"),
+                    }
+                )
+
+        # Also check meta keys for more investigation data
+        meta_keys = await client.keys("ares:blue:inv:*:meta")
+        seen_ids = {inv["investigation_id"] for inv in investigations}
+        for key in meta_keys:
+            key_str = key if isinstance(key, str) else key.decode()
+            parts = key_str.split(":")
+            if len(parts) < 4:
+                continue
+            inv_id = parts[3]
+            if inv_id in seen_ids:
+                continue
+
+            meta_data = await client.hgetall(key_str)
+            if meta_data:
+                started_at = meta_data.get("started_at")
+                if isinstance(started_at, bytes):
+                    started_at = started_at.decode()
+                investigations.append(
+                    {
+                        "investigation_id": inv_id,
+                        "status": meta_data.get("status", b"unknown").decode()
+                        if isinstance(meta_data.get("status"), bytes)
+                        else meta_data.get("status", "unknown"),
+                        "started_at": started_at,
+                    }
+                )
+
+        # Sort by started_at (most recent first)
+        investigations.sort(
+            key=lambda x: x.get("started_at") or "",
+            reverse=True,
+        )
+
+        if latest:
+            # Prefer running investigations
+            running = [i for i in investigations if i["status"] == "running"]
+            if running:
+                print(running[0]["investigation_id"])
+            elif investigations:
+                print(investigations[0]["investigation_id"])
+            return
+
+        if not investigations:
+            print("No investigations found")
+            return
+
+        print(f"{'Investigation ID':<25} {'Status':<12} {'Started':<25} {'Completed':<25}")
+        print("-" * 90)
+        for inv in investigations:
+            started = inv.get("started_at", "")[:25] if inv.get("started_at") else ""
+            completed = inv.get("completed_at", "")[:25] if inv.get("completed_at") else ""
+            if inv.get("failed_at"):
+                completed = f"FAILED: {inv['failed_at'][:15]}"
+            print(
+                f"{inv['investigation_id']:<25} {inv['status']:<12} {started:<25} {completed:<25}"
+            )
+
+    finally:
+        await client.aclose()
+
+
+@app.command
+async def delete(
+    investigation_id: Annotated[str, cyclopts.Parameter(help="Investigation ID to delete")],
+    *,
+    force: Annotated[bool, cyclopts.Parameter(help="Skip confirmation")] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Delete an investigation and all its data."""
+    redis_url = redis_url or get_redis_url()
+
+    if not force:
+        confirm = await asyncio.to_thread(
+            input, f"Delete investigation {investigation_id} and all data? [y/N] "
+        )
+        if confirm.lower() != "y":
+            print("Aborted")
+            return
+
+    client = await create_verified_redis_client(redis_url, decode_responses=True)
+    try:
+        # Find and delete all keys for this investigation
+        pattern = f"ares:blue:inv:{investigation_id}:*"
+        keys = await client.keys(pattern)
+
+        if not keys:
+            print(f"No data found for investigation: {investigation_id}")
+            return
+
+        deleted = await client.delete(*keys)
+        print(f"Deleted {deleted} keys for investigation: {investigation_id}")
+
+    finally:
+        await client.aclose()
+
+
+@app.command
+async def cleanup(
+    *,
+    max_age_hours: Annotated[
+        int, cyclopts.Parameter(help="Max age in hours for investigations")
+    ] = 24,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+    dry_run: Annotated[bool, cyclopts.Parameter(help="Show what would be deleted")] = False,
+) -> None:
+    """Clean up old investigations."""
+    redis_url = redis_url or get_redis_url()
+    client = await create_verified_redis_client(redis_url, decode_responses=True)
+    cutoff = datetime.now(timezone.utc).timestamp() - (max_age_hours * 3600)
+
+    try:
+        # Find investigations to clean up
+        status_keys = await client.keys("ares:blue:inv:*:status")
+        to_delete: list[str] = []
+
+        for key in status_keys:
+            key_str = key if isinstance(key, str) else key.decode()
+            parts = key_str.split(":")
+            if len(parts) < 4:
+                continue
+            inv_id = parts[3]
+
+            status_data = await client.get(key_str)
+            if not status_data:
+                continue
+
+            status = json.loads(status_data)
+            # Only clean up completed or failed investigations
+            if status.get("status") not in ("completed", "failed"):
+                continue
+
+            # Check age
+            completed_at = status.get("completed_at") or status.get("failed_at")
+            if completed_at:
+                try:
+                    completed_ts = datetime.fromisoformat(
+                        completed_at.replace("Z", "+00:00")
+                    ).timestamp()
+                    if completed_ts < cutoff:
+                        to_delete.append(inv_id)
+                except (ValueError, AttributeError):
+                    pass
+
+        if not to_delete:
+            print(f"No investigations older than {max_age_hours} hours to clean up")
+            return
+
+        print(f"Found {len(to_delete)} investigation(s) to clean up:")
+        for inv_id in to_delete:
+            print(f"  - {inv_id}")
+
+        if dry_run:
+            print("(dry run - no changes made)")
+            return
+
+        # Delete keys for each investigation
+        total_deleted = 0
+        for inv_id in to_delete:
+            pattern = f"ares:blue:inv:{inv_id}:*"
+            keys = await client.keys(pattern)
+            if keys:
+                deleted = await client.delete(*keys)
+                total_deleted += deleted
+
+        print(f"Deleted {total_deleted} keys from {len(to_delete)} investigation(s)")
+
+    finally:
+        await client.aclose()
+
+
+@app.command
+async def evidence(
+    investigation_id: Annotated[str, cyclopts.Parameter(help="Investigation ID")] = "",
+    *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Get evidence from latest investigation")
+    ] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+    json_output: Annotated[bool, cyclopts.Parameter(help="Output as JSON")] = False,
+) -> None:
+    """Show evidence collected during an investigation."""
+    redis_url = redis_url or get_redis_url()
+
+    if latest:
+        inv_id = await _get_latest_investigation_id(redis_url)
+        if not inv_id:
+            print("No investigations found")
+            return
+        investigation_id = inv_id
+
+    if not investigation_id:
+        logger.error("Either investigation_id or --latest is required")
+        sys.exit(1)
+
+    client = await create_verified_redis_client(redis_url, decode_responses=True)
+    try:
+        evidence_key = f"ares:blue:inv:{investigation_id}:evidence"
+        evidence_data = await client.hgetall(evidence_key)
+
+        if not evidence_data:
+            print(f"No evidence found for investigation: {investigation_id}")
+            return
+
+        evidence_items = []
+        for value in evidence_data.values():
+            try:
+                evidence_items.append(json.loads(value))
+            except json.JSONDecodeError:
+                pass
+
+        if json_output:
+            print(json.dumps(evidence_items, indent=2))
+            return
+
+        print(f"Evidence for investigation: {investigation_id}")
+        print(f"Total items: {len(evidence_items)}")
+        print("-" * 60)
+
+        # Group by type
+        by_type: dict[str, list] = {}
+        for item in evidence_items:
+            ev_type = item.get("type", "unknown")
+            by_type.setdefault(ev_type, []).append(item)
+
+        for ev_type, items in sorted(by_type.items()):
+            print(f"\n{ev_type.upper()} ({len(items)} items):")
+            for item in items[:10]:  # Limit to 10 per type
+                value = item.get("value", "")
+                if isinstance(value, dict):
+                    value = json.dumps(value)
+                print(f"  - {value[:80]}{'...' if len(str(value)) > 80 else ''}")
+            if len(items) > 10:
+                print(f"  ... and {len(items) - 10} more")
+
+    finally:
+        await client.aclose()
+
+
+@app.command
+async def techniques(
+    investigation_id: Annotated[str, cyclopts.Parameter(help="Investigation ID")] = "",
+    *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Get techniques from latest investigation")
+    ] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Show MITRE ATT&CK techniques identified during an investigation."""
+    redis_url = redis_url or get_redis_url()
+
+    if latest:
+        inv_id = await _get_latest_investigation_id(redis_url)
+        if not inv_id:
+            print("No investigations found")
+            return
+        investigation_id = inv_id
+
+    if not investigation_id:
+        logger.error("Either investigation_id or --latest is required")
+        sys.exit(1)
+
+    client = await create_verified_redis_client(redis_url, decode_responses=True)
+    try:
+        # Get techniques
+        techniques_key = f"ares:blue:inv:{investigation_id}:techniques"
+        techniques = await client.smembers(techniques_key)
+
+        # Get technique names
+        names_key = f"ares:blue:inv:{investigation_id}:technique_names"
+        names = await client.hgetall(names_key)
+
+        if not techniques:
+            print(f"No techniques identified for investigation: {investigation_id}")
+            return
+
+        print(f"MITRE ATT&CK Techniques for investigation: {investigation_id}")
+        print("-" * 60)
+
+        for tech_id in sorted(techniques):
+            name = names.get(tech_id, "")
+            print(f"  {tech_id}: {name}" if name else f"  {tech_id}")
+
+    finally:
+        await client.aclose()
+
+
+@app.command
+async def runtime(
+    investigation_id: Annotated[str, cyclopts.Parameter(help="Investigation ID")] = "",
+    *,
+    latest: Annotated[bool, cyclopts.Parameter(help="Get runtime of latest investigation")] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Show runtime information for an investigation."""
+    redis_url = redis_url or get_redis_url()
+
+    if latest:
+        inv_id = await _get_latest_investigation_id(redis_url)
+        if not inv_id:
+            print("No investigations found")
+            return
+        investigation_id = inv_id
+
+    if not investigation_id:
+        logger.error("Either investigation_id or --latest is required")
+        sys.exit(1)
+
+    result = await get_investigation_status(investigation_id, redis_url)
+    if not result:
+        print(f"Investigation not found: {investigation_id}")
+        return
+
+    started_at = result.get("started_at")
+    completed_at = result.get("completed_at") or result.get("failed_at")
+    status = result.get("status", "unknown")
+
+    print(f"Investigation: {investigation_id}")
+    print(f"Status: {status}")
+
+    if started_at:
+        try:
+            start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            print(f"Started: {start_dt.isoformat()}")
+
+            if completed_at:
+                end_dt = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+                elapsed = (end_dt - start_dt).total_seconds()
+            elif status == "running":
+                elapsed = (datetime.now(timezone.utc) - start_dt).total_seconds()
+            else:
+                elapsed = 0
+
+            if elapsed > 0:
+                hours, remainder = divmod(int(elapsed), 3600)
+                minutes, seconds = divmod(remainder, 60)
+                if hours > 0:
+                    duration = f"{hours}h {minutes}m {seconds}s"
+                elif minutes > 0:
+                    duration = f"{minutes}m {seconds}s"
+                else:
+                    duration = f"{seconds}s"
+                print(f"Duration: {duration}")
+
+        except (ValueError, AttributeError):
+            pass
+
+    if completed_at:
+        print(f"Completed: {completed_at}")
+
+
+async def _get_latest_investigation_id(redis_url: str) -> str | None:
+    """Get the ID of the latest investigation (prefer running)."""
+    client = await create_verified_redis_client(redis_url, decode_responses=True)
+    try:
+        investigations: list[tuple[str, str, str | None]] = []  # (id, status, started_at)
+
+        status_keys = await client.keys("ares:blue:inv:*:status")
+        for key in status_keys:
+            key_str = key if isinstance(key, str) else key.decode()
+            parts = key_str.split(":")
+            if len(parts) < 4:
+                continue
+            inv_id = parts[3]
+
+            status_data = await client.get(key_str)
+            if status_data:
+                status = json.loads(status_data)
+                investigations.append(
+                    (
+                        inv_id,
+                        status.get("status", "unknown"),
+                        status.get("started_at"),
+                    )
+                )
+
+        if not investigations:
+            return None
+
+        # Prefer running, then sort by started_at
+        running = [i for i in investigations if i[1] == "running"]
+        if running:
+            return running[0][0]
+
+        investigations.sort(key=lambda x: x[2] or "", reverse=True)
+        return investigations[0][0]
+
+    finally:
+        await client.aclose()
+
+
+def main():
+    """Entry point."""
+    app()
+
+
+if __name__ == "__main__":
+    main()

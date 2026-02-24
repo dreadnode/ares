@@ -15,6 +15,7 @@ from ares.main import (
     app,
     investigate_alert,
     main,
+    merge_alerts,
     should_use_multi_agent,
     version,
 )
@@ -439,3 +440,69 @@ class TestHighSeverityLevels:
     def test_is_frozenset(self):
         """HIGH_SEVERITY_LEVELS should be a frozenset for immutability."""
         assert isinstance(HIGH_SEVERITY_LEVELS, frozenset)
+
+
+class TestMergeAlerts:
+    """Tests for merge_alerts function."""
+
+    def test_merge_empty_lists(self):
+        """Test merging two empty lists."""
+        result = merge_alerts([], [])
+        assert result == []
+
+    def test_merge_firing_only(self):
+        """Test with only firing alerts."""
+        firing = [
+            {"fingerprint": "fp-1", "labels": {"alertname": "Alert1"}},
+            {"fingerprint": "fp-2", "labels": {"alertname": "Alert2"}},
+        ]
+        result = merge_alerts(firing, [])
+        assert len(result) == 2
+        assert result[0]["fingerprint"] == "fp-1"
+        assert result[1]["fingerprint"] == "fp-2"
+
+    def test_merge_historical_only(self):
+        """Test with only historical alerts."""
+        historical = [
+            {"fingerprint": "fp-3", "labels": {"alertname": "Alert3"}},
+            {"fingerprint": "fp-4", "labels": {"alertname": "Alert4"}},
+        ]
+        result = merge_alerts([], historical)
+        assert len(result) == 2
+
+    def test_merge_deduplicates_by_fingerprint(self):
+        """Test that alerts with same fingerprint are deduplicated."""
+        firing = [
+            {"fingerprint": "fp-1", "labels": {"alertname": "Alert1-Firing"}},
+        ]
+        historical = [
+            {"fingerprint": "fp-1", "labels": {"alertname": "Alert1-Historical"}},
+            {"fingerprint": "fp-2", "labels": {"alertname": "Alert2"}},
+        ]
+        result = merge_alerts(firing, historical)
+        assert len(result) == 2
+        # Firing alert should take priority
+        assert result[0]["labels"]["alertname"] == "Alert1-Firing"
+        assert result[1]["fingerprint"] == "fp-2"
+
+    def test_merge_preserves_order(self):
+        """Test that firing alerts appear before historical."""
+        firing = [
+            {"fingerprint": "fp-1", "labels": {"alertname": "Firing1"}},
+        ]
+        historical = [
+            {"fingerprint": "fp-2", "labels": {"alertname": "Historical1"}},
+        ]
+        result = merge_alerts(firing, historical)
+        assert result[0]["fingerprint"] == "fp-1"
+        assert result[1]["fingerprint"] == "fp-2"
+
+    def test_merge_skips_empty_fingerprints(self):
+        """Test that alerts with empty fingerprints are skipped."""
+        firing = [
+            {"fingerprint": "", "labels": {"alertname": "NoFP"}},
+            {"fingerprint": "fp-1", "labels": {"alertname": "WithFP"}},
+        ]
+        result = merge_alerts(firing, [])
+        assert len(result) == 1
+        assert result[0]["fingerprint"] == "fp-1"
