@@ -207,6 +207,27 @@ List multi-agent Redis operations, statuses, and locks:
 task red:multi:redis:list
 ```
 
+Kill running operations (keeps latest by default):
+
+```bash
+task red:multi:kill                        # Kill all running except latest
+task red:multi:kill OPERATION_ID=op-xxx    # Kill specific operation
+task red:multi:kill KEEP_LATEST=false      # Kill ALL running
+```
+
+Delete a specific operation:
+
+```bash
+task red:multi:delete OPERATION_ID=op-xxx
+```
+
+Clean up old operations:
+
+```bash
+task red:multi:cleanup                     # Default: 24 hours
+task red:multi:cleanup MAX_AGE_HOURS=1
+```
+
 **Syncing Code to Pods:**
 
 Sync specific files to pods:

@@ -444,12 +444,14 @@ class TestRedisStateBackend:
         mock_redis.hget.side_effect = [
             '"true"',  # has_domain_admin
             '"kerberoast -> secretsdump"',  # domain_admin_path
+            '"hash-123"',  # da_hash_id
         ]
 
-        achieved, path = await backend.get_domain_admin()
+        achieved, path, da_hash_id = await backend.get_domain_admin()
 
         assert achieved == "true"  # Note: JSON string, caller should parse
         assert path == "kerberoast -> secretsdump"
+        assert da_hash_id == "hash-123"
 
     @pytest.mark.asyncio
     async def test_set_dc(self, backend, mock_redis):
@@ -502,23 +504,61 @@ class TestRedisStateBackend:
 
     @pytest.mark.asyncio
     async def test_add_weakness(self, backend, mock_redis):
-        """Test adding a weakness (uses SET for deduplication)."""
-        mock_redis.sadd.return_value = 1  # 1 = added (new item)
-        result = await backend.add_weakness("SMB signing disabled on 192.168.58.10")
+        """Test adding a weakness (uses HASH with dedup key for deduplication)."""
+        mock_redis.hsetnx.return_value = 1  # 1 = added (new item)
+        result = await backend.add_weakness(
+            "SMB signing disabled on 192.168.58.10", "smb_signing:192.168.58.10"
+        )
 
         assert result is True
-        mock_redis.sadd.assert_called()
-        call_args = mock_redis.sadd.call_args
+        mock_redis.hsetnx.assert_called()
+        call_args = mock_redis.hsetnx.call_args
         assert call_args[0][0] == "ares:op:op-test-123:weaknesses"
-        assert call_args[0][1] == "SMB signing disabled on 192.168.58.10"
+        assert call_args[0][1] == "smb_signing:192.168.58.10"  # dedup key
+        assert call_args[0][2] == "SMB signing disabled on 192.168.58.10"  # full block
 
     @pytest.mark.asyncio
     async def test_add_weakness_duplicate(self, backend, mock_redis):
         """Test adding a duplicate weakness returns False."""
-        mock_redis.sadd.return_value = 0  # 0 = already existed
-        result = await backend.add_weakness("SMB signing disabled on 192.168.58.10")
+        mock_redis.hsetnx.return_value = 0  # 0 = already existed
+        result = await backend.add_weakness(
+            "SMB signing disabled on 192.168.58.10", "smb_signing:192.168.58.10"
+        )
 
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_get_weaknesses_hash_format(self, backend, mock_redis):
+        """Test getting weaknesses from HASH format (new format)."""
+        mock_redis.type.return_value = "hash"
+        mock_redis.hgetall.return_value = {
+            "smb_signing:192.168.58.10": "SMB signing disabled on 192.168.58.10",
+            "unconstrained_delegation:dc01$": "Unconstrained delegation on DC01$",
+        }
+
+        result = await backend.get_weaknesses()
+
+        assert len(result) == 2
+        assert "SMB signing disabled on 192.168.58.10" in result
+        assert "Unconstrained delegation on DC01$" in result
+
+    @pytest.mark.asyncio
+    async def test_get_weaknesses_legacy_set_format(self, backend, mock_redis):
+        """Test getting weaknesses migrates from legacy SET format to HASH."""
+        mock_redis.type.return_value = "set"
+        mock_redis.smembers.return_value = {
+            "SMB signing disabled on 192.168.58.10",
+            "Unconstrained delegation on DC01$",
+        }
+        mock_redis.pipeline.return_value = mock_redis
+
+        result = await backend.get_weaknesses()
+
+        assert len(result) == 2
+        # Verify migration pipeline was used
+        mock_redis.delete.assert_called_once()
+        mock_redis.hset.assert_called()
+        mock_redis.execute.assert_called_once()
 
     def test_credential_dedup_key_is_case_insensitive(self, backend):
         """Test that credential dedup keys are case-insensitive.

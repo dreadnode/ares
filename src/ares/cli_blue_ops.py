@@ -553,6 +553,225 @@ async def runtime(
         print(f"Completed: {completed_at}")
 
 
+async def _get_latest_operation_id(redis_url: str) -> tuple[str | None, bool]:
+    """Get the ID of the latest red team operation (prefer running).
+
+    Returns:
+        Tuple of (operation_id, is_running)
+    """
+    from ares.core.task_queue import RedisTaskQueue
+
+    client = await create_verified_redis_client(redis_url, decode_responses=True)
+    try:
+        # Check for running operations first
+        lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
+        running_ops: set[str] = set()
+        for key in lock_keys:
+            key_str = key if isinstance(key, str) else key.decode()
+            parts = key_str.split(":")
+            if len(parts) >= 2:
+                running_ops.add(parts[-1])
+
+        # Get all operations with meta data
+        meta_keys = await client.keys("ares:op:*:meta")
+        operations: list[tuple[str, str | None]] = []  # (id, started_at)
+
+        for key in meta_keys:
+            key_str = key if isinstance(key, str) else key.decode()
+            parts = key_str.split(":")
+            if len(parts) >= 3:
+                op_id = parts[2]
+                meta_data = await client.hgetall(key_str)
+                started_at = meta_data.get("started_at") or meta_data.get(b"started_at")
+                if isinstance(started_at, bytes):
+                    started_at = started_at.decode()
+                operations.append((op_id, started_at))
+
+        if not operations:
+            return None, False
+
+        # Prefer running operations
+        running = [(op_id, started) for op_id, started in operations if op_id in running_ops]
+        if running:
+            running.sort(key=lambda x: x[1] or "", reverse=True)
+            return running[0][0], True
+
+        # Otherwise, return most recent
+        operations.sort(key=lambda x: x[1] or "", reverse=True)
+        return operations[0][0], False
+
+    finally:
+        await client.aclose()
+
+
+@app.command(name="from-operation")
+async def from_operation(
+    operation_id: Annotated[str, cyclopts.Parameter(help="Red team operation ID")] = "",
+    *,
+    latest: Annotated[bool, cyclopts.Parameter(help="Use latest red team operation")] = False,
+    model: Annotated[str, cyclopts.Parameter(help="LLM model to use")] = "",
+    max_steps: Annotated[int, cyclopts.Parameter(help="Maximum agent steps")] = 50,
+    grafana_url: Annotated[str, cyclopts.Parameter(help="Grafana URL")] = "",
+    grafana_api_key: Annotated[str, cyclopts.Parameter(help="Grafana API key")] = "",
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+    wait: Annotated[bool, cyclopts.Parameter(help="Wait for investigations to complete")] = False,
+) -> None:
+    """Submit multi-agent investigations for alerts from a red team operation.
+
+    This fetches alerts from Grafana that occurred during the red team operation's
+    time window and submits each as a multi-agent investigation.
+    """
+    from ares.cli_ops import _load_state_from_redis
+    from ares.eval.detection_playbook import create_detection_playbook
+    from ares.tools.blue import GrafanaTools
+
+    if not operation_id and not latest:
+        logger.error("Either operation_id or --latest is required")
+        sys.exit(1)
+
+    # Resolve Redis URL
+    redis_url = redis_url or get_redis_url()
+    if not redis_url:
+        logger.error("Redis URL required. Use --redis-url or set REDIS_URL")
+        sys.exit(1)
+
+    # Resolve operation ID
+    operation_is_running = False
+    if latest:
+        resolved_op, operation_is_running = await _get_latest_operation_id(redis_url)
+        if not resolved_op:
+            logger.error("No red team operations found")
+            sys.exit(1)
+        operation_id = resolved_op
+        logger.info(f"Using latest operation: {operation_id} (running={operation_is_running})")
+
+    # Load operation state
+    client = await create_verified_redis_client(redis_url, decode_responses=False)
+    try:
+        state = await _load_state_from_redis(client, operation_id)
+        if not state:
+            logger.error(f"No state found for operation: {operation_id}")
+            sys.exit(1)
+    finally:
+        await client.aclose()
+
+    # Create detection playbook for time window
+    playbook = create_detection_playbook(state)
+    window_start = playbook.attack_window_start
+    window_end = playbook.attack_window_end
+
+    logger.info(f"Operation: {operation_id}")
+    logger.info(f"Attack window: {window_start.isoformat()} to {window_end.isoformat()}")
+    logger.info(f"Techniques used: {len(playbook.techniques_used)}")
+
+    # Resolve Grafana config
+    grafana_url = grafana_url or os.environ.get("GRAFANA_URL", "")
+    grafana_api_key = grafana_api_key or os.environ.get("GRAFANA_SERVICE_ACCOUNT_TOKEN", "")
+
+    if not grafana_url:
+        logger.error("Grafana URL required. Use --grafana-url or set GRAFANA_URL")
+        sys.exit(1)
+    if not grafana_api_key:
+        logger.error(
+            "Grafana API key required. Use --grafana-api-key or set GRAFANA_SERVICE_ACCOUNT_TOKEN"
+        )
+        sys.exit(1)
+
+    # Fetch alerts from Grafana
+    grafana = GrafanaTools(base_url=grafana_url, api_key=grafana_api_key)
+
+    if operation_is_running:
+        # Running operation: combine firing + historical alerts
+        firing_alerts = await grafana.get_firing_alerts()
+        historical_alerts = await grafana.get_alerts_in_time_range(window_start, window_end)
+        # Merge and dedupe
+        seen_fingerprints: set[str] = set()
+        alerts: list[dict] = []
+        for alert in firing_alerts + historical_alerts:
+            fp = alert.get("fingerprint", "")
+            if fp and fp not in seen_fingerprints:
+                seen_fingerprints.add(fp)
+                alerts.append(alert)
+            elif not fp:
+                alerts.append(alert)
+        logger.info(
+            f"Alerts: {len(firing_alerts)} firing + {len(historical_alerts)} historical = {len(alerts)} total"
+        )
+    else:
+        # Completed operation: historical alerts only
+        alerts = await grafana.get_alerts_in_time_range(window_start, window_end)
+        if not alerts:
+            logger.info("No historical alerts found, checking currently firing")
+            alerts = await grafana.get_firing_alerts()
+        logger.info(f"Retrieved {len(alerts)} alerts from operation time window")
+
+    if not alerts:
+        logger.warning("No alerts found for this operation")
+        return
+
+    # Resolve model
+    resolved_model = (
+        model or os.environ.get("ARES_ORCHESTRATOR_MODEL") or os.environ.get("ARES_MODEL")
+    )
+    if not resolved_model:
+        logger.error("No model specified. Use --model or set ARES_ORCHESTRATOR_MODEL/ARES_MODEL")
+        sys.exit(1)
+
+    # Collect env vars to pass
+    env_vars = {}
+    for key in [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GRAFANA_SERVICE_ACCOUNT_TOKEN",
+        "GRAFANA_API_KEY",
+        "GRAFANA_URL",
+        "DREADNODE_API_KEY",
+        "DREADNODE_SERVER_URL",
+        "DREADNODE_ORGANIZATION",
+        "DREADNODE_WORKSPACE",
+        "DREADNODE_PROJECT",
+        "ARES_MODEL",
+        "ARES_ORCHESTRATOR_MODEL",
+    ]:
+        if os.environ.get(key):
+            env_vars[key] = os.environ[key]
+
+    # Submit each alert as a multi-agent investigation
+    submitted = 0
+    for alert in alerts:
+        alert_name = alert.get("labels", {}).get("alertname", "unknown")
+        severity = alert.get("labels", {}).get("severity", "unknown")
+
+        # Add operation context to alert
+        alert["operation_context"] = {
+            "operation_id": operation_id,
+            "attack_window_start": window_start.isoformat(),
+            "attack_window_end": window_end.isoformat(),
+            "techniques_used": list(playbook.techniques_used)[:20],
+        }
+
+        logger.info(f"Submitting: {alert_name} (severity={severity})")
+
+        result = await submit_investigation(
+            alert=alert,
+            model=resolved_model,
+            max_steps=max_steps,
+            multi_agent=True,  # Force multi-agent
+            auto_route=False,  # Already forcing multi-agent
+            grafana_url=grafana_url,
+            grafana_api_key=grafana_api_key,
+            redis_url=redis_url,
+            wait_for_completion=wait,
+            env_vars=env_vars,
+        )
+
+        inv_id = result["investigation_id"]
+        print(f"  Investigation: {inv_id} (status={result['status']})")
+        submitted += 1
+
+    print(f"\nSubmitted {submitted} investigations from operation {operation_id}")
+
+
 async def _get_latest_investigation_id(redis_url: str) -> str | None:
     """Get the ID of the latest investigation (prefer running)."""
     client = await create_verified_redis_client(redis_url, decode_responses=True)

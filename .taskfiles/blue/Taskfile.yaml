@@ -676,6 +676,53 @@ tasks:
           --redis-url "{{.REDIS_URL}}" \
           $MULTI_AGENT_FLAG
 
+  multi:remote:
+    desc: "Run multi-agent blue investigation from red team operation (usage: task blue:multi:remote [OPERATION_ID=op-xxx] [LATEST=true])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+      MODEL_ARG:
+        sh: |
+          if [ -n "{{.MODEL_ALL}}" ]; then
+            echo "{{.MODEL_ALL}}"
+          else
+            echo "{{.MODEL}}"
+          fi
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required. Usage: task blue:multi:remote OPERATION_ID=op-xxx  OR  task blue:multi:remote LATEST=true"
+    cmds:
+      - |
+        echo "Running multi-agent blue investigation from red team operation..."
+        echo "K8s namespace: {{.K8S_NAMESPACE}}"
+        echo ""
+
+        # Build operation context args
+        OP_ARGS=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          OP_ARGS="--latest"
+        elif [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ARGS="{{.OPERATION_ID}}"
+        fi
+
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
+          env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
+          ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
+          DREADNODE_API_KEY="{{.DREADNODE_API_KEY}}" \
+          DREADNODE_SERVER_URL="{{.DREADNODE_SERVER_URL}}" \
+          DREADNODE_ORGANIZATION="{{.DREADNODE_ORGANIZATION}}" \
+          DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
+          DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
+          GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
+          GRAFANA_URL="{{.GRAFANA_URL}}" \
+          ARES_MODEL="{{.MODEL_ARG}}" \
+          ARES_ORCHESTRATOR_MODEL="{{.MODEL_ARG}}" \
+          /usr/bin/python3 -m ares.cli_blue_ops from-operation $OP_ARGS \
+          --model "{{.MODEL_ARG}}" \
+          --max-steps {{.MAX_STEPS_BLUE}} \
+          --grafana-url "{{.GRAFANA_URL}}"
+
   multi:status:
     desc: "Check investigation status (usage: task blue:multi:status [INVESTIGATION_ID=inv-xxx] [LATEST=true])"
     silent: true

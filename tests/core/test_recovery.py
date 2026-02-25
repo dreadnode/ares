@@ -59,7 +59,7 @@ def mock_backend():
     backend.get_domains = AsyncMock(return_value=[])
     backend.get_vulnerabilities = AsyncMock(return_value=[])
     backend.get_exploited_vulnerabilities = AsyncMock(return_value=set())
-    backend.get_domain_admin = AsyncMock(return_value=(False, None))
+    backend.get_domain_admin = AsyncMock(return_value=(False, None, None))
     backend.get_golden_ticket = AsyncMock(return_value=False)
     backend.get_meta = AsyncMock(return_value=None)
     backend.get_all_dcs = AsyncMock(return_value={})

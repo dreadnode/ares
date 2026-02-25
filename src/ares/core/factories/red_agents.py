@@ -759,9 +759,12 @@ def create_role_hooks(
                 hashes = dispatcher._extract_hashes_from_output(output)
                 for h in hashes:
                     try:
-                        # Use extracted domain, fallback to target domain (same as credentials)
-                        # Non-domain-prefixed hashes like "user:rid:lmhash:nthash:::" have empty domain
-                        hash_domain = h.domain or shared_state.target_domain or ""
+                        # Use extracted domain only - do NOT fallback to target_domain here.
+                        # The orchestrator will resolve the correct domain from the target host's
+                        # FQDN in _process_realtime_hash_discovery(). This correctly handles
+                        # child domain DCs (e.g., winterfell serves north.sevenkingdoms.local,
+                        # not the operation's target domain sevenkingdoms.local).
+                        hash_domain = h.domain or ""
                         await task_queue.publish_discovery(
                             operation_id=operation_id,
                             discovery_type="hash",
@@ -775,7 +778,7 @@ def create_role_hooks(
                             task_id=current_task_id,
                         )
                         logger.info(
-                            f"📡 [{log_name}] Published hash: {hash_domain}\\{h.username} ({h.hash_type})"
+                            f"📡 [{log_name}] Published hash: {hash_domain or '(no domain)'}\\{h.username} ({h.hash_type})"
                         )
                     except Exception as e:
                         logger.warning(f"Failed to publish hash discovery: {e}")

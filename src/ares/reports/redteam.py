@@ -7,6 +7,7 @@ credentials, attack paths, and MITRE ATT&CK mapping.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,36 @@ from ares.core.templates import get_template_loader
 
 if TYPE_CHECKING:
     from ares.core.models import SharedRedTeamState
+
+
+def _parse_weakness_block(block: str) -> dict[str, str]:
+    """Parse a markdown weakness block into structured fields."""
+    result: dict[str, str] = {}
+    if not block:
+        return result
+
+    lines = block.strip().split("\n")
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+
+        # Parse title (### Title)
+        if stripped.startswith("### "):
+            result["title"] = stripped[4:].strip()
+        elif stripped.startswith("**") and ":**" not in stripped and stripped.endswith("**"):
+            result["title"] = stripped.strip("*").strip()
+
+        # Parse **Key:** Value patterns
+        elif ":**" in stripped:
+            clean = stripped.lstrip("-").strip()
+            match = re.match(r"\*\*([^*:]+):\*\*\s*(.*)$", clean)
+            if match:
+                key = match.group(1).strip().lower().replace(" ", "_")
+                value = match.group(2).strip()
+                result[key] = value
+
+    return result
 
 
 class RedTeamReportGenerator:
@@ -74,10 +105,12 @@ class RedTeamReportGenerator:
         )
 
         # Render the report using the template
+        target_ips = state.target_ips or ([state.target.ip] if state.target else [])
         return self.loader.render(
             "redteam/reports/operation_summary.md.jinja",
             operation_id=state.operation_id,
             target_ip=state.target.ip if state.target else "Unknown",
+            target_ips=target_ips,
             started_at=state.started_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
             completed_at=completed_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
             duration=duration_str,
@@ -96,7 +129,7 @@ class RedTeamReportGenerator:
             users=unique_users,
             credentials=unique_creds,
             shares=state.all_shares,
-            weaknesses=state.all_weaknesses,
+            weaknesses=[_parse_weakness_block(w) for w in state.all_weaknesses],
             timeline=state.operation_timeline,
             techniques_identified=state.identified_techniques,
         )
@@ -123,10 +156,16 @@ class RedTeamReportGenerator:
         summary_parts = []
 
         # Operation overview
-        target_ip = state.target.ip if state.target else "Unknown"
+        target_ips = state.target_ips or ([state.target.ip] if state.target else [])
+        if len(target_ips) > 1:
+            target_desc = f"**{len(target_ips)} targets** ({', '.join(target_ips[:3])}{'...' if len(target_ips) > 3 else ''})"
+        elif target_ips:
+            target_desc = f"target **{target_ips[0]}**"
+        else:
+            target_desc = "target **Unknown**"
         summary_parts.append(
-            f"Red team operation **{state.operation_id}** was executed against target "
-            f"**{target_ip}** in an Active Directory penetration testing engagement."
+            f"Red team operation **{state.operation_id}** was executed against {target_desc} "
+            f"in an Active Directory penetration testing engagement."
         )
 
         # Key achievements
@@ -279,12 +318,14 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
     # Get target info
     target_ip = state.target.ip if state.target else "Unknown"
     target_domain = state.target.domain if state.target else "Unknown"
+    target_ips = state.target_ips or ([target_ip] if target_ip != "Unknown" else [])
 
     # Render the comprehensive report
     return loader.render(
         "redteam/reports/comprehensive_report.md.jinja",
         operation_id=state.operation_id,
         target_ip=target_ip,
+        target_ips=target_ips,
         target_domain=target_domain,
         started_at=state.started_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
         completed_at=completed_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -299,7 +340,7 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
         users=state.all_users,
         credentials=unique_creds,
         hashes=unique_hashes,
-        weaknesses=state.all_weaknesses,
+        weaknesses=[_parse_weakness_block(w) for w in state.all_weaknesses],
         timeline=timeline,
         techniques=sorted(all_techniques),
         discovered_vulns=discovered_vulns,

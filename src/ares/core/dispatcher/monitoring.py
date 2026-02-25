@@ -695,19 +695,27 @@ class MonitoringMixin:
         if not username or not hash_value:
             return
 
-        # Fallback to target domain if hash domain is empty
-        # (non-domain-prefixed secretsdump output: "user:rid:lmhash:nthash:::")
-        if not domain and self.shared_state.target and self.shared_state.target.domain:
-            domain = self.shared_state.target.domain
-
-        # Look up parent credential from task params for attack chain tracking
+        # Look up parent credential and target from task params for attack chain tracking
         parent_credential_id: str | None = None
         parent_attack_step: int = 0
+        target_ip: str | None = None
         if task_id and self._shared_state:
             task_info = self._shared_state.pending_tasks.get(task_id)
             if task_info and task_info.params:
                 parent_credential_id = task_info.params.get("parent_credential_id")
                 parent_attack_step = int(task_info.params.get("parent_attack_step", 0) or 0)
+                # Get target IP for domain resolution
+                target_ip = task_info.params.get("target") or task_info.params.get("target_host")
+                if not target_ip:
+                    target_ips = task_info.params.get("target_ips", [])
+                    if target_ips and isinstance(target_ips, list):
+                        target_ip = target_ips[0]
+
+        # Fallback to domain resolved from target host's FQDN
+        # (non-domain-prefixed secretsdump output: "user:rid:lmhash:nthash:::")
+        # This correctly handles child domain DCs (e.g., winterfell serves north.sevenkingdoms.local)
+        if not domain:
+            domain = self._resolve_domain_from_target_host(target_ip)
 
         hash_obj = Hash(
             username=username,
@@ -788,6 +796,65 @@ class MonitoringMixin:
             )
             logger.warning(f"🚀 Auto-dispatched exploit for {vuln_type} on {target}")
 
+    async def _ping_or_reconnect_dispatcher_redis(
+        self: RedTeamDispatcher, timeout: float = 5.0
+    ) -> bool:
+        """Ping dispatcher's Redis client and reconnect if stale.
+
+        The dispatcher has its own _redis_client separate from _task_queue.
+        Both need health checking to detect stale Sentinel connections after
+        pod restarts.
+
+        Args:
+            timeout: Max seconds to wait for ping response
+
+        Returns:
+            True if ping succeeded, False if reconnection was needed
+        """
+        if not self._redis_client:
+            return True  # No client to check
+
+        try:
+            await asyncio.wait_for(self._redis_client.ping(), timeout=timeout)
+            return True
+        except Exception as e:
+            logger.warning(
+                f"Dispatcher Redis ping failed ({type(e).__name__}: {e}), forcing reconnection"
+            )
+            # Invalidate Sentinel client to force fresh DNS resolution
+            from ares.core.redis_client import create_redis_client, invalidate_sentinel_client
+
+            invalidate_sentinel_client()
+
+            # Close stale client
+            try:
+                await self._redis_client.aclose()
+            except Exception:
+                pass
+            self._redis_client = None
+
+            # Reconnect with fresh Sentinel IPs
+            try:
+                self._redis_client = await create_redis_client(self._redis_url)
+                await self._redis_client.ping()
+
+                # Update state backend with new client
+                if self._shared_state and hasattr(self._shared_state, "_backend"):
+                    from ares.core.state_backend import RedisStateBackend
+
+                    backend = RedisStateBackend(self._redis_client, self._shared_state.operation_id)
+                    self._shared_state.set_backend(backend)
+
+                # Update context offloader with new client
+                if self._context_offloader:
+                    self._context_offloader._redis = self._redis_client
+
+                logger.info("Dispatcher Redis client reconnected successfully")
+                return False
+            except Exception as reconnect_error:
+                logger.error(f"Dispatcher Redis reconnection failed: {reconnect_error}")
+                raise
+
     async def _maintenance_loop(self: RedTeamDispatcher) -> None:
         """
         Background task for stale cleanup, task reconciliation, and periodic checkpointing.
@@ -821,13 +888,26 @@ class MonitoringMixin:
 
                 # Check Redis connection health to detect stale Sentinel connections
                 # This catches issues when Sentinel pods restart with new IPs
-                if now - last_connection_check >= connection_check_interval and self._task_queue:
-                    try:
-                        ping_ok = await self._task_queue.ping_or_reconnect(timeout=5.0)
-                        if not ping_ok:
-                            logger.warning("Redis connection was stale, reconnected successfully")
-                    except Exception as e:
-                        logger.error(f"Redis connection health check failed: {e}")
+                # Both _task_queue and _redis_client need health checks - they are separate clients
+                if now - last_connection_check >= connection_check_interval:
+                    # Check task queue Redis client
+                    if self._task_queue:
+                        try:
+                            ping_ok = await self._task_queue.ping_or_reconnect(timeout=5.0)
+                            if not ping_ok:
+                                logger.warning("Task queue Redis was stale, reconnected")
+                        except Exception as e:
+                            logger.error(f"Task queue Redis health check failed: {e}")
+
+                    # Check dispatcher's Redis client (used for state persistence, vulns, etc.)
+                    if self._redis_client:
+                        try:
+                            ping_ok = await self._ping_or_reconnect_dispatcher_redis(timeout=5.0)
+                            if not ping_ok:
+                                logger.warning("Dispatcher Redis was stale, reconnected")
+                        except Exception as e:
+                            logger.error(f"Dispatcher Redis health check failed: {e}")
+
                     last_connection_check = now
 
                 # Log throttle health periodically (uses Redis, must run on main loop)
@@ -1102,6 +1182,15 @@ class MonitoringMixin:
         The thread creates its own Redis connection to avoid sharing connections
         across threads (which is not safe for async Redis).
         """
+        # Get operation_id for log context (shared_state is set before thread starts)
+        operation_id = self._shared_state.operation_id if self._shared_state else "-"
+
+        # Use contextualize so all logs from this thread include the operation_id
+        with logger.contextualize(operation_id=operation_id):
+            self._threaded_result_consumer_loop_inner()
+
+    def _threaded_result_consumer_loop_inner(self: RedTeamDispatcher) -> None:
+        """Inner implementation of the threaded result consumer loop."""
         from ares.core.task_queue import RedisTaskQueue
 
         loop = asyncio.new_event_loop()

@@ -62,6 +62,7 @@ from ares.core.worker.operations import (
     get_active_operation_pointer,
     get_operation_model,
     get_operation_model_overrides,
+    get_worker_credentials,
 )
 from ares.core.worker.prompts import (
     TASK_PROMPTS,
@@ -81,6 +82,7 @@ __all__ = [
     "get_operation_model_overrides",
     "get_rate_limit_backoff_delays",
     "get_rate_limit_max_retries",
+    "get_worker_credentials",
     "logger",
     "resolve_dc_ip_for_domain",
     "run_worker",

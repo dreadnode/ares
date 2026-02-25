@@ -385,10 +385,37 @@ async def get_active_operation_pointer(redis_url: str, max_operation_age: int = 
             pass
 
 
+async def get_worker_credentials(redis_url: str, operation_id: str) -> dict[str, str] | None:
+    """Fetch API credentials for workers from Redis.
+
+    These credentials are persisted by the orchestrator when an operation starts,
+    allowing workers in separate pods to authenticate with LLM providers.
+    """
+    client = await create_redis_client(redis_url, decode_responses=True)
+    try:
+        raw = await client.get(f"ares:op:{operation_id}:worker_credentials")
+        if not raw:
+            return None
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items() if v}
+        logger.warning(f"Unexpected worker credentials payload type: {type(data)}")
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to read worker credentials for {operation_id}: {e}")
+        return None
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+
 __all__ = [
     "discover_active_operation",
     "get_active_operation_pointer",
     "get_operation_model",
     "get_operation_model_overrides",
+    "get_worker_credentials",
     "is_operation_completed",
 ]

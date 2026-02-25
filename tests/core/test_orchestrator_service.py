@@ -288,3 +288,80 @@ async def test_process_operation_request_uses_inline_env_vars_when_present():
     # The get call should not have been made for env_vars key
     for call in mock_client.get.await_args_list:
         assert "env_vars" not in str(call)
+
+
+@pytest.mark.asyncio
+async def test_process_operation_request_persists_worker_credentials():
+    """Test that worker credentials are persisted during operation processing."""
+    service = OrchestratorService(redis_url="redis://", namespace="test")
+    service._publish_operation_status = AsyncMock()
+    service._persist_worker_credentials = AsyncMock()
+
+    # Create a mock task queue with client
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=None)
+    mock_client.set = AsyncMock()
+    service.task_queue = SimpleNamespace(_client=mock_client)
+
+    request_data = {
+        "operation_id": "op-cred-persist",
+        "target_domain": "contoso.local",
+        "target_ips": ["192.168.58.1"],
+        "model": "test-model",
+        "env_vars": {
+            "OPENAI_API_KEY": "sk-test",  # pragma: allowlist secret
+            "DREADNODE_API_KEY": "dn-test",  # pragma: allowlist secret
+        },
+    }
+
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch(
+            "ares.core.orchestrator_service.run_multi_agent_operation",
+            new=AsyncMock(return_value={"ok": True}),
+        ),
+    ):
+        await service._process_operation_request(request_data)
+
+    # Verify worker credentials were persisted
+    service._persist_worker_credentials.assert_awaited_once()
+    call_args = service._persist_worker_credentials.call_args
+    assert call_args[0][0] == "op-cred-persist"
+    assert call_args[0][1]["OPENAI_API_KEY"] == "sk-test"  # pragma: allowlist secret
+
+
+@pytest.mark.asyncio
+async def test_process_operation_request_wraps_with_logging_context():
+    """Test that operation processing is wrapped with logging context."""
+    service = OrchestratorService(redis_url="redis://", namespace="test")
+    service._publish_operation_status = AsyncMock()
+
+    request_data = {
+        "operation_id": "op-logging-test",
+        "target_domain": "contoso.local",
+        "target_ips": ["192.168.58.1"],
+        "model": "test-model",
+    }
+
+    # Track if _process_operation_request_inner is called
+    inner_called = False
+    original_inner = service._process_operation_request_inner
+
+    async def track_inner(request_data):
+        nonlocal inner_called
+        inner_called = True
+        await original_inner(request_data)
+
+    service._process_operation_request_inner = track_inner
+
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch(
+            "ares.core.orchestrator_service.run_multi_agent_operation",
+            new=AsyncMock(return_value={"ok": True}),
+        ),
+    ):
+        await service._process_operation_request(request_data)
+
+    # Inner method should have been called (via contextualize wrapper)
+    assert inner_called

@@ -182,13 +182,14 @@ tasks:
             2>&1 | tee -a "{{.LOGFILE}}"
         silent: false
 
-      # Follow logs
+      # Follow logs filtered to this operation only
       - cmd: |
           echo ""
           echo "Following orchestrator logs (Ctrl+C to stop)..."
           echo "Operation ID: {{.OPERATION_ID_COMPUTED}}"
           echo ""
-          kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | tee -a "{{.LOGFILE}}"
+          kubectl logs -f --since=0s -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | \
+            grep --line-buffered "{{.OPERATION_ID_COMPUTED}}" | tee -a "{{.LOGFILE}}"
         silent: false
 
       # Auto-fetch report when operation completes
@@ -458,6 +459,51 @@ tasks:
     cmds:
       - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops delete "{{.OPERATION_ID}}" --force
 
+  multi:kill:
+    desc: "Kill running operations except the latest (usage: task red:multi:kill [OPERATION_ID=op-xxx] [KEEP_LATEST=true])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      KEEP_LATEST: '{{.KEEP_LATEST | default "true"}}'
+    cmds:
+      - |
+        set -euo pipefail
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          # Kill specific operation
+          echo "Killing operation: {{.OPERATION_ID}}"
+          kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops delete "{{.OPERATION_ID}}" --force
+        else
+          # Get all running operations
+          RUNNING_OPS=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops queue 2>/dev/null | grep '\[running\]' | awk '{print $1}' || true)
+          if [ -z "$RUNNING_OPS" ]; then
+            echo "No running operations found"
+            exit 0
+          fi
+
+          # Count running ops
+          NUM_RUNNING=$(echo "$RUNNING_OPS" | wc -l | tr -d ' ')
+          echo "Found $NUM_RUNNING running operation(s)"
+
+          if [ "{{.KEEP_LATEST}}" = "true" ] && [ "$NUM_RUNNING" -gt 1 ]; then
+            # Kill all except the latest (last one, since they're sorted by time)
+            LATEST=$(echo "$RUNNING_OPS" | tail -1)
+            TO_KILL=$(echo "$RUNNING_OPS" | head -n -1)
+            echo "Keeping latest: $LATEST"
+            for op in $TO_KILL; do
+              echo "Killing: $op"
+              kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops delete "$op" --force
+            done
+          elif [ "{{.KEEP_LATEST}}" = "false" ]; then
+            # Kill all running
+            for op in $RUNNING_OPS; do
+              echo "Killing: $op"
+              kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops delete "$op" --force
+            done
+          else
+            echo "Only 1 running operation - use KEEP_LATEST=false to kill it"
+          fi
+        fi
+
   multi:backfill-domains:
     desc: "Backfill domain list into Redis state (usage: task red:multi:backfill-domains OPERATION_ID=op-xxx)"
     silent: true
@@ -724,13 +770,14 @@ tasks:
             2>&1 | tee -a "{{.LOGFILE}}"
         silent: false
 
-      # Follow logs
+      # Follow logs filtered to this operation only
       - cmd: |
           echo ""
           echo "Following orchestrator logs (Ctrl+C to stop)..."
           echo "Operation ID: {{.OPERATION_ID_COMPUTED}}"
           echo ""
-          kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | tee -a "{{.LOGFILE}}"
+          kubectl logs -f --since=0s -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | \
+            grep --line-buffered "{{.OPERATION_ID_COMPUTED}}" | tee -a "{{.LOGFILE}}"
         silent: false
 
       # Auto-fetch report when operation completes

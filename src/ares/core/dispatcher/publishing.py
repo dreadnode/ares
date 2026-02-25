@@ -275,7 +275,9 @@ class PublishingMixin:
                         and self.shared_state.has_domain_admin
                     ):
                         await backend.set_domain_admin(
-                            achieved=True, path=self.shared_state.domain_admin_path
+                            achieved=True,
+                            path=self.shared_state.domain_admin_path,
+                            da_hash_id=self.shared_state.da_hash_id,
                         )
                         logger.success(
                             "✅ Domain Admin status persisted directly to Redis (krbtgt found)"

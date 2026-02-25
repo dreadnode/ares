@@ -17,7 +17,7 @@ Redis key structure:
     ares:op:{op_id}:hosts             LIST
     ares:op:{op_id}:users             LIST
     ares:op:{op_id}:shares            LIST
-    ares:op:{op_id}:weaknesses        SET
+    ares:op:{op_id}:weaknesses        HASH (dedup_key -> block) - normalized key dedup
     ares:op:{op_id}:vulns             HASH
     ares:op:{op_id}:dedup:{set_name}  SET
     ares:op:{op_id}:meta              HASH
@@ -472,7 +472,9 @@ class RedisStateBackend:
     # =========================================================================
 
     async def add_share(self, share: Share) -> bool:
-        """Add a share to Redis LIST.
+        """Add a share to Redis HASH (additive, no delete).
+
+        Uses host:name as the dedup key for O(1) lookup.
 
         Args:
             share: Share to add
@@ -482,8 +484,10 @@ class RedisStateBackend:
         """
         key = self._key(self.KEY_SHARES)
         try:
+            # Dedup key: normalized host:name
+            dedup_key = f"{(share.host or '').strip().lower()}:{(share.name or '').strip().lower()}"
             data = _serialize_share(share)
-            await self._redis.rpush(key, data)
+            await self._redis.hset(key, dedup_key, data)
             await self._set_ttl(key)
             return True
         except Exception as e:
@@ -491,52 +495,90 @@ class RedisStateBackend:
             return False
 
     async def get_shares(self) -> list[Share]:
-        """Get all shares from Redis LIST.
+        """Get all shares from Redis HASH.
 
         Returns:
             List of Share objects
         """
         key = self._key(self.KEY_SHARES)
         try:
-            items = await self._redis.lrange(key, 0, -1)
-            return [_deserialize_share(item) for item in items]
+            items = await self._redis.hgetall(key)
+            return [_deserialize_share(v) for v in items.values()]
         except Exception as e:
             logger.warning(f"Failed to get shares from Redis: {e}")
             return []
 
     # =========================================================================
-    # Weaknesses
+    # Weaknesses (Redis HASH with normalized dedup key)
     # =========================================================================
 
-    async def add_weakness(self, weakness: str) -> bool:
-        """Add a weakness string to Redis SET (auto-deduplicates).
+    async def add_weakness(self, weakness: str, dedup_key: str) -> bool:
+        """Add a weakness to Redis HASH with O(1) deduplication via HSETNX.
+
+        Uses normalized dedup_key (e.g., "unconstrained_delegation:dc01$") as the
+        hash field, allowing semantically identical weaknesses with different
+        wording to be deduplicated properly.
 
         Args:
-            weakness: Weakness description
+            weakness: Full weakness description block
+            dedup_key: Normalized deduplication key (from _extract_weakness_dedup_key)
 
         Returns:
             True if added (was new), False if already existed
         """
         key = self._key(self.KEY_WEAKNESSES)
         try:
-            added = await self._redis.sadd(key, weakness)
+            # HSETNX returns 1 if field was set (new), 0 if already existed
+            added = await self._redis.hsetnx(key, dedup_key, weakness)
+            if not added:
+                logger.debug(f"Weakness rejected (duplicate key): {dedup_key}")
+                return False
             await self._set_ttl(key)
-            return added > 0
+            return True
         except Exception as e:
             logger.warning(f"Failed to add weakness to Redis: {e}")
             return False
 
     async def get_weaknesses(self) -> list[str]:
-        """Get all weaknesses from Redis SET.
+        """Get all weaknesses from Redis HASH.
+
+        Includes fallback for legacy SET format to support operations that were
+        in-progress during deployment.
 
         Returns:
-            List of weakness strings
+            List of weakness description strings
         """
         key = self._key(self.KEY_WEAKNESSES)
         try:
-            items = await self._redis.smembers(key)
-            # Items may be bytes or str depending on decode_responses
-            return [item if isinstance(item, str) else item.decode() for item in items]
+            # Check the key type first
+            key_type = await self._redis.type(key)
+            key_type_str = key_type if isinstance(key_type, str) else key_type.decode()
+
+            if key_type_str == "hash":
+                # New HASH format - values are the weakness blocks
+                items = await self._redis.hgetall(key)
+                return [v if isinstance(v, str) else v.decode() for v in items.values()]
+
+            if key_type_str == "set":
+                # Legacy SET format - migrate to HASH on read
+                items = await self._redis.smembers(key)
+                weaknesses = [item if isinstance(item, str) else item.decode() for item in items]
+                if weaknesses:
+                    logger.info(f"Migrating {len(weaknesses)} weaknesses from SET to HASH format")
+                    # Note: We can't compute dedup keys here without the model's
+                    # _extract_weakness_dedup_key method. Use weakness[:64] as fallback key.
+                    pipe = self._redis.pipeline()
+                    pipe.delete(key)
+                    for weakness in weaknesses:
+                        # Use truncated weakness as key for legacy migration
+                        legacy_key = weakness[:64].replace("\n", " ").strip()
+                        pipe.hset(key, legacy_key, weakness)
+                    pipe.expire(key, self.DEFAULT_TTL)
+                    await pipe.execute()
+                return weaknesses
+
+            # Key doesn't exist or unknown type
+            return []
         except Exception as e:
             logger.warning(f"Failed to get weaknesses from Redis: {e}")
             return []
@@ -768,10 +810,15 @@ class RedisStateBackend:
 
     # Convenience methods for common meta fields
 
-    async def set_domain_admin(self, achieved: bool, path: str | None = None) -> None:
+    async def set_domain_admin(
+        self,
+        achieved: bool,
+        path: str | None = None,
+        da_hash_id: str | None = None,
+    ) -> None:
         """Set domain admin achievement status.
 
-        This method only persists the DA flag and path. It does NOT set completed_at,
+        This method only persists the DA flag, path, and hash ID. It does NOT set completed_at,
         as that should only be set when the operation actually completes (controlled
         by stop_on_domain_admin or stop_on_golden_ticket config).
 
@@ -781,12 +828,15 @@ class RedisStateBackend:
         await self.set_meta("has_domain_admin", achieved)
         if path:
             await self.set_meta("domain_admin_path", path)
+        if da_hash_id:
+            await self.set_meta("da_hash_id", da_hash_id)
 
-    async def get_domain_admin(self) -> tuple[bool, str | None]:
-        """Get domain admin status and path."""
+    async def get_domain_admin(self) -> tuple[bool, str | None, str | None]:
+        """Get domain admin status, path, and hash ID."""
         achieved = await self.get_meta("has_domain_admin", default=False)
         path = await self.get_meta("domain_admin_path")
-        return achieved, path
+        da_hash_id = await self.get_meta("da_hash_id")
+        return achieved, path, da_hash_id
 
     async def set_golden_ticket(self, achieved: bool) -> None:
         """Set golden ticket achievement status."""

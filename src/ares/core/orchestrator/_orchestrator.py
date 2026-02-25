@@ -422,6 +422,7 @@ async def _prime_operation(
         # Store target info so CLI can reconstruct state
         if target_ips:
             await state._backend.set_meta("target_ip", target_ips[0])
+            await state._backend.set_meta("target_ips", ",".join(target_ips))
         if target_domain:
             await state._backend.set_meta("target_domain", target_domain)
 
@@ -3005,6 +3006,8 @@ async def _auto_golden_ticket(
                             "status": "failed_no_dc",
                         }
                     )
+                    # Update processed_domains to prevent duplicate attempts in this iteration
+                    processed_domains.add(domain.lower())
                     continue
 
                 # Run lookupsid to get domain SID
@@ -3032,6 +3035,8 @@ async def _auto_golden_ticket(
                                 "status": "failed_no_sid",
                             }
                         )
+                        # Update processed_domains to prevent duplicate attempts in this iteration
+                        processed_domains.add(domain.lower())
                         continue
 
                     domain_sid = sid_match.group(1)
@@ -3074,6 +3079,8 @@ async def _auto_golden_ticket(
                                 "status": "success",
                             }
                         )
+                        # Update processed_domains to prevent duplicate attempts in this iteration
+                        processed_domains.add(domain.lower())
 
                         # Add to state timeline
                         from ares.core.models import TimelineEvent
@@ -3101,6 +3108,8 @@ async def _auto_golden_ticket(
                                 "error": output[:500],
                             }
                         )
+                        # Update processed_domains to prevent duplicate attempts in this iteration
+                        processed_domains.add(domain.lower())
 
                 except Exception as e:
                     logger.warning(f"🎫 Auto-golden-ticket: Error generating ticket: {e}")
@@ -3113,6 +3122,8 @@ async def _auto_golden_ticket(
                             "error": str(e)[:500],
                         }
                     )
+                    # Update processed_domains to prevent duplicate attempts in this iteration
+                    processed_domains.add(domain.lower())
 
         except asyncio.CancelledError:
             break

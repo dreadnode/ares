@@ -1260,18 +1260,18 @@ class TestHashDomainValidation:
         # Simulate BloodHound discovering user in child.contoso.local
         state.add_user("svc.backup", "child.contoso.local", source="bloodhound")
 
-        # Now a hash comes in with wrong domain (FABRIKAM realm from kerberoast)
+        # Now a hash comes in with NetBIOS domain (needs correction)
         hash_obj = Hash(
             username="svc.backup",
-            hash_value="$krb5tgs$23$*svc.backup$FABRIKAM$http/web01$abc123",
+            hash_value="$krb5tgs$23$*svc.backup$CHILD$http/web01$abc123",
             hash_type="Kerberoast",
-            domain="fabrikam.local",  # Wrong domain from Kerberos realm
+            domain="CHILD",  # NetBIOS name needs to be resolved to FQDN
         )
         result = state.add_hash(hash_obj, "kerberoast")
 
         assert result is True
         assert len(state.all_hashes) == 1
-        # Domain should be corrected to the known domain
+        # NetBIOS domain should be corrected to the known FQDN
         assert state.all_hashes[0].domain == "child.contoso.local"
 
     def test_hash_domain_not_changed_when_matches_known_domain(self) -> None:
@@ -1293,6 +1293,31 @@ class TestHashDomainValidation:
         result = state.add_hash(hash_obj, "kerberoast")
 
         assert result is True
+        assert state.all_hashes[0].domain == "fabrikam.local"
+
+    def test_hash_fqdn_domain_not_corrected_even_if_user_known_elsewhere(self) -> None:
+        """Test that an FQDN domain is NOT corrected, even if user is known elsewhere.
+
+        This is important because users may legitimately exist in multiple domains.
+        If a hash comes in with an FQDN, we should trust it rather than "correct"
+        it based on prior enumeration data which may be incomplete.
+        """
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.add_user("svc.backup", "child.contoso.local", source="bloodhound")
+
+        # Hash comes in with different FQDN - should NOT be corrected
+        hash_obj = Hash(
+            username="svc.backup",
+            hash_value="$krb5tgs$23$*svc.backup$FABRIKAM$http/web01$abc123",
+            hash_type="Kerberoast",
+            domain="fabrikam.local",  # Different FQDN
+        )
+        result = state.add_hash(hash_obj, "kerberoast")
+
+        assert result is True
+        # FQDN should be trusted, NOT corrected to child.contoso.local
         assert state.all_hashes[0].domain == "fabrikam.local"
 
     def test_hash_domain_accepted_when_user_not_previously_seen(self) -> None:
@@ -1317,7 +1342,8 @@ class TestHashDomainValidation:
         """Test that longer FQDN is preferred when user exists in multiple domains.
 
         In AD forests, child domains are more specific. If a user exists in both
-        contoso.local and child.contoso.local, prefer the child.
+        contoso.local and child.contoso.local, prefer the child when resolving
+        NetBIOS names.
         """
         from ares.core.models import Hash, SharedRedTeamState
 
@@ -1327,17 +1353,17 @@ class TestHashDomainValidation:
         state.add_user("testuser", "contoso.local", source="ldap")
         state.add_user("testuser", "child.contoso.local", source="bloodhound")
 
-        # Hash comes in with wrong domain
+        # Hash comes in with NetBIOS name (not FQDN) - should be resolved
         hash_obj = Hash(
             username="testuser",
             hash_value="aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890",
             hash_type="NTLM",
-            domain="fabrikam.local",  # Wrong domain
+            domain="FABRIKAM",  # NetBIOS - will try to resolve
         )
         result = state.add_hash(hash_obj, "secretsdump")
 
         assert result is True
-        # Should prefer the longer (more specific) FQDN
+        # Should prefer the longer (more specific) FQDN when resolving NetBIOS
         assert state.all_hashes[0].domain == "child.contoso.local"
 
 
@@ -2008,3 +2034,195 @@ class TestGoldenTicketCapabilityDetection:
         dc_ips = {cap["dc_ip"] for cap in capabilities}
         assert "192.168.58.10" in dc_ips
         assert "192.168.58.11" in dc_ips
+
+
+class TestHashDomainCorrectionLogic:
+    """Tests for _validate_hash_domain domain correction logic."""
+
+    def test_fqdn_domain_not_overridden(self) -> None:
+        """Test that an FQDN domain is NOT overridden by another FQDN.
+
+        Bug fix: When a hash comes in with a valid FQDN (e.g., child.contoso.local)
+        but the user was only enumerated in a different domain (e.g., contoso.local),
+        we should NOT "correct" the domain. Both are valid FQDNs.
+        """
+        from ares.core.models import SharedRedTeamState, User
+
+        state = SharedRedTeamState(operation_id="test-op")
+        # Simulate: krbtgt was enumerated only from parent domain
+        state.all_users.append(
+            User(username="krbtgt", domain="contoso.local", discovered_via="ldap")
+        )
+
+        # Hash comes in with child domain FQDN - should NOT be corrected
+        result = state._validate_hash_domain(
+            username="krbtgt",
+            domain="child.contoso.local",
+            source_agent="secretsdump",
+        )
+
+        # FQDN should be trusted, not overridden
+        assert result == "child.contoso.local"
+
+    def test_netbios_domain_corrected_to_fqdn(self) -> None:
+        """Test that a NetBIOS domain IS corrected to an FQDN."""
+        from ares.core.models import SharedRedTeamState, User
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_users.append(
+            User(username="svc_backup", domain="contoso.local", discovered_via="ldap")
+        )
+
+        # NetBIOS name should be corrected to FQDN
+        result = state._validate_hash_domain(
+            username="svc_backup",
+            domain="CONTOSO",  # NetBIOS (no dot)
+            source_agent="kerberoast",
+        )
+
+        assert result == "contoso.local"
+
+    def test_unknown_user_domain_accepted(self) -> None:
+        """Test that a domain for an unknown user is accepted as-is."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        # No users enumerated
+
+        result = state._validate_hash_domain(
+            username="newuser",
+            domain="fabrikam.local",
+            source_agent="asreproast",
+        )
+
+        assert result == "fabrikam.local"
+
+    def test_matching_domain_kept(self) -> None:
+        """Test that a matching domain is kept unchanged."""
+        from ares.core.models import SharedRedTeamState, User
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_users.append(
+            User(username="admin", domain="contoso.local", discovered_via="ldap")
+        )
+
+        result = state._validate_hash_domain(
+            username="admin",
+            domain="contoso.local",
+            source_agent="secretsdump",
+        )
+
+        assert result == "contoso.local"
+
+    def test_well_known_account_krbtgt_never_corrected(self) -> None:
+        """Test that krbtgt domain is NEVER corrected, even if only known elsewhere.
+
+        Bug fix: krbtgt exists in EVERY domain with the same username but different
+        hashes. We should never "correct" a krbtgt domain based on user lookups.
+        """
+        from ares.core.models import SharedRedTeamState, User
+
+        state = SharedRedTeamState(operation_id="test-op")
+        # krbtgt enumerated only from parent domain
+        state.all_users.append(
+            User(username="krbtgt", domain="contoso.local", discovered_via="ldap")
+        )
+
+        # Hash comes in with NetBIOS name "CHILD" - should NOT be corrected
+        # because krbtgt is a well-known account
+        result = state._validate_hash_domain(
+            username="krbtgt",
+            domain="child",  # NetBIOS, not FQDN
+            source_agent="secretsdump",
+        )
+
+        # Should keep "child", NOT "correct" to contoso.local
+        assert result == "child"
+
+    def test_well_known_account_administrator_never_corrected(self) -> None:
+        """Test that Administrator domain is NEVER corrected."""
+        from ares.core.models import SharedRedTeamState, User
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_users.append(
+            User(username="Administrator", domain="contoso.local", discovered_via="ldap")
+        )
+
+        result = state._validate_hash_domain(
+            username="Administrator",
+            domain="fabrikam",  # Different NetBIOS domain
+            source_agent="secretsdump",
+        )
+
+        # Should NOT be corrected - Administrator exists in every domain
+        assert result == "fabrikam"
+
+
+class TestAttackChainConsistency:
+    """Tests for attack chain building consistency."""
+
+    def test_build_attack_chain_uses_da_hash_id(self) -> None:
+        """Test that build_attack_chain uses da_hash_id when available."""
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # First krbtgt hash (from child domain)
+        hash1 = Hash(
+            username="krbtgt",
+            domain="child.contoso.local",
+            hash_value="aad3b4...",
+            hash_type="NTLM",
+            source="secretsdump",
+        )
+        state.add_hash(hash1, "agent1")
+
+        # Store the da_hash_id from first krbtgt
+        assert state.has_domain_admin is True
+        assert state.da_hash_id == hash1.id
+
+        # Second krbtgt hash (from parent domain - different hash value)
+        hash2 = Hash(
+            username="krbtgt",
+            domain="contoso.local",
+            hash_value="bbc4e5...",  # Different hash
+            hash_type="NTLM",
+            source="secretsdump",
+        )
+        state.add_hash(hash2, "agent2")
+
+        # Build attack chain should use the FIRST krbtgt (da_hash_id), not the last
+        chain = state.build_attack_chain()
+
+        # The chain should end with the first krbtgt hash
+        assert len(chain) > 0
+        last_step = chain[-1]
+        assert last_step["username"] == "krbtgt"
+        assert last_step["domain"] == "child.contoso.local"  # First krbtgt's domain
+
+    def test_da_hash_id_set_only_once(self) -> None:
+        """Test that da_hash_id is only set for the first krbtgt hash."""
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        hash1 = Hash(
+            username="krbtgt",
+            domain="contoso.local",
+            hash_value="aad3b4...",
+            hash_type="NTLM",
+        )
+        state.add_hash(hash1, "agent1")
+        first_da_hash_id = state.da_hash_id
+
+        hash2 = Hash(
+            username="krbtgt",
+            domain="fabrikam.local",
+            hash_value="ccd5f6...",  # Different hash
+            hash_type="NTLM",
+        )
+        state.add_hash(hash2, "agent2")
+
+        # da_hash_id should still be the first one
+        assert state.da_hash_id == first_da_hash_id
+        assert state.da_hash_id == hash1.id

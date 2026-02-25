@@ -1,9 +1,13 @@
 # Red Team Operation Report
 
 **Operation ID**: {{ operation_id }}
-**Target**: {{ target_ip }}
+
+**Target{% if target_ips|length > 1 %}s{% endif %}**: {% if target_ips %}{{ target_ips | join(', ') }}{% else %}{{ target_ip }}{% endif %}
+
 **Started**: {{ started_at }}
+
 **Completed**: {{ completed_at }}
+
 **Stage**: {{ stage }}
 
 ---
@@ -31,30 +35,42 @@
 
 ### Hosts ({{ host_count }})
 {% for host in hosts %}
-- **{{ host.hostname }}** ({{ host.ip }})
-  - Roles: {{ host.roles|join(', ') if host.roles else 'Unknown' }}
-  - OS: {{ host.os }}
-  - Services: {{ host.services|join(', ') if host.services else 'None' }}
+#### {{ host.hostname or host.ip }}{% if host.is_dc %} [DC]{% endif %}
+
+- **IP**: {{ host.ip }}
+- **Roles**: {{ host.roles|join(', ') if host.roles else 'Unknown' }}
+- **OS**: {{ host.os or 'Unknown' }}
+- **Services**:
+{% for svc in host.services %}
+  - {{ svc }}
+{% endfor %}
+{% if not host.services %}
+  - None
+{% endif %}
 {% endfor %}
 
 ### User Accounts ({{ user_count }})
+
+| Username | Domain | Admin | Description |
+|----------|--------|-------|-------------|
 {% for user in users %}
-- **{{ user.username }}@{{ user.domain }}** {{ "(ADMIN)" if user.is_admin else "" }}
-  {% if user.description %}- Description: {{ user.description }}{% endif %}
+| {{ user.username }} | {{ user.domain }} | {{ "Yes" if user.is_admin else "No" }} | {{ user.description or '-' }} |
 {% endfor %}
 
 ### Credentials ({{ credential_count }})
+
+| Username | Domain | Source | Admin |
+|----------|--------|--------|-------|
 {% for cred in credentials %}
-- **{{ cred.username }}** {{ "(ADMIN)" if cred.is_admin else "" }}
-  - Source: {{ cred.source }}
-  {% if cred.domain %}- Domain: {{ cred.domain }}{% endif %}
+| {{ cred.username }} | {{ cred.domain or 'Unknown' }} | {{ cred.source }} | {{ "Yes" if cred.is_admin else "No" }} |
 {% endfor %}
 
 ### Network Shares ({{ share_count }})
+
+| Share | Host | Permissions | Comment |
+|-------|------|-------------|---------|
 {% for share in shares %}
-- **{{ share.name }}** on {{ share.host }}
-  - Permissions: {{ share.permissions if share.permissions else 'Unknown' }}
-  {% if share.comment %}- Comment: {{ share.comment }}{% endif %}
+| {{ share.name }} | {{ share.host }} | {{ share.permissions or 'Unknown' }} | {{ share.comment or '-' }} |
 {% endfor %}
 
 ---
@@ -83,9 +99,10 @@
 ## Vulnerabilities and Weaknesses
 
 {% if weaknesses %}
-{% for weakness in weaknesses %}
-{{ weakness }}
-
+| Finding | Affected Resource | Impact |
+|---------|-------------------|--------|
+{% for w in weaknesses %}
+| **{{ w.title or 'Unknown' }}**<br>{{ w.vulnerability or '-' }} | {{ w.affected_resource or '-' }} | {{ w.impact or '-' }} |
 {% endfor %}
 {% else %}
 No significant weaknesses recorded.

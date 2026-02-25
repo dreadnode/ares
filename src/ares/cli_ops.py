@@ -1112,8 +1112,15 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
     target = None
     target_ip = meta.get("target_ip")
     target_domain = meta.get("target_domain")
+    target_ips_str = meta.get("target_ips", "")
+    target_ips = (
+        [ip.strip() for ip in target_ips_str.split(",") if ip.strip()] if target_ips_str else []
+    )
     if target_ip:
         target = Target(ip=target_ip, domain=target_domain)
+        # Ensure target_ips includes at least the primary target
+        if not target_ips:
+            target_ips = [target_ip]
 
     # Load DC map and NetBIOS map
     dc_map = await backend.get_all_dcs()
@@ -1123,6 +1130,7 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
     kwargs: dict = {
         "operation_id": operation_id,
         "target": target,
+        "target_ips": target_ips,
         "all_credentials": credentials,
         "all_hashes": hashes,
         "all_hosts": hosts,
@@ -1753,6 +1761,7 @@ async def queue(
                     "completed_total": len(state.completed_tasks),
                     "status_counts": status_counts,
                     "has_domain_admin": state.has_domain_admin,
+                    "has_golden_ticket": state.has_golden_ticket,
                     "vuln_total": len(state.discovered_vulnerabilities),
                     "exploited_total": len(state.exploited_vulnerabilities),
                 }
@@ -1778,8 +1787,9 @@ async def queue(
                 f"completed: {op['completed_total']}"
             )
             da = "yes" if op["has_domain_admin"] else "no"
+            gt = "yes" if op["has_golden_ticket"] else "no"
             print(
-                f"    domain_admin: {da}  "
+                f"    domain_admin: {da}  golden_ticket: {gt}  "
                 f"vulns: {op['vuln_total']}  "
                 f"exploited: {op['exploited_total']}"
             )
