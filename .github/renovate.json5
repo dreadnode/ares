@@ -38,7 +38,8 @@
     {
       matchManagers: ["poetry", "pip_requirements"],
       matchDepTypes: ["python"],
-      enabled: false,
+      allowedVersions: "<=3.13",
+      enabled: true,
     },
     {
       description: "Auto merge non-major updates",
