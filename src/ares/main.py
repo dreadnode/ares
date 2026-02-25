@@ -1287,6 +1287,147 @@ async def worker(
 
 
 @dataclass
+class BlueWorkerArgs:
+    """Blue team worker agent arguments.
+
+    Attributes:
+        role: Worker role (triage, threat_hunter, lateral_analyst).
+        investigation_id: Investigation ID to join (auto-discovers if not provided).
+        config_file: Path to config file (auto-detected if not specified).
+        redis_url: Redis URL for task queue connection (from config if not specified).
+        model: LLM model to use (from config if not specified).
+        max_steps: Maximum agent steps per task.
+        grafana_url: Grafana URL for MCP tools.
+    """
+
+    role: str = ""
+    investigation_id: str = ""
+    config_file: str = ""
+    redis_url: str = ""
+    model: str = ""
+    max_steps: int = 0
+    grafana_url: str = ""
+
+
+# Cyclopts decorator typing not yet fully supported by type checkers
+@app.command(name="blue-worker")  # type: ignore[untyped-decorator]
+async def blue_worker(
+    role: str,
+    investigation_id: str = "",
+    *,
+    worker_args: BlueWorkerArgs | None = None,
+    dn_args: DreadnodeArgs | None = None,
+) -> None:
+    """
+    Run a specialized blue team worker agent that processes tasks from the dispatcher.
+
+    This command starts a blue team worker agent that:
+    - Connects to Redis and discovers active investigations (if investigation_id not provided)
+    - Registers with the blue team dispatcher
+    - Polls for assigned tasks based on its role
+    - Processes tasks using specialized toolsets (including MCP tools from Grafana)
+    - Reports results back to the orchestrator
+
+    Worker roles:
+    - triage: Initial alert triage and assessment
+    - threat_hunter: Threat hunting and detection queries
+    - lateral_analyst: Lateral movement analysis
+
+    Args:
+        role: Worker role (triage, threat_hunter, lateral_analyst)
+        investigation_id: Investigation ID to join (optional - will auto-discover if not provided)
+
+    Example:
+        # Join specific investigation
+        uv run ares blue-worker triage inv-12345678 --worker-args.redis-url redis://redis:6379
+
+        # Auto-discover active investigation
+        uv run ares blue-worker threat_hunter --worker-args.redis-url redis://redis:6379
+    """
+    from ares.core.config import load_config
+
+    worker_args = worker_args or BlueWorkerArgs()
+    dn_args = dn_args or DreadnodeArgs()
+
+    # Normalize role (accept hyphens or underscores)
+    role = role.replace("-", "_")
+
+    # Validate role
+    valid_roles = ["triage", "threat_hunter", "lateral_analyst"]
+    if role not in valid_roles:
+        logger.error(f"Invalid role: {role}. Must be one of: {', '.join(valid_roles)}")
+        return
+
+    # Load config file for defaults
+    config = load_config(worker_args.config_file or None)
+
+    # Use config values if CLI args not specified
+    redis_url = worker_args.redis_url or config.redis_url
+    model = worker_args.model or os.getenv("ARES_MODEL")
+    max_steps = worker_args.max_steps if worker_args.max_steps > 0 else 30
+    grafana_url = worker_args.grafana_url or os.getenv("GRAFANA_URL", "")
+
+    # Configure Dreadnode (optional - don't fail if platform unavailable)
+    dreadnode_token = dn_args.token or os.getenv("DREADNODE_API_KEY", "")
+
+    try:
+        dn = _configure_dreadnode()
+        dn.configure(
+            server=dn_args.server,
+            token=dreadnode_token,
+            organization=dn_args.organization,
+            workspace=dn_args.workspace,
+            project=dn_args.project,
+            console=dn_args.console,
+        )
+    except Exception as e:
+        logger.warning(f"Dreadnode platform unavailable, continuing without telemetry: {e}")
+
+    if not investigation_id:
+        investigation_id = os.getenv("INVESTIGATION_ID", "")
+
+    # Log startup
+    logger.info("=" * 60)
+    logger.info(f"ARES BLUE WORKER AGENT: {role.upper()}")
+    logger.info("=" * 60)
+    logger.info(f"Config: {worker_args.config_file or 'auto-detected'}")
+    logger.info(f"Investigation ID: {investigation_id or '(auto-discover)'}")
+    logger.info(f"Role: {role}")
+    logger.info(f"Model: {model or '(from investigation config)'}")
+    logger.info(f"Max Steps: {max_steps}")
+    logger.info(f"Redis: {redis_url}")
+    logger.info(f"Grafana: {grafana_url or '(not configured)'}")
+    logger.info(f"Pod: {os.environ.get('HOSTNAME', 'local')}")
+    logger.info("=" * 60)
+
+    from ares.core.blue_worker import run_blue_worker
+    from ares.core.models import BlueRole
+
+    # Convert string role to BlueRole enum
+    role_mapping = {
+        "triage": BlueRole.TRIAGE,
+        "threat_hunter": BlueRole.THREAT_HUNTER,
+        "lateral_analyst": BlueRole.LATERAL_ANALYST,
+    }
+    blue_role = role_mapping[role]
+
+    try:
+        await run_blue_worker(
+            role=blue_role,
+            investigation_id=investigation_id or None,
+            redis_url=redis_url,
+            model=model or None,
+            max_steps=max_steps if max_steps > 0 else None,
+            grafana_url=grafana_url or None,
+        )
+    except KeyboardInterrupt:
+        logger.info("Blue worker interrupted by user")
+    except Exception as e:
+        logger.error(f"Blue worker failed: {e}")
+        raise
+
+
+@dataclass
 class EvalArgs:
     """Evaluation arguments.
 

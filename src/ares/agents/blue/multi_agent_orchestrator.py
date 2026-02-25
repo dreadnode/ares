@@ -44,19 +44,43 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
     The orchestrator doesn't query logs directly - it dispatches
     tasks to specialized workers and synthesizes their findings.
+
+    Supports two modes:
+    - In-process workers (default): Workers run as asyncio tasks
+    - Distributed workers: Tasks submitted to Redis for remote worker pods
     """
 
     _dispatcher: BlueTeamDispatcher | None = None
     _workers: dict[BlueRole, BlueWorkerAgent]
+    _blue_task_queue: Any | None = None
+    _use_distributed_workers: bool = False
+    _investigation_id: str = ""
 
     def __init__(self) -> None:
+        super().__init__()
         self._workers = {}
 
     def set_dispatcher(self, dispatcher: BlueTeamDispatcher) -> None:
         self._dispatcher = dispatcher
+        self._investigation_id = dispatcher.investigation_id
 
     def set_workers(self, workers: dict[BlueRole, BlueWorkerAgent]) -> None:
         self._workers = workers
+
+    def set_distributed_mode(
+        self,
+        blue_task_queue: Any,
+        investigation_id: str,
+    ) -> None:
+        """Enable distributed workers mode.
+
+        Args:
+            blue_task_queue: BlueTaskQueue for submitting tasks to Redis.
+            investigation_id: Current investigation ID.
+        """
+        self._use_distributed_workers = True
+        self._blue_task_queue = blue_task_queue
+        self._investigation_id = investigation_id
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def dispatch_triage(
@@ -84,6 +108,32 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         correlation = self._dispatcher.shared_state.correlation_context
 
         task = await self._dispatcher.dispatch_triage(alert, correlation)
+
+        # Distributed mode: submit to Redis for remote workers
+        if self._use_distributed_workers and self._blue_task_queue:
+            task_id = await self._blue_task_queue.submit_task(
+                investigation_id=self._investigation_id,
+                task_type=task.task_type.value,
+                target_role=task.assigned_role.value,
+                params=task.params,
+                task_id=task.task_id,
+            )
+            if wait_for_result:
+                result = await self._blue_task_queue.wait_for_result(task_id, timeout=600)
+                if result:
+                    return _format_task_result(
+                        "Triage",
+                        task_id,
+                        {
+                            "success": result.success,
+                            "result": result.result or {},
+                            "error": result.error,
+                        },
+                    )
+                return f"ERROR: Triage task {task_id} timed out"
+            return f"[+] Triage dispatched to remote worker: task_id={task_id}"
+
+        # In-process mode: use local workers
         worker = self._workers.get(BlueRole.TRIAGE)
 
         if not worker:
@@ -133,6 +183,32 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             username=username,
             context=context,
         )
+
+        # Distributed mode: submit to Redis for remote workers
+        if self._use_distributed_workers and self._blue_task_queue:
+            task_id = await self._blue_task_queue.submit_task(
+                investigation_id=self._investigation_id,
+                task_type=task.task_type.value,
+                target_role=task.assigned_role.value,
+                params=task.params,
+                task_id=task.task_id,
+            )
+            if wait_for_result:
+                result = await self._blue_task_queue.wait_for_result(task_id, timeout=600)
+                if result:
+                    return _format_task_result(
+                        "Threat Hunt",
+                        task_id,
+                        {
+                            "success": result.success,
+                            "result": result.result or {},
+                            "error": result.error,
+                        },
+                    )
+                return f"ERROR: Threat hunt task {task_id} timed out"
+            return f"[+] Threat hunt dispatched to remote worker: task_id={task_id}"
+
+        # In-process mode: use local workers
         worker = self._workers.get(BlueRole.THREAT_HUNTER)
 
         if not worker:
@@ -176,6 +252,32 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             focus_user=focus_user,
             context=context,
         )
+
+        # Distributed mode: submit to Redis for remote workers
+        if self._use_distributed_workers and self._blue_task_queue:
+            task_id = await self._blue_task_queue.submit_task(
+                investigation_id=self._investigation_id,
+                task_type=task.task_type.value,
+                target_role=task.assigned_role.value,
+                params=task.params,
+                task_id=task.task_id,
+            )
+            if wait_for_result:
+                result = await self._blue_task_queue.wait_for_result(task_id, timeout=600)
+                if result:
+                    return _format_task_result(
+                        "Lateral Analysis",
+                        task_id,
+                        {
+                            "success": result.success,
+                            "result": result.result or {},
+                            "error": result.error,
+                        },
+                    )
+                return f"ERROR: Lateral analysis task {task_id} timed out"
+            return f"[+] Lateral analysis dispatched to remote worker: task_id={task_id}"
+
+        # In-process mode: use local workers
         worker = self._workers.get(BlueRole.LATERAL_ANALYST)
 
         if not worker:
@@ -422,6 +524,8 @@ class BlueTeamOrchestrator:
         max_steps: int = 50,
         redis_url: str = "redis://localhost:6379",
         attack_context: dict | None = None,
+        use_distributed_workers: bool = False,
+        blue_task_queue: Any | None = None,
     ):
         self.model = model
         self.grafana_url = grafana_url
@@ -432,6 +536,9 @@ class BlueTeamOrchestrator:
         self.redis_url = redis_url
         self.attack_context = attack_context
         self._mcp_tools: list | None = None
+        # Distributed workers mode - if True, submit tasks to Redis for remote workers
+        self._use_distributed_workers = use_distributed_workers
+        self._blue_task_queue = blue_task_queue
 
     async def _ensure_mcp_connection(self) -> None:
         """Ensure MCP connection is ready (from pool)."""
@@ -494,42 +601,53 @@ class BlueTeamOrchestrator:
         dispatcher = BlueTeamDispatcher(redis_client)
         await dispatcher.start(investigation_id, alert, correlation_context)
 
-        # Ensure MCP connection
-        await self._ensure_mcp_connection()
+        # Ensure MCP connection (only needed for in-process workers)
+        if not self._use_distributed_workers:
+            await self._ensure_mcp_connection()
 
-        # Create worker agents
+        # Create worker agents (only for in-process mode)
         workers: dict[BlueRole, BlueWorkerAgent] = {}
 
-        for role, max_steps in [
-            (BlueRole.TRIAGE, 8),
-            (BlueRole.THREAT_HUNTER, 20),
-            (BlueRole.LATERAL_ANALYST, 15),
-        ]:
-            agent, callback_tools = create_blue_agent(
-                role=role,
-                model=self.model,
-                backend=dispatcher.backend,
-                dispatcher=dispatcher,
-                mitre_client=self.mitre_client,
-                mcp_tools=self._mcp_tools,
-                max_steps=max_steps,
-                grafana_url=self.grafana_url,
-                alert=alert,
-            )
-            worker = BlueWorkerAgent(
-                role=role,
-                agent=agent,
-                agent_name=f"{role.value}-{investigation_id[:8]}",
-                investigation_id=investigation_id,
-                dispatcher=dispatcher,
-                callback_tools=callback_tools,
-            )
-            workers[role] = worker
+        if not self._use_distributed_workers:
+            for role, max_steps in [
+                (BlueRole.TRIAGE, 8),
+                (BlueRole.THREAT_HUNTER, 20),
+                (BlueRole.LATERAL_ANALYST, 15),
+            ]:
+                agent, callback_tools = create_blue_agent(
+                    role=role,
+                    model=self.model,
+                    backend=dispatcher.backend,
+                    dispatcher=dispatcher,
+                    mitre_client=self.mitre_client,
+                    mcp_tools=self._mcp_tools,
+                    max_steps=max_steps,
+                    grafana_url=self.grafana_url,
+                    alert=alert,
+                )
+                worker = BlueWorkerAgent(
+                    role=role,
+                    agent=agent,
+                    agent_name=f"{role.value}-{investigation_id[:8]}",
+                    investigation_id=investigation_id,
+                    dispatcher=dispatcher,
+                    callback_tools=callback_tools,
+                )
+                workers[role] = worker
+        else:
+            logger.info("Distributed workers mode - tasks will be submitted to Redis")
 
         # Create orchestrator agent
         orchestrator_tools = BlueOrchestratorTools()
         orchestrator_tools.set_dispatcher(dispatcher)
         orchestrator_tools.set_workers(workers)
+
+        # Enable distributed mode if configured
+        if self._use_distributed_workers and self._blue_task_queue:
+            orchestrator_tools.set_distributed_mode(
+                blue_task_queue=self._blue_task_queue,
+                investigation_id=investigation_id,
+            )
 
         instructions = load_blue_instructions(BlueRole.ORCHESTRATOR)
         stop_conditions = get_blue_stop_conditions(BlueRole.ORCHESTRATOR)

@@ -89,6 +89,20 @@ class AnnouncementMixin:
         else:
             logger.success(f"GOLDEN TICKET FORGED for {domain}")
 
+        # Announce operation complete if stop_on_golden_ticket is enabled
+        # This sets the Redis status key so workers detect completion
+        if get_stop_on_golden_ticket():
+            summary = (
+                f"Golden Ticket forged for {domain}"
+                if not target_domain
+                else f"Golden Ticket forged: {domain} → {target_domain}"
+            )
+            await self.announce_operation_complete(
+                source_agent=source_agent,
+                success=True,
+                summary=summary,
+            )
+
     async def announce_operation_complete(
         self: RedTeamDispatcher,
         source_agent: str,
@@ -115,6 +129,7 @@ class AnnouncementMixin:
                     "success": success,
                     "summary": summary,
                     "domain_admin_achieved": self.shared_state.has_domain_admin,
+                    "golden_ticket_forged": self.shared_state.has_golden_ticket,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
                 await self._redis_client.setex(

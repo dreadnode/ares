@@ -306,18 +306,18 @@ class BlueStateBackend:
     # Meta (Scalars) — Redis HASH
     # =========================================================================
 
-    async def set_meta(self, k: str, v: Any) -> None:
+    async def set_meta(self, k: str, value: Any) -> None:
         """Set a scalar meta field.
 
         Values are JSON-serialized before storage.
 
         Args:
             k: Field name.
-            v: Value (will be JSON serialized).
+            value: Value (will be JSON serialized).
         """
         key = self._key(self.KEY_META)
         try:
-            await self._redis.hset(key, k, json.dumps(v, separators=(",", ":"), default=str))
+            await self._redis.hset(key, k, json.dumps(value, separators=(",", ":"), default=str))
             await self._set_ttl(key)
         except Exception as e:
             logger.warning(f"Failed to set meta field {k}: {e}")

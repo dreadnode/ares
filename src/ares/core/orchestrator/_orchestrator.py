@@ -3066,7 +3066,15 @@ async def _auto_golden_ticket(
                             f"→ Use: export KRB5CCNAME={ticket_path}\n"
                             f"→ Then: psexec.py -k -no-pass dc.{domain}"
                         )
-                        state.has_golden_ticket = True
+
+                        # Announce golden ticket - this sets has_golden_ticket, checkpoints,
+                        # and marks operation complete if stop_on_golden_ticket is enabled
+                        await dispatcher.announce_golden_ticket(
+                            domain=domain,
+                            krbtgt_hash=hash_obj.hash_value,
+                            ticket_path=ticket_path,
+                            source_agent="auto_golden_ticket",
+                        )
 
                         # Store ticket details in state (persisted to Redis!)
                         state.add_golden_ticket(
@@ -3085,16 +3093,29 @@ async def _auto_golden_ticket(
                         # Add to state timeline
                         from ares.core.models import TimelineEvent
 
-                        state.operation_timeline.append(
-                            TimelineEvent(
-                                id=f"golden-ticket-{domain.replace('.', '-')}",
-                                timestamp=datetime.now(timezone.utc),
-                                source="auto_golden_ticket",
-                                description=f"Golden ticket generated for {domain} Administrator",
-                                mitre_techniques=["T1558.001"],
-                                confidence=1.0,
-                            )
+                        timeline_event = TimelineEvent(
+                            id=f"golden-ticket-{domain.replace('.', '-')}",
+                            timestamp=datetime.now(timezone.utc),
+                            source="auto_golden_ticket",
+                            description=f"Golden ticket generated for {domain} Administrator",
+                            mitre_techniques=["T1558.001"],
+                            confidence=1.0,
                         )
+                        state.operation_timeline.append(timeline_event)
+
+                        # Persist timeline event to Redis
+                        backend = getattr(state, "_backend", None)
+                        if backend:
+                            event_dict = {
+                                "id": timeline_event.id,
+                                "timestamp": timeline_event.timestamp.isoformat(),
+                                "description": timeline_event.description,
+                                "evidence_ids": timeline_event.evidence_ids,
+                                "mitre_techniques": timeline_event.mitre_techniques,
+                                "confidence": timeline_event.confidence,
+                                "source": timeline_event.source,
+                            }
+                            await backend.add_timeline_event(event_dict)
                     else:
                         logger.warning(
                             f"🎫 Auto-golden-ticket: Failed to generate ticket for {domain}: {output}"
@@ -3482,7 +3503,12 @@ async def _wait_for_completion(
 
         # Check for domain admin or explicit completion
         if dispatcher.shared_state.has_domain_admin:
-            logger.success("Domain Admin achieved! Operation complete.")
+            from ares.core.config import get_stop_on_golden_ticket
+
+            if get_stop_on_golden_ticket():
+                logger.success("Domain Admin achieved! Continuing to forge golden ticket...")
+            else:
+                logger.success("Domain Admin achieved! Operation complete.")
             # Wait for loot collection (share spider, etc.) while background tasks are still running
             await _wait_for_loot_collection(dispatcher)
             # Wait for golden ticket generation (if krbtgt hash is available)

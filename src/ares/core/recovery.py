@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from ares.core.config import get_default_max_retries
-from ares.core.models import SharedRedTeamState, TaskStatus
+from ares.core.models import SharedRedTeamState, TaskStatus, TimelineEvent
 from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue
 
@@ -289,6 +289,25 @@ class OperationRecoveryManager:
         # Load artifacts
         artifacts = await backend.get_all_artifacts()
         state.downloaded_artifacts.update(artifacts)
+
+        # Load timeline events
+        timeline_events = await backend.get_timeline_events()
+        for event_dict in timeline_events:
+            try:
+                event = TimelineEvent(
+                    id=event_dict.get("id", ""),
+                    timestamp=datetime.fromisoformat(event_dict["timestamp"]),
+                    description=event_dict.get("description", ""),
+                    evidence_ids=event_dict.get("evidence_ids", []),
+                    mitre_techniques=event_dict.get("mitre_techniques", []),
+                    confidence=event_dict.get("confidence", 0.5),
+                    source=event_dict.get("source", "investigation"),
+                )
+                state.operation_timeline.append(event)
+            except (KeyError, ValueError) as e:
+                logger.warning(f"Failed to deserialize timeline event: {e}")
+        if timeline_events:
+            logger.info(f"Loaded {len(state.operation_timeline)} timeline events from Redis")
 
     def _dedupe_hashes(self, hashes: list) -> list:
         """Deduplicate hashes, keeping first occurrence.

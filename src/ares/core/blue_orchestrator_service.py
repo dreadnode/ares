@@ -18,6 +18,7 @@ from typing import Any
 
 from loguru import logger
 
+from ares.core.blue_task_queue import BlueTaskQueue
 from ares.core.config import get_namespace, get_redis_url
 from ares.core.litellm_env import configure_litellm_env
 from ares.core.redis_client import invalidate_sentinel_client
@@ -107,12 +108,20 @@ class BlueOrchestratorService:
         self.namespace = namespace or get_namespace()
         self.investigations_queue = investigations_queue
         self.task_queue: RedisTaskQueue | None = None
+        self.blue_task_queue: BlueTaskQueue | None = None
         self.running = False
         self._shutdown_event = asyncio.Event()
         self._report_dir = Path(os.environ.get("ARES_REPORT_DIR", "./reports"))
         self._grafana_url = os.environ.get("GRAFANA_URL", "")
         self._grafana_api_key = os.environ.get("GRAFANA_SERVICE_ACCOUNT_TOKEN") or os.environ.get(
             "GRAFANA_API_KEY", ""
+        )
+        # Distributed workers mode - if True, register investigations for remote workers
+        # Supports both ARES_BLUE_DISTRIBUTED_WORKERS and COORDINATION_MODE env vars
+        distributed_env = os.environ.get("ARES_BLUE_DISTRIBUTED_WORKERS", "").lower()
+        coordination_mode = os.environ.get("COORDINATION_MODE", "").lower()
+        self._use_distributed_workers = (
+            distributed_env in ("1", "true", "yes") or coordination_mode == "distributed"
         )
 
     @staticmethod
@@ -130,6 +139,14 @@ class BlueOrchestratorService:
         self.task_queue = RedisTaskQueue(self.redis_url)
         await self.task_queue.connect()
         logger.success("Connected to Redis")
+
+        # Initialize BlueTaskQueue for investigation registration (distributed workers)
+        if self._use_distributed_workers:
+            self.blue_task_queue = BlueTaskQueue(self.redis_url)
+            await self.blue_task_queue.connect()
+            logger.info(
+                "Distributed workers mode enabled - will register investigations for remote workers"
+            )
 
         self.running = True
 
@@ -287,6 +304,29 @@ class BlueOrchestratorService:
             if use_multi_agent:
                 from ares.agents.blue import BlueTeamOrchestrator
 
+                # Register investigation for distributed workers if enabled
+                if self._use_distributed_workers and self.blue_task_queue:
+                    # Collect credentials to pass to workers
+                    worker_credentials = {}
+                    for key in [
+                        "OPENAI_API_KEY",
+                        "GRAFANA_SERVICE_ACCOUNT_TOKEN",
+                        "GRAFANA_API_KEY",
+                    ]:
+                        val = os.environ.get(key)
+                        if val:
+                            worker_credentials[key] = val
+
+                    await self.blue_task_queue.register_investigation(
+                        investigation_id=request.investigation_id,
+                        alert=request.alert,
+                        model=request.model,
+                        credentials=worker_credentials,
+                    )
+                    logger.info(
+                        f"Registered investigation {request.investigation_id} for distributed workers"
+                    )
+
                 orchestrator = BlueTeamOrchestrator(
                     model=request.model,
                     grafana_url=grafana_url,
@@ -295,6 +335,8 @@ class BlueOrchestratorService:
                     report_dir=report_dir,
                     max_steps=request.max_steps,
                     redis_url=self.redis_url,
+                    use_distributed_workers=self._use_distributed_workers,
+                    blue_task_queue=self.blue_task_queue,
                 )
             else:
                 from ares.agents.blue import InvestigationOrchestrator
@@ -349,6 +391,10 @@ class BlueOrchestratorService:
                 f"(duration {duration_str})"
             )
 
+            # Unregister investigation from distributed workers
+            if self._use_distributed_workers and self.blue_task_queue:
+                await self.blue_task_queue.unregister_investigation(request.investigation_id)
+
         except Exception as e:
             logger.error(f"Error processing investigation: {e}")
             await self._publish_investigation_status(
@@ -397,6 +443,9 @@ class BlueOrchestratorService:
 
         if self.task_queue:
             await self.task_queue.disconnect()
+
+        if self.blue_task_queue:
+            await self.blue_task_queue.disconnect()
 
         logger.info("Blue team orchestrator service stopped")
 

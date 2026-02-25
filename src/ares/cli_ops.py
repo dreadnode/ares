@@ -1065,7 +1065,7 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
     Returns:
         SharedRedTeamState or None if not found
     """
-    from ares.core.models import SharedRedTeamState, Target
+    from ares.core.models import SharedRedTeamState, Target, TimelineEvent
     from ares.core.state_backend import RedisStateBackend
 
     # Check if operation exists by looking for meta key
@@ -1126,6 +1126,24 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
     dc_map = await backend.get_all_dcs()
     netbios_map = await backend.get_all_netbios_mappings()
 
+    # Load timeline events
+    timeline_events_raw = await backend.get_timeline_events()
+    timeline_events = []
+    for event_dict in timeline_events_raw:
+        try:
+            event = TimelineEvent(
+                id=event_dict.get("id", ""),
+                timestamp=datetime.fromisoformat(event_dict["timestamp"]),
+                description=event_dict.get("description", ""),
+                evidence_ids=event_dict.get("evidence_ids", []),
+                mitre_techniques=event_dict.get("mitre_techniques", []),
+                confidence=event_dict.get("confidence", 0.5),
+                source=event_dict.get("source", "investigation"),
+            )
+            timeline_events.append(event)
+        except (KeyError, ValueError):
+            pass  # Skip invalid events
+
     # Create state object with correct field names
     kwargs: dict = {
         "operation_id": operation_id,
@@ -1145,6 +1163,7 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
         "domain_admin_path": domain_admin_path,
         "domain_controllers": dc_map,
         "netbios_to_fqdn": netbios_map,
+        "operation_timeline": timeline_events,
     }
     if started_at is not None:
         kwargs["started_at"] = started_at

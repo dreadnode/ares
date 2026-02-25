@@ -436,12 +436,16 @@ async def exploitation_workflow(
                 await asyncio.gather(*active_tasks, return_exceptions=True)
                 active_tasks.clear()
 
-            # Announce operation complete - sets Redis status key so workers detect completion
-            await dispatcher.announce_operation_complete(
-                source_agent="exploitation_workflow",
-                success=True,
-                summary=f"Domain Admin achieved via {state.domain_admin_path or 'unknown'}",
-            )
+            # Only announce operation complete if NOT waiting for golden ticket
+            # If stop_on_golden_ticket is enabled, the operation continues past DA
+            from ares.core.config import get_stop_on_golden_ticket
+
+            if not get_stop_on_golden_ticket():
+                await dispatcher.announce_operation_complete(
+                    source_agent="exploitation_workflow",
+                    success=True,
+                    summary=f"Domain Admin achieved via {state.domain_admin_path or 'unknown'}",
+                )
             break
 
         # Clean up completed tasks

@@ -27,7 +27,6 @@ tasks:
         sh: op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo ""
       OPENAI_API_KEY:
         sh: op item get "Openai" --fields dreadnode-ares-api-key --reveal 2>/dev/null || echo ""
-        # sh: op item get "Openai" --fields dreadnode-jayson-api-key --reveal 2>/dev/null || echo ""
       ARES_MODEL:
         sh: |
           if [ -n "{{.MODEL_ALL}}" ]; then
@@ -188,48 +187,80 @@ tasks:
           echo "Following orchestrator logs (auto-exits on completion, Ctrl+C to stop early)..."
           echo "Operation ID: {{.OPERATION_ID_COMPUTED}}"
           echo ""
-          # Follow logs and exit automatically when operation completes
+
+          # Use a marker file to signal completion
+          DONE_MARKER="/tmp/ares_done_$$"
+          rm -f "$DONE_MARKER"
+
+          # Run kubectl in background
           kubectl logs -f --since=0s -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | \
             grep --line-buffered "{{.OPERATION_ID_COMPUTED}}" | \
             while IFS= read -r line; do
               echo "$line" | tee -a "{{.LOGFILE}}"
-              # Exit when we see the completion message
               if echo "$line" | grep -q "completed successfully"; then
                 echo ""
                 echo "✓ Operation completed - fetching report..."
+                touch "$DONE_MARKER"
                 break
               fi
-            done
+            done &
+          LOG_PID=$!
+
+          # Wait for completion or timeout
+          while kill -0 $LOG_PID 2>/dev/null; do
+            if [ -f "$DONE_MARKER" ]; then
+              break
+            fi
+            sleep 0.5
+          done
+
+          # Always cleanup, regardless of how we exited the loop
+          kill $LOG_PID 2>/dev/null || true
+          # Kill any kubectl processes for this namespace (pipeline processes may be orphaned)
+          pkill -f "kubectl logs -f.*{{.K8S_NAMESPACE}}.*ares-orchestrator" 2>/dev/null || true
+          rm -f "$DONE_MARKER"
         silent: false
 
       # Auto-fetch report from Redis when operation completes
       - cmd: |
           mkdir -p ./reports
 
-          # Port-forward to Redis and fetch report directly from Redis cache
           echo "Fetching report from Redis..."
+
+          # Port-forward to Redis
           kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 6379:6379 &
           PF_PID=$!
           sleep 2
+
+          # Verify port-forward is running
+          if ! kill -0 $PF_PID 2>/dev/null; then
+            echo ""
+            echo "ERROR: kubectl port-forward failed (check k8s credentials with: kubectl auth can-i get pods)"
+            echo "Fetch manually: task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}}"
+            exit 0
+          fi
 
           trap "kill $PF_PID 2>/dev/null || true" EXIT
 
           # Build Redis URL
           REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+          if [ -z "$REDIS_PASS" ]; then
+            echo "WARNING: Could not get Redis password, trying without auth"
+          fi
           if [ -n "$REDIS_PASS" ]; then
             export ARES_REDIS_URL="redis://:${REDIS_PASS}@localhost:6379"
           else
             export ARES_REDIS_URL="redis://localhost:6379"
           fi
 
-          # Use the report command to fetch from Redis cache
-          python -m ares.cli_ops report "{{.OPERATION_ID_COMPUTED}}" --output-dir ./reports 2>&1 || true
-
-          if [ -f "./reports/{{.OPERATION_ID_COMPUTED}}_report.md" ]; then
+          # Fetch report
+          if python -m ares.cli_ops report "{{.OPERATION_ID_COMPUTED}}" --output-dir ./reports 2>&1; then
             echo ""
             echo "✓ Report saved: ./reports/{{.OPERATION_ID_COMPUTED}}_report.md"
           else
-            echo "Warning: Could not fetch report. Try: task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}}"
+            echo ""
+            echo "ERROR: Report fetch failed"
+            echo "Fetch manually: task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}}"
           fi
 
           kill $PF_PID 2>/dev/null || true
@@ -792,48 +823,80 @@ tasks:
           echo "Following orchestrator logs (auto-exits on completion, Ctrl+C to stop early)..."
           echo "Operation ID: {{.OPERATION_ID_COMPUTED}}"
           echo ""
-          # Follow logs and exit automatically when operation completes
+
+          # Use a marker file to signal completion
+          DONE_MARKER="/tmp/ares_done_$$"
+          rm -f "$DONE_MARKER"
+
+          # Run kubectl in background
           kubectl logs -f --since=0s -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | \
             grep --line-buffered "{{.OPERATION_ID_COMPUTED}}" | \
             while IFS= read -r line; do
               echo "$line" | tee -a "{{.LOGFILE}}"
-              # Exit when we see the completion message
               if echo "$line" | grep -q "completed successfully"; then
                 echo ""
                 echo "✓ Operation completed - fetching report..."
+                touch "$DONE_MARKER"
                 break
               fi
-            done
+            done &
+          LOG_PID=$!
+
+          # Wait for completion or timeout
+          while kill -0 $LOG_PID 2>/dev/null; do
+            if [ -f "$DONE_MARKER" ]; then
+              break
+            fi
+            sleep 0.5
+          done
+
+          # Always cleanup, regardless of how we exited the loop
+          kill $LOG_PID 2>/dev/null || true
+          # Kill any kubectl processes for this namespace (pipeline processes may be orphaned)
+          pkill -f "kubectl logs -f.*{{.K8S_NAMESPACE}}.*ares-orchestrator" 2>/dev/null || true
+          rm -f "$DONE_MARKER"
         silent: false
 
       # Auto-fetch report from Redis when operation completes
       - cmd: |
           mkdir -p ./reports
 
-          # Port-forward to Redis and fetch report directly from Redis cache
           echo "Fetching report from Redis..."
+
+          # Port-forward to Redis
           kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 6379:6379 &
           PF_PID=$!
           sleep 2
+
+          # Verify port-forward is running
+          if ! kill -0 $PF_PID 2>/dev/null; then
+            echo ""
+            echo "ERROR: kubectl port-forward failed (check k8s credentials with: kubectl auth can-i get pods)"
+            echo "Fetch manually: task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}}"
+            exit 0
+          fi
 
           trap "kill $PF_PID 2>/dev/null || true" EXIT
 
           # Build Redis URL
           REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+          if [ -z "$REDIS_PASS" ]; then
+            echo "WARNING: Could not get Redis password, trying without auth"
+          fi
           if [ -n "$REDIS_PASS" ]; then
             export ARES_REDIS_URL="redis://:${REDIS_PASS}@localhost:6379"
           else
             export ARES_REDIS_URL="redis://localhost:6379"
           fi
 
-          # Use the report command to fetch from Redis cache
-          python -m ares.cli_ops report "{{.OPERATION_ID_COMPUTED}}" --output-dir ./reports 2>&1 || true
-
-          if [ -f "./reports/{{.OPERATION_ID_COMPUTED}}_report.md" ]; then
+          # Fetch report
+          if python -m ares.cli_ops report "{{.OPERATION_ID_COMPUTED}}" --output-dir ./reports 2>&1; then
             echo ""
             echo "✓ Report saved: ./reports/{{.OPERATION_ID_COMPUTED}}_report.md"
           else
-            echo "Warning: Could not fetch report. Try: task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}}"
+            echo ""
+            echo "ERROR: Report fetch failed"
+            echo "Fetch manually: task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}}"
           fi
 
           kill $PF_PID 2>/dev/null || true

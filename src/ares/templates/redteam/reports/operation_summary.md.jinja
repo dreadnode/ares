@@ -2,7 +2,7 @@
 
 **Operation ID**: {{ operation_id }}
 
-**Target{% if target_ips|length > 1 %}s{% endif %}**: {% if target_ips %}{{ target_ips | join(', ') }}{% else %}{{ target_ip }}{% endif %}
+**Target{% if target_ips|length > 1 %}s{% endif %}**: {% if target_ips %}{{ target_ips | join(', ') }}{% else %}{{ target_ip }}{% endif %}{{ "" }}
 
 **Started**: {{ started_at }}
 

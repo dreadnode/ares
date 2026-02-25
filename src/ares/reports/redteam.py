@@ -104,6 +104,12 @@ class RedTeamReportGenerator:
             if c.is_admin or c.username.lower() in ("administrator", "krbtgt")
         )
 
+        # Aggregate MITRE techniques from timeline events
+        all_techniques: set[str] = set(state.identified_techniques)
+        for event in state.operation_timeline:
+            if event.mitre_techniques:
+                all_techniques.update(event.mitre_techniques)
+
         # Render the report using the template
         target_ips = state.target_ips or ([state.target.ip] if state.target else [])
         return self.loader.render(
@@ -131,7 +137,7 @@ class RedTeamReportGenerator:
             shares=state.all_shares,
             weaknesses=[_parse_weakness_block(w) for w in state.all_weaknesses],
             timeline=state.operation_timeline,
-            techniques_identified=state.identified_techniques,
+            techniques_identified=sorted(all_techniques),
         )
 
     def _generate_executive_summary(self, state: SharedRedTeamState) -> str:
@@ -146,10 +152,25 @@ class RedTeamReportGenerator:
         if state.report_summary:
             return state.report_summary
 
+        # Deduplicate credentials (case-insensitive on domain+username+password)
+        # Must match generate() deduplication logic
+        seen_creds: set[tuple[str, str, str]] = set()
+        unique_creds = []
+        for cred in state.all_credentials:
+            cred_key = (cred.domain.lower(), cred.username.lower(), cred.password)
+            if cred_key not in seen_creds:
+                seen_creds.add(cred_key)
+                unique_creds.append(cred)
+
         # Calculate counts from SharedRedTeamState
         host_count = len(state.all_hosts)
-        credential_count = len(state.all_credentials)
-        admin_count = sum(1 for c in state.all_credentials if c.is_admin)
+        credential_count = len(unique_creds)
+        # Count admins - check is_admin flag OR known admin usernames (match generate())
+        admin_count = sum(
+            1
+            for c in unique_creds
+            if c.is_admin or c.username.lower() in ("administrator", "krbtgt")
+        )
         vulnerability_count = len(state.discovered_vulnerabilities)
         exploited_count = len(state.exploited_vulnerabilities)
 

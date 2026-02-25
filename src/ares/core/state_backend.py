@@ -85,6 +85,9 @@ class RedisStateBackend:
     KEY_NETBIOS_MAP = "netbios_map"
     KEY_ARTIFACTS = "artifacts"
 
+    # Timeline key
+    KEY_TIMELINE = "timeline"
+
     # Persistence tracking keys (critical attack artifacts)
     KEY_GOLDEN_TICKETS = "golden_tickets"
     KEY_ADMINSD_BACKDOORS = "adminsd_backdoors"
@@ -1090,6 +1093,43 @@ class RedisStateBackend:
         except Exception as e:
             logger.warning(f"Failed to get all artifacts: {e}")
             return {}
+
+    # =========================================================================
+    # Timeline Events (Redis LIST)
+    # =========================================================================
+
+    async def add_timeline_event(self, event: dict) -> bool:
+        """Add a timeline event to Redis LIST.
+
+        Args:
+            event: Timeline event dict with id, timestamp, description, etc.
+
+        Returns:
+            True if added successfully
+        """
+        key = self._key(self.KEY_TIMELINE)
+        try:
+            data = json.dumps(event, separators=(",", ":"), default=str)
+            await self._redis.rpush(key, data)
+            await self._set_ttl(key)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to add timeline event to Redis: {e}")
+            return False
+
+    async def get_timeline_events(self) -> list[dict]:
+        """Get all timeline events from Redis LIST.
+
+        Returns:
+            List of timeline event dicts
+        """
+        key = self._key(self.KEY_TIMELINE)
+        try:
+            items = await self._redis.lrange(key, 0, -1)
+            return [json.loads(item if isinstance(item, str) else item.decode()) for item in items]
+        except Exception as e:
+            logger.warning(f"Failed to get timeline events from Redis: {e}")
+            return []
 
     # =========================================================================
     # Pending Tasks Tracking (Redis HASH)
