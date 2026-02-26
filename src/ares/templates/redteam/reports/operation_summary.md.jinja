@@ -98,6 +98,20 @@
 
 ## Vulnerabilities and Weaknesses
 
+### Discovered Vulnerabilities ({{ discovered_vulns|length }})
+
+{% if discovered_vulns %}
+| Type | Target | Priority | Exploited | Details |
+|------|--------|----------|-----------|---------|
+{% for v in discovered_vulns %}
+| {{ v.vuln_type }} | {{ v.target }} | {{ v.priority }} | {{ "✓" if v.exploited else "✗" }} | {{ v.details or '-' }} |
+{% endfor %}
+{% else %}
+No structured vulnerabilities discovered.
+{% endif %}
+
+### Security Weaknesses ({{ weaknesses|length }})
+
 {% if weaknesses %}
 | Finding | Affected Resource | Impact |
 |---------|-------------------|--------|

@@ -110,6 +110,21 @@ class RedTeamReportGenerator:
             if event.mitre_techniques:
                 all_techniques.update(event.mitre_techniques)
 
+        # Build discovered vulnerabilities list for template
+        discovered_vulns = []
+        for vuln_id, vuln in state.discovered_vulnerabilities.items():
+            discovered_vulns.append(
+                {
+                    "vuln_id": vuln_id,
+                    "vuln_type": vuln.vuln_type,
+                    "target": vuln.target,
+                    "priority": vuln.priority,
+                    "exploited": vuln_id in state.exploited_vulnerabilities,
+                    "details": vuln.details or "",
+                }
+            )
+        discovered_vulns.sort(key=lambda v: v.get("priority", 999))  # type: ignore[arg-type,return-value]
+
         # Render the report using the template
         target_ips = state.target_ips or ([state.target.ip] if state.target else [])
         return self.loader.render(
@@ -136,6 +151,7 @@ class RedTeamReportGenerator:
             credentials=unique_creds,
             shares=state.all_shares,
             weaknesses=[_parse_weakness_block(w) for w in state.all_weaknesses],
+            discovered_vulns=discovered_vulns,
             timeline=state.operation_timeline,
             techniques_identified=sorted(all_techniques),
         )
@@ -203,11 +219,20 @@ class RedTeamReportGenerator:
         if achievements:
             summary_parts.append("\n\n**Key Achievements:**\n" + "\n".join(achievements))
 
+        # Deduplicate users (case-insensitive on domain+username) - match generate()
+        seen_users: set[tuple[str, str]] = set()
+        unique_user_count = 0
+        for user in state.all_users:
+            user_key = (user.domain.lower(), user.username.lower())
+            if user_key not in seen_users:
+                seen_users.add(user_key)
+                unique_user_count += 1
+
         # Discovery statistics
         summary_parts.append(
             f"\n\n**Discovery Statistics:**\n"
             f"- Hosts Discovered: {host_count}\n"
-            f"- User Accounts: {len(state.all_users)}\n"
+            f"- User Accounts: {unique_user_count}\n"
             f"- Network Shares: {len(state.all_shares)}\n"
             f"- Password Hashes: {len(state.all_hashes)}\n"
             f"- Vulnerabilities: {vulnerability_count}\n"
