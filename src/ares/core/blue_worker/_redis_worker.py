@@ -396,94 +396,121 @@ async def run_blue_worker(
     task_queue = BlueTaskQueue(redis_url)
     await task_queue.connect()
 
-    try:
-        # Discover investigation if not provided
-        if investigation_id is None and discover_investigation:
-            if discovery_timeout is None:
-                logger.info(
-                    "No investigation ID provided, waiting indefinitely for an active investigation..."
-                )
-            else:
-                logger.info(f"No investigation ID provided, waiting up to {discovery_timeout}s...")
-            investigation_id = await task_queue.discover_active_investigation(
-                max_wait=discovery_timeout
-            )
+    # Track original investigation_id to know if we should loop
+    original_investigation_id = investigation_id
+    should_loop = discover_investigation and original_investigation_id is None
 
-            if investigation_id is None:
-                logger.error("No active investigation found within timeout")
+    try:
+        while True:
+            # Discover investigation if not provided (or re-discover after completion)
+            current_investigation_id = investigation_id
+            if current_investigation_id is None and discover_investigation:
+                if discovery_timeout is None:
+                    logger.info(
+                        "No investigation ID provided, waiting indefinitely for an active investigation..."
+                    )
+                else:
+                    logger.info(
+                        f"No investigation ID provided, waiting up to {discovery_timeout}s..."
+                    )
+                current_investigation_id = await task_queue.discover_active_investigation(
+                    max_wait=discovery_timeout
+                )
+
+                if current_investigation_id is None:
+                    logger.error("No active investigation found within timeout")
+                    return
+
+            if current_investigation_id is None:
+                logger.error("Investigation ID required but not provided and discovery disabled")
                 return
 
-        if investigation_id is None:
-            logger.error("Investigation ID required but not provided and discovery disabled")
-            return
+            # Get model from investigation config if not provided
+            current_model = model
+            if not current_model:
+                current_model = await task_queue.get_investigation_model(current_investigation_id)
+            if not current_model:
+                current_model = os.getenv("ARES_MODEL") or os.getenv("ARES_WORKER_MODEL")
+            if not current_model:
+                logger.error("No model specified for worker")
+                return
 
-        # Get model from investigation config if not provided
-        if not model:
-            model = await task_queue.get_investigation_model(investigation_id)
-        if not model:
-            model = os.getenv("ARES_MODEL") or os.getenv("ARES_WORKER_MODEL")
-        if not model:
-            logger.error("No model specified for worker")
-            return
+            # Get credentials from investigation
+            credentials = await task_queue.get_investigation_credentials(current_investigation_id)
+            if credentials:
+                for key, value in credentials.items():
+                    if value and not os.environ.get(key):
+                        os.environ[key] = value
+                        logger.debug(f"Set credential from Redis: {key}")
+                logger.info(f"Loaded {len(credentials)} credentials from investigation config")
 
-        # Get credentials from investigation
-        credentials = await task_queue.get_investigation_credentials(investigation_id)
-        if credentials:
-            for key, value in credentials.items():
-                if value and not os.environ.get(key):
-                    os.environ[key] = value
-                    logger.debug(f"Set credential from Redis: {key}")
-            logger.info(f"Loaded {len(credentials)} credentials from investigation config")
+            # Get alert for agent context
+            alert = await task_queue.get_investigation_alert(current_investigation_id)
 
-        # Get alert for agent context
-        alert = await task_queue.get_investigation_alert(investigation_id)
+            logger.info(
+                f"Starting {role.value} worker for investigation {current_investigation_id}"
+            )
+            logger.info(f"Pod: {pod_name}, Model: {current_model}")
 
-        logger.info(f"Starting {role.value} worker for investigation {investigation_id}")
-        logger.info(f"Pod: {pod_name}, Model: {model}")
+            # Create Redis client for state backend
+            redis_client = await create_redis_client(redis_url, decode_responses=True)
+            backend = BlueStateBackend(redis_client, current_investigation_id)
 
-        # Create Redis client for state backend
-        redis_client = await create_redis_client(redis_url, decode_responses=True)
-        backend = BlueStateBackend(redis_client, investigation_id)
+            # Create MITRE client
+            mitre_client = MITREAttackClient()
 
-        # Create MITRE client
-        mitre_client = MITREAttackClient()
+            # Attempt to load MCP tools from mcp-grafana
+            mcp_tools = await _load_mcp_tools(grafana_url)
 
-        # Attempt to load MCP tools from mcp-grafana
-        mcp_tools = await _load_mcp_tools(grafana_url)
+            # Create blue team dispatcher for shared state access
+            from ares.core.blue_dispatcher import BlueTeamDispatcher
 
-        # Create blue team dispatcher for shared state access
-        from ares.core.blue_dispatcher import BlueTeamDispatcher
+            dispatcher = BlueTeamDispatcher(redis_client)
+            await dispatcher.start(current_investigation_id, alert)
 
-        dispatcher = BlueTeamDispatcher(redis_client)
-        await dispatcher.start(investigation_id, alert)
+            # Create the specialized agent
+            agent, callback_tools = create_blue_agent(
+                role=role,
+                model=current_model,
+                backend=backend,
+                dispatcher=dispatcher,
+                mitre_client=mitre_client,
+                mcp_tools=mcp_tools,
+                max_steps=max_steps or 30,
+                grafana_url=grafana_url or os.environ.get("GRAFANA_URL", ""),
+                alert=alert,
+            )
 
-        # Create the specialized agent
-        agent, callback_tools = create_blue_agent(
-            role=role,
-            model=model,
-            backend=backend,
-            dispatcher=dispatcher,
-            mitre_client=mitre_client,
-            mcp_tools=mcp_tools,
-            max_steps=max_steps or 30,
-            grafana_url=grafana_url or os.environ.get("GRAFANA_URL", ""),
-            alert=alert,
-        )
+            # Create and start worker
+            worker = BlueRedisWorkerAgent(
+                role=role,
+                task_queue=task_queue,
+                agent=agent,
+                agent_name=f"blue-{role.value}-{pod_name}",
+                callback_tools=callback_tools,
+                backend=backend,
+                investigation_id=current_investigation_id,
+                pod_name=pod_name,
+                redis_url=redis_url,
+            )
 
-        # Create and start worker
-        worker = BlueRedisWorkerAgent(
-            role=role,
-            task_queue=task_queue,
-            agent=agent,
-            agent_name=f"blue-{role.value}-{pod_name}",
-            callback_tools=callback_tools,
-            backend=backend,
-            investigation_id=investigation_id,
-            pod_name=pod_name,
-            redis_url=redis_url,
-        )
+            await worker.start()
 
-        await worker.start()
+            # Worker finished - investigation completed or no longer active
+            logger.info(f"Worker finished for investigation {current_investigation_id}")
+
+            # Clean up dispatcher
+            await dispatcher.stop()
+            await redis_client.aclose()
+
+            # If we were given a specific investigation ID, don't loop
+            if not should_loop:
+                logger.info("Worker bound to specific investigation, exiting")
+                break
+
+            # Loop back to discover next investigation
+            logger.info("Investigation completed, waiting for next investigation...")
+            investigation_id = None  # Reset to trigger re-discovery
 
     finally:
         await task_queue.disconnect()

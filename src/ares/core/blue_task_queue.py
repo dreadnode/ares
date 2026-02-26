@@ -71,15 +71,20 @@ class BlueTaskResult(BaseModel):
 class BlueTaskQueue:
     """Redis-based task queue for blue team inter-pod communication.
 
+    Supports two modes:
+    1. Per-investigation queues (legacy): Tasks queued per investigation
+    2. Global queues (default): Single queue per role, tasks include investigation_id
+
     Queue naming convention:
-        - ares:blue:tasks:{investigation_id}:{role}  - Task queue per role (List)
+        - ares:blue:tasks:global:{role}              - Global task queue per role (List)
+        - ares:blue:tasks:{investigation_id}:{role}  - Per-investigation queue (legacy)
         - ares:blue:results:{task_id}                - Result queue per task (List, TTL)
         - ares:blue:heartbeat:{agent}                - Agent heartbeat (String, TTL)
         - ares:blue:active_investigations            - Active investigation IDs (Set)
         - ares:blue:investigation:{id}:meta          - Investigation metadata (Hash)
 
     Usage (Orchestrator):
-        queue = BlueTaskQueue(redis_url)
+        queue = BlueTaskQueue(redis_url, use_global_queue=True)
         await queue.connect()
 
         task_id = await queue.submit_task(
@@ -91,18 +96,12 @@ class BlueTaskQueue:
 
         result = await queue.wait_for_result(task_id, timeout=300)
 
-    Usage (Worker):
-        queue = BlueTaskQueue(redis_url)
+    Usage (Worker with global queue):
+        queue = BlueTaskQueue(redis_url, use_global_queue=True)
         await queue.connect()
 
-        inv_id = await queue.discover_active_investigation()
-
         while True:
-            task = await queue.poll_task(
-                investigation_id=inv_id,
-                role="threat_hunter",
-                timeout=5
-            )
+            task = await queue.poll_global_task(role="threat_hunter", timeout=5)
             if task:
                 result = await process_task(task)
                 await queue.send_result(task.task_id, result)
@@ -110,6 +109,7 @@ class BlueTaskQueue:
 
     # Queue key prefixes
     TASK_QUEUE_PREFIX = "ares:blue:tasks"
+    GLOBAL_TASK_QUEUE_PREFIX = "ares:blue:tasks:global"
     RESULT_QUEUE_PREFIX = "ares:blue:results"
     HEARTBEAT_PREFIX = "ares:blue:heartbeat"
     INVESTIGATIONS_KEY = "ares:blue:active_investigations"
@@ -120,8 +120,9 @@ class BlueTaskQueue:
     HEARTBEAT_TTL = 60  # 60 seconds
     INVESTIGATION_TTL = 86400  # 24 hours
 
-    def __init__(self, redis_url: str | None = None):
+    def __init__(self, redis_url: str | None = None, use_global_queue: bool = True):
         self.redis_url = redis_url or get_redis_url()
+        self.use_global_queue = use_global_queue
         self._client: Redis | None = None
         self._connected = False
         self._heartbeat_ttl = max(self.HEARTBEAT_TTL, get_agent_heartbeat_timeout() * 2)
@@ -267,11 +268,21 @@ class BlueTaskQueue:
         logger.info(f"Registered investigation {investigation_id} for worker discovery")
 
     async def unregister_investigation(self, investigation_id: str) -> None:
-        """Remove an investigation from the active set."""
+        """Remove an investigation from the active set and delete metadata.
+
+        This triggers workers to stop polling for this investigation's tasks
+        and re-discover a new active investigation.
+        """
         if not self._connected:
             await self.connect()
 
+        # Remove from active set
         await self.redis.srem(self.INVESTIGATIONS_KEY, investigation_id)
+
+        # Delete metadata so workers detect investigation is no longer active
+        meta_key = self._investigation_meta_key(investigation_id)
+        await self.redis.delete(meta_key)
+
         logger.info(f"Unregistered investigation {investigation_id}")
 
     async def discover_active_investigation(

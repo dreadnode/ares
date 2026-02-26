@@ -85,7 +85,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def dispatch_triage(
         self,
-        wait_for_result: bool = True,
+        wait_for_result: bool = False,
     ) -> str:
         """Dispatch initial triage of the alert to the triage worker.
 
@@ -96,7 +96,8 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
         Args:
             wait_for_result: If True, wait for triage to complete and
-                return findings. If False, return task_id immediately.
+                return findings. If False (default), return task_id immediately
+                so you can dispatch other tasks in parallel.
 
         Returns:
             Triage findings (if wait_for_result) or task_id.
@@ -155,7 +156,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         hostname: str = "",
         username: str = "",
         context: str = "",
-        wait_for_result: bool = True,
+        wait_for_result: bool = False,
     ) -> str:
         """Dispatch a threat hunting task to the threat hunter worker.
 
@@ -168,7 +169,8 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             hostname: Host to focus investigation on.
             username: User to focus investigation on.
             context: Additional context from prior investigation steps.
-            wait_for_result: If True, wait for hunt to complete.
+            wait_for_result: If True, wait for hunt to complete. If False (default),
+                return task_id immediately for parallel execution.
 
         Returns:
             Hunt findings (if wait_for_result) or task_id.
@@ -228,7 +230,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         focus_host: str = "",
         focus_user: str = "",
         context: str = "",
-        wait_for_result: bool = True,
+        wait_for_result: bool = False,
     ) -> str:
         """Dispatch lateral movement analysis to the lateral analyst.
 
@@ -239,7 +241,8 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             focus_host: Primary host to analyze lateral movement from/to.
             focus_user: Primary user to analyze activity for.
             context: Additional context from prior investigation steps.
-            wait_for_result: If True, wait for analysis to complete.
+            wait_for_result: If True, wait for analysis to complete. If False (default),
+                return task_id immediately for parallel execution.
 
         Returns:
             Analysis findings (if wait_for_result) or task_id.
@@ -351,6 +354,79 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         if result.get("error") and "timed out" in str(result.get("error", "")):
             return f"[*] Task {task_id} still running..."
         return _format_task_result("Task", task_id, result)
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def get_pending_tasks(self) -> str:
+        """Get status of all pending tasks.
+
+        Use this to check which dispatched tasks are still running
+        and which have completed.
+
+        Returns:
+            Summary of pending and completed tasks.
+        """
+        if not self._dispatcher:
+            return "ERROR: No dispatcher configured"
+
+        pending = await self._dispatcher.backend.get_pending_tasks()
+        completed = await self._dispatcher.backend.get_completed_tasks()
+
+        lines = ["=== Task Status ==="]
+        lines.append(f"Pending: {len(pending)}")
+        for task_id, info in list(pending.items())[:10]:
+            task_type = info.get("task_type", "unknown")
+            role = info.get("assigned_role", "unknown")
+            lines.append(f"  - {task_id}: {task_type} ({role}) [running]")
+
+        lines.append(f"Completed: {len(completed)}")
+        for task_id in list(completed.keys())[-5:]:
+            lines.append(f"  - {task_id} [done]")
+
+        return "\n".join(lines)
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def wait_for_all_tasks(self, timeout: int = 300) -> str:
+        """Wait for all pending tasks to complete.
+
+        Use this before calling complete_investigation() to ensure
+        all dispatched work has finished.
+
+        Args:
+            timeout: Maximum seconds to wait (default 300 = 5 minutes).
+
+        Returns:
+            Summary of completed tasks or timeout message.
+        """
+        if not self._dispatcher:
+            return "ERROR: No dispatcher configured"
+
+        import time
+
+        start = time.monotonic()
+        completed_count = 0
+
+        while True:
+            pending = await self._dispatcher.backend.get_pending_tasks()
+            if not pending:
+                break
+
+            elapsed = time.monotonic() - start
+            if elapsed >= timeout:
+                return (
+                    f"[!] Timeout after {int(elapsed)}s. "
+                    f"{len(pending)} tasks still pending, {completed_count} completed."
+                )
+
+            # Wait briefly for results
+            for task_id in list(pending.keys()):
+                result = await self._dispatcher.wait_for_result(task_id, timeout=5)
+                if not (result.get("error") and "timed out" in str(result.get("error", ""))):
+                    completed_count += 1
+                    break  # Check pending list again
+
+            await asyncio.sleep(1)
+
+        return f"[+] All tasks complete. {completed_count} tasks finished in {int(time.monotonic() - start)}s."
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def complete_investigation(
