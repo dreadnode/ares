@@ -22,7 +22,6 @@ from ares.core.models import (
     Share,
     TaskResult,
     TaskStatus,
-    User,
     VulnerabilityInfo,
 )
 
@@ -988,41 +987,21 @@ class ResultProcessingMixin:
     def _add_user(self: RedTeamDispatcher, username: str, domain: str, source: str = "") -> bool:
         """Add a user to the shared state.
 
+        Delegates to SharedRedTeamState.add_user() which handles:
+        - Parent/child domain deduplication (prevents same user in both parent and child)
+        - Domain upgrade logic (child domain is more specific)
+        - Sibling domain conflict resolution
+        - NetBIOS to FQDN normalization
+
         Args:
             username: The username.
             domain: The domain.
             source: Tool/method that discovered this user.
+
+        Returns:
+            True if user was added, False if rejected or duplicate.
         """
-        if not username:
-            return False
-        normalized = username.strip()
-        if not normalized or normalized.lower() in {"(none)", "none", "null", "(null)"}:
-            return False
-        if "/" in normalized or "\\" in normalized or normalized.endswith(".txt"):
-            return False
-        # Skip machine accounts (ending in $) - these are computer accounts, not users
-        if normalized.endswith("$"):
-            return False
-        # Filter out tool output artifacts that look like usernames but are actually
-        # status messages or descriptions (e.g., "gpp_passwords_found" from netexec)
-        artifact_patterns = (
-            "_found",
-            "_failed",
-            "_success",
-            "_error",
-            "_status",
-            "passwords_",
-            "credentials_",
-            "hashes_",
-        )
-        normalized_lower = normalized.lower()
-        if any(pattern in normalized_lower for pattern in artifact_patterns):
-            return False
-        for existing in self.shared_state.all_users:
-            if existing.username == normalized and existing.domain == domain:
-                return False
-        self.shared_state.all_users.append(User(username=normalized, domain=domain, source=source))
-        return True
+        return self.shared_state.add_user(username, domain, source)
 
     def _extract_hosts_from_output(self: RedTeamDispatcher, output: str) -> list[Host]:
         """Extract hosts from netexec SMB output.

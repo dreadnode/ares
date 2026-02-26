@@ -351,27 +351,12 @@ class BlueOrchestratorService:
                 )
 
             # Run the investigation
+            # Note: Status is updated to "completed" inside investigate() after report generation
             logger.info(f"Starting investigation: {request.investigation_id}")
             result = await orchestrator.investigate(
                 alert=request.alert,
                 correlation_context=request.correlation_context,
                 investigation_id=request.investigation_id,
-            )
-
-            # Publish investigation status: completed
-            await self._publish_investigation_status(
-                request.investigation_id,
-                "completed",
-                {
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                    "result": {
-                        "investigation_id": result.get("investigation_id"),
-                        "status": result.get("status"),
-                        "evidence_count": result.get("evidence_count"),
-                        "techniques_identified": result.get("techniques_identified"),
-                        "highest_pyramid_level": result.get("highest_pyramid_level"),
-                    },
-                },
             )
 
             completed_at = datetime.now(timezone.utc)

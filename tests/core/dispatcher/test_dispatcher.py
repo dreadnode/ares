@@ -1243,6 +1243,57 @@ class TestAddUserDomainUpgrade:
         assert state.all_hashes[0].domain == "child.contoso.local"
 
 
+class TestDispatcherAddUserDelegation:
+    """Tests that dispatcher's _add_user delegates to shared_state.add_user.
+
+    Regression test for bug where _add_user directly appended to all_users list,
+    bypassing parent/child domain deduplication logic in SharedRedTeamState.add_user().
+    """
+
+    def test_dispatcher_add_user_prevents_duplicate_parent_child_domains(self):
+        """Dispatcher._add_user should prevent same user in parent and child domains.
+
+        This is a regression test for a bug where:
+        1. User was added to sevenkingdoms.local
+        2. Same user was added to north.sevenkingdoms.local (child domain)
+        3. Bug: both were added because _add_user only checked exact match
+        4. Fix: _add_user now delegates to shared_state.add_user() which handles parent/child
+        """
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-delegation")
+
+        # Add user to parent domain first
+        result1 = dispatcher._add_user("testuser", "contoso.local", "test")
+        assert result1 is True
+        assert len(dispatcher.shared_state.all_users) == 1
+
+        # Try to add same user to child domain - should upgrade, not add duplicate
+        result2 = dispatcher._add_user("testuser", "child.contoso.local", "test")
+        assert result2 is True  # Returns True because user was upgraded
+        assert len(dispatcher.shared_state.all_users) == 1  # Still only one user
+        assert dispatcher.shared_state.all_users[0].domain == "child.contoso.local"
+
+    def test_dispatcher_add_user_rejects_parent_when_child_exists(self):
+        """Dispatcher._add_user should reject parent domain when user already in child."""
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-reject-parent")
+
+        # Add user to child domain first
+        result1 = dispatcher._add_user("testuser", "child.contoso.local", "test")
+        assert result1 is True
+        assert len(dispatcher.shared_state.all_users) == 1
+
+        # Try to add same user to parent domain - should be rejected
+        result2 = dispatcher._add_user("testuser", "contoso.local", "test")
+        assert result2 is False  # Rejected - already in more specific child domain
+        assert len(dispatcher.shared_state.all_users) == 1  # Still only one user
+        assert dispatcher.shared_state.all_users[0].domain == "child.contoso.local"
+
+
 class TestRetroactiveDomainNormalize:
     """Tests for retroactive domain normalization."""
 

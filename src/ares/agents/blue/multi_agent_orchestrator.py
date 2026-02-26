@@ -566,6 +566,65 @@ class BlueTeamOrchestrator:
         """Clear local MCP references."""
         self._mcp_tools = None
 
+    async def _update_status_completed(
+        self,
+        redis_client: Any,
+        investigation_id: str,
+        status: str,
+        investigation_state: InvestigationState,
+    ) -> None:
+        """Update investigation status to completed in Redis.
+
+        This is called immediately after report generation to ensure the status
+        is persisted even if the orchestrator service crashes before it can
+        update the status itself.
+
+        Args:
+            redis_client: Redis client instance.
+            investigation_id: Investigation ID.
+            status: Final status (completed/escalated).
+            investigation_state: Final investigation state.
+        """
+        import json
+        from datetime import datetime, timezone
+
+        status_key = f"ares:blue:inv:{investigation_id}:status"
+        now = datetime.now(timezone.utc).isoformat()
+
+        try:
+            # Read existing status to preserve started_at
+            existing_data = await redis_client.get(status_key)
+            started_at = None
+            if existing_data:
+                existing = json.loads(
+                    existing_data if isinstance(existing_data, str) else existing_data.decode()
+                )
+                started_at = existing.get("started_at")
+
+            status_data = {
+                "status": status,
+                "updated_at": now,
+                "completed_at": now,
+                "result": {
+                    "investigation_id": investigation_id,
+                    "status": status,
+                    "evidence_count": len(investigation_state.evidence),
+                    "techniques_identified": list(investigation_state.identified_techniques),
+                    "highest_pyramid_level": investigation_state.highest_pyramid_level,
+                },
+            }
+            if started_at:
+                status_data["started_at"] = started_at
+
+            await redis_client.setex(
+                status_key,
+                86400,  # 24h TTL
+                json.dumps(status_data),
+            )
+            logger.debug(f"Updated status to {status} for investigation {investigation_id}")
+        except Exception as e:
+            logger.warning(f"Failed to update investigation status to Redis: {e}")
+
     async def investigate(
         self,
         alert: dict,
@@ -720,6 +779,12 @@ class BlueTeamOrchestrator:
                 report_gen = MarkdownReportGenerator(self.report_dir)
                 report_path = report_gen.generate(investigation_state)
                 logger.success(f"Report generated: {report_path}")
+
+                # Update status to completed immediately after report generation
+                # This ensures status is correct even if the orchestrator service crashes
+                await self._update_status_completed(
+                    redis_client, investigation_id, status, investigation_state
+                )
             except Exception as e:
                 logger.error(f"Report generation failed: {e}")
 

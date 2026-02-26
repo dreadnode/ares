@@ -273,11 +273,11 @@ class TestPublishSharePersistence:
         assert result is True
         assert share in dispatcher.shared_state.all_shares
 
-        # Verify Redis calls include share persistence (shares use rpush to LIST)
+        # Verify Redis calls include share persistence (shares use hset to HASH for dedup)
         redis_calls = task_queue.redis.calls
-        rpush_calls = [c for c in redis_calls if c[0] == "rpush" and "share" in c[1].lower()]
-        assert len(rpush_calls) >= 1, (
-            f"Should persist share to Redis via rpush, got calls: {redis_calls}"
+        hset_calls = [c for c in redis_calls if c[0] == "hset" and "share" in c[1].lower()]
+        assert len(hset_calls) >= 1, (
+            f"Should persist share to Redis via hset, got calls: {redis_calls}"
         )
 
     @pytest.mark.asyncio
