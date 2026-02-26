@@ -355,6 +355,7 @@ class BlueOrchestratorService:
             result = await orchestrator.investigate(
                 alert=request.alert,
                 correlation_context=request.correlation_context,
+                investigation_id=request.investigation_id,
             )
 
             # Publish investigation status: completed

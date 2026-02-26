@@ -227,16 +227,30 @@ tasks:
 
           echo "Fetching report from Redis..."
 
-          # Port-forward to Redis
-          kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 6379:6379 &
-          PF_PID=$!
-          sleep 2
+          # Port-forward to Redis (use 16379 locally to avoid conflicts with local Redis)
+          # Kill any stale port-forward first
+          lsof -ti:16379 | xargs kill 2>/dev/null || true
+          sleep 1
 
-          # Verify port-forward is running
-          if ! kill -0 $PF_PID 2>/dev/null; then
+          kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 16379:6379 2>&1 &
+          PF_PID=$!
+
+          # Wait for port to be connectable (up to 15 seconds)
+          i=0
+          while [ $i -lt 15 ]; do
+            if nc -z localhost 16379 2>/dev/null; then
+              break
+            fi
+            sleep 1
+            i=$((i + 1))
+          done
+
+          # Final check: is port actually open?
+          if ! nc -z localhost 16379 2>/dev/null; then
             echo ""
-            echo "ERROR: kubectl port-forward failed (check k8s credentials with: kubectl auth can-i get pods)"
+            echo "ERROR: kubectl port-forward failed (port not connectable after 15s)"
             echo "Fetch manually: task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}}"
+            kill $PF_PID 2>/dev/null || true
             exit 0
           fi
 
@@ -248,9 +262,9 @@ tasks:
             echo "WARNING: Could not get Redis password, trying without auth"
           fi
           if [ -n "$REDIS_PASS" ]; then
-            export ARES_REDIS_URL="redis://:${REDIS_PASS}@localhost:6379"
+            export ARES_REDIS_URL="redis://:${REDIS_PASS}@localhost:16379"
           else
-            export ARES_REDIS_URL="redis://localhost:6379"
+            export ARES_REDIS_URL="redis://localhost:16379"
           fi
 
           # Fetch report
@@ -455,10 +469,13 @@ tasks:
       - cmd: mkdir -p "{{.OUTPUT_DIR}}"
         silent: true
       - |
-        # Start port-forward in background
-        kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 6379:6379 &
+        # Start port-forward in background (use 16379 locally to avoid conflicts with local Redis)
+        # Kill any stale port-forward first
+        lsof -ti:16379 | xargs kill 2>/dev/null || true
+        sleep 1
+
+        kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 16379:6379 2>&1 &
         PF_PID=$!
-        sleep 2  # Wait for port-forward to establish
 
         cleanup() {
           kill $PF_PID 2>/dev/null || true
@@ -466,11 +483,26 @@ tasks:
         }
         trap cleanup INT TERM EXIT
 
+        # Wait for port to be connectable (up to 15 seconds)
+        i=0
+        while [ $i -lt 15 ]; do
+          if nc -z localhost 16379 2>/dev/null; then
+            break
+          fi
+          sleep 1
+          i=$((i + 1))
+        done
+
+        if ! nc -z localhost 16379 2>/dev/null; then
+          echo "ERROR: kubectl port-forward failed (port not connectable after 15s)"
+          exit 1
+        fi
+
         # Build Redis URL with password if available
         if [ -n "{{.REDIS_PASSWORD}}" ]; then
-          export ARES_REDIS_URL="redis://:{{.REDIS_PASSWORD}}@localhost:6379"
+          export ARES_REDIS_URL="redis://:{{.REDIS_PASSWORD}}@localhost:16379"
         else
-          export ARES_REDIS_URL="redis://localhost:6379"
+          export ARES_REDIS_URL="redis://localhost:16379"
         fi
 
         ONCE_FLAG=""
@@ -863,16 +895,30 @@ tasks:
 
           echo "Fetching report from Redis..."
 
-          # Port-forward to Redis
-          kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 6379:6379 &
-          PF_PID=$!
-          sleep 2
+          # Port-forward to Redis (use 16379 locally to avoid conflicts with local Redis)
+          # Kill any stale port-forward first
+          lsof -ti:16379 | xargs kill 2>/dev/null || true
+          sleep 1
 
-          # Verify port-forward is running
-          if ! kill -0 $PF_PID 2>/dev/null; then
+          kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 16379:6379 2>&1 &
+          PF_PID=$!
+
+          # Wait for port to be connectable (up to 15 seconds)
+          i=0
+          while [ $i -lt 15 ]; do
+            if nc -z localhost 16379 2>/dev/null; then
+              break
+            fi
+            sleep 1
+            i=$((i + 1))
+          done
+
+          # Final check: is port actually open?
+          if ! nc -z localhost 16379 2>/dev/null; then
             echo ""
-            echo "ERROR: kubectl port-forward failed (check k8s credentials with: kubectl auth can-i get pods)"
+            echo "ERROR: kubectl port-forward failed (port not connectable after 15s)"
             echo "Fetch manually: task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}}"
+            kill $PF_PID 2>/dev/null || true
             exit 0
           fi
 
@@ -884,9 +930,9 @@ tasks:
             echo "WARNING: Could not get Redis password, trying without auth"
           fi
           if [ -n "$REDIS_PASS" ]; then
-            export ARES_REDIS_URL="redis://:${REDIS_PASS}@localhost:6379"
+            export ARES_REDIS_URL="redis://:${REDIS_PASS}@localhost:16379"
           else
-            export ARES_REDIS_URL="redis://localhost:6379"
+            export ARES_REDIS_URL="redis://localhost:16379"
           fi
 
           # Fetch report

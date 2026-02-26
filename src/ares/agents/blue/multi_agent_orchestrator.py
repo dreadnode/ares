@@ -570,6 +570,7 @@ class BlueTeamOrchestrator:
         self,
         alert: dict,
         correlation_context: dict | None = None,
+        investigation_id: str | None = None,
     ) -> dict:
         """Run a multi-agent investigation on an alert.
 
@@ -582,11 +583,15 @@ class BlueTeamOrchestrator:
         Args:
             alert: The alert dictionary.
             correlation_context: Optional alert correlation context.
+            investigation_id: Optional ID for the investigation. If not provided,
+                a new one will be generated. When using distributed workers,
+                this MUST match the ID used to register the investigation.
 
         Returns:
             Result dict matching monolithic orchestrator output shape.
         """
-        investigation_id = f"inv-{uuid.uuid4().hex[:8]}"
+        if investigation_id is None:
+            investigation_id = f"inv-{uuid.uuid4().hex[:8]}"
         alert_name = alert.get("labels", {}).get("alertname", "unknown")
 
         logger.info(f"Starting multi-agent investigation {investigation_id}: {alert_name}")
