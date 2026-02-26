@@ -288,11 +288,19 @@ async def delete(
         pattern = f"ares:blue:inv:{investigation_id}:*"
         keys = await client.keys(pattern)
 
-        if not keys:
+        deleted = 0
+        if keys:
+            deleted = await client.delete(*keys)
+
+        # Also remove from active investigations set
+        removed = await client.srem("ares:blue:active_investigations", investigation_id)
+        if removed:
+            deleted += removed
+
+        if deleted == 0:
             print(f"No data found for investigation: {investigation_id}")
             return
 
-        deleted = await client.delete(*keys)
         print(f"Deleted {deleted} keys for investigation: {investigation_id}")
 
     finally:
@@ -366,6 +374,11 @@ async def cleanup(
             if keys:
                 deleted = await client.delete(*keys)
                 total_deleted += deleted
+
+        # Also remove from active investigations set
+        if to_delete:
+            removed = await client.srem("ares:blue:active_investigations", *to_delete)
+            total_deleted += removed
 
         print(f"Deleted {total_deleted} keys from {len(to_delete)} investigation(s)")
 

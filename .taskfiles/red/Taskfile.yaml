@@ -3,6 +3,10 @@
 # Extracted from main Taskfile to reduce duplication
 version: "3"
 
+# Enable proper shell behavior for pipelines
+set: [errexit, pipefail]
+shopt: [globstar]
+
 vars:
   # Remote paths (local to this taskfile)
   REMOTE_REPORT_DIR: '{{.REMOTE_REPORT_DIR | default "/reports"}}'
@@ -26,7 +30,7 @@ tasks:
       GRAFANA_SERVICE_ACCOUNT_TOKEN:
         sh: op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo ""
       OPENAI_API_KEY:
-        sh: op item get "Openai" --fields dreadnode-ares-api-key --reveal 2>/dev/null || echo ""
+        sh: op item get "Dreadnode Openai" --fields dreadnode-ares-api-key --reveal 2>/dev/null || echo ""
       ARES_MODEL:
         sh: |
           if [ -n "{{.MODEL_ALL}}" ]; then
@@ -188,41 +192,50 @@ tasks:
           echo "Operation ID: {{.OPERATION_ID_COMPUTED}}"
           echo ""
 
-          # Use a marker file to signal completion
+          # Wait briefly for operation to start being processed
+          sleep 2
+
           DONE_MARKER="/tmp/ares_done_$$"
           rm -f "$DONE_MARKER"
 
-          # Run kubectl in background
-          kubectl logs -f --since=0s -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | \
-            grep --line-buffered "{{.OPERATION_ID_COMPUTED}}" | \
-            while IFS= read -r line; do
-              echo "$line" | tee -a "{{.LOGFILE}}"
-              if echo "$line" | grep -q "completed successfully"; then
-                echo ""
-                echo "✓ Operation completed - fetching report..."
-                touch "$DONE_MARKER"
-                break
-              fi
-            done &
-          LOG_PID=$!
-
-          # Wait for completion or timeout
-          while kill -0 $LOG_PID 2>/dev/null; do
-            if [ -f "$DONE_MARKER" ]; then
+          # Stream logs using process substitution so break exits immediately
+          # (pipes run while loop in subshell, making break wait for pipeline)
+          while IFS= read -r line; do
+            echo "$line" | tee -a "{{.LOGFILE}}"
+            if echo "$line" | grep -q "completed successfully"; then
+              echo ""
+              echo "✓ Operation completed - fetching report..."
+              touch "$DONE_MARKER"
+              # Kill kubectl logs before breaking to ensure clean exit
+              pkill -f "kubectl logs -f.*{{.K8S_NAMESPACE}}.*ares-orchestrator" 2>/dev/null || true
               break
             fi
-            sleep 0.5
-          done
+          done < <(timeout 1800 stdbuf -oL kubectl logs -f --since=10s -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | \
+            stdbuf -oL grep --line-buffered "{{.OPERATION_ID_COMPUTED}}" || true)
 
-          # Always cleanup, regardless of how we exited the loop
-          kill $LOG_PID 2>/dev/null || true
-          # Kill any kubectl processes for this namespace (pipeline processes may be orphaned)
+          # Cleanup any orphaned kubectl processes
           pkill -f "kubectl logs -f.*{{.K8S_NAMESPACE}}.*ares-orchestrator" 2>/dev/null || true
+
+          # If operation didn't complete, create a marker to skip report fetch
+          if [ ! -f "$DONE_MARKER" ]; then
+            echo ""
+            echo "Operation {{.OPERATION_ID_COMPUTED}} is queued/running but not yet complete."
+            echo "Monitor: task red:multi:loot LATEST=true WATCH=5"
+            echo "Report:  task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}}"
+            touch "/tmp/ares_skip_report_$$"
+          fi
           rm -f "$DONE_MARKER"
         silent: false
 
       # Auto-fetch report from Redis when operation completes
       - cmd: |
+          # Skip if operation didn't complete
+          SKIP_MARKER="/tmp/ares_skip_report_$$"
+          if [ -f "$SKIP_MARKER" ]; then
+            rm -f "$SKIP_MARKER"
+            exit 0
+          fi
+
           mkdir -p ./reports
 
           echo "Fetching report from Redis..."
@@ -856,41 +869,50 @@ tasks:
           echo "Operation ID: {{.OPERATION_ID_COMPUTED}}"
           echo ""
 
-          # Use a marker file to signal completion
+          # Wait briefly for operation to start being processed
+          sleep 2
+
           DONE_MARKER="/tmp/ares_done_$$"
           rm -f "$DONE_MARKER"
 
-          # Run kubectl in background
-          kubectl logs -f --since=0s -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | \
-            grep --line-buffered "{{.OPERATION_ID_COMPUTED}}" | \
-            while IFS= read -r line; do
-              echo "$line" | tee -a "{{.LOGFILE}}"
-              if echo "$line" | grep -q "completed successfully"; then
-                echo ""
-                echo "✓ Operation completed - fetching report..."
-                touch "$DONE_MARKER"
-                break
-              fi
-            done &
-          LOG_PID=$!
-
-          # Wait for completion or timeout
-          while kill -0 $LOG_PID 2>/dev/null; do
-            if [ -f "$DONE_MARKER" ]; then
+          # Stream logs using process substitution so break exits immediately
+          # (pipes run while loop in subshell, making break wait for pipeline)
+          while IFS= read -r line; do
+            echo "$line" | tee -a "{{.LOGFILE}}"
+            if echo "$line" | grep -q "completed successfully"; then
+              echo ""
+              echo "✓ Operation completed - fetching report..."
+              touch "$DONE_MARKER"
+              # Kill kubectl logs before breaking to ensure clean exit
+              pkill -f "kubectl logs -f.*{{.K8S_NAMESPACE}}.*ares-orchestrator" 2>/dev/null || true
               break
             fi
-            sleep 0.5
-          done
+          done < <(timeout 1800 stdbuf -oL kubectl logs -f --since=10s -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | \
+            stdbuf -oL grep --line-buffered "{{.OPERATION_ID_COMPUTED}}" || true)
 
-          # Always cleanup, regardless of how we exited the loop
-          kill $LOG_PID 2>/dev/null || true
-          # Kill any kubectl processes for this namespace (pipeline processes may be orphaned)
+          # Cleanup any orphaned kubectl processes
           pkill -f "kubectl logs -f.*{{.K8S_NAMESPACE}}.*ares-orchestrator" 2>/dev/null || true
+
+          # If operation didn't complete, create a marker to skip report fetch
+          if [ ! -f "$DONE_MARKER" ]; then
+            echo ""
+            echo "Operation {{.OPERATION_ID_COMPUTED}} is queued/running but not yet complete."
+            echo "Monitor: task red:multi:loot LATEST=true WATCH=5"
+            echo "Report:  task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}}"
+            touch "/tmp/ares_skip_report_$$"
+          fi
           rm -f "$DONE_MARKER"
         silent: false
 
       # Auto-fetch report from Redis when operation completes
       - cmd: |
+          # Skip if operation didn't complete
+          SKIP_MARKER="/tmp/ares_skip_report_$$"
+          if [ -f "$SKIP_MARKER" ]; then
+            rm -f "$SKIP_MARKER"
+            exit 0
+          fi
+
           mkdir -p ./reports
 
           echo "Fetching report from Redis..."

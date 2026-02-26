@@ -263,23 +263,56 @@ class BlueRedisWorkerAgent:
         )
 
     def _threaded_heartbeat_loop(self) -> None:
-        """Send heartbeats from a dedicated thread to avoid blocking."""
+        """Send heartbeats from a dedicated thread to avoid blocking.
+
+        Creates its own Redis client to avoid event loop conflicts with the
+        main thread's client.
+        """
+        import json
+        from datetime import datetime, timezone
+
+        from ares.core.redis_client import create_redis_client
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
+        redis_client = None
         retry_delay = 1.0
         max_retry_delay = 60.0
+        heartbeat_key = f"ares:blue:heartbeat:{self.agent_name}"
+        heartbeat_ttl = 60
+
+        async def connect_redis():
+            """Create a Redis client for this thread's event loop."""
+            return await create_redis_client(self.redis_url, decode_responses=True)
+
+        async def send_heartbeat(client, status: str, current_task: str | None):
+            """Send a heartbeat to Redis."""
+            data = json.dumps(
+                {
+                    "agent_name": self.agent_name,
+                    "status": status,
+                    "current_task": current_task,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "pod": self.pod_name,
+                }
+            )
+            await client.setex(heartbeat_key, heartbeat_ttl, data)
+
+        async def close_redis(client):
+            """Close the Redis client."""
+            if client:
+                await client.aclose()
 
         try:
+            # Create Redis client for this thread
+            redis_client = loop.run_until_complete(connect_redis())
+
             while not self._heartbeat_stop_event.is_set() and self._running:
                 try:
                     status = "busy" if self._current_task else "idle"
                     loop.run_until_complete(
-                        self.task_queue.heartbeat(
-                            agent_name=self.agent_name,
-                            status=status,
-                            current_task=self._current_task,
-                        )
+                        send_heartbeat(redis_client, status, self._current_task)
                     )
                     retry_delay = 1.0
 
@@ -292,6 +325,12 @@ class BlueRedisWorkerAgent:
 
                     if is_connection_error:
                         logger.warning(f"Heartbeat connection error, will retry: {e}")
+                        # Try to reconnect
+                        try:
+                            loop.run_until_complete(close_redis(redis_client))
+                            redis_client = loop.run_until_complete(connect_redis())
+                        except Exception as reconnect_error:
+                            logger.warning(f"Heartbeat reconnect failed: {reconnect_error}")
                         self._heartbeat_stop_event.wait(retry_delay)
                         retry_delay = min(retry_delay * 2, max_retry_delay)
                         continue
@@ -300,6 +339,11 @@ class BlueRedisWorkerAgent:
                 self._heartbeat_stop_event.wait(15)
 
         finally:
+            if redis_client:
+                try:
+                    loop.run_until_complete(close_redis(redis_client))
+                except Exception:
+                    pass
             loop.close()
             logger.debug(f"Heartbeat thread stopped for {self.agent_name}")
 
