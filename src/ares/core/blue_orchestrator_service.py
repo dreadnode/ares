@@ -112,6 +112,9 @@ class BlueOrchestratorService:
         self.running = False
         self._shutdown_event = asyncio.Event()
         self._report_dir = Path(os.environ.get("ARES_REPORT_DIR", "./reports"))
+        # Concurrent investigation processing (default 10 for better throughput)
+        self._max_concurrent = int(os.environ.get("ARES_BLUE_MAX_CONCURRENT", "10"))
+        self._active_investigations: set[asyncio.Task] = set()
         self._grafana_url = os.environ.get("GRAFANA_URL", "")
         self._grafana_api_key = os.environ.get("GRAFANA_SERVICE_ACCOUNT_TOKEN") or os.environ.get(
             "GRAFANA_API_KEY", ""
@@ -167,19 +170,45 @@ class BlueOrchestratorService:
             await self.shutdown()
 
     async def _run_service_loop(self) -> None:
-        """Main service loop - poll for investigations."""
+        """Main service loop - poll for investigations and process concurrently."""
         import time
 
         last_successful_poll = time.monotonic()
         stale_connection_threshold = 30.0
 
+        logger.info(f"Concurrent investigation limit: {self._max_concurrent}")
+
         while self.running:
             try:
+                # Clean up completed tasks
+                done_tasks = {t for t in self._active_investigations if t.done()}
+                for task in done_tasks:
+                    self._active_investigations.discard(task)
+                    # Log any exceptions from completed tasks
+                    if task.exception():
+                        logger.error(f"Investigation task failed: {task.exception()}")
+
+                # Check if we can accept more investigations
+                if len(self._active_investigations) >= self._max_concurrent:
+                    # At capacity - wait briefly for a slot to free up
+                    await asyncio.sleep(1)
+                    continue
+
                 result = await asyncio.wait_for(self._pop_investigation_request(), timeout=5.0)
                 last_successful_poll = time.monotonic()
 
                 if result:
-                    await self._process_investigation_request(result)
+                    # Spawn investigation as background task
+                    inv_id = result.get("investigation_id", "unknown")
+                    task = asyncio.create_task(
+                        self._process_investigation_request(result),
+                        name=f"investigation-{inv_id}",
+                    )
+                    self._active_investigations.add(task)
+                    logger.info(
+                        f"Spawned investigation {inv_id} "
+                        f"({len(self._active_investigations)}/{self._max_concurrent} active)"
+                    )
 
             except asyncio.TimeoutError:
                 elapsed = time.monotonic() - last_successful_poll
@@ -426,6 +455,18 @@ class BlueOrchestratorService:
         logger.info("Shutting down blue team orchestrator service...")
         self.running = False
         self._shutdown_event.set()
+
+        # Wait for active investigations to complete (with timeout)
+        if self._active_investigations:
+            logger.info(f"Waiting for {len(self._active_investigations)} active investigations...")
+            _, pending = await asyncio.wait(
+                self._active_investigations,
+                timeout=60.0,
+            )
+            if pending:
+                logger.warning(f"Cancelling {len(pending)} pending investigations")
+                for task in pending:
+                    task.cancel()
 
         if self.task_queue:
             await self.task_queue.disconnect()

@@ -516,6 +516,263 @@ async def run_blue_worker(
         await task_queue.disconnect()
 
 
+async def run_blue_global_worker(
+    role: BlueRole,
+    redis_url: str | None = None,
+    model: str | None = None,
+    max_steps: int | None = None,
+    grafana_url: str | None = None,
+) -> None:
+    """Run a global pool worker that handles tasks from any investigation.
+
+    Unlike run_blue_worker which binds to a specific investigation, this worker
+    polls from the global role queue and handles tasks from any active investigation.
+    This enables N workers per role across all investigations for better throughput.
+
+    Args:
+        role: The agent role (triage, threat_hunter, lateral_analyst).
+        redis_url: Redis URL for task queue and state.
+        model: LLM model to use (falls back to ARES_MODEL env var).
+        max_steps: Override default max steps for role.
+        grafana_url: Grafana URL for MCP tools.
+    """
+    from ares.core.blue_state_backend import BlueStateBackend
+    from ares.core.blue_task_queue import BlueTaskQueue
+    from ares.core.blue_worker.prompts import generate_blue_task_prompt
+    from ares.core.config import get_redis_url
+    from ares.core.factories.blue_agents import create_blue_agent
+    from ares.core.litellm_env import configure_litellm_env
+    from ares.core.models import BlueTaskType
+    from ares.core.redis_client import create_redis_client
+    from ares.core.rigging_patches import apply as apply_rigging_patches
+    from ares.integrations.mitre import MITREAttackClient
+
+    apply_rigging_patches()
+    configure_litellm_env()
+
+    redis_url = redis_url or get_redis_url()
+    pod_name = os.environ.get("HOSTNAME", f"local-{role.value}")
+
+    if not os.environ.get("ARES_ROLE"):
+        os.environ["ARES_ROLE"] = role.value
+
+    # Get model from env if not provided
+    current_model = model or os.getenv("ARES_MODEL") or os.getenv("ARES_WORKER_MODEL")
+    if not current_model:
+        logger.error("No model specified for global worker (set ARES_MODEL)")
+        return
+
+    # Create task queue with global queue enabled
+    task_queue = BlueTaskQueue(redis_url, use_global_queue=True)
+    await task_queue.connect()
+
+    # Pre-load MCP tools (shared across all tasks)
+    mcp_tools = await _load_mcp_tools(grafana_url)
+    mitre_client = MITREAttackClient()
+
+    agent_name = f"blue-{role.value}-{pod_name}"
+    logger.info(f"Starting global pool worker {agent_name} for role {role.value}")
+    logger.info(f"Model: {current_model}, polling from global queue")
+
+    # Cache for investigation-specific resources
+    _investigation_cache: dict[str, dict] = {}
+
+    async def get_investigation_context(investigation_id: str) -> dict:
+        """Get or create context for an investigation."""
+        if investigation_id in _investigation_cache:
+            return _investigation_cache[investigation_id]
+
+        # Create new context for this investigation
+        redis_client = await create_redis_client(redis_url, decode_responses=True)
+        backend = BlueStateBackend(redis_client, investigation_id)
+        alert = await task_queue.get_investigation_alert(investigation_id)
+
+        from ares.core.blue_dispatcher import BlueTeamDispatcher
+
+        dispatcher = BlueTeamDispatcher(redis_client)
+        await dispatcher.start(investigation_id, alert)
+
+        # Create agent for this investigation
+        agent, callback_tools = create_blue_agent(
+            role=role,
+            model=current_model,
+            backend=backend,
+            dispatcher=dispatcher,
+            mitre_client=mitre_client,
+            mcp_tools=mcp_tools,
+            max_steps=max_steps or 30,
+            grafana_url=grafana_url or os.environ.get("GRAFANA_URL", ""),
+            alert=alert,
+        )
+
+        ctx = {
+            "redis_client": redis_client,
+            "backend": backend,
+            "dispatcher": dispatcher,
+            "agent": agent,
+            "callback_tools": callback_tools,
+        }
+        _investigation_cache[investigation_id] = ctx
+        return ctx
+
+    async def cleanup_context(investigation_id: str) -> None:
+        """Clean up cached context for an investigation."""
+        if investigation_id not in _investigation_cache:
+            return
+
+        ctx = _investigation_cache.pop(investigation_id)
+        try:
+            await ctx["dispatcher"].stop()
+            await ctx["redis_client"].aclose()
+        except Exception as e:
+            logger.warning(f"Error cleaning up context for {investigation_id}: {e}")
+
+    retry_delay = 1.0
+    max_retry_delay = 60.0
+    last_maintenance = time.monotonic()
+    maintenance_interval = 15.0
+
+    try:
+        while True:
+            try:
+                # Periodic maintenance
+                if (time.monotonic() - last_maintenance) >= maintenance_interval:
+                    last_maintenance = time.monotonic()
+                    await task_queue.ping_or_reconnect()
+
+                    # Clean up contexts for completed investigations
+                    for inv_id in list(_investigation_cache.keys()):
+                        alert = await task_queue.get_investigation_alert(inv_id)
+                        if not alert:
+                            logger.info(f"Investigation {inv_id} no longer active, cleaning up")
+                            await cleanup_context(inv_id)
+
+                # Poll global queue for tasks
+                task = await task_queue.poll_global_task(role=role.value, timeout=5.0)
+
+                if task is None:
+                    retry_delay = 1.0
+                    continue
+
+                logger.info(
+                    f"[{agent_name}] Received task {task.task_id} "
+                    f"(type={task.task_type}, inv={task.investigation_id})"
+                )
+
+                # Get context for this task's investigation
+                ctx = await get_investigation_context(task.investigation_id)
+                agent = ctx["agent"]
+                callback_tools = ctx["callback_tools"]
+                backend = ctx["backend"]
+
+                # Process the task
+                try:
+                    task_type = BlueTaskType(task.task_type)
+                except ValueError:
+                    logger.warning(f"Unknown task type: {task.task_type}")
+                    await task_queue.send_result(
+                        task_id=task.task_id,
+                        success=False,
+                        error=f"Unknown task type: {task.task_type}",
+                        worker_pod=pod_name,
+                        agent_name=agent_name,
+                    )
+                    continue
+
+                # Get state summary
+                try:
+                    snapshot = await backend.snapshot()
+                    state_summary = {
+                        "investigation_id": task.investigation_id,
+                        "evidence_count": len(snapshot.get("evidence", [])),
+                        "techniques_identified": list(snapshot.get("techniques", set())),
+                        "hosts_investigated": list(snapshot.get("hosts", set())),
+                        "users_investigated": list(snapshot.get("users", set())),
+                        "stage": snapshot.get("meta", {}).get("stage", "triage"),
+                    }
+                except Exception:
+                    state_summary = {}
+
+                # Generate prompt and run agent
+                prompt = generate_blue_task_prompt(
+                    task_type=task_type,
+                    params=task.params,
+                    shared_state_summary=state_summary,
+                )
+
+                completion_event = asyncio.Event()
+                callback_tools.set_completion_event(completion_event)
+
+                logger.info(f"[{agent_name}] Running agent for task {task.task_id}")
+                await agent.run(prompt)
+
+                # Send result
+                if completion_event.is_set():
+                    result_data = callback_tools.result_data
+                    logger.info(f"[{agent_name}] Task {task.task_id} completed")
+                    await task_queue.send_result(
+                        task_id=task.task_id,
+                        success=True,
+                        result=result_data,
+                        worker_pod=pod_name,
+                        agent_name=agent_name,
+                    )
+                else:
+                    logger.warning(f"[{agent_name}] Task {task.task_id} ended without callback")
+                    await task_queue.send_result(
+                        task_id=task.task_id,
+                        success=True,
+                        result={
+                            "type": role.value,
+                            "summary": "Agent completed without explicit completion signal",
+                            "partial": True,
+                        },
+                        worker_pod=pod_name,
+                        agent_name=agent_name,
+                    )
+
+                retry_delay = 1.0
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                error_str = str(e).lower()
+                is_connection_error = any(
+                    keyword in error_str
+                    for keyword in ["connection", "closed", "timeout", "broken pipe", "reset"]
+                )
+
+                if is_connection_error:
+                    logger.warning(
+                        f"Global worker connection error, retrying in {retry_delay:.1f}s: {e}"
+                    )
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, max_retry_delay)
+                else:
+                    logger.error(f"Global worker error: {e}", exc_info=True)
+                    # Send error result if we have a task
+                    if "task" in dir() and task:
+                        try:
+                            await task_queue.send_result(
+                                task_id=task.task_id,
+                                success=False,
+                                error=str(e),
+                                worker_pod=pod_name,
+                                agent_name=agent_name,
+                            )
+                        except Exception:
+                            pass
+                    await asyncio.sleep(5)
+                    retry_delay = 1.0
+
+    finally:
+        # Clean up all cached contexts
+        for inv_id in list(_investigation_cache.keys()):
+            await cleanup_context(inv_id)
+        await task_queue.disconnect()
+        logger.info(f"Global worker {agent_name} stopped")
+
+
 async def _load_mcp_tools(grafana_url: str | None = None) -> list:
     """Attempt to load MCP tools from mcp-grafana.
 
@@ -554,5 +811,6 @@ async def _load_mcp_tools(grafana_url: str | None = None) -> list:
 
 __all__ = [
     "BlueRedisWorkerAgent",
+    "run_blue_global_worker",
     "run_blue_worker",
 ]

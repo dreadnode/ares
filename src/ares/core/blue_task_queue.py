@@ -211,8 +211,12 @@ class BlueTaskQueue:
         logger.warning(f"Redis connection error, will retry: {error}")
 
     def _task_queue_key(self, investigation_id: str, role: str) -> str:
-        """Get task queue key for a role within an investigation."""
+        """Get task queue key for a role within an investigation (legacy mode)."""
         return f"{self.TASK_QUEUE_PREFIX}:{investigation_id}:{role}"
+
+    def _global_task_queue_key(self, role: str) -> str:
+        """Get global task queue key for a role (shared across all investigations)."""
+        return f"{self.GLOBAL_TASK_QUEUE_PREFIX}:{role}"
 
     def _result_queue_key(self, task_id: str) -> str:
         """Get result queue key for a task."""
@@ -393,7 +397,11 @@ class BlueTaskQueue:
             params=params,
         )
 
-        queue_key = self._task_queue_key(investigation_id, target_role)
+        # Use global queue if enabled, otherwise per-investigation queue
+        if self.use_global_queue:
+            queue_key = self._global_task_queue_key(target_role)
+        else:
+            queue_key = self._task_queue_key(investigation_id, target_role)
 
         try:
             await self.redis.lpush(queue_key, task.model_dump_json())
@@ -456,7 +464,7 @@ class BlueTaskQueue:
         role: str,
         timeout: float = 5.0,
     ) -> BlueTaskMessage | None:
-        """Poll for next task (blocking).
+        """Poll for next task from per-investigation queue (blocking).
 
         Args:
             investigation_id: Investigation to poll tasks for.
@@ -470,6 +478,60 @@ class BlueTaskQueue:
             await self.connect()
 
         queue_key = self._task_queue_key(investigation_id, role)
+
+        try:
+            result = await asyncio.wait_for(
+                self.redis.brpop(queue_key, timeout=int(timeout)),
+                timeout=timeout + 2.0,
+            )
+
+            if result is None:
+                return None
+
+            _, data = result
+            return BlueTaskMessage.model_validate_json(data)
+
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"BRPOP hung for {timeout + 2.0}s on queue {queue_key} - "
+                "possible stale Sentinel connection, forcing reconnection"
+            )
+            invalidate_sentinel_client()
+            self._handle_connection_error(
+                TimeoutError("BRPOP hung - possible stale Sentinel connection")
+            )
+            return None
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(
+                keyword in error_str
+                for keyword in ["connection", "closed", "timeout", "broken pipe", "reset"]
+            ):
+                self._handle_connection_error(e)
+            raise
+
+    async def poll_global_task(
+        self,
+        role: str,
+        timeout: float = 5.0,
+    ) -> BlueTaskMessage | None:
+        """Poll for next task from global role queue (blocking).
+
+        Workers use this to receive tasks from any active investigation.
+        The task includes investigation_id so workers know which state backend to use.
+
+        Args:
+            role: Worker role to poll for (triage, threat_hunter, lateral_analyst).
+            timeout: How long to block waiting.
+
+        Returns:
+            BlueTaskMessage or None if timeout.
+        """
+        if not self._connected:
+            await self.connect()
+
+        queue_key = self._global_task_queue_key(role)
 
         try:
             result = await asyncio.wait_for(

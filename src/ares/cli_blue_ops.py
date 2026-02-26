@@ -313,15 +313,59 @@ async def cleanup(
     max_age_hours: Annotated[
         int, cyclopts.Parameter(help="Max age in hours for investigations")
     ] = 24,
+    all_investigations: Annotated[
+        bool, cyclopts.Parameter("--all", help="Delete ALL investigations (ignores max-age-hours)")
+    ] = False,
     redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
     dry_run: Annotated[bool, cyclopts.Parameter(help="Show what would be deleted")] = False,
+    force: Annotated[bool, cyclopts.Parameter(help="Skip confirmation for --all")] = False,
 ) -> None:
     """Clean up old investigations."""
     redis_url = redis_url or get_redis_url()
     client = await create_verified_redis_client(redis_url, decode_responses=True)
-    cutoff = datetime.now(timezone.utc).timestamp() - (max_age_hours * 3600)
 
     try:
+        if all_investigations:
+            # Clear ALL investigations
+            inv_keys = await client.keys("ares:blue:inv:*")
+            op_keys = await client.keys("ares:blue:op:*")
+            active_exists = await client.exists("ares:blue:active_investigations")
+            queue_len = await client.llen("ares:blue:investigations")
+
+            print(f"Found {len(inv_keys)} investigation keys")
+            print(f"Found {len(op_keys)} operation tracking keys")
+            print(f"Queue length: {queue_len}")
+
+            if dry_run:
+                print("(dry run - no changes made)")
+                return
+
+            if not force:
+                confirm = await asyncio.to_thread(
+                    input, "Delete ALL blue team investigations? [y/N] "
+                )
+                if confirm.lower() != "y":
+                    print("Aborted")
+                    return
+
+            deleted = 0
+            if inv_keys:
+                deleted += await client.delete(*inv_keys)
+            if op_keys:
+                deleted += await client.delete(*op_keys)
+            if active_exists:
+                deleted += await client.delete("ares:blue:active_investigations")
+            if queue_len > 0:
+                await client.delete("ares:blue:investigations")
+                deleted += 1
+
+            print(f"Deleted {deleted} keys")
+            print("All blue team investigations cleared")
+            return
+
+        # Original behavior: clean up old investigations
+        cutoff = datetime.now(timezone.utc).timestamp() - (max_age_hours * 3600)
+
         # Find investigations to clean up
         status_keys = await client.keys("ares:blue:inv:*:status")
         to_delete: list[str] = []
@@ -617,6 +661,156 @@ async def _get_latest_operation_id(redis_url: str) -> tuple[str | None, bool]:
         await client.aclose()
 
 
+@app.command(name="operation-status")
+async def operation_status(
+    operation_id: Annotated[str, cyclopts.Parameter(help="Red team operation ID")] = "",
+    *,
+    latest: Annotated[bool, cyclopts.Parameter(help="Use latest red team operation")] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+    watch: Annotated[int, cyclopts.Parameter(help="Watch mode: refresh every N seconds")] = 0,
+) -> None:
+    """Show aggregate status of all investigations from a red team operation."""
+    redis_url = redis_url or get_redis_url()
+
+    if latest:
+        resolved_op, _ = await _get_latest_operation_id(redis_url)
+        if not resolved_op:
+            logger.error("No red team operations found")
+            sys.exit(1)
+        operation_id = resolved_op
+
+    if not operation_id:
+        logger.error("Either operation_id or --latest is required")
+        sys.exit(1)
+
+    async def show_status() -> bool:
+        """Show status, return True if all investigations are done."""
+        client = await create_verified_redis_client(redis_url, decode_responses=True)
+        try:
+            # Get investigation IDs for this operation
+            op_inv_key = f"ares:blue:op:{operation_id}:investigations"
+            inv_ids = await client.smembers(op_inv_key)
+
+            if not inv_ids:
+                print(f"No investigations found for operation: {operation_id}")
+                return True
+
+            # Get status for each investigation
+            statuses: dict[str, list[dict]] = {
+                "submitted": [],
+                "running": [],
+                "completed": [],
+                "failed": [],
+            }
+            earliest_start: datetime | None = None
+            latest_end: datetime | None = None
+
+            for inv_id in sorted(inv_ids):
+                status_key = f"ares:blue:inv:{inv_id}:status"
+                status_json = await client.get(status_key)
+                if status_json:
+                    status = json.loads(status_json)
+                    status["investigation_id"] = inv_id
+                    statuses.setdefault(status.get("status", "unknown"), []).append(status)
+
+                    # Track timing
+                    if status.get("started_at"):
+                        started = datetime.fromisoformat(
+                            status["started_at"].replace("Z", "+00:00")
+                        )
+                        if earliest_start is None or started < earliest_start:
+                            earliest_start = started
+
+                    completed_at = status.get("completed_at") or status.get("failed_at")
+                    if completed_at:
+                        ended = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+                        if latest_end is None or ended > latest_end:
+                            latest_end = ended
+                else:
+                    statuses["submitted"].append({"investigation_id": inv_id})
+
+            # Calculate duration
+            now = datetime.now(timezone.utc)
+            if earliest_start:
+                if statuses["running"] or statuses["submitted"]:
+                    # Still running - duration from start to now
+                    elapsed = (now - earliest_start).total_seconds()
+                elif latest_end:
+                    # All done - duration from start to last completion
+                    elapsed = (latest_end - earliest_start).total_seconds()
+                else:
+                    elapsed = 0
+            else:
+                elapsed = 0
+
+            # Format duration
+            hours, remainder = divmod(int(elapsed), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            if hours > 0:
+                duration = f"{hours}h {minutes}m {seconds}s"
+            elif minutes > 0:
+                duration = f"{minutes}m {seconds}s"
+            else:
+                duration = f"{seconds}s"
+
+            # Print summary
+            total = len(inv_ids)
+            running = len(statuses["running"])
+            completed = len(statuses["completed"])
+            failed = len(statuses["failed"])
+            submitted = len(statuses["submitted"])
+
+            print(f"Operation: {operation_id}")
+            print(f"Total investigations: {total}")
+            print(f"  Running:   {running}")
+            print(f"  Completed: {completed}")
+            print(f"  Failed:    {failed}")
+            print(f"  Submitted: {submitted}")
+            print(f"Duration: {duration}")
+
+            if earliest_start:
+                print(f"Started: {earliest_start.isoformat()}")
+            if latest_end and not (statuses["running"] or statuses["submitted"]):
+                print(f"Completed: {latest_end.isoformat()}")
+
+            # Show running investigations
+            if statuses["running"]:
+                print("\nRunning investigations:")
+                for inv in statuses["running"]:
+                    inv_id = inv["investigation_id"]
+                    started_str = inv.get("started_at", "")[:19] if inv.get("started_at") else ""
+                    print(f"  {inv_id} (started: {started_str})")
+
+            # Show failed investigations
+            if statuses["failed"]:
+                print("\nFailed investigations:")
+                for inv in statuses["failed"]:
+                    inv_id = inv["investigation_id"]
+                    error = inv.get("error", "")[:60] if inv.get("error") else ""
+                    print(f"  {inv_id}: {error}")
+
+            return not (statuses["running"] or statuses["submitted"])
+
+        finally:
+            await client.aclose()
+
+    if watch > 0:
+        while True:
+            # Clear screen
+            print("\033[2J\033[H", end="")
+            all_done = await show_status()
+            if all_done:
+                print("\nAll investigations complete.")
+                break
+            print(f"\nRefreshing in {watch}s... (Ctrl+C to stop)")
+            try:
+                await asyncio.sleep(watch)
+            except KeyboardInterrupt:
+                break
+    else:
+        await show_status()
+
+
 @app.command(name="from-operation")
 async def from_operation(
     operation_id: Annotated[str, cyclopts.Parameter(help="Red team operation ID")] = "",
@@ -628,6 +822,9 @@ async def from_operation(
     grafana_api_key: Annotated[str, cyclopts.Parameter(help="Grafana API key")] = "",
     redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
     wait: Annotated[bool, cyclopts.Parameter(help="Wait for investigations to complete")] = False,
+    batch: Annotated[
+        bool, cyclopts.Parameter(help="Batch related alerts into fewer investigations")
+    ] = True,
 ) -> None:
     """Submit multi-agent investigations for alerts from a red team operation.
 
@@ -749,40 +946,150 @@ async def from_operation(
         if os.environ.get(key):
             env_vars[key] = os.environ[key]
 
-    # Submit each alert as a multi-agent investigation
-    submitted = 0
-    for alert in alerts:
-        alert_name = alert.get("labels", {}).get("alertname", "unknown")
-        severity = alert.get("labels", {}).get("severity", "unknown")
+    # Create Redis client for tracking operation -> investigations mapping
+    tracking_client = await create_verified_redis_client(redis_url, decode_responses=True)
+    op_inv_key = f"ares:blue:op:{operation_id}:investigations"
 
-        # Add operation context to alert
-        alert["operation_context"] = {
-            "operation_id": operation_id,
-            "attack_window_start": window_start.isoformat(),
-            "attack_window_end": window_end.isoformat(),
-            "techniques_used": list(playbook.techniques_used)[:20],
-        }
+    async def track_investigation(inv_id: str) -> None:
+        """Add investigation ID to operation's tracking set."""
+        await tracking_client.sadd(op_inv_key, inv_id)
+        # Set TTL of 7 days for the operation tracking key
+        await tracking_client.expire(op_inv_key, 7 * 24 * 3600)
 
-        logger.info(f"Submitting: {alert_name} (severity={severity})")
+    try:
+        # Batch alerts using AlertCorrelator if enabled
+        if batch and len(alerts) > 1:
+            from ares.core.alert_correlation import AlertCorrelator
 
-        result = await submit_investigation(
-            alert=alert,
-            model=resolved_model,
-            max_steps=max_steps,
-            multi_agent=True,  # Force multi-agent
-            auto_route=False,  # Already forcing multi-agent
-            grafana_url=grafana_url,
-            grafana_api_key=grafana_api_key,
-            redis_url=redis_url,
-            wait_for_completion=wait,
-            env_vars=env_vars,
-        )
+            correlator = AlertCorrelator()
+            for alert in alerts:
+                correlator.add_alert(alert)
 
-        inv_id = result["investigation_id"]
-        print(f"  Investigation: {inv_id} (status={result['status']})")
-        submitted += 1
+            clusters = correlator.clusters
+            logger.info(f"Batched {len(alerts)} alerts into {len(clusters)} investigation clusters")
 
-    print(f"\nSubmitted {submitted} investigations from operation {operation_id}")
+            submitted = 0
+            for cluster in clusters:
+                # Create a batch alert that represents the cluster
+                primary_alert = cluster.alerts[0]  # Use first alert as primary
+                batch_alert = {
+                    **primary_alert,
+                    "batch_info": {
+                        "is_batch": True,
+                        "cluster_id": cluster.cluster_id,
+                        "alert_count": len(cluster.alerts),
+                        "common_hosts": list(cluster.common_hosts)[:10],
+                        "common_users": list(cluster.common_users)[:10],
+                        "common_ips": list(cluster.common_ips)[:10],
+                        "techniques": list(cluster.techniques),
+                        "related_alerts": [
+                            {
+                                "alertname": a.get("labels", {}).get("alertname", "unknown"),
+                                "severity": a.get("labels", {}).get("severity", "unknown"),
+                                "fingerprint": a.get("fingerprint", ""),
+                            }
+                            for a in cluster.alerts[1:]  # Exclude primary
+                        ],
+                    },
+                    "operation_context": {
+                        "operation_id": operation_id,
+                        "attack_window_start": window_start.isoformat(),
+                        "attack_window_end": window_end.isoformat(),
+                        "techniques_used": list(playbook.techniques_used)[:20],
+                    },
+                }
+
+                # Merge labels from all alerts (for better context)
+                merged_techniques = set()
+                for a in cluster.alerts:
+                    labels = a.get("labels", {})
+                    if "mitre_technique" in labels:
+                        merged_techniques.add(labels["mitre_technique"])
+                if merged_techniques:
+                    batch_alert.setdefault("labels", {})["merged_techniques"] = list(
+                        merged_techniques
+                    )
+
+                alert_names = [
+                    a.get("labels", {}).get("alertname", "?") for a in cluster.alerts[:5]
+                ]
+                if len(cluster.alerts) > 5:
+                    alert_names.append(f"+{len(cluster.alerts) - 5} more")
+
+                logger.info(
+                    f"Submitting cluster {cluster.cluster_id}: "
+                    f"{len(cluster.alerts)} alerts [{', '.join(alert_names)}]"
+                )
+
+                result = await submit_investigation(
+                    alert=batch_alert,
+                    model=resolved_model,
+                    max_steps=max_steps,
+                    multi_agent=True,
+                    auto_route=False,
+                    grafana_url=grafana_url,
+                    grafana_api_key=grafana_api_key,
+                    redis_url=redis_url,
+                    wait_for_completion=wait,
+                    env_vars=env_vars,
+                )
+
+                inv_id = result["investigation_id"]
+                await track_investigation(inv_id)
+                print(
+                    f"  Investigation: {inv_id} ({len(cluster.alerts)} alerts, "
+                    f"status={result['status']})"
+                )
+                submitted += 1
+
+            print(f"\nSubmitted {submitted} batched investigations from operation {operation_id}")
+            print(f"  (Reduced from {len(alerts)} individual alerts)")
+            print(
+                f"\nTrack progress with: task blue:multi:operation-status OPERATION_ID={operation_id}"
+            )
+
+        else:
+            # Submit each alert as a separate investigation (original behavior)
+            submitted = 0
+            for alert in alerts:
+                alert_name = alert.get("labels", {}).get("alertname", "unknown")
+                severity = alert.get("labels", {}).get("severity", "unknown")
+
+                # Add operation context to alert
+                alert["operation_context"] = {
+                    "operation_id": operation_id,
+                    "attack_window_start": window_start.isoformat(),
+                    "attack_window_end": window_end.isoformat(),
+                    "techniques_used": list(playbook.techniques_used)[:20],
+                }
+
+                logger.info(f"Submitting: {alert_name} (severity={severity})")
+
+                result = await submit_investigation(
+                    alert=alert,
+                    model=resolved_model,
+                    max_steps=max_steps,
+                    multi_agent=True,  # Force multi-agent
+                    auto_route=False,  # Already forcing multi-agent
+                    grafana_url=grafana_url,
+                    grafana_api_key=grafana_api_key,
+                    redis_url=redis_url,
+                    wait_for_completion=wait,
+                    env_vars=env_vars,
+                )
+
+                inv_id = result["investigation_id"]
+                await track_investigation(inv_id)
+                print(f"  Investigation: {inv_id} (status={result['status']})")
+                submitted += 1
+
+            print(f"\nSubmitted {submitted} investigations from operation {operation_id}")
+            print(
+                f"\nTrack progress with: task blue:multi:operation-status OPERATION_ID={operation_id}"
+            )
+
+    finally:
+        await tracking_client.aclose()
 
 
 async def _get_latest_investigation_id(redis_url: str) -> str | None:

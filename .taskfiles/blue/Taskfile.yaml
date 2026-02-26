@@ -818,6 +818,32 @@ tasks:
         fi
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops runtime $INV_ID_ARG $LATEST_FLAG
 
+  multi:operation-status:
+    desc: "Show aggregate status for all investigations from a red team operation (usage: task blue:multi:operation-status [OPERATION_ID=op-xxx] [LATEST=true] [WATCH=10])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+      WATCH: '{{.WATCH | default "0"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required"
+    cmds:
+      - |
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        OP_ID_ARG=""
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ID_ARG="{{.OPERATION_ID}}"
+        fi
+        WATCH_ARG=""
+        if [ "{{.WATCH}}" != "0" ]; then
+          WATCH_ARG="--watch {{.WATCH}}"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops operation-status $OP_ID_ARG $LATEST_FLAG $WATCH_ARG
+
   multi:delete:
     desc: "Delete an investigation and all its data (usage: task blue:multi:delete INVESTIGATION_ID=inv-xxx)"
     silent: true
@@ -830,15 +856,56 @@ tasks:
       - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops delete "{{.INVESTIGATION_ID}}" --force
 
   multi:cleanup:
-    desc: "Clean up old investigations (usage: task blue:multi:cleanup [MAX_AGE_HOURS=24])"
+    desc: "Clean up old investigations (usage: task blue:multi:cleanup [MAX_AGE_HOURS=24] [ALL=true])"
     silent: true
     vars:
       MAX_AGE_HOURS: '{{.MAX_AGE_HOURS | default "24"}}'
+      ALL: '{{.ALL | default "false"}}'
+      DRY_RUN: '{{.DRY_RUN | default "false"}}'
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops cleanup --max-age-hours {{.MAX_AGE_HOURS}}
+      - |
+        ALL_FLAG=""
+        if [ "{{.ALL}}" = "true" ]; then
+          ALL_FLAG="--all --force"
+        fi
+        DRY_RUN_FLAG=""
+        if [ "{{.DRY_RUN}}" = "true" ]; then
+          DRY_RUN_FLAG="--dry-run"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops cleanup --max-age-hours {{.MAX_AGE_HOURS}} $ALL_FLAG $DRY_RUN_FLAG
 
   multi:logs:
-    desc: "Follow blue orchestrator logs"
+    desc: "Follow blue team logs (usage: task blue:multi:logs [ALL=true] [ROLE=orchestrator|triage|threat-hunter|lateral-analyst])"
     silent: true
+    vars:
+      ALL: '{{.ALL | default "false"}}'
+      ROLE: '{{.ROLE | default ""}}'
+      LINES: '{{.LINES | default "100"}}'
+      MAX_LOG_REQUESTS: '{{.MAX_LOG_REQUESTS | default "50"}}'
     cmds:
-      - kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator
+      - |
+        if [ "{{.ALL}}" = "true" ]; then
+          echo "Following all blue team pods..."
+          kubectl logs -f -n {{.K8S_NAMESPACE}} \
+            -l ares.dreadnode.io/component=blue-team \
+            --tail={{.LINES}} \
+            --prefix=true \
+            --max-log-requests={{.MAX_LOG_REQUESTS}}
+        elif [ -n "{{.ROLE}}" ]; then
+          if [ "{{.ROLE}}" = "orchestrator" ]; then
+            echo "Following blue orchestrator logs..."
+            kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator --tail={{.LINES}}
+          else
+            echo "Following blue {{.ROLE}} logs..."
+            kubectl logs -f -n {{.K8S_NAMESPACE}} \
+              -l ares.dreadnode.io/component=blue-team,ares.dreadnode.io/role={{.ROLE}} \
+              --tail={{.LINES}} \
+              --prefix=true \
+              --max-log-requests={{.MAX_LOG_REQUESTS}}
+          fi
+        else
+          echo "Following blue orchestrator logs..."
+          echo "Tip: Use ALL=true to see all blue team pods, or ROLE=triage|threat-hunter|lateral-analyst"
+          echo ""
+          kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator --tail={{.LINES}}
+        fi

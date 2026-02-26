@@ -120,7 +120,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
                 task_id=task.task_id,
             )
             if wait_for_result:
-                result = await self._blue_task_queue.wait_for_result(task_id, timeout=600)
+                result = await self._blue_task_queue.wait_for_result(task_id, timeout=60)
                 if result:
                     return _format_task_result(
                         "Triage",
@@ -142,7 +142,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
         if wait_for_result:
             worker.start_task(task)
-            result = await self._dispatcher.wait_for_result(task.task_id, timeout=600)
+            result = await self._dispatcher.wait_for_result(task.task_id, timeout=60)
             return _format_task_result("Triage", task.task_id, result)
 
         worker.start_task(task)
@@ -196,7 +196,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
                 task_id=task.task_id,
             )
             if wait_for_result:
-                result = await self._blue_task_queue.wait_for_result(task_id, timeout=600)
+                result = await self._blue_task_queue.wait_for_result(task_id, timeout=60)
                 if result:
                     return _format_task_result(
                         "Threat Hunt",
@@ -218,7 +218,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
         if wait_for_result:
             worker.start_task(task)
-            result = await self._dispatcher.wait_for_result(task.task_id, timeout=600)
+            result = await self._dispatcher.wait_for_result(task.task_id, timeout=60)
             return _format_task_result("Threat Hunt", task.task_id, result)
 
         worker.start_task(task)
@@ -266,7 +266,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
                 task_id=task.task_id,
             )
             if wait_for_result:
-                result = await self._blue_task_queue.wait_for_result(task_id, timeout=600)
+                result = await self._blue_task_queue.wait_for_result(task_id, timeout=60)
                 if result:
                     return _format_task_result(
                         "Lateral Analysis",
@@ -288,7 +288,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
         if wait_for_result:
             worker.start_task(task)
-            result = await self._dispatcher.wait_for_result(task.task_id, timeout=600)
+            result = await self._dispatcher.wait_for_result(task.task_id, timeout=60)
             return _format_task_result("Lateral Analysis", task.task_id, result)
 
         worker.start_task(task)
@@ -385,14 +385,14 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         return "\n".join(lines)
 
     @dn.tool_method  # type: ignore[untyped-decorator]
-    async def wait_for_all_tasks(self, timeout: int = 300) -> str:
+    async def wait_for_all_tasks(self, timeout: int = 120) -> str:
         """Wait for all pending tasks to complete.
 
         Use this before calling complete_investigation() to ensure
         all dispatched work has finished.
 
         Args:
-            timeout: Maximum seconds to wait (default 300 = 5 minutes).
+            timeout: Maximum seconds to wait (default 120 = 2 minutes).
 
         Returns:
             Summary of completed tasks or timeout message.
@@ -624,7 +624,7 @@ class BlueTeamOrchestrator:
         try:
             from ares.tools.blue.grafana import MCPConnectionPool, connect_grafana_mcp
 
-            timeout = 10.0 if MCPConnectionPool.is_connected() else 60.0
+            timeout = 10.0 if MCPConnectionPool.is_connected() else 30.0
             mcp_client = await asyncio.wait_for(
                 connect_grafana_mcp(
                     grafana_url=self.grafana_url,
