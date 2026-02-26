@@ -597,7 +597,7 @@ class BlueTeamOrchestrator:
         grafana_api_key: str,
         mitre_client: MITREAttackClient,
         report_dir: Path,
-        max_steps: int = 50,
+        max_steps: int = 25,
         redis_url: str = "redis://localhost:6379",
         attack_context: dict | None = None,
         use_distributed_workers: bool = False,
@@ -750,9 +750,9 @@ class BlueTeamOrchestrator:
 
         if not self._use_distributed_workers:
             for role, max_steps in [
-                (BlueRole.TRIAGE, 8),
-                (BlueRole.THREAT_HUNTER, 20),
-                (BlueRole.LATERAL_ANALYST, 15),
+                (BlueRole.TRIAGE, 5),
+                (BlueRole.THREAT_HUNTER, 10),
+                (BlueRole.LATERAL_ANALYST, 8),
             ]:
                 agent, callback_tools = create_blue_agent(
                     role=role,

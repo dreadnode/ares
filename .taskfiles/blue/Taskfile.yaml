@@ -855,6 +855,17 @@ tasks:
     cmds:
       - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops delete "{{.INVESTIGATION_ID}}" --force
 
+  multi:delete-operation:
+    desc: "Delete an operation and all its investigations (usage: task blue:multi:delete-operation OPERATION_ID=op-xxx)"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+    cmds:
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops delete-operation "{{.OPERATION_ID}}" --force
+
   multi:cleanup:
     desc: "Clean up old investigations (usage: task blue:multi:cleanup [MAX_AGE_HOURS=24] [ALL=true])"
     silent: true

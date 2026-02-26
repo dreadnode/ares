@@ -476,7 +476,7 @@ async def run_blue_worker(
                 dispatcher=dispatcher,
                 mitre_client=mitre_client,
                 mcp_tools=mcp_tools,
-                max_steps=max_steps or 30,
+                max_steps=max_steps or 10,
                 grafana_url=grafana_url or os.environ.get("GRAFANA_URL", ""),
                 alert=alert,
             )
@@ -600,7 +600,7 @@ async def run_blue_global_worker(
             dispatcher=dispatcher,
             mitre_client=mitre_client,
             mcp_tools=mcp_tools,
-            max_steps=max_steps or 30,
+            max_steps=max_steps or 10,
             grafana_url=grafana_url or os.environ.get("GRAFANA_URL", ""),
             alert=alert,
         )

@@ -307,6 +307,69 @@ async def delete(
         await client.aclose()
 
 
+@app.command(name="delete-operation")
+async def delete_operation(
+    operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID to delete")],
+    *,
+    force: Annotated[bool, cyclopts.Parameter(help="Skip confirmation")] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Delete an operation and all its investigations."""
+    redis_url = redis_url or get_redis_url()
+
+    client = await create_verified_redis_client(redis_url, decode_responses=True)
+    try:
+        # Get investigation IDs for this operation
+        op_inv_key = f"ares:blue:op:{operation_id}:investigations"
+        inv_ids = await client.smembers(op_inv_key)
+
+        if not inv_ids:
+            print(f"No investigations found for operation: {operation_id}")
+            # Check if the operation key exists at all
+            exists = await client.exists(op_inv_key)
+            if not exists:
+                print(f"Operation tracking key does not exist: {op_inv_key}")
+            return
+
+        print(f"Operation: {operation_id}")
+        print(f"Investigations to delete: {len(inv_ids)}")
+        for inv_id in sorted(inv_ids):
+            print(f"  - {inv_id}")
+
+        if not force:
+            confirm = await asyncio.to_thread(
+                input,
+                f"\nDelete operation {operation_id} and {len(inv_ids)} investigation(s)? [y/N] ",
+            )
+            if confirm.lower() != "y":
+                print("Aborted")
+                return
+
+        # Delete all investigation keys
+        total_deleted = 0
+        for inv_id in inv_ids:
+            pattern = f"ares:blue:inv:{inv_id}:*"
+            keys = await client.keys(pattern)
+            if keys:
+                deleted = await client.delete(*keys)
+                total_deleted += deleted
+
+        # Remove from active investigations set
+        if inv_ids:
+            removed = await client.srem("ares:blue:active_investigations", *inv_ids)
+            total_deleted += removed
+
+        # Delete the operation tracking key
+        await client.delete(op_inv_key)
+        total_deleted += 1
+
+        print(f"\nDeleted {total_deleted} keys")
+        print(f"Operation {operation_id} and {len(inv_ids)} investigation(s) deleted")
+
+    finally:
+        await client.aclose()
+
+
 @app.command
 async def cleanup(
     *,
