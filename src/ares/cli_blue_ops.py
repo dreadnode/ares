@@ -763,6 +763,7 @@ async def operation_status(
                 "submitted": [],
                 "running": [],
                 "completed": [],
+                "escalated": [],
                 "failed": [],
             }
             earliest_start: datetime | None = None
@@ -820,6 +821,7 @@ async def operation_status(
             total = len(inv_ids)
             running = len(statuses["running"])
             completed = len(statuses["completed"])
+            escalated = len(statuses["escalated"])
             failed = len(statuses["failed"])
             submitted = len(statuses["submitted"])
 
@@ -827,6 +829,7 @@ async def operation_status(
             print(f"Total investigations: {total}")
             print(f"  Running:   {running}")
             print(f"  Completed: {completed}")
+            print(f"  Escalated: {escalated}")
             print(f"  Failed:    {failed}")
             print(f"  Submitted: {submitted}")
             print(f"Duration: {duration}")

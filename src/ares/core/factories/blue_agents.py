@@ -14,6 +14,7 @@ from dreadnode.agent.stop import StopCondition, tool_use
 from loguru import logger
 
 from ares.core.factories.blue_factory import max_tool_calls_stop
+from ares.core.factories.mcp_utils import parse_mcp_text_content
 from ares.core.models import BlueRole
 from ares.core.templates import get_template_loader
 from ares.tools.blue.callbacks import BlueWorkerCallbackTools
@@ -311,13 +312,14 @@ def _extract_mcp_query_fn(mcp_tools: list | None) -> Any:
                     limit: int,
                     _fn=tool_fn,
                 ):
-                    return await _fn(
+                    result = await _fn(
                         datasourceUid=datasource_uid,
                         logql=logql,
                         startRfc3339=start_time,
                         endRfc3339=end_time,
                         limit=limit,
                     )
+                    return parse_mcp_text_content(result)
 
                 logger.info(
                     "QueryTemplateTools will use MCP query_loki_logs for authenticated queries"

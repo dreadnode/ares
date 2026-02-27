@@ -34,6 +34,7 @@ from ares.core.evidence_validation import (
     reset_evidence_validation,
     store_query_result,
 )
+from ares.core.factories.mcp_utils import parse_mcp_text_content
 from ares.core.models import Evidence, InvestigationState, PyramidLevel
 from ares.core.query_resilience import QueryResilientExecutor, get_resilient_executor
 from ares.core.templates import get_template_loader
@@ -1746,13 +1747,14 @@ def create_investigation_agent(
                         limit: int,
                         _fn=tool_fn,
                     ):
-                        return await _fn(
+                        result = await _fn(
                             datasourceUid=datasource_uid,
                             logql=logql,
                             startRfc3339=start_time,
                             endRfc3339=end_time,
                             limit=limit,
                         )
+                        return parse_mcp_text_content(result)
 
                     mcp_query_fn = mcp_loki_wrapper
                     logger.info(
