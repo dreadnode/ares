@@ -44,7 +44,7 @@ class InvestigationRequest:
     alert: dict[str, Any]
     correlation_context: dict[str, Any] | None = None
     model: str | None = None
-    max_steps: int = 50
+    max_steps: int = 25
     multi_agent: bool = False
     auto_route: bool = True
     report_dir: str | None = None
@@ -70,7 +70,7 @@ class InvestigationRequest:
             alert=data["alert"],
             correlation_context=data.get("correlation_context"),
             model=model,
-            max_steps=data.get("max_steps", 50),
+            max_steps=data.get("max_steps", 25),
             multi_agent=data.get("multi_agent", False),
             auto_route=data.get("auto_route", True),
             report_dir=data.get("report_dir")

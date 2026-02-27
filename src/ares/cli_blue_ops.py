@@ -46,7 +46,7 @@ async def submit(
         str, cyclopts.Parameter(help="Investigation ID (auto-generated if not provided)")
     ] = "",
     model: Annotated[str, cyclopts.Parameter(help="LLM model to use")] = "",
-    max_steps: Annotated[int, cyclopts.Parameter(help="Maximum agent steps")] = 50,
+    max_steps: Annotated[int, cyclopts.Parameter(help="Maximum agent steps")] = 25,
     multi_agent: Annotated[bool, cyclopts.Parameter(help="Force multi-agent mode")] = False,
     auto_route: Annotated[
         bool, cyclopts.Parameter(help="Auto-route HIGH/CRITICAL to multi-agent")
@@ -880,7 +880,7 @@ async def from_operation(
     *,
     latest: Annotated[bool, cyclopts.Parameter(help="Use latest red team operation")] = False,
     model: Annotated[str, cyclopts.Parameter(help="LLM model to use")] = "",
-    max_steps: Annotated[int, cyclopts.Parameter(help="Maximum agent steps")] = 50,
+    max_steps: Annotated[int, cyclopts.Parameter(help="Maximum agent steps")] = 25,
     grafana_url: Annotated[str, cyclopts.Parameter(help="Grafana URL")] = "",
     grafana_api_key: Annotated[str, cyclopts.Parameter(help="Grafana API key")] = "",
     redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
