@@ -774,39 +774,56 @@ async def run_blue_global_worker(
 
 
 async def _load_mcp_tools(grafana_url: str | None = None) -> list:
-    """Attempt to load MCP tools from mcp-grafana.
+    """Load MCP tools from mcp-grafana using the pooled connection.
 
-    Returns empty list if MCP not available.
+    Uses the same MCP connection approach as the orchestrator (rigging.mcp) to ensure:
+    - Proper credentials are passed (GRAFANA_URL, GRAFANA_SERVICE_ACCOUNT_TOKEN)
+    - Tools are returned in the correct format (callable tool objects, not descriptors)
+    - Connection pooling is used for efficiency
+
+    Returns empty list if MCP not available or credentials missing.
     """
-    mcp_tools: list = []
-
     try:
-        from dreadnode.mcp import connect_stdio
+        from ares.tools.blue.grafana import connect_grafana_mcp
 
-        # Check if mcp-grafana is available
-        mcp_grafana_path = os.environ.get("MCP_GRAFANA_PATH", "mcp-grafana")
+        # Get credentials from env (may have been loaded from investigation config)
+        grafana_url = grafana_url or os.environ.get("GRAFANA_URL", "")
+        grafana_api_key = os.environ.get("GRAFANA_SERVICE_ACCOUNT_TOKEN", "") or os.environ.get(
+            "GRAFANA_API_KEY", ""
+        )
 
-        # Try to connect
-        logger.info(f"Attempting to load MCP tools from {mcp_grafana_path}")
-        mcp_client = await connect_stdio(mcp_grafana_path)
+        if not grafana_url:
+            logger.warning("GRAFANA_URL not set - MCP tools not available")
+            return []
 
-        if mcp_client:
-            # Get tools from MCP
-            tools = await mcp_client.list_tools()
-            if tools:
-                mcp_tools = list(tools)
-                logger.info(f"Loaded {len(mcp_tools)} MCP tools from mcp-grafana")
-            else:
-                logger.warning("MCP connected but no tools available")
+        if not grafana_api_key:
+            logger.warning("GRAFANA_SERVICE_ACCOUNT_TOKEN not set - MCP tools not available")
+            return []
 
-    except ImportError:
-        logger.debug("dreadnode MCP not available")
+        logger.info(f"Loading MCP tools from mcp-grafana (grafana_url={grafana_url[:50]}...)")
+
+        # Use the same pooled connection as the orchestrator
+        # This returns a rigging MCP client with callable tool objects
+        mcp_client = await connect_grafana_mcp(
+            grafana_url=grafana_url,
+            grafana_api_key=grafana_api_key,
+        )
+
+        if mcp_client and mcp_client.tools:
+            logger.success(f"Loaded {len(mcp_client.tools)} MCP tools from mcp-grafana")
+            return mcp_client.tools
+
+        logger.warning("MCP connected but no tools available")
+        return []
+
     except FileNotFoundError:
-        logger.warning("mcp-grafana binary not found")
+        logger.warning(
+            "mcp-grafana binary not found - install with: go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest"
+        )
     except Exception as e:
         logger.warning(f"Failed to load MCP tools: {e}")
 
-    return mcp_tools
+    return []
 
 
 __all__ = [
