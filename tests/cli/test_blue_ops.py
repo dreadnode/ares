@@ -5,7 +5,7 @@ Tests for the from-operation command and related helpers.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -60,7 +60,7 @@ class TestGetLatestOperationId:
             if "op-running" in key:
                 return {"started_at": now.isoformat()}
             if "op-completed" in key:
-                return {"started_at": (now.replace(hour=now.hour - 1)).isoformat()}
+                return {"started_at": (now - timedelta(hours=1)).isoformat()}
             return {}
 
         mock_client.hgetall = mock_hgetall
