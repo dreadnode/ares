@@ -7,6 +7,7 @@ credentials, attack paths, and MITRE ATT&CK mapping.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,36 @@ from ares.core.templates import get_template_loader
 
 if TYPE_CHECKING:
     from ares.core.models import SharedRedTeamState
+
+
+def _parse_weakness_block(block: str) -> dict[str, str]:
+    """Parse a markdown weakness block into structured fields."""
+    result: dict[str, str] = {}
+    if not block:
+        return result
+
+    lines = block.strip().split("\n")
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+
+        # Parse title (### Title)
+        if stripped.startswith("### "):
+            result["title"] = stripped[4:].strip()
+        elif stripped.startswith("**") and ":**" not in stripped and stripped.endswith("**"):
+            result["title"] = stripped.strip("*").strip()
+
+        # Parse **Key:** Value patterns
+        elif ":**" in stripped:
+            clean = stripped.lstrip("-").strip()
+            match = re.match(r"\*\*([^*:]+):\*\*\s*(.*)$", clean)
+            if match:
+                key = match.group(1).strip().lower().replace(" ", "_")
+                value = match.group(2).strip()
+                result[key] = value
+
+    return result
 
 
 class RedTeamReportGenerator:
@@ -73,11 +104,34 @@ class RedTeamReportGenerator:
             if c.is_admin or c.username.lower() in ("administrator", "krbtgt")
         )
 
+        # Aggregate MITRE techniques from timeline events
+        all_techniques: set[str] = set(state.identified_techniques)
+        for event in state.operation_timeline:
+            if event.mitre_techniques:
+                all_techniques.update(event.mitre_techniques)
+
+        # Build discovered vulnerabilities list for template
+        discovered_vulns = []
+        for vuln_id, vuln in state.discovered_vulnerabilities.items():
+            discovered_vulns.append(
+                {
+                    "vuln_id": vuln_id,
+                    "vuln_type": vuln.vuln_type,
+                    "target": vuln.target,
+                    "priority": vuln.priority,
+                    "exploited": vuln_id in state.exploited_vulnerabilities,
+                    "details": vuln.details or "",
+                }
+            )
+        discovered_vulns.sort(key=lambda v: v.get("priority", 999))  # type: ignore[arg-type,return-value]
+
         # Render the report using the template
+        target_ips = state.target_ips or ([state.target.ip] if state.target else [])
         return self.loader.render(
             "redteam/reports/operation_summary.md.jinja",
             operation_id=state.operation_id,
             target_ip=state.target.ip if state.target else "Unknown",
+            target_ips=target_ips,
             started_at=state.started_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
             completed_at=completed_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
             duration=duration_str,
@@ -96,9 +150,10 @@ class RedTeamReportGenerator:
             users=unique_users,
             credentials=unique_creds,
             shares=state.all_shares,
-            weaknesses=state.all_weaknesses,
+            weaknesses=[_parse_weakness_block(w) for w in state.all_weaknesses],
+            discovered_vulns=discovered_vulns,
             timeline=state.operation_timeline,
-            techniques_identified=state.identified_techniques,
+            techniques_identified=sorted(all_techniques),
         )
 
     def _generate_executive_summary(self, state: SharedRedTeamState) -> str:
@@ -113,20 +168,41 @@ class RedTeamReportGenerator:
         if state.report_summary:
             return state.report_summary
 
+        # Deduplicate credentials (case-insensitive on domain+username+password)
+        # Must match generate() deduplication logic
+        seen_creds: set[tuple[str, str, str]] = set()
+        unique_creds = []
+        for cred in state.all_credentials:
+            cred_key = (cred.domain.lower(), cred.username.lower(), cred.password)
+            if cred_key not in seen_creds:
+                seen_creds.add(cred_key)
+                unique_creds.append(cred)
+
         # Calculate counts from SharedRedTeamState
         host_count = len(state.all_hosts)
-        credential_count = len(state.all_credentials)
-        admin_count = sum(1 for c in state.all_credentials if c.is_admin)
+        credential_count = len(unique_creds)
+        # Count admins - check is_admin flag OR known admin usernames (match generate())
+        admin_count = sum(
+            1
+            for c in unique_creds
+            if c.is_admin or c.username.lower() in ("administrator", "krbtgt")
+        )
         vulnerability_count = len(state.discovered_vulnerabilities)
         exploited_count = len(state.exploited_vulnerabilities)
 
         summary_parts = []
 
         # Operation overview
-        target_ip = state.target.ip if state.target else "Unknown"
+        target_ips = state.target_ips or ([state.target.ip] if state.target else [])
+        if len(target_ips) > 1:
+            target_desc = f"**{len(target_ips)} targets** ({', '.join(target_ips[:3])}{'...' if len(target_ips) > 3 else ''})"
+        elif target_ips:
+            target_desc = f"target **{target_ips[0]}**"
+        else:
+            target_desc = "target **Unknown**"
         summary_parts.append(
-            f"Red team operation **{state.operation_id}** was executed against target "
-            f"**{target_ip}** in an Active Directory penetration testing engagement."
+            f"Red team operation **{state.operation_id}** was executed against {target_desc} "
+            f"in an Active Directory penetration testing engagement."
         )
 
         # Key achievements
@@ -143,11 +219,20 @@ class RedTeamReportGenerator:
         if achievements:
             summary_parts.append("\n\n**Key Achievements:**\n" + "\n".join(achievements))
 
+        # Deduplicate users (case-insensitive on domain+username) - match generate()
+        seen_users: set[tuple[str, str]] = set()
+        unique_user_count = 0
+        for user in state.all_users:
+            user_key = (user.domain.lower(), user.username.lower())
+            if user_key not in seen_users:
+                seen_users.add(user_key)
+                unique_user_count += 1
+
         # Discovery statistics
         summary_parts.append(
             f"\n\n**Discovery Statistics:**\n"
             f"- Hosts Discovered: {host_count}\n"
-            f"- User Accounts: {len(state.all_users)}\n"
+            f"- User Accounts: {unique_user_count}\n"
             f"- Network Shares: {len(state.all_shares)}\n"
             f"- Password Hashes: {len(state.all_hashes)}\n"
             f"- Vulnerabilities: {vulnerability_count}\n"
@@ -279,12 +364,14 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
     # Get target info
     target_ip = state.target.ip if state.target else "Unknown"
     target_domain = state.target.domain if state.target else "Unknown"
+    target_ips = state.target_ips or ([target_ip] if target_ip != "Unknown" else [])
 
     # Render the comprehensive report
     return loader.render(
         "redteam/reports/comprehensive_report.md.jinja",
         operation_id=state.operation_id,
         target_ip=target_ip,
+        target_ips=target_ips,
         target_domain=target_domain,
         started_at=state.started_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
         completed_at=completed_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -299,7 +386,7 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
         users=state.all_users,
         credentials=unique_creds,
         hashes=unique_hashes,
-        weaknesses=state.all_weaknesses,
+        weaknesses=[_parse_weakness_block(w) for w in state.all_weaknesses],
         timeline=timeline,
         techniques=sorted(all_techniques),
         discovered_vulns=discovered_vulns,

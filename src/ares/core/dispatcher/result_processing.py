@@ -22,7 +22,6 @@ from ares.core.models import (
     Share,
     TaskResult,
     TaskStatus,
-    User,
     VulnerabilityInfo,
 )
 
@@ -32,6 +31,95 @@ if TYPE_CHECKING:
 
 class ResultProcessingMixin:
     """Task result processing and data extraction."""
+
+    def _resolve_domain_from_target_host(self: RedTeamDispatcher, target_ip: str | None) -> str:
+        """Resolve the domain of a target host from its FQDN hostname.
+
+        When dumping hashes from a DC, the hashes belong to the domain that DC serves,
+        which may be a child domain different from the operation's target domain.
+
+        Resolution logic:
+        1. Look up the target IP in all_hosts
+        2. If hostname is an FQDN (contains '.'), extract domain from it
+        3. Otherwise fall back to operation's target domain
+
+        Args:
+            target_ip: IP address of the target host (from task params).
+
+        Returns:
+            The resolved domain (FQDN) or empty string if cannot be determined.
+        """
+        if not target_ip:
+            # Fall back to operation's target domain
+            if self.shared_state.target and self.shared_state.target.domain:
+                return self.shared_state.target.domain
+            return ""
+
+        # Look up host by IP
+        for host in self.shared_state.all_hosts:
+            if host.ip == target_ip:
+                hostname = (host.hostname or "").strip().lower()
+                if hostname and "." in hostname:
+                    # Extract domain from FQDN (e.g., "dc01.child.contoso.local" -> "child.contoso.local")
+                    parts = hostname.split(".", 1)
+                    if len(parts) > 1:
+                        domain = parts[1]
+                        logger.debug(
+                            f"Resolved domain from target host {target_ip} ({hostname}): {domain}"
+                        )
+                        return domain
+                break
+
+        # Fall back to operation's target domain
+        if self.shared_state.target and self.shared_state.target.domain:
+            return self.shared_state.target.domain
+        return ""
+
+    def _resolve_extracted_domain(
+        self: RedTeamDispatcher, extracted_domain: str, target_domain: str
+    ) -> str:
+        """Resolve the correct domain for extracted data, preferring target host FQDN over NetBIOS.
+
+        When tools run against a DC, the target host's domain (from its FQDN) is
+        authoritative. LLM often extracts NetBIOS names like "NORTH" from output like
+        "NORTH\\krbtgt:hash" or "NORTH\\jon.snow", but we should use the target DC's domain.
+
+        Resolution logic:
+        1. If extracted domain is empty → use target_domain
+        2. If extracted domain is FQDN (contains ".") → trust it
+        3. If extracted domain is NetBIOS AND target_domain FQDN matches → use target_domain
+        4. Otherwise → use extracted domain (will be resolved later)
+
+        Args:
+            extracted_domain: Domain extracted by LLM from tool output (may be NetBIOS).
+            target_domain: Domain resolved from target host's FQDN (authoritative).
+
+        Returns:
+            The resolved domain to use.
+        """
+        if not extracted_domain:
+            return target_domain
+
+        # If extracted domain is already an FQDN, trust it
+        if "." in extracted_domain:
+            return extracted_domain
+
+        # Extracted domain is NetBIOS (no ".") - check if target_domain matches
+        # Check if target_domain starts with the NetBIOS name
+        # e.g., extracted="north", target="north.sevenkingdoms.local" → match
+        if (
+            target_domain
+            and "." in target_domain
+            and target_domain.startswith(extracted_domain + ".")
+        ):
+            logger.debug(
+                f"Domain resolved: {extracted_domain} -> {target_domain} "
+                f"(NetBIOS matched target host FQDN)"
+            )
+            return target_domain
+
+        # No match - return extracted domain (will be resolved later)
+        return extracted_domain
 
     async def complete_task(
         self: RedTeamDispatcher,
@@ -225,6 +313,7 @@ class ResultProcessingMixin:
                 parent_credential_id,
                 parent_attack_step,
                 task_queue=task_queue,
+                target_ip=target_ip,
             )
 
         # Process additional result fields only on success
@@ -236,6 +325,7 @@ class ResultProcessingMixin:
                 parent_credential_id,
                 parent_attack_step,
                 task_queue=task_queue,
+                target_ip=target_ip,
             )
             output = self._extract_output_from_result(result)
         elif success and isinstance(result, str):
@@ -248,6 +338,7 @@ class ResultProcessingMixin:
                 parent_credential_id,
                 parent_attack_step,
                 task_queue=task_queue,
+                target_ip=target_ip,
             )
 
         # Auto-chain secretsdump after successful S4U attack (any task type with ccache output)
@@ -290,6 +381,7 @@ class ResultProcessingMixin:
         parent_credential_id: str | None = None,
         parent_attack_step: int = 0,
         task_queue: Any = None,
+        target_ip: str | None = None,
     ) -> None:
         """Process discovered_* fields from worker result.
 
@@ -300,6 +392,7 @@ class ResultProcessingMixin:
             parent_credential_id: ID of credential used to discover these items (for attack chain).
             parent_attack_step: Attack step of parent credential.
             task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
+            target_ip: IP of the target host (for resolving hash domain from FQDN).
         """
         discovered_hosts = result.get("discovered_hosts")
         if isinstance(discovered_hosts, list) and discovered_hosts:
@@ -393,12 +486,19 @@ class ResultProcessingMixin:
         # Instead, shares are extracted deterministically from raw output via
         # _extract_shares_from_output() in _process_output_text().
 
+        # Get fallback domain for users by resolving from target host's FQDN
+        # This correctly handles child domain DCs (e.g., winterfell serves north.sevenkingdoms.local)
+        target_domain = self._resolve_domain_from_target_host(target_ip)
+
         discovered_users = result.get("discovered_users")
         if isinstance(discovered_users, list):
             for u in discovered_users:
                 if not isinstance(u, dict):
                     continue
-                self._add_user(u.get("username", ""), u.get("domain", ""), source_agent)
+                # Resolve user domain: prefer target_domain FQDN over LLM-extracted NetBIOS
+                extracted_domain = u.get("domain", "").strip().lower()
+                user_domain = self._resolve_extracted_domain(extracted_domain, target_domain)
+                self._add_user(u.get("username", ""), user_domain, source_agent)
 
         # Process trusted domains (from BloodHound, nltest, etc.)
         trusted_domains = result.get("trusted_domains")
@@ -595,6 +695,7 @@ class ResultProcessingMixin:
         parent_credential_id: str | None = None,
         parent_attack_step: int = 0,
         task_queue: Any = None,
+        target_ip: str | None = None,
     ) -> None:
         """Process credential/hash/share fields from successful result.
 
@@ -605,14 +706,14 @@ class ResultProcessingMixin:
             parent_credential_id: ID of credential used to discover these items.
             parent_attack_step: Attack step of parent credential.
             task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
+            target_ip: IP of the target host (for resolving hash domain from FQDN).
         """
         # Calculate attack_step for discoveries (parent + 1)
         discovery_step = parent_attack_step + 1 if parent_credential_id else 0
 
-        # Get target domain for fallback when hash domain is empty
-        target_domain = ""
-        if self.shared_state.target and self.shared_state.target.domain:
-            target_domain = self.shared_state.target.domain
+        # Get fallback domain for hashes by resolving from target host's FQDN
+        # This correctly handles child domain DCs (e.g., winterfell serves north.sevenkingdoms.local)
+        target_domain = self._resolve_domain_from_target_host(target_ip)
 
         cred_data = result.get("credential")
         if isinstance(cred_data, dict):
@@ -647,8 +748,12 @@ class ResultProcessingMixin:
 
         hash_data = result.get("hash")
         if isinstance(hash_data, dict):
-            # Use target_domain as fallback when hash domain is empty
-            hash_domain = hash_data.get("domain", "") or target_domain
+            # Resolve hash domain: prefer target_domain FQDN over LLM-extracted NetBIOS
+            # When secretsdump runs against a DC, the target host's domain is authoritative.
+            # LLM often extracts "NORTH" (NetBIOS) from output like "NORTH\krbtgt:hash",
+            # but we should use "north.sevenkingdoms.local" from the DC's FQDN.
+            extracted_domain = hash_data.get("domain", "").strip().lower()
+            hash_domain = self._resolve_extracted_domain(extracted_domain, target_domain)
             hash_obj = Hash(
                 username=hash_data.get("username", ""),
                 hash_value=hash_data.get("hash_value", ""),
@@ -668,8 +773,9 @@ class ResultProcessingMixin:
             for h in hashes_data:
                 if not isinstance(h, dict):
                     continue
-                # Use target_domain as fallback when hash domain is empty
-                hash_domain = h.get("domain", "") or target_domain
+                # Resolve hash domain: prefer target_domain FQDN over LLM-extracted NetBIOS
+                extracted_domain = h.get("domain", "").strip().lower()
+                hash_domain = self._resolve_extracted_domain(extracted_domain, target_domain)
                 hash_obj = Hash(
                     username=h.get("username", ""),
                     hash_value=h.get("hash_value", ""),
@@ -706,6 +812,7 @@ class ResultProcessingMixin:
         parent_credential_id: str | None = None,
         parent_attack_step: int = 0,
         task_queue: Any = None,
+        target_ip: str | None = None,
     ) -> None:
         """Process raw output text to extract discoveries.
 
@@ -715,10 +822,11 @@ class ResultProcessingMixin:
             parent_credential_id: ID of credential used to run the command (for attack chain).
             parent_attack_step: Attack step of parent credential.
             task_queue: Optional task queue for direct dispatch (threaded consumer passes its own).
+            target_ip: IP of the target host (for resolving hash domain from FQDN).
         """
-        domain = ""
-        if self.shared_state.target and self.shared_state.target.domain:
-            domain = self.shared_state.target.domain
+        # Resolve domain from target host's FQDN (e.g., dc01.child.contoso.local -> child.contoso.local)
+        # This correctly handles child domain DCs instead of defaulting to operation's target domain
+        domain = self._resolve_domain_from_target_host(target_ip)
 
         for host in self._extract_hosts_from_output(output):
             # Use publish_host to ensure checkpoint is triggered for merged data
@@ -879,41 +987,21 @@ class ResultProcessingMixin:
     def _add_user(self: RedTeamDispatcher, username: str, domain: str, source: str = "") -> bool:
         """Add a user to the shared state.
 
+        Delegates to SharedRedTeamState.add_user() which handles:
+        - Parent/child domain deduplication (prevents same user in both parent and child)
+        - Domain upgrade logic (child domain is more specific)
+        - Sibling domain conflict resolution
+        - NetBIOS to FQDN normalization
+
         Args:
             username: The username.
             domain: The domain.
             source: Tool/method that discovered this user.
+
+        Returns:
+            True if user was added, False if rejected or duplicate.
         """
-        if not username:
-            return False
-        normalized = username.strip()
-        if not normalized or normalized.lower() in {"(none)", "none", "null", "(null)"}:
-            return False
-        if "/" in normalized or "\\" in normalized or normalized.endswith(".txt"):
-            return False
-        # Skip machine accounts (ending in $) - these are computer accounts, not users
-        if normalized.endswith("$"):
-            return False
-        # Filter out tool output artifacts that look like usernames but are actually
-        # status messages or descriptions (e.g., "gpp_passwords_found" from netexec)
-        artifact_patterns = (
-            "_found",
-            "_failed",
-            "_success",
-            "_error",
-            "_status",
-            "passwords_",
-            "credentials_",
-            "hashes_",
-        )
-        normalized_lower = normalized.lower()
-        if any(pattern in normalized_lower for pattern in artifact_patterns):
-            return False
-        for existing in self.shared_state.all_users:
-            if existing.username == normalized and existing.domain == domain:
-                return False
-        self.shared_state.all_users.append(User(username=normalized, domain=domain, source=source))
-        return True
+        return self.shared_state.add_user(username, domain, source)
 
     def _extract_hosts_from_output(self: RedTeamDispatcher, output: str) -> list[Host]:
         """Extract hosts from netexec SMB output.
@@ -1703,10 +1791,10 @@ class ResultProcessingMixin:
                 discovered_by=source_agent,
             )
 
-            logger.warning(
-                f"🎫 Auto-queued {vuln_type} for {account} (target: {target_spn or 'any'})"
-            )
             if queued_vuln_id:
+                logger.warning(
+                    f"🎫 Auto-queued {vuln_type} for {account} (target: {target_spn or 'any'})"
+                )
                 queued += 1
 
             # Auto-dispatch S4U attack if we have credentials for constrained delegation

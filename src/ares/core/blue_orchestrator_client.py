@@ -20,7 +20,7 @@ async def submit_investigation(
     investigation_id: str | None = None,
     correlation_context: dict[str, Any] | None = None,
     model: str | None = None,
-    max_steps: int = 50,
+    max_steps: int = 25,
     multi_agent: bool = False,
     auto_route: bool = True,
     report_dir: str | None = None,

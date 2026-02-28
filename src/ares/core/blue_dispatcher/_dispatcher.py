@@ -186,7 +186,11 @@ class BlueTeamDispatcher(
                 },
             )
         except asyncio.TimeoutError:
-            logger.warning(f"Task {task_id} timed out after {timeout}s")
+            # Use DEBUG for short poll timeouts, WARNING for real timeouts
+            if timeout <= 30:
+                logger.debug(f"Task {task_id} poll timeout after {timeout}s (still running)")
+            else:
+                logger.warning(f"Task {task_id} timed out after {timeout}s")
             return {
                 "success": False,
                 "result": {},

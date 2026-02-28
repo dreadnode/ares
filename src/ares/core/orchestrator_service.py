@@ -114,6 +114,27 @@ class OrchestratorService:
     def _decode_redis_value(value: str | bytes) -> str:
         return value.decode() if isinstance(value, bytes) else str(value)
 
+    @staticmethod
+    def _unwrap_json_string(value: str) -> str:
+        """Unwrap a potentially double-encoded JSON string.
+
+        Some Redis values may be double-encoded (json.dumps called twice),
+        resulting in values like '"\"2026-02-22T21:32:56\""'. This function
+        repeatedly decodes until we get a non-JSON-string result.
+        """
+        result = value
+        for _ in range(3):  # Max 3 levels of encoding
+            try:
+                decoded = json.loads(result)
+                if isinstance(decoded, str):
+                    result = decoded
+                else:
+                    # Not a string, return as-is
+                    return result
+            except (json.JSONDecodeError, TypeError):
+                break
+        return result
+
     async def _get_checkpoint_time(self, op_id: str) -> datetime | None:
         if self.task_queue is None:
             return None
@@ -126,10 +147,8 @@ class OrchestratorService:
 
         checkpoint_str = self._decode_redis_value(started_at)
         # Decode JSON since set_meta uses json.dumps()
-        try:
-            checkpoint_str = json.loads(checkpoint_str)
-        except json.JSONDecodeError:
-            pass
+        # Handle potentially double-encoded strings from old data
+        checkpoint_str = self._unwrap_json_string(checkpoint_str)
         checkpoint_time = datetime.fromisoformat(checkpoint_str)
         if checkpoint_time.tzinfo is None:
             checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
@@ -491,12 +510,52 @@ class OrchestratorService:
         except Exception as e:
             logger.warning(f"Failed to persist model overrides for {operation_id}: {e}")
 
+    async def _persist_worker_credentials(
+        self, operation_id: str, request_env_vars: dict[str, str] | None
+    ) -> None:
+        """Persist API credentials so workers can authenticate with LLM providers."""
+        if not request_env_vars:
+            return
+        if not self.task_queue or not self.task_queue._client:
+            logger.warning("Cannot persist worker credentials: Redis client unavailable")
+            return
+
+        # Only persist API keys that workers need for LLM calls
+        credential_keys = {
+            "OPENAI_API_KEY",
+            "DREADNODE_API_KEY",
+            "ANTHROPIC_API_KEY",
+        }
+        credentials = {
+            key: value
+            for key, value in request_env_vars.items()
+            if value and key in credential_keys
+        }
+        if not credentials:
+            return
+
+        key = f"ares:op:{operation_id}:worker_credentials"
+        try:
+            await self.task_queue._client.set(key, json.dumps(credentials))
+            logger.debug(f"Persisted worker credentials: {list(credentials.keys())}")
+        except Exception as e:
+            logger.warning(f"Failed to persist worker credentials for {operation_id}: {e}")
+
     async def _process_operation_request(self, request_data: dict[str, Any]) -> None:
         """Process an operation request.
 
         Args:
             request_data: Operation request data from Redis
         """
+        # Extract operation_id early for logging context
+        operation_id = request_data.get("operation_id", "-")
+
+        # Use contextualize so all logs within this operation include the operation_id
+        with logger.contextualize(operation_id=operation_id):
+            await self._process_operation_request_inner(request_data)
+
+    async def _process_operation_request_inner(self, request_data: dict[str, Any]) -> None:
+        """Inner implementation of operation request processing (wrapped with logging context)."""
         started_at = datetime.now(timezone.utc)
         try:
             # Fetch env_vars from separate key if not in request (security: secrets stored separately)
@@ -530,6 +589,7 @@ class OrchestratorService:
             if request.model:
                 await self._persist_operation_model(request.operation_id, request.model)
             await self._persist_operation_model_overrides(request.operation_id, request.env_vars)
+            await self._persist_worker_credentials(request.operation_id, request.env_vars)
 
             openai_api_key = self._resolve_openai_api_key(request.env_vars)
 
@@ -682,11 +742,13 @@ async def main() -> None:
     # Get configuration from environment (operations_queue not in config system)
     operations_queue = os.getenv("OPERATIONS_QUEUE", "ares:operations")
 
-    # Setup logging
+    # Setup logging with operation_id support
     logger.remove()
+    # Patcher ensures operation_id always has a default value
+    logger.configure(patcher=lambda record: record["extra"].setdefault("operation_id", "-"))
     logger.add(
         sys.stderr,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>[{extra[operation_id]}]</cyan> - <level>{message}</level>",
         level=os.getenv("LOG_LEVEL", "INFO"),
     )
 

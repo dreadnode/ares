@@ -16,11 +16,13 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from ares.core.config import get_default_max_retries
-from ares.core.models import SharedRedTeamState, TaskStatus
+from ares.core.models import SharedRedTeamState, TaskStatus, TimelineEvent
 from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue
 
 if TYPE_CHECKING:
+    from redis.asyncio import Redis
+
     from ares.core.k8s_executor import KubernetesPodExecutor
 
 
@@ -72,11 +74,18 @@ class OperationRecoveryManager:
         """
         self._k8s = k8s_executor
         self._redis_url = redis_url
-        self._redis_client = None
+        self._redis_client: Redis | None = None
         self._connected = False
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_task: asyncio.Task | None = None
         self._running = False
+
+    @property
+    def redis_client(self) -> Redis:
+        """Get the Redis client. Raises RuntimeError if not connected."""
+        if self._redis_client is None:
+            raise RuntimeError("Redis not connected. Call _ensure_connected() first.")
+        return self._redis_client
 
     def _is_connection_error(self, error: Exception) -> bool:
         """Check if an exception is a connection-related error."""
@@ -191,7 +200,7 @@ class OperationRecoveryManager:
 
         # Check if Redis-native keys exist for this operation
         meta_key = f"ares:op:{operation_id}:meta"
-        has_data = await self._redis_client.exists(meta_key)
+        has_data = await self.redis_client.exists(meta_key)
 
         if not has_data:
             raise RecoveryError(f"No state found for operation {operation_id}")
@@ -201,7 +210,7 @@ class OperationRecoveryManager:
 
             # Create state with backend - data is already in Redis
             state = SharedRedTeamState(operation_id=operation_id)
-            backend = RedisStateBackend(self._redis_client, operation_id)
+            backend = RedisStateBackend(self.redis_client, operation_id)
             state.set_backend(backend)
 
             # Load all data from Redis into memory for sync access
@@ -256,7 +265,11 @@ class OperationRecoveryManager:
         await state.load_persistence_tracking_from_backend()
 
         # Load meta fields
-        state.has_domain_admin, state.domain_admin_path = await backend.get_domain_admin()
+        (
+            state.has_domain_admin,
+            state.domain_admin_path,
+            state.da_hash_id,
+        ) = await backend.get_domain_admin()
         state.has_golden_ticket = await backend.get_meta("has_golden_ticket", default=False)
         completed_at_str = await backend.get_meta("completed_at")
         if completed_at_str:
@@ -276,6 +289,25 @@ class OperationRecoveryManager:
         # Load artifacts
         artifacts = await backend.get_all_artifacts()
         state.downloaded_artifacts.update(artifacts)
+
+        # Load timeline events
+        timeline_events = await backend.get_timeline_events()
+        for event_dict in timeline_events:
+            try:
+                event = TimelineEvent(
+                    id=event_dict.get("id", ""),
+                    timestamp=datetime.fromisoformat(event_dict["timestamp"]),
+                    description=event_dict.get("description", ""),
+                    evidence_ids=event_dict.get("evidence_ids", []),
+                    mitre_techniques=event_dict.get("mitre_techniques", []),
+                    confidence=event_dict.get("confidence", 0.5),
+                    source=event_dict.get("source", "investigation"),
+                )
+                state.operation_timeline.append(event)
+            except (KeyError, ValueError) as e:
+                logger.warning(f"Failed to deserialize timeline event: {e}")
+        if timeline_events:
+            logger.info(f"Loaded {len(state.operation_timeline)} timeline events from Redis")
 
     def _dedupe_hashes(self, hashes: list) -> list:
         """Deduplicate hashes, keeping first occurrence.
@@ -445,7 +477,7 @@ class OperationRecoveryManager:
 
         try:
             key = f"ares:op:{operation_id}:meta"
-            return await self._redis_client.exists(key) > 0
+            return await self.redis_client.exists(key) > 0
         except Exception as e:
             if self._is_connection_error(e):
                 self._handle_connection_error(e)
@@ -467,7 +499,7 @@ class OperationRecoveryManager:
         try:
             from ares.core.state_backend import RedisStateBackend
 
-            backend = RedisStateBackend(self._redis_client, operation_id)
+            backend = RedisStateBackend(self.redis_client, operation_id)
             deleted = await backend.delete_all_keys()
             logger.info(f"Deleted {deleted} keys for operation {operation_id}")
             return deleted > 0
@@ -514,7 +546,7 @@ class OperationRecoveryManager:
         try:
             # Scan for operation meta keys
             operations = []
-            async for key in self._redis_client.scan_iter("ares:op:*:meta"):
+            async for key in self.redis_client.scan_iter("ares:op:*:meta"):
                 # Extract operation ID from key
                 key_str = key.decode() if isinstance(key, bytes) else key
                 parts = key_str.split(":")
@@ -551,7 +583,7 @@ class OperationRecoveryManager:
 
         try:
             # Scan for operation meta keys
-            async for key in self._redis_client.scan_iter("ares:op:*:meta"):
+            async for key in self.redis_client.scan_iter("ares:op:*:meta"):
                 key_str = key.decode() if isinstance(key, bytes) else key
                 parts = key_str.split(":")
                 if len(parts) >= 3:

@@ -274,6 +274,45 @@ class TestReportWithTechniques:
         # Techniques should be in the report
         assert "T1046" in report or "T1003" in report or "technique" in report.lower()
 
+    def test_techniques_aggregated_from_timeline_events(self, generator: RedTeamReportGenerator):
+        """Test that techniques from timeline events are aggregated into the report."""
+        from ares.core.models import TimelineEvent
+
+        # Create state with NO identified_techniques but WITH timeline events that have techniques
+        state = SharedRedTeamState(
+            operation_id="op-test-timeline-agg",
+            target=Target(
+                ip="192.168.58.100",
+                hostname="dc01.contoso.local",
+                domain="contoso.local",
+            ),
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            identified_techniques=set(),  # Empty!
+            operation_timeline=[
+                TimelineEvent(
+                    id="evt-001",
+                    timestamp=datetime.now(timezone.utc),
+                    description="Hash discovered via Kerberoast",
+                    mitre_techniques=["T1558.003"],
+                    source="ares-privesc",
+                ),
+                TimelineEvent(
+                    id="evt-002",
+                    timestamp=datetime.now(timezone.utc),
+                    description="Credential found in SYSVOL",
+                    mitre_techniques=["T1552.006"],
+                    source="ares-recon",
+                ),
+            ],
+        )
+
+        report = generator.generate(state)
+
+        # Both techniques from timeline should appear in the Techniques Identified section
+        assert "T1558.003" in report
+        assert "T1552.006" in report
+
 
 class TestEdgeCases:
     """Edge case tests for report generation."""

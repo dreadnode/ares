@@ -70,15 +70,16 @@ class PublishingMixin:
             import uuid
             from datetime import datetime, timezone
 
-            self.shared_state.operation_timeline.append(
-                TimelineEvent(
-                    id=f"evt-cred-{uuid.uuid4().hex[:8]}",
-                    timestamp=datetime.now(timezone.utc),
-                    source=source_agent,
-                    description=f"Credential discovered: {credential.domain}\\{credential.username} via {credential.source}",
-                    mitre_techniques=["T1078"] if is_admin else ["T1552"],
-                )
+            timeline_event = TimelineEvent(
+                id=f"evt-cred-{uuid.uuid4().hex[:8]}",
+                timestamp=datetime.now(timezone.utc),
+                source=source_agent,
+                description=f"Credential discovered: {credential.domain}\\{credential.username} via {credential.source}",
+                mitre_techniques=["T1078"] if is_admin else ["T1552"],
             )
+            self.shared_state.operation_timeline.append(timeline_event)
+            # Persist timeline event to Redis
+            await self._persist_timeline_event(timeline_event, task_queue)
             is_main_thread = threading.current_thread() is threading.main_thread()
             if is_main_thread:
                 await self._checkpoint()
@@ -245,15 +246,16 @@ class PublishingMixin:
             )
             if is_critical:
                 event_desc = f"CRITICAL: {event_desc}"
-            self.shared_state.operation_timeline.append(
-                TimelineEvent(
-                    id=f"evt-hash-{uuid.uuid4().hex[:8]}",
-                    timestamp=datetime.now(timezone.utc),
-                    source=source_agent,
-                    description=event_desc,
-                    mitre_techniques=["T1003"],  # OS Credential Dumping
-                )
+            timeline_event = TimelineEvent(
+                id=f"evt-hash-{uuid.uuid4().hex[:8]}",
+                timestamp=datetime.now(timezone.utc),
+                source=source_agent,
+                description=event_desc,
+                mitre_techniques=["T1003"],  # OS Credential Dumping
             )
+            self.shared_state.operation_timeline.append(timeline_event)
+            # Persist timeline event to Redis
+            await self._persist_timeline_event(timeline_event, task_queue)
             if is_main_thread:
                 await self._checkpoint()
             # CRITICAL: Persist directly to Redis using the threaded consumer's client.
@@ -275,7 +277,9 @@ class PublishingMixin:
                         and self.shared_state.has_domain_admin
                     ):
                         await backend.set_domain_admin(
-                            achieved=True, path=self.shared_state.domain_admin_path
+                            achieved=True,
+                            path=self.shared_state.domain_admin_path,
+                            da_hash_id=self.shared_state.da_hash_id,
                         )
                         logger.success(
                             "✅ Domain Admin status persisted directly to Redis (krbtgt found)"
@@ -1125,6 +1129,52 @@ class PublishingMixin:
                     )
                 except Exception as e:
                     logger.error(f"Failed to auto-exploit constrained delegation: {e}")
+
+    async def _persist_timeline_event(
+        self: RedTeamDispatcher,
+        event: TimelineEvent,
+        task_queue: Any = None,
+    ) -> None:
+        """Persist a timeline event to Redis.
+
+        Works from both main thread (using backend) and threaded consumer
+        (using task_queue.redis).
+
+        Args:
+            event: The TimelineEvent to persist.
+            task_queue: Optional task queue for threaded dispatch.
+        """
+        # Serialize TimelineEvent to dict
+        event_dict = {
+            "id": event.id,
+            "timestamp": event.timestamp.isoformat(),
+            "description": event.description,
+            "evidence_ids": event.evidence_ids,
+            "mitre_techniques": event.mitre_techniques,
+            "confidence": event.confidence,
+            "source": event.source,
+        }
+
+        is_main_thread = threading.current_thread() is threading.main_thread()
+        backend = getattr(self.shared_state, "_backend", None)
+
+        if is_main_thread and backend:
+            # Main thread: use the shared state backend
+            try:
+                await backend.add_timeline_event(event_dict)
+            except Exception as e:
+                logger.warning(f"Failed to persist timeline event via backend: {e}")
+        elif task_queue is not None:
+            # Threaded consumer: use task_queue.redis directly
+            try:
+                from ares.core.state_backend import RedisStateBackend
+
+                threaded_backend = RedisStateBackend(
+                    task_queue.redis, self.shared_state.operation_id
+                )
+                await threaded_backend.add_timeline_event(event_dict)
+            except Exception as e:
+                logger.warning(f"Failed to persist timeline event via task_queue: {e}")
 
     async def _load_mssql_enum_dispatched(self: RedTeamDispatcher) -> None:
         """Load MSSQL enum dispatch tracking from Redis backend.

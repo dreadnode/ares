@@ -29,6 +29,9 @@ class PersistenceMixin:
     Checkpoint fallback for threaded consumer mutations.
     """
 
+    # Type hints for mixin compatibility with RedTeamDispatcher
+    _shared_state: SharedRedTeamState | None
+
     async def _persist_collection(
         self: RedTeamDispatcher,
         key: str,
@@ -39,7 +42,7 @@ class PersistenceMixin:
         """Persist a collection to Redis LIST using clear-and-rewrite."""
         if not items:
             return
-        pipe = self._redis_client.pipeline()
+        pipe = self.redis_client.pipeline()
         pipe.delete(key)
         for item in items:
             pipe.rpush(key, serializer(item))
@@ -66,9 +69,9 @@ class PersistenceMixin:
 
         from ares.core.state_backend import RedisStateBackend
 
-        backend = RedisStateBackend(self._redis_client, self.shared_state.operation_id)
+        backend = RedisStateBackend(self.redis_client, self.shared_state.operation_id)
 
-        pipe = self._redis_client.pipeline()
+        pipe = self.redis_client.pipeline()
         # NO DELETE - additive HSET preserves worker-persisted credentials
         for cred in credentials:
             dedup_key = backend._build_credential_dedup_key(cred)
@@ -96,9 +99,9 @@ class PersistenceMixin:
         from ares.core.state_backend import RedisStateBackend
 
         # Create a temporary backend instance just for building dedup keys
-        backend = RedisStateBackend(self._redis_client, self.shared_state.operation_id)
+        backend = RedisStateBackend(self.redis_client, self.shared_state.operation_id)
 
-        pipe = self._redis_client.pipeline()
+        pipe = self.redis_client.pipeline()
         # NO DELETE - additive HSET preserves worker-persisted hashes
         for h in hashes:
             hash_type = (h.hash_type or "").strip().lower()
@@ -110,15 +113,62 @@ class PersistenceMixin:
         pipe.expire(key, ttl)
         await pipe.execute()
 
+    async def _persist_shares(
+        self: RedTeamDispatcher,
+        key: str,
+        shares: list[Any],
+        serializer: Callable[[Any], str],
+        ttl: int,
+    ) -> None:
+        """Persist shares to Redis HASH using HSET (additive, no delete).
+
+        Uses host:name as dedup key to prevent duplicates.
+
+        CRITICAL: NO DELETE! Workers persist directly to Redis, orchestrator's
+        in-memory state may not have worker shares yet. DELETE would wipe them.
+        """
+        if not shares:
+            return
+
+        pipe = self.redis_client.pipeline()
+        # NO DELETE - additive HSET preserves worker-persisted shares
+        for share in shares:
+            host = (share.host or "").strip().lower()
+            name = (share.name or "").strip().lower()
+            dedup_key = f"{host}:{name}"
+            pipe.hset(key, dedup_key, serializer(share))
+        pipe.expire(key, ttl)
+        await pipe.execute()
+
     async def _persist_set_additive(
         self: RedTeamDispatcher, key: str, items: list | set, ttl: int
     ) -> None:
         """Persist items to a Redis SET using SADD (additive, no delete)."""
         if not items:
             return
-        pipe = self._redis_client.pipeline()
+        pipe = self.redis_client.pipeline()
         for item in items:
             pipe.sadd(key, item)
+        pipe.expire(key, ttl)
+        await pipe.execute()
+
+    async def _persist_weaknesses(
+        self: RedTeamDispatcher, key: str, weaknesses: list[str], ttl: int
+    ) -> None:
+        """Persist weaknesses to Redis HASH using dedup key (additive, no delete).
+
+        Uses normalized dedup keys extracted from weakness content to prevent
+        semantically identical weaknesses with different wording from being stored
+        as duplicates.
+        """
+        if not weaknesses:
+            return
+
+        pipe = self.redis_client.pipeline()
+        # NO DELETE - additive HSET preserves worker-persisted weaknesses
+        for weakness in weaknesses:
+            dedup_key = self.shared_state._extract_weakness_dedup_key(weakness)
+            pipe.hset(key, dedup_key, weakness)
         pipe.expire(key, ttl)
         await pipe.execute()
 
@@ -128,7 +178,7 @@ class PersistenceMixin:
         """Persist items to a Redis HASH using HSET (additive, no delete)."""
         if not items:
             return
-        pipe = self._redis_client.pipeline()
+        pipe = self.redis_client.pipeline()
         for item_key, item in items.items():
             pipe.hset(key, item_key, serializer(item))
         pipe.expire(key, ttl)
@@ -272,7 +322,7 @@ class PersistenceMixin:
             return
 
         pending_key = f"ares:op:{op_id}:pending_tasks"
-        pipe = self._redis_client.pipeline()
+        pipe = self.redis_client.pipeline()
         # NO DELETE - additive HSET preserves tasks already in Redis
         # Snapshot to avoid "dict changed size during iteration"
         for task_id, task_info in list(self.shared_state.pending_tasks.items()):
@@ -285,7 +335,7 @@ class PersistenceMixin:
         if not self.shared_state.completed_tasks:
             return
         completed_key = f"ares:op:{op_id}:completed_tasks"
-        pipe = self._redis_client.pipeline()
+        pipe = self.redis_client.pipeline()
         # Snapshot to avoid "dict changed size during iteration"
         for task_id, task_result in list(self.shared_state.completed_tasks.items()):
             result_dict = {
@@ -325,11 +375,13 @@ class PersistenceMixin:
 
             ttl = backend.DEFAULT_TTL
 
-            # Persist list collections (clear-and-rewrite)
+            # Persist hosts (clear-and-rewrite - hosts only added by orchestrator)
             await self._persist_collection(
                 f"ares:op:{op_id}:hosts", self.shared_state.all_hosts, _serialize_host, ttl
             )
-            await self._persist_collection(
+
+            # Persist shares using HASH (additive, no delete - preserves worker data)
+            await self._persist_shares(
                 f"ares:op:{op_id}:shares", self.shared_state.all_shares, _serialize_share, ttl
             )
 
@@ -344,10 +396,11 @@ class PersistenceMixin:
                 f"ares:op:{op_id}:hashes", self.shared_state.all_hashes, _serialize_hash, ttl
             )
 
-            # Persist SET collections (additive, no delete - preserves worker data)
-            await self._persist_set_additive(
+            # Persist weaknesses using HASH with normalized dedup keys (additive, no delete)
+            await self._persist_weaknesses(
                 f"ares:op:{op_id}:weaknesses", self.shared_state.all_weaknesses, ttl
             )
+            # Persist exploited vulnerabilities SET (additive, no delete)
             await self._persist_set_additive(
                 f"ares:op:{op_id}:exploited", self.shared_state.exploited_vulnerabilities, ttl
             )

@@ -56,6 +56,8 @@ from ares.core.task_queue import TaskResult as QueueTaskResult
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from redis.asyncio import Redis
+
 
 class RedTeamDispatcher(
     ThrottlingMixin,
@@ -109,7 +111,7 @@ class RedTeamDispatcher(
         self._task_callbacks: dict[str, Callable] = {}
         self._running = False
         self._redis_url = redis_url
-        self._redis_client = None
+        self._redis_client: Redis | None = None
         self._heartbeat_task: asyncio.Task | None = None
         self._agent_heartbeat_timeout = get_agent_heartbeat_timeout()
         self._credential_access_event = asyncio.Event()
@@ -330,6 +332,13 @@ class RedTeamDispatcher(
         if self._shared_state is None:
             raise RuntimeError("Dispatcher not started. Call start() first.")
         return self._shared_state
+
+    @property
+    def redis_client(self) -> Redis:
+        """Get the Redis client. Raises RuntimeError if not connected."""
+        if self._redis_client is None:
+            raise RuntimeError("Redis not connected. Call start() first.")
+        return self._redis_client
 
     @property
     def task_queue(self) -> RedisTaskQueue | None:

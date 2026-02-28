@@ -33,6 +33,7 @@ class BlueWorkerCallbackTools(Toolset):  # type: ignore[misc]
     _result_data: dict[str, Any]
 
     def __init__(self) -> None:
+        super().__init__()
         self._result_data = {}
 
     def set_completion_event(self, event: asyncio.Event) -> None:

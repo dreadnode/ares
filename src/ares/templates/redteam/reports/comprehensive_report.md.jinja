@@ -1,9 +1,13 @@
 # Red Team Operation Report
 
 **Operation ID**: {{ operation_id }}
-**Target**: {{ target_ip }} ({{ target_domain }})
+
+**Target{% if target_ips|length > 1 %}s{% endif %}**: {% if target_ips %}{{ target_ips | join(', ') }}{% else %}{{ target_ip }}{% endif %} ({{ target_domain }})
+
 **Started**: {{ started_at }}
+
 **Completed**: {{ completed_at }}
+
 **Duration**: {{ duration }}
 
 ---
@@ -149,9 +153,10 @@ No specific vulnerabilities discovered.
 ### Security Weaknesses
 
 {% if weaknesses %}
-{% for weakness in weaknesses %}
-{{ weakness }}
-
+| Finding | Affected Resource | Discovery Method | Impact |
+|---------|-------------------|------------------|--------|
+{% for w in weaknesses %}
+| **{{ w.title or 'Unknown' }}**<br>{{ w.vulnerability or '-' }} | {{ w.affected_resource or '-' }} | {{ w.discovery_method or '-' }} | {{ w.impact or '-' }} |
 {% endfor %}
 {% else %}
 No significant weaknesses recorded.

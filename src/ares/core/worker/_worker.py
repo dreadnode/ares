@@ -51,6 +51,7 @@ from ares.core.worker.operations import (
     get_active_operation_pointer,
     get_operation_model,
     get_operation_model_overrides,
+    get_worker_credentials,
     is_operation_completed,
 )
 from ares.core.worker.prompts import (
@@ -910,7 +911,11 @@ class RedisWorkerAgent:
             fresh.all_users.extend(await backend.get_users())
             fresh.all_shares.extend(await backend.get_shares())
             fresh.all_domains.extend(await backend.get_domains())
-            fresh.has_domain_admin, fresh.domain_admin_path = await backend.get_domain_admin()
+            (
+                fresh.has_domain_admin,
+                fresh.domain_admin_path,
+                fresh.da_hash_id,
+            ) = await backend.get_domain_admin()
             fresh.has_golden_ticket = await backend.get_golden_ticket()
             # Load DC map for child domain resolution
             fresh.domain_controllers.update(await backend.get_all_dcs())
@@ -1762,7 +1767,11 @@ class RedisWorkerAgent:
             fresh.all_users.extend(await backend.get_users())
             fresh.all_shares.extend(await backend.get_shares())
             fresh.all_domains.extend(await backend.get_domains())
-            fresh.has_domain_admin, fresh.domain_admin_path = await backend.get_domain_admin()
+            (
+                fresh.has_domain_admin,
+                fresh.domain_admin_path,
+                fresh.da_hash_id,
+            ) = await backend.get_domain_admin()
             fresh.has_golden_ticket = await backend.get_golden_ticket()
             # Load DC map for child domain resolution
             fresh.domain_controllers.update(await backend.get_all_dcs())
@@ -2232,6 +2241,22 @@ async def run_worker(
                 "or submit an operation model."
             )
             return
+
+        # Fetch and set worker credentials (API keys) from Redis
+        # These are persisted by the orchestrator when the operation starts
+        credentials = await get_worker_credentials(redis_url, operation_id)
+        if credentials:
+            for key, value in credentials.items():
+                if value and not os.environ.get(key):
+                    os.environ[key] = value
+                    logger.debug(f"Set credential from Redis: {key}")
+            logger.info(f"Loaded {len(credentials)} credentials from operation config")
+        # Check if we already have the key in env (e.g., mounted secret)
+        elif not os.environ.get("OPENAI_API_KEY"):
+            logger.warning(
+                "No worker credentials found in Redis and OPENAI_API_KEY not in environment. "
+                "LLM calls may fail."
+            )
 
         logger.info(f"Starting {role.value} worker for operation {operation_id}")
         logger.info(f"Pod: {pod_name}, Redis: {redis_url}, Redis Queue: {use_redis_queue}")

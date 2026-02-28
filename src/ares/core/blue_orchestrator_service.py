@@ -18,6 +18,7 @@ from typing import Any
 
 from loguru import logger
 
+from ares.core.blue_task_queue import BlueTaskQueue
 from ares.core.config import get_namespace, get_redis_url
 from ares.core.litellm_env import configure_litellm_env
 from ares.core.redis_client import invalidate_sentinel_client
@@ -43,7 +44,7 @@ class InvestigationRequest:
     alert: dict[str, Any]
     correlation_context: dict[str, Any] | None = None
     model: str | None = None
-    max_steps: int = 50
+    max_steps: int = 25
     multi_agent: bool = False
     auto_route: bool = True
     report_dir: str | None = None
@@ -69,7 +70,7 @@ class InvestigationRequest:
             alert=data["alert"],
             correlation_context=data.get("correlation_context"),
             model=model,
-            max_steps=data.get("max_steps", 50),
+            max_steps=data.get("max_steps", 25),
             multi_agent=data.get("multi_agent", False),
             auto_route=data.get("auto_route", True),
             report_dir=data.get("report_dir")
@@ -107,12 +108,23 @@ class BlueOrchestratorService:
         self.namespace = namespace or get_namespace()
         self.investigations_queue = investigations_queue
         self.task_queue: RedisTaskQueue | None = None
+        self.blue_task_queue: BlueTaskQueue | None = None
         self.running = False
         self._shutdown_event = asyncio.Event()
         self._report_dir = Path(os.environ.get("ARES_REPORT_DIR", "./reports"))
+        # Concurrent investigation processing (default 10 for better throughput)
+        self._max_concurrent = int(os.environ.get("ARES_BLUE_MAX_CONCURRENT", "10"))
+        self._active_investigations: set[asyncio.Task] = set()
         self._grafana_url = os.environ.get("GRAFANA_URL", "")
         self._grafana_api_key = os.environ.get("GRAFANA_SERVICE_ACCOUNT_TOKEN") or os.environ.get(
             "GRAFANA_API_KEY", ""
+        )
+        # Distributed workers mode - if True, register investigations for remote workers
+        # Supports both ARES_BLUE_DISTRIBUTED_WORKERS and COORDINATION_MODE env vars
+        distributed_env = os.environ.get("ARES_BLUE_DISTRIBUTED_WORKERS", "").lower()
+        coordination_mode = os.environ.get("COORDINATION_MODE", "").lower()
+        self._use_distributed_workers = (
+            distributed_env in ("1", "true", "yes") or coordination_mode == "distributed"
         )
 
     @staticmethod
@@ -130,6 +142,14 @@ class BlueOrchestratorService:
         self.task_queue = RedisTaskQueue(self.redis_url)
         await self.task_queue.connect()
         logger.success("Connected to Redis")
+
+        # Initialize BlueTaskQueue for investigation registration (distributed workers)
+        if self._use_distributed_workers:
+            self.blue_task_queue = BlueTaskQueue(self.redis_url)
+            await self.blue_task_queue.connect()
+            logger.info(
+                "Distributed workers mode enabled - will register investigations for remote workers"
+            )
 
         self.running = True
 
@@ -150,19 +170,45 @@ class BlueOrchestratorService:
             await self.shutdown()
 
     async def _run_service_loop(self) -> None:
-        """Main service loop - poll for investigations."""
+        """Main service loop - poll for investigations and process concurrently."""
         import time
 
         last_successful_poll = time.monotonic()
         stale_connection_threshold = 30.0
 
+        logger.info(f"Concurrent investigation limit: {self._max_concurrent}")
+
         while self.running:
             try:
+                # Clean up completed tasks
+                done_tasks = {t for t in self._active_investigations if t.done()}
+                for task in done_tasks:
+                    self._active_investigations.discard(task)
+                    # Log any exceptions from completed tasks
+                    if task.exception():
+                        logger.error(f"Investigation task failed: {task.exception()}")
+
+                # Check if we can accept more investigations
+                if len(self._active_investigations) >= self._max_concurrent:
+                    # At capacity - wait briefly for a slot to free up
+                    await asyncio.sleep(1)
+                    continue
+
                 result = await asyncio.wait_for(self._pop_investigation_request(), timeout=5.0)
                 last_successful_poll = time.monotonic()
 
                 if result:
-                    await self._process_investigation_request(result)
+                    # Spawn investigation as background task
+                    inv_id = result.get("investigation_id", "unknown")
+                    task = asyncio.create_task(
+                        self._process_investigation_request(result),
+                        name=f"investigation-{inv_id}",
+                    )
+                    self._active_investigations.add(task)
+                    logger.info(
+                        f"Spawned investigation {inv_id} "
+                        f"({len(self._active_investigations)}/{self._max_concurrent} active)"
+                    )
 
             except asyncio.TimeoutError:
                 elapsed = time.monotonic() - last_successful_poll
@@ -287,6 +333,29 @@ class BlueOrchestratorService:
             if use_multi_agent:
                 from ares.agents.blue import BlueTeamOrchestrator
 
+                # Register investigation for distributed workers if enabled
+                if self._use_distributed_workers and self.blue_task_queue:
+                    # Collect credentials to pass to workers
+                    worker_credentials = {}
+                    for key in [
+                        "OPENAI_API_KEY",
+                        "GRAFANA_SERVICE_ACCOUNT_TOKEN",
+                        "GRAFANA_API_KEY",
+                    ]:
+                        val = os.environ.get(key)
+                        if val:
+                            worker_credentials[key] = val
+
+                    await self.blue_task_queue.register_investigation(
+                        investigation_id=request.investigation_id,
+                        alert=request.alert,
+                        model=request.model,
+                        credentials=worker_credentials,
+                    )
+                    logger.info(
+                        f"Registered investigation {request.investigation_id} for distributed workers"
+                    )
+
                 orchestrator = BlueTeamOrchestrator(
                     model=request.model,
                     grafana_url=grafana_url,
@@ -295,6 +364,8 @@ class BlueOrchestratorService:
                     report_dir=report_dir,
                     max_steps=request.max_steps,
                     redis_url=self.redis_url,
+                    use_distributed_workers=self._use_distributed_workers,
+                    blue_task_queue=self.blue_task_queue,
                 )
             else:
                 from ares.agents.blue import InvestigationOrchestrator
@@ -309,26 +380,12 @@ class BlueOrchestratorService:
                 )
 
             # Run the investigation
+            # Note: Status is updated to "completed" inside investigate() after report generation
             logger.info(f"Starting investigation: {request.investigation_id}")
             result = await orchestrator.investigate(
                 alert=request.alert,
                 correlation_context=request.correlation_context,
-            )
-
-            # Publish investigation status: completed
-            await self._publish_investigation_status(
-                request.investigation_id,
-                "completed",
-                {
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                    "result": {
-                        "investigation_id": result.get("investigation_id"),
-                        "status": result.get("status"),
-                        "evidence_count": result.get("evidence_count"),
-                        "techniques_identified": result.get("techniques_identified"),
-                        "highest_pyramid_level": result.get("highest_pyramid_level"),
-                    },
-                },
+                investigation_id=request.investigation_id,
             )
 
             completed_at = datetime.now(timezone.utc)
@@ -348,6 +405,10 @@ class BlueOrchestratorService:
                 f"{len(result.get('techniques_identified', []))} techniques "
                 f"(duration {duration_str})"
             )
+
+            # Unregister investigation from distributed workers
+            if self._use_distributed_workers and self.blue_task_queue:
+                await self.blue_task_queue.unregister_investigation(request.investigation_id)
 
         except Exception as e:
             logger.error(f"Error processing investigation: {e}")
@@ -395,8 +456,23 @@ class BlueOrchestratorService:
         self.running = False
         self._shutdown_event.set()
 
+        # Wait for active investigations to complete (with timeout)
+        if self._active_investigations:
+            logger.info(f"Waiting for {len(self._active_investigations)} active investigations...")
+            _, pending = await asyncio.wait(
+                self._active_investigations,
+                timeout=60.0,
+            )
+            if pending:
+                logger.warning(f"Cancelling {len(pending)} pending investigations")
+                for task in pending:
+                    task.cancel()
+
         if self.task_queue:
             await self.task_queue.disconnect()
+
+        if self.blue_task_queue:
+            await self.blue_task_queue.disconnect()
 
         logger.info("Blue team orchestrator service stopped")
 

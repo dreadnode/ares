@@ -29,7 +29,7 @@ class TestInvestigationRequest:
         assert request.investigation_id == "inv-12345678"
         assert request.alert["labels"]["alertname"] == "HighCPU"
         assert request.model == "test-model"
-        assert request.max_steps == 50
+        assert request.max_steps == 25
         assert request.multi_agent is False
         assert request.auto_route is True
 

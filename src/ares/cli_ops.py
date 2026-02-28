@@ -1065,7 +1065,7 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
     Returns:
         SharedRedTeamState or None if not found
     """
-    from ares.core.models import SharedRedTeamState, Target
+    from ares.core.models import SharedRedTeamState, Target, TimelineEvent
     from ares.core.state_backend import RedisStateBackend
 
     # Check if operation exists by looking for meta key
@@ -1112,17 +1112,43 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
     target = None
     target_ip = meta.get("target_ip")
     target_domain = meta.get("target_domain")
+    target_ips_str = meta.get("target_ips", "")
+    target_ips = (
+        [ip.strip() for ip in target_ips_str.split(",") if ip.strip()] if target_ips_str else []
+    )
     if target_ip:
         target = Target(ip=target_ip, domain=target_domain)
+        # Ensure target_ips includes at least the primary target
+        if not target_ips:
+            target_ips = [target_ip]
 
     # Load DC map and NetBIOS map
     dc_map = await backend.get_all_dcs()
     netbios_map = await backend.get_all_netbios_mappings()
 
+    # Load timeline events
+    timeline_events_raw = await backend.get_timeline_events()
+    timeline_events = []
+    for event_dict in timeline_events_raw:
+        try:
+            event = TimelineEvent(
+                id=event_dict.get("id", ""),
+                timestamp=datetime.fromisoformat(event_dict["timestamp"]),
+                description=event_dict.get("description", ""),
+                evidence_ids=event_dict.get("evidence_ids", []),
+                mitre_techniques=event_dict.get("mitre_techniques", []),
+                confidence=event_dict.get("confidence", 0.5),
+                source=event_dict.get("source", "investigation"),
+            )
+            timeline_events.append(event)
+        except (KeyError, ValueError):
+            pass  # Skip invalid events
+
     # Create state object with correct field names
     kwargs: dict = {
         "operation_id": operation_id,
         "target": target,
+        "target_ips": target_ips,
         "all_credentials": credentials,
         "all_hashes": hashes,
         "all_hosts": hosts,
@@ -1137,6 +1163,7 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
         "domain_admin_path": domain_admin_path,
         "domain_controllers": dc_map,
         "netbios_to_fqdn": netbios_map,
+        "operation_timeline": timeline_events,
     }
     if started_at is not None:
         kwargs["started_at"] = started_at
@@ -1753,6 +1780,7 @@ async def queue(
                     "completed_total": len(state.completed_tasks),
                     "status_counts": status_counts,
                     "has_domain_admin": state.has_domain_admin,
+                    "has_golden_ticket": state.has_golden_ticket,
                     "vuln_total": len(state.discovered_vulnerabilities),
                     "exploited_total": len(state.exploited_vulnerabilities),
                 }
@@ -1778,8 +1806,9 @@ async def queue(
                 f"completed: {op['completed_total']}"
             )
             da = "yes" if op["has_domain_admin"] else "no"
+            gt = "yes" if op["has_golden_ticket"] else "no"
             print(
-                f"    domain_admin: {da}  "
+                f"    domain_admin: {da}  golden_ticket: {gt}  "
                 f"vulns: {op['vuln_total']}  "
                 f"exploited: {op['exploited_total']}"
             )

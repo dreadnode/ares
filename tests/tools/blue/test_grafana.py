@@ -305,6 +305,201 @@ class TestGetAlertHistory:
             mock_client_class.assert_not_called()
 
 
+class TestGetAlertsInTimeRange:
+    """Tests for get_alerts_in_time_range method."""
+
+    @pytest.fixture
+    def grafana_tools(self) -> GrafanaTools:
+        return GrafanaTools(
+            base_url="http://grafana:3000",
+            api_key="test-key",  # pragma: allowlist secret
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_alerts_in_time_range_success(self, grafana_tools: GrafanaTools):
+        """Test successful time-windowed alert retrieval."""
+        from datetime import datetime, timezone
+
+        mock_annotations = [
+            {
+                "id": 1,
+                "alertId": 100,
+                "panelId": 1,
+                "alertName": "HighCPU",
+                "time": 1704105000000,
+                "timeEnd": 1704108600000,
+                "tags": ["alertname:HighCPU", "severity:warning"],
+                "text": "CPU usage exceeded threshold",
+            },
+            {
+                "id": 2,
+                "alertId": 101,
+                "panelId": 2,
+                "alertName": "DiskFull",
+                "time": 1704106000000,
+                "tags": ["alertname:DiskFull"],
+                "text": "Disk space low",
+            },
+        ]
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = mock_annotations
+            mock_client.get.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_class.return_value = mock_client
+
+            from_time = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+            to_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+            alerts = await grafana_tools.get_alerts_in_time_range(from_time, to_time)
+            assert len(alerts) == 2
+            assert alerts[0]["labels"]["alertname"] == "HighCPU"
+            assert alerts[0]["fingerprint"] == "ann-100-1"
+
+    @pytest.mark.asyncio
+    async def test_get_alerts_in_time_range_applies_buffer(self, grafana_tools: GrafanaTools):
+        """Test that buffer is applied to time window."""
+        from datetime import datetime, timezone
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = []
+            mock_client.get.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_class.return_value = mock_client
+
+            from_time = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+            to_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+            await grafana_tools.get_alerts_in_time_range(from_time, to_time, buffer_minutes=60)
+
+            # Verify API call was made with expanded time window
+            call_args = mock_client.get.call_args
+            params = call_args.kwargs.get("params", {})
+            # from_time - 60 minutes = 09:00, to_time + 60 minutes = 13:00
+            expected_from = int(
+                datetime(2024, 1, 1, 9, 0, 0, tzinfo=timezone.utc).timestamp() * 1000
+            )
+            expected_to = int(
+                datetime(2024, 1, 1, 13, 0, 0, tzinfo=timezone.utc).timestamp() * 1000
+            )
+            assert params["from"] == expected_from
+            assert params["to"] == expected_to
+
+    @pytest.mark.asyncio
+    async def test_get_alerts_in_time_range_auth_error(self, grafana_tools: GrafanaTools):
+        """Test authentication error handling."""
+        from datetime import datetime, timezone
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 401
+            mock_response.text = "Invalid token"
+            mock_client.get.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_class.return_value = mock_client
+
+            from_time = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+            to_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+            with pytest.raises(AuthenticationError):
+                await grafana_tools.get_alerts_in_time_range(from_time, to_time)
+
+    @pytest.mark.asyncio
+    async def test_get_alerts_in_time_range_http_error(self, grafana_tools: GrafanaTools):
+        """Test HTTP error returns empty list."""
+        from datetime import datetime, timezone
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.get.side_effect = httpx.HTTPError("Connection failed")
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_class.return_value = mock_client
+
+            from_time = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+            to_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+            alerts = await grafana_tools.get_alerts_in_time_range(from_time, to_time)
+            assert alerts == []
+
+
+class TestTransformAnnotationsToAlerts:
+    """Tests for _transform_annotations_to_alerts method."""
+
+    @pytest.fixture
+    def grafana_tools(self) -> GrafanaTools:
+        return GrafanaTools(
+            base_url="http://grafana:3000",
+            api_key="test-key",  # pragma: allowlist secret
+        )
+
+    def test_transform_basic_annotation(self, grafana_tools: GrafanaTools):
+        """Test transformation of basic annotation."""
+        annotations = [
+            {
+                "id": 1,
+                "alertId": 100,
+                "panelId": 1,
+                "alertName": "TestAlert",
+                "time": 1704105000000,
+                "timeEnd": 1704108600000,
+                "tags": [],
+                "text": "Alert description",
+            }
+        ]
+        alerts = grafana_tools._transform_annotations_to_alerts(annotations)
+        assert len(alerts) == 1
+        assert alerts[0]["fingerprint"] == "ann-100-1"
+        assert alerts[0]["labels"]["alertname"] == "TestAlert"
+        assert alerts[0]["status"]["state"] == "resolved"
+
+    def test_transform_with_tags(self, grafana_tools: GrafanaTools):
+        """Test transformation extracts labels from tags."""
+        annotations = [
+            {
+                "id": 1,
+                "alertId": 100,
+                "panelId": 1,
+                "alertName": "TestAlert",
+                "time": 1704105000000,
+                "tags": ["severity:critical", "team=security"],
+                "text": "Alert",
+            }
+        ]
+        alerts = grafana_tools._transform_annotations_to_alerts(annotations)
+        assert alerts[0]["labels"]["severity"] == "critical"
+        assert alerts[0]["labels"]["team"] == "security"
+
+    def test_transform_deduplicates_by_fingerprint(self, grafana_tools: GrafanaTools):
+        """Test that duplicate annotations are deduplicated."""
+        annotations = [
+            {"id": 1, "alertId": 100, "panelId": 1, "tags": [], "time": 1000},
+            {"id": 2, "alertId": 100, "panelId": 1, "tags": [], "time": 2000},  # Same fingerprint
+        ]
+        alerts = grafana_tools._transform_annotations_to_alerts(annotations)
+        assert len(alerts) == 1
+
+    def test_transform_skips_non_alerts(self, grafana_tools: GrafanaTools):
+        """Test that non-alert annotations are skipped."""
+        annotations = [
+            {"id": 1, "alertId": 0, "panelId": 1, "tags": [], "time": 1000},  # Not an alert
+            {"id": 2, "alertId": 100, "panelId": 1, "tags": [], "time": 2000},
+        ]
+        alerts = grafana_tools._transform_annotations_to_alerts(annotations)
+        assert len(alerts) == 1
+        assert alerts[0]["_alert_id"] == 100
+
+
 class TestCreateAnnotation:
     """Tests for create_annotation method."""
 

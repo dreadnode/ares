@@ -699,6 +699,7 @@ class SharedRedTeamState:
 
     operation_id: str
     target: Target | None = None
+    target_ips: list[str] = field(default_factory=list)  # All target IPs (for multi-target ops)
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None  # Set when operation completes
 
@@ -739,6 +740,7 @@ class SharedRedTeamState:
     has_domain_admin: bool = False
     has_golden_ticket: bool = False
     domain_admin_path: str | None = None
+    da_hash_id: str | None = None  # ID of the krbtgt hash that achieved DA (for attack chain)
 
     # Persistence tracking (CRITICAL: must be in state for pub/sub visibility)
     # Golden tickets: {domain, ticket_path, created_at, krbtgt_hash}
@@ -1428,6 +1430,12 @@ class SharedRedTeamState:
         This method checks if we've seen this user in a DIFFERENT domain via BloodHound,
         LDAP enumeration, or other recon, and corrects the domain if so.
 
+        IMPORTANT: If the incoming domain is already an FQDN (contains "."), we trust it.
+        Domain "correction" is primarily for fixing NetBIOS names, not overriding valid FQDNs.
+        For example, krbtgt exists in EVERY domain with the same name but different hashes.
+        We should NOT "correct" child.contoso.local to contoso.local just because
+        krbtgt was only enumerated from the parent domain.
+
         Args:
             username: The username from the hash (lowercase)
             domain: The domain extracted from the hash (may be wrong)
@@ -1441,6 +1449,27 @@ class SharedRedTeamState:
 
         username_lower = username.lower()
         domain_lower = domain.lower()
+
+        # CRITICAL: Never correct domain for well-known accounts that exist in EVERY domain.
+        # These accounts (krbtgt, Administrator, Guest, etc.) have the same username in every
+        # domain but are completely different accounts with different hashes/passwords.
+        # "Correcting" their domain based on user lookups is ALWAYS wrong.
+        well_known_accounts = {"krbtgt", "administrator", "guest", "defaultaccount"}
+        if username_lower in well_known_accounts:
+            logger.debug(
+                f"Domain kept as-is (well-known account): {domain_lower}\\{username_lower} "
+                f"(never correct well-known accounts, source: {source_agent})"
+            )
+            return domain_lower
+
+        # CRITICAL: If the incoming domain is already an FQDN (contains "."), trust it.
+        # Domain correction was designed for fixing NetBIOS names like "CONTOSO" -> "contoso.local",
+        # NOT for overriding valid FQDNs like "child.contoso.local" -> "contoso.local".
+        #
+        # Why this matters: Users like krbtgt exist in EVERY domain with the same name.
+        # If we only enumerated krbtgt from the parent domain, we shouldn't "correct" a child
+        # domain's krbtgt hash to the parent domain. They're different accounts with different hashes.
+        is_incoming_fqdn = "." in domain_lower
 
         # Find all domains where this user has been seen
         known_domains: set[str] = set()
@@ -1456,24 +1485,34 @@ class SharedRedTeamState:
             # Domain matches a known domain for this user - all good
             return domain_lower
 
-        # Domain doesn't match any known domain for this user!
+        # Domain doesn't match any known domain for this user.
+        # If incoming domain is an FQDN, do NOT override it - trust the tool's output.
+        # The user may exist in multiple domains (e.g., krbtgt, Administrator, Guest).
+        if is_incoming_fqdn:
+            logger.debug(
+                f"Domain kept as-is (FQDN): {domain_lower}\\{username_lower} "
+                f"(user also known in {known_domains}, source: {source_agent})"
+            )
+            return domain_lower
+
+        # Incoming domain is NetBIOS-only - try to correct it
         if len(known_domains) == 1:
-            # User exists in exactly one other domain - use that
+            # User exists in exactly one domain - use that
             correct_domain = next(iter(known_domains))
             logger.warning(
-                f"Domain correction: {domain_lower}\\{username_lower} -> "
+                f"Domain correction (NetBIOS -> FQDN): {domain_lower}\\{username_lower} -> "
                 f"{correct_domain}\\{username_lower} (user known from prior recon, "
                 f"source: {source_agent})"
             )
             return correct_domain
 
-        # User exists in multiple other domains - pick the most likely one
+        # User exists in multiple domains - pick the most likely one
         # Prefer child domains over parent domains (more specific)
         # E.g., prefer child.contoso.local over contoso.local
         sorted_domains = sorted(known_domains, key=len, reverse=True)
         best_match = sorted_domains[0]
         logger.warning(
-            f"Domain correction (ambiguous): {domain_lower}\\{username_lower} -> "
+            f"Domain correction (NetBIOS -> FQDN, ambiguous): {domain_lower}\\{username_lower} -> "
             f"{best_match}\\{username_lower} (user known in {known_domains}, "
             f"picked longest FQDN, source: {source_agent})"
         )
@@ -2220,6 +2259,7 @@ class SharedRedTeamState:
         # - Having 7 hashes instead of all ntds.dit hashes = NOT domain admin
         if hash_type == "ntlm" and username == "krbtgt" and not self.has_domain_admin:
             self.has_domain_admin = True
+            self.da_hash_id = hash_obj.id  # Store the ID for consistent attack chain building
             self.completed_at = datetime.now(timezone.utc)  # Record completion time
             # Build attack path from credential chain instead of hardcoding
             attack_chain = self.format_attack_chain(hash_obj)
@@ -2249,7 +2289,9 @@ class SharedRedTeamState:
             # Also persist DA status if achieved
             if hash_type == "ntlm" and username == "krbtgt":
                 task2 = loop.create_task(
-                    self._backend.set_domain_admin(achieved=True, path=self.domain_admin_path)
+                    self._backend.set_domain_admin(
+                        achieved=True, path=self.domain_admin_path, da_hash_id=self.da_hash_id
+                    )
                 )
                 self._track_background_task(task2, "set_domain_admin")
 
@@ -2276,8 +2318,9 @@ class SharedRedTeamState:
         """Build the attack chain by walking parent_id backwards.
 
         Args:
-            item: The credential or hash to start from. If None, uses the most
-                  recent DA credential (krbtgt or Administrator hash).
+            item: The credential or hash to start from. If None, uses the
+                  stored DA hash (da_hash_id) or falls back to the most recent
+                  krbtgt/Administrator hash.
 
         Returns:
             List of chain steps from initial access to final compromise, each with:
@@ -2289,13 +2332,21 @@ class SharedRedTeamState:
         """
         # If no item provided, find the DA credential
         if item is None:
-            for hash_obj in reversed(self.all_hashes):
-                if hash_obj.hash_type.lower() == "ntlm" and hash_obj.username.lower() in (
-                    "krbtgt",
-                    "administrator",
-                ):
-                    item = hash_obj
-                    break
+            # CRITICAL: Use the stored da_hash_id if available.
+            # This ensures consistency with domain_admin_path which was set when
+            # the FIRST krbtgt hash was found. If we just pick the last krbtgt
+            # hash, we might get a different attack chain (e.g., from a child domain).
+            if self.da_hash_id:
+                item = self.find_by_id(self.da_hash_id)
+            # Fallback to finding the most recent krbtgt/administrator hash
+            if item is None:
+                for hash_obj in reversed(self.all_hashes):
+                    if hash_obj.hash_type.lower() == "ntlm" and hash_obj.username.lower() in (
+                        "krbtgt",
+                        "administrator",
+                    ):
+                        item = hash_obj
+                        break
 
         if item is None:
             return []
@@ -2671,7 +2722,8 @@ class SharedRedTeamState:
             import asyncio
 
             loop = asyncio.get_running_loop()
-            task = loop.create_task(self._backend.add_weakness(block))
+            # Pass dedup_key to backend for proper HASH-based deduplication
+            task = loop.create_task(self._backend.add_weakness(block, dedup_key))
             self._track_background_task(task, "add_weakness")
 
         return True

@@ -1742,6 +1742,57 @@ class BloodHoundTools(Toolset):
         """Set the operation state for this toolset."""
         self.state = state
 
+    def _find_credential_domain(self, username: str, password: str) -> str | None:
+        """Find the domain for a credential by username/password lookup.
+
+        Returns the credential's domain if found in state, None otherwise.
+        """
+        if not self.state:
+            return None
+        for cred in self.state.all_credentials:
+            if cred.username.lower() == username.lower() and cred.password == password:
+                return cred.domain
+        return None
+
+    def _is_valid_credential_for_domain(
+        self, cred_domain: str, target_domain: str
+    ) -> tuple[bool, str]:
+        """Check if credentials from cred_domain can authenticate to target_domain.
+
+        Returns (is_valid, reason) tuple.
+
+        Valid scenarios:
+        - Exact match: contoso.local -> contoso.local
+        - Parent to child: contoso.local -> child.contoso.local (parent can enumerate child)
+
+        Invalid scenarios:
+        - Child to parent: child.contoso.local -> contoso.local (child can't auth to parent LDAP)
+        - Cross-forest: contoso.local -> fabrikam.local (different forests)
+        """
+        cred_lower = cred_domain.lower()
+        target_lower = target_domain.lower()
+
+        # Exact match - always valid
+        if cred_lower == target_lower:
+            return True, "exact domain match"
+
+        # Parent credentials can enumerate child domains
+        if target_lower.endswith("." + cred_lower):
+            return True, "parent domain credentials can enumerate child"
+
+        # Child credentials cannot authenticate to parent domain LDAP
+        if cred_lower.endswith("." + target_lower):
+            return (
+                False,
+                f"child domain credentials ({cred_domain}) cannot authenticate to parent domain ({target_domain}) LDAP",
+            )
+
+        # Different forests/unrelated domains
+        return (
+            False,
+            f"credentials are for different domain ({cred_domain}), not valid for {target_domain}",
+        )
+
     def _parse_bloodhound_output(self, raw_output: str) -> dict[str, Any]:
         """Parse BloodHound collection output for actionable attack paths.
 
@@ -1951,6 +2002,15 @@ class BloodHoundTools(Toolset):
             domain_key = domain.lower()
             if domain_key in getattr(self.state, "processed_bloodhound_domains", set()):
                 return f"BloodHound already completed for {domain} - skipping to save time"
+
+        # CREDENTIAL DOMAIN CHECK: Verify credentials can authenticate to target domain
+        # Child domain creds cannot auth to parent domain LDAP, cross-forest won't work either
+        cred_domain = self._find_credential_domain(username, password)
+        if cred_domain:
+            is_valid, reason = self._is_valid_credential_for_domain(cred_domain, domain)
+            if not is_valid:
+                logger.warning(f"Skipping BloodHound for {domain}: {reason}")
+                return f"Skipping BloodHound for {domain} - {reason}. Use credentials valid for this domain."
 
         cmd = [
             "bloodhound-python",

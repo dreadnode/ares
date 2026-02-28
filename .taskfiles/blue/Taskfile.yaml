@@ -15,8 +15,7 @@ vars:
   GRAFANA_SERVICE_ACCOUNT_TOKEN:
     sh: op item get "Ares Grafana MCP" --fields api-token --reveal 2>/dev/null || echo ""
   OPENAI_API_KEY:
-    sh: op item get "Openai" --fields dreadnode-jayson-api-key --reveal 2>/dev/null || echo ""
-    # sh: op item get "Openai" --fields dreadnode-personal-api-key --reveal 2>/dev/null || echo ""
+    sh: op item get "Dreadnode Openai" --fields dreadnode-ares-api-key --reveal 2>/dev/null || echo ""
 
   # Model selection (MODEL_ALL takes precedence over MODEL)
   MODEL_ARG:
@@ -147,6 +146,52 @@ tasks:
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
           --dn-args.project {{.DREADNODE_PROJECT}} \
           2>&1 | tee -a "$LOGFILE"
+
+  once:remote:
+    desc: "Run blue team agent once on K8s cluster (usage: task blue:once:remote [OPERATION_ID=op-xxx] [LATEST=true])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required. Usage: task blue:once:remote OPERATION_ID=op-xxx  OR  task blue:once:remote LATEST=true"
+    cmds:
+      - |
+        echo "Running blue team agent on K8s cluster..."
+        echo "K8s namespace: {{.K8S_NAMESPACE}}"
+        echo ""
+
+        # Build operation context args
+        OP_ARGS=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          OP_ARGS="--args.latest"
+        elif [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ARGS="--args.operation-id {{.OPERATION_ID}}"
+        fi
+
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
+          env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
+          ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
+          DREADNODE_API_KEY="{{.DREADNODE_API_KEY}}" \
+          DREADNODE_SERVER_URL="{{.DREADNODE_SERVER_URL}}" \
+          DREADNODE_ORGANIZATION="{{.DREADNODE_ORGANIZATION}}" \
+          DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
+          DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
+          GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
+          GRAFANA_URL="{{.GRAFANA_URL}}" \
+          /usr/bin/python3 -m ares \
+          --args.model "{{.MODEL_ARG}}" \
+          --args.grafana-url "{{.GRAFANA_URL}}" \
+          --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
+          --args.report-dir /tmp/reports \
+          --args.once \
+          $OP_ARGS \
+          --dn-args.server "{{.DREADNODE_SERVER_URL}}" \
+          --dn-args.token "$DREADNODE_API_KEY" \
+          --dn-args.organization "{{.DREADNODE_ORGANIZATION}}" \
+          --dn-args.workspace "{{.DREADNODE_WORKSPACE}}" \
+          --dn-args.project "{{.DREADNODE_PROJECT}}"
 
   once:local:
     desc: "Run blue team agent once and exit using .env file (usage: task blue:once:local [OPERATION_ID=op-xxx] [LATEST=true])"
@@ -504,3 +549,374 @@ tasks:
     silent: true
     cmds:
       - python examples/grafana_mcp_windows_example.py
+
+  # ===========================================================================
+  # Multi-Agent Blue Team Tasks (via K8s orchestrator service)
+  # ===========================================================================
+
+  multi:
+    desc: "Submit investigation to blue orchestrator (usage: task blue:multi ALERT=alert.json [INVESTIGATION_ID=inv-xxx])"
+    silent: true
+    vars:
+      ALERT: '{{.ALERT | default ""}}'
+      INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
+      MULTI_AGENT: '{{.MULTI_AGENT | default "false"}}'
+      MODEL_ARG:
+        sh: |
+          if [ -n "{{.MODEL_ALL}}" ]; then
+            echo "{{.MODEL_ALL}}"
+          else
+            echo "{{.MODEL}}"
+          fi
+    preconditions:
+      - sh: test -n "{{.ALERT}}"
+        msg: "ALERT variable is required. Usage: task blue:multi ALERT=alert.json"
+      - sh: test -f "{{.ALERT}}"
+        msg: "Alert file not found: {{.ALERT}}"
+    cmds:
+      - |
+        echo "Submitting investigation to blue orchestrator service..."
+        echo "Alert file: {{.ALERT}}"
+        echo "K8s namespace: {{.K8S_NAMESPACE}}"
+        echo ""
+
+        INV_ID_ARG=""
+        if [ -n "{{.INVESTIGATION_ID}}" ]; then
+          INV_ID_ARG="--investigation-id {{.INVESTIGATION_ID}}"
+        fi
+
+        MULTI_AGENT_FLAG=""
+        if [ "{{.MULTI_AGENT}}" = "true" ]; then
+          MULTI_AGENT_FLAG="--multi-agent"
+        fi
+
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
+          env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
+          ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
+          DREADNODE_API_KEY="{{.DREADNODE_API_KEY}}" \
+          DREADNODE_SERVER_URL="{{.DREADNODE_SERVER_URL}}" \
+          DREADNODE_ORGANIZATION="{{.DREADNODE_ORGANIZATION}}" \
+          DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
+          DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
+          GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
+          GRAFANA_URL="{{.GRAFANA_URL}}" \
+          ARES_MODEL="{{.MODEL_ARG}}" \
+          ARES_ORCHESTRATOR_MODEL="{{.MODEL_ARG}}" \
+          python -m ares.cli_blue_ops submit "$(cat {{.ALERT}})" \
+          $INV_ID_ARG \
+          --model "{{.MODEL_ARG}}" \
+          --max-steps {{.MAX_STEPS_BLUE}} \
+          $MULTI_AGENT_FLAG
+
+  multi:local:
+    desc: "Submit investigation using .env file (usage: task blue:multi:local ALERT=alert.json)"
+    silent: true
+    vars:
+      ALERT: '{{.ALERT | default ""}}'
+      INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
+      MULTI_AGENT: '{{.MULTI_AGENT | default "false"}}'
+      MODEL_ARG:
+        sh: |
+          if [ -n "{{.MODEL_ALL}}" ]; then
+            echo "{{.MODEL_ALL}}"
+          else
+            echo "{{.MODEL}}"
+          fi
+      REDIS_URL:
+        sh: |
+          REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+          if [ -n "$REDIS_PASS" ]; then
+            echo "redis://:${REDIS_PASS}@redis:6379"
+          else
+            echo "redis://redis:6379"
+          fi
+    preconditions:
+      - sh: test -f .env
+        msg: ".env file not found"
+      - sh: test -n "{{.ALERT}}"
+        msg: "ALERT variable is required. Usage: task blue:multi:local ALERT=alert.json"
+      - sh: test -f "{{.ALERT}}"
+        msg: "Alert file not found: {{.ALERT}}"
+    cmds:
+      - |
+        set -a
+        . ./.env
+        set +a
+
+        echo "Submitting investigation to blue orchestrator service..."
+        echo "Alert file: {{.ALERT}}"
+        echo ""
+
+        INV_ID_ARG=""
+        if [ -n "{{.INVESTIGATION_ID}}" ]; then
+          INV_ID_ARG="--investigation-id {{.INVESTIGATION_ID}}"
+        fi
+
+        MULTI_AGENT_FLAG=""
+        if [ "{{.MULTI_AGENT}}" = "true" ]; then
+          MULTI_AGENT_FLAG="--multi-agent"
+        fi
+
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
+          env OPENAI_API_KEY="$OPENAI_API_KEY" \
+          ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+          DREADNODE_API_KEY="$DREADNODE_API_KEY" \
+          DREADNODE_SERVER_URL="$DREADNODE_SERVER_URL" \
+          DREADNODE_ORGANIZATION="$DREADNODE_ORGANIZATION" \
+          DREADNODE_WORKSPACE="$DREADNODE_WORKSPACE" \
+          DREADNODE_PROJECT="$DREADNODE_PROJECT" \
+          GRAFANA_SERVICE_ACCOUNT_TOKEN="$GRAFANA_SERVICE_ACCOUNT_TOKEN" \
+          GRAFANA_URL="$GRAFANA_URL" \
+          ARES_MODEL="{{.MODEL_ARG}}" \
+          ARES_ORCHESTRATOR_MODEL="{{.MODEL_ARG}}" \
+          python -m ares.cli_blue_ops submit "$(cat {{.ALERT}})" \
+          $INV_ID_ARG \
+          --model "{{.MODEL_ARG}}" \
+          --max-steps {{.MAX_STEPS_BLUE}} \
+          --redis-url "{{.REDIS_URL}}" \
+          $MULTI_AGENT_FLAG
+
+  multi:remote:
+    desc: "Run multi-agent blue investigation from red team operation (usage: task blue:multi:remote [OPERATION_ID=op-xxx] [LATEST=true])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+      MODEL_ARG:
+        sh: |
+          if [ -n "{{.MODEL_ALL}}" ]; then
+            echo "{{.MODEL_ALL}}"
+          else
+            echo "{{.MODEL}}"
+          fi
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required. Usage: task blue:multi:remote OPERATION_ID=op-xxx  OR  task blue:multi:remote LATEST=true"
+    cmds:
+      - |
+        echo "Running multi-agent blue investigation from red team operation..."
+        echo "K8s namespace: {{.K8S_NAMESPACE}}"
+        echo ""
+
+        # Build operation context args
+        OP_ARGS=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          OP_ARGS="--latest"
+        elif [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ARGS="{{.OPERATION_ID}}"
+        fi
+
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
+          env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
+          ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
+          DREADNODE_API_KEY="{{.DREADNODE_API_KEY}}" \
+          DREADNODE_SERVER_URL="{{.DREADNODE_SERVER_URL}}" \
+          DREADNODE_ORGANIZATION="{{.DREADNODE_ORGANIZATION}}" \
+          DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
+          DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
+          GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
+          GRAFANA_URL="{{.GRAFANA_URL}}" \
+          ARES_MODEL="{{.MODEL_ARG}}" \
+          ARES_ORCHESTRATOR_MODEL="{{.MODEL_ARG}}" \
+          /usr/bin/python3 -m ares.cli_blue_ops from-operation $OP_ARGS \
+          --model "{{.MODEL_ARG}}" \
+          --max-steps {{.MAX_STEPS_BLUE}} \
+          --grafana-url "{{.GRAFANA_URL}}"
+
+  multi:status:
+    desc: "Check investigation status (usage: task blue:multi:status [INVESTIGATION_ID=inv-xxx] [LATEST=true])"
+    silent: true
+    vars:
+      INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+    preconditions:
+      - sh: test -n "{{.INVESTIGATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either INVESTIGATION_ID or LATEST=true is required"
+    cmds:
+      - |
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        INV_ID_ARG=""
+        if [ -n "{{.INVESTIGATION_ID}}" ]; then
+          INV_ID_ARG="{{.INVESTIGATION_ID}}"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops status $INV_ID_ARG $LATEST_FLAG
+
+  multi:list:
+    desc: "List all investigations"
+    silent: true
+    cmds:
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops list
+
+  multi:evidence:
+    desc: "Show evidence for an investigation (usage: task blue:multi:evidence [INVESTIGATION_ID=inv-xxx] [LATEST=true])"
+    silent: true
+    vars:
+      INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+      JSON: '{{.JSON | default "false"}}'
+    preconditions:
+      - sh: test -n "{{.INVESTIGATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either INVESTIGATION_ID or LATEST=true is required"
+    cmds:
+      - |
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        INV_ID_ARG=""
+        if [ -n "{{.INVESTIGATION_ID}}" ]; then
+          INV_ID_ARG="{{.INVESTIGATION_ID}}"
+        fi
+        JSON_FLAG=""
+        if [ "{{.JSON}}" = "true" ]; then
+          JSON_FLAG="--json-output"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops evidence $INV_ID_ARG $LATEST_FLAG $JSON_FLAG
+
+  multi:techniques:
+    desc: "Show MITRE techniques identified (usage: task blue:multi:techniques [INVESTIGATION_ID=inv-xxx] [LATEST=true])"
+    silent: true
+    vars:
+      INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+    preconditions:
+      - sh: test -n "{{.INVESTIGATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either INVESTIGATION_ID or LATEST=true is required"
+    cmds:
+      - |
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        INV_ID_ARG=""
+        if [ -n "{{.INVESTIGATION_ID}}" ]; then
+          INV_ID_ARG="{{.INVESTIGATION_ID}}"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops techniques $INV_ID_ARG $LATEST_FLAG
+
+  multi:runtime:
+    desc: "Show runtime for an investigation (usage: task blue:multi:runtime [INVESTIGATION_ID=inv-xxx] [LATEST=true])"
+    silent: true
+    vars:
+      INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+    preconditions:
+      - sh: test -n "{{.INVESTIGATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either INVESTIGATION_ID or LATEST=true is required"
+    cmds:
+      - |
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        INV_ID_ARG=""
+        if [ -n "{{.INVESTIGATION_ID}}" ]; then
+          INV_ID_ARG="{{.INVESTIGATION_ID}}"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops runtime $INV_ID_ARG $LATEST_FLAG
+
+  multi:operation-status:
+    desc: "Show aggregate status for all investigations from a red team operation (usage: task blue:multi:operation-status [OPERATION_ID=op-xxx] [LATEST=true] [WATCH=10])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+      WATCH: '{{.WATCH | default "0"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required"
+    cmds:
+      - |
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        OP_ID_ARG=""
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ID_ARG="{{.OPERATION_ID}}"
+        fi
+        WATCH_ARG=""
+        if [ "{{.WATCH}}" != "0" ]; then
+          WATCH_ARG="--watch {{.WATCH}}"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops operation-status $OP_ID_ARG $LATEST_FLAG $WATCH_ARG
+
+  multi:delete:
+    desc: "Delete an investigation and all its data (usage: task blue:multi:delete INVESTIGATION_ID=inv-xxx)"
+    silent: true
+    vars:
+      INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
+    preconditions:
+      - sh: test -n "{{.INVESTIGATION_ID}}"
+        msg: "INVESTIGATION_ID variable is required"
+    cmds:
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops delete "{{.INVESTIGATION_ID}}" --force
+
+  multi:delete-operation:
+    desc: "Delete an operation and all its investigations (usage: task blue:multi:delete-operation OPERATION_ID=op-xxx)"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+    cmds:
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops delete-operation "{{.OPERATION_ID}}" --force
+
+  multi:cleanup:
+    desc: "Clean up old investigations (usage: task blue:multi:cleanup [MAX_AGE_HOURS=24] [ALL=true])"
+    silent: true
+    vars:
+      MAX_AGE_HOURS: '{{.MAX_AGE_HOURS | default "24"}}'
+      ALL: '{{.ALL | default "false"}}'
+      DRY_RUN: '{{.DRY_RUN | default "false"}}'
+    cmds:
+      - |
+        ALL_FLAG=""
+        if [ "{{.ALL}}" = "true" ]; then
+          ALL_FLAG="--all --force"
+        fi
+        DRY_RUN_FLAG=""
+        if [ "{{.DRY_RUN}}" = "true" ]; then
+          DRY_RUN_FLAG="--dry-run"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops cleanup --max-age-hours {{.MAX_AGE_HOURS}} $ALL_FLAG $DRY_RUN_FLAG
+
+  multi:logs:
+    desc: "Follow blue team logs (usage: task blue:multi:logs [ALL=true] [ROLE=orchestrator|triage|threat-hunter|lateral-analyst])"
+    silent: true
+    vars:
+      ALL: '{{.ALL | default "false"}}'
+      ROLE: '{{.ROLE | default ""}}'
+      LINES: '{{.LINES | default "100"}}'
+      MAX_LOG_REQUESTS: '{{.MAX_LOG_REQUESTS | default "50"}}'
+    cmds:
+      - |
+        if [ "{{.ALL}}" = "true" ]; then
+          echo "Following all blue team pods..."
+          kubectl logs -f -n {{.K8S_NAMESPACE}} \
+            -l ares.dreadnode.io/component=blue-team \
+            --tail={{.LINES}} \
+            --prefix=true \
+            --max-log-requests={{.MAX_LOG_REQUESTS}}
+        elif [ -n "{{.ROLE}}" ]; then
+          if [ "{{.ROLE}}" = "orchestrator" ]; then
+            echo "Following blue orchestrator logs..."
+            kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator --tail={{.LINES}}
+          else
+            echo "Following blue {{.ROLE}} logs..."
+            kubectl logs -f -n {{.K8S_NAMESPACE}} \
+              -l ares.dreadnode.io/component=blue-team,ares.dreadnode.io/role={{.ROLE}} \
+              --tail={{.LINES}} \
+              --prefix=true \
+              --max-log-requests={{.MAX_LOG_REQUESTS}}
+          fi
+        else
+          echo "Following blue orchestrator logs..."
+          echo "Tip: Use ALL=true to see all blue team pods, or ROLE=triage|threat-hunter|lateral-analyst"
+          echo ""
+          kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator --tail={{.LINES}}
+        fi

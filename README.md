@@ -169,6 +169,19 @@ task blue:reports:latest      # Show latest report
 | `task blue:reports:clean`            | Delete all reports (asks for confirmation)                   |
 | `task blue:mitre:test`               | Test MITRE ATT&CK data loading                               |
 
+**Blue Team Multi-Agent Tasks (K8s):**
+
+| Command                                           | Description                                                                  |
+| ------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `task blue:multi:remote LATEST=true`              | Submit investigations from latest red team operation                         |
+| `task blue:multi:operation-status LATEST=true`    | Show aggregate status of all investigations from an operation                |
+| `task blue:multi:operation-status ... WATCH=10`   | Watch mode: refresh every N seconds                                          |
+| `task blue:multi:logs ALL=true`                   | Follow all blue team agent logs                                              |
+| `task blue:multi:logs ROLE=triage`                | Follow specific agent logs (triage, threat-hunter, lateral-analyst)          |
+| `task blue:multi:status LATEST=true`              | Check individual investigation status                                        |
+| `task blue:multi:list`                            | List all investigations                                                      |
+| `task blue:multi:evidence LATEST=true`            | Show collected evidence                                                      |
+
 **Red Team Tasks (Multi-Agent):**
 
 | Command                                | Description                                                  |
@@ -307,6 +320,83 @@ The SOC agent follows a structured 4-stage investigation process:
 - Assess Pyramid of Pain state (are we at TTPs?)
 - Generate comprehensive markdown report
 - Provide actionable recommendations
+
+### Multi-Agent Blue Team (K8s)
+
+For large-scale investigations, the blue team can run as a multi-agent system
+on Kubernetes. This is particularly useful for investigating alerts generated
+during a red team operation.
+
+**Architecture:**
+
+- **Orchestrator**: Coordinates investigations, dispatches tasks to workers
+- **Triage Agent**: Initial alert analysis and evidence collection
+- **Threat Hunter Agent**: Deep-dive investigation and technique mapping
+- **Lateral Analyst Agent**: Scope analysis across hosts and users
+
+**Workflow:**
+
+```bash
+# Terminal 1: Submit investigations from a red team operation
+task blue:multi:remote LATEST=true
+# Output includes: "Track progress with: task blue:multi:operation-status OPERATION_ID=op-xxx"
+
+# Terminal 2: Follow all blue team agent logs
+task blue:multi:logs ALL=true
+
+# Check aggregate status of all investigations from the operation
+task blue:multi:operation-status LATEST=true
+
+# Watch mode: auto-refresh every 10 seconds until all complete
+task blue:multi:operation-status LATEST=true WATCH=10
+
+# View collected evidence
+task blue:multi:evidence LATEST=true
+```
+
+The `from-operation` command fetches alerts from Grafana that occurred during
+the red team operation's time window, batches related alerts into clusters,
+and submits each cluster as a multi-agent investigation.
+
+**Log Streaming Options:**
+
+```bash
+# All blue team pods (orchestrator + workers)
+task blue:multi:logs ALL=true
+
+# Specific agent role
+task blue:multi:logs ROLE=triage
+task blue:multi:logs ROLE=threat-hunter
+task blue:multi:logs ROLE=lateral-analyst
+
+# Just orchestrator (default)
+task blue:multi:logs
+```
+
+**Development: Syncing Code Changes**
+
+After modifying code locally, sync to the K8s pods:
+
+```bash
+# Sync code to blue team pods
+task remote:sync:full TEAM=blue
+
+# Rollout to pick up changes (required for orchestrator - it's a long-running process)
+task remote:rollout TEAM=blue
+```
+
+Workers spawn fresh for each task and will pick up new code automatically.
+The orchestrator is long-running and requires a rollout to reload modules.
+
+**Cleanup:**
+
+```bash
+# Clear ALL investigations (clean slate)
+task blue:multi:cleanup ALL=true
+
+# Clean up old investigations (default: older than 24h)
+task blue:multi:cleanup MAX_AGE_HOURS=48
+```
 
 ## Question Engines
 

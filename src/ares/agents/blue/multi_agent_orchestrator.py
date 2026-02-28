@@ -44,24 +44,48 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
     The orchestrator doesn't query logs directly - it dispatches
     tasks to specialized workers and synthesizes their findings.
+
+    Supports two modes:
+    - In-process workers (default): Workers run as asyncio tasks
+    - Distributed workers: Tasks submitted to Redis for remote worker pods
     """
 
     _dispatcher: BlueTeamDispatcher | None = None
     _workers: dict[BlueRole, BlueWorkerAgent]
+    _blue_task_queue: Any | None = None
+    _use_distributed_workers: bool = False
+    _investigation_id: str = ""
 
     def __init__(self) -> None:
+        super().__init__()
         self._workers = {}
 
     def set_dispatcher(self, dispatcher: BlueTeamDispatcher) -> None:
         self._dispatcher = dispatcher
+        self._investigation_id = dispatcher.investigation_id
 
     def set_workers(self, workers: dict[BlueRole, BlueWorkerAgent]) -> None:
         self._workers = workers
 
+    def set_distributed_mode(
+        self,
+        blue_task_queue: Any,
+        investigation_id: str,
+    ) -> None:
+        """Enable distributed workers mode.
+
+        Args:
+            blue_task_queue: BlueTaskQueue for submitting tasks to Redis.
+            investigation_id: Current investigation ID.
+        """
+        self._use_distributed_workers = True
+        self._blue_task_queue = blue_task_queue
+        self._investigation_id = investigation_id
+
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def dispatch_triage(
         self,
-        wait_for_result: bool = True,
+        wait_for_result: bool = False,
     ) -> str:
         """Dispatch initial triage of the alert to the triage worker.
 
@@ -72,7 +96,8 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
         Args:
             wait_for_result: If True, wait for triage to complete and
-                return findings. If False, return task_id immediately.
+                return findings. If False (default), return task_id immediately
+                so you can dispatch other tasks in parallel.
 
         Returns:
             Triage findings (if wait_for_result) or task_id.
@@ -84,6 +109,32 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         correlation = self._dispatcher.shared_state.correlation_context
 
         task = await self._dispatcher.dispatch_triage(alert, correlation)
+
+        # Distributed mode: submit to Redis for remote workers
+        if self._use_distributed_workers and self._blue_task_queue:
+            task_id = await self._blue_task_queue.submit_task(
+                investigation_id=self._investigation_id,
+                task_type=task.task_type.value,
+                target_role=task.assigned_role.value,
+                params=task.params,
+                task_id=task.task_id,
+            )
+            if wait_for_result:
+                result = await self._blue_task_queue.wait_for_result(task_id, timeout=60)
+                if result:
+                    return _format_task_result(
+                        "Triage",
+                        task_id,
+                        {
+                            "success": result.success,
+                            "result": result.result or {},
+                            "error": result.error,
+                        },
+                    )
+                return f"ERROR: Triage task {task_id} timed out"
+            return f"[+] Triage dispatched to remote worker: task_id={task_id}"
+
+        # In-process mode: use local workers
         worker = self._workers.get(BlueRole.TRIAGE)
 
         if not worker:
@@ -91,7 +142,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
         if wait_for_result:
             worker.start_task(task)
-            result = await self._dispatcher.wait_for_result(task.task_id, timeout=600)
+            result = await self._dispatcher.wait_for_result(task.task_id, timeout=60)
             return _format_task_result("Triage", task.task_id, result)
 
         worker.start_task(task)
@@ -105,7 +156,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         hostname: str = "",
         username: str = "",
         context: str = "",
-        wait_for_result: bool = True,
+        wait_for_result: bool = False,
     ) -> str:
         """Dispatch a threat hunting task to the threat hunter worker.
 
@@ -118,7 +169,8 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             hostname: Host to focus investigation on.
             username: User to focus investigation on.
             context: Additional context from prior investigation steps.
-            wait_for_result: If True, wait for hunt to complete.
+            wait_for_result: If True, wait for hunt to complete. If False (default),
+                return task_id immediately for parallel execution.
 
         Returns:
             Hunt findings (if wait_for_result) or task_id.
@@ -133,6 +185,32 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             username=username,
             context=context,
         )
+
+        # Distributed mode: submit to Redis for remote workers
+        if self._use_distributed_workers and self._blue_task_queue:
+            task_id = await self._blue_task_queue.submit_task(
+                investigation_id=self._investigation_id,
+                task_type=task.task_type.value,
+                target_role=task.assigned_role.value,
+                params=task.params,
+                task_id=task.task_id,
+            )
+            if wait_for_result:
+                result = await self._blue_task_queue.wait_for_result(task_id, timeout=60)
+                if result:
+                    return _format_task_result(
+                        "Threat Hunt",
+                        task_id,
+                        {
+                            "success": result.success,
+                            "result": result.result or {},
+                            "error": result.error,
+                        },
+                    )
+                return f"ERROR: Threat hunt task {task_id} timed out"
+            return f"[+] Threat hunt dispatched to remote worker: task_id={task_id}"
+
+        # In-process mode: use local workers
         worker = self._workers.get(BlueRole.THREAT_HUNTER)
 
         if not worker:
@@ -140,7 +218,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
         if wait_for_result:
             worker.start_task(task)
-            result = await self._dispatcher.wait_for_result(task.task_id, timeout=600)
+            result = await self._dispatcher.wait_for_result(task.task_id, timeout=60)
             return _format_task_result("Threat Hunt", task.task_id, result)
 
         worker.start_task(task)
@@ -152,7 +230,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         focus_host: str = "",
         focus_user: str = "",
         context: str = "",
-        wait_for_result: bool = True,
+        wait_for_result: bool = False,
     ) -> str:
         """Dispatch lateral movement analysis to the lateral analyst.
 
@@ -163,7 +241,8 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             focus_host: Primary host to analyze lateral movement from/to.
             focus_user: Primary user to analyze activity for.
             context: Additional context from prior investigation steps.
-            wait_for_result: If True, wait for analysis to complete.
+            wait_for_result: If True, wait for analysis to complete. If False (default),
+                return task_id immediately for parallel execution.
 
         Returns:
             Analysis findings (if wait_for_result) or task_id.
@@ -176,6 +255,32 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             focus_user=focus_user,
             context=context,
         )
+
+        # Distributed mode: submit to Redis for remote workers
+        if self._use_distributed_workers and self._blue_task_queue:
+            task_id = await self._blue_task_queue.submit_task(
+                investigation_id=self._investigation_id,
+                task_type=task.task_type.value,
+                target_role=task.assigned_role.value,
+                params=task.params,
+                task_id=task.task_id,
+            )
+            if wait_for_result:
+                result = await self._blue_task_queue.wait_for_result(task_id, timeout=60)
+                if result:
+                    return _format_task_result(
+                        "Lateral Analysis",
+                        task_id,
+                        {
+                            "success": result.success,
+                            "result": result.result or {},
+                            "error": result.error,
+                        },
+                    )
+                return f"ERROR: Lateral analysis task {task_id} timed out"
+            return f"[+] Lateral analysis dispatched to remote worker: task_id={task_id}"
+
+        # In-process mode: use local workers
         worker = self._workers.get(BlueRole.LATERAL_ANALYST)
 
         if not worker:
@@ -183,7 +288,7 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
         if wait_for_result:
             worker.start_task(task)
-            result = await self._dispatcher.wait_for_result(task.task_id, timeout=600)
+            result = await self._dispatcher.wait_for_result(task.task_id, timeout=60)
             return _format_task_result("Lateral Analysis", task.task_id, result)
 
         worker.start_task(task)
@@ -249,6 +354,79 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         if result.get("error") and "timed out" in str(result.get("error", "")):
             return f"[*] Task {task_id} still running..."
         return _format_task_result("Task", task_id, result)
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def get_pending_tasks(self) -> str:
+        """Get status of all pending tasks.
+
+        Use this to check which dispatched tasks are still running
+        and which have completed.
+
+        Returns:
+            Summary of pending and completed tasks.
+        """
+        if not self._dispatcher:
+            return "ERROR: No dispatcher configured"
+
+        pending = await self._dispatcher.backend.get_pending_tasks()
+        completed = await self._dispatcher.backend.get_completed_tasks()
+
+        lines = ["=== Task Status ==="]
+        lines.append(f"Pending: {len(pending)}")
+        for task_id, info in list(pending.items())[:10]:
+            task_type = info.get("task_type", "unknown")
+            role = info.get("assigned_role", "unknown")
+            lines.append(f"  - {task_id}: {task_type} ({role}) [running]")
+
+        lines.append(f"Completed: {len(completed)}")
+        for task_id in list(completed.keys())[-5:]:
+            lines.append(f"  - {task_id} [done]")
+
+        return "\n".join(lines)
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def wait_for_all_tasks(self, timeout: int = 120) -> str:
+        """Wait for all pending tasks to complete.
+
+        Use this before calling complete_investigation() to ensure
+        all dispatched work has finished.
+
+        Args:
+            timeout: Maximum seconds to wait (default 120 = 2 minutes).
+
+        Returns:
+            Summary of completed tasks or timeout message.
+        """
+        if not self._dispatcher:
+            return "ERROR: No dispatcher configured"
+
+        import time
+
+        start = time.monotonic()
+        completed_count = 0
+
+        while True:
+            pending = await self._dispatcher.backend.get_pending_tasks()
+            if not pending:
+                break
+
+            elapsed = time.monotonic() - start
+            if elapsed >= timeout:
+                return (
+                    f"[!] Timeout after {int(elapsed)}s. "
+                    f"{len(pending)} tasks still pending, {completed_count} completed."
+                )
+
+            # Wait briefly for results
+            for task_id in list(pending.keys()):
+                result = await self._dispatcher.wait_for_result(task_id, timeout=5)
+                if not (result.get("error") and "timed out" in str(result.get("error", ""))):
+                    completed_count += 1
+                    break  # Check pending list again
+
+            await asyncio.sleep(1)
+
+        return f"[+] All tasks complete. {completed_count} tasks finished in {int(time.monotonic() - start)}s."
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def complete_investigation(
@@ -419,9 +597,11 @@ class BlueTeamOrchestrator:
         grafana_api_key: str,
         mitre_client: MITREAttackClient,
         report_dir: Path,
-        max_steps: int = 50,
+        max_steps: int = 25,
         redis_url: str = "redis://localhost:6379",
         attack_context: dict | None = None,
+        use_distributed_workers: bool = False,
+        blue_task_queue: Any | None = None,
     ):
         self.model = model
         self.grafana_url = grafana_url
@@ -432,6 +612,9 @@ class BlueTeamOrchestrator:
         self.redis_url = redis_url
         self.attack_context = attack_context
         self._mcp_tools: list | None = None
+        # Distributed workers mode - if True, submit tasks to Redis for remote workers
+        self._use_distributed_workers = use_distributed_workers
+        self._blue_task_queue = blue_task_queue
 
     async def _ensure_mcp_connection(self) -> None:
         """Ensure MCP connection is ready (from pool)."""
@@ -441,7 +624,7 @@ class BlueTeamOrchestrator:
         try:
             from ares.tools.blue.grafana import MCPConnectionPool, connect_grafana_mcp
 
-            timeout = 10.0 if MCPConnectionPool.is_connected() else 60.0
+            timeout = 10.0 if MCPConnectionPool.is_connected() else 30.0
             mcp_client = await asyncio.wait_for(
                 connect_grafana_mcp(
                     grafana_url=self.grafana_url,
@@ -459,10 +642,70 @@ class BlueTeamOrchestrator:
         """Clear local MCP references."""
         self._mcp_tools = None
 
+    async def _update_status_completed(
+        self,
+        redis_client: Any,
+        investigation_id: str,
+        status: str,
+        investigation_state: InvestigationState,
+    ) -> None:
+        """Update investigation status to completed in Redis.
+
+        This is called immediately after report generation to ensure the status
+        is persisted even if the orchestrator service crashes before it can
+        update the status itself.
+
+        Args:
+            redis_client: Redis client instance.
+            investigation_id: Investigation ID.
+            status: Final status (completed/escalated).
+            investigation_state: Final investigation state.
+        """
+        import json
+        from datetime import datetime, timezone
+
+        status_key = f"ares:blue:inv:{investigation_id}:status"
+        now = datetime.now(timezone.utc).isoformat()
+
+        try:
+            # Read existing status to preserve started_at
+            existing_data = await redis_client.get(status_key)
+            started_at = None
+            if existing_data:
+                existing = json.loads(
+                    existing_data if isinstance(existing_data, str) else existing_data.decode()
+                )
+                started_at = existing.get("started_at")
+
+            status_data = {
+                "status": status,
+                "updated_at": now,
+                "completed_at": now,
+                "result": {
+                    "investigation_id": investigation_id,
+                    "status": status,
+                    "evidence_count": len(investigation_state.evidence),
+                    "techniques_identified": list(investigation_state.identified_techniques),
+                    "highest_pyramid_level": investigation_state.highest_pyramid_level,
+                },
+            }
+            if started_at:
+                status_data["started_at"] = started_at
+
+            await redis_client.setex(
+                status_key,
+                86400,  # 24h TTL
+                json.dumps(status_data),
+            )
+            logger.debug(f"Updated status to {status} for investigation {investigation_id}")
+        except Exception as e:
+            logger.warning(f"Failed to update investigation status to Redis: {e}")
+
     async def investigate(
         self,
         alert: dict,
         correlation_context: dict | None = None,
+        investigation_id: str | None = None,
     ) -> dict:
         """Run a multi-agent investigation on an alert.
 
@@ -475,11 +718,15 @@ class BlueTeamOrchestrator:
         Args:
             alert: The alert dictionary.
             correlation_context: Optional alert correlation context.
+            investigation_id: Optional ID for the investigation. If not provided,
+                a new one will be generated. When using distributed workers,
+                this MUST match the ID used to register the investigation.
 
         Returns:
             Result dict matching monolithic orchestrator output shape.
         """
-        investigation_id = f"inv-{uuid.uuid4().hex[:8]}"
+        if investigation_id is None:
+            investigation_id = f"inv-{uuid.uuid4().hex[:8]}"
         alert_name = alert.get("labels", {}).get("alertname", "unknown")
 
         logger.info(f"Starting multi-agent investigation {investigation_id}: {alert_name}")
@@ -494,42 +741,53 @@ class BlueTeamOrchestrator:
         dispatcher = BlueTeamDispatcher(redis_client)
         await dispatcher.start(investigation_id, alert, correlation_context)
 
-        # Ensure MCP connection
-        await self._ensure_mcp_connection()
+        # Ensure MCP connection (only needed for in-process workers)
+        if not self._use_distributed_workers:
+            await self._ensure_mcp_connection()
 
-        # Create worker agents
+        # Create worker agents (only for in-process mode)
         workers: dict[BlueRole, BlueWorkerAgent] = {}
 
-        for role, max_steps in [
-            (BlueRole.TRIAGE, 8),
-            (BlueRole.THREAT_HUNTER, 20),
-            (BlueRole.LATERAL_ANALYST, 15),
-        ]:
-            agent, callback_tools = create_blue_agent(
-                role=role,
-                model=self.model,
-                backend=dispatcher.backend,
-                dispatcher=dispatcher,
-                mitre_client=self.mitre_client,
-                mcp_tools=self._mcp_tools,
-                max_steps=max_steps,
-                grafana_url=self.grafana_url,
-                alert=alert,
-            )
-            worker = BlueWorkerAgent(
-                role=role,
-                agent=agent,
-                agent_name=f"{role.value}-{investigation_id[:8]}",
-                investigation_id=investigation_id,
-                dispatcher=dispatcher,
-                callback_tools=callback_tools,
-            )
-            workers[role] = worker
+        if not self._use_distributed_workers:
+            for role, max_steps in [
+                (BlueRole.TRIAGE, 5),
+                (BlueRole.THREAT_HUNTER, 10),
+                (BlueRole.LATERAL_ANALYST, 8),
+            ]:
+                agent, callback_tools = create_blue_agent(
+                    role=role,
+                    model=self.model,
+                    backend=dispatcher.backend,
+                    dispatcher=dispatcher,
+                    mitre_client=self.mitre_client,
+                    mcp_tools=self._mcp_tools,
+                    max_steps=max_steps,
+                    grafana_url=self.grafana_url,
+                    alert=alert,
+                )
+                worker = BlueWorkerAgent(
+                    role=role,
+                    agent=agent,
+                    agent_name=f"{role.value}-{investigation_id[:8]}",
+                    investigation_id=investigation_id,
+                    dispatcher=dispatcher,
+                    callback_tools=callback_tools,
+                )
+                workers[role] = worker
+        else:
+            logger.info("Distributed workers mode - tasks will be submitted to Redis")
 
         # Create orchestrator agent
         orchestrator_tools = BlueOrchestratorTools()
         orchestrator_tools.set_dispatcher(dispatcher)
         orchestrator_tools.set_workers(workers)
+
+        # Enable distributed mode if configured
+        if self._use_distributed_workers and self._blue_task_queue:
+            orchestrator_tools.set_distributed_mode(
+                blue_task_queue=self._blue_task_queue,
+                investigation_id=investigation_id,
+            )
 
         instructions = load_blue_instructions(BlueRole.ORCHESTRATOR)
         stop_conditions = get_blue_stop_conditions(BlueRole.ORCHESTRATOR)
@@ -597,6 +855,12 @@ class BlueTeamOrchestrator:
                 report_gen = MarkdownReportGenerator(self.report_dir)
                 report_path = report_gen.generate(investigation_state)
                 logger.success(f"Report generated: {report_path}")
+
+                # Update status to completed immediately after report generation
+                # This ensures status is correct even if the orchestrator service crashes
+                await self._update_status_completed(
+                    redis_client, investigation_id, status, investigation_state
+                )
             except Exception as e:
                 logger.error(f"Report generation failed: {e}")
 
