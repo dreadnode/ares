@@ -79,6 +79,8 @@ __all__ = [
     "TaskResult",
     "TaskStatus",
     "TimelineEvent",
+    "TriageDecision",
+    "TriageRecord",
     "User",
     "VulnerabilityInfo",
     "parse",
@@ -3223,6 +3225,88 @@ class BlueTaskInfo:
     retry_count: int = 0
 
 
+class TriageDecision(Enum):
+    """Triage decisions for escalated investigations.
+
+    When an investigation is escalated, the triage agent evaluates
+    whether it truly requires human review or can be handled automatically.
+
+    Attributes:
+        PENDING: Triage not yet performed.
+        CONFIRMED: Valid escalation, needs human review.
+        DOWNGRADED: False positive or low priority, auto-completed.
+        REINVESTIGATE: Need more data before deciding.
+        ROUTED: Routed to specific team/action.
+    """
+
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    DOWNGRADED = "downgraded"
+    REINVESTIGATE = "reinvestigate"
+    ROUTED = "routed"
+
+
+@dataclass
+class TriageRecord:
+    """Record of a triage decision for audit trail.
+
+    Each time the triage agent makes a decision, a record is created
+    to track the reasoning and enable post-hoc analysis.
+
+    Attributes:
+        triage_id: Unique identifier for this triage record.
+        investigation_id: Investigation this triage applies to.
+        decision: The triage decision made.
+        reasoning: LLM-generated explanation for the decision.
+        confidence: Confidence score 0.0-1.0 for the decision.
+        routed_to: Team/action if decision is ROUTED.
+        focus_areas: Areas to focus on if decision is REINVESTIGATE.
+        reinvestigation_cycle: Current reinvestigation cycle (0-2).
+        created_at: When this record was created.
+    """
+
+    triage_id: str
+    investigation_id: str
+    decision: TriageDecision
+    reasoning: str
+    confidence: float
+    routed_to: str | None = None
+    focus_areas: list[str] = field(default_factory=list)
+    reinvestigation_cycle: int = 0
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for Redis storage."""
+        return {
+            "triage_id": self.triage_id,
+            "investigation_id": self.investigation_id,
+            "decision": self.decision.value,
+            "reasoning": self.reasoning,
+            "confidence": self.confidence,
+            "routed_to": self.routed_to,
+            "focus_areas": self.focus_areas,
+            "reinvestigation_cycle": self.reinvestigation_cycle,
+            "created_at": self.created_at.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TriageRecord:
+        """Create from dictionary (Redis deserialization)."""
+        return cls(
+            triage_id=data["triage_id"],
+            investigation_id=data["investigation_id"],
+            decision=TriageDecision(data["decision"]),
+            reasoning=data["reasoning"],
+            confidence=data["confidence"],
+            routed_to=data.get("routed_to"),
+            focus_areas=data.get("focus_areas", []),
+            reinvestigation_cycle=data.get("reinvestigation_cycle", 0),
+            created_at=datetime.fromisoformat(data["created_at"])
+            if isinstance(data.get("created_at"), str)
+            else data.get("created_at", datetime.now(timezone.utc)),
+        )
+
+
 @dataclass
 class SharedBlueTeamState:
     """Cluster-wide state shared across all blue team agents.
@@ -3295,6 +3379,10 @@ class SharedBlueTeamState:
     # Task tracking
     pending_tasks: dict[str, BlueTaskInfo] = field(default_factory=dict)
     completed_tasks: dict[str, BlueTaskInfo] = field(default_factory=dict)
+
+    # Triage tracking (for escalated investigations)
+    triage_decision: TriageDecision = TriageDecision.PENDING
+    triage_records: list[TriageRecord] = field(default_factory=list)
 
     # Evidence dedup keys (in-memory for fast checking)
     _evidence_dedup_keys: set[str] = field(

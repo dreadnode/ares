@@ -6,6 +6,7 @@ Imports are lazy to prevent loading blue team code in red team contexts.
 __all__ = [
     "BlueWorkerCallbackTools",
     "CompletionTools",
+    "EscalationTriageTools",
     "GrafanaTools",
     "InvestigationTools",
     "LearningTools",
@@ -20,6 +21,7 @@ __all__ = [
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "BlueWorkerCallbackTools": ("ares.tools.blue.callbacks", "BlueWorkerCallbackTools"),
     "CompletionTools": ("ares.tools.blue.actions", "CompletionTools"),
+    "EscalationTriageTools": ("ares.tools.blue.triage_tools", "EscalationTriageTools"),
     "GrafanaTools": ("ares.tools.blue.grafana", "GrafanaTools"),
     "connect_grafana_mcp": ("ares.tools.blue.grafana", "connect_grafana_mcp"),
     "InvestigationTools": ("ares.tools.blue.investigation", "InvestigationTools"),

@@ -764,7 +764,16 @@ async def operation_status(
                 "running": [],
                 "completed": [],
                 "escalated": [],
+                "routed": [],
                 "failed": [],
+            }
+            # Triage breakdown for escalated investigations
+            triage_counts: dict[str, int] = {
+                "confirmed": 0,
+                "downgraded": 0,
+                "reinvestigate": 0,
+                "routed": 0,
+                "pending": 0,
             }
             earliest_start: datetime | None = None
             latest_end: datetime | None = None
@@ -790,6 +799,19 @@ async def operation_status(
                         ended = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
                         if latest_end is None or ended > latest_end:
                             latest_end = ended
+
+                    # Check triage status for escalated/routed/completed (may have been triaged)
+                    inv_status = status.get("status", "")
+                    if inv_status in ("escalated", "routed", "completed"):
+                        triage_key = f"ares:blue:inv:{inv_id}:triage:decision"
+                        triage_data = await client.get(triage_key)
+                        if triage_data:
+                            try:
+                                triage = json.loads(triage_data)
+                                decision = triage.get("decision", "pending")
+                                triage_counts[decision] = triage_counts.get(decision, 0) + 1
+                            except json.JSONDecodeError:
+                                pass
                 else:
                     statuses["submitted"].append({"investigation_id": inv_id})
 
@@ -822,6 +844,7 @@ async def operation_status(
             running = len(statuses["running"])
             completed = len(statuses["completed"])
             escalated = len(statuses["escalated"])
+            routed = len(statuses.get("routed", []))
             failed = len(statuses["failed"])
             submitted = len(statuses["submitted"])
 
@@ -830,12 +853,23 @@ async def operation_status(
             print(f"  Running:   {running}")
             print(f"  Completed: {completed}")
             print(f"  Escalated: {escalated}")
+            print(f"  Routed:    {routed}")
             print(f"  Failed:    {failed}")
             print(f"  Submitted: {submitted}")
             print(f"Duration: {duration}")
 
+            # Show triage breakdown if any triage occurred
+            total_triaged = sum(triage_counts.values())
+            if total_triaged > 0:
+                print("\nTriage breakdown:")
+                print(f"  Confirmed:     {triage_counts.get('confirmed', 0)}")
+                print(f"  Downgraded:    {triage_counts.get('downgraded', 0)}")
+                print(f"  Routed:        {triage_counts.get('routed', 0)}")
+                print(f"  Reinvestigate: {triage_counts.get('reinvestigate', 0)}")
+                print(f"  Pending:       {triage_counts.get('pending', 0)}")
+
             if earliest_start:
-                print(f"Started: {earliest_start.isoformat()}")
+                print(f"\nStarted: {earliest_start.isoformat()}")
             if latest_end and not (statuses["running"] or statuses["submitted"]):
                 print(f"Completed: {latest_end.isoformat()}")
 
@@ -1108,8 +1142,10 @@ async def from_operation(
                 )
                 submitted += 1
 
-            print(f"\nSubmitted {submitted} batched investigations from operation {operation_id}")
-            print(f"  (Reduced from {len(alerts)} individual alerts)")
+            print(
+                f"\nSubmitted {submitted} batched investigations from operation {operation_id} "
+                f"({len(alerts)} alerts clustered)"
+            )
             print(
                 f"\nTrack progress with: task blue:multi:operation-status OPERATION_ID={operation_id}"
             )
@@ -1193,6 +1229,137 @@ async def _get_latest_investigation_id(redis_url: str) -> str | None:
 
         investigations.sort(key=lambda x: x[2] or "", reverse=True)
         return investigations[0][0]
+
+    finally:
+        await client.aclose()
+
+
+@app.command(name="triage-status")
+async def triage_status(
+    investigation_id: Annotated[str, cyclopts.Parameter(help="Investigation ID")] = "",
+    *,
+    latest: Annotated[
+        bool, cyclopts.Parameter(help="Get triage status of latest investigation")
+    ] = False,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+    json_output: Annotated[bool, cyclopts.Parameter(help="Output as JSON")] = False,
+) -> None:
+    """Show triage decision and audit trail for an escalated investigation.
+
+    Triage decisions:
+    - confirmed: Valid escalation, needs human review
+    - downgraded: False positive or low priority, auto-completed
+    - reinvestigate: More data needed before deciding
+    - routed: Routed to specific team/action
+    - pending: Triage not yet performed
+    """
+    redis_url = redis_url or get_redis_url()
+
+    if latest:
+        inv_id = await _get_latest_investigation_id(redis_url)
+        if not inv_id:
+            print("No investigations found")
+            return
+        investigation_id = inv_id
+
+    if not investigation_id:
+        logger.error("Either investigation_id or --latest is required")
+        sys.exit(1)
+
+    client = await create_verified_redis_client(redis_url, decode_responses=True)
+    try:
+        # Get triage decision
+        decision_key = f"ares:blue:inv:{investigation_id}:triage:decision"
+        decision_data = await client.get(decision_key)
+
+        # Get triage records (audit trail)
+        records_key = f"ares:blue:inv:{investigation_id}:triage:records"
+        records_raw = await client.lrange(records_key, 0, -1)
+        records = []
+        for r in records_raw:
+            try:
+                records.append(json.loads(r))
+            except json.JSONDecodeError:
+                pass
+
+        # Get investigation status
+        status_key = f"ares:blue:inv:{investigation_id}:status"
+        status_data = await client.get(status_key)
+        status = "unknown"
+        if status_data:
+            status_json = json.loads(status_data)
+            status = status_json.get("status", "unknown")
+
+        # Get escalation reason from meta
+        meta_key = f"ares:blue:inv:{investigation_id}:meta"
+        meta_data = await client.hgetall(meta_key)
+        escalated = False
+        escalation_reason = None
+        if meta_data:
+            escalated_raw = meta_data.get("escalated")
+            if escalated_raw:
+                try:
+                    escalated = json.loads(escalated_raw)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            reason_raw = meta_data.get("escalation_reason")
+            if reason_raw:
+                try:
+                    escalation_reason = json.loads(reason_raw)
+                except (json.JSONDecodeError, TypeError):
+                    escalation_reason = str(reason_raw)
+
+        if json_output:
+            output = {
+                "investigation_id": investigation_id,
+                "status": status,
+                "escalated": escalated,
+                "escalation_reason": escalation_reason,
+                "triage_decision": json.loads(decision_data) if decision_data else None,
+                "triage_records": records,
+            }
+            print(json.dumps(output, indent=2))
+            return
+
+        print(f"Investigation: {investigation_id}")
+        print(f"Status: {status}")
+        print(f"Escalated: {escalated}")
+        if escalation_reason:
+            print(f"Escalation reason: {escalation_reason}")
+        print("-" * 60)
+
+        if not decision_data and not records:
+            print("No triage data found (investigation may not have been escalated)")
+            return
+
+        # Show current decision
+        print("\nTriage Decision:")
+        if decision_data:
+            decision = json.loads(decision_data)
+            print(f"  Decision: {decision.get('decision', 'unknown').upper()}")
+            print(f"  Confidence: {decision.get('confidence', 0):.2f}")
+            if decision.get("routed_to"):
+                print(f"  Routed to: {decision.get('routed_to')}")
+            if decision.get("focus_areas"):
+                print(f"  Focus areas: {', '.join(decision.get('focus_areas', []))}")
+            if decision.get("reinvestigation_cycle", 0) > 0:
+                print(f"  Reinvestigation cycle: {decision.get('reinvestigation_cycle')}/2")
+            print(f"\n  Reasoning: {decision.get('reasoning', 'None provided')}")
+        else:
+            print("  Decision: PENDING")
+
+        # Show audit trail
+        if records:
+            print("\n" + "-" * 60)
+            print("Triage Audit Trail:")
+            for i, record in enumerate(records, 1):
+                print(f"\n  [{i}] {record.get('created_at', 'unknown')}")
+                print(f"      Decision: {record.get('decision', 'unknown').upper()}")
+                print(f"      Confidence: {record.get('confidence', 0):.2f}")
+                reasoning = record.get("reasoning", "")
+                if len(reasoning) > 100:
+                    reasoning = reasoning[:100] + "..."
+                print(f"      Reasoning: {reasoning}")
 
     finally:
         await client.aclose()
