@@ -174,7 +174,9 @@ class BlueOrchestratorService:
         import time
 
         last_successful_poll = time.monotonic()
-        stale_connection_threshold = 30.0
+        # Base threshold when idle; extended when investigations are active
+        stale_connection_threshold_idle = 30.0
+        stale_connection_threshold_busy = 300.0  # 5 min when busy (LLM calls starve event loop)
 
         logger.info(f"Concurrent investigation limit: {self._max_concurrent}")
 
@@ -212,13 +214,31 @@ class BlueOrchestratorService:
 
             except asyncio.TimeoutError:
                 elapsed = time.monotonic() - last_successful_poll
-                if elapsed > stale_connection_threshold:
-                    logger.warning(
-                        f"No successful Redis poll for {elapsed:.1f}s, "
-                        f"forcing reconnection (possible Sentinel pod restart)"
-                    )
-                    await self._force_reconnect()
-                    last_successful_poll = time.monotonic()
+                # Use longer threshold when investigations are active - LLM calls can starve
+                # the event loop, causing poll timeouts that aren't actual Redis failures
+                has_active = len(self._active_investigations) > 0
+                threshold = (
+                    stale_connection_threshold_busy
+                    if has_active
+                    else stale_connection_threshold_idle
+                )
+
+                if elapsed > threshold:
+                    # Before forcing reconnect, verify connection is actually dead with a ping
+                    if await self._is_connection_alive():
+                        # Connection is fine, just event loop starvation from LLM calls
+                        logger.debug(
+                            f"Poll timeout after {elapsed:.1f}s but Redis ping succeeded "
+                            f"({len(self._active_investigations)} active investigations)"
+                        )
+                        last_successful_poll = time.monotonic()
+                    else:
+                        logger.warning(
+                            f"No successful Redis poll for {elapsed:.1f}s and ping failed, "
+                            f"forcing reconnection (possible Sentinel pod restart)"
+                        )
+                        await self._force_reconnect()
+                        last_successful_poll = time.monotonic()
                 continue
             except Exception as e:
                 logger.error(f"Error in service loop: {e}")
@@ -242,6 +262,25 @@ class BlueOrchestratorService:
                 logger.info("Reconnected to Redis after forced reconnection")
             except Exception as e:
                 logger.error(f"Failed to reconnect to Redis: {e}")
+
+    async def _is_connection_alive(self) -> bool:
+        """Check if Redis connection is alive with a quick ping.
+
+        Used to distinguish between actual connection failures and event loop
+        starvation (e.g., from concurrent LLM calls blocking the loop).
+        """
+        if not self.task_queue or not self.task_queue._client:
+            return False
+
+        try:
+            # Use a short timeout - if ping doesn't respond quickly, connection is likely dead
+            result = await asyncio.wait_for(
+                self.task_queue._client.ping(),
+                timeout=2.0,
+            )
+            return result is True
+        except Exception:
+            return False
 
     async def _pop_investigation_request(self) -> dict[str, Any] | None:
         """Pop an investigation request from Redis queue."""
