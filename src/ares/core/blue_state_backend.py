@@ -86,6 +86,8 @@ class BlueStateBackend:
     KEY_COMPLETED_TASKS = "tasks:completed"
     KEY_TECHNIQUE_NAMES = "technique_names"
     KEY_RECOMMENDATIONS = "recommendations"
+    KEY_TRIAGE_DECISION = "triage:decision"
+    KEY_TRIAGE_RECORDS = "triage:records"
 
     # Dedup set prefix
     KEY_DEDUP_PREFIX = "dedup"
@@ -598,6 +600,131 @@ class BlueStateBackend:
             return {}
 
     # =========================================================================
+    # Triage (Redis STRING for decision, LIST for records)
+    # =========================================================================
+
+    async def set_triage_decision(
+        self,
+        decision: str,
+        reasoning: str,
+        confidence: float,
+        routed_to: str | None = None,
+        focus_areas: list[str] | None = None,
+        reinvestigation_cycle: int = 0,
+    ) -> None:
+        """Set the current triage decision for the investigation.
+
+        Also adds a triage record for audit trail.
+
+        Args:
+            decision: Triage decision (pending, confirmed, downgraded, reinvestigate, routed).
+            reasoning: LLM-generated explanation for the decision.
+            confidence: Confidence score 0.0-1.0.
+            routed_to: Team/action if decision is "routed".
+            focus_areas: Areas to focus on if decision is "reinvestigate".
+            reinvestigation_cycle: Current reinvestigation cycle (0-2).
+        """
+        import uuid
+
+        key = self._key(self.KEY_TRIAGE_DECISION)
+        try:
+            decision_data = {
+                "decision": decision,
+                "reasoning": reasoning,
+                "confidence": confidence,
+                "routed_to": routed_to,
+                "focus_areas": focus_areas or [],
+                "reinvestigation_cycle": reinvestigation_cycle,
+            }
+            await self._redis.set(
+                key, json.dumps(decision_data, separators=(",", ":"), default=str)
+            )
+            await self._set_ttl(key)
+        except Exception as e:
+            logger.warning(f"Failed to set triage decision in Redis: {e}")
+
+        # Also add a triage record for audit trail
+        triage_id = f"triage-{uuid.uuid4().hex[:8]}"
+        record = {
+            "triage_id": triage_id,
+            "investigation_id": self._investigation_id,
+            "decision": decision,
+            "reasoning": reasoning,
+            "confidence": confidence,
+            "routed_to": routed_to,
+            "focus_areas": focus_areas or [],
+            "reinvestigation_cycle": reinvestigation_cycle,
+            "created_at": json.dumps(None, default=str),  # Will be set to current time
+        }
+        await self.add_triage_record(record)
+
+    async def get_triage_decision(self) -> dict | None:
+        """Get the current triage decision.
+
+        Returns:
+            Dict with decision data, or None if not set.
+        """
+        key = self._key(self.KEY_TRIAGE_DECISION)
+        try:
+            data = await self._redis.get(key)
+            if data is None:
+                return None
+            return json.loads(data if isinstance(data, str) else data.decode())
+        except Exception as e:
+            logger.warning(f"Failed to get triage decision from Redis: {e}")
+            return None
+
+    async def add_triage_record(self, record: dict) -> None:
+        """Add a triage record for audit trail.
+
+        Args:
+            record: Triage record dict.
+        """
+        from datetime import datetime, timezone
+
+        key = self._key(self.KEY_TRIAGE_RECORDS)
+        try:
+            # Set created_at if not already set
+            if "created_at" not in record or record["created_at"] is None:
+                record["created_at"] = datetime.now(timezone.utc).isoformat()
+            data = json.dumps(record, separators=(",", ":"), default=str)
+            await self._redis.rpush(key, data)
+            await self._set_ttl(key)
+        except Exception as e:
+            logger.warning(f"Failed to add triage record to Redis: {e}")
+
+    async def get_triage_records(self) -> list[dict]:
+        """Get all triage records for audit trail.
+
+        Returns:
+            List of triage record dicts.
+        """
+        key = self._key(self.KEY_TRIAGE_RECORDS)
+        try:
+            items = await self._redis.lrange(key, 0, -1)
+            records = []
+            for item in items:
+                try:
+                    records.append(json.loads(item if isinstance(item, str) else item.decode()))
+                except json.JSONDecodeError:
+                    logger.warning("Invalid JSON in triage records list")
+            return records
+        except Exception as e:
+            logger.warning(f"Failed to get triage records from Redis: {e}")
+            return []
+
+    async def get_reinvestigation_cycle(self) -> int:
+        """Get the current reinvestigation cycle count.
+
+        Returns:
+            Current cycle count (0 = no reinvestigations yet).
+        """
+        decision = await self.get_triage_decision()
+        if decision:
+            return decision.get("reinvestigation_cycle", 0)
+        return 0
+
+    # =========================================================================
     # Snapshot — read ALL keys into a single dict
     # =========================================================================
 
@@ -648,6 +775,8 @@ class BlueStateBackend:
             "pending_tasks": {},
             "completed_tasks": {},
             "recommendations": [],
+            "triage_decision": None,
+            "triage_records": [],
         }
 
         # Evidence (HASH values -> list[dict])
@@ -795,6 +924,18 @@ class BlueStateBackend:
             result["recommendations"] = await self.get_recommendations()
         except Exception as e:
             logger.warning(f"Failed to snapshot recommendations: {e}")
+
+        # Triage decision (STRING -> dict)
+        try:
+            result["triage_decision"] = await self.get_triage_decision()
+        except Exception as e:
+            logger.warning(f"Failed to snapshot triage decision: {e}")
+
+        # Triage records (LIST -> list[dict])
+        try:
+            result["triage_records"] = await self.get_triage_records()
+        except Exception as e:
+            logger.warning(f"Failed to snapshot triage records: {e}")
 
         return result
 

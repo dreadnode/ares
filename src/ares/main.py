@@ -1400,7 +1400,7 @@ async def blue_worker(
     logger.info(f"Pod: {os.environ.get('HOSTNAME', 'local')}")
     logger.info("=" * 60)
 
-    from ares.core.blue_worker import run_blue_worker
+    from ares.core.blue_worker import run_blue_global_worker, run_blue_worker
     from ares.core.models import BlueRole
 
     # Convert string role to BlueRole enum
@@ -1411,15 +1411,30 @@ async def blue_worker(
     }
     blue_role = role_mapping[role]
 
+    # Check if global worker mode is enabled (for distributed orchestrator architecture)
+    # ARES_BLUE_GLOBAL_POOL is the canonical env var set in K8s deployments
+    use_global_worker = os.getenv("ARES_BLUE_GLOBAL_POOL", "").lower() in ("1", "true", "yes")
+    if use_global_worker:
+        logger.info("Global worker mode enabled - polling from global task queues")
+
     try:
-        await run_blue_worker(
-            role=blue_role,
-            investigation_id=investigation_id or None,
-            redis_url=redis_url,
-            model=model or None,
-            max_steps=max_steps if max_steps > 0 else None,
-            grafana_url=grafana_url or None,
-        )
+        if use_global_worker:
+            await run_blue_global_worker(
+                role=blue_role,
+                redis_url=redis_url,
+                model=model or None,
+                max_steps=max_steps if max_steps > 0 else None,
+                grafana_url=grafana_url or None,
+            )
+        else:
+            await run_blue_worker(
+                role=blue_role,
+                investigation_id=investigation_id or None,
+                redis_url=redis_url,
+                model=model or None,
+                max_steps=max_steps if max_steps > 0 else None,
+                grafana_url=grafana_url or None,
+            )
     except KeyboardInterrupt:
         logger.info("Blue worker interrupted by user")
     except Exception as e:

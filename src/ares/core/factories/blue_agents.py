@@ -413,3 +413,63 @@ def _role_to_name(role: BlueRole) -> str:
         BlueRole.LATERAL_ANALYST: "Lateral Analyst",
     }
     return names.get(role, f"Blue Agent ({role.value})")
+
+
+def create_triage_agent(
+    model: str,
+    backend: BlueStateBackend,
+    shared_state: Any,
+    max_steps: int = 10,
+) -> Agent:
+    """Create an escalation triage agent.
+
+    The triage agent evaluates escalated investigations to determine
+    if they truly require human review.
+
+    Args:
+        model: LLM model identifier.
+        backend: BlueStateBackend for state persistence.
+        shared_state: SharedBlueTeamState with investigation data.
+        max_steps: Maximum agent steps (default 10).
+
+    Returns:
+        Configured Agent for escalation triage.
+    """
+    from ares.core.templates import get_template_loader
+    from ares.tools.blue.triage_tools import EscalationTriageTools
+
+    # Load triage instructions
+    try:
+        loader = get_template_loader()
+        instructions = loader.render("blueteam/agents/escalation_triage.md.jinja")
+    except Exception as e:
+        logger.warning(f"Failed to load triage template: {e}")
+        instructions = (
+            "You are an escalation triage agent. Evaluate the investigation and "
+            "call one of: confirm_escalation, downgrade_escalation, "
+            "request_reinvestigation, or route_to_team."
+        )
+
+    # Create and configure tools
+    triage_tools = EscalationTriageTools()
+    triage_tools.set_backend(backend)
+    triage_tools.set_shared_state(shared_state)
+
+    # Stop conditions: any decision tool ends the agent
+    stop_conditions = [
+        tool_use("confirm_escalation"),
+        tool_use("downgrade_escalation"),
+        tool_use("request_reinvestigation"),
+        tool_use("route_to_team"),
+        max_tool_calls_stop(max_calls=15),
+    ]
+
+    return dn.Agent(
+        name="Escalation Triage",
+        model=model,
+        instructions=instructions,
+        max_steps=max_steps,
+        tools=[triage_tools],
+        stop_conditions=stop_conditions,
+        thread=Thread(),  # type: ignore[call-arg]
+    )

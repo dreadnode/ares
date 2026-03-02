@@ -30,6 +30,7 @@ from ares.core.factories.blue_agents import (
 from ares.core.models import (
     BlueRole,
     InvestigationState,
+    SharedBlueTeamState,
 )
 from ares.reports.investigation import MarkdownReportGenerator
 
@@ -350,6 +351,22 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         if not self._dispatcher:
             return "ERROR: No dispatcher configured"
 
+        # Use distributed task queue if available (results come via Redis)
+        if self._use_distributed_workers and self._blue_task_queue:
+            result = await self._blue_task_queue.wait_for_result(task_id, timeout=10)
+            if result is None:
+                return f"[*] Task {task_id} still running..."
+            return _format_task_result(
+                "Task",
+                task_id,
+                {
+                    "success": result.success,
+                    "result": result.result or {},
+                    "error": result.error,
+                },
+            )
+
+        # In-process mode
         result = await self._dispatcher.wait_for_result(task_id, timeout=10)
         if result.get("error") and "timed out" in str(result.get("error", "")):
             return f"[*] Task {task_id} still running..."
@@ -701,6 +718,69 @@ class BlueTeamOrchestrator:
         except Exception as e:
             logger.warning(f"Failed to update investigation status to Redis: {e}")
 
+    async def _run_escalation_triage(
+        self,
+        investigation_id: str,
+        shared_state: SharedBlueTeamState,
+        backend: Any,
+        current_status: str,
+    ) -> str:
+        """Run escalation triage on an escalated investigation.
+
+        The triage agent evaluates if the escalation is warranted or if
+        the investigation can be auto-completed (downgraded) or routed.
+
+        Args:
+            investigation_id: The investigation ID.
+            shared_state: Shared investigation state.
+            backend: BlueStateBackend for persistence.
+            current_status: Current status ("escalated").
+
+        Returns:
+            Updated status: "escalated" (confirmed), "completed" (downgraded), or "routed".
+        """
+        from ares.agents.blue.triage_agent import EscalationTriageAgent
+        from ares.core.models import TriageDecision
+
+        logger.info(f"Running escalation triage for {investigation_id}")
+
+        triage_agent = EscalationTriageAgent(model=self.model, max_steps=10)
+
+        try:
+            triage_result = await triage_agent.triage(
+                investigation_id=investigation_id,
+                shared_state=shared_state,
+                backend=backend,
+            )
+
+            # Map triage decision to investigation status
+            if triage_result.decision == TriageDecision.DOWNGRADED:
+                logger.success(f"Triage downgraded escalation: {triage_result.reasoning[:100]}...")
+                return "completed"
+
+            if triage_result.decision == TriageDecision.ROUTED:
+                logger.success(
+                    f"Triage routed to {triage_result.routed_to}: {triage_result.reasoning[:100]}..."
+                )
+                return "routed"
+
+            if triage_result.decision == TriageDecision.REINVESTIGATE:
+                # For now, reinvestigate counts as confirmed (needs more work)
+                # Future: dispatch additional workers with focus areas
+                logger.info(
+                    f"Triage requested reinvestigation (focus: {triage_result.focus_areas}), "
+                    f"keeping escalated status"
+                )
+                return "escalated"
+
+            # CONFIRMED or PENDING
+            logger.info(f"Triage confirmed escalation: {triage_result.reasoning[:100]}...")
+            return "escalated"
+
+        except Exception as e:
+            logger.error(f"Triage agent failed: {e}, keeping escalated status")
+            return current_status
+
     async def investigate(
         self,
         alert: dict,
@@ -849,6 +929,17 @@ class BlueTeamOrchestrator:
             status = "completed"
             if shared_state.escalated:
                 status = "escalated"
+
+                # Run automatic triage on escalated investigations
+                try:
+                    status = await self._run_escalation_triage(
+                        investigation_id,
+                        shared_state,
+                        dispatcher.backend,
+                        status,
+                    )
+                except Exception as e:
+                    logger.error(f"Triage failed, keeping escalated status: {e}")
 
             # Generate report
             try:

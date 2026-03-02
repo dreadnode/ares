@@ -566,8 +566,8 @@ async def run_blue_global_worker(
     task_queue = BlueTaskQueue(redis_url, use_global_queue=True)
     await task_queue.connect()
 
-    # Pre-load MCP tools (shared across all tasks)
-    mcp_tools = await _load_mcp_tools(grafana_url)
+    # MCP tools are loaded per-investigation when credentials are available
+    # (see get_investigation_context)
     mitre_client = MITREAttackClient()
 
     agent_name = f"blue-{role.value}-{pod_name}"
@@ -581,6 +581,21 @@ async def run_blue_global_worker(
         """Get or create context for an investigation."""
         if investigation_id in _investigation_cache:
             return _investigation_cache[investigation_id]
+
+        # Load credentials from investigation config (stored by orchestrator)
+        credentials = await task_queue.get_investigation_credentials(investigation_id)
+        if credentials:
+            for key, value in credentials.items():
+                if value:
+                    os.environ[key] = value
+                    logger.debug(f"Set credential from investigation: {key}")
+            logger.info(
+                f"Loaded {len(credentials)} credentials for investigation {investigation_id}"
+            )
+
+        # Load MCP tools now that credentials are available
+        # (credentials may include GRAFANA_SERVICE_ACCOUNT_TOKEN)
+        inv_mcp_tools = await _load_mcp_tools(grafana_url)
 
         # Create new context for this investigation
         redis_client = await create_redis_client(redis_url, decode_responses=True)
@@ -599,7 +614,7 @@ async def run_blue_global_worker(
             backend=backend,
             dispatcher=dispatcher,
             mitre_client=mitre_client,
-            mcp_tools=mcp_tools,
+            mcp_tools=inv_mcp_tools,
             max_steps=max_steps or 10,
             grafana_url=grafana_url or os.environ.get("GRAFANA_URL", ""),
             alert=alert,
@@ -632,9 +647,14 @@ async def run_blue_global_worker(
     last_maintenance = time.monotonic()
     maintenance_interval = 15.0
 
+    poll_count = 0
     try:
         while True:
             try:
+                poll_count += 1
+                if poll_count <= 3 or poll_count % 60 == 0:
+                    logger.debug(f"[{agent_name}] Poll iteration {poll_count}")
+
                 # Periodic maintenance
                 if (time.monotonic() - last_maintenance) >= maintenance_interval:
                     last_maintenance = time.monotonic()
@@ -651,6 +671,8 @@ async def run_blue_global_worker(
                 task = await task_queue.poll_global_task(role=role.value, timeout=5.0)
 
                 if task is None:
+                    if poll_count <= 3:
+                        logger.debug(f"[{agent_name}] No task available, continuing to poll")
                     retry_delay = 1.0
                     continue
 

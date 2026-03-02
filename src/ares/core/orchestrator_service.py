@@ -392,14 +392,23 @@ class OrchestratorService:
             except asyncio.TimeoutError:
                 # asyncio.wait_for timed out - BLPOP didn't return in time
                 # This could mean the connection is stale (Sentinel pod restarted)
+                # or simply that no tasks are in the queue (normal idle state)
                 elapsed = time.monotonic() - last_successful_poll
                 if elapsed > stale_connection_threshold:
-                    logger.warning(
-                        f"No successful Redis poll for {elapsed:.1f}s, "
-                        f"forcing reconnection (possible Sentinel pod restart)"
-                    )
-                    await self._force_reconnect()
-                    last_successful_poll = time.monotonic()
+                    # Before forcing reconnect, verify connection is actually dead with a ping
+                    if await self._is_connection_alive():
+                        # Connection is fine, just no tasks in queue - reset timer
+                        logger.debug(
+                            f"Poll timeout after {elapsed:.1f}s but Redis ping succeeded (no tasks in queue)"
+                        )
+                        last_successful_poll = time.monotonic()
+                    else:
+                        logger.warning(
+                            f"No successful Redis poll for {elapsed:.1f}s and ping failed, "
+                            f"forcing reconnection (possible Sentinel pod restart)"
+                        )
+                        await self._force_reconnect()
+                        last_successful_poll = time.monotonic()
                 continue
             except Exception as e:
                 logger.error(f"Error in service loop: {e}")
@@ -426,6 +435,25 @@ class OrchestratorService:
                 logger.info("Reconnected to Redis after forced reconnection")
             except Exception as e:
                 logger.error(f"Failed to reconnect to Redis: {e}")
+
+    async def _is_connection_alive(self) -> bool:
+        """Check if Redis connection is alive with a quick ping.
+
+        Used to distinguish between actual connection failures and BLPOP timeouts
+        that occur when no tasks are available.
+        """
+        if not self.task_queue or not self.task_queue._client:
+            return False
+
+        try:
+            # Use a short timeout - if ping doesn't respond quickly, connection is likely dead
+            result = await asyncio.wait_for(
+                self.task_queue._client.ping(),
+                timeout=2.0,
+            )
+            return result is True
+        except Exception:
+            return False
 
     async def _pop_operation_request(self) -> dict[str, Any] | None:
         """Pop an operation request from Redis queue.
