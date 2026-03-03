@@ -2262,7 +2262,8 @@ class SharedRedTeamState:
         if hash_type == "ntlm" and username == "krbtgt" and not self.has_domain_admin:
             self.has_domain_admin = True
             self.da_hash_id = hash_obj.id  # Store the ID for consistent attack chain building
-            self.completed_at = datetime.now(timezone.utc)  # Record completion time
+            # NOTE: Do NOT set completed_at here - that's controlled by stop_on_domain_admin
+            # or stop_on_golden_ticket config in announcements.py
             # Build attack path from credential chain instead of hardcoding
             attack_chain = self.format_attack_chain(hash_obj)
             self.domain_admin_path = attack_chain
@@ -3447,7 +3448,7 @@ class SharedBlueTeamState:
             graph.add_connection(
                 source=conn.get("source", ""),
                 destination=conn.get("destination", ""),
-                connection_type=conn.get("connection_type", ""),
+                conn_type=conn.get("connection_type", ""),
                 user=conn.get("user", ""),
                 mitre_technique=conn.get("mitre_technique", ""),
             )

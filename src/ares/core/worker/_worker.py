@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from loguru import logger
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind
 
 from ares.core.config import (
     get_agent_task_timeout,
@@ -43,8 +45,7 @@ from ares.core.messages import (
 from ares.core.models import AgentRole, SharedRedTeamState
 from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue, TaskMessage
-
-# Import from split modules
+from ares.core.tracing import create_agent_span_attributes
 from ares.core.worker.cleanup import close_litellm_clients
 from ares.core.worker.operations import (
     discover_active_operation,
@@ -64,6 +65,8 @@ from ares.tools.red.common import clear_credential_context, set_credential_conte
 
 if TYPE_CHECKING:
     from dreadnode.agent import Agent
+
+_tracer = trace.get_tracer("ares.worker")
 
 
 def _update_etc_hosts(hosts_list: list, written_ips: set[str], agent_name: str) -> set[str]:
@@ -505,6 +508,31 @@ class RedisWorkerAgent:
         self._current_task = task.task_id
         started_at = datetime.now(timezone.utc).isoformat()
         payload_snapshot = task.payload
+
+        # Create CONSUMER span for Tempo service graph (explicit span management)
+        # This pairs with the PRODUCER span from submit_task
+        # Extract target info from payload for span metrics
+        target_host = (
+            payload_snapshot.get("target")
+            or payload_snapshot.get("target_ip")
+            or payload_snapshot.get("dc_ip")
+            or payload_snapshot.get("host")
+            or payload_snapshot.get("hostname")
+        )
+        span_attrs = create_agent_span_attributes(self.role.value, "red", target_host=target_host)
+        span_attrs.update(
+            {
+                "task.id": task.task_id,
+                "task.type": task.task_type,
+                "task.source_agent": task.source_agent,
+                "worker.pod": self.pod_name,
+                "worker.agent": self.agent_name,
+            }
+        )
+        _task_span = _tracer.start_span(
+            "process_task", kind=SpanKind.CONSUMER, attributes=span_attrs
+        )
+
         try:
             await self.task_queue.set_task_status(
                 task_id=task.task_id,
@@ -889,6 +917,8 @@ class RedisWorkerAgent:
             self._current_task = None
             # Clear credential context to prevent leakage between tasks
             clear_credential_context()
+            # End the CONSUMER span for Tempo service graph
+            _task_span.end()
 
     async def _refresh_shared_state(self) -> None:
         if not self.redis_url or not self.operation_id:

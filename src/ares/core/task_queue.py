@@ -20,7 +20,10 @@ from ares.core.redis_client import (
     create_redis_client,
     get_redis_sentinel_config,
     invalidate_sentinel_client,
+    is_connection_error,
+    timed_redis_write,
 )
+from ares.core.tracing import producer_span
 
 
 class TaskMessage(BaseModel):
@@ -255,6 +258,9 @@ class RedisTaskQueue:
 
         task_id = task_id or f"{task_type}_{uuid.uuid4().hex[:12]}"
 
+        # Target service name for Tempo service graph
+        target_service = f"ares-{target_role.replace('_', '-')}-agent"
+
         task = TaskMessage(
             task_id=task_id,
             task_type=task_type,
@@ -267,36 +273,59 @@ class RedisTaskQueue:
 
         queue_key = self._task_queue_key(target_role)
 
-        try:
-            # Priority-based insertion:
-            # - priority <= 2 (urgent): RPUSH to front of queue (processed first)
-            # - priority > 2 (normal): LPUSH to back of queue (FIFO order)
-            # Workers use BRPOP from right, so RPUSH items are processed immediately.
-            if priority <= 2:
-                await self._client.rpush(queue_key, task.model_dump_json())
-                logger.info(
-                    f"Task {task_id} URGENT (priority={priority}) submitted to front of {queue_key}"
-                )
-            else:
-                await self._client.lpush(queue_key, task.model_dump_json())
-                logger.info(f"Task {task_id} submitted to {queue_key}")
-            return task_id
+        # Extract target info from payload for span metrics
+        target_host = (
+            payload.get("target")
+            or payload.get("target_ip")
+            or payload.get("dc_ip")
+            or payload.get("host")
+            or payload.get("hostname")
+        )
 
-        except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in [
-                    "connection",
-                    "connect",
-                    "closed",
-                    "timeout",
-                    "broken pipe",
-                    "reset",
-                ]
-            ):
-                self._handle_connection_error(e)
-            raise
+        # Create PRODUCER span for Tempo service graph
+        with producer_span(
+            name="submit_task",
+            target_service=target_service,
+            role=source_agent.replace("ares-", "").replace("-agent", ""),
+            team="red",
+            target_host=target_host,
+            additional_attrs={
+                "task.id": task_id,
+                "task.type": task_type,
+                "task.target_role": target_role,
+                "task.priority": priority,
+            },
+        ):
+            try:
+                # Priority-based insertion:
+                # - priority <= 2 (urgent): RPUSH to front of queue (processed first)
+                # - priority > 2 (normal): LPUSH to back of queue (FIFO order)
+                # Workers use BRPOP from right, so RPUSH items are processed immediately.
+                task_json = task.model_dump_json()
+                if priority <= 2:
+                    await timed_redis_write(
+                        self._client.rpush(queue_key, task_json),
+                        operation_name=f"submit_task_{task_id}",
+                    )
+                    logger.info(
+                        f"Task {task_id} URGENT (priority={priority}) submitted to front of {queue_key}"
+                    )
+                else:
+                    await timed_redis_write(
+                        self._client.lpush(queue_key, task_json),
+                        operation_name=f"submit_task_{task_id}",
+                    )
+                    logger.info(f"Task {task_id} submitted to {queue_key}")
+                return task_id
+
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout submitting task {task_id} to {queue_key}")
+                raise
+
+            except Exception as e:
+                if is_connection_error(e):
+                    self._handle_connection_error(e)
+                raise
 
     async def wait_for_result(
         self,
@@ -334,18 +363,7 @@ class RedisTaskQueue:
             return TaskResult.model_validate_json(data)
 
         except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in [
-                    "connection",
-                    "connect",
-                    "closed",
-                    "timeout",
-                    "broken pipe",
-                    "reset",
-                ]
-            ):
+            if is_connection_error(e):
                 self._handle_connection_error(e)
             raise
 
@@ -423,13 +441,18 @@ class RedisTaskQueue:
         self,
         role: str,
         timeout: float = 5.0,
+        max_retries: int = 2,
     ) -> TaskMessage | None:
         """
         Poll for next task (blocking).
 
+        Includes automatic retry on stale connection detection to avoid missed
+        poll cycles when Sentinel pods restart.
+
         Args:
             role: Worker role to poll for
             timeout: How long to block waiting
+            max_retries: Max retries on stale connection (default: 2)
 
         Returns:
             TaskMessage or None if timeout
@@ -437,56 +460,58 @@ class RedisTaskQueue:
         Raises:
             Exception: Re-raises connection errors after marking connection as failed
         """
-        if not self._connected:
-            await self.connect()
-
         queue_key = self._task_queue_key(role)
+        last_error: Exception | None = None
 
-        try:
-            # BRPOP from right for FIFO order
-            # Wrap in asyncio.wait_for to catch hung connections.
-            # The Redis timeout parameter only works if the request reaches the server.
-            # On a stale/dead TCP connection, the await hangs forever without this.
-            result = await asyncio.wait_for(
-                self._client.brpop(queue_key, timeout=int(timeout)),
-                timeout=timeout + 2.0,  # Extra margin for network latency
-            )
+        for attempt in range(max_retries + 1):
+            if not self._connected:
+                await self.connect()
 
-            if result is None:
-                return None
+            try:
+                # BRPOP from right for FIFO order
+                # Wrap in asyncio.wait_for to catch hung connections.
+                # The Redis timeout parameter only works if the request reaches the server.
+                # On a stale/dead TCP connection, the await hangs forever without this.
+                result = await asyncio.wait_for(
+                    self._client.brpop(queue_key, timeout=int(timeout)),
+                    timeout=timeout + 2.0,  # Extra margin for network latency
+                )
 
-            _, data = result
-            return TaskMessage.model_validate_json(data)
+                if result is None:
+                    return None
 
-        except asyncio.TimeoutError:
-            # asyncio.wait_for timed out but Redis BRPOP didn't return
-            # This indicates a stale connection (e.g., Sentinel pod restarted)
-            logger.warning(
-                f"BRPOP hung for {timeout + 2.0}s on queue {queue_key} - "
-                "possible stale Sentinel connection, forcing reconnection"
-            )
-            invalidate_sentinel_client()
-            self._handle_connection_error(
-                TimeoutError("BRPOP hung - possible stale Sentinel connection")
-            )
-            return None
+                _, data = result
+                return TaskMessage.model_validate_json(data)
 
-        except Exception as e:
-            # Check if it's a connection error
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in [
-                    "connection",
-                    "connect",
-                    "closed",
-                    "timeout",
-                    "broken pipe",
-                    "reset",
-                ]
-            ):
-                self._handle_connection_error(e)
-            raise
+            except asyncio.TimeoutError:
+                # asyncio.wait_for timed out but Redis BRPOP didn't return
+                # This indicates a stale connection (e.g., Sentinel pod restarted)
+                logger.warning(
+                    f"BRPOP hung for {timeout + 2.0}s on queue {queue_key} - "
+                    f"stale connection detected (attempt {attempt + 1}/{max_retries + 1})"
+                )
+                invalidate_sentinel_client()
+                self._handle_connection_error(
+                    TimeoutError("BRPOP hung - possible stale Sentinel connection")
+                )
+                last_error = TimeoutError("BRPOP hung after retries")
+                # Retry immediately after reconnection
+                continue
+
+            except Exception as e:
+                if is_connection_error(e):
+                    attempt_info = f"attempt {attempt + 1}/{max_retries + 1}"
+                    logger.warning(f"Connection error during poll ({attempt_info}): {e}")
+                    self._handle_connection_error(e)
+                    last_error = e
+                    # Retry on connection errors
+                    continue
+                raise
+
+        # All retries exhausted, return None to avoid blocking the worker loop
+        if last_error:
+            logger.error(f"poll_task failed after {max_retries + 1} attempts: {last_error}")
+        return None
 
     async def send_result(
         self,
@@ -526,25 +551,25 @@ class RedisTaskQueue:
         result_key = self._result_queue_key(task_id)
 
         try:
-            # Push result and set TTL
-            await self._client.lpush(result_key, task_result.model_dump_json())
-            await self._client.expire(result_key, self.RESULT_TTL)
+            # Push result and set TTL with timeout protection
+            result_json = task_result.model_dump_json()
+            await timed_redis_write(
+                self._client.lpush(result_key, result_json),
+                operation_name=f"send_result_{task_id}",
+            )
+            await timed_redis_write(
+                self._client.expire(result_key, self.RESULT_TTL),
+                operation_name=f"expire_result_{task_id}",
+            )
 
             logger.info(f"Result sent for task {task_id}: success={success}")
 
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout sending result for task {task_id}")
+            raise
+
         except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in [
-                    "connection",
-                    "connect",
-                    "closed",
-                    "timeout",
-                    "broken pipe",
-                    "reset",
-                ]
-            ):
+            if is_connection_error(e):
                 self._handle_connection_error(e)
             raise
 
@@ -589,18 +614,7 @@ class RedisTaskQueue:
         try:
             await self._client.set(heartbeat_key, data, ex=self._heartbeat_ttl)
         except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in [
-                    "connection",
-                    "connect",
-                    "closed",
-                    "timeout",
-                    "broken pipe",
-                    "reset",
-                ]
-            ):
+            if is_connection_error(e):
                 self._handle_connection_error(e)
             raise
 
@@ -621,18 +635,7 @@ class RedisTaskQueue:
         try:
             await self._client.set(key, json.dumps(data, default=str), ex=self.TASK_STATUS_TTL)
         except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in [
-                    "connection",
-                    "connect",
-                    "closed",
-                    "timeout",
-                    "broken pipe",
-                    "reset",
-                ]
-            ):
+            if is_connection_error(e):
                 self._handle_connection_error(e)
             raise
 
@@ -657,18 +660,7 @@ class RedisTaskQueue:
             return json.loads(data)
 
         except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in [
-                    "connection",
-                    "connect",
-                    "closed",
-                    "timeout",
-                    "broken pipe",
-                    "reset",
-                ]
-            ):
+            if is_connection_error(e):
                 self._handle_connection_error(e)
             raise
 
@@ -865,18 +857,7 @@ class RedisTaskQueue:
             return task_id
 
         except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in [
-                    "connection",
-                    "connect",
-                    "closed",
-                    "timeout",
-                    "broken pipe",
-                    "reset",
-                ]
-            ):
+            if is_connection_error(e):
                 self._handle_connection_error(e)
             raise
 
@@ -916,18 +897,7 @@ class RedisTaskQueue:
             logger.debug(f"State update published to {channel} ({count} subscribers)")
             return count
         except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in [
-                    "connection",
-                    "connect",
-                    "closed",
-                    "timeout",
-                    "broken pipe",
-                    "reset",
-                ]
-            ):
+            if is_connection_error(e):
                 self._handle_connection_error(e)
             # Don't raise - pub/sub failures shouldn't break the main flow
             logger.warning(f"Failed to publish state update: {e}")
@@ -1021,18 +991,7 @@ class RedisTaskQueue:
             logger.debug(f"Published {discovery_type} discovery to {queue_key}")
             return True
         except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in [
-                    "connection",
-                    "connect",
-                    "closed",
-                    "timeout",
-                    "broken pipe",
-                    "reset",
-                ]
-            ):
+            if is_connection_error(e):
                 self._handle_connection_error(e)
             logger.warning(f"Failed to publish discovery: {e}")
             return False
@@ -1070,18 +1029,7 @@ class RedisTaskQueue:
                     logger.warning(f"Invalid discovery JSON: {data}")
 
         except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in [
-                    "connection",
-                    "connect",
-                    "closed",
-                    "timeout",
-                    "broken pipe",
-                    "reset",
-                ]
-            ):
+            if is_connection_error(e):
                 self._handle_connection_error(e)
             logger.warning(f"Failed to poll discoveries: {e}")
 

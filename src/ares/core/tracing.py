@@ -1,0 +1,640 @@
+"""OpenTelemetry tracing for Ares agents.
+
+This module provides tracing infrastructure with MITRE ATT&CK mappings
+for both red and blue team agents. Spans are created using the dreadnode
+SDK and include attributes for:
+- attack_team: "red" or "blue"
+- mitre.tactic: MITRE tactic shortname (e.g., "credential-access")
+- mitre.technique.id: MITRE technique ID (e.g., "T1003")
+- attack_phase: Current phase of the operation
+- attack_target_host: Target hostname/IP being attacked
+- attack_target_type: Target type (domain_controller, server, workstation)
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from typing import Any
+
+import dreadnode as dn
+from loguru import logger
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind
+
+# =============================================================================
+# MITRE Tactic Mappings
+# =============================================================================
+
+# Map red team agent roles to primary MITRE tactics
+ROLE_TO_TACTIC: dict[str, str] = {
+    "orchestrator": "command-and-control",
+    "recon": "discovery",
+    "credential_access": "credential-access",
+    "cracker": "credential-access",
+    "acl": "privilege-escalation",
+    "privesc": "privilege-escalation",
+    "lateral": "lateral-movement",
+    "coercion": "credential-access",
+}
+
+# Map blue team roles to their investigative focus
+BLUE_ROLE_TO_TACTIC: dict[str, str] = {
+    "orchestrator": "collection",  # Collecting investigation results
+    "triage": "discovery",  # Initial discovery of threat indicators
+    "threat_hunter": "discovery",  # Active threat hunting
+    "lateral_analyst": "lateral-movement",  # Analyzing lateral movement
+}
+
+# =============================================================================
+# MITRE Technique Mappings
+# =============================================================================
+
+# Map tool names to MITRE technique IDs
+# This is a comprehensive mapping of Ares tools to their MITRE techniques
+TOOL_TO_TECHNIQUE: dict[str, str] = {
+    # Reconnaissance / Discovery
+    "nmap_scan": "T1046",  # Network Service Discovery
+    "portscan": "T1046",
+    "ping_sweep": "T1018",  # Remote System Discovery
+    "ldap_domain_dump": "T1087.002",  # Domain Account Discovery
+    "ldap_search": "T1087.002",
+    "ldap_search_descriptions": "T1087.002",
+    "bloodhound_collection": "T1087.002",
+    "sharphound": "T1087.002",
+    "get_domain_info": "T1087.002",
+    "enum_domain_trusts": "T1482",  # Domain Trust Discovery
+    "enumerate_forest": "T1482",
+    "enum_constrained_delegation": "T1087.002",
+    "enum_unconstrained_delegation": "T1087.002",
+    "enum_rbcd_targets": "T1087.002",
+    "smb_share_enum": "T1135",  # Network Share Discovery
+    "enumerate_shares": "T1135",
+    "smbclient_ls": "T1135",
+    # Credential Access
+    "secretsdump": "T1003.006",  # DCSync  # pragma: allowlist secret
+    "secretsdump_kerberos": "T1003.006",  # pragma: allowlist secret
+    "ntds_dit_extract": "T1003.003",  # NTDS
+    "kerberoast": "T1558.003",  # Kerberoasting
+    "targeted_kerberoast": "T1558.003",
+    "asrep_roast": "T1558.004",  # AS-REP Roasting
+    "certipy_auth": "T1649",  # Steal or Forge Authentication Certificates
+    "certipy_find": "T1649",
+    "laps_dump": "T1003.008",  # LSASS Memory
+    "dump_lsass": "T1003.001",  # LSASS Memory
+    "gpp_password_finder": "T1552.006",  # Group Policy Preferences  # pragma: allowlist secret
+    "gmsa_dump_passwords": "T1003.006",  # pragma: allowlist secret
+    "extract_trust_key": "T1003.006",
+    "smbclient_spider": "T1552.001",  # Credentials in Files
+    "sysvol_script_search": "T1552.001",
+    # Credential cracking
+    "hashcat_crack": "T1110.002",  # Password Cracking
+    "crack_hash": "T1110.002",
+    # Privilege Escalation
+    "certipy_req": "T1649",  # ADCS abuse
+    "rbcd_attack": "T1134.001",  # Token Impersonation
+    "constrained_delegation_attack": "T1134.001",
+    "unconstrained_delegation_attack": "T1558.001",  # Golden Ticket
+    "dcsync": "T1003.006",  # DCSync
+    "add_shadow_credentials": "T1556.006",  # Shadow Credentials
+    "set_rbcd": "T1098.001",  # Account Manipulation
+    "add_computer": "T1136.002",  # Create Account: Domain Account
+    # ACL Exploitation
+    "dacl_edit": "T1222.001",  # File/Dir Permissions Modification
+    "add_user_to_group": "T1098.001",  # Account Manipulation
+    "modify_owner": "T1222.001",
+    "modify_dacl": "T1222.001",
+    "write_gpo": "T1484.001",  # Group Policy Modification
+    # Lateral Movement
+    "psexec": "T1021.002",  # SMB/Windows Admin Shares
+    "wmiexec": "T1047",  # WMI
+    "smbexec": "T1021.002",
+    "atexec": "T1053.005",  # Scheduled Task/Job
+    "dcomexec": "T1021.003",  # Distributed COM
+    "evil_winrm": "T1021.006",  # WinRM
+    "rdp_connect": "T1021.001",  # RDP
+    "ssh_connect": "T1021.004",  # SSH
+    "mssql_exec": "T1021.002",  # SMB
+    # Coercion / Relay
+    "petitpotam": "T1187",  # Forced Authentication
+    "printerbug": "T1187",
+    "dfscoerce": "T1187",
+    "shadowcoerce": "T1187",
+    "coerce_auth": "T1187",
+    "ntlm_relay": "T1557.001",  # LLMNR/NBT-NS Poisoning
+    "relay_to_ldap": "T1557.001",
+    "relay_to_smb": "T1557.001",
+    # MSSQL
+    "mssql_enum_impersonation": "T1078.002",  # Valid Accounts: Domain
+    "mssql_enum_linked_servers": "T1021.002",
+    "mssql_impersonate": "T1134.001",
+    "mssql_xp_cmdshell": "T1059.001",  # Command and Scripting Interpreter
+    # Golden Ticket / Persistence
+    "forge_golden_ticket": "T1558.001",  # Golden Ticket  # nosec B105
+    "forge_silver_ticket": "T1558.002",  # Silver Ticket
+    "create_machine_account": "T1136.002",
+}
+
+# Map tool categories to tactics for fallback
+TOOL_CATEGORY_TO_TACTIC: dict[str, str] = {
+    "NetworkEnumerationTools": "discovery",
+    "BloodHoundTools": "discovery",
+    "PostureValidationTools": "discovery",
+    "CredentialDiscoveryTools": "credential-access",
+    "CredentialHarvestingTools": "credential-access",
+    "SharePilferingTools": "collection",
+    "CrackingTools": "credential-access",
+    "ACLExploitTools": "privilege-escalation",
+    "CertipyTools": "privilege-escalation",
+    "DelegationTools": "privilege-escalation",
+    "MSSQLTools": "lateral-movement",
+    "CVEExploitTools": "privilege-escalation",
+    "GoldenTicketTools": "persistence",
+    "TrustAttackTools": "privilege-escalation",
+    "GMSATools": "credential-access",
+    "LateralMovementTools": "lateral-movement",
+    "CoercionTools": "credential-access",
+    "CoercionNetworkTools": "credential-access",
+}
+
+# =============================================================================
+# Attack Phases
+# =============================================================================
+
+# Map agent roles to attack phases
+ROLE_TO_PHASE: dict[str, str] = {
+    "orchestrator": "coordination",
+    "recon": "reconnaissance",
+    "credential_access": "credential-theft",
+    "cracker": "credential-theft",
+    "acl": "privilege-escalation",
+    "privesc": "privilege-escalation",
+    "lateral": "lateral-movement",
+    "coercion": "credential-theft",
+}
+
+# Blue team investigation phases
+BLUE_ROLE_TO_PHASE: dict[str, str] = {
+    "orchestrator": "coordination",
+    "triage": "initial-triage",
+    "threat_hunter": "threat-hunting",
+    "lateral_analyst": "lateral-analysis",
+}
+
+
+# =============================================================================
+# Target Type Detection
+# =============================================================================
+
+# Hostname patterns that indicate target type
+DC_HOSTNAME_PATTERNS = {"dc", "dc01", "dc02", "dc1", "dc2", "pdc", "bdc", "domaincontroller"}
+SQL_HOSTNAME_PATTERNS = {"sql", "sql01", "sql1", "mssql", "db", "database"}
+WEB_HOSTNAME_PATTERNS = {"web", "www", "iis", "apache", "nginx"}
+WORKSTATION_PATTERNS = {"ws", "pc", "desktop", "laptop", "client"}
+
+
+def infer_target_type(hostname: str | None, dc_ips: set[str] | None = None) -> str | None:
+    """Infer target type from hostname patterns.
+
+    Args:
+        hostname: Target hostname or IP.
+        dc_ips: Optional set of known DC IPs for matching.
+
+    Returns:
+        Target type string or None if unknown.
+    """
+    if not hostname:
+        return None
+
+    hostname_lower = hostname.lower().split(".")[0]  # Get first part before domain
+
+    # Check if IP matches known DC
+    if dc_ips and hostname in dc_ips:
+        return "domain_controller"
+
+    # Check hostname patterns
+    if hostname_lower in DC_HOSTNAME_PATTERNS or hostname_lower.startswith("dc"):
+        return "domain_controller"
+    if any(hostname_lower.startswith(p) for p in SQL_HOSTNAME_PATTERNS):
+        return "sql_server"
+    if any(hostname_lower.startswith(p) for p in WEB_HOSTNAME_PATTERNS):
+        return "web_server"
+    if any(hostname_lower.startswith(p) for p in WORKSTATION_PATTERNS):
+        return "workstation"
+
+    # Default to server for other hostnames
+    return "server"
+
+
+# =============================================================================
+# Span Creation Functions
+# =============================================================================
+
+
+def get_tool_mitre_info(tool_name: str) -> tuple[str | None, str | None]:
+    """Get MITRE technique ID and tactic for a tool.
+
+    Args:
+        tool_name: Name of the tool being executed.
+
+    Returns:
+        Tuple of (technique_id, tactic) or (None, None) if not mapped.
+    """
+    technique_id = TOOL_TO_TECHNIQUE.get(tool_name)
+    tactic = None
+
+    if technique_id:
+        # Derive tactic from technique ID prefix patterns
+        if technique_id.startswith(("T1087", "T1018", "T1046", "T1135", "T1482")):
+            tactic = "discovery"
+        elif technique_id.startswith(("T1003", "T1558", "T1187", "T1557", "T1552", "T1110")):
+            tactic = "credential-access"
+        elif technique_id.startswith(("T1134", "T1098", "T1078", "T1222", "T1484", "T1649")):
+            tactic = "privilege-escalation"
+        elif technique_id.startswith(("T1021", "T1047", "T1053")):
+            tactic = "lateral-movement"
+        elif technique_id.startswith(("T1136",)):
+            tactic = "persistence"
+        elif technique_id.startswith(("T1059",)):
+            tactic = "execution"
+
+    return technique_id, tactic
+
+
+def create_agent_span_attributes(
+    role: str,
+    team: str,
+    tool_name: str | None = None,
+    target_host: str | None = None,
+    target_type: str | None = None,
+    additional_attrs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create span attributes for an agent operation.
+
+    Args:
+        role: Agent role (e.g., "recon", "credential_access").
+        team: Team name ("red" or "blue").
+        tool_name: Optional tool being executed.
+        target_host: Optional target hostname/IP for the operation.
+        target_type: Optional target type (e.g., "domain_controller", "server", "workstation").
+        additional_attrs: Optional additional attributes to include.
+
+    Returns:
+        Dictionary of span attributes.
+    """
+    attrs: dict[str, Any] = {
+        "attack_team": team,
+        "agent.role": role,
+    }
+
+    # Set attack phase
+    if team == "red":
+        phase = ROLE_TO_PHASE.get(role, "unknown")
+        tactic = ROLE_TO_TACTIC.get(role, "unknown")
+    else:
+        phase = BLUE_ROLE_TO_PHASE.get(role, "investigation")
+        tactic = BLUE_ROLE_TO_TACTIC.get(role, "discovery")
+
+    attrs["attack_phase"] = phase
+    attrs["mitre.tactic"] = tactic
+
+    # Get tool-specific MITRE info
+    if tool_name:
+        technique_id, tool_tactic = get_tool_mitre_info(tool_name)
+        if technique_id:
+            attrs["mitre.technique.id"] = technique_id
+        if tool_tactic:
+            # Tool-specific tactic overrides role default
+            attrs["mitre.tactic"] = tool_tactic
+        attrs["tool.name"] = tool_name
+
+    # Add target attributes for Tempo span metrics
+    if target_host:
+        attrs["attack_target_host"] = target_host
+    if target_type:
+        attrs["attack_target_type"] = target_type
+    elif target_host:
+        # Infer target type if not provided
+        inferred_type = infer_target_type(target_host)
+        if inferred_type:
+            attrs["attack_target_type"] = inferred_type
+
+    # Merge additional attributes
+    if additional_attrs:
+        attrs.update(additional_attrs)
+
+    return attrs
+
+
+@contextmanager
+def agent_span(
+    name: str,
+    role: str,
+    team: str,
+    tool_name: str | None = None,
+    target_host: str | None = None,
+    target_type: str | None = None,
+    additional_attrs: dict[str, Any] | None = None,
+):
+    """Create a traced span for agent operations.
+
+    This context manager creates an OpenTelemetry span with proper
+    MITRE ATT&CK attributes for observability.
+
+    Args:
+        name: Span name (e.g., "tool_execution", "agent_step").
+        role: Agent role (e.g., "recon", "credential_access").
+        team: Team name ("red" or "blue").
+        tool_name: Optional tool being executed.
+        target_host: Optional target hostname/IP.
+        target_type: Optional target type.
+        additional_attrs: Optional additional attributes.
+
+    Yields:
+        The span object for adding additional attributes.
+
+    Example:
+        >>> with agent_span("tool_execution", "recon", "red", "nmap_scan",
+        ...                 target_host="192.168.58.10") as span:
+        ...     # Execute tool
+        ...     pass
+    """
+    attrs = create_agent_span_attributes(
+        role, team, tool_name, target_host, target_type, additional_attrs
+    )
+
+    with dn.span(name, attributes=attrs) as span:
+        yield span
+
+
+def trace_tool_call(
+    role: str,
+    team: str,
+    tool_name: str,
+    is_error: bool = False,
+    error_message: str | None = None,
+    target_host: str | None = None,
+    target_type: str | None = None,
+) -> None:
+    """Record a tool call as a span.
+
+    Creates a point-in-time span for a tool execution with
+    appropriate MITRE attributes.
+
+    Args:
+        role: Agent role executing the tool.
+        team: Team name ("red" or "blue").
+        tool_name: Name of the tool being executed.
+        is_error: Whether the tool call resulted in an error.
+        error_message: Optional error message if is_error is True.
+        target_host: Optional target hostname/IP.
+        target_type: Optional target type.
+    """
+    attrs = create_agent_span_attributes(
+        role, team, tool_name, target_host=target_host, target_type=target_type
+    )
+    attrs["tool.status"] = "error" if is_error else "success"
+    if is_error and error_message:
+        attrs["error.message"] = error_message[:500]  # Truncate long errors
+
+    try:
+        with dn.span(f"tool.{tool_name}", attributes=attrs):
+            pass  # Point-in-time span
+    except Exception as e:
+        # Don't let tracing errors break the agent
+        logger.debug(f"Failed to create trace span: {e}")
+
+
+def trace_blue_investigation(
+    role: str,
+    investigation_id: str,
+    techniques_found: list[str] | None = None,
+    severity: str | None = None,
+    target_host: str | None = None,
+) -> None:
+    """Record a blue team investigation span.
+
+    Creates a span for blue team investigation activities with
+    proper attributes for dashboard correlation.
+
+    Args:
+        role: Blue team role (e.g., "triage", "threat_hunter").
+        investigation_id: ID of the investigation.
+        techniques_found: List of MITRE technique IDs found.
+        severity: Severity assessment if available.
+        target_host: Optional target host being investigated.
+    """
+    attrs = create_agent_span_attributes(role, "blue", target_host=target_host)
+    attrs["investigation.id"] = investigation_id
+
+    if techniques_found:
+        # Set the first technique as the primary one
+        attrs["mitre.technique.id"] = techniques_found[0]
+        attrs["mitre.techniques.count"] = len(techniques_found)
+
+    if severity:
+        attrs["investigation.severity"] = severity
+
+    try:
+        with dn.span(f"investigation.{role}", attributes=attrs):
+            pass
+    except Exception as e:
+        logger.debug(f"Failed to create investigation span: {e}")
+
+
+# =============================================================================
+# Service Graph Spans (CLIENT/SERVER for Tempo service graph)
+# =============================================================================
+
+# Get a tracer for spans that need explicit span kinds
+_tracer = trace.get_tracer("ares.agents")
+
+
+@contextmanager
+def client_span(
+    name: str,
+    target_service: str,
+    role: str,
+    team: str,
+    tool_name: str | None = None,
+    target_host: str | None = None,
+    target_type: str | None = None,
+    additional_attrs: dict[str, Any] | None = None,
+):
+    """Create a CLIENT span for outgoing calls to another service.
+
+    Use this when the orchestrator dispatches work to an agent.
+    The target_service attribute enables Tempo service graph.
+
+    Args:
+        name: Span name (e.g., "dispatch_agent", "call_agent").
+        target_service: Name of the service being called (e.g., "ares-credential-access-agent").
+        role: Agent role making the call.
+        team: Team name ("red" or "blue").
+        tool_name: Optional tool being requested.
+        target_host: Optional target hostname/IP.
+        target_type: Optional target type.
+        additional_attrs: Optional additional attributes.
+
+    Yields:
+        The span object for adding additional attributes.
+
+    Example:
+        >>> with client_span("dispatch", "ares-recon-agent", "orchestrator", "red",
+        ...                  target_host="dc01.contoso.local") as span:
+        ...     # Dispatch task to agent
+        ...     span.set_attribute("task.id", task_id)
+    """
+    attrs = create_agent_span_attributes(
+        role, team, tool_name, target_host, target_type, additional_attrs
+    )
+    # peer.service is the standard OTel attribute for service graph edges
+    attrs["peer.service"] = target_service
+    attrs["rpc.service"] = target_service
+
+    span = None
+    try:
+        span = _tracer.start_span(name, kind=SpanKind.CLIENT, attributes=attrs)
+    except Exception as e:
+        logger.debug(f"Failed to create client span: {e}")
+
+    try:
+        yield span
+    finally:
+        if span:
+            span.end()
+
+
+@contextmanager
+def server_span(
+    name: str,
+    role: str,
+    team: str,
+    tool_name: str | None = None,
+    target_host: str | None = None,
+    target_type: str | None = None,
+    additional_attrs: dict[str, Any] | None = None,
+):
+    """Create a SERVER span for incoming requests.
+
+    Use this when an agent receives and handles a task.
+    SERVER spans pair with CLIENT spans for Tempo service graph.
+
+    Args:
+        name: Span name (e.g., "handle_task", "execute_tool").
+        role: Agent role handling the request.
+        team: Team name ("red" or "blue").
+        tool_name: Optional tool being executed.
+        target_host: Optional target hostname/IP.
+        target_type: Optional target type.
+        additional_attrs: Optional additional attributes.
+
+    Yields:
+        The span object for adding additional attributes.
+
+    Example:
+        >>> with server_span("handle_task", "credential_access", "red",
+        ...                  target_host="dc01.contoso.local") as span:
+        ...     # Execute the agent's task
+        ...     span.set_attribute("task.id", task_id)
+    """
+    attrs = create_agent_span_attributes(
+        role, team, tool_name, target_host, target_type, additional_attrs
+    )
+
+    span = None
+    try:
+        span = _tracer.start_span(name, kind=SpanKind.SERVER, attributes=attrs)
+    except Exception as e:
+        logger.debug(f"Failed to create server span: {e}")
+
+    try:
+        yield span
+    finally:
+        if span:
+            span.end()
+
+
+@contextmanager
+def producer_span(
+    name: str,
+    target_service: str,
+    role: str,
+    team: str,
+    target_host: str | None = None,
+    target_type: str | None = None,
+    additional_attrs: dict[str, Any] | None = None,
+):
+    """Create a PRODUCER span for async message publishing.
+
+    Use this when publishing tasks to a queue for async processing.
+
+    Args:
+        name: Span name (e.g., "publish_task", "enqueue").
+        target_service: Name of the consuming service.
+        role: Agent role publishing the message.
+        team: Team name ("red" or "blue").
+        target_host: Optional target hostname/IP.
+        target_type: Optional target type.
+        additional_attrs: Optional additional attributes.
+
+    Yields:
+        The span object for adding additional attributes.
+    """
+    attrs = create_agent_span_attributes(
+        role, team, None, target_host, target_type, additional_attrs
+    )
+    attrs["messaging.destination.name"] = target_service
+    attrs["peer.service"] = target_service
+
+    span = None
+    try:
+        span = _tracer.start_span(name, kind=SpanKind.PRODUCER, attributes=attrs)
+    except Exception as e:
+        logger.debug(f"Failed to create producer span: {e}")
+
+    try:
+        yield span
+    finally:
+        if span:
+            span.end()
+
+
+@contextmanager
+def consumer_span(
+    name: str,
+    role: str,
+    team: str,
+    target_host: str | None = None,
+    target_type: str | None = None,
+    additional_attrs: dict[str, Any] | None = None,
+):
+    """Create a CONSUMER span for async message consumption.
+
+    Use this when consuming tasks from a queue.
+
+    Args:
+        name: Span name (e.g., "consume_task", "process_message").
+        role: Agent role consuming the message.
+        team: Team name ("red" or "blue").
+        target_host: Optional target hostname/IP.
+        target_type: Optional target type.
+        additional_attrs: Optional additional attributes.
+
+    Yields:
+        The span object for adding additional attributes.
+    """
+    attrs = create_agent_span_attributes(
+        role, team, None, target_host, target_type, additional_attrs
+    )
+
+    span = None
+    try:
+        span = _tracer.start_span(name, kind=SpanKind.CONSUMER, attributes=attrs)
+    except Exception as e:
+        logger.debug(f"Failed to create consumer span: {e}")
+
+    try:
+        yield span
+    finally:
+        if span:
+            span.end()

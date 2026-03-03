@@ -21,7 +21,10 @@ from loguru import logger
 from ares.core.blue_task_queue import BlueTaskQueue
 from ares.core.config import get_namespace, get_redis_url
 from ares.core.litellm_env import configure_litellm_env
-from ares.core.redis_client import invalidate_sentinel_client
+from ares.core.redis_client import (
+    invalidate_sentinel_client,
+    is_connection_error,
+)
 from ares.core.task_queue import RedisTaskQueue
 
 
@@ -174,6 +177,8 @@ class BlueOrchestratorService:
         import time
 
         last_successful_poll = time.monotonic()
+        last_health_check = time.monotonic()
+        health_check_interval = 15.0  # Periodic health check every 15s
         # Base threshold when idle; extended when investigations are active
         stale_connection_threshold_idle = 30.0
         stale_connection_threshold_busy = 300.0  # 5 min when busy (LLM calls starve event loop)
@@ -182,6 +187,8 @@ class BlueOrchestratorService:
 
         while self.running:
             try:
+                now = time.monotonic()
+
                 # Clean up completed tasks
                 done_tasks = {t for t in self._active_investigations if t.done()}
                 for task in done_tasks:
@@ -190,6 +197,17 @@ class BlueOrchestratorService:
                     if task.exception():
                         logger.error(f"Investigation task failed: {task.exception()}")
 
+                # Periodic health check to detect stale Redis connections early
+                if now - last_health_check >= health_check_interval:
+                    last_health_check = now
+                    if self.task_queue:
+                        try:
+                            ping_ok = await self.task_queue.ping_or_reconnect(timeout=5.0)
+                            if not ping_ok:
+                                logger.info("Redis connection was stale, reconnected proactively")
+                        except Exception as e:
+                            logger.warning(f"Health check failed: {e}")
+
                 # Check if we can accept more investigations
                 if len(self._active_investigations) >= self._max_concurrent:
                     # At capacity - wait briefly for a slot to free up
@@ -197,7 +215,7 @@ class BlueOrchestratorService:
                     continue
 
                 result = await asyncio.wait_for(self._pop_investigation_request(), timeout=5.0)
-                last_successful_poll = time.monotonic()
+                last_successful_poll = now
 
                 if result:
                     # Spawn investigation as background task
@@ -259,9 +277,20 @@ class BlueOrchestratorService:
                 logger.debug(f"Error disconnecting task queue: {e}")
             try:
                 await self.task_queue.connect()
-                logger.info("Reconnected to Redis after forced reconnection")
+                logger.info("Reconnected task_queue to Redis")
             except Exception as e:
-                logger.error(f"Failed to reconnect to Redis: {e}")
+                logger.error(f"Failed to reconnect task_queue to Redis: {e}")
+
+        if self.blue_task_queue:
+            try:
+                await self.blue_task_queue.disconnect()
+            except Exception as e:
+                logger.debug(f"Error disconnecting blue_task_queue: {e}")
+            try:
+                await self.blue_task_queue.connect()
+                logger.info("Reconnected blue_task_queue to Redis")
+            except Exception as e:
+                logger.error(f"Failed to reconnect blue_task_queue to Redis: {e}")
 
     async def _is_connection_alive(self) -> bool:
         """Check if Redis connection is alive with a quick ping.
@@ -282,15 +311,45 @@ class BlueOrchestratorService:
         except Exception:
             return False
 
-    async def _pop_investigation_request(self) -> dict[str, Any] | None:
-        """Pop an investigation request from Redis queue."""
+    async def _pop_investigation_request(self, max_retries: int = 2) -> dict[str, Any] | None:
+        """Pop an investigation request from Redis queue.
+
+        Includes timeout protection and retry logic for stale connections.
+        """
         if not self.task_queue or not self.task_queue._client:
             return None
 
-        result = await self.task_queue._client.blpop(self.investigations_queue, timeout=5)
-        if result:
-            _, value = result
-            return json.loads(value)
+        timeout = 5.0
+        for attempt in range(max_retries + 1):
+            try:
+                # Wrap blpop with asyncio.wait_for to detect stale connections
+                result = await asyncio.wait_for(
+                    self.task_queue._client.blpop(self.investigations_queue, timeout=int(timeout)),
+                    timeout=timeout + 2.0,
+                )
+                if result:
+                    _, value = result
+                    return json.loads(value)
+                return None
+
+            except asyncio.TimeoutError:
+                attempt_info = f"attempt {attempt + 1}/{max_retries + 1}"
+                logger.warning(
+                    f"BLPOP hung on {self.investigations_queue} - "
+                    f"stale connection detected ({attempt_info})"
+                )
+                await self._force_reconnect()
+                continue
+
+            except Exception as e:
+                if is_connection_error(e):
+                    attempt_info = f"attempt {attempt + 1}/{max_retries + 1}"
+                    logger.warning(f"Connection error during poll ({attempt_info}): {e}")
+                    await self._force_reconnect()
+                    continue
+                raise
+
+        logger.error(f"_pop_investigation_request failed after {max_retries + 1} attempts")
         return None
 
     def _should_use_multi_agent(self, request: InvestigationRequest) -> bool:
@@ -313,12 +372,23 @@ class BlueOrchestratorService:
             if not request_data.get("env_vars") and investigation_id != "unknown":
                 env_vars_key = f"ares:blue:inv:{investigation_id}:env_vars"
                 if self.task_queue and self.task_queue._client:
-                    env_vars_data = await self.task_queue._client.get(env_vars_key)
-                    if env_vars_data:
-                        env_vars_str = self._decode_redis_value(env_vars_data)
-                        request_data["env_vars"] = json.loads(env_vars_str)
-                        await self.task_queue._client.delete(env_vars_key)
-                        logger.debug(f"Loaded and deleted env_vars from {env_vars_key}")
+                    try:
+                        env_vars_data = await asyncio.wait_for(
+                            self.task_queue._client.get(env_vars_key),
+                            timeout=10.0,
+                        )
+                        if env_vars_data:
+                            env_vars_str = self._decode_redis_value(env_vars_data)
+                            request_data["env_vars"] = json.loads(env_vars_str)
+                            await asyncio.wait_for(
+                                self.task_queue._client.delete(env_vars_key),
+                                timeout=10.0,
+                            )
+                            logger.debug(f"Loaded and deleted env_vars from {env_vars_key}")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Timeout fetching env_vars for {investigation_id}")
+                    except Exception as e:
+                        logger.warning(f"Error fetching env_vars: {e}")
 
             request = InvestigationRequest.from_dict(request_data)
             alert_name = request.alert.get("labels", {}).get("alertname", "unknown")
@@ -391,9 +461,8 @@ class BlueOrchestratorService:
                         model=request.model,
                         credentials=worker_credentials,
                     )
-                    logger.info(
-                        f"Registered investigation {request.investigation_id} for distributed workers"
-                    )
+                    inv_id = request.investigation_id
+                    logger.info(f"Registered investigation {inv_id} for distributed workers")
 
                 orchestrator = BlueTeamOrchestrator(
                     model=request.model,
@@ -477,14 +546,24 @@ class BlueOrchestratorService:
             **data,
         }
 
-        # Set status in Redis with 24h expiry
-        await self.task_queue._client.setex(
-            status_key,
-            86400,
-            json.dumps(status_data),
-        )
-
-        logger.debug(f"Published status for {investigation_id}: {status}")
+        try:
+            # Set status in Redis with 24h expiry, with timeout protection
+            await asyncio.wait_for(
+                self.task_queue._client.setex(
+                    status_key,
+                    86400,
+                    json.dumps(status_data),
+                ),
+                timeout=10.0,
+            )
+            logger.debug(f"Published status for {investigation_id}: {status}")
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout publishing status for {investigation_id}")
+        except Exception as e:
+            if is_connection_error(e):
+                logger.warning(f"Connection error publishing status: {e}")
+            else:
+                logger.error(f"Error publishing status: {e}")
 
     async def shutdown(self) -> None:
         """Shutdown the blue orchestrator service."""
@@ -522,9 +601,15 @@ async def main() -> None:
 
     # Setup logging
     logger.remove()
+    log_format = (
+        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+        "<level>{level: <8}</level> | "
+        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+        "<level>{message}</level>"
+    )
     logger.add(
         sys.stderr,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        format=log_format,
         level=os.getenv("LOG_LEVEL", "INFO"),
     )
 

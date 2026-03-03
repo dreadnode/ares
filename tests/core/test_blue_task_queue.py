@@ -639,13 +639,21 @@ class TestBlueTaskQueueErrorHandling:
     @pytest.mark.asyncio
     async def test_submit_task_handles_connection_error(self, connected_queue):
         connected_queue._client.lpush = AsyncMock(side_effect=ConnectionError("Connection reset"))
+        connected_queue._client.aclose = AsyncMock()
 
-        with pytest.raises(ConnectionError):
+        with (
+            patch(
+                "ares.core.blue_task_queue.create_redis_client",
+                return_value=connected_queue._client,
+            ),
+            pytest.raises(ConnectionError),
+        ):
             await connected_queue.submit_task(
                 investigation_id="inv-123",
                 task_type="triage",
                 target_role="triage",
                 params={},
+                max_retries=0,  # Test single attempt behavior
             )
 
         assert connected_queue._connected is False
@@ -658,21 +666,227 @@ class TestBlueTaskQueueErrorHandling:
 
         connected_queue._client.brpop = slow_brpop
 
-        with patch("ares.core.blue_task_queue.invalidate_sentinel_client"):
+        with (
+            patch("ares.core.blue_task_queue.invalidate_sentinel_client"),
+            patch(
+                "ares.core.blue_task_queue.create_redis_client",
+                return_value=connected_queue._client,
+            ),
+        ):
+            # Use max_retries=0 to test single attempt behavior
             result = await connected_queue.poll_task(
                 investigation_id="inv-123",
                 role="triage",
                 timeout=0.1,
+                max_retries=0,
             )
 
         assert result is None
         assert connected_queue._connected is False
 
-    def test_handle_connection_error_resets_state(self, connected_queue):
-        connected_queue._handle_connection_error(ConnectionError("Test error"))
+    @pytest.mark.asyncio
+    async def test_handle_connection_error_resets_state(self, connected_queue):
+        connected_queue._client.aclose = AsyncMock()
+
+        await connected_queue._handle_connection_error(ConnectionError("Test error"))
 
         assert connected_queue._connected is False
         assert connected_queue._client is None
+
+
+class TestBlueTaskQueueRetryLogic:
+    """Tests for poll_task and poll_global_task retry behavior."""
+
+    @pytest.fixture
+    def queue_with_reconnect(self):
+        """Queue that tracks reconnection attempts."""
+        queue = BlueTaskQueue(redis_url="redis://localhost")
+        mock_client = AsyncMock()
+        mock_client.ping = AsyncMock(return_value=True)
+        queue._client = mock_client
+        queue._connected = True
+        return queue
+
+    @pytest.mark.asyncio
+    async def test_poll_task_retries_on_connection_error(self, queue_with_reconnect):
+        """Test poll_task retries on connection errors."""
+        call_count = 0
+
+        async def failing_then_success(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise ConnectionError("Connection closed unexpectedly")
+
+        queue_with_reconnect._client.brpop = failing_then_success
+
+        with patch(
+            "ares.core.blue_task_queue.create_redis_client",
+            return_value=queue_with_reconnect._client,
+        ):
+            result = await queue_with_reconnect.poll_task(
+                investigation_id="inv-123",
+                role="triage",
+                timeout=0.1,
+                max_retries=2,
+            )
+
+        assert result is None
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_poll_task_returns_none_after_exhausting_retries(self, queue_with_reconnect):
+        """Test poll_task returns None after all retries fail."""
+        brpop_call_count = [0]
+
+        async def failing_brpop(*args, **kwargs):
+            brpop_call_count[0] += 1
+            raise ConnectionError("Connection reset by peer")
+
+        # Set up initial client
+        queue_with_reconnect._client.brpop = failing_brpop
+
+        # Create fresh mock client for each reconnection that also fails
+        async def mock_create_client(*args, **kwargs):
+            mock = AsyncMock()
+            mock.ping = AsyncMock(return_value=True)
+            mock.brpop = failing_brpop
+            return mock
+
+        with patch(
+            "ares.core.blue_task_queue.create_redis_client",
+            side_effect=mock_create_client,
+        ):
+            result = await queue_with_reconnect.poll_task(
+                investigation_id="inv-123",
+                role="triage",
+                timeout=0.1,
+                max_retries=2,
+            )
+
+        assert result is None
+        # max_retries=2 means 3 total attempts (initial + 2 retries)
+        assert brpop_call_count[0] == 3
+
+    @pytest.mark.asyncio
+    async def test_poll_task_succeeds_on_retry_after_initial_failure(self, queue_with_reconnect):
+        """Test poll_task returns message on successful retry."""
+        task_msg = BlueTaskMessage(
+            task_id="task-123",
+            task_type="triage_alert",
+            investigation_id="inv-abc",
+            assigned_role="triage",
+            params={},
+        )
+        call_count = 0
+
+        async def fail_then_succeed(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise TimeoutError("Connection timeout")
+            return ("queue_key", task_msg.model_dump_json())
+
+        queue_with_reconnect._client.brpop = fail_then_succeed
+
+        with patch(
+            "ares.core.blue_task_queue.create_redis_client",
+            return_value=queue_with_reconnect._client,
+        ):
+            result = await queue_with_reconnect.poll_task(
+                investigation_id="inv-abc",
+                role="triage",
+                timeout=1.0,
+                max_retries=2,
+            )
+
+        assert result is not None
+        assert result.task_id == "task-123"
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_poll_global_task_retries_on_timeout(self, queue_with_reconnect):
+        """Test poll_global_task retries on stale connection timeout."""
+        call_count = 0
+
+        async def slow_then_normal(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Simulate hung connection (will trigger asyncio.TimeoutError)
+                await asyncio.sleep(10)
+
+        queue_with_reconnect._client.brpop = slow_then_normal
+
+        with (
+            patch("ares.core.blue_task_queue.invalidate_sentinel_client"),
+            patch(
+                "ares.core.blue_task_queue.create_redis_client",
+                return_value=queue_with_reconnect._client,
+            ),
+        ):
+            result = await queue_with_reconnect.poll_global_task(
+                role="threat_hunter",
+                timeout=0.1,
+                max_retries=2,
+            )
+
+        assert result is None
+        # First call times out, second succeeds with None
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_poll_global_task_returns_none_after_exhausting_retries(
+        self, queue_with_reconnect
+    ):
+        """Test poll_global_task returns None after all retries fail."""
+        brpop_call_count = [0]
+
+        async def failing_brpop(*args, **kwargs):
+            brpop_call_count[0] += 1
+            raise OSError("Network unreachable")
+
+        # Set up initial client
+        queue_with_reconnect._client.brpop = failing_brpop
+
+        # Create fresh mock client for each reconnection that also fails
+        async def mock_create_client(*args, **kwargs):
+            mock = AsyncMock()
+            mock.ping = AsyncMock(return_value=True)
+            mock.brpop = failing_brpop
+            return mock
+
+        with patch(
+            "ares.core.blue_task_queue.create_redis_client",
+            side_effect=mock_create_client,
+        ):
+            result = await queue_with_reconnect.poll_global_task(
+                role="lateral_analyst",
+                timeout=0.1,
+                max_retries=1,
+            )
+
+        assert result is None
+        # max_retries=1 means 2 total attempts
+        assert brpop_call_count[0] == 2
+
+    @pytest.mark.asyncio
+    async def test_poll_task_raises_non_connection_errors(self, queue_with_reconnect):
+        """Test poll_task raises non-connection errors immediately."""
+        queue_with_reconnect._client.brpop = AsyncMock(
+            side_effect=ValueError("Invalid data format")
+        )
+
+        with pytest.raises(ValueError, match="Invalid data format"):
+            await queue_with_reconnect.poll_task(
+                investigation_id="inv-123",
+                role="triage",
+                timeout=0.1,
+                max_retries=2,
+            )
+
+        # Should not retry for non-connection errors
+        assert queue_with_reconnect._client.brpop.call_count == 1
 
 
 class TestBlueTaskQueueAutoConnect:

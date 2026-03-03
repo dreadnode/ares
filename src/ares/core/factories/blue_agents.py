@@ -17,6 +17,7 @@ from ares.core.factories.blue_factory import max_tool_calls_stop
 from ares.core.factories.mcp_utils import parse_mcp_text_content
 from ares.core.models import BlueRole
 from ares.core.templates import get_template_loader
+from ares.core.tracing import trace_tool_call
 from ares.tools.blue.callbacks import BlueWorkerCallbackTools
 from ares.tools.blue.shared_wrappers import SharedInvestigationTools
 
@@ -390,7 +391,7 @@ def create_blue_hooks(role: BlueRole) -> list:
         logger.debug(f"[{role.value}] Tool call: {tool_name}")
 
     async def log_tool_result(event: ToolEnd):
-        """Log tool results for observability."""
+        """Log tool results for observability with tracing."""
         if not hasattr(event, "tool_call") or not event.tool_call:
             return
         tool_name = event.tool_call.name
@@ -400,6 +401,13 @@ def create_blue_hooks(role: BlueRole) -> list:
             else 0
         )
         logger.debug(f"[{role.value}] Tool result: {tool_name} ({result_len} chars)")
+
+        # Determine if tool had an error
+        is_error = hasattr(event, "error") and event.error is not None
+        error_msg = str(event.error)[:500] if is_error else None
+
+        # Create trace span for blue team tool execution
+        trace_tool_call(role.value, "blue", tool_name, is_error=is_error, error_message=error_msg)
 
     return [log_tool_usage, log_tool_result]
 

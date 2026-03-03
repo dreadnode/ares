@@ -258,6 +258,77 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             # Some methods use different param names, try without target
             return await method(hours_back=hours_back)
 
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def run_parallel_detections(
+        self,
+        query_names: list[str],
+        target_host: str | None = None,
+        hours_back: int | None = None,
+        max_concurrent: int = 5,
+    ) -> dict[str, dict[str, Any]]:
+        """Run multiple detection queries in parallel for faster investigation.
+
+        Executes multiple detection queries concurrently using asyncio.gather(),
+        significantly reducing total investigation time compared to sequential execution.
+
+        Args:
+            query_names: List of detection query names (e.g. ["detect_dcsync",
+                "detect_kerberoasting", "detect_pass_the_hash"]).
+                Use list_query_templates() to see all available names.
+            target_host: Optional hostname/IP to focus all detections on.
+            hours_back: Hours of logs to search (default: 1 hour).
+            max_concurrent: Maximum concurrent queries (default: 5).
+                Higher values are faster but may stress Loki.
+
+        Returns:
+            Dict mapping query_name -> result for each query.
+
+        Example:
+            results = await run_parallel_detections(
+                ["detect_dcsync", "detect_golden_ticket", "detect_kerberoasting"],
+                target_host="dc01",
+                hours_back=2
+            )
+            # Results: {"detect_dcsync": {...}, "detect_golden_ticket": {...}, ...}
+        """
+        import asyncio
+
+        # Validate all query names upfront
+        available = {
+            t["name"] for t in self.list_query_templates() if t["name"].startswith("detect_")
+        }
+        invalid = [q for q in query_names if q not in available]
+        if invalid:
+            avail = list(available)
+            return {
+                q: {"status": "error", "error": f"Unknown query: '{q}'. Available: {avail}"}
+                for q in invalid
+            }
+
+        async def run_single(query_name: str) -> tuple[str, dict[str, Any]]:
+            """Run a single query and return (name, result) tuple."""
+            result = await self.run_detection_query(query_name, target_host, hours_back)
+            return query_name, result
+
+        # Process in batches if more queries than max_concurrent
+        results: dict[str, dict[str, Any]] = {}
+        for i in range(0, len(query_names), max_concurrent):
+            batch = query_names[i : i + max_concurrent]
+            batch_results = await asyncio.gather(
+                *[run_single(q) for q in batch],
+                return_exceptions=True,
+            )
+            for item in batch_results:
+                if isinstance(item, Exception):
+                    # Should not happen since run_detection_query catches exceptions
+                    logger.error(f"Parallel detection failed: {item}")
+                    continue
+                query_name, result = item
+                results[query_name] = result
+
+        logger.info(f"Parallel detections completed: {len(results)}/{len(query_names)} queries")
+        return results
+
     # =========================================================================
     # RECONNAISSANCE & DISCOVERY (TA0007)
     # Maps to: nmap_scan, enumerate_users, enumerate_shares
@@ -1432,10 +1503,11 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # Computer recon with BloodHound-specific attributes:
         # - operatingsystem, operatingsystemversion
         # - serviceprincipalname, msds-allowedtodelegateto
+        ad_attrs = "objectclass=computer|operatingsystem|serviceprincipalname|allowedtodelegateto"
         logql = (
             f"{self._build_selector()}"
             ' |~ "(?i)(ldap|389|636|bloodhound|sharphound)"'
-            ' |~ "(?i)(objectclass=computer|operatingsystem|serviceprincipalname|allowedtodelegateto)"'
+            f' |~ "(?i)({ad_attrs})"'
         )
 
         logger.info(f"BloodHound computer recon detection: {logql}")
@@ -1955,9 +2027,9 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         # DS-Replication GUIDs
         guid_filter = self._build_pattern_filter(
             [
-                "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2",  # DS-Replication-Get-Changes
-                "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2",  # DS-Replication-Get-Changes-All
-                "89e95b76-444d-4c62-991a-0facbeda640c",  # DS-Replication-Get-Changes-In-Filtered-Set
+                "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2",  # Get-Changes
+                "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2",  # Get-Changes-All
+                "89e95b76-444d-4c62-991a-0facbeda640c",  # Get-Changes-In-Filtered-Set
                 "1131f6aa",  # Short form
                 "1131f6ad",  # Short form
                 "89e95b76",  # Short form
@@ -2071,7 +2143,9 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             selector = '{job="windows-system"}'
 
         # Event 7036: Service Control Manager
-        logql = f'{selector} |~ "(7036|7045)" |~ "(?i)(remoteregistry|remote.registry)" |~ "(?i)(running|started|start)"'
+        svc_pattern = "(?i)(remoteregistry|remote.registry)"
+        state_pattern = "(?i)(running|started|start)"
+        logql = f'{selector} |~ "(7036|7045)" |~ "{svc_pattern}" |~ "{state_pattern}"'
 
         logger.info(f"RemoteRegistry service detection: {logql}")
 

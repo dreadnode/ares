@@ -16,9 +16,15 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind
 
 from ares.core.blue_worker.prompts import generate_blue_task_prompt
 from ares.core.models import BlueRole, BlueTaskType
+from ares.core.redis_client import is_connection_error
+from ares.core.tracing import create_agent_span_attributes
+
+_tracer = trace.get_tracer("ares.blue_worker")
 
 if TYPE_CHECKING:
     from dreadnode.agent import Agent
@@ -149,13 +155,7 @@ class BlueRedisWorkerAgent:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                error_str = str(e).lower()
-                is_connection_error = any(
-                    keyword in error_str
-                    for keyword in ["connection", "closed", "timeout", "broken pipe", "reset"]
-                )
-
-                if is_connection_error:
+                if is_connection_error(e):
                     logger.warning(
                         f"Worker loop connection error, retrying in {retry_delay:.1f}s: {e}"
                     )
@@ -170,6 +170,22 @@ class BlueRedisWorkerAgent:
         """Process a task from the Redis queue."""
         self._current_task = task.task_id
         logger.info(f"[{self.agent_name}] Processing task {task.task_id} (type={task.task_type})")
+
+        # Create CONSUMER span for Tempo service graph (explicit span management)
+        # This pairs with the PRODUCER span from submit_task
+        span_attrs = create_agent_span_attributes(self.role.value, "blue")
+        span_attrs.update(
+            {
+                "task.id": task.task_id,
+                "task.type": task.task_type,
+                "investigation.id": self.investigation_id,
+                "worker.pod": self.pod_name,
+                "worker.agent": self.agent_name,
+            }
+        )
+        _task_span = _tracer.start_span(
+            "process_task", kind=SpanKind.CONSUMER, attributes=span_attrs
+        )
 
         try:
             # Get task type enum
@@ -225,6 +241,8 @@ class BlueRedisWorkerAgent:
 
         finally:
             self._current_task = None
+            # End the CONSUMER span for Tempo service graph
+            _task_span.end()
 
     async def _get_state_summary(self) -> dict[str, Any]:
         """Get current investigation state summary from Redis."""
@@ -406,9 +424,7 @@ async def run_blue_worker(
             current_investigation_id = investigation_id
             if current_investigation_id is None and discover_investigation:
                 if discovery_timeout is None:
-                    logger.info(
-                        "No investigation ID provided, waiting indefinitely for an active investigation..."
-                    )
+                    logger.info("No investigation ID, waiting indefinitely for active one")
                 else:
                     logger.info(
                         f"No investigation ID provided, waiting up to {discovery_timeout}s..."
@@ -758,13 +774,7 @@ async def run_blue_global_worker(
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                error_str = str(e).lower()
-                is_connection_error = any(
-                    keyword in error_str
-                    for keyword in ["connection", "closed", "timeout", "broken pipe", "reset"]
-                )
-
-                if is_connection_error:
+                if is_connection_error(e):
                     logger.warning(
                         f"Global worker connection error, retrying in {retry_delay:.1f}s: {e}"
                     )
@@ -839,9 +849,8 @@ async def _load_mcp_tools(grafana_url: str | None = None) -> list:
         return []
 
     except FileNotFoundError:
-        logger.warning(
-            "mcp-grafana binary not found - install with: go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest"
-        )
+        install_cmd = "go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest"
+        logger.warning(f"mcp-grafana binary not found - install with: {install_cmd}")
     except Exception as e:
         logger.warning(f"Failed to load MCP tools: {e}")
 

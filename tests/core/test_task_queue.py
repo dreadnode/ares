@@ -300,36 +300,38 @@ class TestRedisTaskQueueConnectionErrorHandling:
             assert "will retry" in call_args
 
     @pytest.mark.asyncio
-    async def test_poll_task_connection_error_resets_state(self, task_queue, mock_redis_client):
-        """Test poll_task handles connection errors and resets state."""
+    async def test_poll_task_connection_error_retries_and_returns_none(
+        self, task_queue, mock_redis_client
+    ):
+        """Test poll_task retries on connection errors and returns None after exhausting retries."""
         mock_redis_client.brpop.side_effect = Exception("Connection closed unexpectedly")
 
-        with pytest.raises(Exception, match="Connection closed"):
-            await task_queue.poll_task(role="cracker", timeout=1.0)
+        # With retry logic, poll_task returns None after exhausting retries
+        result = await task_queue.poll_task(role="cracker", timeout=1.0, max_retries=2)
 
-        # Connection state should be reset
-        assert task_queue._connected is False
-        assert task_queue._client is None
+        assert result is None
+        # brpop should be called max_retries + 1 times
+        assert mock_redis_client.brpop.call_count == 3
 
     @pytest.mark.asyncio
-    async def test_poll_task_connection_timeout_resets_state(self, task_queue, mock_redis_client):
-        """Test poll_task handles timeout errors and resets state."""
+    async def test_poll_task_connection_timeout_retries(self, task_queue, mock_redis_client):
+        """Test poll_task retries on timeout errors."""
         mock_redis_client.brpop.side_effect = Exception("Connection timeout")
 
-        with pytest.raises(Exception, match="timeout"):
-            await task_queue.poll_task(role="cracker", timeout=1.0)
+        result = await task_queue.poll_task(role="cracker", timeout=1.0, max_retries=1)
 
-        assert task_queue._connected is False
+        assert result is None
+        assert mock_redis_client.brpop.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_poll_task_broken_pipe_resets_state(self, task_queue, mock_redis_client):
-        """Test poll_task handles broken pipe errors and resets state."""
+    async def test_poll_task_broken_pipe_retries(self, task_queue, mock_redis_client):
+        """Test poll_task retries on broken pipe errors."""
         mock_redis_client.brpop.side_effect = Exception("Broken pipe")
 
-        with pytest.raises(Exception, match="Broken pipe"):
-            await task_queue.poll_task(role="cracker", timeout=1.0)
+        result = await task_queue.poll_task(role="cracker", timeout=1.0, max_retries=1)
 
-        assert task_queue._connected is False
+        assert result is None
+        assert mock_redis_client.brpop.call_count == 2
 
     @pytest.mark.asyncio
     async def test_poll_task_non_connection_error_preserves_state(
@@ -414,7 +416,8 @@ class TestRedisTaskQueueConnectionErrorHandling:
             # poll_task with timeout=0.1 should trigger asyncio.TimeoutError
             # after 0.1 + 2.0 = 2.1 seconds, but we mock so it's faster
             # Actually the wait_for will use timeout + 2.0, so we use a tiny timeout
-            result = await task_queue.poll_task(role="cracker", timeout=0.1)
+            # Using max_retries=0 to test single attempt behavior
+            result = await task_queue.poll_task(role="cracker", timeout=0.1, max_retries=0)
 
             # Should return None (not raise) to allow retry
             assert result is None

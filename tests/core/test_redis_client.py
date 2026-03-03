@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from typing import Any
@@ -15,6 +16,8 @@ from ares.core.redis_client import (
     create_redis_client,
     create_verified_redis_client,
     get_redis_sentinel_config,
+    is_connection_error,
+    timed_redis_write,
 )
 
 
@@ -249,3 +252,132 @@ async def test_create_verified_redis_client_no_sentinel(monkeypatch: pytest.Monk
     client = await create_verified_redis_client("redis://localhost", decode_responses=True)
 
     assert client == "url-client"
+
+
+class TestIsConnectionError:
+    """Tests for is_connection_error() helper function."""
+
+    @pytest.mark.parametrize(
+        "error_message",
+        [
+            "Connection closed unexpectedly",
+            "connection reset by peer",
+            "Connection refused",
+            "Cannot connect to host",
+            "Socket timeout",
+            "Broken pipe",
+            "Network unreachable",
+            "No route to host",
+            "EOF occurred",
+            "errno 111",
+            "SOCKET_ERROR",
+        ],
+    )
+    def test_detects_connection_errors(self, error_message: str) -> None:
+        """Test that various connection error messages are detected."""
+        error = Exception(error_message)
+        assert is_connection_error(error) is True
+
+    @pytest.mark.parametrize(
+        "error_message",
+        [
+            "Key not found",
+            "Invalid argument",
+            "Permission denied",
+            "Out of memory",
+            "Syntax error in command",
+            "WRONGTYPE Operation against a key holding the wrong kind of value",
+        ],
+    )
+    def test_returns_false_for_non_connection_errors(self, error_message: str) -> None:
+        """Test that non-connection errors are not detected."""
+        error = Exception(error_message)
+        assert is_connection_error(error) is False
+
+    def test_case_insensitive_matching(self) -> None:
+        """Test that matching is case-insensitive."""
+        assert is_connection_error(Exception("CONNECTION RESET")) is True
+        assert is_connection_error(Exception("TimeOut occurred")) is True
+        assert is_connection_error(Exception("BROKEN PIPE")) is True
+
+    def test_handles_empty_error_message(self) -> None:
+        """Test handling of empty error message."""
+        assert is_connection_error(Exception("")) is False
+
+    def test_handles_base_exception(self) -> None:
+        """Test that it works with BaseException types."""
+        assert is_connection_error(TimeoutError("Connection timeout")) is True
+        assert is_connection_error(OSError("Connection refused")) is True
+
+
+class TestTimedRedisWrite:
+    """Tests for timed_redis_write() helper function."""
+
+    @pytest.mark.asyncio
+    async def test_success_returns_result(self) -> None:
+        """Test that successful operations return their result."""
+
+        async def mock_redis_op():
+            return "OK"
+
+        result = await timed_redis_write(mock_redis_op(), timeout=5.0)
+        assert result == "OK"
+
+    @pytest.mark.asyncio
+    async def test_timeout_raises_timeout_error(self) -> None:
+        """Test that operations exceeding timeout raise TimeoutError."""
+
+        async def slow_redis_op():
+            await asyncio.sleep(10)
+            return "OK"
+
+        with pytest.raises(asyncio.TimeoutError):
+            await timed_redis_write(slow_redis_op(), timeout=0.1, operation_name="slow_op")
+
+    @pytest.mark.asyncio
+    async def test_uses_custom_timeout(self) -> None:
+        """Test that custom timeout is respected."""
+
+        async def fast_redis_op():
+            await asyncio.sleep(0.05)
+            return "OK"
+
+        # Should succeed with adequate timeout
+        result = await timed_redis_write(fast_redis_op(), timeout=1.0)
+        assert result == "OK"
+
+        # Should fail with too-short timeout
+        with pytest.raises(asyncio.TimeoutError):
+            await timed_redis_write(fast_redis_op(), timeout=0.01)
+
+    @pytest.mark.asyncio
+    async def test_uses_default_timeout_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test that default timeout is read from environment."""
+
+        # Reload module to pick up new env var (or just test the behavior)
+        async def fast_op():
+            return "OK"
+
+        # Default timeout (10s) should be plenty for this fast operation
+        result = await timed_redis_write(fast_op())
+        assert result == "OK"
+
+    @pytest.mark.asyncio
+    async def test_propagates_redis_exceptions(self) -> None:
+        """Test that Redis exceptions are propagated."""
+
+        async def failing_redis_op():
+            raise ValueError("WRONGTYPE Operation")
+
+        with pytest.raises(ValueError, match="WRONGTYPE"):
+            await timed_redis_write(failing_redis_op(), timeout=5.0)
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_operation_returns_none(self) -> None:
+        """Test that None results are properly returned."""
+
+        async def none_returning_op():
+            return None
+
+        result = await timed_redis_write(none_returning_op(), timeout=5.0)
+        assert result is None

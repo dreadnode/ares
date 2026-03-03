@@ -13,6 +13,8 @@ import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 from loguru import logger
 
+from ares.core.tracing import trace_blue_investigation
+
 if TYPE_CHECKING:
     import asyncio
 
@@ -79,15 +81,23 @@ class BlueWorkerCallbackTools(Toolset):  # type: ignore[misc]
         logger.info(
             f"Triage complete: severity={severity_assessment}, deep={needs_deep_investigation}"
         )
+        techniques = initial_techniques or []
         self._signal_completion(
             {
                 "type": "triage",
                 "summary": summary,
                 "severity_assessment": severity_assessment,
-                "initial_techniques": initial_techniques or [],
+                "initial_techniques": techniques,
                 "recommended_next_steps": recommended_next_steps or [],
                 "needs_deep_investigation": needs_deep_investigation,
             }
+        )
+        # Create trace span for triage completion with MITRE techniques
+        trace_blue_investigation(
+            role="triage",
+            investigation_id="triage",
+            techniques_found=techniques or None,
+            severity=severity_assessment,
         )
         return f"[+] Triage complete. Severity: {severity_assessment}. Findings reported to orchestrator."
 
@@ -115,18 +125,25 @@ class BlueWorkerCallbackTools(Toolset):  # type: ignore[misc]
         Returns:
             Confirmation message.
         """
-        logger.info(f"Hunt complete: techniques={len(techniques_found or [])}")
+        techniques = techniques_found or []
+        logger.info(f"Hunt complete: techniques={len(techniques)}")
         self._signal_completion(
             {
                 "type": "hunt",
                 "findings_summary": findings_summary,
-                "techniques_found": techniques_found or [],
+                "techniques_found": techniques,
                 "evidence_highlights": evidence_highlights or [],
                 "detection_gaps": detection_gaps or [],
                 "recommended_pivots": recommended_pivots or [],
             }
         )
-        return f"[+] Threat hunt complete. {len(techniques_found or [])} techniques confirmed."
+        # Create trace span for hunt completion with MITRE techniques
+        trace_blue_investigation(
+            role="threat_hunter",
+            investigation_id="hunt",
+            techniques_found=techniques or None,
+        )
+        return f"[+] Threat hunt complete. {len(techniques)} techniques confirmed."
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     def lateral_complete(
@@ -152,21 +169,24 @@ class BlueWorkerCallbackTools(Toolset):  # type: ignore[misc]
         Returns:
             Confirmation message.
         """
-        logger.info(
-            f"Lateral analysis complete: "
-            f"hosts={len(hosts_investigated or [])}, users={len(users_investigated or [])}"
-        )
+        hosts = hosts_investigated or []
+        users = users_investigated or []
+        logger.info(f"Lateral analysis complete: hosts={len(hosts)}, users={len(users)}")
         self._signal_completion(
             {
                 "type": "lateral",
                 "scope_summary": scope_summary,
-                "hosts_investigated": hosts_investigated or [],
-                "users_investigated": users_investigated or [],
+                "hosts_investigated": hosts,
+                "users_investigated": users,
                 "lateral_paths": lateral_paths or [],
                 "containment_recommendations": containment_recommendations or [],
             }
         )
-        return (
-            f"[+] Lateral analysis complete. "
-            f"{len(hosts_investigated or [])} hosts, {len(users_investigated or [])} users analyzed."
+        # Create trace span for lateral analysis completion
+        # Lateral movement maps to T1021 (Remote Services)
+        trace_blue_investigation(
+            role="lateral_analyst",
+            investigation_id="lateral",
+            techniques_found=["T1021"] if lateral_paths else None,
         )
+        return f"[+] Lateral analysis complete. {len(hosts)} hosts, {len(users)} users analyzed."

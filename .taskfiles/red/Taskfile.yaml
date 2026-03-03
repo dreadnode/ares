@@ -245,7 +245,7 @@ tasks:
           lsof -ti:16379 | xargs kill 2>/dev/null || true
           sleep 1
 
-          kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 16379:6379 2>&1 &
+          kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 16379:6379 2>/dev/null &
           PF_PID=$!
 
           # Wait for port to be connectable (up to 15 seconds)
@@ -487,7 +487,7 @@ tasks:
         lsof -ti:16379 | xargs kill 2>/dev/null || true
         sleep 1
 
-        kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 16379:6379 2>&1 &
+        kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 16379:6379 2>/dev/null &
         PF_PID=$!
 
         cleanup() {
@@ -922,7 +922,7 @@ tasks:
           lsof -ti:16379 | xargs kill 2>/dev/null || true
           sleep 1
 
-          kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 16379:6379 2>&1 &
+          kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 16379:6379 2>/dev/null &
           PF_PID=$!
 
           # Wait for port to be connectable (up to 15 seconds)

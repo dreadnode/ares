@@ -424,11 +424,53 @@ class TestLoadMcpTools:
     """Tests for _load_mcp_tools helper."""
 
     @pytest.mark.asyncio
-    async def test_returns_empty_list_when_connect_fails(self):
+    async def test_returns_empty_list_when_connect_fails(self, monkeypatch):
+        """Test that _load_mcp_tools returns empty list when connection fails."""
+        from unittest.mock import AsyncMock, patch
+
         from ares.core.blue_worker._redis_worker import _load_mcp_tools
 
-        # The function handles errors gracefully and returns empty list
-        result = await _load_mcp_tools()
+        # Set required env vars so we get past the early returns
+        monkeypatch.setenv("GRAFANA_SERVICE_ACCOUNT_TOKEN", "test-token")
+
+        # Mock connect_grafana_mcp at the source location (import is inside function)
+        with patch(
+            "ares.tools.blue.grafana.connect_grafana_mcp",
+            new=AsyncMock(side_effect=ConnectionError("Connection refused")),
+        ):
+            result = await _load_mcp_tools(grafana_url="http://grafana:3000")
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_list_when_no_grafana_url(self, monkeypatch):
+        """Test that _load_mcp_tools returns empty list when GRAFANA_URL not set."""
+        from ares.core.blue_worker._redis_worker import _load_mcp_tools
+
+        # Clear env vars that could provide a URL
+        monkeypatch.delenv("GRAFANA_URL", raising=False)
+
+        # Pass no grafana_url - should return empty list
+        result = await _load_mcp_tools(grafana_url=None)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_list_when_binary_not_found(self, monkeypatch):
+        """Test that _load_mcp_tools returns empty list when mcp-grafana not installed."""
+        from unittest.mock import AsyncMock, patch
+
+        from ares.core.blue_worker._redis_worker import _load_mcp_tools
+
+        # Set required env vars so we get past the early returns
+        monkeypatch.setenv("GRAFANA_SERVICE_ACCOUNT_TOKEN", "test-token")
+
+        # Mock connect_grafana_mcp at the source location (import is inside function)
+        with patch(
+            "ares.tools.blue.grafana.connect_grafana_mcp",
+            new=AsyncMock(side_effect=FileNotFoundError("mcp-grafana not found")),
+        ):
+            result = await _load_mcp_tools(grafana_url="http://grafana:3000")
+
         assert result == []
 
 
