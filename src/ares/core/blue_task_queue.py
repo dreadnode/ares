@@ -29,7 +29,10 @@ from ares.core.redis_client import (
     create_redis_client,
     get_redis_sentinel_config,
     invalidate_sentinel_client,
+    is_connection_error,
+    timed_redis_write,
 )
+from ares.core.tracing import producer_span
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -203,12 +206,17 @@ class BlueTaskQueue:
             logger.info("Reconnected to Redis after ping failure")
             return False
 
-    def _handle_connection_error(self, error: Exception) -> None:
-        """Handle Redis connection errors by resetting connection state."""
+    async def _handle_connection_error(self, error: Exception) -> None:
+        """Handle Redis connection errors by resetting connection state and reconnecting."""
         self._connected = False
+        invalidate_sentinel_client()
         if self._client:
+            try:
+                await self._client.aclose()
+            except Exception:
+                pass
             self._client = None
-        logger.warning(f"Redis connection error, will retry: {error}")
+        logger.warning(f"Redis connection error, reconnecting: {error}")
 
     def _task_queue_key(self, investigation_id: str, role: str) -> str:
         """Get task queue key for a role within an investigation (legacy mode)."""
@@ -371,8 +379,11 @@ class BlueTaskQueue:
         target_role: str,
         params: dict[str, Any],
         task_id: str | None = None,
+        max_retries: int = 2,
     ) -> str:
         """Submit a task to a role's queue.
+
+        Includes automatic retry on connection errors.
 
         Args:
             investigation_id: Investigation this task belongs to.
@@ -380,14 +391,15 @@ class BlueTaskQueue:
             target_role: Role to handle the task (triage, threat_hunter, etc.).
             params: Task-specific parameters.
             task_id: Optional task ID (generated if not provided).
+            max_retries: Max retries on connection error (default: 2).
 
         Returns:
             Task ID for tracking.
         """
-        if not self._connected:
-            await self.connect()
-
         task_id = task_id or f"{task_type}_{uuid.uuid4().hex[:8]}"
+
+        # Target service name for Tempo service graph
+        target_service = f"ares-blue-{target_role.replace('_', '-')}-agent"
 
         task = BlueTaskMessage(
             task_id=task_id,
@@ -403,58 +415,128 @@ class BlueTaskQueue:
         else:
             queue_key = self._task_queue_key(investigation_id, target_role)
 
-        try:
-            await self.redis.lpush(queue_key, task.model_dump_json())
-            await self.redis.expire(queue_key, self.INVESTIGATION_TTL)
-            logger.info(f"Task {task_id} submitted to {queue_key}")
-            return task_id
+        last_error: Exception | None = None
 
-        except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in ["connection", "closed", "timeout", "broken pipe", "reset"]
-            ):
-                self._handle_connection_error(e)
-            raise
+        # Create PRODUCER span for Tempo service graph
+        with producer_span(
+            name="submit_task",
+            target_service=target_service,
+            role="orchestrator",
+            team="blue",
+            additional_attrs={
+                "task.id": task_id,
+                "task.type": task_type,
+                "task.target_role": target_role,
+                "investigation.id": investigation_id,
+            },
+        ):
+            for attempt in range(max_retries + 1):
+                if not self._connected:
+                    await self.connect()
+
+                try:
+                    task_json = task.model_dump_json()
+                    await timed_redis_write(
+                        self.redis.lpush(queue_key, task_json),
+                        operation_name=f"submit_task_{task_id}",
+                    )
+                    await timed_redis_write(
+                        self.redis.expire(queue_key, self.INVESTIGATION_TTL),
+                        operation_name=f"expire_queue_{task_id}",
+                    )
+                    logger.info(f"Task {task_id} submitted to {queue_key}")
+                    return task_id
+
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"Timeout submitting task {task_id} (attempt {attempt + 1}/{max_retries + 1})"
+                    )
+                    await self._handle_connection_error(TimeoutError("Timeout submitting task"))
+                    last_error = TimeoutError("Timeout submitting task after retries")
+                    continue
+
+                except Exception as e:
+                    if is_connection_error(e):
+                        logger.warning(
+                            f"Connection error submitting {task_id} "
+                            f"(attempt {attempt + 1}/{max_retries + 1}): {e}"
+                        )
+                        await self._handle_connection_error(e)
+                        last_error = e
+                        continue
+                    raise
+
+            if last_error:
+                logger.error(f"submit_task failed after {max_retries + 1} attempts: {last_error}")
+                raise last_error
+            raise RuntimeError("submit_task failed unexpectedly")
 
     async def wait_for_result(
         self,
         task_id: str,
         timeout: float = 300.0,
+        max_retries: int = 2,
     ) -> BlueTaskResult | None:
         """Wait for a task result.
+
+        Includes automatic retry on connection errors.
 
         Args:
             task_id: Task ID to wait for.
             timeout: Maximum wait time in seconds.
+            max_retries: Max retries on connection error (default: 2).
 
         Returns:
             BlueTaskResult or None if timeout.
         """
-        if not self._connected:
-            await self.connect()
-
         result_key = self._result_queue_key(task_id)
+        last_error: Exception | None = None
 
-        try:
-            result = await self.redis.brpop(result_key, timeout=int(timeout))
+        for attempt in range(max_retries + 1):
+            if not self._connected:
+                await self.connect()
 
-            if result is None:
-                logger.warning(f"Timeout waiting for task {task_id}")
-                return None
+            try:
+                # Use asyncio timeout slightly longer than brpop timeout to detect hung connections
+                result = await asyncio.wait_for(
+                    self.redis.brpop(result_key, timeout=int(timeout)),
+                    timeout=timeout + 5.0,
+                )
 
-            _, data = result
-            return BlueTaskResult.model_validate_json(data)
+                if result is None:
+                    logger.warning(f"Timeout waiting for task {task_id}")
+                    return None
 
-        except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in ["connection", "closed", "timeout", "broken pipe", "reset"]
-            ):
-                self._handle_connection_error(e)
-            raise
+                _, data = result
+                return BlueTaskResult.model_validate_json(data)
+
+            except asyncio.TimeoutError:
+                # BRPOP hung longer than expected - stale connection
+                logger.warning(
+                    f"BRPOP hung waiting for result {task_id} - "
+                    f"stale connection (attempt {attempt + 1}/{max_retries + 1})"
+                )
+                await self._handle_connection_error(
+                    TimeoutError("BRPOP hung - possible stale connection")
+                )
+                last_error = TimeoutError("BRPOP hung after retries")
+                continue
+
+            except Exception as e:
+                if is_connection_error(e):
+                    logger.warning(
+                        f"Connection error waiting for {task_id} "
+                        f"(attempt {attempt + 1}/{max_retries + 1}): {e}"
+                    )
+                    await self._handle_connection_error(e)
+                    last_error = e
+                    continue
+                raise
+
+        if last_error:
+            logger.error(f"wait_for_result failed after {max_retries + 1} attempts: {last_error}")
+            raise last_error
+        return None
 
     # === Worker Methods ===
 
@@ -463,107 +545,125 @@ class BlueTaskQueue:
         investigation_id: str,
         role: str,
         timeout: float = 5.0,
+        max_retries: int = 2,
     ) -> BlueTaskMessage | None:
         """Poll for next task from per-investigation queue (blocking).
+
+        Includes automatic retry on stale connection detection.
 
         Args:
             investigation_id: Investigation to poll tasks for.
             role: Worker role to poll for.
             timeout: How long to block waiting.
+            max_retries: Max retries on stale connection (default: 2).
 
         Returns:
             BlueTaskMessage or None if timeout.
         """
-        if not self._connected:
-            await self.connect()
-
         queue_key = self._task_queue_key(investigation_id, role)
+        last_error: Exception | None = None
 
-        try:
-            result = await asyncio.wait_for(
-                self.redis.brpop(queue_key, timeout=int(timeout)),
-                timeout=timeout + 2.0,
-            )
+        for attempt in range(max_retries + 1):
+            if not self._connected:
+                await self.connect()
 
-            if result is None:
-                return None
+            try:
+                result = await asyncio.wait_for(
+                    self.redis.brpop(queue_key, timeout=int(timeout)),
+                    timeout=timeout + 2.0,
+                )
 
-            _, data = result
-            return BlueTaskMessage.model_validate_json(data)
+                if result is None:
+                    return None
 
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"BRPOP hung for {timeout + 2.0}s on queue {queue_key} - "
-                "possible stale Sentinel connection, forcing reconnection"
-            )
-            invalidate_sentinel_client()
-            self._handle_connection_error(
-                TimeoutError("BRPOP hung - possible stale Sentinel connection")
-            )
-            return None
+                _, data = result
+                return BlueTaskMessage.model_validate_json(data)
 
-        except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in ["connection", "closed", "timeout", "broken pipe", "reset"]
-            ):
-                self._handle_connection_error(e)
-            raise
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"BRPOP hung for {timeout + 2.0}s on queue {queue_key} - "
+                    f"stale connection detected (attempt {attempt + 1}/{max_retries + 1})"
+                )
+                await self._handle_connection_error(
+                    TimeoutError("BRPOP hung - possible stale Sentinel connection")
+                )
+                last_error = TimeoutError("BRPOP hung after retries")
+                continue
+
+            except Exception as e:
+                if is_connection_error(e):
+                    attempt_info = f"attempt {attempt + 1}/{max_retries + 1}"
+                    logger.warning(f"Connection error during poll ({attempt_info}): {e}")
+                    await self._handle_connection_error(e)
+                    last_error = e
+                    continue
+                raise
+
+        if last_error:
+            logger.error(f"poll_task failed after {max_retries + 1} attempts: {last_error}")
+        return None
 
     async def poll_global_task(
         self,
         role: str,
         timeout: float = 5.0,
+        max_retries: int = 2,
     ) -> BlueTaskMessage | None:
         """Poll for next task from global role queue (blocking).
 
         Workers use this to receive tasks from any active investigation.
-        The task includes investigation_id so workers know which state backend to use.
+        Includes automatic retry on stale connection detection.
 
         Args:
             role: Worker role to poll for (triage, threat_hunter, lateral_analyst).
             timeout: How long to block waiting.
+            max_retries: Max retries on stale connection (default: 2).
 
         Returns:
             BlueTaskMessage or None if timeout.
         """
-        if not self._connected:
-            await self.connect()
-
         queue_key = self._global_task_queue_key(role)
+        last_error: Exception | None = None
 
-        try:
-            result = await asyncio.wait_for(
-                self.redis.brpop(queue_key, timeout=int(timeout)),
-                timeout=timeout + 2.0,
-            )
+        for attempt in range(max_retries + 1):
+            if not self._connected:
+                await self.connect()
 
-            if result is None:
-                return None
+            try:
+                result = await asyncio.wait_for(
+                    self.redis.brpop(queue_key, timeout=int(timeout)),
+                    timeout=timeout + 2.0,
+                )
 
-            _, data = result
-            return BlueTaskMessage.model_validate_json(data)
+                if result is None:
+                    return None
 
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"BRPOP hung for {timeout + 2.0}s on queue {queue_key} - "
-                "possible stale Sentinel connection, forcing reconnection"
-            )
-            invalidate_sentinel_client()
-            self._handle_connection_error(
-                TimeoutError("BRPOP hung - possible stale Sentinel connection")
-            )
-            return None
+                _, data = result
+                return BlueTaskMessage.model_validate_json(data)
 
-        except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in ["connection", "closed", "timeout", "broken pipe", "reset"]
-            ):
-                self._handle_connection_error(e)
-            raise
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"BRPOP hung for {timeout + 2.0}s on queue {queue_key} - "
+                    f"stale connection detected (attempt {attempt + 1}/{max_retries + 1})"
+                )
+                await self._handle_connection_error(
+                    TimeoutError("BRPOP hung - possible stale Sentinel connection")
+                )
+                last_error = TimeoutError("BRPOP hung after retries")
+                continue
+
+            except Exception as e:
+                if is_connection_error(e):
+                    attempt_info = f"attempt {attempt + 1}/{max_retries + 1}"
+                    logger.warning(f"Connection error during poll ({attempt_info}): {e}")
+                    await self._handle_connection_error(e)
+                    last_error = e
+                    continue
+                raise
+
+        if last_error:
+            logger.error(f"poll_global_task failed after {max_retries + 1} attempts: {last_error}")
+        return None
 
     async def send_result(
         self,
@@ -573,8 +673,11 @@ class BlueTaskQueue:
         error: str | None = None,
         worker_pod: str | None = None,
         agent_name: str | None = None,
+        max_retries: int = 2,
     ) -> None:
         """Send task result back to orchestrator.
+
+        Includes automatic retry on connection errors.
 
         Args:
             task_id: Task ID.
@@ -583,10 +686,8 @@ class BlueTaskQueue:
             error: Error message if failed.
             worker_pod: Pod that processed the task.
             agent_name: Logical agent name.
+            max_retries: Max retries on connection error (default: 2).
         """
-        if not self._connected:
-            await self.connect()
-
         task_result = BlueTaskResult(
             task_id=task_id,
             success=success,
@@ -597,20 +698,47 @@ class BlueTaskQueue:
         )
 
         result_key = self._result_queue_key(task_id)
+        last_error: Exception | None = None
 
-        try:
-            await self.redis.lpush(result_key, task_result.model_dump_json())
-            await self.redis.expire(result_key, self.RESULT_TTL)
-            logger.info(f"Result sent for task {task_id}: success={success}")
+        for attempt in range(max_retries + 1):
+            if not self._connected:
+                await self.connect()
 
-        except Exception as e:
-            error_str = str(e).lower()
-            if any(
-                keyword in error_str
-                for keyword in ["connection", "closed", "timeout", "broken pipe", "reset"]
-            ):
-                self._handle_connection_error(e)
-            raise
+            try:
+                result_json = task_result.model_dump_json()
+                await timed_redis_write(
+                    self.redis.lpush(result_key, result_json),
+                    operation_name=f"send_result_{task_id}",
+                )
+                await timed_redis_write(
+                    self.redis.expire(result_key, self.RESULT_TTL),
+                    operation_name=f"expire_result_{task_id}",
+                )
+                logger.info(f"Result sent for task {task_id}: success={success}")
+                return
+
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Timeout sending result {task_id} (attempt {attempt + 1}/{max_retries + 1})"
+                )
+                await self._handle_connection_error(TimeoutError("Timeout sending result"))
+                last_error = TimeoutError("Timeout sending result after retries")
+                continue
+
+            except Exception as e:
+                if is_connection_error(e):
+                    logger.warning(
+                        f"Connection error sending result {task_id} "
+                        f"(attempt {attempt + 1}/{max_retries + 1}): {e}"
+                    )
+                    await self._handle_connection_error(e)
+                    last_error = e
+                    continue
+                raise
+
+        if last_error:
+            logger.error(f"send_result failed after {max_retries + 1} attempts: {last_error}")
+            raise last_error
 
     # === Heartbeat Methods ===
 

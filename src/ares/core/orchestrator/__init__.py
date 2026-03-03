@@ -31,6 +31,7 @@ from ares.core.orchestrator._orchestrator import (
     _auto_coercion,
     _auto_credential_access,
     _auto_delegation_enumeration,
+    _auto_golden_ticket,
     _wait_for_crack_tasks,
     run_multi_agent_operation,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "_auto_coercion",
     "_auto_credential_access",
     "_auto_delegation_enumeration",
+    "_auto_golden_ticket",
     "_wait_for_crack_tasks",
     "get_crack_task_grace_period",
     "get_max_runtime",

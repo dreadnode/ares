@@ -340,6 +340,299 @@ class TestAutoCoercion:
         dispatcher.request_coercion.assert_not_called()
 
 
+class TestAutoGoldenTicket:
+    """Tests for _auto_golden_ticket background task."""
+
+    @pytest.mark.asyncio
+    async def test_auto_golden_ticket_uses_password_credential(self):
+        """Test that _auto_golden_ticket prefers password credential for lookupsid."""
+        from unittest.mock import patch
+
+        from ares.core.models import Credential, Hash
+        from ares.core.orchestrator import _auto_golden_ticket
+
+        state = SharedRedTeamState(
+            operation_id="op-gt-password",
+            target=Target(ip="192.168.58.20", domain="contoso.local"),
+        )
+        # Add krbtgt hash
+        state.all_hashes.append(
+            Hash(
+                username="krbtgt",
+                hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                hash_type="ntlm",
+                domain="contoso.local",
+                source="secretsdump",
+            )
+        )
+        # Add password credential
+        state.all_credentials.append(
+            Credential(
+                username="testuser",
+                password="TestPass123!",  # pragma: allowlist secret
+                domain="contoso.local",
+                source="kerberoast",
+            )
+        )
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.21")
+
+        # Mock run_tool to capture the command
+        captured_cmds = []
+
+        def mock_run_tool(cmd, timeout_seconds=60):
+            captured_cmds.append(cmd)
+            # Return lookupsid-like output with SID
+            return ("Domain SID is: S-1-5-21-1234567890-1234567890-1234567890", "", 0)
+
+        with patch("ares.tools.red.common.run_tool", side_effect=mock_run_tool):
+            task = asyncio.create_task(_auto_golden_ticket(dispatcher, check_interval=0.1))
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Should have used password credential, not hash
+        assert len(captured_cmds) >= 1
+        lookupsid_cmd = captured_cmds[0]
+        assert "impacket-lookupsid" in lookupsid_cmd[0]
+        # Password auth format: domain/user:password@target
+        assert "testuser:TestPass123!" in lookupsid_cmd[1]
+        assert "-hashes" not in lookupsid_cmd
+
+    @pytest.mark.asyncio
+    async def test_auto_golden_ticket_falls_back_to_pth(self):
+        """Test that _auto_golden_ticket uses PTH when no password credential available."""
+        from unittest.mock import patch
+
+        from ares.core.models import Hash
+        from ares.core.orchestrator import _auto_golden_ticket
+
+        state = SharedRedTeamState(
+            operation_id="op-gt-pth",
+            target=Target(ip="192.168.58.22", domain="contoso.local"),
+        )
+        # Add krbtgt hash
+        state.all_hashes.append(
+            Hash(
+                username="krbtgt",
+                hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                hash_type="ntlm",
+                domain="contoso.local",
+                source="secretsdump",
+            )
+        )
+        # Add user hash (for PTH) - no password credentials
+        state.all_hashes.append(
+            Hash(
+                username="admin",
+                hash_value="aabbccdd11223344aabbccdd11223344",
+                hash_type="ntlm",
+                domain="contoso.local",
+                source="secretsdump",
+            )
+        )
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.23")
+
+        captured_cmds = []
+
+        def mock_run_tool(cmd, timeout_seconds=60):
+            captured_cmds.append(cmd)
+            return ("Domain SID is: S-1-5-21-1234567890-1234567890-1234567890", "", 0)
+
+        with patch("ares.tools.red.common.run_tool", side_effect=mock_run_tool):
+            task = asyncio.create_task(_auto_golden_ticket(dispatcher, check_interval=0.1))
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Should have used PTH with -hashes flag
+        assert len(captured_cmds) >= 1
+        lookupsid_cmd = captured_cmds[0]
+        assert "impacket-lookupsid" in lookupsid_cmd[0]
+        assert "-hashes" in lookupsid_cmd
+        # Should use the admin hash, not krbtgt
+        hashes_idx = lookupsid_cmd.index("-hashes")
+        assert ":aabbccdd11223344" in lookupsid_cmd[hashes_idx + 1]
+
+    @pytest.mark.asyncio
+    async def test_auto_golden_ticket_pth_extracts_nt_from_lm_nt(self):
+        """Test that PTH correctly extracts NT hash from LM:NT format."""
+        from unittest.mock import patch
+
+        from ares.core.models import Hash
+        from ares.core.orchestrator import _auto_golden_ticket
+
+        state = SharedRedTeamState(
+            operation_id="op-gt-lmnt",
+            target=Target(ip="192.168.58.24", domain="contoso.local"),
+        )
+        # Add krbtgt hash
+        state.all_hashes.append(
+            Hash(
+                username="krbtgt",
+                hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                hash_type="ntlm",
+                domain="contoso.local",
+                source="secretsdump",
+            )
+        )
+        # Add user hash with LM:NT format
+        state.all_hashes.append(
+            Hash(
+                username="svc_backup",
+                hash_value="deadbeef00001111:cafebabe22223333",
+                hash_type="ntlm",
+                domain="contoso.local",
+                source="secretsdump",
+            )
+        )
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.25")
+
+        captured_cmds = []
+
+        def mock_run_tool(cmd, timeout_seconds=60):
+            captured_cmds.append(cmd)
+            return ("Domain SID is: S-1-5-21-1234567890-1234567890-1234567890", "", 0)
+
+        with patch("ares.tools.red.common.run_tool", side_effect=mock_run_tool):
+            task = asyncio.create_task(_auto_golden_ticket(dispatcher, check_interval=0.1))
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Should have extracted NT hash (after colon)
+        assert len(captured_cmds) >= 1
+        lookupsid_cmd = captured_cmds[0]
+        hashes_idx = lookupsid_cmd.index("-hashes")
+        # Should use :NTHASH format (empty LM, just NT)
+        assert ":cafebabe22223333" in lookupsid_cmd[hashes_idx + 1]
+
+    @pytest.mark.asyncio
+    async def test_auto_golden_ticket_skips_krbtgt_for_pth(self):
+        """Test that PTH does not use krbtgt hash for authentication."""
+        from unittest.mock import patch
+
+        from ares.core.models import Hash
+        from ares.core.orchestrator import _auto_golden_ticket
+
+        state = SharedRedTeamState(
+            operation_id="op-gt-skip-krbtgt",
+            target=Target(ip="192.168.58.26", domain="contoso.local"),
+        )
+        # Add only krbtgt hash - no user hashes
+        state.all_hashes.append(
+            Hash(
+                username="krbtgt",
+                hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                hash_type="ntlm",
+                domain="contoso.local",
+                source="secretsdump",
+            )
+        )
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.27")
+
+        captured_cmds = []
+
+        def mock_run_tool(cmd, timeout_seconds=60):
+            captured_cmds.append(cmd)
+            return ("Domain SID is: S-1-5-21-1234567890-1234567890-1234567890", "", 0)
+
+        with patch("ares.tools.red.common.run_tool", side_effect=mock_run_tool):
+            task = asyncio.create_task(_auto_golden_ticket(dispatcher, check_interval=0.1))
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Should NOT have run lookupsid - no valid credential available
+        assert len(captured_cmds) == 0
+
+    @pytest.mark.asyncio
+    async def test_auto_golden_ticket_prefers_same_domain_hash(self):
+        """Test that PTH prefers hash from same domain as krbtgt."""
+        from unittest.mock import patch
+
+        from ares.core.models import Hash
+        from ares.core.orchestrator import _auto_golden_ticket
+
+        state = SharedRedTeamState(
+            operation_id="op-gt-same-domain",
+            target=Target(ip="192.168.58.28", domain="contoso.local"),
+        )
+        # Add krbtgt hash for contoso.local
+        state.all_hashes.append(
+            Hash(
+                username="krbtgt",
+                hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                hash_type="ntlm",
+                domain="contoso.local",
+                source="secretsdump",
+            )
+        )
+        # Add hash from different domain (added first)
+        state.all_hashes.append(
+            Hash(
+                username="other_user",
+                hash_value="aaaa11112222bbbb",
+                hash_type="ntlm",
+                domain="fabrikam.local",
+                source="secretsdump",
+            )
+        )
+        # Add hash from same domain (added second)
+        state.all_hashes.append(
+            Hash(
+                username="same_domain_user",
+                hash_value="cccc33334444dddd",
+                hash_type="ntlm",
+                domain="contoso.local",
+                source="secretsdump",
+            )
+        )
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.29")
+
+        captured_cmds = []
+
+        def mock_run_tool(cmd, timeout_seconds=60):
+            captured_cmds.append(cmd)
+            return ("Domain SID is: S-1-5-21-1234567890-1234567890-1234567890", "", 0)
+
+        with patch("ares.tools.red.common.run_tool", side_effect=mock_run_tool):
+            task = asyncio.create_task(_auto_golden_ticket(dispatcher, check_interval=0.1))
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Should have used same_domain_user (contoso.local), not other_user (fabrikam.local)
+        assert len(captured_cmds) >= 1
+        lookupsid_cmd = captured_cmds[0]
+        assert "same_domain_user" in lookupsid_cmd[1]
+        assert ":cccc33334444dddd" in lookupsid_cmd[3]
+
+
 class TestWaitForCrackTasks:
     """Tests for crack task grace period."""
 

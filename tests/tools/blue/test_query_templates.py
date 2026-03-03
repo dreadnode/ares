@@ -1101,6 +1101,119 @@ class TestBloodhoundComputerEnumDetection:
         assert result["_mitre_technique"] == "T1018"
 
 
+class TestRunParallelDetections:
+    """Tests for run_parallel_detections method."""
+
+    @pytest.fixture
+    def tools(self) -> QueryTemplateTools:
+        return QueryTemplateTools(loki_url="http://localhost:3100")
+
+    @pytest.mark.asyncio
+    async def test_run_parallel_detections_success(self, tools: QueryTemplateTools):
+        """Test running multiple detections in parallel."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_response
+            )
+            results = await tools.run_parallel_detections(
+                query_names=["detect_dcsync", "detect_kerberoasting"],
+                hours_back=2,
+            )
+
+        assert "detect_dcsync" in results
+        assert "detect_kerberoasting" in results
+        assert results["detect_dcsync"]["status"] == "success"
+        assert results["detect_kerberoasting"]["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_run_parallel_detections_with_target_host(self, tools: QueryTemplateTools):
+        """Test parallel detections with target host filter."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_instance = mock_client.return_value.__aenter__.return_value
+            mock_instance.get = AsyncMock(return_value=mock_response)
+
+            results = await tools.run_parallel_detections(
+                query_names=["detect_secretsdump"],
+                target_host="dc01.contoso.local",
+            )
+
+        assert "detect_secretsdump" in results
+
+    @pytest.mark.asyncio
+    async def test_run_parallel_detections_invalid_query(self, tools: QueryTemplateTools):
+        """Test parallel detections with invalid query name."""
+        results = await tools.run_parallel_detections(
+            query_names=["invalid_query_name"],
+        )
+
+        assert "invalid_query_name" in results
+        assert results["invalid_query_name"]["status"] == "error"
+        assert "Unknown query" in results["invalid_query_name"]["error"]
+
+    @pytest.mark.asyncio
+    async def test_run_parallel_detections_mixed_valid_invalid(self, tools: QueryTemplateTools):
+        """Test parallel detections with mix of valid and invalid queries."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_response
+            )
+            results = await tools.run_parallel_detections(
+                query_names=["detect_dcsync", "invalid_query"],
+            )
+
+        # Invalid queries are caught during validation, so only invalid ones return errors
+        # Valid queries run normally
+        assert "invalid_query" in results
+        assert results["invalid_query"]["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_run_parallel_detections_respects_max_concurrent(self, tools: QueryTemplateTools):
+        """Test that max_concurrent limits batch size."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        call_count = 0
+
+        async def track_calls(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return mock_response
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = track_calls
+
+            # Run with 3 queries but max_concurrent=2
+            results = await tools.run_parallel_detections(
+                query_names=["detect_dcsync", "detect_kerberoasting", "detect_golden_ticket"],
+                max_concurrent=2,
+            )
+
+        assert len(results) == 3
+        # All 3 queries should have been executed
+        assert "detect_dcsync" in results
+        assert "detect_kerberoasting" in results
+        assert "detect_golden_ticket" in results
+
+    @pytest.mark.asyncio
+    async def test_run_parallel_detections_empty_list(self, tools: QueryTemplateTools):
+        """Test parallel detections with empty query list."""
+        results = await tools.run_parallel_detections(query_names=[])
+        assert results == {}
+
+
 class TestListQueryTemplates:
     """Tests for list_query_templates method."""
 

@@ -27,6 +27,7 @@ from ares.core.config import (
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.models import AgentInfo, AgentRole, SharedRedTeamState
 from ares.core.templates import get_template_loader
+from ares.core.tracing import trace_tool_call
 from ares.tools.red import (
     ACLExploitTools,
     BloodHoundTools,
@@ -237,8 +238,9 @@ def create_role_hooks(
     async def log_tool_usage(event: ToolStart):
         """Log tool calls for observability."""
         if hasattr(event, "tool_call") and event.tool_call:
-            logger.info(f"🔧 [{log_name}] Tool: {event.tool_call.name}")
-            dn.log_metric(f"multiagent_{log_name}_tool_{event.tool_call.name}", 1, mode="count")
+            tool_name = event.tool_call.name
+            logger.info(f"🔧 [{log_name}] Tool: {tool_name}")
+            dn.log_metric(f"multiagent_{log_name}_tool_{tool_name}", 1, mode="count")
 
     async def log_tool_result(event: ToolEnd) -> Reaction | None:
         """Log tool results and apply circuit breaker for repeated failures."""
@@ -293,6 +295,37 @@ def create_role_hooks(
                     log_fn(f"{icon} [{log_name}] {tool_name}:\n{result}{suffix}")
                 else:
                     log_fn(f"{icon} [{log_name}] {tool_name}: {result}{suffix}")
+
+        # Create trace span for tool execution with result status
+        error_msg = str(event.error)[:500] if hasattr(event, "error") and event.error else None
+
+        # Extract target info from tool arguments for span metrics
+        target_host = None
+        if hasattr(event, "tool_call") and event.tool_call and event.tool_call.arguments:
+            try:
+                import json
+
+                args = json.loads(event.tool_call.arguments)
+                # Try common argument names for target
+                target_host = (
+                    args.get("target")
+                    or args.get("target_ip")
+                    or args.get("dc_ip")
+                    or args.get("host")
+                    or args.get("hostname")
+                    or args.get("ip")
+                )
+            except Exception:
+                pass
+
+        trace_tool_call(
+            role.value,
+            "red",
+            tool_name,
+            is_error=is_error,
+            error_message=error_msg,
+            target_host=target_host,
+        )
 
         # Circuit breaker logic
         # Use nonlocal to modify the tripped flag

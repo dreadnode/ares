@@ -254,6 +254,87 @@ def invalidate_sentinel_client():
         _thread_local.sentinel_created_at = 0
 
 
+# Connection error keywords for detecting Redis connection issues.
+# Case-insensitive matching against exception messages.
+_CONNECTION_ERROR_KEYWORDS = frozenset(
+    {
+        "connection",
+        "connect",
+        "closed",
+        "timeout",
+        "broken pipe",
+        "reset",
+        "refused",
+        "unreachable",
+        "reset by peer",
+        "no route",
+        "network",
+        "eof",
+        "errno",
+        "socket",
+    }
+)
+
+
+def is_connection_error(error: BaseException) -> bool:
+    """Check if an exception indicates a Redis connection error.
+
+    Used to determine if an operation should trigger reconnection logic.
+    Matches against common connection error keywords in a case-insensitive manner.
+
+    Args:
+        error: The exception to check.
+
+    Returns:
+        True if the error appears to be a connection-related issue.
+    """
+    error_str = str(error).lower()
+    return any(keyword in error_str for keyword in _CONNECTION_ERROR_KEYWORDS)
+
+
+# Default timeout for Redis write operations (seconds)
+_DEFAULT_WRITE_TIMEOUT = float(os.getenv("REDIS_WRITE_TIMEOUT", "10.0"))
+
+
+async def timed_redis_write(
+    coro,
+    timeout: float | None = None,
+    operation_name: str = "redis_write",
+):
+    """Execute a Redis write operation with a timeout.
+
+    Wraps Redis write operations (set, hset, lpush, etc.) with asyncio.wait_for()
+    to prevent indefinite blocking when Redis is unavailable.
+
+    Args:
+        coro: The coroutine to execute (e.g., client.set(...))
+        timeout: Timeout in seconds (default: REDIS_WRITE_TIMEOUT env var or 10s)
+        operation_name: Name for logging (e.g., "set_domain_admin")
+
+    Returns:
+        The result of the Redis operation.
+
+    Raises:
+        asyncio.TimeoutError: If operation exceeds timeout.
+        Exception: Any Redis exception from the operation.
+
+    Example:
+        await timed_redis_write(
+            client.hset("key", "field", "value"),
+            timeout=5.0,
+            operation_name="persist_credential"
+        )
+    """
+    if timeout is None:
+        timeout = _DEFAULT_WRITE_TIMEOUT
+
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.error(f"Redis write timed out after {timeout}s: {operation_name}")
+        raise
+
+
 async def create_redis_client(
     redis_url: str | None = None,
     *,
@@ -502,7 +583,7 @@ async def create_verified_redis_client(
 
             # Connected to wrong instance type (likely demoted master with stale data)
             logger.warning(
-                f"ROLE verification failed: not connected to master (attempt {attempt}/{max_retries}). "
+                f"ROLE verification failed: not master (attempt {attempt}/{max_retries}). "
                 "Sentinel may have stale data or failover in progress."
             )
             await client.aclose()

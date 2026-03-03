@@ -400,3 +400,140 @@ class TestBlueOrchestratorService:
         result = await service._pop_investigation_request()
 
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_pop_investigation_request_retries_on_timeout(self):
+        """Test that _pop_investigation_request retries on asyncio.TimeoutError."""
+        import asyncio
+
+        service = BlueOrchestratorService(redis_url="redis://", namespace="test")
+        service._force_reconnect = AsyncMock()
+
+        mock_client = AsyncMock()
+        # First call times out, second succeeds
+        mock_client.blpop = AsyncMock(
+            side_effect=[
+                asyncio.TimeoutError("Stale connection"),
+                (
+                    b"ares:blue:investigations",
+                    json.dumps({"investigation_id": "inv-retry", "alert": {}}).encode(),
+                ),
+            ]
+        )
+        service.task_queue = SimpleNamespace(_client=mock_client)
+
+        result = await service._pop_investigation_request()
+
+        assert result is not None
+        assert result["investigation_id"] == "inv-retry"
+        service._force_reconnect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_pop_investigation_request_retries_on_connection_error(self):
+        """Test that _pop_investigation_request retries on connection errors."""
+        service = BlueOrchestratorService(redis_url="redis://", namespace="test")
+        service._force_reconnect = AsyncMock()
+
+        mock_client = AsyncMock()
+        # First call has connection error, second succeeds
+        mock_client.blpop = AsyncMock(
+            side_effect=[
+                ConnectionError("Connection closed"),
+                (
+                    b"ares:blue:investigations",
+                    json.dumps({"investigation_id": "inv-conn", "alert": {}}).encode(),
+                ),
+            ]
+        )
+        service.task_queue = SimpleNamespace(_client=mock_client)
+
+        result = await service._pop_investigation_request()
+
+        assert result is not None
+        assert result["investigation_id"] == "inv-conn"
+        service._force_reconnect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_pop_investigation_request_returns_none_after_max_retries(self):
+        """Test that _pop_investigation_request returns None after exhausting retries."""
+        import asyncio
+
+        service = BlueOrchestratorService(redis_url="redis://", namespace="test")
+        service._force_reconnect = AsyncMock()
+
+        mock_client = AsyncMock()
+        # All calls timeout
+        mock_client.blpop = AsyncMock(side_effect=asyncio.TimeoutError("Stale connection"))
+        service.task_queue = SimpleNamespace(_client=mock_client)
+
+        result = await service._pop_investigation_request(max_retries=2)
+
+        assert result is None
+        # Should have called force_reconnect for each retry
+        assert service._force_reconnect.await_count == 3  # initial + 2 retries
+
+    @pytest.mark.asyncio
+    async def test_is_connection_alive_returns_true_on_pong(self):
+        """Test _is_connection_alive returns True when ping succeeds."""
+        service = BlueOrchestratorService(redis_url="redis://", namespace="test")
+
+        mock_client = AsyncMock()
+        mock_client.ping = AsyncMock(return_value=True)
+        service.task_queue = SimpleNamespace(_client=mock_client)
+
+        result = await service._is_connection_alive()
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_is_connection_alive_returns_false_on_exception(self):
+        """Test _is_connection_alive returns False when ping fails."""
+        service = BlueOrchestratorService(redis_url="redis://", namespace="test")
+
+        mock_client = AsyncMock()
+        mock_client.ping = AsyncMock(side_effect=Exception("Connection lost"))
+        service.task_queue = SimpleNamespace(_client=mock_client)
+
+        result = await service._is_connection_alive()
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_publish_status_handles_timeout(self):
+        """Test _publish_investigation_status handles timeout gracefully."""
+        import asyncio
+
+        service = BlueOrchestratorService(redis_url="redis://", namespace="test")
+
+        mock_client = AsyncMock()
+        mock_client.setex = AsyncMock(side_effect=asyncio.TimeoutError("Timeout"))
+        service.task_queue = SimpleNamespace(_client=mock_client)
+
+        # Should not raise - just log warning
+        await service._publish_investigation_status(
+            "inv-timeout",
+            "running",
+            {"started_at": "2026-02-23T12:00:00Z"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_force_reconnect_reconnects_both_queues(self):
+        """Test _force_reconnect reconnects both task_queue and blue_task_queue."""
+        service = BlueOrchestratorService(redis_url="redis://", namespace="test")
+
+        mock_task_queue = MagicMock()
+        mock_task_queue.disconnect = AsyncMock()
+        mock_task_queue.connect = AsyncMock()
+        service.task_queue = mock_task_queue
+
+        mock_blue_queue = MagicMock()
+        mock_blue_queue.disconnect = AsyncMock()
+        mock_blue_queue.connect = AsyncMock()
+        service.blue_task_queue = mock_blue_queue
+
+        await service._force_reconnect()
+
+        mock_task_queue.disconnect.assert_awaited_once()
+        mock_task_queue.connect.assert_awaited_once()
+        mock_blue_queue.disconnect.assert_awaited_once()
+        mock_blue_queue.connect.assert_awaited_once()
