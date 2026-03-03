@@ -125,6 +125,10 @@ class RedisTaskQueue:
         When called from a non-main thread (e.g., threaded result consumer),
         uses direct connection to avoid SentinelConnectionPool's cross-loop
         Future issues.
+
+        Uses socket_timeout=None to allow blocking operations (BRPOP) to wait
+        for extended periods without hitting socket timeout. Timeout control
+        is handled at the application level via asyncio.wait_for.
         """
         if self._connected:
             return
@@ -139,12 +143,17 @@ class RedisTaskQueue:
                 self.redis_url,
                 decode_responses=True,  # Auto-decode to strings
                 direct_connection=direct_connection,
+                # Disable socket_timeout for blocking operations (BRPOP).
+                # The default 10s socket_timeout breaks BRPOP which may need to
+                # wait minutes for tool execution results. Timeout control is
+                # handled via asyncio.wait_for in wait_for_result/poll_task.
+                socket_timeout=None,
             )
             await self._client.ping()
             self._connected = True
             if get_redis_sentinel_config():
                 conn_type = "direct" if direct_connection else "via Sentinel"
-                logger.info(f"TaskQueue connected to Redis {conn_type}")
+                logger.info(f"TaskQueue connected to Redis {conn_type} (socket_timeout=None)")
             else:
                 logger.info(f"TaskQueue connected to Redis at {self.redis_url}")
 
@@ -351,8 +360,14 @@ class RedisTaskQueue:
         result_key = self._result_queue_key(task_id)
 
         try:
-            # BRPOP blocks until result available or timeout
-            result = await self._client.brpop(result_key, timeout=int(timeout))
+            # Wrap BRPOP in asyncio.wait_for for proper timeout control.
+            # The Redis BRPOP timeout only works if the request reaches the server.
+            # On stale/dead TCP connections, BRPOP can hang forever without this wrapper.
+            # We use timeout + 5s margin to allow BRPOP to return naturally if possible.
+            result = await asyncio.wait_for(
+                self._client.brpop(result_key, timeout=int(timeout)),
+                timeout=timeout + 5.0,
+            )
 
             if result is None:
                 logger.warning(f"Timeout waiting for task {task_id}")
@@ -361,6 +376,15 @@ class RedisTaskQueue:
             # result is (key, value) tuple
             _, data = result
             return TaskResult.model_validate_json(data)
+
+        except asyncio.TimeoutError:
+            # asyncio.wait_for timed out - this indicates a stale connection
+            # since BRPOP should have returned None before asyncio timeout
+            logger.warning(
+                f"asyncio timeout waiting for task {task_id} - possible stale connection"
+            )
+            self._handle_connection_error(TimeoutError("asyncio.wait_for timeout"))
+            return None
 
         except Exception as e:
             if is_connection_error(e):

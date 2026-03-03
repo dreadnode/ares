@@ -601,6 +601,34 @@ class TestRedisTaskQueueResults:
         assert result.result["output"] == "done"
 
     @pytest.mark.asyncio
+    async def test_wait_for_result_asyncio_timeout(self, task_queue, mock_redis_client):
+        """Test wait_for_result handles asyncio.TimeoutError from hung BRPOP.
+
+        This tests the fix for stale connections where BRPOP hangs forever
+        on a dead TCP socket. The asyncio.wait_for wrapper should detect
+        this and return None while resetting connection state.
+        """
+        import asyncio
+
+        # Simulate a hung BRPOP that never returns (stale connection)
+        async def hung_brpop(*args, **kwargs):
+            await asyncio.sleep(100)  # Would block forever without wait_for
+
+        mock_redis_client.brpop = hung_brpop
+
+        with patch("ares.core.task_queue.invalidate_sentinel_client"):
+            # wait_for_result with timeout=0.1 should trigger asyncio.TimeoutError
+            # after 0.1 + 5.0 = 5.1 seconds, but we mock so it's faster
+            result = await task_queue.wait_for_result("task_stale", timeout=0.1)
+
+            # Should return None (not raise) to indicate timeout
+            assert result is None
+
+            # Connection state should be reset
+            assert task_queue._connected is False
+            assert task_queue._client is None
+
+    @pytest.mark.asyncio
     async def test_check_result_not_ready(self, task_queue, mock_redis_client):
         """Test non-blocking check when result not ready."""
         mock_redis_client.rpop.return_value = None

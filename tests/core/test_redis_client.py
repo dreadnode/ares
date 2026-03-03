@@ -174,6 +174,63 @@ async def test_create_redis_client_uses_sentinel(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
+async def test_create_redis_client_explicit_socket_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that explicit socket_timeout parameter overrides default."""
+    asyncio_module = install_dummy_redis(monkeypatch)
+
+    from_url_mock = MagicMock(return_value="url-client")
+    asyncio_module.from_url = from_url_mock
+
+    monkeypatch.delenv("REDIS_SENTINEL_HOST", raising=False)
+    monkeypatch.delenv("REDIS_SENTINEL_MASTER", raising=False)
+
+    # Test with explicit socket_timeout=None (for blocking operations like BRPOP)
+    await create_redis_client("redis://localhost", socket_timeout=None)
+
+    call_kwargs = from_url_mock.call_args[1]
+    assert call_kwargs["socket_timeout"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_redis_client_socket_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that socket_timeout=... uses default from environment."""
+    asyncio_module = install_dummy_redis(monkeypatch)
+
+    from_url_mock = MagicMock(return_value="url-client")
+    asyncio_module.from_url = from_url_mock
+
+    monkeypatch.delenv("REDIS_SENTINEL_HOST", raising=False)
+    monkeypatch.delenv("REDIS_SENTINEL_MASTER", raising=False)
+    monkeypatch.setenv("REDIS_SOCKET_TIMEOUT", "15")
+
+    # Default behavior (socket_timeout=...) should use env var
+    await create_redis_client("redis://localhost")
+
+    call_kwargs = from_url_mock.call_args[1]
+    assert call_kwargs["socket_timeout"] == 15.0
+
+
+@pytest.mark.asyncio
+async def test_create_redis_client_explicit_socket_timeout_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that explicit numeric socket_timeout is used."""
+    asyncio_module = install_dummy_redis(monkeypatch)
+
+    from_url_mock = MagicMock(return_value="url-client")
+    asyncio_module.from_url = from_url_mock
+
+    monkeypatch.delenv("REDIS_SENTINEL_HOST", raising=False)
+    monkeypatch.delenv("REDIS_SENTINEL_MASTER", raising=False)
+
+    # Test with explicit numeric socket_timeout
+    await create_redis_client("redis://localhost", socket_timeout=30.0)
+
+    call_kwargs = from_url_mock.call_args[1]
+    assert call_kwargs["socket_timeout"] == 30.0
+
+
+@pytest.mark.asyncio
 async def test_create_redis_client_uses_url(monkeypatch: pytest.MonkeyPatch) -> None:
     asyncio_module = install_dummy_redis(monkeypatch)
     asyncio_module.Sentinel = DummySentinel

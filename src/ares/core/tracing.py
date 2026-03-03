@@ -7,8 +7,14 @@ SDK and include attributes for:
 - mitre.tactic: MITRE tactic shortname (e.g., "credential-access")
 - mitre.technique.id: MITRE technique ID (e.g., "T1003")
 - attack_phase: Current phase of the operation
-- attack_target_host: Target hostname/IP being attacked
-- attack_target_type: Target type (domain_controller, server, workstation)
+
+OTel Semantic Convention attributes:
+- destination.address: Target hostname/IP being attacked (OTel standard)
+- user.name: Target username when attacking a user account
+
+Custom attack namespace attributes:
+- attack.target.type: Target type (domain_controller, server, workstation, user)
+- attack.target.domain: Domain name of the target (e.g., contoso.local)
 """
 
 from __future__ import annotations
@@ -156,6 +162,95 @@ TOOL_CATEGORY_TO_TACTIC: dict[str, str] = {
     "CoercionNetworkTools": "credential-access",
 }
 
+# Map tool names to their category (toolset class name)
+# This enables attack_tool_category span attribute for metrics/dashboards
+TOOL_TO_CATEGORY: dict[str, str] = {
+    # NetworkEnumerationTools - Discovery tools
+    "nmap_scan": "NetworkEnumerationTools",
+    "portscan": "NetworkEnumerationTools",
+    "ping_sweep": "NetworkEnumerationTools",
+    "ldap_domain_dump": "NetworkEnumerationTools",
+    "ldap_search": "NetworkEnumerationTools",
+    "ldap_search_descriptions": "NetworkEnumerationTools",
+    "bloodhound_collection": "NetworkEnumerationTools",
+    "sharphound": "NetworkEnumerationTools",
+    "get_domain_info": "NetworkEnumerationTools",
+    "enum_domain_trusts": "NetworkEnumerationTools",
+    "enumerate_forest": "NetworkEnumerationTools",
+    "enum_constrained_delegation": "NetworkEnumerationTools",
+    "enum_unconstrained_delegation": "NetworkEnumerationTools",
+    "enum_rbcd_targets": "NetworkEnumerationTools",
+    "smb_share_enum": "NetworkEnumerationTools",
+    "enumerate_shares": "NetworkEnumerationTools",
+    "smbclient_ls": "NetworkEnumerationTools",
+    # CredentialHarvestingTools - Credential extraction
+    "secretsdump": "CredentialHarvestingTools",  # pragma: allowlist secret
+    "secretsdump_kerberos": "CredentialHarvestingTools",  # pragma: allowlist secret
+    "ntds_dit_extract": "CredentialHarvestingTools",
+    "kerberoast": "CredentialHarvestingTools",
+    "targeted_kerberoast": "CredentialHarvestingTools",
+    "asrep_roast": "CredentialHarvestingTools",
+    "laps_dump": "CredentialHarvestingTools",
+    "dump_lsass": "CredentialHarvestingTools",
+    "gpp_password_finder": "CredentialHarvestingTools",  # pragma: allowlist secret
+    "smbclient_spider": "SharePilferingTools",
+    "sysvol_script_search": "SharePilferingTools",
+    # GMSATools - GMSA password extraction
+    "gmsa_dump_passwords": "GMSATools",  # pragma: allowlist secret
+    # TrustAttackTools - Forest/trust attacks
+    "extract_trust_key": "TrustAttackTools",
+    # CertipyTools - ADCS attacks
+    "certipy_auth": "CertipyTools",
+    "certipy_find": "CertipyTools",
+    "certipy_req": "CertipyTools",
+    # CrackingTools - Hash cracking
+    "hashcat_crack": "CrackingTools",
+    "crack_hash": "CrackingTools",
+    # DelegationTools - Delegation attacks
+    "rbcd_attack": "DelegationTools",
+    "constrained_delegation_attack": "DelegationTools",
+    "unconstrained_delegation_attack": "DelegationTools",
+    "set_rbcd": "DelegationTools",
+    # PrivilegeEscalationTools - Generic privesc
+    "dcsync": "PrivilegeEscalationTools",
+    "add_shadow_credentials": "PrivilegeEscalationTools",
+    "add_computer": "PrivilegeEscalationTools",
+    # ACLExploitTools - ACL manipulation
+    "dacl_edit": "ACLExploitTools",
+    "add_user_to_group": "ACLExploitTools",
+    "modify_owner": "ACLExploitTools",
+    "modify_dacl": "ACLExploitTools",
+    "write_gpo": "ACLExploitTools",
+    # LateralMovementTools - Lateral movement
+    "psexec": "LateralMovementTools",
+    "wmiexec": "LateralMovementTools",
+    "smbexec": "LateralMovementTools",
+    "atexec": "LateralMovementTools",
+    "dcomexec": "LateralMovementTools",
+    "evil_winrm": "LateralMovementTools",
+    "rdp_connect": "LateralMovementTools",
+    "ssh_connect": "LateralMovementTools",
+    "mssql_exec": "LateralMovementTools",
+    # CoercionTools - NTLM coercion/relay
+    "petitpotam": "CoercionTools",
+    "printerbug": "CoercionTools",
+    "dfscoerce": "CoercionTools",
+    "shadowcoerce": "CoercionTools",
+    "coerce_auth": "CoercionTools",
+    "ntlm_relay": "CoercionTools",
+    "relay_to_ldap": "CoercionTools",
+    "relay_to_smb": "CoercionTools",
+    # MSSQLTools - MSSQL attacks
+    "mssql_enum_impersonation": "MSSQLTools",
+    "mssql_enum_linked_servers": "MSSQLTools",
+    "mssql_impersonate": "MSSQLTools",
+    "mssql_xp_cmdshell": "MSSQLTools",
+    # GoldenTicketTools - Kerberos ticket forging
+    "forge_golden_ticket": "GoldenTicketTools",  # nosec B105
+    "forge_silver_ticket": "GoldenTicketTools",
+    "create_machine_account": "GoldenTicketTools",
+}
+
 # =============================================================================
 # Attack Phases
 # =============================================================================
@@ -260,12 +355,26 @@ def get_tool_mitre_info(tool_name: str) -> tuple[str | None, str | None]:
     return technique_id, tactic
 
 
+def get_tool_category(tool_name: str) -> str | None:
+    """Get the category (toolset class name) for a tool.
+
+    Args:
+        tool_name: Name of the tool being executed.
+
+    Returns:
+        Category string (e.g., "LateralMovementTools") or None if not mapped.
+    """
+    return TOOL_TO_CATEGORY.get(tool_name)
+
+
 def create_agent_span_attributes(
     role: str,
     team: str,
     tool_name: str | None = None,
     target_host: str | None = None,
     target_type: str | None = None,
+    target_user: str | None = None,
+    target_domain: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create span attributes for an agent operation.
@@ -275,7 +384,9 @@ def create_agent_span_attributes(
         team: Team name ("red" or "blue").
         tool_name: Optional tool being executed.
         target_host: Optional target hostname/IP for the operation.
-        target_type: Optional target type (e.g., "domain_controller", "server", "workstation").
+        target_type: Optional target type (e.g., "domain_controller", "server", "workstation", "user").
+        target_user: Optional target username (e.g., "svc_backup").
+        target_domain: Optional target domain (e.g., "contoso.local").
         additional_attrs: Optional additional attributes to include.
 
     Returns:
@@ -306,17 +417,41 @@ def create_agent_span_attributes(
             # Tool-specific tactic overrides role default
             attrs["mitre.tactic"] = tool_tactic
         attrs["tool.name"] = tool_name
+        # Set attack_tool_name for Tempo metrics extraction
+        attrs["attack_tool_name"] = tool_name
+        # Set attack_tool_category for dashboard grouping
+        category = get_tool_category(tool_name)
+        if category:
+            attrs["attack_tool_category"] = category
 
-    # Add target attributes for Tempo span metrics
+    # Add target attributes using OTel semantic conventions
     if target_host:
-        attrs["attack_target_host"] = target_host
+        # OTel standard: destination.address for hosts/IPs/FQDNs
+        attrs["destination.address"] = target_host
+    if target_user:
+        # OTel standard: user.name for usernames
+        attrs["user.name"] = target_user
+
+    # Custom attack namespace for domain-specific enrichment
     if target_type:
-        attrs["attack_target_type"] = target_type
+        attrs["attack.target.type"] = target_type
     elif target_host:
         # Infer target type if not provided
         inferred_type = infer_target_type(target_host)
         if inferred_type:
-            attrs["attack_target_type"] = inferred_type
+            attrs["attack.target.type"] = inferred_type
+    elif target_user:
+        # If only user is specified, target type is user
+        attrs["attack.target.type"] = "user"
+
+    if target_domain:
+        attrs["attack.target.domain"] = target_domain
+    elif target_host and "." in target_host:
+        # Try to extract domain from FQDN
+        parts = target_host.split(".", 1)
+        if len(parts) > 1 and not parts[1].replace(".", "").isdigit():
+            # Not an IP address, extract domain
+            attrs["attack.target.domain"] = parts[1]
 
     # Merge additional attributes
     if additional_attrs:
@@ -333,6 +468,8 @@ def agent_span(
     tool_name: str | None = None,
     target_host: str | None = None,
     target_type: str | None = None,
+    target_user: str | None = None,
+    target_domain: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
 ):
     """Create a traced span for agent operations.
@@ -347,6 +484,8 @@ def agent_span(
         tool_name: Optional tool being executed.
         target_host: Optional target hostname/IP.
         target_type: Optional target type.
+        target_user: Optional target username.
+        target_domain: Optional target domain.
         additional_attrs: Optional additional attributes.
 
     Yields:
@@ -359,7 +498,14 @@ def agent_span(
         ...     pass
     """
     attrs = create_agent_span_attributes(
-        role, team, tool_name, target_host, target_type, additional_attrs
+        role,
+        team,
+        tool_name,
+        target_host,
+        target_type,
+        target_user,
+        target_domain,
+        additional_attrs,
     )
 
     with dn.span(name, attributes=attrs) as span:
@@ -374,6 +520,8 @@ def trace_tool_call(
     error_message: str | None = None,
     target_host: str | None = None,
     target_type: str | None = None,
+    target_user: str | None = None,
+    target_domain: str | None = None,
 ) -> None:
     """Record a tool call as a span.
 
@@ -388,9 +536,17 @@ def trace_tool_call(
         error_message: Optional error message if is_error is True.
         target_host: Optional target hostname/IP.
         target_type: Optional target type.
+        target_user: Optional target username.
+        target_domain: Optional target domain.
     """
     attrs = create_agent_span_attributes(
-        role, team, tool_name, target_host=target_host, target_type=target_type
+        role,
+        team,
+        tool_name,
+        target_host=target_host,
+        target_type=target_type,
+        target_user=target_user,
+        target_domain=target_domain,
     )
     attrs["tool.status"] = "error" if is_error else "success"
     if is_error and error_message:
@@ -410,6 +566,8 @@ def trace_blue_investigation(
     techniques_found: list[str] | None = None,
     severity: str | None = None,
     target_host: str | None = None,
+    target_user: str | None = None,
+    target_domain: str | None = None,
 ) -> None:
     """Record a blue team investigation span.
 
@@ -422,8 +580,12 @@ def trace_blue_investigation(
         techniques_found: List of MITRE technique IDs found.
         severity: Severity assessment if available.
         target_host: Optional target host being investigated.
+        target_user: Optional target user being investigated.
+        target_domain: Optional target domain.
     """
-    attrs = create_agent_span_attributes(role, "blue", target_host=target_host)
+    attrs = create_agent_span_attributes(
+        role, "blue", target_host=target_host, target_user=target_user, target_domain=target_domain
+    )
     attrs["investigation.id"] = investigation_id
 
     if techniques_found:
@@ -458,6 +620,8 @@ def client_span(
     tool_name: str | None = None,
     target_host: str | None = None,
     target_type: str | None = None,
+    target_user: str | None = None,
+    target_domain: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
 ):
     """Create a CLIENT span for outgoing calls to another service.
@@ -473,6 +637,8 @@ def client_span(
         tool_name: Optional tool being requested.
         target_host: Optional target hostname/IP.
         target_type: Optional target type.
+        target_user: Optional target username.
+        target_domain: Optional target domain.
         additional_attrs: Optional additional attributes.
 
     Yields:
@@ -485,7 +651,14 @@ def client_span(
         ...     span.set_attribute("task.id", task_id)
     """
     attrs = create_agent_span_attributes(
-        role, team, tool_name, target_host, target_type, additional_attrs
+        role,
+        team,
+        tool_name,
+        target_host,
+        target_type,
+        target_user,
+        target_domain,
+        additional_attrs,
     )
     # peer.service is the standard OTel attribute for service graph edges
     attrs["peer.service"] = target_service
@@ -512,6 +685,8 @@ def server_span(
     tool_name: str | None = None,
     target_host: str | None = None,
     target_type: str | None = None,
+    target_user: str | None = None,
+    target_domain: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
 ):
     """Create a SERVER span for incoming requests.
@@ -526,6 +701,8 @@ def server_span(
         tool_name: Optional tool being executed.
         target_host: Optional target hostname/IP.
         target_type: Optional target type.
+        target_user: Optional target username.
+        target_domain: Optional target domain.
         additional_attrs: Optional additional attributes.
 
     Yields:
@@ -538,7 +715,14 @@ def server_span(
         ...     span.set_attribute("task.id", task_id)
     """
     attrs = create_agent_span_attributes(
-        role, team, tool_name, target_host, target_type, additional_attrs
+        role,
+        team,
+        tool_name,
+        target_host,
+        target_type,
+        target_user,
+        target_domain,
+        additional_attrs,
     )
 
     span = None
@@ -562,6 +746,8 @@ def producer_span(
     team: str,
     target_host: str | None = None,
     target_type: str | None = None,
+    target_user: str | None = None,
+    target_domain: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
 ):
     """Create a PRODUCER span for async message publishing.
@@ -575,13 +761,15 @@ def producer_span(
         team: Team name ("red" or "blue").
         target_host: Optional target hostname/IP.
         target_type: Optional target type.
+        target_user: Optional target username.
+        target_domain: Optional target domain.
         additional_attrs: Optional additional attributes.
 
     Yields:
         The span object for adding additional attributes.
     """
     attrs = create_agent_span_attributes(
-        role, team, None, target_host, target_type, additional_attrs
+        role, team, None, target_host, target_type, target_user, target_domain, additional_attrs
     )
     attrs["messaging.destination.name"] = target_service
     attrs["peer.service"] = target_service
@@ -606,6 +794,8 @@ def consumer_span(
     team: str,
     target_host: str | None = None,
     target_type: str | None = None,
+    target_user: str | None = None,
+    target_domain: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
 ):
     """Create a CONSUMER span for async message consumption.
@@ -618,13 +808,15 @@ def consumer_span(
         team: Team name ("red" or "blue").
         target_host: Optional target hostname/IP.
         target_type: Optional target type.
+        target_user: Optional target username.
+        target_domain: Optional target domain.
         additional_attrs: Optional additional attributes.
 
     Yields:
         The span object for adding additional attributes.
     """
     attrs = create_agent_span_attributes(
-        role, team, None, target_host, target_type, additional_attrs
+        role, team, None, target_host, target_type, target_user, target_domain, additional_attrs
     )
 
     span = None
