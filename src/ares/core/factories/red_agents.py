@@ -301,12 +301,14 @@ def create_role_hooks(
 
         # Extract target info from tool arguments for span metrics
         target_host = None
+        target_domain = None
+        target_user = None
         if hasattr(event, "tool_call") and event.tool_call and event.tool_call.arguments:
             try:
                 import json
 
                 args = json.loads(event.tool_call.arguments)
-                # Try common argument names for target
+                # Try common argument names for target host/IP
                 target_host = (
                     args.get("target")
                     or args.get("target_ip")
@@ -315,6 +317,10 @@ def create_role_hooks(
                     or args.get("hostname")
                     or args.get("ip")
                 )
+                # Extract domain for attack.target.domain attribute
+                target_domain = args.get("domain") or args.get("target_domain")
+                # Extract username for user.name attribute
+                target_user = args.get("username") or args.get("user") or args.get("target_user")
             except Exception:
                 pass
 
@@ -325,6 +331,8 @@ def create_role_hooks(
             is_error=is_error,
             error_message=error_msg,
             target_host=target_host,
+            target_domain=target_domain,
+            target_user=target_user,
         )
 
         # Circuit breaker logic
