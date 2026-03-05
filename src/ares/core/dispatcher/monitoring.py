@@ -1284,6 +1284,8 @@ class MonitoringMixin:
 
     def _handle_consumer_error(self: RedTeamDispatcher, e: Exception, failures: int) -> bool:
         """Handle errors in the threaded result consumer. Returns True if should stop."""
+        from ares.core.redis_client import invalidate_sentinel_client
+
         error_str = str(e).lower()
         connection_keywords = [
             "connection",
@@ -1293,10 +1295,16 @@ class MonitoringMixin:
             "reset",
             "refused",
             "sentinel",
+            # DNS resolution failures
+            "name or service not known",
+            "getaddrinfo",
+            "temporary failure in name resolution",
         ]
         is_connection_error = any(kw in error_str for kw in connection_keywords)
 
         if is_connection_error:
+            # Invalidate Sentinel client to force fresh DNS resolution on reconnect
+            invalidate_sentinel_client()
             max_failures = get_max_redis_consecutive_failures()
             delay = min(
                 get_redis_retry_base_delay() * (2 ** min(failures - 1, 4)),

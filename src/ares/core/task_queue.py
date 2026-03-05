@@ -453,6 +453,11 @@ class RedisTaskQueue:
                         logger.warning(f"Failed to parse result for {task_id}: {e}")
                         results[task_id] = None
         except Exception as e:
+            # Handle connection errors to force reconnection on next call
+            if is_connection_error(e):
+                self._handle_connection_error(e)
+                # Force fresh DNS resolution on reconnect (handles Sentinel pod restarts)
+                invalidate_sentinel_client()
             # On pipeline failure, return empty results (caller will retry)
             logger.warning(f"Pipeline check_results_batch failed: {e}")
             return dict.fromkeys(task_ids)

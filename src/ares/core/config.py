@@ -673,6 +673,13 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:
     if stop_on_gt := os.environ.get("ARES_STOP_ON_GOLDEN_TICKET"):
         config.stop_on_golden_ticket = stop_on_gt.lower() in ("true", "1", "yes")
 
+    # Service-level operation timeout override
+    if op_timeout := os.environ.get("ARES_OPERATION_TIMEOUT"):
+        try:
+            config.operation_timeout = int(op_timeout)
+        except ValueError:
+            pass
+
     # Replay overrides
     if replay_mode := os.environ.get("ARES_REPLAY_MODE"):
         config.replay_mode = replay_mode.lower()  # type: ignore[assignment]
@@ -1005,6 +1012,18 @@ def get_stop_on_golden_ticket() -> bool:
     return load_config().stop_on_golden_ticket
 
 
+def get_operation_timeout() -> int:
+    """Get service-level operation timeout in seconds.
+
+    This is the hard timeout for the entire operation at the service level.
+    If run_multi_agent_operation() doesn't return within this time,
+    it will be cancelled and the service will continue to the next operation.
+
+    Default: 7200 seconds (2 hours)
+    """
+    return load_config().operation_timeout
+
+
 def get_rate_limit_backoff_delays() -> list[float]:
     """Get list of delays (seconds) between rate limit retries."""
     return load_config().rate_limit_backoff_delays
@@ -1127,6 +1146,7 @@ __all__ = [
     "get_namespace",
     "get_offload_threshold",
     "get_offload_ttl",
+    "get_operation_timeout",
     "get_query_limits_by_stage",
     "get_rate_limit_backoff",
     "get_rate_limit_backoff_delays",

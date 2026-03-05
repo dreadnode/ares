@@ -13,12 +13,18 @@ OTel Semantic Convention attributes:
 - user.name: Target username when attacking a user account
 
 Custom attack namespace attributes:
-- attack.target.type: Target type (domain_controller, server, workstation, user)
-- attack.target.domain: Domain name of the target (e.g., contoso.local)
+- attack_target_type: Target type (domain_controller, server, workstation, user)
+- attack_target_domain: Domain name of the target (e.g., contoso.local)
+
+OTEL Export Configuration:
+- Call setup_otel_tracing() early in worker entry points to enable OTLP export
+- Respects OTEL_EXPORTER_OTLP_TRACES_ENDPOINT environment variable
+- Required because dreadnode SDK doesn't auto-configure from OTEL env vars
 """
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from typing import Any
 
@@ -26,6 +32,99 @@ import dreadnode as dn
 from loguru import logger
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
+
+# =============================================================================
+# OTEL TracerProvider Setup
+# =============================================================================
+
+# Track whether we've already set up the TracerProvider
+_otel_initialized = False
+
+
+def setup_otel_tracing() -> bool:
+    """Configure OpenTelemetry TracerProvider with OTLP exporter.
+
+    This function sets up direct OTLP export using the standard OpenTelemetry
+    environment variables. It's required because the dreadnode SDK doesn't
+    automatically configure from OTEL_EXPORTER_OTLP_TRACES_ENDPOINT.
+
+    Environment variables used:
+    - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: Full URL for trace export (e.g., http://alloy:4318/v1/traces)
+    - OTEL_EXPORTER_OTLP_ENDPOINT: Base URL (fallback, /v1/traces appended)
+    - OTEL_SERVICE_NAME: Service name for resource attributes
+    - OTEL_RESOURCE_ATTRIBUTES: Additional resource attributes (comma-separated key=value)
+
+    Returns:
+        True if OTLP exporter was configured, False otherwise.
+
+    Example:
+        >>> from ares.core.tracing import setup_otel_tracing
+        >>> setup_otel_tracing()  # Call early in worker startup
+        True
+    """
+    global _otel_initialized
+
+    if _otel_initialized:
+        return True
+
+    # Check for OTLP endpoint configuration
+    traces_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+    base_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+
+    if not traces_endpoint and not base_endpoint:
+        logger.debug("No OTEL_EXPORTER_OTLP_TRACES_ENDPOINT set, skipping OTLP setup")
+        return False
+
+    # Determine final endpoint - traces_endpoint takes precedence
+    # At this point, at least one of traces_endpoint or base_endpoint is set
+    # (we returned early above if neither was set)
+    endpoint = (
+        traces_endpoint or f"{base_endpoint.rstrip('/')}/v1/traces"  # type: ignore[union-attr]
+    )
+
+    try:
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        # Build resource attributes
+        service_name = os.environ.get("OTEL_SERVICE_NAME", "ares-agent")
+        resource_attrs = {"service.name": service_name}
+
+        # Parse OTEL_RESOURCE_ATTRIBUTES (comma-separated key=value pairs)
+        resource_attrs_str = os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "")
+        if resource_attrs_str:
+            for raw_pair in resource_attrs_str.split(","):
+                pair = raw_pair.strip()
+                if "=" in pair:
+                    key, value = pair.split("=", 1)
+                    resource_attrs[key.strip()] = value.strip()
+
+        resource = Resource.create(resource_attrs)
+
+        # Create TracerProvider with resource
+        provider = TracerProvider(resource=resource)
+
+        # Configure OTLP exporter
+        # Use http/protobuf by default (matches K8s configmap OTEL_EXPORTER_OTLP_PROTOCOL)
+        exporter = OTLPSpanExporter(endpoint=endpoint)
+        provider.add_span_processor(BatchSpanProcessor(exporter))
+
+        # Set as global TracerProvider
+        trace.set_tracer_provider(provider)
+        _otel_initialized = True
+
+        logger.info(f"OTEL tracing configured: {endpoint} (service: {service_name})")
+        return True
+
+    except ImportError as e:
+        logger.warning(f"OTEL dependencies not available: {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"Failed to configure OTEL tracing: {e}")
+        return False
+
 
 # =============================================================================
 # MITRE Tactic Mappings
@@ -434,24 +533,24 @@ def create_agent_span_attributes(
 
     # Custom attack namespace for domain-specific enrichment
     if target_type:
-        attrs["attack.target.type"] = target_type
+        attrs["attack_target_type"] = target_type
     elif target_host:
         # Infer target type if not provided
         inferred_type = infer_target_type(target_host)
         if inferred_type:
-            attrs["attack.target.type"] = inferred_type
+            attrs["attack_target_type"] = inferred_type
     elif target_user:
         # If only user is specified, target type is user
-        attrs["attack.target.type"] = "user"
+        attrs["attack_target_type"] = "user"
 
     if target_domain:
-        attrs["attack.target.domain"] = target_domain
+        attrs["attack_target_domain"] = target_domain
     elif target_host and "." in target_host:
         # Try to extract domain from FQDN
         parts = target_host.split(".", 1)
         if len(parts) > 1 and not parts[1].replace(".", "").isdigit():
             # Not an IP address, extract domain
-            attrs["attack.target.domain"] = parts[1]
+            attrs["attack_target_domain"] = parts[1]
 
     # Merge additional attributes
     if additional_attrs:

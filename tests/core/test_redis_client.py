@@ -328,6 +328,12 @@ class TestIsConnectionError:
             "EOF occurred",
             "errno 111",
             "SOCKET_ERROR",
+            # DNS resolution failures
+            "Name or service not known",
+            "Error -2 connecting to redis-0.redis-headless: Name or service not known",
+            "getaddrinfo failed: Name does not resolve",
+            "Temporary failure in name resolution",
+            "No address associated with hostname",
         ],
     )
     def test_detects_connection_errors(self, error_message: str) -> None:

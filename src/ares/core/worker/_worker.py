@@ -2171,6 +2171,12 @@ async def run_worker(
 
     configure_litellm_env()
 
+    # Configure OTEL tracing to export to OTLP endpoint (e.g., Alloy/Tempo)
+    # This is required because the dreadnode SDK doesn't auto-configure from OTEL env vars
+    from ares.core.tracing import setup_otel_tracing
+
+    setup_otel_tracing()
+
     # Initialize replay system if configured
     from ares.core.config import (
         get_replay_fallback,

@@ -309,15 +309,16 @@ def create_role_hooks(
 
                 args = json.loads(event.tool_call.arguments)
                 # Try common argument names for target host/IP
+                # Prefer IP-specific args first for consistent metrics
                 target_host = (
-                    args.get("target")
-                    or args.get("target_ip")
+                    args.get("target_ip")
                     or args.get("dc_ip")
+                    or args.get("ip")
+                    or args.get("target")
                     or args.get("host")
                     or args.get("hostname")
-                    or args.get("ip")
                 )
-                # Extract domain for attack.target.domain attribute
+                # Extract domain for attack_target_domain attribute
                 target_domain = args.get("domain") or args.get("target_domain")
                 # Extract username for user.name attribute
                 target_user = args.get("username") or args.get("user") or args.get("target_user")

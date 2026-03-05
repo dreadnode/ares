@@ -30,6 +30,13 @@ from ares.core.task_queue import RedisTaskQueue
 
 def _configure_dreadnode():
     configure_litellm_env()
+
+    # Configure OTEL tracing to export to OTLP endpoint (e.g., Alloy/Tempo)
+    # This is required because the dreadnode SDK doesn't auto-configure from OTEL env vars
+    from ares.core.tracing import setup_otel_tracing
+
+    setup_otel_tracing()
+
     import dreadnode as dn
 
     return dn
@@ -37,6 +44,9 @@ def _configure_dreadnode():
 
 # Severity levels that trigger multi-agent routing
 HIGH_SEVERITY_LEVELS = frozenset({"critical", "high"})
+
+# Stale investigation threshold - investigations running longer than this are orphaned
+STALE_INVESTIGATION_THRESHOLD_SECONDS = 3600  # 1 hour
 
 
 @dataclass
@@ -156,6 +166,9 @@ class BlueOrchestratorService:
 
         self.running = True
 
+        # Cleanup stale investigations from previous orchestrator instance
+        await self._cleanup_stale_investigations()
+
         # Setup signal handlers
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -172,13 +185,92 @@ class BlueOrchestratorService:
         finally:
             await self.shutdown()
 
+    async def _cleanup_stale_investigations(self) -> None:
+        """Clean up investigations orphaned by previous orchestrator instance.
+
+        When the orchestrator restarts, in-flight investigations are left in "running"
+        status forever. This method detects and marks them as failed on startup.
+        """
+        if not self.task_queue or not self.task_queue._client:
+            logger.warning("Cannot cleanup stale investigations - no Redis connection")
+            return
+
+        try:
+            client = self.task_queue._client
+            now = datetime.now(timezone.utc)
+            cleaned = 0
+
+            # Find all investigation status keys
+            status_keys = await asyncio.wait_for(
+                client.keys("ares:blue:inv:*:status"),
+                timeout=30.0,
+            )
+
+            for key in status_keys:
+                try:
+                    key_str = key.decode() if isinstance(key, bytes) else key
+                    status_json = await asyncio.wait_for(client.get(key_str), timeout=5.0)
+
+                    if not status_json:
+                        continue
+
+                    status = json.loads(status_json)
+                    if status.get("status") != "running":
+                        continue
+
+                    started_at = status.get("started_at")
+                    if not started_at:
+                        continue
+
+                    # Parse start time and check if stale
+                    start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                    elapsed = (now - start_dt).total_seconds()
+
+                    if elapsed > STALE_INVESTIGATION_THRESHOLD_SECONDS:
+                        # Extract investigation ID from key
+                        parts = key_str.split(":")
+                        inv_id = parts[3] if len(parts) >= 4 else "unknown"
+
+                        # Mark as failed
+                        status["status"] = "failed"
+                        status["failed_at"] = now.isoformat()
+                        status["error"] = (
+                            f"Investigation orphaned after orchestrator restart "
+                            f"(was running {elapsed / 3600:.1f}h)"
+                        )
+
+                        await asyncio.wait_for(
+                            client.set(key_str, json.dumps(status)),
+                            timeout=5.0,
+                        )
+
+                        logger.warning(
+                            f"Marked stale investigation {inv_id} as failed "
+                            f"(running {elapsed / 3600:.1f}h)"
+                        )
+                        cleaned += 1
+
+                except Exception as e:
+                    logger.debug(f"Error processing investigation key {key}: {e}")
+                    continue
+
+            if cleaned > 0:
+                logger.info(f"Cleaned up {cleaned} stale investigations from previous instance")
+
+        except asyncio.TimeoutError:
+            logger.warning("Timeout scanning for stale investigations")
+        except Exception as e:
+            logger.warning(f"Error cleaning up stale investigations: {e}")
+
     async def _run_service_loop(self) -> None:
         """Main service loop - poll for investigations and process concurrently."""
         import time
 
         last_successful_poll = time.monotonic()
         last_health_check = time.monotonic()
+        last_stale_check = time.monotonic()
         health_check_interval = 15.0  # Periodic health check every 15s
+        stale_check_interval = 300.0  # Check for stale investigations every 5 min
         # Base threshold when idle; extended when investigations are active
         stale_connection_threshold_idle = 30.0
         stale_connection_threshold_busy = 300.0  # 5 min when busy (LLM calls starve event loop)
@@ -207,6 +299,14 @@ class BlueOrchestratorService:
                                 logger.info("Redis connection was stale, reconnected proactively")
                         except Exception as e:
                             logger.warning(f"Health check failed: {e}")
+
+                # Periodic check for stale investigations (stuck mid-operation)
+                if now - last_stale_check >= stale_check_interval:
+                    last_stale_check = now
+                    try:
+                        await self._cleanup_stale_investigations()
+                    except Exception as e:
+                        logger.warning(f"Stale investigation cleanup failed: {e}")
 
                 # Check if we can accept more investigations
                 if len(self._active_investigations) >= self._max_concurrent:
@@ -414,6 +514,58 @@ class BlueOrchestratorService:
                 "running",
                 {"started_at": started_at.isoformat()},
             )
+
+            # Track investigation to operation if operation_context is present
+            # or if there's an active red operation running
+            operation_context = request.alert.get("operation_context", {})
+            operation_id = operation_context.get("operation_id")
+
+            # If no explicit operation_context, try to find active red operation
+            if not operation_id and self.task_queue and self.task_queue._client:
+                try:
+                    # Look for running red operations (ares:op:*:meta with completed_at=None)
+                    op_keys = await asyncio.wait_for(
+                        self.task_queue._client.keys("ares:op:*:meta"),
+                        timeout=5.0,
+                    )
+                    for key in op_keys:
+                        key_str = key.decode() if isinstance(key, bytes) else key
+                        meta = await asyncio.wait_for(
+                            self.task_queue._client.hgetall(key_str),
+                            timeout=5.0,
+                        )
+                        # Check if operation is still running (no completed_at)
+                        completed = meta.get(b"completed_at") or meta.get("completed_at")
+                        if not completed:
+                            # Extract operation ID from key: ares:op:{op_id}:meta
+                            parts = key_str.split(":")
+                            if len(parts) >= 3:
+                                operation_id = parts[2]
+                                logger.debug(
+                                    f"Auto-tracking to active red operation: {operation_id}"
+                                )
+                                break
+                except Exception as e:
+                    logger.debug(f"Could not find active red operation: {e}")
+
+            if operation_id and self.task_queue and self.task_queue._client:
+                try:
+                    op_inv_key = f"ares:blue:op:{operation_id}:investigations"
+                    await asyncio.wait_for(
+                        self.task_queue._client.sadd(op_inv_key, request.investigation_id),
+                        timeout=5.0,
+                    )
+                    # Set TTL of 7 days
+                    await asyncio.wait_for(
+                        self.task_queue._client.expire(op_inv_key, 7 * 24 * 3600),
+                        timeout=5.0,
+                    )
+                    logger.info(
+                        f"Tracked investigation {request.investigation_id} "
+                        f"to operation {operation_id}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to track investigation to operation: {e}")
 
             if not request.model:
                 raise ValueError(

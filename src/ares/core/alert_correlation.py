@@ -26,6 +26,7 @@ class AlertCluster:
     common_ips: set[str] = field(default_factory=set)
     techniques: set[str] = field(default_factory=set)
     time_range: tuple[datetime, datetime] | None = None
+    operation_id: str | None = None
 
     def add_alert(self, alert: dict) -> None:
         """Add an alert to the cluster.
@@ -79,6 +80,11 @@ class AlertCluster:
             except ValueError:
                 pass
 
+        # Extract operation_id from operation_context (set by blue:multi:remote)
+        op_context = alert.get("operation_context", {})
+        if op_context.get("operation_id"):
+            self.operation_id = op_context["operation_id"]
+
     def similarity_score(self, alert: dict) -> float:
         """Calculate similarity score between this cluster and an alert.
 
@@ -89,6 +95,14 @@ class AlertCluster:
             Similarity score between 0.0 and 1.0
         """
         score = 0.0
+
+        # Operation ID match: small bonus for same operation, but NOT enough to auto-cluster
+        # This was previously returning 1.0, which clustered ALL alerts from an operation
+        # into a single investigation - defeating the purpose of parallel investigations.
+        op_context = alert.get("operation_context", {})
+        alert_op_id = op_context.get("operation_id")
+        if alert_op_id and self.operation_id and alert_op_id == self.operation_id:
+            score += 0.1  # Small bonus, not auto-cluster
         labels = alert.get("labels", {})
 
         # Host match: high weight
@@ -149,6 +163,7 @@ class AlertCluster:
         return {
             "cluster_id": self.cluster_id,
             "alert_count": len(self.alerts),
+            "operation_id": self.operation_id,
             "common_hosts": list(self.common_hosts)[:10],
             "common_users": list(self.common_users)[:10],
             "common_ips": list(self.common_ips)[:10],

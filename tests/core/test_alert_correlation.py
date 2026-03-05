@@ -359,6 +359,63 @@ class TestAlertCluster:
 
         assert score >= 0.3  # Instance host match gives 0.3
 
+    def test_add_alert_extracts_operation_id(self) -> None:
+        """Test that add_alert extracts operation_id from operation_context."""
+        cluster = AlertCluster(cluster_id="cluster-0001")
+
+        alert = {
+            "labels": {"hostname": "server01"},
+            "operation_context": {"operation_id": "op-20260303-123456"},
+            "fingerprint": "abc123",
+        }
+        cluster.add_alert(alert)
+
+        assert cluster.operation_id == "op-20260303-123456"
+
+    def test_similarity_score_operation_id_match(self) -> None:
+        """Test that matching operation_id gives small bonus (not auto-cluster)."""
+        cluster = AlertCluster(cluster_id="cluster-0001")
+        cluster.operation_id = "op-20260303-123456"
+
+        # Alert with same operation_id but different host/domain
+        alert = {
+            "labels": {"hostname": "different-host"},
+            "operation_context": {"operation_id": "op-20260303-123456"},
+        }
+        score = cluster.similarity_score(alert)
+
+        # Same operation_id gives 0.1 bonus - NOT enough to auto-cluster (threshold 0.3)
+        # This prevents all alerts from same operation being forced into one cluster
+        assert score == pytest.approx(0.1, abs=0.01)
+
+    def test_similarity_score_operation_id_mismatch(self) -> None:
+        """Test that different operation_ids don't boost score."""
+        cluster = AlertCluster(cluster_id="cluster-0001")
+        cluster.operation_id = "op-20260303-111111"
+
+        alert = {
+            "labels": {"hostname": "server01"},
+            "operation_context": {"operation_id": "op-20260303-222222"},
+        }
+        score = cluster.similarity_score(alert)
+
+        # No operation_id boost, no host match either
+        assert score == 0.0
+
+    def test_similarity_score_operation_id_only_in_alert(self) -> None:
+        """Test scoring when cluster has no operation_id but alert does."""
+        cluster = AlertCluster(cluster_id="cluster-0001")
+        # cluster.operation_id is None
+
+        alert = {
+            "labels": {"hostname": "server01"},
+            "operation_context": {"operation_id": "op-20260303-123456"},
+        }
+        score = cluster.similarity_score(alert)
+
+        # No operation_id match (cluster has none), no host match
+        assert score == 0.0
+
     def test_to_summary(self) -> None:
         """Test cluster summary generation."""
         cluster = AlertCluster(cluster_id="cluster-0001")
@@ -367,6 +424,7 @@ class TestAlertCluster:
         cluster.common_users = {"admin"}
         cluster.common_ips = {"192.168.58.100"}
         cluster.techniques = {"T1059.001"}
+        cluster.operation_id = "op-20260303-123456"
         cluster.time_range = (
             datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc),
             datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
@@ -376,6 +434,7 @@ class TestAlertCluster:
 
         assert summary["cluster_id"] == "cluster-0001"
         assert summary["alert_count"] == 2
+        assert summary["operation_id"] == "op-20260303-123456"
         assert len(summary["common_hosts"]) == 2
         assert len(summary["common_users"]) == 1
         assert summary["time_range"]["start"] is not None
@@ -763,3 +822,95 @@ class TestAlertCorrelatorIntegration:
 
         # Should be correlated by user + source_ip
         assert len(correlator.clusters) <= 2  # Might create 1-2 clusters depending on ordering
+
+    def test_correlate_cross_domain_attack_separate_clusters(self) -> None:
+        """Test that cross-domain alerts with only operation_id match create separate clusters.
+
+        Previously operation_id match auto-clustered ALL alerts into one cluster (return 1.0).
+        This was a bug - it prevented parallel investigations of different incidents.
+        Now operation_id only gives a 0.1 bonus, so alerts with different hosts/users/IPs
+        will correctly create separate clusters for parallel investigation.
+        """
+        correlator = AlertCorrelator()
+
+        # Cross-domain attack - different hosts, users, and domains
+        operation_id = "op-20260303-123456"
+        alerts = [
+            {
+                "labels": {
+                    "hostname": "dc01.contoso.local",
+                    "user": "admin",
+                    "mitre_technique": "T1003",
+                },
+                "operation_context": {"operation_id": operation_id},
+                "fingerprint": "cross1",
+            },
+            {
+                "labels": {
+                    "hostname": "dc01.fabrikam.local",  # Different domain
+                    "user": "svc_sql",  # Different user
+                    "mitre_technique": "T1558",
+                },
+                "operation_context": {"operation_id": operation_id},
+                "fingerprint": "cross2",
+            },
+            {
+                "labels": {
+                    "hostname": "web01.child.contoso.local",  # Child domain
+                    "user": "krbtgt",  # Different user
+                    "mitre_technique": "T1558.003",
+                },
+                "operation_context": {"operation_id": operation_id},
+                "fingerprint": "cross3",
+            },
+        ]
+
+        for alert in alerts:
+            correlator.add_alert(alert)
+
+        # Alerts should create SEPARATE clusters since they have different hosts/users
+        # operation_id only adds 0.1 bonus, not enough to auto-cluster (threshold 0.3)
+        assert len(correlator.clusters) == 3
+        # Each cluster should have operation_id set
+        for cluster in correlator.clusters:
+            assert cluster.operation_id == operation_id
+
+    def test_alerts_cluster_by_host_not_operation_id(self) -> None:
+        """Test that alerts cluster by host/user/IP, NOT by operation_id.
+
+        Operation ID only provides a small bonus (0.1) - not enough to cluster
+        alerts that would otherwise be unrelated. This enables parallel
+        investigation of different incidents within the same operation.
+        """
+        correlator = AlertCorrelator()
+
+        # Same operation but different hosts - should create separate clusters
+        alerts = [
+            {
+                "labels": {"hostname": "dc01.contoso.local", "user": "admin"},
+                "operation_context": {"operation_id": "op-111111-111111"},
+                "fingerprint": "op1_alert1",
+            },
+            {
+                # Same host + user = should cluster with previous
+                "labels": {"hostname": "dc01.contoso.local", "user": "admin"},
+                "operation_context": {"operation_id": "op-111111-111111"},
+                "fingerprint": "op1_alert2",
+            },
+            {
+                # Different host = should NOT cluster (operation_id only adds 0.1)
+                "labels": {"hostname": "dc01.fabrikam.local", "user": "svc_sql"},
+                "operation_context": {"operation_id": "op-111111-111111"},
+                "fingerprint": "op1_alert3",
+            },
+        ]
+
+        for alert in alerts:
+            correlator.add_alert(alert)
+
+        # Should create 2 clusters - grouped by host/user, not by operation
+        assert len(correlator.clusters) == 2
+        # First cluster has 2 alerts (same host+user)
+        assert len(correlator.clusters[0].alerts) == 2
+        # Second cluster has 1 alert (different host)
+        assert len(correlator.clusters[1].alerts) == 1

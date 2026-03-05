@@ -423,7 +423,7 @@ def create_blue_hooks(role: BlueRole) -> list:
                     or args.get("hostname")
                     or args.get("ip")
                 )
-                # Extract domain for attack.target.domain attribute
+                # Extract domain for attack_target_domain attribute
                 target_domain = args.get("domain") or args.get("target_domain")
                 # Extract username for user.name attribute
                 target_user = args.get("username") or args.get("user") or args.get("target_user")

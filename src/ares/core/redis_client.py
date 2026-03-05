@@ -275,6 +275,11 @@ _CONNECTION_ERROR_KEYWORDS = frozenset(
         "eof",
         "errno",
         "socket",
+        # DNS resolution failures
+        "name or service not known",
+        "getaddrinfo",
+        "temporary failure in name resolution",
+        "no address associated",
     }
 )
 

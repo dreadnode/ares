@@ -1,5 +1,7 @@
 """Tests for the tracing module."""
 
+from unittest.mock import MagicMock, patch
+
 from ares.core.tracing import (
     ROLE_TO_PHASE,
     ROLE_TO_TACTIC,
@@ -9,7 +11,174 @@ from ares.core.tracing import (
     get_tool_category,
     get_tool_mitre_info,
     infer_target_type,
+    setup_otel_tracing,
 )
+
+
+class TestSetupOtelTracing:
+    """Tests for setup_otel_tracing function."""
+
+    def test_returns_false_when_no_endpoint_configured(self, monkeypatch):
+        """Should return False when no OTEL endpoint is configured."""
+        # Clear any existing env vars
+        monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+        monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+
+        # Reset initialization state
+        import ares.core.tracing as tracing_module
+
+        tracing_module._otel_initialized = False
+
+        result = setup_otel_tracing()
+        assert result is False
+
+    def test_configures_from_traces_endpoint(self, monkeypatch):
+        """Should configure TracerProvider from OTEL_EXPORTER_OTLP_TRACES_ENDPOINT."""
+        monkeypatch.setenv(
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "http://alloy.test.local:4318/v1/traces",
+        )
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "ares-test-agent")
+
+        # Reset initialization state
+        import ares.core.tracing as tracing_module
+
+        tracing_module._otel_initialized = False
+
+        # Mock at the source module level since imports are inside the function
+        with (
+            patch("opentelemetry.trace.set_tracer_provider") as mock_set_provider,
+            patch("opentelemetry.sdk.trace.TracerProvider") as mock_provider_cls,
+            patch(
+                "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"
+            ) as mock_exporter_cls,
+            patch("opentelemetry.sdk.trace.export.BatchSpanProcessor"),
+            patch("opentelemetry.sdk.resources.Resource") as mock_resource_cls,
+        ):
+            # Setup mocks
+            mock_provider = MagicMock()
+            mock_provider_cls.return_value = mock_provider
+            mock_resource_cls.create.return_value = MagicMock()
+
+            result = setup_otel_tracing()
+
+            assert result is True
+            mock_exporter_cls.assert_called_once_with(
+                endpoint="http://alloy.test.local:4318/v1/traces"
+            )
+            mock_set_provider.assert_called_once_with(mock_provider)
+
+    def test_configures_from_base_endpoint(self, monkeypatch):
+        """Should append /v1/traces to base OTEL_EXPORTER_OTLP_ENDPOINT."""
+        monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.test:4318")
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "ares-test")
+
+        # Reset initialization state
+        import ares.core.tracing as tracing_module
+
+        tracing_module._otel_initialized = False
+
+        with (
+            patch("opentelemetry.trace.set_tracer_provider"),
+            patch("opentelemetry.sdk.trace.TracerProvider") as mock_provider_cls,
+            patch(
+                "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"
+            ) as mock_exporter_cls,
+            patch("opentelemetry.sdk.trace.export.BatchSpanProcessor"),
+            patch("opentelemetry.sdk.resources.Resource"),
+        ):
+            mock_provider_cls.return_value = MagicMock()
+
+            result = setup_otel_tracing()
+
+            assert result is True
+            mock_exporter_cls.assert_called_once_with(
+                endpoint="http://collector.test:4318/v1/traces"
+            )
+
+    def test_parses_resource_attributes(self, monkeypatch):
+        """Should parse OTEL_RESOURCE_ATTRIBUTES into resource."""
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://test:4318/v1/traces")
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "ares-agent")
+        monkeypatch.setenv(
+            "OTEL_RESOURCE_ATTRIBUTES",
+            "service.namespace=attack-simulation,deployment.environment=staging,attack.team=red",
+        )
+
+        # Reset initialization state
+        import ares.core.tracing as tracing_module
+
+        tracing_module._otel_initialized = False
+
+        with (
+            patch("opentelemetry.trace.set_tracer_provider"),
+            patch("opentelemetry.sdk.trace.TracerProvider") as mock_provider_cls,
+            patch("opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"),
+            patch("opentelemetry.sdk.trace.export.BatchSpanProcessor"),
+            patch("opentelemetry.sdk.resources.Resource") as mock_resource_cls,
+        ):
+            mock_provider_cls.return_value = MagicMock()
+            mock_resource_cls.create.return_value = MagicMock()
+
+            result = setup_otel_tracing()
+
+            assert result is True
+            # Verify resource was created with parsed attributes
+            call_args = mock_resource_cls.create.call_args[0][0]
+            assert call_args["service.name"] == "ares-agent"
+            assert call_args["service.namespace"] == "attack-simulation"
+            assert call_args["deployment.environment"] == "staging"
+            assert call_args["attack.team"] == "red"
+
+    def test_returns_true_when_already_initialized(self, monkeypatch):
+        """Should return True without reconfiguring when already initialized."""
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://test:4318")
+
+        # Set already initialized
+        import ares.core.tracing as tracing_module
+
+        tracing_module._otel_initialized = True
+
+        with patch("ares.core.tracing.trace.set_tracer_provider") as mock_set:
+            result = setup_otel_tracing()
+
+            assert result is True
+            mock_set.assert_not_called()  # Should not reconfigure
+
+    def test_handles_import_error_gracefully(self, monkeypatch):
+        """Should return False gracefully if OTEL dependencies unavailable."""
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://test:4318/v1/traces")
+
+        # Reset initialization state
+        import ares.core.tracing as tracing_module
+
+        tracing_module._otel_initialized = False
+
+        # Simulate import failure by making the exporter import raise
+        with patch(
+            "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter",
+            side_effect=ImportError("No module"),
+        ):
+            result = setup_otel_tracing()
+            assert result is False
+
+    def test_handles_configuration_error_gracefully(self, monkeypatch):
+        """Should return False gracefully if TracerProvider configuration fails."""
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://test:4318/v1/traces")
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "test")
+
+        # Reset initialization state
+        import ares.core.tracing as tracing_module
+
+        tracing_module._otel_initialized = False
+
+        with patch(
+            "opentelemetry.sdk.trace.TracerProvider",
+            side_effect=Exception("Config error"),
+        ):
+            result = setup_otel_tracing()
+            assert result is False
 
 
 class TestToolMitreInfo:
@@ -184,46 +353,46 @@ class TestTargetAttributes:
         assert attrs["destination.address"] == "192.168.58.10"
 
     def test_target_type_included(self):
-        """Explicit target type should be included using attack.target.type."""
+        """Explicit target type should be included using attack_target_type."""
         attrs = create_agent_span_attributes(
             "lateral", "red", target_host="192.168.58.10", target_type="domain_controller"
         )
-        assert attrs["attack.target.type"] == "domain_controller"
+        assert attrs["attack_target_type"] == "domain_controller"
 
     def test_target_type_inferred_from_hostname(self):
         """Target type should be inferred from hostname if not provided."""
         attrs = create_agent_span_attributes("lateral", "red", target_host="dc01.contoso.local")
-        assert attrs["attack.target.type"] == "domain_controller"
+        assert attrs["attack_target_type"] == "domain_controller"
 
     def test_target_type_not_overwritten_when_explicit(self):
         """Explicit target type should not be overwritten by inference."""
         attrs = create_agent_span_attributes(
             "lateral", "red", target_host="dc01", target_type="custom_type"
         )
-        assert attrs["attack.target.type"] == "custom_type"
+        assert attrs["attack_target_type"] == "custom_type"
 
     def test_target_user_included(self):
         """Target user should be included using OTel user.name."""
         attrs = create_agent_span_attributes("credential_access", "red", target_user="svc_backup")
         assert attrs["user.name"] == "svc_backup"
-        assert attrs["attack.target.type"] == "user"
+        assert attrs["attack_target_type"] == "user"
 
     def test_target_domain_included(self):
-        """Target domain should be included using attack.target.domain."""
+        """Target domain should be included using attack_target_domain."""
         attrs = create_agent_span_attributes(
             "lateral", "red", target_host="dc01.contoso.local", target_domain="contoso.local"
         )
-        assert attrs["attack.target.domain"] == "contoso.local"
+        assert attrs["attack_target_domain"] == "contoso.local"
 
     def test_target_domain_inferred_from_fqdn(self):
         """Target domain should be inferred from FQDN if not provided."""
         attrs = create_agent_span_attributes("lateral", "red", target_host="dc01.contoso.local")
-        assert attrs["attack.target.domain"] == "contoso.local"
+        assert attrs["attack_target_domain"] == "contoso.local"
 
     def test_target_domain_not_inferred_from_ip(self):
         """Target domain should not be inferred from IP addresses."""
         attrs = create_agent_span_attributes("lateral", "red", target_host="192.168.58.10")
-        assert "attack.target.domain" not in attrs
+        assert "attack_target_domain" not in attrs
 
 
 class TestMitreMappings:
@@ -351,8 +520,8 @@ class TestTraceToolCall:
 
         call_kwargs = mock_dn_span.call_args[1]
         assert call_kwargs["attributes"]["destination.address"] == "dc01.contoso.local"
-        assert call_kwargs["attributes"]["attack.target.type"] == "domain_controller"
-        assert call_kwargs["attributes"]["attack.target.domain"] == "contoso.local"
+        assert call_kwargs["attributes"]["attack_target_type"] == "domain_controller"
+        assert call_kwargs["attributes"]["attack_target_domain"] == "contoso.local"
 
     def test_trace_tool_call_with_explicit_target_type(self):
         """trace_tool_call should use explicit target type."""
@@ -375,7 +544,7 @@ class TestTraceToolCall:
 
         call_kwargs = mock_dn_span.call_args[1]
         assert call_kwargs["attributes"]["destination.address"] == "192.168.58.10"
-        assert call_kwargs["attributes"]["attack.target.type"] == "domain_controller"
+        assert call_kwargs["attributes"]["attack_target_type"] == "domain_controller"
 
     def test_trace_tool_call_with_target_user(self):
         """trace_tool_call should include target user using OTel user.name."""
@@ -398,8 +567,8 @@ class TestTraceToolCall:
 
         call_kwargs = mock_dn_span.call_args[1]
         assert call_kwargs["attributes"]["user.name"] == "svc_backup"
-        assert call_kwargs["attributes"]["attack.target.type"] == "user"
-        assert call_kwargs["attributes"]["attack.target.domain"] == "contoso.local"
+        assert call_kwargs["attributes"]["attack_target_type"] == "user"
+        assert call_kwargs["attributes"]["attack_target_domain"] == "contoso.local"
 
     def test_trace_tool_call_includes_attack_tool_attrs(self):
         """trace_tool_call should include attack_tool_name and attack_tool_category."""

@@ -400,6 +400,12 @@ async def run_blue_worker(
     apply_rigging_patches()
     configure_litellm_env()
 
+    # Configure OTEL tracing to export to OTLP endpoint (e.g., Alloy/Tempo)
+    # This is required because the dreadnode SDK doesn't auto-configure from OTEL env vars
+    from ares.core.tracing import setup_otel_tracing
+
+    setup_otel_tracing()
+
     redis_url = redis_url or get_redis_url()
     pod_name = os.environ.get("HOSTNAME", f"local-{role.value}")
 
@@ -565,6 +571,12 @@ async def run_blue_global_worker(
 
     apply_rigging_patches()
     configure_litellm_env()
+
+    # Configure OTEL tracing to export to OTLP endpoint (e.g., Alloy/Tempo)
+    # This is required because the dreadnode SDK doesn't auto-configure from OTEL env vars
+    from ares.core.tracing import setup_otel_tracing
+
+    setup_otel_tracing()
 
     redis_url = redis_url or get_redis_url()
     pod_name = os.environ.get("HOSTNAME", f"local-{role.value}")
