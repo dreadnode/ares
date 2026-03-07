@@ -153,6 +153,7 @@ async def _load_or_initialize_state(
     target_domain: str,
     target_ips: list[str],
     initial_credential: Credential | None,
+    target_environment: str | None = None,
 ) -> None:
     if resume_from_checkpoint:
         try:
@@ -175,6 +176,7 @@ async def _load_or_initialize_state(
     state.target = Target(
         ip=target_ips[0] if target_ips else "",
         domain=target_domain,
+        environment=target_environment or "",
     )
     if target_domain:
         state.add_domain(target_domain)
@@ -493,6 +495,9 @@ async def _prime_operation(
             await state._backend.set_meta("target_ips", ",".join(target_ips))
         if target_domain:
             await state._backend.set_meta("target_domain", target_domain)
+        # Persist target environment from state (set in _load_or_initialize_state)
+        if state.target and state.target.environment:
+            await state._backend.set_meta("target_environment", state.target.environment)
 
         # Set the active operation pointer for worker discovery
         # This allows workers to find the operation immediately via the pointer
@@ -652,6 +657,7 @@ async def run_multi_agent_operation(
     openai_api_key: str | None = None,
     report_dir: str | Path | None = None,
     max_runtime: float | None = None,
+    target_environment: str | None = None,
 ) -> dict[str, Any]:
     """
     Main entry point for multi-agent red team operations.
@@ -670,6 +676,7 @@ async def run_multi_agent_operation(
         openai_api_key: Optional OpenAI API key to bind directly to the generator
         report_dir: Directory to write the final report (default: ./reports)
         max_runtime: Maximum runtime in seconds (default: 1800s / 30 min, via ARES_MAX_RUNTIME env)
+        target_environment: Target environment for tracing (e.g., "dev", "staging", "prod")
 
     Returns:
         Operation results summary
@@ -745,6 +752,7 @@ async def run_multi_agent_operation(
         target_domain=target_domain,
         target_ips=target_ips,
         initial_credential=initial_credential,
+        target_environment=target_environment,
     )
 
     # Create agent ensemble

@@ -494,5 +494,232 @@ class TestBlueOrchestratorToolsDistributedModeIntegration:
         assert "error" in result.lower() or "crashed" in result.lower()
 
 
+class TestBlueOrchestratorToolsWaitForAllTasks:
+    """Tests for wait_for_all_tasks with heartbeat-aware timeout."""
+
+    @pytest.fixture
+    def tools_with_dispatcher(self):
+        tools = BlueOrchestratorTools()
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.investigation_id = "inv-123"
+        mock_dispatcher.backend = MagicMock()
+        mock_dispatcher.wait_for_result = AsyncMock(return_value={"success": True, "result": {}})
+        tools.set_dispatcher(mock_dispatcher)
+        return tools
+
+    @pytest.mark.asyncio
+    async def test_returns_error_without_dispatcher(self):
+        tools = BlueOrchestratorTools()
+        result = await tools.wait_for_all_tasks()
+        assert "ERROR" in result
+
+    @pytest.mark.asyncio
+    async def test_returns_immediately_when_no_pending_tasks(self, tools_with_dispatcher):
+        tools_with_dispatcher._dispatcher.backend.get_pending_tasks = AsyncMock(return_value={})
+
+        result = await tools_with_dispatcher.wait_for_all_tasks()
+
+        assert "[+]" in result
+        assert "complete" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_waits_for_tasks_to_complete(self, tools_with_dispatcher):
+        # First call returns pending, second call returns empty
+        tools_with_dispatcher._dispatcher.backend.get_pending_tasks = AsyncMock(
+            side_effect=[
+                {"task-1": {"task_type": "triage", "assigned_role": "triage"}},
+                {},  # Tasks completed
+            ]
+        )
+
+        result = await tools_with_dispatcher.wait_for_all_tasks(timeout=60)
+
+        assert "[+]" in result
+        assert "complete" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_hard_timeout_exceeded(self, tools_with_dispatcher):
+        # Always return pending tasks
+        tools_with_dispatcher._dispatcher.backend.get_pending_tasks = AsyncMock(
+            return_value={"task-1": {"task_type": "triage", "assigned_role": "triage"}}
+        )
+        # Result always times out
+        tools_with_dispatcher._dispatcher.wait_for_result = AsyncMock(
+            return_value={"error": "timed out"}
+        )
+
+        # Use very short timeouts for fast test
+        result = await tools_with_dispatcher.wait_for_all_tasks(timeout=1, hard_timeout=2)
+
+        assert "[!]" in result
+        assert "timeout" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_extends_deadline_when_workers_heartbeating_in_process_mode(
+        self, tools_with_dispatcher
+    ):
+        """In-process mode always considers workers alive."""
+        call_count = 0
+
+        async def mock_get_pending():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                return {"task-1": {"task_type": "threat_hunt", "assigned_role": "threat_hunter"}}
+            return {}  # Complete on 3rd call
+
+        tools_with_dispatcher._dispatcher.backend.get_pending_tasks = AsyncMock(
+            side_effect=mock_get_pending
+        )
+
+        result = await tools_with_dispatcher.wait_for_all_tasks(timeout=60)
+
+        assert "[+]" in result
+        assert call_count >= 3
+
+    @pytest.mark.asyncio
+    async def test_distributed_mode_checks_heartbeats(self, tools_with_dispatcher):
+        """In distributed mode, checks heartbeats to determine liveness."""
+        mock_queue = AsyncMock()
+        mock_queue.get_all_heartbeats = AsyncMock(
+            return_value={
+                "blue-threat_hunter-pod1": {
+                    "current_task": "task-1",
+                    "timestamp": "2026-03-05T12:00:00+00:00",
+                    "status": "busy",
+                }
+            }
+        )
+        tools_with_dispatcher.set_distributed_mode(mock_queue, "inv-123")
+
+        call_count = 0
+
+        async def mock_get_pending():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                return {"task-1": {"task_type": "threat_hunt", "assigned_role": "threat_hunter"}}
+            return {}
+
+        tools_with_dispatcher._dispatcher.backend.get_pending_tasks = AsyncMock(
+            side_effect=mock_get_pending
+        )
+
+        result = await tools_with_dispatcher.wait_for_all_tasks(timeout=60)
+
+        assert "[+]" in result
+
+    @pytest.mark.asyncio
+    async def test_times_out_when_no_heartbeats(self, tools_with_dispatcher):
+        """Times out when workers stop heartbeating."""
+        mock_queue = AsyncMock()
+        # No heartbeats returned
+        mock_queue.get_all_heartbeats = AsyncMock(return_value={})
+        tools_with_dispatcher.set_distributed_mode(mock_queue, "inv-123")
+
+        tools_with_dispatcher._dispatcher.backend.get_pending_tasks = AsyncMock(
+            return_value={"task-1": {"task_type": "triage", "assigned_role": "triage"}}
+        )
+        tools_with_dispatcher._dispatcher.wait_for_result = AsyncMock(
+            return_value={"error": "timed out"}
+        )
+
+        result = await tools_with_dispatcher.wait_for_all_tasks(timeout=1, hard_timeout=5)
+
+        assert "[!]" in result
+        assert "no worker heartbeats" in result.lower()
+
+
+class TestCheckWorkersAliveForTasks:
+    """Tests for _check_workers_alive_for_tasks helper method."""
+
+    @pytest.fixture
+    def tools_with_queue(self):
+        tools = BlueOrchestratorTools()
+        mock_queue = AsyncMock()
+        tools.set_distributed_mode(mock_queue, "inv-123")
+        return tools
+
+    @pytest.mark.asyncio
+    async def test_returns_true_for_inprocess_mode(self):
+        """In-process workers are always considered alive."""
+        tools = BlueOrchestratorTools()
+        # No task queue = in-process mode
+
+        any_alive, count = await tools._check_workers_alive_for_tasks({"task-1", "task-2"})
+
+        assert any_alive is True
+        assert count == 2
+
+    @pytest.mark.asyncio
+    async def test_returns_true_when_heartbeat_matches_pending_task(self, tools_with_queue):
+        from datetime import datetime, timezone
+
+        # Use a fresh timestamp (now)
+        fresh_timestamp = datetime.now(timezone.utc).isoformat()
+        tools_with_queue._blue_task_queue.get_all_heartbeats = AsyncMock(
+            return_value={
+                "blue-triage-pod1": {
+                    "current_task": "task-1",
+                    "timestamp": fresh_timestamp,
+                }
+            }
+        )
+
+        any_alive, count = await tools_with_queue._check_workers_alive_for_tasks(
+            {"task-1", "task-2"}
+        )
+
+        assert any_alive is True
+        assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_no_matching_heartbeats(self, tools_with_queue):
+        tools_with_queue._blue_task_queue.get_all_heartbeats = AsyncMock(
+            return_value={
+                "blue-triage-pod1": {
+                    "current_task": "other-task",  # Different task
+                    "timestamp": "2026-03-05T13:00:00+00:00",
+                }
+            }
+        )
+
+        any_alive, count = await tools_with_queue._check_workers_alive_for_tasks(
+            {"task-1", "task-2"}
+        )
+
+        assert any_alive is False
+        assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_heartbeat_stale(self, tools_with_queue):
+        tools_with_queue._blue_task_queue.get_all_heartbeats = AsyncMock(
+            return_value={
+                "blue-triage-pod1": {
+                    "current_task": "task-1",
+                    # Stale timestamp (more than 60s ago)
+                    "timestamp": "2020-01-01T00:00:00+00:00",
+                }
+            }
+        )
+
+        any_alive, count = await tools_with_queue._check_workers_alive_for_tasks({"task-1"})
+
+        assert any_alive is False
+        assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_handles_heartbeat_error_gracefully(self, tools_with_queue):
+        tools_with_queue._blue_task_queue.get_all_heartbeats = AsyncMock(
+            side_effect=Exception("Redis connection error")
+        )
+
+        # Should not raise, assumes alive on error
+        any_alive, count = await tools_with_queue._check_workers_alive_for_tasks({"task-1"})
+
+        assert any_alive is True  # Assumes alive on error
+        assert count == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

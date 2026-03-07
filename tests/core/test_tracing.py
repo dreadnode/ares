@@ -395,6 +395,97 @@ class TestTargetAttributes:
         assert "attack_target_domain" not in attrs
 
 
+class TestIpFqdnSeparation:
+    """Tests for separate IP, FQDN, and hostname attributes."""
+
+    def test_target_ip_sets_destination_address(self):
+        """Target IP should be used for destination.address."""
+        attrs = create_agent_span_attributes("lateral", "red", target_ip="192.168.58.10")
+        assert attrs["destination.address"] == "192.168.58.10"
+        assert "server.address" not in attrs
+        assert "host.name" not in attrs
+
+    def test_target_fqdn_sets_server_address_and_host_name(self):
+        """Target FQDN should set server.address and derive host.name."""
+        attrs = create_agent_span_attributes("lateral", "red", target_fqdn="dc01.contoso.local")
+        assert attrs["destination.address"] == "dc01.contoso.local"
+        assert attrs["server.address"] == "dc01.contoso.local"
+        assert attrs["host.name"] == "dc01"
+        assert attrs["attack_target_domain"] == "contoso.local"
+
+    def test_target_ip_preferred_over_fqdn_for_destination(self):
+        """When both IP and FQDN provided, IP should be destination.address."""
+        attrs = create_agent_span_attributes(
+            "lateral",
+            "red",
+            target_ip="192.168.58.10",
+            target_fqdn="dc01.contoso.local",
+        )
+        assert attrs["destination.address"] == "192.168.58.10"
+        assert attrs["server.address"] == "dc01.contoso.local"
+        assert attrs["host.name"] == "dc01"
+
+    def test_target_hostname_without_fqdn(self):
+        """Plain hostname should set host.name without server.address."""
+        attrs = create_agent_span_attributes("lateral", "red", target_hostname="dc01")
+        assert attrs["host.name"] == "dc01"
+        assert "server.address" not in attrs
+
+    def test_explicit_hostname_overrides_fqdn_derivation(self):
+        """Explicit target_hostname should override FQDN-derived hostname."""
+        attrs = create_agent_span_attributes(
+            "lateral",
+            "red",
+            target_fqdn="dc01.contoso.local",
+            target_hostname="custom-host",
+        )
+        assert attrs["host.name"] == "custom-host"
+        assert attrs["server.address"] == "dc01.contoso.local"
+
+    def test_target_host_legacy_fqdn_sets_server_address(self):
+        """Legacy target_host with FQDN should still set server.address."""
+        attrs = create_agent_span_attributes("lateral", "red", target_host="dc01.contoso.local")
+        assert attrs["destination.address"] == "dc01.contoso.local"
+        assert attrs["server.address"] == "dc01.contoso.local"
+        assert attrs["host.name"] == "dc01"
+
+    def test_target_host_legacy_ip_no_server_address(self):
+        """Legacy target_host with IP should not set server.address."""
+        attrs = create_agent_span_attributes("lateral", "red", target_host="192.168.58.10")
+        assert attrs["destination.address"] == "192.168.58.10"
+        assert "server.address" not in attrs
+        assert "host.name" not in attrs
+
+    def test_target_type_inferred_from_fqdn(self):
+        """Target type should be inferred from FQDN hostname part."""
+        attrs = create_agent_span_attributes("lateral", "red", target_fqdn="dc01.contoso.local")
+        assert attrs["attack_target_type"] == "domain_controller"
+
+    def test_target_type_inferred_from_hostname(self):
+        """Target type should be inferred from explicit hostname."""
+        attrs = create_agent_span_attributes("lateral", "red", target_hostname="sql01")
+        assert attrs["attack_target_type"] == "sql_server"
+
+    def test_all_fields_combined(self):
+        """Test all new fields combined with user and domain."""
+        attrs = create_agent_span_attributes(
+            "lateral",
+            "red",
+            tool_name="psexec",
+            target_ip="192.168.58.10",
+            target_fqdn="dc01.contoso.local",
+            target_hostname="dc01",
+            target_user="administrator",
+            target_domain="contoso.local",
+        )
+        assert attrs["destination.address"] == "192.168.58.10"
+        assert attrs["server.address"] == "dc01.contoso.local"
+        assert attrs["host.name"] == "dc01"
+        assert attrs["user.name"] == "administrator"
+        assert attrs["attack_target_domain"] == "contoso.local"
+        assert attrs["attack_target_type"] == "domain_controller"
+
+
 class TestMitreMappings:
     """Tests for MITRE mappings completeness."""
 

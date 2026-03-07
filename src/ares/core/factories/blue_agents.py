@@ -407,25 +407,46 @@ def create_blue_hooks(role: BlueRole) -> list:
         error_msg = str(event.error)[:500] if is_error else None
 
         # Extract target info from tool arguments for span metrics
-        target_host = None
+        # Separate IP, FQDN, and hostname for OTel semantic convention compliance
+        target_ip = None
+        target_fqdn = None
+        target_hostname = None
         target_domain = None
         target_user = None
         if hasattr(event, "tool_call") and event.tool_call and event.tool_call.arguments:
             try:
                 import json
+                import re
 
                 args = json.loads(event.tool_call.arguments)
-                # Try common argument names for target host/IP
-                target_host = (
-                    args.get("target")
-                    or args.get("target_ip")
-                    or args.get("host")
-                    or args.get("hostname")
-                    or args.get("ip")
-                )
-                # Extract domain for attack_target_domain attribute
+                ip_pattern = r"^\d{1,3}(?:\.\d{1,3}){3}$"
+
+                # Extract IP from IP-specific args
+                for arg in ("target_ip", "ip"):
+                    val = args.get(arg)
+                    if val and re.match(ip_pattern, val):
+                        target_ip = val
+                        break
+
+                # Extract FQDN/hostname from host args
+                for arg in ("target", "host", "hostname"):
+                    val = args.get(arg)
+                    if val:
+                        if re.match(ip_pattern, val):
+                            # It's an IP, use as target_ip if not already set
+                            if not target_ip:
+                                target_ip = val
+                        elif "." in val:
+                            # FQDN - extract hostname
+                            target_fqdn = val
+                            target_hostname = val.split(".")[0]
+                        else:
+                            # Plain hostname
+                            target_hostname = val
+                        break
+
+                # Extract domain and user (unchanged)
                 target_domain = args.get("domain") or args.get("target_domain")
-                # Extract username for user.name attribute
                 target_user = args.get("username") or args.get("user") or args.get("target_user")
             except Exception:
                 pass
@@ -437,7 +458,9 @@ def create_blue_hooks(role: BlueRole) -> list:
             tool_name,
             is_error=is_error,
             error_message=error_msg,
-            target_host=target_host,
+            target_ip=target_ip,
+            target_fqdn=target_fqdn,
+            target_hostname=target_hostname,
             target_domain=target_domain,
             target_user=target_user,
         )

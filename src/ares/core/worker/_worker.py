@@ -519,7 +519,22 @@ class RedisWorkerAgent:
             or payload_snapshot.get("host")
             or payload_snapshot.get("hostname")
         )
-        span_attrs = create_agent_span_attributes(self.role.value, "red", target_host=target_host)
+
+        # Refresh state BEFORE span creation to get target.environment from Redis
+        await self._refresh_shared_state()
+
+        # Get target environment from shared state for tracing
+        target_env = None
+        if self.shared_state and self.shared_state.target:
+            env_val = self.shared_state.target.environment
+            # Ensure it's a string (OTel requires primitive types)
+            if isinstance(env_val, str) and env_val:
+                target_env = env_val
+            elif env_val:
+                target_env = str(env_val)
+        span_attrs = create_agent_span_attributes(
+            self.role.value, "red", target_host=target_host, target_environment=target_env
+        )
         span_attrs.update(
             {
                 "task.id": task.task_id,
@@ -573,7 +588,7 @@ class RedisWorkerAgent:
                 )
 
         try:
-            await self._refresh_shared_state()
+            # State already refreshed above (before span creation)
             # Handle "command" tasks directly via subprocess (no agent needed)
             if task.task_type == "command":
                 await self._execute_command_task(task)
@@ -949,6 +964,19 @@ class RedisWorkerAgent:
             fresh.has_golden_ticket = await backend.get_golden_ticket()
             # Load DC map for child domain resolution
             fresh.domain_controllers.update(await backend.get_all_dcs())
+
+            # Reconstruct Target from meta for environment tracking
+            target_ip = await backend.get_meta("target_ip", default="")
+            target_domain = await backend.get_meta("target_domain", default="")
+            target_env = await backend.get_meta("target_environment", default="")
+            if target_ip or target_domain:
+                from ares.core.models import Target
+
+                fresh.target = Target(
+                    ip=target_ip or "",
+                    domain=target_domain or "",
+                    environment=target_env or "",
+                )
 
             self._merge_shared_state(fresh)
         except Exception as e:
@@ -1805,6 +1833,19 @@ class RedisWorkerAgent:
             fresh.has_golden_ticket = await backend.get_golden_ticket()
             # Load DC map for child domain resolution
             fresh.domain_controllers.update(await backend.get_all_dcs())
+
+            # Reconstruct Target from meta for environment tracking
+            target_ip = await backend.get_meta("target_ip", default="")
+            target_domain = await backend.get_meta("target_domain", default="")
+            target_env = await backend.get_meta("target_environment", default="")
+            if target_ip or target_domain:
+                from ares.core.models import Target
+
+                fresh.target = Target(
+                    ip=target_ip or "",
+                    domain=target_domain or "",
+                    environment=target_env or "",
+                )
 
             self._merge_shared_state(fresh)
         except Exception as e:

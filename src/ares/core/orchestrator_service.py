@@ -55,6 +55,8 @@ class OperationRequest:
     report_dir: str | None = None
     # API keys passed from client (set as env vars before running)
     env_vars: dict[str, str] | None = None
+    # Target environment for tracing (e.g., "dev", "staging", "prod")
+    target_environment: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OperationRequest:
@@ -88,6 +90,7 @@ class OperationRequest:
             or env_vars.get("ARES_REPORT_DIR")
             or os.environ.get("ARES_REPORT_DIR"),
             env_vars=env_vars or None,
+            target_environment=data.get("target_environment"),
         )
 
 
@@ -713,6 +716,7 @@ class OrchestratorService:
                         max_steps=request.max_steps,
                         checkpoint_interval=request.checkpoint_interval,
                         openai_api_key=openai_api_key,
+                        target_environment=request.target_environment,
                     ),
                     timeout=float(operation_timeout),
                 )

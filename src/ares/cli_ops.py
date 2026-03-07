@@ -243,11 +243,15 @@ async def submit(
     ] = None,
     max_steps: Annotated[int, cyclopts.Parameter(help="Maximum agent steps")] = 200,
     redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+    env: Annotated[
+        str | None,
+        cyclopts.Parameter(help="Target environment (e.g., dev, staging, prod) for tracing"),
+    ] = None,
 ) -> None:
     """Submit a multi-agent red team operation to the orchestrator service.
 
     Example:
-        ares-ops submit dreadgoad contoso.local --ips 192.168.58.90 192.168.58.129 --wait
+        ares-ops submit dreadgoad contoso.local --ips 192.168.58.90 --env dev --wait
     """
     # Resolve config defaults
     resolved_redis_url = redis_url or get_redis_url()
@@ -334,6 +338,7 @@ async def submit(
             redis_url=resolved_redis_url,
             wait_for_completion=wait,
             env_vars=env_vars or None,
+            target_environment=env,
         )
 
         logger.success(f"Operation submitted: {operation_id}")

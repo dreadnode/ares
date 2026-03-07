@@ -443,6 +443,7 @@ class Target(Model):
     ip: str
     hostname: str = ""
     domain: str = ""
+    environment: str = ""  # Target environment (e.g., "dev", "staging", "prod")
 
 
 class Host(Model):

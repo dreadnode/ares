@@ -314,7 +314,16 @@ class MonitoringMixin:
             activity_time = getattr(task_info, "last_activity_at", None) or task_info.created_at
             age_seconds = (now - activity_time).total_seconds()
 
-            if age_seconds > effective_timeout:
+            # Different timeouts for PENDING vs IN_PROGRESS:
+            # - PENDING: task waiting in queue, no worker has picked it up yet.
+            #   Use 3x the timeout since it's not "stale", just waiting for a worker.
+            # - IN_PROGRESS: worker picked up but went silent. Use normal timeout.
+            if task_info.status == TaskStatus.PENDING:
+                task_timeout = effective_timeout * 3  # 270s at hard cap, 540s normal
+            else:
+                task_timeout = effective_timeout
+
+            if age_seconds > task_timeout:
                 stale_task_ids.append(task_id)
             elif self._should_warn_slow_pickup(
                 task_id, task_info, age_seconds, pickup_warning_threshold
@@ -338,10 +347,15 @@ class MonitoringMixin:
                     activity_time = (
                         getattr(stale_task, "last_activity_at", None) or stale_task.created_at
                     )
+                    status_desc = (
+                        "never picked up by worker"
+                        if stale_task.status == TaskStatus.PENDING
+                        else "worker went silent"
+                    )
                     logger.warning(
                         f"Cleaned up stale task {task_id} ({stale_task.task_type} -> "
-                        f"{stale_task.assigned_agent}) - no activity for "
-                        f"{(now - activity_time).total_seconds():.0f}s"
+                        f"{stale_task.assigned_agent}) - {status_desc}, "
+                        f"no activity for {(now - activity_time).total_seconds():.0f}s"
                     )
 
             logger.info(
@@ -390,7 +404,15 @@ class MonitoringMixin:
             activity_time = getattr(task_info, "last_activity_at", None) or task_info.created_at
             age_seconds = (now - activity_time).total_seconds()
 
-            if age_seconds > stale_timeout:
+            # Different timeouts for PENDING vs IN_PROGRESS:
+            # - PENDING: task waiting in queue, no worker picked it up. Use 3x timeout.
+            # - IN_PROGRESS: worker picked up but went silent. Use normal timeout.
+            if task_info.status == TaskStatus.PENDING:
+                task_timeout = stale_timeout * 3
+            else:
+                task_timeout = stale_timeout
+
+            if age_seconds > task_timeout:
                 stale_task_ids.append(task_id)
 
         if stale_task_ids:
@@ -402,10 +424,15 @@ class MonitoringMixin:
                     activity_time = (
                         getattr(stale_task, "last_activity_at", None) or stale_task.created_at
                     )
+                    status_desc = (
+                        "never picked up by worker"
+                        if stale_task.status == TaskStatus.PENDING
+                        else "worker went silent"
+                    )
                     logger.warning(
                         f"Threaded cleanup: removed stale task {task_id} ({stale_task.task_type} -> "
-                        f"{stale_task.assigned_agent}) - no activity for "
-                        f"{(now - activity_time).total_seconds():.0f}s"
+                        f"{stale_task.assigned_agent}) - {status_desc}, "
+                        f"no activity for {(now - activity_time).total_seconds():.0f}s"
                     )
 
             logger.info(

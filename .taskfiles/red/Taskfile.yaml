@@ -17,11 +17,12 @@ tasks:
   # ===========================================================================
 
   multi:
-    desc: "Run multi-agent red team operation (usage: task red:multi [TARGET=dreadgoad] [DOMAIN=contoso.local])"
+    desc: "Run multi-agent red team operation (usage: task red:multi [TARGET=dreadgoad] [DOMAIN=contoso.local] [TARGET_ENV=staging])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       RESUME: '{{.RESUME | default "false"}}'
+      TARGET_ENV: '{{.TARGET_ENV | default "staging"}}'
       # Computed vars
       ANTHROPIC_API_KEY:
         sh: op item get "Dreadnode Claude" --fields api-key --reveal 2>/dev/null || echo ""
@@ -181,6 +182,7 @@ tasks:
             --model "{{.MODEL_ARG}}" \
             --max-steps {{.MAX_STEPS_RED}} \
             --redis-url "{{.REDIS_URL}}" \
+            --env "{{.TARGET_ENV}}" \
             $RESUME_FLAG \
             2>&1 | tee -a "{{.LOGFILE}}"
         silent: false
@@ -684,11 +686,12 @@ tasks:
   # ===========================================================================
 
   multi:local:
-    desc: "Run multi-agent red team operation using .env file (usage: task red:multi:local [TARGET=dreadgoad] [DOMAIN=contoso.local])"
+    desc: "Run multi-agent red team operation using .env file (usage: task red:multi:local [TARGET=dreadgoad] [DOMAIN=contoso.local] [TARGET_ENV=staging])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       RESUME: '{{.RESUME | default "false"}}'
+      TARGET_ENV: '{{.TARGET_ENV | default "staging"}}'
       # Computed vars (no 1Password - uses .env)
       ARES_MODEL:
         sh: |
@@ -858,6 +861,7 @@ tasks:
             --model "{{.MODEL_ARG}}" \
             --max-steps {{.MAX_STEPS_RED}} \
             --redis-url "{{.REDIS_URL}}" \
+            --env "{{.TARGET_ENV}}" \
             $RESUME_FLAG \
             2>&1 | tee -a "{{.LOGFILE}}"
         silent: false
