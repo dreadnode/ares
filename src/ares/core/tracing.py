@@ -9,7 +9,7 @@ SDK and include attributes for:
 - attack_phase: Current phase of the operation
 
 OTel Semantic Convention attributes:
-- destination.address: Target IP address (preferred) or FQDN
+- destination.address: Target FQDN (preferred for dashboard filtering) or IP address
 - server.address: Target FQDN when attacking a server
 - host.name: Target hostname (derived from FQDN)
 - user.name: Target username when attacking a user account
@@ -38,6 +38,71 @@ from opentelemetry.trace import SpanKind
 
 # IP address pattern for validation
 IP_PATTERN = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+# Common domain TLDs for FQDN detection (not usernames!)
+# This prevents treating "sansa.stark" as an FQDN
+FQDN_SUFFIXES = (
+    ".local",
+    ".internal",
+    ".corp",
+    ".lan",
+    ".ad",
+    ".domain",
+    ".com",
+    ".net",
+    ".org",
+    ".io",
+)
+
+
+def is_likely_fqdn(value: str) -> bool:
+    """Check if value looks like an FQDN vs a username.
+
+    FQDNs have domain suffixes (.local, .com, etc.) or 3+ segments.
+    Usernames like 'sansa.stark' have 2 segments and no TLD.
+
+    Args:
+        value: The string to check.
+
+    Returns:
+        True if the value looks like an FQDN, False otherwise.
+
+    Examples:
+        >>> is_likely_fqdn("dc01.contoso.local")
+        True
+        >>> is_likely_fqdn("sansa.stark")
+        False
+        >>> is_likely_fqdn("dc01.child.parent")
+        True
+        >>> is_likely_fqdn("192.168.58.10")
+        False  # IPs should be checked separately
+    """
+    if not value or not isinstance(value, str):
+        return False
+
+    # IPs are not FQDNs
+    if IP_PATTERN.match(value):
+        return False
+
+    val_lower = value.lower()
+
+    # Has common TLD suffix -> FQDN
+    if any(val_lower.endswith(suffix) for suffix in FQDN_SUFFIXES):
+        return True
+
+    # 3+ segments (e.g., 'dc01.contoso.local') -> FQDN
+    if value.count(".") >= 2:
+        return True
+
+    # Single dot with hostname-like prefix (dc, sql, web, etc.) -> FQDN
+    parts = value.split(".")
+    if len(parts) == 2:
+        prefix = parts[0].lower()
+        if prefix.startswith(("dc", "sql", "web", "ws", "pc", "srv")):
+            return True
+
+    return False
+
 
 # =============================================================================
 # OTEL TracerProvider Setup
@@ -240,7 +305,8 @@ TOOL_TO_TECHNIQUE: dict[str, str] = {
     "mssql_impersonate": "T1134.001",
     "mssql_xp_cmdshell": "T1059.001",  # Command and Scripting Interpreter
     # Golden Ticket / Persistence
-    "forge_golden_ticket": "T1558.001",  # Golden Ticket  # nosec B105
+    "generate_golden_ticket": "T1558.001",  # Golden Ticket
+    "forge_golden_ticket": "T1558.001",  # Golden Ticket (alias)  # nosec B105
     "forge_silver_ticket": "T1558.002",  # Silver Ticket
     "create_machine_account": "T1136.002",
 }
@@ -476,7 +542,6 @@ def create_agent_span_attributes(
     role: str,
     team: str,
     tool_name: str | None = None,
-    target_host: str | None = None,
     target_ip: str | None = None,
     target_fqdn: str | None = None,
     target_hostname: str | None = None,
@@ -485,6 +550,7 @@ def create_agent_span_attributes(
     target_domain: str | None = None,
     target_environment: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
+    dc_ips: set[str] | None = None,
 ) -> dict[str, Any]:
     """Create span attributes for an agent operation.
 
@@ -492,7 +558,6 @@ def create_agent_span_attributes(
         role: Agent role (e.g., "recon", "credential_access").
         team: Team name ("red" or "blue").
         tool_name: Optional tool being executed.
-        target_host: Optional target hostname/IP (legacy, for backwards compatibility).
         target_ip: Optional validated IP address.
         target_fqdn: Optional FQDN (e.g., "dc01.contoso.local").
         target_hostname: Optional hostname (e.g., "dc01").
@@ -501,6 +566,7 @@ def create_agent_span_attributes(
         target_domain: Optional target domain (e.g., "contoso.local").
         target_environment: Optional target environment (e.g., "dev", "staging", "prod").
         additional_attrs: Optional additional attributes to include.
+        dc_ips: Optional set of known DC IP addresses for target type inference.
 
     Returns:
         Dictionary of span attributes.
@@ -538,40 +604,39 @@ def create_agent_span_attributes(
             attrs["attack_tool_category"] = category
 
     # Add target attributes using OTel semantic conventions
-    # Prefer FQDN for destination.address (better for dashboard filtering)
+    # IMPORTANT: Keep IP and FQDN in SEPARATE fields for clean dashboard filtering
+    #
+    # destination.address = FQDN only (for dashboard "Target FQDN" column)
+    # destination.ip = IP only (for dashboard "Target IP" column)
+    # server.address = FQDN (OTel standard for server hostname)
+
+    # Set destination.address to FQDN only
     if target_fqdn:
         attrs["destination.address"] = target_fqdn
-    elif target_ip:
-        attrs["destination.address"] = target_ip
-    elif target_host:  # Backwards compat
-        attrs["destination.address"] = target_host
-
-    # Add FQDN as server.address (OTel standard)
-    if target_fqdn:
         attrs["server.address"] = target_fqdn
-    elif target_host and "." in target_host and not IP_PATTERN.match(target_host):
-        attrs["server.address"] = target_host
+
+    # Set destination.ip to IP only (never FQDN)
+    if target_ip:
+        attrs["destination.ip"] = target_ip
 
     # Add hostname as host.name (OTel standard)
     if target_hostname:
         attrs["host.name"] = target_hostname
     elif target_fqdn:
         attrs["host.name"] = target_fqdn.split(".")[0]
-    elif target_host and "." in target_host and not IP_PATTERN.match(target_host):
-        attrs["host.name"] = target_host.split(".")[0]
 
     if target_user:
         # OTel standard: user.name for usernames
         attrs["user.name"] = target_user
 
     # Custom attack namespace for domain-specific enrichment
-    # Determine target host for type inference (prefer FQDN > hostname > IP > legacy)
-    effective_host = target_fqdn or target_hostname or target_ip or target_host
+    # Determine target host for type inference (prefer FQDN > hostname > IP)
+    effective_host = target_fqdn or target_hostname or target_ip
     if target_type:
         attrs["attack_target_type"] = target_type
     elif effective_host:
-        # Infer target type if not provided
-        inferred_type = infer_target_type(effective_host)
+        # Infer target type if not provided, using DC IPs for accurate detection
+        inferred_type = infer_target_type(effective_host, dc_ips)
         if inferred_type:
             attrs["attack_target_type"] = inferred_type
     elif target_user:
@@ -584,12 +649,6 @@ def create_agent_span_attributes(
         # Extract domain from FQDN
         parts = target_fqdn.split(".", 1)
         if len(parts) > 1:
-            attrs["attack_target_domain"] = parts[1]
-    elif target_host and "." in target_host:
-        # Try to extract domain from legacy target_host FQDN
-        parts = target_host.split(".", 1)
-        if len(parts) > 1 and not parts[1].replace(".", "").isdigit():
-            # Not an IP address, extract domain
             attrs["attack_target_domain"] = parts[1]
 
     # Add target environment for filtering spans by deployment target
@@ -617,7 +676,6 @@ def agent_span(
     role: str,
     team: str,
     tool_name: str | None = None,
-    target_host: str | None = None,
     target_ip: str | None = None,
     target_fqdn: str | None = None,
     target_hostname: str | None = None,
@@ -626,6 +684,7 @@ def agent_span(
     target_domain: str | None = None,
     target_environment: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
+    dc_ips: set[str] | None = None,
 ):
     """Create a traced span for agent operations.
 
@@ -637,15 +696,15 @@ def agent_span(
         role: Agent role (e.g., "recon", "credential_access").
         team: Team name ("red" or "blue").
         tool_name: Optional tool being executed.
-        target_host: Optional target hostname/IP (legacy).
         target_ip: Optional validated IP address.
-        target_fqdn: Optional FQDN.
-        target_hostname: Optional hostname.
+        target_fqdn: Optional FQDN (e.g., "dc01.contoso.local").
+        target_hostname: Optional hostname (e.g., "dc01").
         target_type: Optional target type.
         target_user: Optional target username.
         target_domain: Optional target domain.
         target_environment: Optional target environment.
         additional_attrs: Optional additional attributes.
+        dc_ips: Optional set of known DC IP addresses for target type inference.
 
     Yields:
         The span object for adding additional attributes.
@@ -660,7 +719,6 @@ def agent_span(
         role,
         team,
         tool_name,
-        target_host,
         target_ip,
         target_fqdn,
         target_hostname,
@@ -669,6 +727,7 @@ def agent_span(
         target_domain,
         target_environment,
         additional_attrs,
+        dc_ips,
     )
 
     with dn.span(name, attributes=attrs) as span:
@@ -681,13 +740,14 @@ def trace_tool_call(
     tool_name: str,
     is_error: bool = False,
     error_message: str | None = None,
-    target_host: str | None = None,
     target_ip: str | None = None,
     target_fqdn: str | None = None,
     target_hostname: str | None = None,
     target_type: str | None = None,
     target_user: str | None = None,
     target_domain: str | None = None,
+    dc_ips: set[str] | None = None,
+    operation_id: str | None = None,
 ) -> None:
     """Record a tool call as a span.
 
@@ -700,29 +760,32 @@ def trace_tool_call(
         tool_name: Name of the tool being executed.
         is_error: Whether the tool call resulted in an error.
         error_message: Optional error message if is_error is True.
-        target_host: Optional target hostname/IP (legacy, for backwards compat).
         target_ip: Optional validated IP address.
         target_fqdn: Optional FQDN (e.g., "dc01.contoso.local").
         target_hostname: Optional hostname (e.g., "dc01").
         target_type: Optional target type.
         target_user: Optional target username.
         target_domain: Optional target domain.
+        dc_ips: Optional set of known DC IP addresses for target type inference.
+        operation_id: Optional operation ID for correlation (attack_operation_id).
     """
     attrs = create_agent_span_attributes(
         role,
         team,
         tool_name,
-        target_host=target_host,
         target_ip=target_ip,
         target_fqdn=target_fqdn,
         target_hostname=target_hostname,
         target_type=target_type,
         target_user=target_user,
         target_domain=target_domain,
+        dc_ips=dc_ips,
     )
     attrs["tool.status"] = "error" if is_error else "success"
     if is_error and error_message:
         attrs["error.message"] = error_message[:500]  # Truncate long errors
+    if operation_id:
+        attrs["attack_operation_id"] = operation_id
 
     try:
         with dn.span(f"tool.{tool_name}", attributes=attrs):
@@ -732,12 +795,98 @@ def trace_tool_call(
         logger.debug(f"Failed to create trace span: {e}")
 
 
+def trace_discovery(
+    discovery_type: str,
+    source_agent: str,
+    operation_id: str | None = None,
+    target_user: str | None = None,
+    target_domain: str | None = None,
+    target_ip: str | None = None,
+    target_fqdn: str | None = None,
+    target_hostname: str | None = None,
+    weakness_type: str | None = None,
+    additional_attrs: dict[str, Any] | None = None,
+) -> None:
+    """Record a discovery event as a span.
+
+    Creates a span for state-changing discoveries like credentials,
+    hashes, weaknesses, and vulnerabilities. These are separate from
+    tool calls because the discovery info is extracted from tool OUTPUT,
+    not arguments.
+
+    Args:
+        discovery_type: Type of discovery ("credential", "hash", "weakness", "vulnerability").
+        source_agent: Agent that made the discovery.
+        operation_id: Operation ID for correlation.
+        target_user: Username discovered (for credentials/hashes).
+        target_domain: Domain of the target.
+        target_ip: Optional target IP.
+        target_fqdn: Optional target FQDN.
+        target_hostname: Optional target hostname.
+        weakness_type: Type of weakness (e.g., "constrained_delegation").
+        additional_attrs: Optional additional attributes.
+    """
+    attrs: dict[str, Any] = {
+        "service.namespace": "ares",
+        "attack_team": "red",
+        "attack_phase": "discovery",
+        "discovery.type": discovery_type,
+        "discovery.source_agent": source_agent,
+    }
+
+    if operation_id:
+        attrs["attack_operation_id"] = operation_id
+
+    # Add target info using OTel conventions
+    if target_user:
+        attrs["user.name"] = target_user
+        attrs["attack_target_type"] = "user"
+
+    if target_domain:
+        attrs["attack_target_domain"] = target_domain
+
+    if target_ip:
+        attrs["destination.ip"] = target_ip
+
+    if target_fqdn:
+        attrs["destination.address"] = target_fqdn
+        attrs["server.address"] = target_fqdn
+        if not target_hostname:
+            attrs["host.name"] = target_fqdn.split(".")[0]
+
+    if target_hostname:
+        attrs["host.name"] = target_hostname
+
+    if weakness_type:
+        attrs["weakness.type"] = weakness_type
+        # Map weakness types to MITRE techniques
+        weakness_mitre_map = {
+            "constrained_delegation": "T1134.001",
+            "unconstrained_delegation": "T1558.001",
+            "kerberoastable": "T1558.003",
+            "asreproastable": "T1558.004",
+            "dcsync_rights": "T1003.006",
+        }
+        if weakness_type in weakness_mitre_map:
+            attrs["mitre.technique.id"] = weakness_mitre_map[weakness_type]
+
+    if additional_attrs:
+        attrs.update(additional_attrs)
+
+    try:
+        with dn.span(f"discovery.{discovery_type}", attributes=attrs):
+            pass  # Point-in-time span
+    except Exception as e:
+        logger.debug(f"Failed to create discovery span: {e}")
+
+
 def trace_blue_investigation(
     role: str,
     investigation_id: str,
     techniques_found: list[str] | None = None,
     severity: str | None = None,
-    target_host: str | None = None,
+    target_ip: str | None = None,
+    target_fqdn: str | None = None,
     target_user: str | None = None,
     target_domain: str | None = None,
 ) -> None:
@@ -751,12 +900,18 @@ def trace_blue_investigation(
         investigation_id: ID of the investigation.
         techniques_found: List of MITRE technique IDs found.
         severity: Severity assessment if available.
-        target_host: Optional target host being investigated.
+        target_ip: Optional target IP being investigated.
+        target_fqdn: Optional target FQDN being investigated.
         target_user: Optional target user being investigated.
         target_domain: Optional target domain.
     """
     attrs = create_agent_span_attributes(
-        role, "blue", target_host=target_host, target_user=target_user, target_domain=target_domain
+        role,
+        "blue",
+        target_ip=target_ip,
+        target_fqdn=target_fqdn,
+        target_user=target_user,
+        target_domain=target_domain,
     )
     attrs["investigation.id"] = investigation_id
 
@@ -790,7 +945,6 @@ def client_span(
     role: str,
     team: str,
     tool_name: str | None = None,
-    target_host: str | None = None,
     target_ip: str | None = None,
     target_fqdn: str | None = None,
     target_hostname: str | None = None,
@@ -811,7 +965,6 @@ def client_span(
         role: Agent role making the call.
         team: Team name ("red" or "blue").
         tool_name: Optional tool being requested.
-        target_host: Optional target hostname/IP (legacy).
         target_ip: Optional validated IP address.
         target_fqdn: Optional FQDN.
         target_hostname: Optional hostname.
@@ -834,7 +987,6 @@ def client_span(
         role,
         team,
         tool_name,
-        target_host,
         target_ip,
         target_fqdn,
         target_hostname,
@@ -867,7 +1019,6 @@ def server_span(
     role: str,
     team: str,
     tool_name: str | None = None,
-    target_host: str | None = None,
     target_ip: str | None = None,
     target_fqdn: str | None = None,
     target_hostname: str | None = None,
@@ -887,7 +1038,6 @@ def server_span(
         role: Agent role handling the request.
         team: Team name ("red" or "blue").
         tool_name: Optional tool being executed.
-        target_host: Optional target hostname/IP (legacy).
         target_ip: Optional validated IP address.
         target_fqdn: Optional FQDN.
         target_hostname: Optional hostname.
@@ -910,7 +1060,6 @@ def server_span(
         role,
         team,
         tool_name,
-        target_host,
         target_ip,
         target_fqdn,
         target_hostname,
@@ -940,7 +1089,6 @@ def producer_span(
     target_service: str,
     role: str,
     team: str,
-    target_host: str | None = None,
     target_ip: str | None = None,
     target_fqdn: str | None = None,
     target_hostname: str | None = None,
@@ -949,6 +1097,7 @@ def producer_span(
     target_domain: str | None = None,
     target_environment: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
+    dc_ips: set[str] | None = None,
 ):
     """Create a PRODUCER span for async message publishing.
 
@@ -959,13 +1108,13 @@ def producer_span(
         target_service: Name of the consuming service.
         role: Agent role publishing the message.
         team: Team name ("red" or "blue").
-        target_host: Optional target hostname/IP (legacy).
         target_ip: Optional validated IP address.
         target_fqdn: Optional FQDN.
         target_hostname: Optional hostname.
         target_type: Optional target type.
         target_user: Optional target username.
         target_domain: Optional target domain.
+        dc_ips: Optional set of known DC IP addresses for target type inference.
         target_environment: Optional target environment.
         additional_attrs: Optional additional attributes.
 
@@ -976,7 +1125,6 @@ def producer_span(
         role,
         team,
         None,
-        target_host,
         target_ip,
         target_fqdn,
         target_hostname,
@@ -985,6 +1133,7 @@ def producer_span(
         target_domain,
         target_environment,
         additional_attrs,
+        dc_ips,
     )
     attrs["messaging.destination.name"] = target_service
     attrs["peer.service"] = target_service
@@ -1007,7 +1156,6 @@ def consumer_span(
     name: str,
     role: str,
     team: str,
-    target_host: str | None = None,
     target_ip: str | None = None,
     target_fqdn: str | None = None,
     target_hostname: str | None = None,
@@ -1016,6 +1164,7 @@ def consumer_span(
     target_domain: str | None = None,
     target_environment: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
+    dc_ips: set[str] | None = None,
 ):
     """Create a CONSUMER span for async message consumption.
 
@@ -1025,7 +1174,6 @@ def consumer_span(
         name: Span name (e.g., "consume_task", "process_message").
         role: Agent role consuming the message.
         team: Team name ("red" or "blue").
-        target_host: Optional target hostname/IP (legacy).
         target_ip: Optional validated IP address.
         target_fqdn: Optional FQDN.
         target_hostname: Optional hostname.
@@ -1034,6 +1182,7 @@ def consumer_span(
         target_domain: Optional target domain.
         target_environment: Optional target environment.
         additional_attrs: Optional additional attributes.
+        dc_ips: Optional set of known DC IP addresses for target type inference.
 
     Yields:
         The span object for adding additional attributes.
@@ -1042,7 +1191,6 @@ def consumer_span(
         role,
         team,
         None,
-        target_host,
         target_ip,
         target_fqdn,
         target_hostname,
@@ -1051,6 +1199,7 @@ def consumer_span(
         target_domain,
         target_environment,
         additional_attrs,
+        dc_ips,
     )
 
     span = None

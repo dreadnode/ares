@@ -45,7 +45,7 @@ from ares.core.messages import (
 from ares.core.models import AgentRole, SharedRedTeamState
 from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue, TaskMessage
-from ares.core.tracing import create_agent_span_attributes
+from ares.core.tracing import IP_PATTERN, create_agent_span_attributes, is_likely_fqdn
 from ares.core.worker.cleanup import close_litellm_clients
 from ares.core.worker.operations import (
     discover_active_operation,
@@ -512,13 +512,42 @@ class RedisWorkerAgent:
         # Create CONSUMER span for Tempo service graph (explicit span management)
         # This pairs with the PRODUCER span from submit_task
         # Extract target info from payload for span metrics
-        target_host = (
-            payload_snapshot.get("target")
-            or payload_snapshot.get("target_ip")
-            or payload_snapshot.get("dc_ip")
-            or payload_snapshot.get("host")
-            or payload_snapshot.get("hostname")
-        )
+        # Properly separate IPs, FQDNs, and usernames to avoid putting usernames in host fields
+        target_ip = None
+        target_fqdn = None
+        target_user = None
+
+        # Check explicit IP fields first
+        for field in ("target_ip", "dc_ip", "ip"):
+            val = payload_snapshot.get(field)
+            if val and IP_PATTERN.match(val):
+                target_ip = val
+                break
+
+        # Check target/host fields - distinguish FQDN from username
+        for field in ("target", "host", "hostname"):
+            val = payload_snapshot.get(field)
+            if val:
+                if IP_PATTERN.match(val):
+                    if not target_ip:
+                        target_ip = val
+                elif "." in val and is_likely_fqdn(val):
+                    target_fqdn = val
+                elif "." in val:
+                    # Has dot but not FQDN -> likely username (e.g., "sansa.stark")
+                    target_user = val
+                elif val:
+                    # Plain hostname without dots
+                    target_fqdn = val
+                break
+
+        # Check explicit user fields
+        if not target_user:
+            target_user = (
+                payload_snapshot.get("target_user")
+                or payload_snapshot.get("username")
+                or payload_snapshot.get("user")
+            )
 
         # Refresh state BEFORE span creation to get target.environment from Redis
         await self._refresh_shared_state()
@@ -533,7 +562,12 @@ class RedisWorkerAgent:
             elif env_val:
                 target_env = str(env_val)
         span_attrs = create_agent_span_attributes(
-            self.role.value, "red", target_host=target_host, target_environment=target_env
+            self.role.value,
+            "red",
+            target_ip=target_ip,
+            target_fqdn=target_fqdn,
+            target_user=target_user,
+            target_environment=target_env,
         )
         span_attrs.update(
             {

@@ -27,7 +27,7 @@ from ares.core.config import (
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.models import AgentInfo, AgentRole, SharedRedTeamState
 from ares.core.templates import get_template_loader
-from ares.core.tracing import trace_tool_call
+from ares.core.tracing import IP_PATTERN, is_likely_fqdn, trace_tool_call
 from ares.tools.red import (
     ACLExploitTools,
     BloodHoundTools,
@@ -299,25 +299,35 @@ def create_role_hooks(
         # Create trace span for tool execution with result status
         error_msg = str(event.error)[:500] if hasattr(event, "error") and event.error else None
 
+        # Build DC IPs set from shared_state for proper target type inference
+        dc_ips: set[str] = set()
+        if shared_state:
+            # Add DC IPs from domain_controllers dict (values are IPs)
+            dc_ips.update(shared_state.domain_controllers.values())
+            # Add IPs from hosts marked as DCs
+            for host in shared_state.all_hosts:
+                if host.is_dc and host.ip:
+                    dc_ips.add(host.ip)
+
         # Extract target info from tool arguments for span metrics
         # Separate IP, FQDN, and hostname for OTel semantic convention compliance
+        # Uses is_likely_fqdn() to distinguish FQDNs from usernames (e.g., "sansa.stark")
         target_ip = None
         target_fqdn = None
         target_hostname = None
         target_domain = None
         target_user = None
+        target_type = None
         if hasattr(event, "tool_call") and event.tool_call and event.tool_call.arguments:
             try:
                 import json
-                import re
 
                 args = json.loads(event.tool_call.arguments)
-                ip_pattern = r"^\d{1,3}(?:\.\d{1,3}){3}$"
 
                 # Extract IP from IP-specific args
                 for arg in ("target_ip", "dc_ip", "ip"):
                     val = args.get(arg)
-                    if val and re.match(ip_pattern, val):
+                    if val and IP_PATTERN.match(val):
                         target_ip = val
                         break
 
@@ -325,24 +335,57 @@ def create_role_hooks(
                 for arg in ("target", "host", "hostname"):
                     val = args.get(arg)
                     if val:
-                        if re.match(ip_pattern, val):
+                        if IP_PATTERN.match(val):
                             # It's an IP, use as target_ip if not already set
                             if not target_ip:
                                 target_ip = val
-                        elif "." in val:
+                        elif "." in val and is_likely_fqdn(val):
                             # FQDN - extract hostname
                             target_fqdn = val
                             target_hostname = val.split(".")[0]
-                        else:
-                            # Plain hostname
+                        elif "." not in val:
+                            # Plain hostname (no dots)
                             target_hostname = val
+                        # else: value with dot but not FQDN (e.g., username) - skip
                         break
 
-                # Extract domain and user (unchanged)
+                # Extract domain and user
                 target_domain = args.get("domain") or args.get("target_domain")
+                # User can be explicit OR a non-FQDN "target" value with a dot
                 target_user = args.get("username") or args.get("user") or args.get("target_user")
+                # If "target" looks like a username (has dot, not FQDN), capture it
+                if not target_user:
+                    target_val = args.get("target")
+                    if (
+                        target_val
+                        and "." in target_val
+                        and not IP_PATTERN.match(target_val)
+                        and not is_likely_fqdn(target_val)
+                    ):
+                        target_user = target_val
             except Exception:
                 pass
+
+        # Try to resolve IP → FQDN from shared_state if we only have an IP
+        if target_ip and not target_fqdn and shared_state:
+            for host in shared_state.all_hosts:
+                if host.ip == target_ip and host.hostname and "." in host.hostname:
+                    target_fqdn = host.hostname
+                    if not target_hostname:
+                        target_hostname = host.hostname.split(".")[0]
+                    # Check if it's a DC
+                    if host.is_dc:
+                        target_type = "domain_controller"
+                    break
+
+        # If we still don't have target_type but have an IP, check if it's a DC
+        if not target_type and target_ip and target_ip in dc_ips:
+            target_type = "domain_controller"
+
+        # Get operation_id for span correlation (Tempo attack_operation_id dimension)
+        operation_id = getattr(shared_state, "operation_id", None) or getattr(
+            dispatcher, "operation_id", None
+        )
 
         trace_tool_call(
             role.value,
@@ -355,6 +398,9 @@ def create_role_hooks(
             target_hostname=target_hostname,
             target_domain=target_domain,
             target_user=target_user,
+            target_type=target_type,
+            dc_ips=dc_ips or None,
+            operation_id=operation_id,
         )
 
         # Circuit breaker logic

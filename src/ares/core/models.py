@@ -2721,6 +2721,26 @@ class SharedRedTeamState:
         self.all_weaknesses.append(block)
         logger.info(f"Weakness added [{dedup_key}]: {block[:60]}...")
 
+        # Trace the weakness discovery
+        try:
+            from ares.core.tracing import trace_discovery
+
+            # Parse dedup_key format: "weakness_type:entity1,entity2,..."
+            parts = dedup_key.split(":", 1)
+            weakness_type = parts[0]
+            entities = parts[1].split(",") if len(parts) > 1 else []
+            # First entity is often a username
+            target_user = entities[0] if entities else None
+            trace_discovery(
+                discovery_type="weakness",
+                source_agent="result_processor",
+                operation_id=self.operation_id,
+                target_user=target_user,
+                weakness_type=weakness_type,
+            )
+        except Exception:
+            pass  # Don't let tracing errors break state management
+
         # Persist to Redis backend if available and in the correct event loop
         if self._can_persist_to_backend():
             import asyncio

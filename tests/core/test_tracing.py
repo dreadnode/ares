@@ -11,6 +11,7 @@ from ares.core.tracing import (
     get_tool_category,
     get_tool_mitre_info,
     infer_target_type,
+    is_likely_fqdn,
     setup_otel_tracing,
 )
 
@@ -305,6 +306,53 @@ class TestCreateAgentSpanAttributes:
         assert attrs["attack_team"] == "red"
 
 
+class TestIsLikelyFqdn:
+    """Tests for is_likely_fqdn function - distinguishes FQDNs from usernames."""
+
+    def test_fqdn_with_local_suffix(self):
+        """FQDNs ending in .local should return True."""
+        assert is_likely_fqdn("dc01.contoso.local") is True
+        assert is_likely_fqdn("server.domain.local") is True
+
+    def test_fqdn_with_other_tld(self):
+        """FQDNs with common TLDs should return True."""
+        assert is_likely_fqdn("host.company.com") is True
+        assert is_likely_fqdn("server.internal") is True
+        assert is_likely_fqdn("db.corp") is True
+
+    def test_username_with_dot_returns_false(self):
+        """Usernames like 'sansa.stark' should return False."""
+        assert is_likely_fqdn("sansa.stark") is False
+        assert is_likely_fqdn("jon.snow") is False
+        assert is_likely_fqdn("john.doe") is False
+
+    def test_three_segment_fqdn(self):
+        """3+ segment names should return True (FQDNs)."""
+        assert is_likely_fqdn("dc01.child.parent") is True
+        assert is_likely_fqdn("server.sub.domain") is True
+
+    def test_hostname_prefix_patterns(self):
+        """Two-segment names with hostname prefixes should return True."""
+        assert is_likely_fqdn("dc01.domain") is True
+        assert is_likely_fqdn("sql01.network") is True
+        assert is_likely_fqdn("web01.something") is True
+
+    def test_ip_address_returns_false(self):
+        """IP addresses should return False (not FQDNs)."""
+        assert is_likely_fqdn("192.168.58.10") is False
+        assert is_likely_fqdn("10.1.2.3") is False
+
+    def test_plain_hostname_returns_false(self):
+        """Plain hostnames without dots should return False."""
+        assert is_likely_fqdn("dc01") is False
+        assert is_likely_fqdn("server") is False
+
+    def test_empty_and_none_returns_false(self):
+        """Empty string and None should return False."""
+        assert is_likely_fqdn("") is False
+        assert is_likely_fqdn(None) is False  # type: ignore[arg-type]
+
+
 class TestInferTargetType:
     """Tests for infer_target_type function."""
 
@@ -345,29 +393,30 @@ class TestInferTargetType:
 
 
 class TestTargetAttributes:
-    """Tests for target_host and target_type in span attributes."""
+    """Tests for target_ip, target_fqdn and target_type in span attributes."""
 
-    def test_target_host_included(self):
-        """Target host should be included using OTel destination.address."""
-        attrs = create_agent_span_attributes("lateral", "red", target_host="192.168.58.10")
-        assert attrs["destination.address"] == "192.168.58.10"
+    def test_target_ip_included(self):
+        """Target IP should be in destination.ip."""
+        attrs = create_agent_span_attributes("lateral", "red", target_ip="192.168.58.10")
+        assert attrs["destination.ip"] == "192.168.58.10"
+        assert "destination.address" not in attrs  # No FQDN provided
 
     def test_target_type_included(self):
         """Explicit target type should be included using attack_target_type."""
         attrs = create_agent_span_attributes(
-            "lateral", "red", target_host="192.168.58.10", target_type="domain_controller"
+            "lateral", "red", target_ip="192.168.58.10", target_type="domain_controller"
         )
         assert attrs["attack_target_type"] == "domain_controller"
 
-    def test_target_type_inferred_from_hostname(self):
-        """Target type should be inferred from hostname if not provided."""
-        attrs = create_agent_span_attributes("lateral", "red", target_host="dc01.contoso.local")
+    def test_target_type_inferred_from_fqdn(self):
+        """Target type should be inferred from FQDN if not provided."""
+        attrs = create_agent_span_attributes("lateral", "red", target_fqdn="dc01.contoso.local")
         assert attrs["attack_target_type"] == "domain_controller"
 
     def test_target_type_not_overwritten_when_explicit(self):
         """Explicit target type should not be overwritten by inference."""
         attrs = create_agent_span_attributes(
-            "lateral", "red", target_host="dc01", target_type="custom_type"
+            "lateral", "red", target_hostname="dc01", target_type="custom_type"
         )
         assert attrs["attack_target_type"] == "custom_type"
 
@@ -380,28 +429,30 @@ class TestTargetAttributes:
     def test_target_domain_included(self):
         """Target domain should be included using attack_target_domain."""
         attrs = create_agent_span_attributes(
-            "lateral", "red", target_host="dc01.contoso.local", target_domain="contoso.local"
+            "lateral", "red", target_fqdn="dc01.contoso.local", target_domain="contoso.local"
         )
         assert attrs["attack_target_domain"] == "contoso.local"
 
     def test_target_domain_inferred_from_fqdn(self):
         """Target domain should be inferred from FQDN if not provided."""
-        attrs = create_agent_span_attributes("lateral", "red", target_host="dc01.contoso.local")
+        attrs = create_agent_span_attributes("lateral", "red", target_fqdn="dc01.contoso.local")
         assert attrs["attack_target_domain"] == "contoso.local"
 
     def test_target_domain_not_inferred_from_ip(self):
         """Target domain should not be inferred from IP addresses."""
-        attrs = create_agent_span_attributes("lateral", "red", target_host="192.168.58.10")
+        attrs = create_agent_span_attributes("lateral", "red", target_ip="192.168.58.10")
         assert "attack_target_domain" not in attrs
 
 
 class TestIpFqdnSeparation:
     """Tests for separate IP, FQDN, and hostname attributes."""
 
-    def test_target_ip_sets_destination_address(self):
-        """Target IP should be used for destination.address."""
+    def test_target_ip_sets_destination_ip(self):
+        """Target IP should be used for destination.ip (separate from FQDN)."""
         attrs = create_agent_span_attributes("lateral", "red", target_ip="192.168.58.10")
-        assert attrs["destination.address"] == "192.168.58.10"
+        # IP goes to destination.ip, destination.address is for FQDNs only
+        assert attrs["destination.ip"] == "192.168.58.10"
+        assert "destination.address" not in attrs
         assert "server.address" not in attrs
         assert "host.name" not in attrs
 
@@ -413,17 +464,20 @@ class TestIpFqdnSeparation:
         assert attrs["host.name"] == "dc01"
         assert attrs["attack_target_domain"] == "contoso.local"
 
-    def test_target_ip_preferred_over_fqdn_for_destination(self):
-        """When both IP and FQDN provided, IP should be destination.address."""
+    def test_fqdn_and_ip_in_separate_fields(self):
+        """When both IP and FQDN provided, they should be in separate fields."""
         attrs = create_agent_span_attributes(
             "lateral",
             "red",
             target_ip="192.168.58.10",
             target_fqdn="dc01.contoso.local",
         )
-        assert attrs["destination.address"] == "192.168.58.10"
+        # FQDN goes to destination.address and server.address
+        assert attrs["destination.address"] == "dc01.contoso.local"
         assert attrs["server.address"] == "dc01.contoso.local"
         assert attrs["host.name"] == "dc01"
+        # IP goes to separate destination.ip field
+        assert attrs["destination.ip"] == "192.168.58.10"
 
     def test_target_hostname_without_fqdn(self):
         """Plain hostname should set host.name without server.address."""
@@ -441,20 +495,6 @@ class TestIpFqdnSeparation:
         )
         assert attrs["host.name"] == "custom-host"
         assert attrs["server.address"] == "dc01.contoso.local"
-
-    def test_target_host_legacy_fqdn_sets_server_address(self):
-        """Legacy target_host with FQDN should still set server.address."""
-        attrs = create_agent_span_attributes("lateral", "red", target_host="dc01.contoso.local")
-        assert attrs["destination.address"] == "dc01.contoso.local"
-        assert attrs["server.address"] == "dc01.contoso.local"
-        assert attrs["host.name"] == "dc01"
-
-    def test_target_host_legacy_ip_no_server_address(self):
-        """Legacy target_host with IP should not set server.address."""
-        attrs = create_agent_span_attributes("lateral", "red", target_host="192.168.58.10")
-        assert attrs["destination.address"] == "192.168.58.10"
-        assert "server.address" not in attrs
-        assert "host.name" not in attrs
 
     def test_target_type_inferred_from_fqdn(self):
         """Target type should be inferred from FQDN hostname part."""
@@ -478,12 +518,40 @@ class TestIpFqdnSeparation:
             target_user="administrator",
             target_domain="contoso.local",
         )
-        assert attrs["destination.address"] == "192.168.58.10"
+        # FQDN goes to destination.address and server.address
+        assert attrs["destination.address"] == "dc01.contoso.local"
         assert attrs["server.address"] == "dc01.contoso.local"
+        # IP goes to separate destination.ip field
+        assert attrs["destination.ip"] == "192.168.58.10"
         assert attrs["host.name"] == "dc01"
         assert attrs["user.name"] == "administrator"
         assert attrs["attack_target_domain"] == "contoso.local"
         assert attrs["attack_target_type"] == "domain_controller"
+
+    def test_dc_ips_enables_dc_detection_from_ip(self):
+        """DC IPs set should enable domain_controller detection from IP alone."""
+        dc_ips = {"192.168.58.10", "192.168.58.20"}
+        attrs = create_agent_span_attributes(
+            "lateral",
+            "red",
+            target_ip="192.168.58.10",
+            dc_ips=dc_ips,
+        )
+        # IP is in dc_ips set, so should be detected as domain_controller
+        assert attrs["attack_target_type"] == "domain_controller"
+        assert attrs["destination.ip"] == "192.168.58.10"
+
+    def test_dc_ips_non_dc_ip_remains_server(self):
+        """IP not in DC IPs set should remain as server type."""
+        dc_ips = {"192.168.58.10", "192.168.58.20"}
+        attrs = create_agent_span_attributes(
+            "lateral",
+            "red",
+            target_ip="192.168.58.30",  # Not in dc_ips
+            dc_ips=dc_ips,
+        )
+        # IP is not in dc_ips set, so should be server
+        assert attrs["attack_target_type"] == "server"
 
 
 class TestMitreMappings:
@@ -591,8 +659,8 @@ class TestTraceToolCall:
             # Should not raise - just logs debug
             trace_tool_call("recon", "red", "nmap_scan")
 
-    def test_trace_tool_call_with_target_host(self):
-        """trace_tool_call should include target host using OTel conventions."""
+    def test_trace_tool_call_with_target_fqdn(self):
+        """trace_tool_call should include target FQDN using OTel conventions."""
         from unittest.mock import MagicMock, patch
 
         from ares.core.tracing import trace_tool_call
@@ -606,7 +674,7 @@ class TestTraceToolCall:
                 "lateral",
                 "red",
                 "psexec",
-                target_host="dc01.contoso.local",
+                target_fqdn="dc01.contoso.local",
             )
 
         call_kwargs = mock_dn_span.call_args[1]
@@ -629,12 +697,13 @@ class TestTraceToolCall:
                 "lateral",
                 "red",
                 "psexec",
-                target_host="192.168.58.10",
+                target_ip="192.168.58.10",
                 target_type="domain_controller",
             )
 
         call_kwargs = mock_dn_span.call_args[1]
-        assert call_kwargs["attributes"]["destination.address"] == "192.168.58.10"
+        # IP goes to destination.ip (separate from FQDN in destination.address)
+        assert call_kwargs["attributes"]["destination.ip"] == "192.168.58.10"
         assert call_kwargs["attributes"]["attack_target_type"] == "domain_controller"
 
     def test_trace_tool_call_with_target_user(self):
@@ -676,12 +745,55 @@ class TestTraceToolCall:
                 "lateral",
                 "red",
                 "psexec",
-                target_host="dc01.contoso.local",
+                target_fqdn="dc01.contoso.local",
             )
 
         call_kwargs = mock_dn_span.call_args[1]
         assert call_kwargs["attributes"]["attack_tool_name"] == "psexec"
         assert call_kwargs["attributes"]["attack_tool_category"] == "LateralMovementTools"
+
+    def test_trace_tool_call_with_operation_id(self):
+        """trace_tool_call should include attack_operation_id for Tempo correlation."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.tracing import trace_tool_call
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_tool_call(
+                "credential_access",
+                "red",
+                "secretsdump",
+                target_fqdn="dc01.contoso.local",
+                operation_id="op-12345",
+            )
+
+        call_kwargs = mock_dn_span.call_args[1]
+        assert call_kwargs["attributes"]["attack_operation_id"] == "op-12345"
+
+    def test_trace_tool_call_without_operation_id(self):
+        """trace_tool_call should not include attack_operation_id when not provided."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.tracing import trace_tool_call
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_tool_call(
+                "credential_access",
+                "red",
+                "secretsdump",
+                target_fqdn="dc01.contoso.local",
+            )
+
+        call_kwargs = mock_dn_span.call_args[1]
+        assert "attack_operation_id" not in call_kwargs["attributes"]
 
 
 class TestTraceBlueInvestigation:

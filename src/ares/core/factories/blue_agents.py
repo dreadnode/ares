@@ -17,7 +17,7 @@ from ares.core.factories.blue_factory import max_tool_calls_stop
 from ares.core.factories.mcp_utils import parse_mcp_text_content
 from ares.core.models import BlueRole
 from ares.core.templates import get_template_loader
-from ares.core.tracing import trace_tool_call
+from ares.core.tracing import IP_PATTERN, is_likely_fqdn, trace_tool_call
 from ares.tools.blue.callbacks import BlueWorkerCallbackTools
 from ares.tools.blue.shared_wrappers import SharedInvestigationTools
 
@@ -408,6 +408,7 @@ def create_blue_hooks(role: BlueRole) -> list:
 
         # Extract target info from tool arguments for span metrics
         # Separate IP, FQDN, and hostname for OTel semantic convention compliance
+        # Uses is_likely_fqdn() to distinguish FQDNs from usernames (e.g., "sansa.stark")
         target_ip = None
         target_fqdn = None
         target_hostname = None
@@ -416,15 +417,13 @@ def create_blue_hooks(role: BlueRole) -> list:
         if hasattr(event, "tool_call") and event.tool_call and event.tool_call.arguments:
             try:
                 import json
-                import re
 
                 args = json.loads(event.tool_call.arguments)
-                ip_pattern = r"^\d{1,3}(?:\.\d{1,3}){3}$"
 
                 # Extract IP from IP-specific args
                 for arg in ("target_ip", "ip"):
                     val = args.get(arg)
-                    if val and re.match(ip_pattern, val):
+                    if val and IP_PATTERN.match(val):
                         target_ip = val
                         break
 
@@ -432,22 +431,34 @@ def create_blue_hooks(role: BlueRole) -> list:
                 for arg in ("target", "host", "hostname"):
                     val = args.get(arg)
                     if val:
-                        if re.match(ip_pattern, val):
+                        if IP_PATTERN.match(val):
                             # It's an IP, use as target_ip if not already set
                             if not target_ip:
                                 target_ip = val
-                        elif "." in val:
+                        elif "." in val and is_likely_fqdn(val):
                             # FQDN - extract hostname
                             target_fqdn = val
                             target_hostname = val.split(".")[0]
-                        else:
-                            # Plain hostname
+                        elif "." not in val:
+                            # Plain hostname (no dots)
                             target_hostname = val
+                        # else: value with dot but not FQDN (e.g., username) - skip
                         break
 
-                # Extract domain and user (unchanged)
+                # Extract domain and user
                 target_domain = args.get("domain") or args.get("target_domain")
+                # User can be explicit OR a non-FQDN "target" value with a dot
                 target_user = args.get("username") or args.get("user") or args.get("target_user")
+                # If "target" looks like a username (has dot, not FQDN), capture it
+                if not target_user:
+                    target_val = args.get("target")
+                    if (
+                        target_val
+                        and "." in target_val
+                        and not IP_PATTERN.match(target_val)
+                        and not is_likely_fqdn(target_val)
+                    ):
+                        target_user = target_val
             except Exception:
                 pass
 
