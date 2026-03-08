@@ -1163,6 +1163,104 @@ class TestCredentialDomainCrossReference:
         domains = {c.domain for c in state.all_credentials}
         assert domains == {"contoso.local", "fabrikam.local"}
 
+    def test_add_credential_rejects_duplicate_when_correct_domain_comes_second(self):
+        """Credential with correct domain should be rejected if wrong domain was stored first.
+
+        This tests the scenario where:
+        1. Credential arrives BEFORE user enumeration with parent domain (hallucination)
+        2. User is then discovered in the child domain (via add_user which upgrades domain)
+        3. Same credential arrives again with the correct child domain
+        4. Second credential should be rejected as duplicate (same user, same password)
+
+        Previously this allowed both credentials, causing duplicates in loot.
+        """
+        from ares.core.models import Target
+
+        state = SharedRedTeamState(operation_id="op-test-cross-domain-dup-reverse")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # Step 1: Credential arrives with PARENT domain (before user enumeration)
+        # This simulates a hallucination where child domain user is attributed to parent
+        # add_credential also adds user with parent domain via add_user()
+        cred1 = Credential(
+            username="test.user",
+            password="TestPass123",  # pragma: allowlist secret
+            domain="contoso.local",  # Wrong - should be child.contoso.local
+            source="spray_result",
+        )
+        added1 = state.add_credential(cred1, "sprayer")
+        assert added1 is True
+        assert len(state.all_credentials) == 1
+        assert state.all_credentials[0].domain == "contoso.local"
+        # User was also added with parent domain
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "contoso.local"
+
+        # Step 2: User is discovered in the CHILD domain (via LDAP/BloodHound)
+        # add_user() upgrades the existing user's domain from parent to child
+        # AND updates existing credentials to the child domain
+        state.add_user("test.user", "child.contoso.local", "bloodhound")
+        # User domain should be upgraded
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "child.contoso.local"
+        # Credential domain should also be upgraded by _update_credentials_domain
+        assert state.all_credentials[0].domain == "child.contoso.local"
+
+        # Step 3: Same credential arrives with CORRECT child domain
+        cred2 = Credential(
+            username="test.user",
+            password="TestPass123",  # pragma: allowlist secret
+            domain="child.contoso.local",  # Correct domain
+            source="ldap_description",
+        )
+        added2 = state.add_credential(cred2, "recon")
+
+        # Should be REJECTED - exact duplicate (same domain:username:password)
+        assert added2 is False
+        assert len(state.all_credentials) == 1
+
+    def test_add_credential_rejects_duplicate_before_user_enumeration(self):
+        """Same username:password with different domains should be rejected before user enum.
+
+        This tests the scenario where:
+        1. Credential arrives with parent domain
+        2. Same credential arrives with child domain (BEFORE user enumeration discovers them)
+        3. Second credential should be rejected as duplicate
+
+        This prevents duplicate loot when agent hallucinations attribute a credential
+        to different domains before we've confirmed which domain the user actually exists in.
+        """
+        from ares.core.models import Target
+
+        state = SharedRedTeamState(operation_id="op-test-cross-domain-dup-early")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # First credential with parent domain
+        cred1 = Credential(
+            username="early.user",
+            password="EarlyPass123",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="spray_result",
+        )
+        added1 = state.add_credential(cred1, "sprayer")
+        assert added1 is True
+        assert len(state.all_credentials) == 1
+
+        # Same credential with child domain - BEFORE any user enumeration
+        # User exists in all_users only via add_credential's add_user call (parent domain)
+        cred2 = Credential(
+            username="early.user",
+            password="EarlyPass123",  # pragma: allowlist secret
+            domain="child.contoso.local",
+            source="another_spray",
+        )
+        added2 = state.add_credential(cred2, "sprayer2")
+
+        # Should be REJECTED - conservative approach: treat as duplicate when user
+        # hasn't been confirmed in multiple domains
+        assert added2 is False
+        assert len(state.all_credentials) == 1
+
 
 class TestAddUserDomainUpgrade:
     """Tests for add_user parent-to-child domain upgrade."""

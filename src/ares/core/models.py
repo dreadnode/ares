@@ -1696,18 +1696,32 @@ class SharedRedTeamState:
                     for u in self.all_users
                     if u.username.lower() == username.lower() and u.domain
                 }
-                if len(user_domains) == 1 and domain.lower() not in user_domains:
-                    # User only exists in one domain, this is likely a hallucination
-                    logger.warning(
-                        f"Credential rejected: cross-domain duplicate {domain}\\{username} "
-                        f"(user only exists in {existing.domain}) from {source_agent}"
+                if len(user_domains) >= 2:
+                    # User exists in multiple domains - legitimate password reuse
+                    logger.info(
+                        f"Password reuse detected: {username} in {domain} and {existing.domain}"
                     )
+                else:
+                    # User exists in 0 or 1 domain - same username:password is a duplicate
+                    # Either:
+                    # - User only exists in one domain (one credential has wrong domain)
+                    # - User not discovered yet (conservative: treat as duplicate)
+                    # We reject the duplicate to prevent storing the same credential twice
+                    # with different (possibly hallucinated) domains
+                    existing_domain = existing.domain.strip().lower()
+                    if user_domains:
+                        known_domain = next(iter(user_domains))
+                        logger.debug(
+                            f"Credential rejected: cross-domain duplicate {domain}\\{username} "
+                            f"(user only exists in {known_domain}) from {source_agent}"
+                        )
+                    else:
+                        logger.debug(
+                            f"Credential rejected: cross-domain duplicate {domain}\\{username} "
+                            f"(already have {existing_domain}\\{username}, user not enumerated yet) "
+                            f"from {source_agent}"
+                        )
                     return False
-                # User exists in multiple domains or we haven't discovered them yet
-                # Log password reuse but allow it
-                logger.info(
-                    f"Password reuse detected: {username} in {domain} and {existing.domain}"
-                )
         credential.username = username
         credential.domain = domain
         credential.password = password
@@ -1892,28 +1906,64 @@ class SharedRedTeamState:
         return True
 
     def _update_credentials_domain(self, username: str, old_domain: str, new_domain: str) -> None:
-        """Update credentials for a user when their domain is corrected."""
-        updated = 0
+        """Update credentials and hashes for a user when their domain is corrected.
+
+        Updates both in-memory state AND persists changes to Redis backend.
+        """
+        updated_creds: list[Credential] = []
+        updated_hashes: list[Hash] = []
+
         for cred in self.all_credentials:
             if (
                 cred.username.lower() == username.lower()
                 and cred.domain.lower() == old_domain.lower()
             ):
+                updated_creds.append(cred)
                 cred.domain = new_domain
-                updated += 1
+
         for hash_obj in self.all_hashes:
             if (
                 hash_obj.username.lower() == username.lower()
                 and hash_obj.domain.lower() == old_domain.lower()
             ):
+                updated_hashes.append(hash_obj)
                 hash_obj.domain = new_domain
-                updated += 1
-        if updated:
+
+        total_updated = len(updated_creds) + len(updated_hashes)
+        if total_updated:
             logger.info(
-                f"Updated {updated} credential(s)/hash(es) for {username}: "
+                f"Updated {total_updated} credential(s)/hash(es) for {username}: "
                 f"{old_domain} -> {new_domain}"
             )
             self.all_credentials = self._dedupe_credentials(self.all_credentials)
+
+            # Persist domain corrections to Redis
+            if self._can_persist_to_backend():
+                import asyncio
+
+                loop = asyncio.get_running_loop()
+                for cred in updated_creds:
+                    task = loop.create_task(
+                        self._backend.update_credential_domain(
+                            cred.username, cred.password, old_domain, new_domain
+                        )
+                    )
+                    self._track_background_task(
+                        task, f"update_cred_domain({username}:{old_domain}->{new_domain})"
+                    )
+                for hash_obj in updated_hashes:
+                    task = loop.create_task(
+                        self._backend.update_hash_domain(
+                            hash_obj.username,
+                            hash_obj.hash_value,
+                            hash_obj.hash_type or "",
+                            old_domain,
+                            new_domain,
+                        )
+                    )
+                    self._track_background_task(
+                        task, f"update_hash_domain({username}:{old_domain}->{new_domain})"
+                    )
 
     def add_domain(self, domain: str) -> bool:
         """Add domain if not duplicate. Returns True if added.
