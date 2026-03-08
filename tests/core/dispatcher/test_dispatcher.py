@@ -954,6 +954,28 @@ class TestCredentialDomainResolution:
         assert password == "SqlP@ss123"  # pragma: allowlist secret
         assert domain == ""  # No domain in output
 
+    def test_extract_plaintext_passwords_extracts_lsa_default_password(self):
+        """Should extract LSA DefaultPassword from secretsdump output."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-cred-11")
+
+        # Actual secretsdump LSA DefaultPassword format
+        output = """
+[*] Dumping cached domain logon information (domain/username:hash)
+[*] Dumping LSA Secrets
+[*] DefaultPassword
+CONTOSO\\svc_backup:B@ckupP@ss123!
+[*] DPAPI_SYSTEM
+        """
+
+        creds = dispatcher._extract_plaintext_passwords_from_output(output)
+
+        assert len(creds) == 1
+        username, password, domain = creds[0]
+        assert username == "svc_backup"
+        assert password == "B@ckupP@ss123!"  # pragma: allowlist secret
+        assert domain == "CONTOSO"
+
 
 class TestCredentialDomainCrossReference:
     """Tests for credential domain cross-reference in SharedRedTeamState.add_credential().
@@ -1716,3 +1738,240 @@ class TestWorkerHeartbeatTaskActivity:
         updated_task = state.pending_tasks["task-123"]
         assert updated_task.last_activity_at > old_time
         assert updated_task.status == TaskStatus.IN_PROGRESS
+
+
+class TestModuleExtractionFunction:
+    """Tests for module-level extract_plaintext_passwords_from_output in extraction.py."""
+
+    def test_module_extract_lsa_default_password(self):
+        """Should extract LSA DefaultPassword from secretsdump output."""
+        from ares.core.dispatcher.extraction import extract_plaintext_passwords_from_output
+
+        # Actual secretsdump LSA DefaultPassword format
+        output = """
+[*] Dumping cached domain logon information (domain/username:hash)
+[*] Dumping LSA Secrets
+[*] DefaultPassword
+CONTOSO\\svc_backup:B@ckupP@ss123!
+[*] DPAPI_SYSTEM
+        """
+
+        creds = extract_plaintext_passwords_from_output(output)
+
+        assert len(creds) == 1
+        username, password, domain = creds[0]
+        assert username == "svc_backup"
+        assert password == "B@ckupP@ss123!"  # pragma: allowlist secret
+        assert domain == "CONTOSO"
+
+    def test_module_extract_password_field(self):
+        """Should still extract Password: field format."""
+        from ares.core.dispatcher.extraction import extract_plaintext_passwords_from_output
+
+        output = """
+        samaccountname: sql_svc
+        Password: SqlP@ss123
+        """
+
+        creds = extract_plaintext_passwords_from_output(output)
+
+        assert len(creds) == 1
+        username, password, domain = creds[0]
+        assert username == "sql_svc"
+        assert password == "SqlP@ss123"  # pragma: allowlist secret
+        assert domain == ""  # No domain in output
+
+    def test_module_extract_deduplicates_case_insensitive(self):
+        """Should deduplicate usernames case-insensitively."""
+        from ares.core.dispatcher.extraction import extract_plaintext_passwords_from_output
+
+        # Same user with different case should NOT be duplicated
+        output = """
+        samaccountname: Admin
+        Password: P@ssw0rd!
+
+        samaccountname: admin
+        Password: P@ssw0rd!
+
+        samaccountname: ADMIN
+        Password: P@ssw0rd!
+        """
+
+        creds = extract_plaintext_passwords_from_output(output)
+
+        # Should only get one entry (first occurrence preserved)
+        assert len(creds) == 1
+        username, password, _domain = creds[0]
+        assert username == "Admin"  # First occurrence preserved
+        assert password == "P@ssw0rd!"  # pragma: allowlist secret
+
+    def test_module_extract_different_passwords_not_deduplicated(self):
+        """Same username with different passwords should NOT be deduplicated."""
+        from ares.core.dispatcher.extraction import extract_plaintext_passwords_from_output
+
+        # Same user with different passwords = different credentials
+        output = """
+        samaccountname: admin
+        Password: OldPass123
+
+        samaccountname: admin
+        Password: NewPass456
+        """
+
+        creds = extract_plaintext_passwords_from_output(output)
+
+        # Should get both entries (different passwords)
+        assert len(creds) == 2
+
+
+class TestDispatcherExtractCaseInsensitiveDedup:
+    """Tests for case-insensitive deduplication in dispatcher method."""
+
+    def test_dispatcher_extract_deduplicates_case_insensitive(self):
+        """Dispatcher method should deduplicate usernames case-insensitively."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dedup")
+
+        # Same user with different case should NOT be duplicated
+        output = """
+        samaccountname: SVC_Backup
+        Password: P@ssw0rd!
+
+        samaccountname: svc_backup
+        Password: P@ssw0rd!
+        """
+
+        creds = dispatcher._extract_plaintext_passwords_from_output(output)
+
+        # Should only get one entry
+        assert len(creds) == 1
+        username, _password, _domain = creds[0]
+        assert username.lower() == "svc_backup"
+
+    def test_dispatcher_extract_lsa_deduplicates_case_insensitive(self):
+        """LSA DefaultPassword extraction should also deduplicate case-insensitively."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-lsa-dedup")
+
+        # Two LSA entries with different case (shouldn't happen in practice, but test defense)
+        output = """
+[*] DefaultPassword
+CONTOSO\\Admin:P@ssw0rd!
+        """
+
+        creds = dispatcher._extract_plaintext_passwords_from_output(output)
+
+        assert len(creds) == 1
+        username, _password, domain = creds[0]
+        assert username == "Admin"
+        assert domain == "CONTOSO"
+
+
+class TestDomainAdminTraceDiscovery:
+    """Tests for trace_discovery call when DA is achieved via krbtgt hash."""
+
+    def test_add_hash_krbtgt_calls_trace_discovery(self):
+        """Adding krbtgt NTLM hash should trigger trace_discovery for domain_admin."""
+        from unittest.mock import patch
+
+        from ares.core.models import Hash
+
+        state = SharedRedTeamState(operation_id="op-test-trace-da")
+
+        krbtgt_hash = Hash(
+            username="krbtgt",
+            domain="contoso.local",
+            hash_type="ntlm",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            source="secretsdump",
+        )
+
+        captured_calls = []
+
+        def mock_trace_discovery(*args, **kwargs):
+            captured_calls.append(kwargs)
+
+        # Patch at the source module where trace_discovery is defined
+        with patch("ares.core.tracing.trace_discovery", side_effect=mock_trace_discovery):
+            state.add_hash(krbtgt_hash, source_agent="lateral")
+
+        # Filter for domain_admin discovery (weakness is also traced)
+        da_calls = [c for c in captured_calls if c["discovery_type"] == "domain_admin"]
+        assert len(da_calls) == 1, f"Expected 1 domain_admin trace, got {len(da_calls)}"
+
+        call = da_calls[0]
+        assert call["source_agent"] == "lateral"
+        assert call["operation_id"] == "op-test-trace-da"
+        assert call["target_user"] == "krbtgt"
+        assert call["target_domain"] == "contoso.local"
+        assert call["additional_attrs"]["auto_detected"] is True
+        assert call["additional_attrs"]["credential_type"] == "ntlm_hash"
+        assert call["additional_attrs"]["mitre.technique.id"] == "T1003.006"
+
+    def test_add_hash_non_krbtgt_does_not_call_trace_discovery(self):
+        """Adding non-krbtgt hash should NOT trigger domain_admin trace_discovery."""
+        from unittest.mock import patch
+
+        from ares.core.models import Hash
+
+        state = SharedRedTeamState(operation_id="op-test-no-trace")
+
+        regular_hash = Hash(
+            username="sql_svc",
+            domain="contoso.local",
+            hash_type="ntlm",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            source="secretsdump",
+        )
+
+        captured_calls = []
+
+        def mock_trace_discovery(*args, **kwargs):
+            captured_calls.append(kwargs)
+
+        with patch("ares.core.tracing.trace_discovery", side_effect=mock_trace_discovery):
+            state.add_hash(regular_hash, source_agent="lateral")
+
+        # Filter for domain_admin discovery only
+        da_calls = [c for c in captured_calls if c["discovery_type"] == "domain_admin"]
+        assert len(da_calls) == 0, "Non-krbtgt hash should NOT trigger domain_admin trace"
+
+    def test_add_hash_krbtgt_only_traces_once(self):
+        """Multiple krbtgt hashes should only trace DA once (first occurrence)."""
+        from unittest.mock import patch
+
+        from ares.core.models import Hash
+
+        state = SharedRedTeamState(operation_id="op-test-trace-once")
+
+        krbtgt_hash1 = Hash(
+            username="krbtgt",
+            domain="contoso.local",
+            hash_type="ntlm",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:aaaa",
+            source="secretsdump",
+        )
+
+        krbtgt_hash2 = Hash(
+            username="krbtgt",
+            domain="child.contoso.local",
+            hash_type="ntlm",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:bbbb",
+            source="secretsdump",
+        )
+
+        captured_calls = []
+
+        def mock_trace_discovery(*args, **kwargs):
+            captured_calls.append(kwargs)
+
+        with patch("ares.core.tracing.trace_discovery", side_effect=mock_trace_discovery):
+            state.add_hash(krbtgt_hash1, source_agent="lateral")
+            state.add_hash(krbtgt_hash2, source_agent="lateral")
+
+        # Filter for domain_admin discovery only
+        da_calls = [c for c in captured_calls if c["discovery_type"] == "domain_admin"]
+
+        # Should only trace once (first krbtgt sets has_domain_admin=True)
+        assert len(da_calls) == 1, f"Expected 1 domain_admin trace, got {len(da_calls)}"
+        assert da_calls[0]["target_domain"] == "contoso.local"

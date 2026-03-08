@@ -140,27 +140,51 @@ def extract_users_from_output(output: str) -> list[str]:
     return users
 
 
-def extract_plaintext_passwords_from_output(output: str) -> list[tuple[str, str]]:
+def extract_plaintext_passwords_from_output(output: str) -> list[tuple[str, str, str]]:
     """Extract username/password pairs from tool output.
 
-    Parses patterns containing "Password:" field along with associated usernames.
+    Parses patterns containing "Password:" field along with associated usernames,
+    as well as LSA DefaultPassword entries from secretsdump output.
 
     Args:
         output: Raw command output containing credential information.
 
     Returns:
-        List of (username, password) tuples.
+        List of (username, password, domain) tuples. Domain may be empty string.
     """
     if not output:
         return []
 
-    creds: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    creds: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
     current_user = ""
+    expecting_default_password = False
 
     for line in output.splitlines():
         stripped = line.strip()
         if not stripped:
+            continue
+
+        # Handle LSA DefaultPassword format from secretsdump:
+        # [*] DefaultPassword
+        # DOMAIN\user:password
+        if "[*] DefaultPassword" in stripped:
+            expecting_default_password = True
+            continue
+
+        if expecting_default_password:
+            expecting_default_password = False
+            # Parse DOMAIN\user:password format
+            lsa_match = re.match(r"^([^\\]+)\\([^:]+):(.+)$", stripped)
+            if lsa_match:
+                domain = lsa_match.group(1).strip()
+                username = lsa_match.group(2).strip()
+                password = lsa_match.group(3).strip()
+                if username and password:
+                    key = (username.lower(), password, domain.lower())
+                    if key not in seen:
+                        seen.add(key)
+                        creds.append((username, password, domain))
             continue
 
         # Track current user from various patterns
@@ -206,12 +230,12 @@ def extract_plaintext_passwords_from_output(output: str) -> list[tuple[str, str]
         if "/" in password or "\\" in password or password.endswith(".txt"):
             continue
 
-        key = (username, password)
+        key = (username.lower(), password, "")
         if key in seen:
             continue
 
         seen.add(key)
-        creds.append(key)
+        creds.append((username, password, ""))
 
     return creds
 

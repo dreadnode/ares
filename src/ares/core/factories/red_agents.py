@@ -895,7 +895,10 @@ def create_role_hooks(
             # Extract and publish credentials
             if tool_name in CREDENTIAL_EXTRACTION_TOOLS:
                 creds = extract_plaintext_passwords_from_output(output)
-                for username, password in creds:
+                for username, password, extracted_domain in creds:
+                    # Use extracted domain if available, otherwise fall back to target domain
+                    target_domain = shared_state.target.domain if shared_state.target else ""
+                    domain = extracted_domain or target_domain or ""
                     try:
                         await task_queue.publish_discovery(
                             operation_id=operation_id,
@@ -903,11 +906,11 @@ def create_role_hooks(
                             data={
                                 "username": username,
                                 "password": password,
-                                "domain": shared_state.target_domain or "",
+                                "domain": domain,
                             },
                             source_agent=log_name,
                         )
-                        logger.info(f"📡 [{log_name}] Published credential: {username}")
+                        logger.info(f"📡 [{log_name}] Published credential: {domain}\\{username}")
                     except Exception as e:
                         logger.warning(f"Failed to publish credential discovery: {e}")
 

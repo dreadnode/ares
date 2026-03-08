@@ -2352,6 +2352,24 @@ class SharedRedTeamState:
                 f"- **Impact:** Complete domain compromise. Golden Tickets grant indefinite DA access."
             )
 
+            # Trace the domain admin achievement for OpenTelemetry
+            # This is critical for Grafana dashboards to show DA as achieved
+            from ares.core.tracing import trace_discovery
+
+            trace_discovery(
+                discovery_type="domain_admin",
+                source_agent=source_agent or "auto-detect",
+                operation_id=self.operation_id,
+                target_user="krbtgt",
+                target_domain=domain,
+                additional_attrs={
+                    "attack_path": attack_chain,
+                    "credential_type": "ntlm_hash",
+                    "mitre.technique.id": "T1003.006",  # DCSync/credential dumping
+                    "auto_detected": True,
+                },
+            )
+
         # Persist to Redis backend if available and in the correct event loop
         if self._can_persist_to_backend():
             import asyncio
