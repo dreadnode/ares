@@ -791,6 +791,34 @@ class BlueTaskQueue:
                 pass
         return None
 
+    async def get_all_heartbeats(self, pattern: str = "*") -> dict[str, dict[str, Any]]:
+        """Get all blue worker heartbeats matching pattern.
+
+        Args:
+            pattern: Glob pattern to filter agent names (default: "*" for all).
+
+        Returns:
+            Dict mapping agent_name to heartbeat data.
+        """
+        if not self._connected:
+            await self.connect()
+
+        result: dict[str, dict[str, Any]] = {}
+        async for key in self.redis.scan_iter(f"{self.HEARTBEAT_PREFIX}:{pattern}"):
+            # Key format: ares:blue:heartbeat:blue-{role}-{pod}
+            # Decode bytes to str if needed
+            key_str = key.decode() if isinstance(key, bytes) else key
+            agent_name = key_str.split(":")[-1]
+            data = await self.redis.get(key)
+            if data:
+                try:
+                    data_str = data.decode() if isinstance(data, bytes) else data
+                    result[agent_name] = json.loads(data_str)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+
+        return result
+
 
 __all__ = [
     "BlueTaskMessage",

@@ -28,7 +28,10 @@ import os
 import socket
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from types import EllipsisType
 
 from loguru import logger
 
@@ -272,6 +275,11 @@ _CONNECTION_ERROR_KEYWORDS = frozenset(
         "eof",
         "errno",
         "socket",
+        # DNS resolution failures
+        "name or service not known",
+        "getaddrinfo",
+        "temporary failure in name resolution",
+        "no address associated",
     }
 )
 
@@ -340,6 +348,7 @@ async def create_redis_client(
     *,
     decode_responses: bool = False,
     direct_connection: bool = False,
+    socket_timeout: float | None | EllipsisType = ...,  # ... means "use default from env"
 ):
     """
     Create a Redis client, using Sentinel master if configured.
@@ -355,6 +364,8 @@ async def create_redis_client(
             with separate event loops to avoid cross-loop Future errors.
             The client won't auto-failover but avoids SentinelConnectionPool's
             internal async state sharing issues.
+        socket_timeout: Socket timeout in seconds. Use None to disable (for blocking
+            operations like BRPOP). Use ... (default) to use env var setting.
 
     Returns:
         Async Redis client connected to master
@@ -365,11 +376,14 @@ async def create_redis_client(
         raise RuntimeError("redis package required: pip install redis") from e
 
     sentinel_config = get_redis_sentinel_config()
-    socket_timeout, socket_connect_timeout, health_check_interval = _get_redis_timeouts()
+    default_socket_timeout, socket_connect_timeout, health_check_interval = _get_redis_timeouts()
+
+    # Use explicit socket_timeout if provided, otherwise use default from env
+    effective_socket_timeout = default_socket_timeout if socket_timeout is ... else socket_timeout
 
     thread_name = threading.current_thread().name
     logger.debug(
-        f"Redis client config for thread '{thread_name}': socket_timeout={socket_timeout}, "
+        f"Redis client config for thread '{thread_name}': socket_timeout={effective_socket_timeout}, "
         f"connect_timeout={socket_connect_timeout}, health_check={health_check_interval}, "
         f"direct_connection={direct_connection}"
     )
@@ -382,11 +396,12 @@ async def create_redis_client(
             # on a previous event loop (e.g., after reconnection or error recovery).
             import redis.asyncio as redis_async
 
-            socket_timeout, socket_connect_timeout, _ = _get_redis_timeouts()
+            # Use default timeout for Sentinel discovery (short operation)
+            sentinel_socket_timeout, _, _ = _get_redis_timeouts()
             fresh_sentinel = redis_async.Sentinel(
                 sentinel_config["sentinels"],
                 password=sentinel_config["sentinel_password"],
-                socket_timeout=socket_timeout,
+                socket_timeout=sentinel_socket_timeout,
                 socket_connect_timeout=socket_connect_timeout,
             )
             try:
@@ -401,7 +416,8 @@ async def create_redis_client(
                         pass
             logger.info(
                 f"Creating direct Redis connection for thread '{thread_name}' "
-                f"to {master_addr[0]}:{master_addr[1]} (fresh Sentinel discovery)"
+                f"to {master_addr[0]}:{master_addr[1]} (fresh Sentinel discovery, "
+                f"socket_timeout={effective_socket_timeout})"
             )
             # Use single_connection_client=True to avoid connection pool's asyncio state
             # sharing issues. This creates a dedicated connection that doesn't share any
@@ -413,7 +429,7 @@ async def create_redis_client(
             return redis_async.from_url(
                 redis_url,
                 decode_responses=decode_responses,
-                socket_timeout=socket_timeout,
+                socket_timeout=effective_socket_timeout,
                 socket_connect_timeout=socket_connect_timeout,
                 health_check_interval=0,
                 single_connection_client=True,  # Dedicated connection, no pool sharing
@@ -426,7 +442,7 @@ async def create_redis_client(
             master_addr = await sentinel_client.discover_master(sentinel_config["master"])
             logger.debug(
                 f"Sentinel discovered master for thread '{thread_name}': "
-                f"{master_addr[0]}:{master_addr[1]}"
+                f"{master_addr[0]}:{master_addr[1]} (socket_timeout={effective_socket_timeout})"
             )
 
             # Use SentinelConnectionPool for automatic failover detection
@@ -435,7 +451,7 @@ async def create_redis_client(
                 password=sentinel_config["redis_password"],
                 db=sentinel_config["db"],
                 decode_responses=decode_responses,
-                socket_timeout=socket_timeout,
+                socket_timeout=effective_socket_timeout,
                 socket_connect_timeout=socket_connect_timeout,
                 health_check_interval=health_check_interval,
             )
@@ -443,7 +459,7 @@ async def create_redis_client(
     return redis_async.from_url(
         redis_url or get_redis_url(),
         decode_responses=decode_responses,
-        socket_timeout=socket_timeout,
+        socket_timeout=effective_socket_timeout,
         socket_connect_timeout=socket_connect_timeout,
         health_check_interval=health_check_interval,
     )

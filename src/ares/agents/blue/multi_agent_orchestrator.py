@@ -401,15 +401,79 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
         return "\n".join(lines)
 
+    async def _check_workers_alive_for_tasks(self, pending_task_ids: set[str]) -> tuple[bool, int]:
+        """Check if any workers are actively working on pending tasks.
+
+        Uses heartbeats to determine liveness. A worker is considered
+        alive if it has heartbeated recently AND claims to be working
+        on one of our pending tasks.
+
+        Args:
+            pending_task_ids: Set of task IDs we're waiting for.
+
+        Returns:
+            Tuple of (any_alive, alive_count).
+        """
+        from datetime import datetime, timezone
+
+        if not self._blue_task_queue:
+            # In-process mode: workers are always "alive" (same process)
+            return (True, len(pending_task_ids))
+
+        try:
+            heartbeats = await self._blue_task_queue.get_all_heartbeats("blue-*")
+        except Exception as e:
+            logger.warning(f"Failed to get heartbeats: {e}")
+            # Assume alive on error to avoid premature timeout
+            return (True, 0)
+
+        now = datetime.now(timezone.utc)
+        alive_count = 0
+        stale_threshold_seconds = 60  # Heartbeat TTL
+
+        for hb in heartbeats.values():
+            current_task = hb.get("current_task")
+            timestamp_str = hb.get("timestamp")
+
+            if not current_task or current_task not in pending_task_ids:
+                continue
+
+            # Check heartbeat freshness
+            if timestamp_str:
+                try:
+                    hb_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+                    age = (now - hb_time).total_seconds()
+                    if age <= stale_threshold_seconds:
+                        alive_count += 1
+                except (ValueError, TypeError):
+                    # Can't parse timestamp, assume alive
+                    alive_count += 1
+            else:
+                # No timestamp but has current_task, assume alive
+                alive_count += 1
+
+        return (alive_count > 0, alive_count)
+
     @dn.tool_method  # type: ignore[untyped-decorator]
-    async def wait_for_all_tasks(self, timeout: int = 120) -> str:
-        """Wait for all pending tasks to complete.
+    async def wait_for_all_tasks(
+        self,
+        timeout: int = 300,
+        hard_timeout: int = 900,
+    ) -> str:
+        """Wait for all pending tasks to complete with heartbeat-aware timeout.
+
+        Uses worker heartbeats to distinguish between "slow but working"
+        and "dead/stuck". The timeout resets when workers are actively
+        heartbeating for pending tasks.
 
         Use this before calling complete_investigation() to ensure
         all dispatched work has finished.
 
         Args:
-            timeout: Maximum seconds to wait (default 120 = 2 minutes).
+            timeout: Soft timeout in seconds (default 300 = 5 minutes).
+                     Resets when workers are actively heartbeating.
+            hard_timeout: Absolute maximum wait time (default 900 = 15 minutes).
+                          Never waits longer than this, even with heartbeats.
 
         Returns:
             Summary of completed tasks or timeout message.
@@ -420,6 +484,9 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         import time
 
         start = time.monotonic()
+        deadline = start + timeout
+        liveness_check_interval = 30  # Check heartbeats every 30s
+        last_liveness_check = start
         completed_count = 0
 
         while True:
@@ -428,11 +495,50 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
                 break
 
             elapsed = time.monotonic() - start
-            if elapsed >= timeout:
+
+            # Hard timeout: absolute maximum
+            if elapsed >= hard_timeout:
                 return (
-                    f"[!] Timeout after {int(elapsed)}s. "
-                    f"{len(pending)} tasks still pending, {completed_count} completed."
+                    f"[!] Hard timeout after {int(elapsed)}s. "
+                    f"{len(pending)} tasks still pending, {completed_count} completed. "
+                    "Workers may be overloaded or stuck."
                 )
+
+            now = time.monotonic()
+
+            # Soft timeout with heartbeat extension
+            if now >= deadline:
+                # Check if workers are alive before timing out
+                pending_ids = set(pending.keys())
+                any_alive, alive_count = await self._check_workers_alive_for_tasks(pending_ids)
+
+                if any_alive:
+                    # Workers are actively working, extend deadline
+                    deadline = now + liveness_check_interval
+                    logger.info(
+                        f"Workers alive ({alive_count} active), extending wait. "
+                        f"elapsed={int(elapsed)}s, {len(pending)} pending"
+                    )
+                else:
+                    # No workers heartbeating for our tasks
+                    return (
+                        f"[!] Timeout after {int(elapsed)}s. "
+                        f"{len(pending)} tasks still pending, {completed_count} completed. "
+                        "No worker heartbeats detected."
+                    )
+
+            # Periodic liveness check (even before deadline)
+            if (now - last_liveness_check) >= liveness_check_interval:
+                last_liveness_check = now
+                pending_ids = set(pending.keys())
+                any_alive, alive_count = await self._check_workers_alive_for_tasks(pending_ids)
+                if any_alive:
+                    # Extend deadline on positive liveness
+                    deadline = max(deadline, now + liveness_check_interval)
+                    logger.debug(
+                        f"Liveness check: {alive_count} workers active, "
+                        f"deadline extended to +{int(deadline - now)}s"
+                    )
 
             # Wait briefly for results
             for task_id in list(pending.keys()):
@@ -443,7 +549,8 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
 
             await asyncio.sleep(1)
 
-        return f"[+] All tasks complete. {completed_count} tasks finished in {int(time.monotonic() - start)}s."
+        elapsed = time.monotonic() - start
+        return f"[+] All tasks complete. {completed_count} tasks finished in {int(elapsed)}s."
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def complete_investigation(
@@ -672,6 +779,9 @@ class BlueTeamOrchestrator:
         is persisted even if the orchestrator service crashes before it can
         update the status itself.
 
+        Retries with fresh Redis connections on failure to handle stale Sentinel
+        connections after pod restarts.
+
         Args:
             redis_client: Redis client instance.
             investigation_id: Investigation ID.
@@ -681,42 +791,65 @@ class BlueTeamOrchestrator:
         import json
         from datetime import datetime, timezone
 
+        from ares.core.redis_client import create_redis_client, invalidate_sentinel_client
+
         status_key = f"ares:blue:inv:{investigation_id}:status"
         now = datetime.now(timezone.utc).isoformat()
 
-        try:
-            # Read existing status to preserve started_at
-            existing_data = await redis_client.get(status_key)
-            started_at = None
-            if existing_data:
-                existing = json.loads(
-                    existing_data if isinstance(existing_data, str) else existing_data.decode()
-                )
-                started_at = existing.get("started_at")
-
-            status_data = {
+        status_data = {
+            "status": status,
+            "updated_at": now,
+            "completed_at": now,
+            "result": {
+                "investigation_id": investigation_id,
                 "status": status,
-                "updated_at": now,
-                "completed_at": now,
-                "result": {
-                    "investigation_id": investigation_id,
-                    "status": status,
-                    "evidence_count": len(investigation_state.evidence),
-                    "techniques_identified": list(investigation_state.identified_techniques),
-                    "highest_pyramid_level": investigation_state.highest_pyramid_level,
-                },
-            }
-            if started_at:
-                status_data["started_at"] = started_at
+                "evidence_count": len(investigation_state.evidence),
+                "techniques_identified": list(investigation_state.identified_techniques),
+                "highest_pyramid_level": investigation_state.highest_pyramid_level,
+            },
+        }
 
-            await redis_client.setex(
-                status_key,
-                86400,  # 24h TTL
-                json.dumps(status_data),
-            )
-            logger.debug(f"Updated status to {status} for investigation {investigation_id}")
-        except Exception as e:
-            logger.warning(f"Failed to update investigation status to Redis: {e}")
+        max_retries = 3
+        client = redis_client
+
+        for attempt in range(max_retries):
+            try:
+                # Read existing status to preserve started_at
+                existing_data = await client.get(status_key)
+                if existing_data:
+                    existing = json.loads(
+                        existing_data if isinstance(existing_data, str) else existing_data.decode()
+                    )
+                    started_at = existing.get("started_at")
+                    if started_at:
+                        status_data["started_at"] = started_at
+
+                await client.setex(
+                    status_key,
+                    86400,  # 24h TTL
+                    json.dumps(status_data),
+                )
+                logger.debug(f"Updated status to {status} for investigation {investigation_id}")
+                return  # Success
+            except Exception as e:
+                logger.warning(
+                    f"Failed to update investigation status to Redis (attempt {attempt + 1}/{max_retries}): {e}"
+                )
+
+                if attempt < max_retries - 1:
+                    # Invalidate sentinel and get fresh client for retry
+                    invalidate_sentinel_client()
+                    await asyncio.sleep(0.5 * (attempt + 1))  # Backoff: 0.5s, 1s
+                    try:
+                        client = await create_redis_client()
+                    except Exception as create_err:
+                        logger.warning(f"Failed to create fresh Redis client: {create_err}")
+                        continue
+                else:
+                    logger.error(
+                        f"Failed to update status for {investigation_id} after {max_retries} attempts - "
+                        f"investigation completed but status may show as 'running'"
+                    )
 
     async def _run_escalation_triage(
         self,

@@ -1175,9 +1175,33 @@ class ResultProcessingMixin:
         seen: set[tuple[str, str]] = set()
         current_user = ""
         current_domain = ""
+        expecting_default_password = False
+
         for line in output.splitlines():
             stripped = line.strip()
             if not stripped:
+                continue
+
+            # Handle LSA DefaultPassword format from secretsdump:
+            # [*] DefaultPassword
+            # DOMAIN\user:password
+            if "[*] DefaultPassword" in stripped:
+                expecting_default_password = True
+                continue
+
+            if expecting_default_password:
+                expecting_default_password = False
+                # Parse DOMAIN\user:password format
+                lsa_match = re.match(r"^([^\\]+)\\([^:]+):(.+)$", stripped)
+                if lsa_match:
+                    domain = lsa_match.group(1).strip()
+                    username = lsa_match.group(2).strip()
+                    password = lsa_match.group(3).strip()
+                    if username and password:
+                        key = (username.lower(), password)
+                        if key not in seen:
+                            seen.add(key)
+                            creds.append((username, password, domain))
                 continue
 
             # Extract domain from DOMAIN\user or user@domain patterns
@@ -1222,7 +1246,7 @@ class ResultProcessingMixin:
                 continue
             if "/" in password or "\\" in password or password.endswith(".txt"):
                 continue
-            key = (username, password)
+            key = (username.lower(), password)
             if key in seen:
                 continue
             seen.add(key)

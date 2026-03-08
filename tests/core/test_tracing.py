@@ -1,13 +1,185 @@
 """Tests for the tracing module."""
 
+from unittest.mock import MagicMock, patch
+
 from ares.core.tracing import (
     ROLE_TO_PHASE,
     ROLE_TO_TACTIC,
+    TOOL_TO_CATEGORY,
     TOOL_TO_TECHNIQUE,
     create_agent_span_attributes,
+    get_tool_category,
     get_tool_mitre_info,
     infer_target_type,
+    is_likely_fqdn,
+    setup_otel_tracing,
 )
+
+
+class TestSetupOtelTracing:
+    """Tests for setup_otel_tracing function."""
+
+    def test_returns_false_when_no_endpoint_configured(self, monkeypatch):
+        """Should return False when no OTEL endpoint is configured."""
+        # Clear any existing env vars
+        monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+        monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+
+        # Reset initialization state
+        import ares.core.tracing as tracing_module
+
+        tracing_module._otel_initialized = False
+
+        result = setup_otel_tracing()
+        assert result is False
+
+    def test_configures_from_traces_endpoint(self, monkeypatch):
+        """Should configure TracerProvider from OTEL_EXPORTER_OTLP_TRACES_ENDPOINT."""
+        monkeypatch.setenv(
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "http://alloy.test.local:4318/v1/traces",
+        )
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "ares-test-agent")
+
+        # Reset initialization state
+        import ares.core.tracing as tracing_module
+
+        tracing_module._otel_initialized = False
+
+        # Mock at the source module level since imports are inside the function
+        with (
+            patch("opentelemetry.trace.set_tracer_provider") as mock_set_provider,
+            patch("opentelemetry.sdk.trace.TracerProvider") as mock_provider_cls,
+            patch(
+                "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"
+            ) as mock_exporter_cls,
+            patch("opentelemetry.sdk.trace.export.BatchSpanProcessor"),
+            patch("opentelemetry.sdk.resources.Resource") as mock_resource_cls,
+        ):
+            # Setup mocks
+            mock_provider = MagicMock()
+            mock_provider_cls.return_value = mock_provider
+            mock_resource_cls.create.return_value = MagicMock()
+
+            result = setup_otel_tracing()
+
+            assert result is True
+            mock_exporter_cls.assert_called_once_with(
+                endpoint="http://alloy.test.local:4318/v1/traces"
+            )
+            mock_set_provider.assert_called_once_with(mock_provider)
+
+    def test_configures_from_base_endpoint(self, monkeypatch):
+        """Should append /v1/traces to base OTEL_EXPORTER_OTLP_ENDPOINT."""
+        monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.test:4318")
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "ares-test")
+
+        # Reset initialization state
+        import ares.core.tracing as tracing_module
+
+        tracing_module._otel_initialized = False
+
+        with (
+            patch("opentelemetry.trace.set_tracer_provider"),
+            patch("opentelemetry.sdk.trace.TracerProvider") as mock_provider_cls,
+            patch(
+                "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"
+            ) as mock_exporter_cls,
+            patch("opentelemetry.sdk.trace.export.BatchSpanProcessor"),
+            patch("opentelemetry.sdk.resources.Resource"),
+        ):
+            mock_provider_cls.return_value = MagicMock()
+
+            result = setup_otel_tracing()
+
+            assert result is True
+            mock_exporter_cls.assert_called_once_with(
+                endpoint="http://collector.test:4318/v1/traces"
+            )
+
+    def test_parses_resource_attributes(self, monkeypatch):
+        """Should parse OTEL_RESOURCE_ATTRIBUTES into resource."""
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://test:4318/v1/traces")
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "ares-agent")
+        monkeypatch.setenv(
+            "OTEL_RESOURCE_ATTRIBUTES",
+            "service.namespace=attack-simulation,deployment.environment=staging,attack.team=red",
+        )
+
+        # Reset initialization state
+        import ares.core.tracing as tracing_module
+
+        tracing_module._otel_initialized = False
+
+        with (
+            patch("opentelemetry.trace.set_tracer_provider"),
+            patch("opentelemetry.sdk.trace.TracerProvider") as mock_provider_cls,
+            patch("opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"),
+            patch("opentelemetry.sdk.trace.export.BatchSpanProcessor"),
+            patch("opentelemetry.sdk.resources.Resource") as mock_resource_cls,
+        ):
+            mock_provider_cls.return_value = MagicMock()
+            mock_resource_cls.create.return_value = MagicMock()
+
+            result = setup_otel_tracing()
+
+            assert result is True
+            # Verify resource was created with parsed attributes
+            call_args = mock_resource_cls.create.call_args[0][0]
+            assert call_args["service.name"] == "ares-agent"
+            assert call_args["service.namespace"] == "attack-simulation"
+            assert call_args["deployment.environment"] == "staging"
+            assert call_args["attack.team"] == "red"
+
+    def test_returns_true_when_already_initialized(self, monkeypatch):
+        """Should return True without reconfiguring when already initialized."""
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://test:4318")
+
+        # Set already initialized
+        import ares.core.tracing as tracing_module
+
+        tracing_module._otel_initialized = True
+
+        with patch("ares.core.tracing.trace.set_tracer_provider") as mock_set:
+            result = setup_otel_tracing()
+
+            assert result is True
+            mock_set.assert_not_called()  # Should not reconfigure
+
+    def test_handles_import_error_gracefully(self, monkeypatch):
+        """Should return False gracefully if OTEL dependencies unavailable."""
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://test:4318/v1/traces")
+
+        # Reset initialization state
+        import ares.core.tracing as tracing_module
+
+        tracing_module._otel_initialized = False
+
+        # Simulate import failure by making the exporter import raise
+        with patch(
+            "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter",
+            side_effect=ImportError("No module"),
+        ):
+            result = setup_otel_tracing()
+            assert result is False
+
+    def test_handles_configuration_error_gracefully(self, monkeypatch):
+        """Should return False gracefully if TracerProvider configuration fails."""
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://test:4318/v1/traces")
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "test")
+
+        # Reset initialization state
+        import ares.core.tracing as tracing_module
+
+        tracing_module._otel_initialized = False
+
+        with patch(
+            "opentelemetry.sdk.trace.TracerProvider",
+            side_effect=Exception("Config error"),
+        ):
+            result = setup_otel_tracing()
+            assert result is False
 
 
 class TestToolMitreInfo:
@@ -44,6 +216,46 @@ class TestToolMitreInfo:
         assert tactic is None
 
 
+class TestToolCategory:
+    """Tests for get_tool_category."""
+
+    def test_lateral_movement_category(self):
+        """Lateral movement tools should return LateralMovementTools."""
+        assert get_tool_category("psexec") == "LateralMovementTools"
+        assert get_tool_category("wmiexec") == "LateralMovementTools"
+        assert get_tool_category("evil_winrm") == "LateralMovementTools"
+
+    def test_credential_harvesting_category(self):
+        """Credential harvesting tools should return CredentialHarvestingTools."""
+        assert get_tool_category("secretsdump") == "CredentialHarvestingTools"
+        assert get_tool_category("kerberoast") == "CredentialHarvestingTools"
+
+    def test_network_enumeration_category(self):
+        """Network enumeration tools should return NetworkEnumerationTools."""
+        assert get_tool_category("nmap_scan") == "NetworkEnumerationTools"
+        assert get_tool_category("ldap_domain_dump") == "NetworkEnumerationTools"
+
+    def test_coercion_category(self):
+        """Coercion tools should return CoercionTools."""
+        assert get_tool_category("petitpotam") == "CoercionTools"
+        assert get_tool_category("ntlm_relay") == "CoercionTools"
+
+    def test_unknown_tool_returns_none(self):
+        """Unknown tools should return None."""
+        assert get_tool_category("unknown_tool") is None
+
+    def test_all_technique_mapped_tools_have_categories(self):
+        """All tools in TOOL_TO_TECHNIQUE should ideally have categories."""
+        # This is a soft check - we want most tools to have categories
+        mapped_count = 0
+        for tool in TOOL_TO_TECHNIQUE:
+            if tool in TOOL_TO_CATEGORY:
+                mapped_count += 1
+        # At least 80% of tools should have category mappings
+        coverage = mapped_count / len(TOOL_TO_TECHNIQUE)
+        assert coverage >= 0.8, f"Only {coverage:.0%} of tools have category mappings"
+
+
 class TestCreateAgentSpanAttributes:
     """Tests for create_agent_span_attributes."""
 
@@ -69,6 +281,22 @@ class TestCreateAgentSpanAttributes:
         assert attrs["mitre.tactic"] == "credential-access"
         assert attrs["tool.name"] == "secretsdump"
 
+    def test_attack_tool_name_attribute(self):
+        """Tool names should set attack_tool_name for Tempo metrics."""
+        attrs = create_agent_span_attributes("lateral", "red", tool_name="psexec")
+        assert attrs["attack_tool_name"] == "psexec"
+
+    def test_attack_tool_category_attribute(self):
+        """Known tools should set attack_tool_category."""
+        attrs = create_agent_span_attributes("lateral", "red", tool_name="psexec")
+        assert attrs["attack_tool_category"] == "LateralMovementTools"
+
+    def test_attack_tool_category_not_set_for_unknown_tool(self):
+        """Unknown tools should not have attack_tool_category."""
+        attrs = create_agent_span_attributes("recon", "red", tool_name="unknown_tool")
+        assert attrs["attack_tool_name"] == "unknown_tool"
+        assert "attack_tool_category" not in attrs
+
     def test_additional_attrs_merged(self):
         """Additional attributes should be merged."""
         attrs = create_agent_span_attributes(
@@ -76,6 +304,53 @@ class TestCreateAgentSpanAttributes:
         )
         assert attrs["custom.attr"] == "value"
         assert attrs["attack_team"] == "red"
+
+
+class TestIsLikelyFqdn:
+    """Tests for is_likely_fqdn function - distinguishes FQDNs from usernames."""
+
+    def test_fqdn_with_local_suffix(self):
+        """FQDNs ending in .local should return True."""
+        assert is_likely_fqdn("dc01.contoso.local") is True
+        assert is_likely_fqdn("server.domain.local") is True
+
+    def test_fqdn_with_other_tld(self):
+        """FQDNs with common TLDs should return True."""
+        assert is_likely_fqdn("host.company.com") is True
+        assert is_likely_fqdn("server.internal") is True
+        assert is_likely_fqdn("db.corp") is True
+
+    def test_username_with_dot_returns_false(self):
+        """Usernames like 'sansa.stark' should return False."""
+        assert is_likely_fqdn("sansa.stark") is False
+        assert is_likely_fqdn("jon.snow") is False
+        assert is_likely_fqdn("john.doe") is False
+
+    def test_three_segment_fqdn(self):
+        """3+ segment names should return True (FQDNs)."""
+        assert is_likely_fqdn("dc01.child.parent") is True
+        assert is_likely_fqdn("server.sub.domain") is True
+
+    def test_hostname_prefix_patterns(self):
+        """Two-segment names with hostname prefixes should return True."""
+        assert is_likely_fqdn("dc01.domain") is True
+        assert is_likely_fqdn("sql01.network") is True
+        assert is_likely_fqdn("web01.something") is True
+
+    def test_ip_address_returns_false(self):
+        """IP addresses should return False (not FQDNs)."""
+        assert is_likely_fqdn("192.168.58.10") is False
+        assert is_likely_fqdn("10.1.2.3") is False
+
+    def test_plain_hostname_returns_false(self):
+        """Plain hostnames without dots should return False."""
+        assert is_likely_fqdn("dc01") is False
+        assert is_likely_fqdn("server") is False
+
+    def test_empty_and_none_returns_false(self):
+        """Empty string and None should return False."""
+        assert is_likely_fqdn("") is False
+        assert is_likely_fqdn(None) is False  # type: ignore[arg-type]
 
 
 class TestInferTargetType:
@@ -118,31 +393,165 @@ class TestInferTargetType:
 
 
 class TestTargetAttributes:
-    """Tests for target_host and target_type in span attributes."""
+    """Tests for target_ip, target_fqdn and target_type in span attributes."""
 
-    def test_target_host_included(self):
-        """Target host should be included in attributes."""
-        attrs = create_agent_span_attributes("lateral", "red", target_host="192.168.58.10")
-        assert attrs["attack_target_host"] == "192.168.58.10"
+    def test_target_ip_included(self):
+        """Target IP should be in destination.ip."""
+        attrs = create_agent_span_attributes("lateral", "red", target_ip="192.168.58.10")
+        assert attrs["destination.ip"] == "192.168.58.10"
+        assert "destination.address" not in attrs  # No FQDN provided
 
     def test_target_type_included(self):
-        """Explicit target type should be included."""
+        """Explicit target type should be included using attack_target_type."""
         attrs = create_agent_span_attributes(
-            "lateral", "red", target_host="192.168.58.10", target_type="domain_controller"
+            "lateral", "red", target_ip="192.168.58.10", target_type="domain_controller"
         )
         assert attrs["attack_target_type"] == "domain_controller"
 
-    def test_target_type_inferred_from_hostname(self):
-        """Target type should be inferred from hostname if not provided."""
-        attrs = create_agent_span_attributes("lateral", "red", target_host="dc01.contoso.local")
+    def test_target_type_inferred_from_fqdn(self):
+        """Target type should be inferred from FQDN if not provided."""
+        attrs = create_agent_span_attributes("lateral", "red", target_fqdn="dc01.contoso.local")
         assert attrs["attack_target_type"] == "domain_controller"
 
     def test_target_type_not_overwritten_when_explicit(self):
         """Explicit target type should not be overwritten by inference."""
         attrs = create_agent_span_attributes(
-            "lateral", "red", target_host="dc01", target_type="custom_type"
+            "lateral", "red", target_hostname="dc01", target_type="custom_type"
         )
         assert attrs["attack_target_type"] == "custom_type"
+
+    def test_target_user_included(self):
+        """Target user should be included using OTel user.name."""
+        attrs = create_agent_span_attributes("credential_access", "red", target_user="svc_backup")
+        assert attrs["user.name"] == "svc_backup"
+        assert attrs["attack_target_type"] == "user"
+
+    def test_target_domain_included(self):
+        """Target domain should be included using attack_target_domain."""
+        attrs = create_agent_span_attributes(
+            "lateral", "red", target_fqdn="dc01.contoso.local", target_domain="contoso.local"
+        )
+        assert attrs["attack_target_domain"] == "contoso.local"
+
+    def test_target_domain_inferred_from_fqdn(self):
+        """Target domain should be inferred from FQDN if not provided."""
+        attrs = create_agent_span_attributes("lateral", "red", target_fqdn="dc01.contoso.local")
+        assert attrs["attack_target_domain"] == "contoso.local"
+
+    def test_target_domain_not_inferred_from_ip(self):
+        """Target domain should not be inferred from IP addresses."""
+        attrs = create_agent_span_attributes("lateral", "red", target_ip="192.168.58.10")
+        assert "attack_target_domain" not in attrs
+
+
+class TestIpFqdnSeparation:
+    """Tests for separate IP, FQDN, and hostname attributes."""
+
+    def test_target_ip_sets_destination_ip(self):
+        """Target IP should be used for destination.ip (separate from FQDN)."""
+        attrs = create_agent_span_attributes("lateral", "red", target_ip="192.168.58.10")
+        # IP goes to destination.ip, destination.address is for FQDNs only
+        assert attrs["destination.ip"] == "192.168.58.10"
+        assert "destination.address" not in attrs
+        assert "server.address" not in attrs
+        assert "host.name" not in attrs
+
+    def test_target_fqdn_sets_server_address_and_host_name(self):
+        """Target FQDN should set server.address and derive host.name."""
+        attrs = create_agent_span_attributes("lateral", "red", target_fqdn="dc01.contoso.local")
+        assert attrs["destination.address"] == "dc01.contoso.local"
+        assert attrs["server.address"] == "dc01.contoso.local"
+        assert attrs["host.name"] == "dc01"
+        assert attrs["attack_target_domain"] == "contoso.local"
+
+    def test_fqdn_and_ip_in_separate_fields(self):
+        """When both IP and FQDN provided, they should be in separate fields."""
+        attrs = create_agent_span_attributes(
+            "lateral",
+            "red",
+            target_ip="192.168.58.10",
+            target_fqdn="dc01.contoso.local",
+        )
+        # FQDN goes to destination.address and server.address
+        assert attrs["destination.address"] == "dc01.contoso.local"
+        assert attrs["server.address"] == "dc01.contoso.local"
+        assert attrs["host.name"] == "dc01"
+        # IP goes to separate destination.ip field
+        assert attrs["destination.ip"] == "192.168.58.10"
+
+    def test_target_hostname_without_fqdn(self):
+        """Plain hostname should set host.name without server.address."""
+        attrs = create_agent_span_attributes("lateral", "red", target_hostname="dc01")
+        assert attrs["host.name"] == "dc01"
+        assert "server.address" not in attrs
+
+    def test_explicit_hostname_overrides_fqdn_derivation(self):
+        """Explicit target_hostname should override FQDN-derived hostname."""
+        attrs = create_agent_span_attributes(
+            "lateral",
+            "red",
+            target_fqdn="dc01.contoso.local",
+            target_hostname="custom-host",
+        )
+        assert attrs["host.name"] == "custom-host"
+        assert attrs["server.address"] == "dc01.contoso.local"
+
+    def test_target_type_inferred_from_fqdn(self):
+        """Target type should be inferred from FQDN hostname part."""
+        attrs = create_agent_span_attributes("lateral", "red", target_fqdn="dc01.contoso.local")
+        assert attrs["attack_target_type"] == "domain_controller"
+
+    def test_target_type_inferred_from_hostname(self):
+        """Target type should be inferred from explicit hostname."""
+        attrs = create_agent_span_attributes("lateral", "red", target_hostname="sql01")
+        assert attrs["attack_target_type"] == "sql_server"
+
+    def test_all_fields_combined(self):
+        """Test all new fields combined with user and domain."""
+        attrs = create_agent_span_attributes(
+            "lateral",
+            "red",
+            tool_name="psexec",
+            target_ip="192.168.58.10",
+            target_fqdn="dc01.contoso.local",
+            target_hostname="dc01",
+            target_user="administrator",
+            target_domain="contoso.local",
+        )
+        # FQDN goes to destination.address and server.address
+        assert attrs["destination.address"] == "dc01.contoso.local"
+        assert attrs["server.address"] == "dc01.contoso.local"
+        # IP goes to separate destination.ip field
+        assert attrs["destination.ip"] == "192.168.58.10"
+        assert attrs["host.name"] == "dc01"
+        assert attrs["user.name"] == "administrator"
+        assert attrs["attack_target_domain"] == "contoso.local"
+        assert attrs["attack_target_type"] == "domain_controller"
+
+    def test_dc_ips_enables_dc_detection_from_ip(self):
+        """DC IPs set should enable domain_controller detection from IP alone."""
+        dc_ips = {"192.168.58.10", "192.168.58.20"}
+        attrs = create_agent_span_attributes(
+            "lateral",
+            "red",
+            target_ip="192.168.58.10",
+            dc_ips=dc_ips,
+        )
+        # IP is in dc_ips set, so should be detected as domain_controller
+        assert attrs["attack_target_type"] == "domain_controller"
+        assert attrs["destination.ip"] == "192.168.58.10"
+
+    def test_dc_ips_non_dc_ip_remains_server(self):
+        """IP not in DC IPs set should remain as server type."""
+        dc_ips = {"192.168.58.10", "192.168.58.20"}
+        attrs = create_agent_span_attributes(
+            "lateral",
+            "red",
+            target_ip="192.168.58.30",  # Not in dc_ips
+            dc_ips=dc_ips,
+        )
+        # IP is not in dc_ips set, so should be server
+        assert attrs["attack_target_type"] == "server"
 
 
 class TestMitreMappings:
@@ -250,8 +659,8 @@ class TestTraceToolCall:
             # Should not raise - just logs debug
             trace_tool_call("recon", "red", "nmap_scan")
 
-    def test_trace_tool_call_with_target_host(self):
-        """trace_tool_call should include target host in attributes."""
+    def test_trace_tool_call_with_target_fqdn(self):
+        """trace_tool_call should include target FQDN using OTel conventions."""
         from unittest.mock import MagicMock, patch
 
         from ares.core.tracing import trace_tool_call
@@ -265,12 +674,13 @@ class TestTraceToolCall:
                 "lateral",
                 "red",
                 "psexec",
-                target_host="dc01.contoso.local",
+                target_fqdn="dc01.contoso.local",
             )
 
         call_kwargs = mock_dn_span.call_args[1]
-        assert call_kwargs["attributes"]["attack_target_host"] == "dc01.contoso.local"
+        assert call_kwargs["attributes"]["destination.address"] == "dc01.contoso.local"
         assert call_kwargs["attributes"]["attack_target_type"] == "domain_controller"
+        assert call_kwargs["attributes"]["attack_target_domain"] == "contoso.local"
 
     def test_trace_tool_call_with_explicit_target_type(self):
         """trace_tool_call should use explicit target type."""
@@ -287,13 +697,103 @@ class TestTraceToolCall:
                 "lateral",
                 "red",
                 "psexec",
-                target_host="192.168.58.10",
+                target_ip="192.168.58.10",
                 target_type="domain_controller",
             )
 
         call_kwargs = mock_dn_span.call_args[1]
-        assert call_kwargs["attributes"]["attack_target_host"] == "192.168.58.10"
+        # IP goes to destination.ip (separate from FQDN in destination.address)
+        assert call_kwargs["attributes"]["destination.ip"] == "192.168.58.10"
         assert call_kwargs["attributes"]["attack_target_type"] == "domain_controller"
+
+    def test_trace_tool_call_with_target_user(self):
+        """trace_tool_call should include target user using OTel user.name."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.tracing import trace_tool_call
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_tool_call(
+                "credential_access",
+                "red",
+                "kerberoast",
+                target_user="svc_backup",
+                target_domain="contoso.local",
+            )
+
+        call_kwargs = mock_dn_span.call_args[1]
+        assert call_kwargs["attributes"]["user.name"] == "svc_backup"
+        assert call_kwargs["attributes"]["attack_target_type"] == "user"
+        assert call_kwargs["attributes"]["attack_target_domain"] == "contoso.local"
+
+    def test_trace_tool_call_includes_attack_tool_attrs(self):
+        """trace_tool_call should include attack_tool_name and attack_tool_category."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.tracing import trace_tool_call
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_tool_call(
+                "lateral",
+                "red",
+                "psexec",
+                target_fqdn="dc01.contoso.local",
+            )
+
+        call_kwargs = mock_dn_span.call_args[1]
+        assert call_kwargs["attributes"]["attack_tool_name"] == "psexec"
+        assert call_kwargs["attributes"]["attack_tool_category"] == "LateralMovementTools"
+
+    def test_trace_tool_call_with_operation_id(self):
+        """trace_tool_call should include attack_operation_id for Tempo correlation."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.tracing import trace_tool_call
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_tool_call(
+                "credential_access",
+                "red",
+                "secretsdump",
+                target_fqdn="dc01.contoso.local",
+                operation_id="op-12345",
+            )
+
+        call_kwargs = mock_dn_span.call_args[1]
+        assert call_kwargs["attributes"]["attack_operation_id"] == "op-12345"
+
+    def test_trace_tool_call_without_operation_id(self):
+        """trace_tool_call should not include attack_operation_id when not provided."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.tracing import trace_tool_call
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_tool_call(
+                "credential_access",
+                "red",
+                "secretsdump",
+                target_fqdn="dc01.contoso.local",
+            )
+
+        call_kwargs = mock_dn_span.call_args[1]
+        assert "attack_operation_id" not in call_kwargs["attributes"]
 
 
 class TestTraceBlueInvestigation:

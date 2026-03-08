@@ -153,6 +153,7 @@ async def _load_or_initialize_state(
     target_domain: str,
     target_ips: list[str],
     initial_credential: Credential | None,
+    target_environment: str | None = None,
 ) -> None:
     if resume_from_checkpoint:
         try:
@@ -175,6 +176,7 @@ async def _load_or_initialize_state(
     state.target = Target(
         ip=target_ips[0] if target_ips else "",
         domain=target_domain,
+        environment=target_environment or "",
     )
     if target_domain:
         state.add_domain(target_domain)
@@ -293,9 +295,10 @@ def _parse_nmap_hosts(output: str) -> list[Host]:
 async def _run_nmap_on_worker(targets: list[str], namespace: str) -> tuple[str, list[Host]]:
     """Run nmap on a recon worker pod via kubectl exec.
 
-    Two-phase scan:
+    Three-phase scan:
     1. Fast port discovery (top 100 ports)
     2. Service version detection on discovered ports
+    3. NetBIOS hostname enrichment for hosts without hostnames
     """
     from ares.core.k8s_executor import KubernetesPodExecutor
 
@@ -352,6 +355,67 @@ async def _run_nmap_on_worker(targets: list[str], namespace: str) -> tuple[str, 
 
     logger.info(f"[DIRECT NMAP] Scan completed for {len(targets)} targets")
     hosts = _parse_nmap_hosts(svc_output)
+
+    # Phase 3: NetBIOS hostname enrichment for hosts without hostnames
+    hosts_needing_enrichment = [
+        h
+        for h in hosts
+        if not h.hostname
+        or (h.hostname.lower().startswith("ip-") and "compute.internal" in h.hostname.lower())
+    ]
+    if hosts_needing_enrichment:
+        logger.info(
+            f"[DIRECT NMAP] Phase 3: NetBIOS hostname resolution for "
+            f"{len(hosts_needing_enrichment)} host(s)"
+        )
+        for host in hosts_needing_enrichment:
+            try:
+                # Use nmap nbstat script for NetBIOS name resolution
+                nbstat_cmd = ["nmap", "-Pn", "-sU", "-p", "137", "--script", "nbstat", host.ip]
+                nb_stdout, _nb_stderr, nb_rc = await executor.execute(
+                    role="recon", command=nbstat_cmd, timeout_seconds=15
+                )
+                if nb_rc == 0 and nb_stdout:
+                    # Parse FQDN from "Nmap scan report for hostname.domain (IP)"
+                    fqdn_match = re.search(
+                        r"Nmap scan report for ([^\s]+)\s+\(" + re.escape(host.ip) + r"\)",
+                        nb_stdout,
+                    )
+                    if fqdn_match:
+                        resolved_hostname = fqdn_match.group(1).strip()
+                        # Skip AWS internal hostnames
+                        if not (
+                            resolved_hostname.lower().startswith("ip-")
+                            and "compute.internal" in resolved_hostname.lower()
+                        ):
+                            host.hostname = resolved_hostname
+                            logger.info(
+                                f"[DIRECT NMAP] Resolved hostname for {host.ip}: {resolved_hostname}"
+                            )
+                            continue
+
+                    # Fallback: parse NetBIOS name from nbstat output
+                    nb_match = re.search(r"nbstat:\s*NetBIOS name:\s*([^,]+)", nb_stdout)
+                    if nb_match:
+                        netbios_name = nb_match.group(1).strip()
+                        # Try to find domain from Names section
+                        # Format: "|     DOMAIN<00>  Flags: <group>" (nmap nbstat output)
+                        domain_match = re.search(
+                            r"^\|?\s+([A-Z0-9_-]+)<00>\s+Flags:.*<group>",
+                            nb_stdout,
+                            re.MULTILINE,
+                        )
+                        if domain_match:
+                            domain = domain_match.group(1).strip().lower()
+                            host.hostname = f"{netbios_name.lower()}.{domain}.local"
+                        else:
+                            host.hostname = netbios_name.lower()
+                        logger.info(
+                            f"[DIRECT NMAP] Resolved NetBIOS name for {host.ip}: {host.hostname}"
+                        )
+            except Exception as e:
+                logger.debug(f"[DIRECT NMAP] NetBIOS resolution failed for {host.ip}: {e}")
+
     return svc_output, hosts
 
 
@@ -431,6 +495,9 @@ async def _prime_operation(
             await state._backend.set_meta("target_ips", ",".join(target_ips))
         if target_domain:
             await state._backend.set_meta("target_domain", target_domain)
+        # Persist target environment from state (set in _load_or_initialize_state)
+        if state.target and state.target.environment:
+            await state._backend.set_meta("target_environment", state.target.environment)
 
         # Set the active operation pointer for worker discovery
         # This allows workers to find the operation immediately via the pointer
@@ -590,6 +657,7 @@ async def run_multi_agent_operation(
     openai_api_key: str | None = None,
     report_dir: str | Path | None = None,
     max_runtime: float | None = None,
+    target_environment: str | None = None,
 ) -> dict[str, Any]:
     """
     Main entry point for multi-agent red team operations.
@@ -608,6 +676,7 @@ async def run_multi_agent_operation(
         openai_api_key: Optional OpenAI API key to bind directly to the generator
         report_dir: Directory to write the final report (default: ./reports)
         max_runtime: Maximum runtime in seconds (default: 1800s / 30 min, via ARES_MAX_RUNTIME env)
+        target_environment: Target environment for tracing (e.g., "dev", "staging", "prod")
 
     Returns:
         Operation results summary
@@ -683,6 +752,7 @@ async def run_multi_agent_operation(
         target_domain=target_domain,
         target_ips=target_ips,
         initial_credential=initial_credential,
+        target_environment=target_environment,
     )
 
     # Create agent ensemble

@@ -126,3 +126,128 @@ class TestCapabilityToToolMapping:
         enabled = get_enabled_tools({"ldapsearch"})
         assert "ldap_search_descriptions" in enabled
         assert "check_sidhistory" in enabled
+
+
+class TestNetBIOSHostnameEnrichment:
+    """Tests for NetBIOS hostname enrichment in nmap_scan.
+
+    The nmap_scan tool has a Phase 3 that attempts to resolve hostnames
+    for hosts that don't have them, using NetBIOS name resolution.
+    """
+
+    def test_fqdn_regex_extracts_hostname_from_nmap_report(self):
+        """Test that FQDN can be extracted from nmap scan report output."""
+        import re
+
+        ip = "192.168.58.10"
+        nmap_output = f"Nmap scan report for dc01.contoso.local ({ip})\n"
+
+        fqdn_match = re.search(
+            r"Nmap scan report for ([^\s]+)\s+\(" + re.escape(ip) + r"\)",
+            nmap_output,
+        )
+
+        assert fqdn_match is not None
+        assert fqdn_match.group(1) == "dc01.contoso.local"
+
+    def test_fqdn_regex_handles_short_hostname(self):
+        """Test FQDN extraction handles short hostnames without domain."""
+        import re
+
+        ip = "192.168.58.20"
+        nmap_output = f"Nmap scan report for sql01 ({ip})\n"
+
+        fqdn_match = re.search(
+            r"Nmap scan report for ([^\s]+)\s+\(" + re.escape(ip) + r"\)",
+            nmap_output,
+        )
+
+        assert fqdn_match is not None
+        assert fqdn_match.group(1) == "sql01"
+
+    def test_netbios_name_regex_extracts_name(self):
+        """Test NetBIOS name extraction from nbstat output."""
+        import re
+
+        nbstat_output = """
+Starting Nmap 7.93 ( https://nmap.org )
+Host script results:
+| nbstat: NetBIOS name: DC01, NetBIOS user: <unknown>, NetBIOS MAC: 00:0c:29:xx:xx:xx
+|_  Names:
+|   DC01<00>            Flags: <unique><active>
+|   CONTOSO<00>         Flags: <group><active>
+"""
+
+        nb_match = re.search(r"nbstat:\s*NetBIOS name:\s*([^,]+)", nbstat_output)
+
+        assert nb_match is not None
+        assert nb_match.group(1).strip() == "DC01"
+
+    def test_domain_group_regex_extracts_domain(self):
+        """Test domain extraction from NetBIOS Names section.
+
+        The regex from reconnaissance.py matches entries with <00> suffix
+        and <group> flag to identify the domain/workgroup name.
+        """
+        import re
+
+        # Nmap nbstat output format (indented entries under Names section)
+        nbstat_output = """
+Names:
+  DC01<00>              Flags: <unique><active>
+  CONTOSO<00>           Flags: <group><active>
+  CONTOSO<1c>           Flags: <group><active>
+"""
+
+        # The regex from reconnaissance.py expects whitespace-prefixed lines
+        domain_match = re.search(
+            r"^\s+([A-Z0-9_-]+)<00>\s+Flags:.*<group>",
+            nbstat_output,
+            re.MULTILINE,
+        )
+
+        assert domain_match is not None
+        assert domain_match.group(1).strip() == "CONTOSO"
+
+    def test_aws_internal_hostname_detection(self):
+        """Test detection of AWS internal hostnames that need enrichment."""
+        # AWS EC2 internal hostnames follow pattern: ip-XXX-XXX-XXX-XXX.region.compute.internal
+        aws_hostname = "ip-10-0-1-50.us-east-1.compute.internal"
+
+        needs_enrichment = (
+            aws_hostname.lower().startswith("ip-") and "compute.internal" in aws_hostname.lower()
+        )
+
+        assert needs_enrichment is True
+
+    def test_normal_hostname_does_not_need_enrichment(self):
+        """Test that normal hostnames don't trigger enrichment."""
+        normal_hostname = "dc01.contoso.local"
+
+        needs_enrichment = (
+            normal_hostname.lower().startswith("ip-")
+            and "compute.internal" in normal_hostname.lower()
+        )
+
+        assert needs_enrichment is False
+
+    def test_empty_hostname_needs_enrichment(self):
+        """Test that empty/None hostnames need enrichment."""
+        hostname = None
+
+        # Logic from reconnaissance.py
+        needs_enrichment = not hostname or (
+            hostname.lower().startswith("ip-") and "compute.internal" in hostname.lower()
+        )
+
+        assert needs_enrichment is True
+
+    def test_fqdn_construction_from_netbios(self):
+        """Test FQDN construction from NetBIOS name and domain."""
+        netbios_name = "DC01"
+        domain = "CONTOSO"
+
+        # Logic from reconnaissance.py - assumes .local TLD
+        fqdn = f"{netbios_name.lower()}.{domain.lower()}.local"
+
+        assert fqdn == "dc01.contoso.local"

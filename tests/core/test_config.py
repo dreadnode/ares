@@ -616,5 +616,73 @@ class TestStopConditionsValidation:
             assert result is True
 
 
+class TestOperationTimeout:
+    """Tests for service-level operation timeout configuration."""
+
+    def test_operation_timeout_default(self):
+        """Test operation_timeout defaults to 7200 seconds (2 hours)."""
+        from ares.core.config import OperationConfig
+
+        config = OperationConfig()
+        assert config.operation_timeout == 7200
+
+    def test_operation_timeout_env_override(self):
+        """Test ARES_OPERATION_TIMEOUT environment override."""
+        config_data = {"agents": {}}
+
+        with patch.dict(
+            os.environ,
+            {"ARES_OPERATION_TIMEOUT": "3600"},
+            clear=False,
+        ):
+            from ares.core.config import _build_config
+
+            config = _build_config(config_data)
+            config = _apply_env_overrides(config)
+
+            assert config.operation_timeout == 3600
+
+    def test_operation_timeout_invalid_env_ignored(self):
+        """Test that invalid ARES_OPERATION_TIMEOUT is ignored."""
+        config_data = {"agents": {}}
+
+        with patch.dict(
+            os.environ,
+            {"ARES_OPERATION_TIMEOUT": "not_a_number"},
+            clear=False,
+        ):
+            from ares.core.config import _build_config
+
+            config = _build_config(config_data)
+            config = _apply_env_overrides(config)
+
+            # Should keep default when value is invalid
+            assert config.operation_timeout == 7200
+
+    def test_get_operation_timeout_function(self):
+        """Test get_operation_timeout helper function."""
+        from ares.core.config import clear_config_cache, get_operation_timeout
+
+        clear_config_cache()
+
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("ARES_")}
+        with patch.dict(os.environ, clean_env, clear=True):
+            clear_config_cache()
+            result = get_operation_timeout()
+            assert result == 7200
+
+    def test_get_operation_timeout_with_env(self):
+        """Test get_operation_timeout with env variable set."""
+        from ares.core.config import clear_config_cache, get_operation_timeout
+
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("ARES_")}
+        clean_env["ARES_OPERATION_TIMEOUT"] = "1800"
+
+        with patch.dict(os.environ, clean_env, clear=True):
+            clear_config_cache()
+            result = get_operation_timeout()
+            assert result == 1800
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

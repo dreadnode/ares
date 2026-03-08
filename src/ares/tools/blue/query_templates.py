@@ -609,6 +609,11 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         Detects red team's kerberoast tool which requests TGS tickets for
         service accounts with SPNs. These tickets can be cracked offline.
 
+        Detection indicators in Windows Event 4769:
+        - TicketEncryptionType: 0x17 (RC4-HMAC, weak cipher for offline cracking)
+        - ServiceName: Service account SPN being targeted
+        - Multiple TGS requests from same client IP
+
         MITRE ATT&CK: T1558.003 (Kerberoasting)
 
         Args:
@@ -622,21 +627,14 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         start_time, end_time = self._get_time_range(hours_back)
 
         selector = self._build_selector(hostname=domain_controller)
-        event_filter = self._build_event_filter(["4769"])
-        tool_filter = self._build_pattern_filter(
-            [
-                "kerberos.ticket",
-                "tgs.request",
-                "getuserspn",
-                "service.ticket",
-                "spn",
-                "rc4",
-                "0x17",
-                "kerberoast",
-            ]
+        # Event 4769: TGS ticket request - Kerberoasting indicator
+        # Key: RC4 encryption (0x17) is weak and used for offline cracking
+        # Also detect via ServiceName patterns (MSSQLSvc, HTTP, etc.)
+        logql = (
+            f"{selector}"
+            ' |= "4769"'
+            ' |~ "(?i)(encryption.*type.*(0x17|rc4)|ticket.*encryption.*(0x17|rc4)|servicename.*(mssql|http|ldap|cifs))"'
         )
-
-        logql = f"{selector} {event_filter} {tool_filter}"
 
         logger.info(f"Kerberoasting detection: {logql}")
 
@@ -644,6 +642,7 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         result["_query_template"] = "kerberoasting"
         result["_mitre_technique"] = "T1558.003"
         result["_red_team_tool"] = "kerberoast"
+        result["_severity"] = "high"
 
         return result
 
@@ -657,6 +656,11 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         Detects red team's asrep_roast tool which targets accounts with
         'Do not require Kerberos preauthentication' enabled.
+
+        Detection indicators in Windows Event 4768:
+        - PreAuthType: 0 (no pre-authentication required)
+        - TicketEncryptionType: 0x17 (RC4-HMAC, weak cipher for offline cracking)
+        - Multiple TGT requests for accounts with DONT_REQUIRE_PREAUTH flag
 
         MITRE ATT&CK: T1558.004 (AS-REP Roasting)
 
@@ -672,21 +676,13 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
 
         selector = self._build_selector(hostname=domain_controller)
         # Event 4768: Kerberos TGT Request (AS-REQ)
-        # Event 4771: Kerberos Pre-Authentication Failed
-        event_filter = self._build_event_filter(["4768", "4771"])
-        tool_filter = self._build_pattern_filter(
-            [
-                "as-req",
-                "getnpusers",
-                "asrep",
-                "pre.auth",
-                "tgt.request",
-                "roast",
-                "dont.require.preauth",
-            ]
+        # Key indicators: PreAuthType=0 (no pre-auth), or RC4 encryption (0x17)
+        # Windows logs show: "Pre-Authentication Type: 0" or "Ticket Encryption Type: 0x17"
+        logql = (
+            f"{selector}"
+            ' |= "4768"'
+            ' |~ "(?i)(preauthtype.*0|pre.?auth.*type.*0|encryption.*type.*(0x17|rc4)|ticket.*options.*0x4)"'
         )
-
-        logql = f"{selector} {event_filter} {tool_filter}"
 
         logger.info(f"AS-REP roasting detection: {logql}")
 
@@ -694,6 +690,61 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
         result["_query_template"] = "asrep_roasting"
         result["_mitre_technique"] = "T1558.004"
         result["_red_team_tool"] = "asrep_roast"
+        result["_severity"] = "high"
+
+        return result
+
+    @dn.tool_method  # type: ignore[untyped-decorator]
+    async def detect_asrep_roasting_bulk(
+        self,
+        domain_controller: str | None = None,
+        hours_back: int | None = None,
+        threshold: int = 3,
+    ) -> dict[str, Any]:
+        """Detect bulk AS-REP Roasting spray attacks.
+
+        AS-REP roasting attacks typically query multiple accounts without
+        pre-authentication in rapid succession. This detection looks for
+        multiple Event 4768 TGT requests in a short time window.
+
+        MITRE ATT&CK: T1558.004 (AS-REP Roasting)
+
+        Args:
+            domain_controller: Optional DC hostname.
+            hours_back: Hours of logs to search (default: 1 hour).
+            threshold: Minimum 4768 events to flag as attack (default: 3).
+
+        Returns:
+            Query results with bulk AS-REP roasting indicators.
+        """
+        dn.log_metric("query_template_asrep_bulk", 1, mode="count")
+        start_time, end_time = self._get_time_range(hours_back)
+
+        selector = self._build_selector(hostname=domain_controller)
+        # Look for multiple 4768 events - AS-REP roasting sprays many accounts
+        # Focus on events from non-DC sources (attackers running GetNPUsers)
+        logql = f'{selector} |= "4768"'
+
+        logger.info(f"Bulk AS-REP roasting detection: {logql}")
+
+        result = await self._query_loki(logql, start_time, end_time, limit=1000)
+
+        # Analyze volume of 4768 events
+        total_requests = self._count_results(result)
+        result["_analysis"] = {
+            "total_tgt_requests": total_requests,
+            "is_likely_attack": total_requests >= threshold,
+            "recommendation": (
+                f"High volume of TGT requests ({total_requests}) - investigate "
+                "for AS-REP roasting. Check source IPs and targeted accounts."
+                if total_requests >= threshold
+                else "Normal TGT request volume"
+            ),
+        }
+        result["_query_template"] = "asrep_roasting_bulk"
+        result["_mitre_technique"] = "T1558.004"
+        result["_red_team_tool"] = "asrep_roast"
+        result["_severity"] = "high" if total_requests >= threshold else "low"
 
         return result
 
@@ -2299,6 +2350,13 @@ class QueryTemplateTools(Toolset):  # type: ignore[misc]
             {
                 "name": "detect_asrep_roasting",
                 "description": "Detect AS-REP roasting attacks",
+                "mitre": "T1558.004",
+                "tactic": "credential_access",
+                "red_team_tool": "asrep_roast",
+            },
+            {
+                "name": "detect_asrep_roasting_bulk",
+                "description": "Detect bulk AS-REP roasting spray attacks",
                 "mitre": "T1558.004",
                 "tactic": "credential_access",
                 "red_team_tool": "asrep_roast",

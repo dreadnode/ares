@@ -152,3 +152,83 @@ class TestStopConditionInteraction:
         assert dispatcher.shared_state.has_golden_ticket is True
         assert dispatcher.shared_state.completed_at is not None
         assert dispatcher.shared_state.completed is True
+
+
+class TestAnnouncementTracing:
+    """Tests for OTel tracing of announcements."""
+
+    @pytest.mark.asyncio
+    @patch("ares.core.dispatcher.announcements.trace_discovery")
+    @patch("ares.core.dispatcher.announcements.get_stop_on_domain_admin", return_value=False)
+    async def test_domain_admin_emits_trace_discovery(
+        self, mock_stop_on_da, mock_trace_discovery, dispatcher
+    ):
+        """announce_domain_admin should call trace_discovery with correct attributes."""
+        await dispatcher.announce_domain_admin(
+            username="jon.snow",
+            domain="north.sevenkingdoms.local",
+            attack_path="privesc → krbtgt (NTLM)",
+            credential_type="hash",
+            source_agent="privesc",
+        )
+
+        mock_trace_discovery.assert_called_once()
+        call_kwargs = mock_trace_discovery.call_args.kwargs
+
+        assert call_kwargs["discovery_type"] == "domain_admin"
+        assert call_kwargs["source_agent"] == "privesc"
+        assert call_kwargs["operation_id"] == "op-test-announce"
+        assert call_kwargs["target_user"] == "jon.snow"
+        assert call_kwargs["target_domain"] == "north.sevenkingdoms.local"
+        assert call_kwargs["additional_attrs"]["attack_path"] == "privesc → krbtgt (NTLM)"
+        assert call_kwargs["additional_attrs"]["credential_type"] == "hash"
+        assert call_kwargs["additional_attrs"]["mitre.technique.id"] == "T1003.006"
+
+    @pytest.mark.asyncio
+    @patch("ares.core.dispatcher.announcements.trace_discovery")
+    @patch("ares.core.dispatcher.announcements.get_stop_on_golden_ticket", return_value=False)
+    async def test_golden_ticket_emits_trace_discovery(
+        self, mock_stop_on_gt, mock_trace_discovery, dispatcher
+    ):
+        """announce_golden_ticket should call trace_discovery with correct attributes."""
+        await dispatcher.announce_golden_ticket(
+            domain="contoso.local",
+            krbtgt_hash="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            ticket_path="/tmp/admin.ccache",
+            source_agent="kerberos-agent",
+            target_domain=None,
+        )
+
+        mock_trace_discovery.assert_called_once()
+        call_kwargs = mock_trace_discovery.call_args.kwargs
+
+        assert call_kwargs["discovery_type"] == "golden_ticket"
+        assert call_kwargs["source_agent"] == "kerberos-agent"
+        assert call_kwargs["operation_id"] == "op-test-announce"
+        assert call_kwargs["target_domain"] == "contoso.local"
+        assert call_kwargs["additional_attrs"]["source_domain"] == "contoso.local"
+        assert call_kwargs["additional_attrs"]["ticket_path"] == "/tmp/admin.ccache"
+        assert call_kwargs["additional_attrs"]["is_forest_escalation"] is False
+        assert call_kwargs["additional_attrs"]["mitre.technique.id"] == "T1558.001"
+
+    @pytest.mark.asyncio
+    @patch("ares.core.dispatcher.announcements.trace_discovery")
+    @patch("ares.core.dispatcher.announcements.get_stop_on_golden_ticket", return_value=False)
+    async def test_golden_ticket_forest_escalation_traced(
+        self, mock_stop_on_gt, mock_trace_discovery, dispatcher
+    ):
+        """Golden ticket with target_domain should trace is_forest_escalation=True."""
+        await dispatcher.announce_golden_ticket(
+            domain="child.contoso.local",
+            krbtgt_hash="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            ticket_path="/tmp/admin.ccache",
+            source_agent="kerberos-agent",
+            target_domain="contoso.local",
+        )
+
+        mock_trace_discovery.assert_called_once()
+        call_kwargs = mock_trace_discovery.call_args.kwargs
+
+        assert call_kwargs["target_domain"] == "contoso.local"
+        assert call_kwargs["additional_attrs"]["source_domain"] == "child.contoso.local"
+        assert call_kwargs["additional_attrs"]["is_forest_escalation"] is True

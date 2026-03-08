@@ -600,6 +600,80 @@ class NetworkEnumerationTools(Toolset):
 
             # Parse and track the scanned hosts
             parsed_hosts = _parse_nmap_hosts(svc_stdout)
+
+            # Phase 3: NetBIOS hostname enrichment for hosts without hostnames
+            hosts_needing_enrichment = [
+                h
+                for h in parsed_hosts
+                if not h.hostname
+                or (
+                    h.hostname.lower().startswith("ip-")
+                    and "compute.internal" in h.hostname.lower()
+                )
+            ]
+            if hosts_needing_enrichment:
+                logger.info(
+                    f"[*] Phase 3: NetBIOS hostname resolution for "
+                    f"{len(hosts_needing_enrichment)} host(s)"
+                )
+                for host in hosts_needing_enrichment:
+                    try:
+                        # Use nmap nbstat script for NetBIOS name resolution
+                        # This also resolves FQDN via DNS if available
+                        nbstat_cmd = [
+                            "nmap",
+                            "-Pn",
+                            "-sU",
+                            "-p",
+                            "137",
+                            "--script",
+                            "nbstat",
+                            host.ip,
+                        ]
+                        nb_stdout, _, nb_rc = run_tool(nbstat_cmd, timeout_seconds=10)
+                        if nb_rc == 0 and nb_stdout:
+                            # Parse FQDN from "Nmap scan report for hostname.domain (IP)"
+                            fqdn_match = re.search(
+                                r"Nmap scan report for ([^\s]+)\s+\(" + re.escape(host.ip) + r"\)",
+                                nb_stdout,
+                            )
+                            if fqdn_match:
+                                resolved_hostname = fqdn_match.group(1).strip()
+                                # Skip AWS internal hostnames
+                                if not (
+                                    resolved_hostname.lower().startswith("ip-")
+                                    and "compute.internal" in resolved_hostname.lower()
+                                ):
+                                    host.hostname = resolved_hostname
+                                    logger.info(
+                                        f"[+] Resolved hostname for {host.ip}: {resolved_hostname}"
+                                    )
+                                    continue
+
+                            # Fallback: parse NetBIOS name from nbstat output
+                            # Format: "| nbstat: NetBIOS name: HOSTNAME, ..."
+                            nb_match = re.search(r"nbstat:\s*NetBIOS name:\s*([^,]+)", nb_stdout)
+                            if nb_match:
+                                netbios_name = nb_match.group(1).strip()
+                                # Try to find domain from Names section
+                                # Format: "DOMAIN<00>  Flags: <group>"
+                                domain_match = re.search(
+                                    r"^\s+([A-Z0-9_-]+)<00>\s+Flags:.*<group>",
+                                    nb_stdout,
+                                    re.MULTILINE,
+                                )
+                                if domain_match:
+                                    domain = domain_match.group(1).strip().lower()
+                                    # Build FQDN: hostname.domain.local (assume .local TLD)
+                                    host.hostname = f"{netbios_name.lower()}.{domain}.local"
+                                else:
+                                    host.hostname = netbios_name.lower()
+                                logger.info(
+                                    f"[+] Resolved NetBIOS name for {host.ip}: {host.hostname}"
+                                )
+                    except Exception as e:
+                        logger.debug(f"[!] NetBIOS resolution failed for {host.ip}: {e}")
+
             if self.state:
                 for ip in targets:
                     self.state.queried_hosts.add(ip)

@@ -17,7 +17,7 @@ from typing import Any
 
 from loguru import logger
 
-from ares.core.config import clear_config_cache, get_namespace, get_redis_url
+from ares.core.config import clear_config_cache, get_namespace, get_operation_timeout, get_redis_url
 from ares.core.litellm_env import configure_litellm_env
 from ares.core.models import Credential
 from ares.core.orchestrator import run_multi_agent_operation
@@ -28,6 +28,13 @@ from ares.core.task_queue import RedisTaskQueue
 
 def _configure_dreadnode():
     configure_litellm_env()
+
+    # Configure OTEL tracing to export to OTLP endpoint (e.g., Alloy/Tempo)
+    # This is required because the dreadnode SDK doesn't auto-configure from OTEL env vars
+    from ares.core.tracing import setup_otel_tracing
+
+    setup_otel_tracing()
+
     import dreadnode as dn
 
     return dn
@@ -48,6 +55,8 @@ class OperationRequest:
     report_dir: str | None = None
     # API keys passed from client (set as env vars before running)
     env_vars: dict[str, str] | None = None
+    # Target environment for tracing (e.g., "dev", "staging", "prod")
+    target_environment: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OperationRequest:
@@ -81,6 +90,7 @@ class OperationRequest:
             or env_vars.get("ARES_REPORT_DIR")
             or os.environ.get("ARES_REPORT_DIR"),
             env_vars=env_vars or None,
+            target_environment=data.get("target_environment"),
         )
 
 
@@ -291,17 +301,42 @@ class OrchestratorService:
 
             configure_litellm_env()
 
-            result = await run_multi_agent_operation(
-                operation_id=operation_id,
-                target_domain=target_domain,
-                target_ips=target_ips,
-                initial_credential=state.all_credentials[0] if state.all_credentials else None,
-                resume_from_checkpoint=True,
-                report_dir=self._report_dir,
-                redis_url=self.redis_url,
-                namespace=self.namespace,
-                model=model,
-            )
+            # Wrap operation with service-level timeout to prevent hanging forever
+            operation_timeout = get_operation_timeout()
+            logger.info(f"Resuming operation with service timeout: {operation_timeout}s")
+
+            try:
+                result = await asyncio.wait_for(
+                    run_multi_agent_operation(
+                        operation_id=operation_id,
+                        target_domain=target_domain,
+                        target_ips=target_ips,
+                        initial_credential=state.all_credentials[0]
+                        if state.all_credentials
+                        else None,
+                        resume_from_checkpoint=True,
+                        report_dir=self._report_dir,
+                        redis_url=self.redis_url,
+                        namespace=self.namespace,
+                        model=model,
+                    ),
+                    timeout=float(operation_timeout),
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"Recovered operation {operation_id} exceeded service timeout "
+                    f"({operation_timeout}s)"
+                )
+                await self._publish_operation_status(
+                    operation_id,
+                    "failed",
+                    {
+                        "failed_at": datetime.now(timezone.utc).isoformat(),
+                        "error": f"Operation exceeded service timeout ({operation_timeout}s)",
+                        "recovered": True,
+                    },
+                )
+                return  # Continue to next operation
 
             # Publish completion status
             await self._publish_operation_status(
@@ -662,20 +697,43 @@ class OrchestratorService:
                 )
             configure_litellm_env()
 
-            result = await run_multi_agent_operation(
-                operation_id=request.operation_id,
-                target_domain=request.target_domain,
-                target_ips=request.target_ips,
-                initial_credential=initial_cred,
-                resume_from_checkpoint=request.resume_from_checkpoint,
-                report_dir=request.report_dir or self._report_dir,
-                redis_url=self.redis_url,
-                namespace=self.namespace,
-                model=request.model,
-                max_steps=request.max_steps,
-                checkpoint_interval=request.checkpoint_interval,
-                openai_api_key=openai_api_key,
-            )
+            # Wrap operation with service-level timeout to prevent hanging forever
+            operation_timeout = get_operation_timeout()
+            logger.info(f"Running operation with service timeout: {operation_timeout}s")
+
+            try:
+                result = await asyncio.wait_for(
+                    run_multi_agent_operation(
+                        operation_id=request.operation_id,
+                        target_domain=request.target_domain,
+                        target_ips=request.target_ips,
+                        initial_credential=initial_cred,
+                        resume_from_checkpoint=request.resume_from_checkpoint,
+                        report_dir=request.report_dir or self._report_dir,
+                        redis_url=self.redis_url,
+                        namespace=self.namespace,
+                        model=request.model,
+                        max_steps=request.max_steps,
+                        checkpoint_interval=request.checkpoint_interval,
+                        openai_api_key=openai_api_key,
+                        target_environment=request.target_environment,
+                    ),
+                    timeout=float(operation_timeout),
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"Operation {request.operation_id} exceeded service timeout "
+                    f"({operation_timeout}s)"
+                )
+                await self._publish_operation_status(
+                    request.operation_id,
+                    "failed",
+                    {
+                        "failed_at": datetime.now(timezone.utc).isoformat(),
+                        "error": f"Operation exceeded service timeout ({operation_timeout}s)",
+                    },
+                )
+                return  # Continue to next operation
 
             # Publish operation status: completed
             await self._publish_operation_status(

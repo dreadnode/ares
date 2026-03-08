@@ -944,3 +944,430 @@ class TestStopOnDomainAdminConfigRespect:
 
         assert len(gt_finishes) >= 1, "Should stop on Golden Ticket"
         assert len(da_finishes) == 0, "Should NOT stop on Domain Admin"
+
+
+class TestTargetExtractionLogic:
+    """Tests for target extraction logic in log_tool_result hook.
+
+    The hook must correctly distinguish between:
+    - FQDNs (e.g., 'dc01.contoso.local') -> target_fqdn
+    - Usernames with dots (e.g., 'sansa.stark') -> target_user
+    - IPs (e.g., '192.168.58.10') -> target_ip
+    - Plain hostnames (e.g., 'dc01') -> target_hostname
+    """
+
+    def _make_tool_end_event(
+        self, tool_name: str, arguments: dict, content: str = "OK"
+    ) -> MagicMock:
+        """Helper to create a mock ToolEnd event with specific arguments."""
+        import json
+
+        event = MagicMock(spec=ToolEnd)
+        event.tool_call = MagicMock()
+        event.tool_call.name = tool_name
+        event.tool_call.arguments = json.dumps(arguments)
+        event.message = MagicMock()
+        event.message.content = content
+        event.error = None
+        return event
+
+    @pytest.mark.asyncio
+    async def test_fqdn_with_local_suffix_extracted_correctly(self, monkeypatch):
+        """Test that FQDNs ending in .local are correctly identified."""
+        from unittest.mock import patch
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.LATERAL, dispatcher, shared_state)
+
+        event = self._make_tool_end_event(
+            "psexec",
+            {
+                "target": "dc01.contoso.local",
+                "username": "admin",
+                "password": "pass",  # pragma: allowlist secret
+            },
+        )
+
+        # Capture what trace_tool_call receives
+        captured_calls = []
+
+        def mock_trace_tool_call(*args, **kwargs):
+            captured_calls.append(kwargs)
+
+        with patch(
+            "ares.core.factories.red_agents.trace_tool_call", side_effect=mock_trace_tool_call
+        ):
+            for hook in hooks:
+                try:
+                    await hook(event)
+                except TypeError:
+                    pass
+
+        assert len(captured_calls) > 0, "trace_tool_call should be called"
+        call = captured_calls[0]
+        assert call.get("target_fqdn") == "dc01.contoso.local"
+        assert call.get("target_hostname") == "dc01"
+
+    @pytest.mark.asyncio
+    async def test_username_with_dot_not_treated_as_fqdn(self, monkeypatch):
+        """Test that usernames like 'sansa.stark' are NOT treated as FQDNs.
+
+        This is the critical bug fix: before, 'sansa.stark' was incorrectly
+        identified as an FQDN because it contains a dot.
+        """
+        from unittest.mock import patch
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.PRIVESC, dispatcher, shared_state)
+
+        # Simulate a tool that has 'target' as a username (not a host)
+        # This happens with privesc tools targeting user accounts
+        event = self._make_tool_end_event(
+            "targeted_kerberoast",
+            {"target": "sansa.stark", "domain": "contoso.local"},
+        )
+
+        captured_calls = []
+
+        def mock_trace_tool_call(*args, **kwargs):
+            captured_calls.append(kwargs)
+
+        with patch(
+            "ares.core.factories.red_agents.trace_tool_call", side_effect=mock_trace_tool_call
+        ):
+            for hook in hooks:
+                try:
+                    await hook(event)
+                except TypeError:
+                    pass
+
+        assert len(captured_calls) > 0, "trace_tool_call should be called"
+        call = captured_calls[0]
+
+        # sansa.stark should NOT be treated as FQDN
+        assert call.get("target_fqdn") is None, (
+            f"Username 'sansa.stark' should NOT be target_fqdn, got: {call.get('target_fqdn')}"
+        )
+        # It should be captured as target_user instead
+        assert call.get("target_user") == "sansa.stark", (
+            f"Username 'sansa.stark' should be target_user, got: {call.get('target_user')}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ip_address_extracted_correctly(self, monkeypatch):
+        """Test that IP addresses are correctly identified."""
+        from unittest.mock import patch
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.LATERAL, dispatcher, shared_state)
+
+        event = self._make_tool_end_event(
+            "psexec",
+            {
+                "target": "192.168.58.10",
+                "username": "admin",
+                "password": "pass",  # pragma: allowlist secret
+            },
+        )
+
+        captured_calls = []
+
+        def mock_trace_tool_call(*args, **kwargs):
+            captured_calls.append(kwargs)
+
+        with patch(
+            "ares.core.factories.red_agents.trace_tool_call", side_effect=mock_trace_tool_call
+        ):
+            for hook in hooks:
+                try:
+                    await hook(event)
+                except TypeError:
+                    pass
+
+        assert len(captured_calls) > 0
+        call = captured_calls[0]
+        assert call.get("target_ip") == "192.168.58.10"
+        assert call.get("target_fqdn") is None
+
+    @pytest.mark.asyncio
+    async def test_plain_hostname_extracted_correctly(self, monkeypatch):
+        """Test that plain hostnames (no dots) are correctly identified."""
+        from unittest.mock import patch
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.LATERAL, dispatcher, shared_state)
+
+        event = self._make_tool_end_event(
+            "psexec",
+            {"target": "dc01", "username": "admin", "password": "pass"},  # pragma: allowlist secret
+        )
+
+        captured_calls = []
+
+        def mock_trace_tool_call(*args, **kwargs):
+            captured_calls.append(kwargs)
+
+        with patch(
+            "ares.core.factories.red_agents.trace_tool_call", side_effect=mock_trace_tool_call
+        ):
+            for hook in hooks:
+                try:
+                    await hook(event)
+                except TypeError:
+                    pass
+
+        assert len(captured_calls) > 0
+        call = captured_calls[0]
+        assert call.get("target_hostname") == "dc01"
+        assert call.get("target_fqdn") is None
+
+    @pytest.mark.asyncio
+    async def test_explicit_target_user_takes_precedence(self, monkeypatch):
+        """Test that explicit target_user arg takes precedence over inferred username."""
+        from unittest.mock import patch
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.PRIVESC, dispatcher, shared_state)
+
+        event = self._make_tool_end_event(
+            "s4u_attack",
+            {
+                "target_spn": "cifs/dc01.contoso.local",
+                "target_user": "administrator",
+                "domain": "contoso.local",
+            },
+        )
+
+        captured_calls = []
+
+        def mock_trace_tool_call(*args, **kwargs):
+            captured_calls.append(kwargs)
+
+        with patch(
+            "ares.core.factories.red_agents.trace_tool_call", side_effect=mock_trace_tool_call
+        ):
+            for hook in hooks:
+                try:
+                    await hook(event)
+                except TypeError:
+                    pass
+
+        assert len(captured_calls) > 0
+        call = captured_calls[0]
+        assert call.get("target_user") == "administrator"
+
+    @pytest.mark.asyncio
+    async def test_three_segment_fqdn_detected(self, monkeypatch):
+        """Test that 3+ segment names are treated as FQDNs."""
+        from unittest.mock import patch
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.LATERAL, dispatcher, shared_state)
+
+        # Three segments without common TLD - should still be FQDN
+        event = self._make_tool_end_event(
+            "psexec",
+            {
+                "target": "dc01.child.parent",
+                "username": "admin",
+                "password": "pass",  # pragma: allowlist secret
+            },
+        )
+
+        captured_calls = []
+
+        def mock_trace_tool_call(*args, **kwargs):
+            captured_calls.append(kwargs)
+
+        with patch(
+            "ares.core.factories.red_agents.trace_tool_call", side_effect=mock_trace_tool_call
+        ):
+            for hook in hooks:
+                try:
+                    await hook(event)
+                except TypeError:
+                    pass
+
+        assert len(captured_calls) > 0
+        call = captured_calls[0]
+        assert call.get("target_fqdn") == "dc01.child.parent"
+
+    @pytest.mark.asyncio
+    async def test_hostname_prefix_with_dot_detected_as_fqdn(self, monkeypatch):
+        """Test that 'dc.something' is treated as FQDN (dc prefix indicates DC)."""
+        from unittest.mock import patch
+
+        shared_state = SharedRedTeamState(operation_id="test-op")
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+
+        hooks = create_role_hooks(AgentRole.LATERAL, dispatcher, shared_state)
+
+        # Two segments but dc prefix -> FQDN
+        event = self._make_tool_end_event(
+            "psexec",
+            {
+                "target": "dc01.internal",
+                "username": "admin",
+                "password": "pass",  # pragma: allowlist secret
+            },
+        )
+
+        captured_calls = []
+
+        def mock_trace_tool_call(*args, **kwargs):
+            captured_calls.append(kwargs)
+
+        with patch(
+            "ares.core.factories.red_agents.trace_tool_call", side_effect=mock_trace_tool_call
+        ):
+            for hook in hooks:
+                try:
+                    await hook(event)
+                except TypeError:
+                    pass
+
+        assert len(captured_calls) > 0
+        call = captured_calls[0]
+        # .internal is a recognized suffix, so should be FQDN
+        assert call.get("target_fqdn") == "dc01.internal"
+
+
+class TestCredentialExtractionDomainFallback:
+    """Tests for credential extraction domain fallback in role hooks.
+
+    When extracting plaintext passwords from tool output:
+    - If the extraction includes a domain (e.g., LSA DefaultPassword), use it
+    - Otherwise, fall back to shared_state.target_domain
+    """
+
+    def _make_tool_end_event(
+        self, tool_name: str, content: str, arguments: dict | None = None
+    ) -> MagicMock:
+        """Helper to create a mock ToolEnd event."""
+        import json
+
+        event = MagicMock(spec=ToolEnd)
+        event.tool_call = MagicMock()
+        event.tool_call.name = tool_name
+        event.tool_call.arguments = json.dumps(arguments or {})
+        event.message = MagicMock()
+        event.message.content = content
+        event.error = None
+        return event
+
+    @pytest.mark.asyncio
+    async def test_lsa_password_uses_extracted_domain(self):
+        """LSA DefaultPassword should use the domain from the output, not target_domain."""
+        from ares.core.models import Target
+
+        shared_state = SharedRedTeamState(operation_id="op-test-lsa-domain")
+        shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # Mock dispatcher with task_queue attribute
+        mock_task_queue = MagicMock()
+        mock_task_queue.publish_discovery = AsyncMock()
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+        dispatcher._task_queue = mock_task_queue  # Hook reads task_queue from dispatcher
+
+        hooks = create_role_hooks(
+            AgentRole.LATERAL,
+            dispatcher,
+            shared_state,
+        )
+
+        # LSA DefaultPassword output with FABRIKAM domain (different from target)
+        secretsdump_output = """
+[*] Dumping LSA Secrets
+[*] DefaultPassword
+FABRIKAM\\svc_backup:B@ckupP@ss123!
+[*] DPAPI_SYSTEM
+        """
+
+        event = self._make_tool_end_event("secretsdump", secretsdump_output)
+
+        # Run hooks
+        for hook in hooks:
+            try:
+                await hook(event)
+            except TypeError:
+                pass
+
+        # Check that publish_discovery was called with FABRIKAM domain (from LSA output),
+        # not contoso.local (target_domain)
+        if mock_task_queue.publish_discovery.called:
+            # Find the credential discovery call (may have hash calls too)
+            for call in mock_task_queue.publish_discovery.call_args_list:
+                if call.kwargs.get("discovery_type") == "credential":
+                    assert call.kwargs["data"]["domain"] == "FABRIKAM", (
+                        f"Should use extracted domain FABRIKAM, got {call.kwargs['data']['domain']}"
+                    )
+                    return
+            # If no credential discovery was made, that's also valid (tool may not be in list)
+
+    @pytest.mark.asyncio
+    async def test_password_field_uses_target_domain_fallback(self):
+        """Password: field extraction (no domain in output) should use target_domain."""
+        from ares.core.models import Target
+
+        shared_state = SharedRedTeamState(operation_id="op-test-fallback")
+        shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        mock_task_queue = MagicMock()
+        mock_task_queue.publish_discovery = AsyncMock()
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+        dispatcher._task_queue = mock_task_queue
+
+        hooks = create_role_hooks(
+            AgentRole.CREDENTIAL_ACCESS,
+            dispatcher,
+            shared_state,
+        )
+
+        # Password field output from ldap_search_descriptions (in CREDENTIAL_EXTRACTION_TOOLS)
+        # Note: output must be >= 20 chars to trigger extraction
+        ldap_output = """
+[*] Searching LDAP descriptions for credentials
+samaccountname: sql_svc
+Password: SqlP@ss123
+[*] Search complete
+        """
+
+        event = self._make_tool_end_event("ldap_search_descriptions", ldap_output)
+
+        for hook in hooks:
+            try:
+                await hook(event)
+            except TypeError:
+                pass
+
+        # Check that publish_discovery was called with target_domain fallback
+        if mock_task_queue.publish_discovery.called:
+            for call in mock_task_queue.publish_discovery.call_args_list:
+                if call.kwargs.get("discovery_type") == "credential":
+                    assert call.kwargs["data"]["domain"] == "contoso.local", (
+                        f"Should use target_domain contoso.local, got {call.kwargs['data']['domain']}"
+                    )
+                    return

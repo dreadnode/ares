@@ -29,6 +29,7 @@ async def submit_operation(
     wait_for_completion: bool = False,
     poll_interval: float = 10.0,
     env_vars: dict[str, str] | None = None,
+    target_environment: str | None = None,
 ) -> dict[str, Any]:
     """Submit an operation request to the orchestrator service.
 
@@ -51,6 +52,7 @@ async def submit_operation(
         wait_for_completion: If True, wait for operation to complete
         poll_interval: Seconds between status polls when waiting
         env_vars: Environment variables to pass to orchestrator (API keys, etc.)
+        target_environment: Target environment (e.g., "dev", "staging", "prod")
 
     Returns:
         Operation status dict with keys:
@@ -66,6 +68,7 @@ async def submit_operation(
         "operation_id": operation_id,
         "target_domain": target_domain,
         "target_ips": target_ips,
+        "target_environment": target_environment,
         "initial_credential": initial_credential,
         "resume_from_checkpoint": resume_from_checkpoint,
         "model": model or os.environ.get("ARES_ORCHESTRATOR_MODEL") or os.environ.get("ARES_MODEL"),

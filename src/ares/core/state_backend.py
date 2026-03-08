@@ -224,6 +224,114 @@ class RedisStateBackend:
             logger.warning(f"Failed to get credentials from Redis: {e}")
             return []
 
+    async def update_credential_domain(
+        self, username: str, password: str, old_domain: str, new_domain: str
+    ) -> bool:
+        """Update a credential's domain in Redis.
+
+        Since credentials are keyed by {domain}:{username}:{password_hash}, changing
+        the domain requires deleting the old entry and adding a new one.
+
+        Args:
+            username: The username
+            password: The password (needed to build the dedup key)
+            old_domain: The current (wrong) domain
+            new_domain: The correct domain
+
+        Returns:
+            True if updated, False if not found or failed
+        """
+        import hashlib
+
+        key = self._key(self.KEY_CREDENTIALS)
+        try:
+            # Build the old dedup key
+            username_lower = username.strip().lower()
+            old_domain_lower = old_domain.strip().lower()
+            new_domain_lower = new_domain.strip().lower()
+            password_hash = hashlib.md5(password.encode(), usedforsecurity=False).hexdigest()[:16]
+            old_field = f"cred:{old_domain_lower}:{username_lower}:{password_hash}"
+            new_field = f"cred:{new_domain_lower}:{username_lower}:{password_hash}"
+
+            # Get the existing credential data
+            data = await self._redis.hget(key, old_field)
+            if not data:
+                logger.debug(f"Credential not found for domain update: {old_field}")
+                return False
+
+            # Deserialize, update domain, re-serialize
+            cred = _deserialize_credential(data)
+            cred.domain = new_domain_lower
+
+            # Delete old entry and add new one atomically via pipeline
+            async with self._redis.pipeline() as pipe:
+                pipe.hdel(key, old_field)
+                pipe.hset(key, new_field, _serialize_credential(cred))
+                await pipe.execute()
+
+            logger.debug(
+                f"Credential domain updated in Redis: {old_domain}\\{username} -> {new_domain}"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to update credential domain in Redis: {e}")
+            return False
+
+    async def update_hash_domain(
+        self, username: str, hash_value: str, hash_type: str, old_domain: str, new_domain: str
+    ) -> bool:
+        """Update a hash's domain in Redis.
+
+        Since hashes are keyed with domain in the dedup key, changing the domain
+        requires deleting the old entry and adding a new one.
+
+        Args:
+            username: The username
+            hash_value: The hash value
+            hash_type: The hash type (ntlm, asrep, etc.)
+            old_domain: The current (wrong) domain
+            new_domain: The correct domain
+
+        Returns:
+            True if updated, False if not found or failed
+        """
+        key = self._key(self.KEY_HASHES)
+        try:
+            username_lower = username.strip().lower()
+            old_domain_lower = old_domain.strip().lower()
+            new_domain_lower = new_domain.strip().lower()
+            hash_type_lower = hash_type.strip().lower()
+
+            # Build old and new dedup keys
+            old_field = self._build_hash_dedup_key(
+                hash_type_lower, hash_value, old_domain_lower, username_lower
+            )
+            new_field = self._build_hash_dedup_key(
+                hash_type_lower, hash_value, new_domain_lower, username_lower
+            )
+
+            # Get the existing hash data
+            data = await self._redis.hget(key, old_field)
+            if not data:
+                logger.debug(f"Hash not found for domain update: {old_field}")
+                return False
+
+            # Deserialize, update domain, re-serialize
+            hash_obj = _deserialize_hash(data)
+            hash_obj.domain = new_domain_lower
+
+            # Delete old entry and add new one atomically via pipeline
+            async with self._redis.pipeline() as pipe:
+                pipe.hdel(key, old_field)
+                pipe.hset(key, new_field, _serialize_hash(hash_obj))
+                await pipe.execute()
+
+            logger.debug(f"Hash domain updated in Redis: {old_domain}\\{username} -> {new_domain}")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to update hash domain in Redis: {e}")
+            return False
+
     # =========================================================================
     # Hashes (Redis HASH with HSETNX for O(1) deduplication)
     # =========================================================================

@@ -45,7 +45,7 @@ from ares.core.messages import (
 from ares.core.models import AgentRole, SharedRedTeamState
 from ares.core.redis_client import create_redis_client
 from ares.core.task_queue import RedisTaskQueue, TaskMessage
-from ares.core.tracing import create_agent_span_attributes
+from ares.core.tracing import IP_PATTERN, create_agent_span_attributes, is_likely_fqdn
 from ares.core.worker.cleanup import close_litellm_clients
 from ares.core.worker.operations import (
     discover_active_operation,
@@ -512,14 +512,63 @@ class RedisWorkerAgent:
         # Create CONSUMER span for Tempo service graph (explicit span management)
         # This pairs with the PRODUCER span from submit_task
         # Extract target info from payload for span metrics
-        target_host = (
-            payload_snapshot.get("target")
-            or payload_snapshot.get("target_ip")
-            or payload_snapshot.get("dc_ip")
-            or payload_snapshot.get("host")
-            or payload_snapshot.get("hostname")
+        # Properly separate IPs, FQDNs, and usernames to avoid putting usernames in host fields
+        target_ip = None
+        target_fqdn = None
+        target_user = None
+
+        # Check explicit IP fields first
+        for field in ("target_ip", "dc_ip", "ip"):
+            val = payload_snapshot.get(field)
+            if val and IP_PATTERN.match(val):
+                target_ip = val
+                break
+
+        # Check target/host fields - distinguish FQDN from username
+        for field in ("target", "host", "hostname"):
+            val = payload_snapshot.get(field)
+            if val:
+                if IP_PATTERN.match(val):
+                    if not target_ip:
+                        target_ip = val
+                elif "." in val and is_likely_fqdn(val):
+                    target_fqdn = val
+                elif "." in val:
+                    # Has dot but not FQDN -> likely username (e.g., "sansa.stark")
+                    target_user = val
+                elif val:
+                    # Plain hostname without dots
+                    target_fqdn = val
+                break
+
+        # Check explicit user fields
+        if not target_user:
+            target_user = (
+                payload_snapshot.get("target_user")
+                or payload_snapshot.get("username")
+                or payload_snapshot.get("user")
+            )
+
+        # Refresh state BEFORE span creation to get target.environment from Redis
+        await self._refresh_shared_state()
+
+        # Get target environment from shared state for tracing
+        target_env = None
+        if self.shared_state and self.shared_state.target:
+            env_val = self.shared_state.target.environment
+            # Ensure it's a string (OTel requires primitive types)
+            if isinstance(env_val, str) and env_val:
+                target_env = env_val
+            elif env_val:
+                target_env = str(env_val)
+        span_attrs = create_agent_span_attributes(
+            self.role.value,
+            "red",
+            target_ip=target_ip,
+            target_fqdn=target_fqdn,
+            target_user=target_user,
+            target_environment=target_env,
         )
-        span_attrs = create_agent_span_attributes(self.role.value, "red", target_host=target_host)
         span_attrs.update(
             {
                 "task.id": task.task_id,
@@ -573,7 +622,7 @@ class RedisWorkerAgent:
                 )
 
         try:
-            await self._refresh_shared_state()
+            # State already refreshed above (before span creation)
             # Handle "command" tasks directly via subprocess (no agent needed)
             if task.task_type == "command":
                 await self._execute_command_task(task)
@@ -949,6 +998,19 @@ class RedisWorkerAgent:
             fresh.has_golden_ticket = await backend.get_golden_ticket()
             # Load DC map for child domain resolution
             fresh.domain_controllers.update(await backend.get_all_dcs())
+
+            # Reconstruct Target from meta for environment tracking
+            target_ip = await backend.get_meta("target_ip", default="")
+            target_domain = await backend.get_meta("target_domain", default="")
+            target_env = await backend.get_meta("target_environment", default="")
+            if target_ip or target_domain:
+                from ares.core.models import Target
+
+                fresh.target = Target(
+                    ip=target_ip or "",
+                    domain=target_domain or "",
+                    environment=target_env or "",
+                )
 
             self._merge_shared_state(fresh)
         except Exception as e:
@@ -1806,6 +1868,19 @@ class RedisWorkerAgent:
             # Load DC map for child domain resolution
             fresh.domain_controllers.update(await backend.get_all_dcs())
 
+            # Reconstruct Target from meta for environment tracking
+            target_ip = await backend.get_meta("target_ip", default="")
+            target_domain = await backend.get_meta("target_domain", default="")
+            target_env = await backend.get_meta("target_environment", default="")
+            if target_ip or target_domain:
+                from ares.core.models import Target
+
+                fresh.target = Target(
+                    ip=target_ip or "",
+                    domain=target_domain or "",
+                    environment=target_env or "",
+                )
+
             self._merge_shared_state(fresh)
         except Exception as e:
             logger.debug(f"[{self.agent_name}] Failed to fetch/merge state: {e}")
@@ -2170,6 +2245,12 @@ async def run_worker(
     apply_rigging_patches()
 
     configure_litellm_env()
+
+    # Configure OTEL tracing to export to OTLP endpoint (e.g., Alloy/Tempo)
+    # This is required because the dreadnode SDK doesn't auto-configure from OTEL env vars
+    from ares.core.tracing import setup_otel_tracing
+
+    setup_otel_tracing()
 
     # Initialize replay system if configured
     from ares.core.config import (

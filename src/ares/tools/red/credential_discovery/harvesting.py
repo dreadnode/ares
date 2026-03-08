@@ -284,6 +284,7 @@ class CredentialHarvestingTools(Toolset):
             if (has_krbtgt or has_administrator) and self.dispatcher:
                 try:
                     cred_type = "krbtgt_hash" if has_krbtgt else "administrator_hash"
+                    da_username = "krbtgt" if has_krbtgt else "Administrator"
                     attack_path = (
                         f"krbtgt hash via secretsdump on {target}"
                         if has_krbtgt
@@ -293,7 +294,7 @@ class CredentialHarvestingTools(Toolset):
                     # Run async announce in sync context
                     asyncio.run(
                         self.dispatcher.announce_domain_admin(
-                            username="Administrator",
+                            username=da_username,
                             domain=domain or "",
                             attack_path=attack_path,
                             credential_type=cred_type,
@@ -791,11 +792,12 @@ class CredentialHarvestingTools(Toolset):
             if (has_krbtgt or has_admin) and self.dispatcher:
                 try:
                     cred_type = "krbtgt_hash" if has_krbtgt else "administrator_credentials"
+                    da_username = "krbtgt" if has_krbtgt else "Administrator"
                     attack_path = f"lsassy credential dump on {target}"
 
                     asyncio.run(
                         self.dispatcher.announce_domain_admin(
-                            username="Administrator",
+                            username=da_username,
                             domain=domain or "",
                             attack_path=attack_path,
                             credential_type=cred_type,

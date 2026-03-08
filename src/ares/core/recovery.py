@@ -282,6 +282,19 @@ class OperationRecoveryManager:
         dc_map = await backend.get_all_dcs()
         state.domain_controllers.update(dc_map)
 
+        # Reconstruct Target from meta for environment tracking
+        target_ip = await backend.get_meta("target_ip", default="")
+        target_domain = await backend.get_meta("target_domain", default="")
+        target_env = await backend.get_meta("target_environment", default="")
+        if target_ip or target_domain:
+            from ares.core.models import Target
+
+            state.target = Target(
+                ip=target_ip or "",
+                domain=target_domain or "",
+                environment=target_env or "",
+            )
+
         # Load NetBIOS map
         netbios_map = await backend.get_all_netbios_mappings()
         state.netbios_to_fqdn.update(netbios_map)

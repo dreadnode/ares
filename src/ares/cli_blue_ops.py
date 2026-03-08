@@ -1057,6 +1057,48 @@ async def from_operation(
         await tracking_client.expire(op_inv_key, 7 * 24 * 3600)
 
     try:
+        # Filter out infrastructure/noise alerts that aren't security-relevant
+        # These create excessive investigation clusters without actionable security context
+        infrastructure_alert_names = {
+            "DatasourceNoData",  # Grafana datasource health
+            "DatasourceError",  # Grafana datasource errors
+            "Watchdog",  # Prometheus/Alertmanager health check
+            "InfoInhibitor",  # Alertmanager inhibitor
+        }
+
+        security_alerts = []
+        filtered_count = 0
+        for alert in alerts:
+            alertname = alert.get("labels", {}).get("alertname", "")
+            if alertname in infrastructure_alert_names:
+                filtered_count += 1
+            else:
+                security_alerts.append(alert)
+
+        if filtered_count > 0:
+            logger.info(
+                f"Filtered {filtered_count} infrastructure alerts "
+                f"(DatasourceNoData, etc.), {len(security_alerts)} security alerts remain"
+            )
+        alerts = security_alerts
+
+        # Note: We intentionally do NOT filter by target scope here.
+        # The time window filter in _query_grafana_alerts already limits alerts
+        # to the operation timeframe, and alert correlation handles grouping.
+        # Aggressive scope filtering was causing most alerts to be dropped,
+        # resulting in only 1-2 investigations instead of proper coverage.
+
+        # Add operation_context to all alerts BEFORE correlation
+        # This allows the correlator to group by operation_id
+        operation_context = {
+            "operation_id": operation_id,
+            "attack_window_start": window_start.isoformat(),
+            "attack_window_end": window_end.isoformat(),
+            "techniques_used": list(playbook.techniques_used)[:20],
+        }
+        for alert in alerts:
+            alert["operation_context"] = operation_context
+
         # Batch alerts using AlertCorrelator if enabled
         if batch and len(alerts) > 1:
             from ares.core.alert_correlation import AlertCorrelator
@@ -1073,7 +1115,7 @@ async def from_operation(
                 # Create a batch alert that represents the cluster
                 primary_alert = cluster.alerts[0]  # Use first alert as primary
                 batch_alert = {
-                    **primary_alert,
+                    **primary_alert,  # Already has operation_context from earlier
                     "batch_info": {
                         "is_batch": True,
                         "cluster_id": cluster.cluster_id,
@@ -1090,12 +1132,6 @@ async def from_operation(
                             }
                             for a in cluster.alerts[1:]  # Exclude primary
                         ],
-                    },
-                    "operation_context": {
-                        "operation_id": operation_id,
-                        "attack_window_start": window_start.isoformat(),
-                        "attack_window_end": window_end.isoformat(),
-                        "techniques_used": list(playbook.techniques_used)[:20],
                     },
                 }
 
@@ -1152,18 +1188,11 @@ async def from_operation(
 
         else:
             # Submit each alert as a separate investigation (original behavior)
+            # Note: operation_context already added to alerts above
             submitted = 0
             for alert in alerts:
                 alert_name = alert.get("labels", {}).get("alertname", "unknown")
                 severity = alert.get("labels", {}).get("severity", "unknown")
-
-                # Add operation context to alert
-                alert["operation_context"] = {
-                    "operation_id": operation_id,
-                    "attack_window_start": window_start.isoformat(),
-                    "attack_window_end": window_end.isoformat(),
-                    "techniques_used": list(playbook.techniques_used)[:20],
-                }
 
                 logger.info(f"Submitting: {alert_name} (severity={severity})")
 

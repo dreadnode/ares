@@ -972,3 +972,255 @@ class TestHashCrackingPriority:
         dispatcher.request_crack.assert_awaited_once()
         call_kwargs = dispatcher.request_crack.call_args.kwargs
         assert call_kwargs["priority"] == 5
+
+
+class TestDirectNmapNetBIOSEnrichment:
+    """Tests for NetBIOS hostname enrichment in direct nmap scan."""
+
+    @pytest.mark.asyncio
+    async def test_netbios_enrichment_resolves_hostname_from_fqdn(self, monkeypatch):
+        """Test that Phase 3 resolves hostname from FQDN in nmap output."""
+        from ares.core.orchestrator._orchestrator import _run_nmap_on_worker
+
+        # Mock executor
+        call_count = 0
+
+        async def mock_execute(role, command, timeout_seconds):
+            nonlocal call_count
+            call_count += 1
+
+            if call_count == 1:
+                # Phase 1: port scan
+                return (
+                    "Nmap scan report for 192.168.58.10\n"
+                    "PORT    STATE SERVICE\n"
+                    "445/tcp open  microsoft-ds\n",
+                    "",
+                    0,
+                )
+            if call_count == 2:
+                # Phase 2: service scan
+                return (
+                    "Nmap scan report for 192.168.58.10\n"
+                    "PORT    STATE SERVICE       VERSION\n"
+                    "445/tcp open  microsoft-ds  Windows Server 2019\n",
+                    "",
+                    0,
+                )
+            # Phase 3: nbstat - returns FQDN
+            return (
+                "Nmap scan report for castelblack.north.contoso.local (192.168.58.10)\n"
+                "PORT    STATE  SERVICE\n"
+                "137/udp open   netbios-ns\n",
+                "",
+                0,
+            )
+
+        mock_executor = MagicMock()
+        mock_executor.execute = AsyncMock(side_effect=mock_execute)
+
+        monkeypatch.setattr(
+            "ares.core.k8s_executor.KubernetesPodExecutor",
+            lambda **_kwargs: mock_executor,
+        )
+
+        _output, hosts = await _run_nmap_on_worker(["192.168.58.10"], "test-ns")
+
+        assert len(hosts) == 1
+        assert hosts[0].ip == "192.168.58.10"
+        assert hosts[0].hostname == "castelblack.north.contoso.local"
+
+    @pytest.mark.asyncio
+    async def test_netbios_enrichment_parses_netbios_name(self, monkeypatch):
+        """Test that Phase 3 parses NetBIOS name when FQDN not available."""
+        from ares.core.orchestrator._orchestrator import _run_nmap_on_worker
+
+        call_count = 0
+
+        async def mock_execute(role, command, timeout_seconds):
+            nonlocal call_count
+            call_count += 1
+
+            if call_count == 1:
+                return (
+                    "Nmap scan report for 192.168.58.11\n"
+                    "PORT    STATE SERVICE\n"
+                    "445/tcp open  microsoft-ds\n",
+                    "",
+                    0,
+                )
+            if call_count == 2:
+                return (
+                    "Nmap scan report for 192.168.58.11\n"
+                    "PORT    STATE SERVICE       VERSION\n"
+                    "445/tcp open  microsoft-ds  Windows Server 2019\n",
+                    "",
+                    0,
+                )
+            # Phase 3: nbstat - returns NetBIOS name only
+            return (
+                "Nmap scan report for 192.168.58.11\n"
+                "| nbstat: NetBIOS name: SQL01, NetBIOS user: <unknown>\n"
+                "|   Names:\n"
+                "|     SQL01<00>          Flags: <unique>\n"
+                "|     CONTOSO<00>        Flags: <group>\n",
+                "",
+                0,
+            )
+
+        mock_executor = MagicMock()
+        mock_executor.execute = AsyncMock(side_effect=mock_execute)
+
+        monkeypatch.setattr(
+            "ares.core.k8s_executor.KubernetesPodExecutor",
+            lambda **_kwargs: mock_executor,
+        )
+
+        _output, hosts = await _run_nmap_on_worker(["192.168.58.11"], "test-ns")
+
+        assert len(hosts) == 1
+        assert hosts[0].ip == "192.168.58.11"
+        assert hosts[0].hostname == "sql01.contoso.local"
+
+    @pytest.mark.asyncio
+    async def test_netbios_enrichment_skips_aws_hostnames(self, monkeypatch):
+        """Test that Phase 3 skips AWS internal hostnames."""
+        from ares.core.orchestrator._orchestrator import _run_nmap_on_worker
+
+        call_count = 0
+
+        async def mock_execute(role, command, timeout_seconds):
+            nonlocal call_count
+            call_count += 1
+
+            if call_count == 1:
+                return (
+                    "Nmap scan report for ip-10-0-1-50.ec2.internal (192.168.58.12)\n"
+                    "PORT    STATE SERVICE\n"
+                    "445/tcp open  microsoft-ds\n",
+                    "",
+                    0,
+                )
+            if call_count == 2:
+                return (
+                    "Nmap scan report for ip-10-0-1-50.ec2.compute.internal (192.168.58.12)\n"
+                    "PORT    STATE SERVICE       VERSION\n"
+                    "445/tcp open  microsoft-ds  Windows Server 2019\n",
+                    "",
+                    0,
+                )
+            # Phase 3: nbstat returns AWS hostname (should be skipped)
+            return (
+                "Nmap scan report for ip-10-0-1-50.ec2.compute.internal (192.168.58.12)\n"
+                "| nbstat: NetBIOS name: WEB01, NetBIOS user: <unknown>\n"
+                "|   Names:\n"
+                "|     WEB01<00>          Flags: <unique>\n",
+                "",
+                0,
+            )
+
+        mock_executor = MagicMock()
+        mock_executor.execute = AsyncMock(side_effect=mock_execute)
+
+        monkeypatch.setattr(
+            "ares.core.k8s_executor.KubernetesPodExecutor",
+            lambda **_kwargs: mock_executor,
+        )
+
+        _output, hosts = await _run_nmap_on_worker(["192.168.58.12"], "test-ns")
+
+        assert len(hosts) == 1
+        assert hosts[0].ip == "192.168.58.12"
+        # Should use NetBIOS name since FQDN was AWS internal
+        assert hosts[0].hostname == "web01"
+
+    @pytest.mark.asyncio
+    async def test_netbios_enrichment_skips_hosts_with_hostname(self, monkeypatch):
+        """Test that Phase 3 skips hosts that already have hostnames."""
+        from ares.core.orchestrator._orchestrator import _run_nmap_on_worker
+
+        call_count = 0
+
+        async def mock_execute(role, command, timeout_seconds):
+            nonlocal call_count
+            call_count += 1
+
+            if call_count == 1:
+                return (
+                    "Nmap scan report for dc01.contoso.local (192.168.58.13)\n"
+                    "PORT    STATE SERVICE\n"
+                    "445/tcp open  microsoft-ds\n",
+                    "",
+                    0,
+                )
+            if call_count == 2:
+                return (
+                    "Nmap scan report for dc01.contoso.local (192.168.58.13)\n"
+                    "PORT    STATE SERVICE       VERSION\n"
+                    "445/tcp open  microsoft-ds  Windows Server 2019\n",
+                    "",
+                    0,
+                )
+            # Should NOT reach Phase 3 - host already has hostname
+            raise AssertionError("Phase 3 should not run for hosts with hostnames")
+
+        mock_executor = MagicMock()
+        mock_executor.execute = AsyncMock(side_effect=mock_execute)
+
+        monkeypatch.setattr(
+            "ares.core.k8s_executor.KubernetesPodExecutor",
+            lambda **_kwargs: mock_executor,
+        )
+
+        _output, hosts = await _run_nmap_on_worker(["192.168.58.13"], "test-ns")
+
+        assert len(hosts) == 1
+        assert hosts[0].ip == "192.168.58.13"
+        assert hosts[0].hostname == "dc01.contoso.local"
+        # Only 2 calls (Phase 1 + Phase 2), no Phase 3
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_netbios_enrichment_handles_timeout(self, monkeypatch):
+        """Test that Phase 3 handles timeout gracefully."""
+        from ares.core.orchestrator._orchestrator import _run_nmap_on_worker
+
+        call_count = 0
+
+        async def mock_execute(role, command, timeout_seconds):
+            nonlocal call_count
+            call_count += 1
+
+            if call_count == 1:
+                return (
+                    "Nmap scan report for 192.168.58.14\n"
+                    "PORT    STATE SERVICE\n"
+                    "445/tcp open  microsoft-ds\n",
+                    "",
+                    0,
+                )
+            if call_count == 2:
+                return (
+                    "Nmap scan report for 192.168.58.14\n"
+                    "PORT    STATE SERVICE       VERSION\n"
+                    "445/tcp open  microsoft-ds  Windows Server 2019\n",
+                    "",
+                    0,
+                )
+            # Phase 3: timeout
+            raise TimeoutError("Command timed out")
+
+        mock_executor = MagicMock()
+        mock_executor.execute = AsyncMock(side_effect=mock_execute)
+
+        monkeypatch.setattr(
+            "ares.core.k8s_executor.KubernetesPodExecutor",
+            lambda **_kwargs: mock_executor,
+        )
+
+        _output, hosts = await _run_nmap_on_worker(["192.168.58.14"], "test-ns")
+
+        # Should still return the host, just without hostname
+        assert len(hosts) == 1
+        assert hosts[0].ip == "192.168.58.14"
+        assert hosts[0].hostname == ""

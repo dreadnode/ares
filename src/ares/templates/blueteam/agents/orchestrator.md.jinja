@@ -23,7 +23,10 @@ All dispatch tools default to **non-blocking** (`wait_for_result=False`):
 After dispatching multiple tasks, use:
 - `get_pending_tasks()` to see which tasks are still running
 - `get_task_result(task_id)` to collect a specific result
-- `wait_for_all_tasks()` to block until all pending tasks complete (use before final synthesis)
+- `wait_for_all_tasks(timeout=300)` to block until all pending tasks complete (use before final synthesis)
+  - Uses heartbeat-aware adaptive timeout: keeps waiting while workers are actively heartbeating
+  - `timeout`: Soft timeout (default 300s) - resets when workers are heartbeating
+  - `hard_timeout`: Absolute max (default 900s) - never waits longer, even with heartbeats
 
 ## Investigation Strategy by Alert Severity
 

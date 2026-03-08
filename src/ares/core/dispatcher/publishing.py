@@ -30,6 +30,7 @@ from ares.core.models import (
     TimelineEvent,
     VulnerabilityInfo,
 )
+from ares.core.tracing import trace_discovery
 
 if TYPE_CHECKING:
     from ares.core.dispatcher._dispatcher import RedTeamDispatcher
@@ -108,6 +109,15 @@ class PublishingMixin:
                     f"{credential.domain}\\{credential.username}"
                 )
             logger.info(f"Credential published: {credential.domain}\\{credential.username}")
+
+            # Trace the credential discovery
+            trace_discovery(
+                discovery_type="credential",
+                source_agent=source_agent,
+                operation_id=self.shared_state.operation_id,
+                target_user=credential.username,
+                target_domain=credential.domain,
+            )
 
             # Check if this credential has golden ticket capability
             # (e.g., is local admin on a DC we already know about)
@@ -299,6 +309,19 @@ class PublishingMixin:
                 self._checkpoint_requested.set()
             logger.info(
                 f"Hash published: {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type})"
+            )
+
+            # Trace the hash discovery
+            trace_discovery(
+                discovery_type="hash",
+                source_agent=source_agent,
+                operation_id=self.shared_state.operation_id,
+                target_user=hash_obj.username,
+                target_domain=hash_obj.domain,
+                additional_attrs={
+                    "hash.type": hash_obj.hash_type or "unknown",
+                    "hash.cracked": bool(hash_obj.cracked_password),
+                },
             )
 
             # If hash has cracked password, create credential via publish_credential()

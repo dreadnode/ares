@@ -429,6 +429,79 @@ class TestRedisTaskQueueConnectionErrorHandling:
             # Sentinel client should be invalidated for fresh DNS resolution
             mock_invalidate.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_check_results_batch_dns_failure_resets_state(
+        self, task_queue, mock_redis_client
+    ):
+        """Test check_results_batch handles DNS resolution failures.
+
+        This tests the fix for the issue where check_results_batch didn't
+        call _handle_connection_error on pipeline failures, leaving the
+        client in a broken state that would fail repeatedly.
+        """
+        # Simulate DNS resolution failure (the exact error from the bug report)
+        # pipeline() is synchronous in redis-py, so use MagicMock not AsyncMock
+        mock_pipeline = MagicMock()
+        mock_pipeline.rpop = MagicMock()  # rpop is chained in pipeline
+        mock_pipeline.execute = AsyncMock(
+            side_effect=Exception(
+                "Failed to connect to Redis: Error -2 connecting to "
+                "redis-0.redis-headless.attack-simulation.svc.cluster.local:6379. "
+                "Name or service not known."
+            )
+        )
+        mock_redis_client.pipeline = MagicMock(return_value=mock_pipeline)
+
+        with patch("ares.core.task_queue.invalidate_sentinel_client") as mock_invalidate:
+            # check_results_batch should return empty results on failure
+            results = await task_queue.check_results_batch(["task_1", "task_2"])
+
+            # Should return dict with None values (not raise)
+            assert results == {"task_1": None, "task_2": None}
+
+            # Connection state should be reset for retry
+            assert task_queue._connected is False
+            assert task_queue._client is None
+
+            # Sentinel client should be invalidated for fresh DNS resolution
+            mock_invalidate.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_check_results_batch_connection_reset_resets_state(
+        self, task_queue, mock_redis_client
+    ):
+        """Test check_results_batch handles connection reset errors."""
+        mock_pipeline = MagicMock()
+        mock_pipeline.rpop = MagicMock()
+        mock_pipeline.execute = AsyncMock(side_effect=Exception("Connection reset by peer"))
+        mock_redis_client.pipeline = MagicMock(return_value=mock_pipeline)
+
+        with patch("ares.core.task_queue.invalidate_sentinel_client") as mock_invalidate:
+            results = await task_queue.check_results_batch(["task_1"])
+
+            assert results == {"task_1": None}
+            assert task_queue._connected is False
+            mock_invalidate.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_check_results_batch_non_connection_error_preserves_state(
+        self, task_queue, mock_redis_client
+    ):
+        """Test check_results_batch preserves state for non-connection errors."""
+        mock_pipeline = MagicMock()
+        mock_pipeline.rpop = MagicMock()
+        mock_pipeline.execute = AsyncMock(side_effect=ValueError("Invalid response format"))
+        mock_redis_client.pipeline = MagicMock(return_value=mock_pipeline)
+
+        results = await task_queue.check_results_batch(["task_1"])
+
+        # Should still return empty results
+        assert results == {"task_1": None}
+
+        # Connection state should be preserved for non-connection errors
+        assert task_queue._connected is True
+        assert task_queue._client is not None
+
 
 class TestRedisTaskQueueKeyGeneration:
     """Tests for queue key generation methods."""
@@ -599,6 +672,34 @@ class TestRedisTaskQueueResults:
         assert result is not None
         assert result.success is True
         assert result.result["output"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_asyncio_timeout(self, task_queue, mock_redis_client):
+        """Test wait_for_result handles asyncio.TimeoutError from hung BRPOP.
+
+        This tests the fix for stale connections where BRPOP hangs forever
+        on a dead TCP socket. The asyncio.wait_for wrapper should detect
+        this and return None while resetting connection state.
+        """
+        import asyncio
+
+        # Simulate a hung BRPOP that never returns (stale connection)
+        async def hung_brpop(*args, **kwargs):
+            await asyncio.sleep(100)  # Would block forever without wait_for
+
+        mock_redis_client.brpop = hung_brpop
+
+        with patch("ares.core.task_queue.invalidate_sentinel_client"):
+            # wait_for_result with timeout=0.1 should trigger asyncio.TimeoutError
+            # after 0.1 + 5.0 = 5.1 seconds, but we mock so it's faster
+            result = await task_queue.wait_for_result("task_stale", timeout=0.1)
+
+            # Should return None (not raise) to indicate timeout
+            assert result is None
+
+            # Connection state should be reset
+            assert task_queue._connected is False
+            assert task_queue._client is None
 
     @pytest.mark.asyncio
     async def test_check_result_not_ready(self, task_queue, mock_redis_client):

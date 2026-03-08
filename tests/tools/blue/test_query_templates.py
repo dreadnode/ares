@@ -331,6 +331,100 @@ class TestASREPRoastingDetection:
 
         assert result["_query_template"] == "asrep_roasting"
         assert result["_mitre_technique"] == "T1558.004"
+        assert result["_severity"] == "high"
+
+
+class TestASREPRoastingBulkDetection:
+    """Tests for detect_asrep_roasting_bulk method."""
+
+    @pytest.fixture
+    def tools(self) -> QueryTemplateTools:
+        return QueryTemplateTools(loki_url="http://localhost:3100")
+
+    @pytest.mark.asyncio
+    async def test_detect_asrep_roasting_bulk_below_threshold(self, tools: QueryTemplateTools):
+        """Test bulk AS-REP roasting detection below threshold."""
+        mock_response = MagicMock()
+        # Only 2 TGT requests - below default threshold of 3
+        mock_response.json.return_value = {
+            "status": "success",
+            "data": {"result": [{"values": [["1", "log1"], ["2", "log2"]]}]},
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_response
+            )
+            result = await tools.detect_asrep_roasting_bulk(threshold=3)
+
+        assert result["_query_template"] == "asrep_roasting_bulk"
+        assert result["_mitre_technique"] == "T1558.004"
+        assert result["_analysis"]["total_tgt_requests"] == 2
+        assert result["_analysis"]["is_likely_attack"] is False
+        assert result["_severity"] == "low"
+
+    @pytest.mark.asyncio
+    async def test_detect_asrep_roasting_bulk_above_threshold(self, tools: QueryTemplateTools):
+        """Test bulk AS-REP roasting detection above threshold."""
+        mock_response = MagicMock()
+        # 10 TGT requests - above default threshold of 3
+        mock_response.json.return_value = {
+            "status": "success",
+            "data": {"result": [{"values": [[str(i), f"log{i}"] for i in range(10)]}]},
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_response
+            )
+            result = await tools.detect_asrep_roasting_bulk(threshold=3)
+
+        assert result["_query_template"] == "asrep_roasting_bulk"
+        assert result["_mitre_technique"] == "T1558.004"
+        assert result["_analysis"]["total_tgt_requests"] == 10
+        assert result["_analysis"]["is_likely_attack"] is True
+        assert result["_severity"] == "high"
+        assert "investigate" in result["_analysis"]["recommendation"].lower()
+
+    @pytest.mark.asyncio
+    async def test_detect_asrep_roasting_bulk_with_dc(self, tools: QueryTemplateTools):
+        """Test bulk AS-REP roasting detection with DC filter."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "success", "data": {"result": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_instance = mock_client.return_value.__aenter__.return_value
+            mock_instance.get = AsyncMock(return_value=mock_response)
+
+            await tools.detect_asrep_roasting_bulk(domain_controller="dc01.contoso.local")
+
+            call_args = mock_instance.get.call_args
+            params = call_args.kwargs.get("params", call_args[1].get("params", {}))
+            assert "dc01.contoso.local" in params["query"]
+
+    @pytest.mark.asyncio
+    async def test_detect_asrep_roasting_bulk_custom_threshold(self, tools: QueryTemplateTools):
+        """Test bulk AS-REP roasting with custom threshold."""
+        mock_response = MagicMock()
+        # 5 TGT requests
+        mock_response.json.return_value = {
+            "status": "success",
+            "data": {"result": [{"values": [[str(i), f"log{i}"] for i in range(5)]}]},
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_response
+            )
+            # Set threshold to 10 - 5 requests should be below
+            result = await tools.detect_asrep_roasting_bulk(threshold=10)
+
+        assert result["_analysis"]["is_likely_attack"] is False
+        assert result["_severity"] == "low"
 
 
 class TestBruteForceDetection:
