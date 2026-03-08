@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from ares.core.config import get_stop_on_domain_admin, get_stop_on_golden_ticket
+from ares.core.tracing import trace_discovery
 
 if TYPE_CHECKING:
     from ares.core.dispatcher._dispatcher import RedTeamDispatcher
@@ -56,6 +57,20 @@ class AnnouncementMixin:
         await self._checkpoint()
         logger.success(f"DOMAIN ADMIN ACHIEVED: {domain}\\{username}")
 
+        # Trace the domain admin achievement for observability
+        trace_discovery(
+            discovery_type="domain_admin",
+            source_agent=source_agent,
+            operation_id=self.shared_state.operation_id,
+            target_user=username,
+            target_domain=domain,
+            additional_attrs={
+                "attack_path": attack_path,
+                "credential_type": credential_type,
+                "mitre.technique.id": "T1003.006",  # DCSync/credential dumping
+            },
+        )
+
     async def announce_golden_ticket(
         self: RedTeamDispatcher,
         domain: str,
@@ -88,6 +103,20 @@ class AnnouncementMixin:
             logger.success(f"GOLDEN TICKET FORGED: {domain} → {target_domain} (forest escalation)")
         else:
             logger.success(f"GOLDEN TICKET FORGED for {domain}")
+
+        # Trace the golden ticket forging for observability
+        trace_discovery(
+            discovery_type="golden_ticket",
+            source_agent=source_agent,
+            operation_id=self.shared_state.operation_id,
+            target_domain=target_domain or domain,
+            additional_attrs={
+                "source_domain": domain,
+                "ticket_path": ticket_path,
+                "is_forest_escalation": bool(target_domain),
+                "mitre.technique.id": "T1558.001",  # Golden Ticket
+            },
+        )
 
         # Announce operation complete if stop_on_golden_ticket is enabled
         # This sets the Redis status key so workers detect completion
