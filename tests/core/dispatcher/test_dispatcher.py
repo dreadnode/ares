@@ -1059,6 +1059,57 @@ class TestCredentialDomainCrossReference:
         # Should use child domain since it's more specific
         assert state.all_credentials[0].domain == "child.contoso.local"
 
+    def test_add_credential_child_domain_not_corrected_to_parent(self):
+        """Child domain should NOT be 'corrected' to parent when user was discovered with parent.
+
+        This tests the scenario where:
+        1. First credential arrives with parent domain (before enumeration)
+        2. User is auto-added with parent domain
+        3. Second credential arrives with CORRECT child domain
+        4. Child domain should be KEPT, not 'corrected' to parent
+        5. User and first credential should be upgraded to child domain
+        """
+        from ares.core.models import Target
+
+        state = SharedRedTeamState(operation_id="op-test-child-not-corrected")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # Step 1: First credential with parent domain
+        cred1 = Credential(
+            username="svc_account",
+            password="SvcP@ss123",  # pragma: allowlist secret
+            domain="contoso.local",  # Parent domain (wrong)
+            source="spray",
+        )
+        added1 = state.add_credential(cred1, "sprayer")
+        assert added1 is True
+        assert len(state.all_credentials) == 1
+        assert state.all_credentials[0].domain == "contoso.local"
+        # User was also added with parent domain
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "contoso.local"
+
+        # Step 2: Second credential with child domain (more specific/correct)
+        cred2 = Credential(
+            username="svc_account",
+            password="SvcP@ss123",  # pragma: allowlist secret
+            domain="child.contoso.local",  # Child domain (correct)
+            source="ldap",
+        )
+        added2 = state.add_credential(cred2, "recon")
+
+        # Second credential should be rejected as duplicate
+        # (after domain upgrade, both have same domain:user:pass)
+        assert added2 is False
+        assert len(state.all_credentials) == 1
+
+        # User should be upgraded to child domain
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "child.contoso.local"
+
+        # First credential should also be upgraded to child domain
+        assert state.all_credentials[0].domain == "child.contoso.local"
+
     def test_add_credential_resolves_netbios_then_user_lookup(self):
         """NetBIOS domain should be resolved first, then user lookup applied."""
         from ares.core.models import Target, User

@@ -1602,12 +1602,31 @@ class SharedRedTeamState:
 
         unique_domains = list(set(user_domains))
 
-        # If user exists in exactly one domain, use it
+        # If user exists in exactly one domain, decide which to use
         if len(unique_domains) == 1:
-            resolved = unique_domains[0]
-            if resolved != provided_lower:
-                logger.debug(f"Domain corrected for {username}: {provided_domain} -> {resolved}")
-            return resolved
+            discovered = unique_domains[0]
+            # If domains match, use it
+            if discovered == provided_lower:
+                return discovered
+            # If provided is more specific (child of discovered), prefer provided
+            # e.g., provided='child.contoso.local', discovered='contoso.local'
+            # The user was initially discovered with parent domain (hallucination),
+            # but this credential has the correct child domain
+            if provided_lower.endswith("." + discovered):
+                logger.debug(
+                    f"Domain kept as provided for {username}: {provided_domain} "
+                    f"(more specific than discovered {discovered})"
+                )
+                return provided_lower
+            # If discovered is more specific (child of provided), use discovered
+            # e.g., provided='contoso.local', discovered='child.contoso.local'
+            if discovered.endswith("." + provided_lower):
+                logger.debug(f"Domain corrected for {username}: {provided_domain} -> {discovered}")
+                return discovered
+            # Different domains entirely (sibling domains) - prefer discovered
+            # since user was enumerated there
+            logger.debug(f"Domain corrected for {username}: {provided_domain} -> {discovered}")
+            return discovered
 
         # User exists in multiple domains - try to find the best match
         # Prefer a child domain of the provided domain (more specific)
