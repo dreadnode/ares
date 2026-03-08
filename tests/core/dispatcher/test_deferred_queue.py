@@ -687,7 +687,8 @@ class TestStaleTaskCleanup:
             assigned_agent="privesc",
             status=TaskStatus.PENDING,
         )
-        old_time = datetime.now(timezone.utc) - timedelta(seconds=get_stale_task_timeout() + 60)
+        # PENDING tasks use 3x the stale timeout, so we need to exceed that threshold
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=get_stale_task_timeout() * 3 + 60)
         stale_task.created_at = old_time
         stale_task.last_activity_at = old_time
 
