@@ -806,27 +806,42 @@ class TestOrchestratorVulnerabilityIterationSafety:
     """Tests for orchestrator vulnerability iteration safety."""
 
     @pytest.mark.asyncio
-    async def test_has_constrained_delegation_for_target_with_concurrent_modification(
+    async def test_has_exploitable_constrained_delegation_with_concurrent_modification(
         self, state_with_vulnerabilities: SharedRedTeamState
     ):
-        """Test _has_constrained_delegation_for_target handles concurrent modification."""
-        from ares.core.models import VulnerabilityInfo
-        from ares.core.orchestrator._orchestrator import _has_constrained_delegation_for_target
+        """Test _has_exploitable_constrained_delegation_for_target handles concurrent modification."""
+        from ares.core.models import Credential, VulnerabilityInfo
+        from ares.core.orchestrator._orchestrator import (
+            _has_exploitable_constrained_delegation_for_target,
+        )
 
-        # Add a constrained delegation vulnerability with target_ip
+        # Add a credential for the delegated account (required for exploitability)
+        cred = Credential(
+            username="svc_sql",
+            password="P@ssw0rd!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="test",
+        )
+        state_with_vulnerabilities.add_credential(cred, source_agent="test")
+
+        # Add a constrained delegation vulnerability with target_ip and account_name
         vuln = VulnerabilityInfo(
             vuln_id="cd_vuln_test",
             vuln_type="constrained_delegation",
             target="192.168.58.50",
-            details={"target_ip": "192.168.58.50", "target_spn": "cifs/dc01.contoso.local"},
+            details={
+                "target_ip": "192.168.58.50",
+                "target_spn": "cifs/dc01.contoso.local",
+                "account_name": "svc_sql",
+            },
             discovered_by="recon",
         )
         state_with_vulnerabilities.discovered_vulnerabilities[vuln.vuln_id] = vuln
 
         async def check_delegation():
-            """Repeatedly call _has_constrained_delegation_for_target."""
+            """Repeatedly call _has_exploitable_constrained_delegation_for_target."""
             for _ in range(20):
-                result = _has_constrained_delegation_for_target(
+                result = _has_exploitable_constrained_delegation_for_target(
                     state_with_vulnerabilities, "192.168.58.50"
                 )
                 assert isinstance(result, bool)
@@ -840,7 +855,7 @@ class TestOrchestratorVulnerabilityIterationSafety:
                     vuln_id=f"cd_concurrent_vuln_{i}",
                     vuln_type="constrained_delegation",
                     target=f"192.168.58.{i}",
-                    details={"target_ip": f"192.168.58.{i}"},
+                    details={"target_ip": f"192.168.58.{i}", "account_name": "svc_sql"},
                     discovered_by="recon",
                 )
                 state_with_vulnerabilities.discovered_vulnerabilities[vuln.vuln_id] = vuln

@@ -1908,33 +1908,77 @@ def _get_dc_ips(state: SharedRedTeamState) -> set[str]:
     return dc_ips
 
 
-def _has_constrained_delegation_for_target(state: SharedRedTeamState, target_ip: str) -> bool:
-    """Check if there's a constrained delegation vulnerability targeting this host.
+def _has_exploitable_constrained_delegation_for_target(
+    state: SharedRedTeamState, target_ip: str
+) -> bool:
+    """Check if there's an EXPLOITABLE constrained delegation vulnerability targeting this host.
 
-    If true, we should use the S4U attack path instead of direct secretsdump.
+    Only returns True if:
+    1. A constrained delegation vulnerability exists targeting this host
+    2. We have working credentials for the delegated account
+
+    If we don't have credentials for the delegated account, the S4U path can't be used,
+    so we should still try secretsdump instead of skipping it.
+
+    Args:
+        state: The shared red team state
+        target_ip: The target IP to check
+
+    Returns:
+        True only if delegation exists AND we have credentials to exploit it
     """
     # Snapshot to avoid "dict changed size during iteration" from concurrent access
     for vuln in list(state.discovered_vulnerabilities.values()):
         if vuln.vuln_type != "constrained_delegation":
             continue
+
         # Defensive: ensure vuln.details is a dict before calling .get()
         details = vuln.details if isinstance(vuln.details, dict) else {}
+
         # Check if target matches the vulnerability's target
+        target_matches = False
         vuln_target_ip = details.get("target_ip", "")
         if vuln_target_ip == target_ip:
+            target_matches = True
+        else:
+            # Also check hostname in target_spn
+            target_spn = details.get("target_spn", "")
+            if target_spn:
+                # Extract hostname from SPN (e.g., cifs/dc01.contoso.local -> dc01.contoso.local)
+                spn_host = target_spn.split("/", 1)[1] if "/" in target_spn else ""
+                for host in state.all_hosts:
+                    if (
+                        host.ip == target_ip
+                        and host.hostname
+                        and spn_host.lower() in host.hostname.lower()
+                    ):
+                        target_matches = True
+                        break
+
+        if not target_matches:
+            continue
+
+        # Target matches - now check if we have credentials for the delegated account
+        account = details.get("account_name") or details.get("account", "")
+        if not account:
+            # No account info in vulnerability - can't determine exploitability
+            # Be conservative and don't skip secretsdump
+            continue
+
+        # Check if we have working credentials for this account
+        account_lower = account.lower().rstrip("$")
+        has_working_creds = any(
+            cred.username.lower() == account_lower and cred.password
+            for cred in state.all_credentials
+        )
+
+        if has_working_creds:
+            # We have credentials - S4U path is viable, skip secretsdump
             return True
-        # Also check hostname in target_spn
-        target_spn = details.get("target_spn", "")
-        if target_spn:
-            # Extract hostname from SPN (e.g., cifs/dc01.contoso.local -> dc01.contoso.local)
-            spn_host = target_spn.split("/", 1)[1] if "/" in target_spn else ""
-            for host in state.all_hosts:
-                if (
-                    host.ip == target_ip
-                    and host.hostname
-                    and spn_host.lower() in host.hostname.lower()
-                ):
-                    return True
+
+        # No credentials for delegated account - S4U can't be used
+        # Continue checking other vulns (there may be another exploitable one)
+
     return False
 
 
@@ -2199,16 +2243,19 @@ async def _auto_credential_access(
                     )
 
                 # For DC hosts: only try secretsdump if credential is privileged OR
-                # there's no constrained delegation path (S4U) available
+                # there's no EXPLOITABLE constrained delegation path (S4U) available.
+                # NOTE: We only skip secretsdump if we have working credentials for the
+                # delegated account. If the account is locked out or we don't have creds,
+                # we should still try secretsdump as a fallback.
                 for dc_ip in dc_hosts_in_domain:
-                    has_s4u_path = _has_constrained_delegation_for_target(state, dc_ip)
+                    has_s4u_path = _has_exploitable_constrained_delegation_for_target(state, dc_ip)
                     is_privileged = _is_likely_privileged_credential(cred.username, cred.source)
 
                     if has_s4u_path and not is_privileged:
-                        # Skip secretsdump - let the S4U attack path handle this DC
+                        # Skip secretsdump - S4U path is viable (we have creds for delegated account)
                         logger.info(
                             f"Skipping secretsdump on DC {dc_ip} for {cred.username}: "
-                            f"constrained delegation path exists, use S4U instead"
+                            f"exploitable constrained delegation path exists, use S4U instead"
                         )
                         continue
 
@@ -2293,9 +2340,12 @@ async def _auto_credential_access(
                                 techniques=["kerberoast", "secretsdump"],
                             )
 
-                        # For DC hosts: only try if privileged or no S4U path
+                        # For DC hosts: only try if privileged or no EXPLOITABLE S4U path
+                        # (requires credentials for the delegated account to be viable)
                         for dc_ip in dc_hosts_in_domain:
-                            has_s4u_path = _has_constrained_delegation_for_target(state, dc_ip)
+                            has_s4u_path = _has_exploitable_constrained_delegation_for_target(
+                                state, dc_ip
+                            )
                             is_privileged = _is_likely_privileged_credential(
                                 hash_obj.username, hash_obj.source
                             )
@@ -2303,7 +2353,7 @@ async def _auto_credential_access(
                             if has_s4u_path and not is_privileged:
                                 logger.info(
                                     f"Skipping secretsdump on DC {dc_ip} for {hash_obj.username} (hash): "
-                                    f"constrained delegation path exists, use S4U instead"
+                                    f"exploitable constrained delegation path exists, use S4U instead"
                                 )
                                 continue
 
