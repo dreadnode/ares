@@ -1913,7 +1913,8 @@ def _has_constrained_delegation_for_target(state: SharedRedTeamState, target_ip:
 
     If true, we should use the S4U attack path instead of direct secretsdump.
     """
-    for vuln in state.discovered_vulnerabilities.values():
+    # Snapshot to avoid "dict changed size during iteration" from concurrent access
+    for vuln in list(state.discovered_vulnerabilities.values()):
         if vuln.vuln_type != "constrained_delegation":
             continue
         # Defensive: ensure vuln.details is a dict before calling .get()
@@ -2916,7 +2917,8 @@ async def _auto_local_admin_secretsdump(
 
             # Also check for BloodHound AdminTo relationships
             # These are stored in discovered_vulnerabilities with local_admin type
-            for vuln_id, vuln in state.discovered_vulnerabilities.items():
+            # Snapshot to avoid "dict changed size during iteration" from concurrent access
+            for vuln_id, vuln in list(state.discovered_vulnerabilities.items()):
                 if vuln.vuln_type not in ("local_admin", "AdminTo", "CanRDP"):
                     continue
 
@@ -3528,7 +3530,8 @@ async def _auto_acl_chain_follow(
 def _get_running_crack_tasks(dispatcher: RedTeamDispatcher) -> list[str]:
     """Get task IDs for crack tasks that are still pending (running)."""
     crack_task_ids = []
-    for task_id, task_info in dispatcher.shared_state.pending_tasks.items():
+    # Snapshot to avoid "dict changed size during iteration" from concurrent access
+    for task_id, task_info in list(dispatcher.shared_state.pending_tasks.items()):
         if task_info.task_type == "crack":
             crack_task_ids.append(task_id)
     return crack_task_ids

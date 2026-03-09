@@ -1586,8 +1586,15 @@ class OrchestratorTools(Toolset):
             vuln_type: Type of vulnerability (ADCS_ESC1, ADCS_ESC4, ADCS_ESC8,
                       krbtgt_hash, domain_admin_hash, acl_abuse,
                       unconstrained_delegation, constrained_delegation, etc.)
-            target: Target to exploit (CA name, server, user, etc.)
-            details: JSON string with vulnerability-specific details
+            target: Target HOST to exploit - must be hostname or IP address.
+                    NEVER use DOMAIN\\User format here. Account info goes in details.
+                    Examples: "dc01.contoso.local", "192.168.58.10", "ca01.contoso.local"
+            details: JSON string with vulnerability-specific details including account info.
+                    Examples by vuln_type:
+                    - domain_admin_hash: {"account": "Administrator", "domain": "contoso.local", "hash": "aad3b..."}
+                    - krbtgt_hash: {"account": "krbtgt", "domain": "contoso.local", "hash": "aad3b..."}
+                    - constrained_delegation: {"account_name": "svc_sql", "target_spn": "cifs/dc01.contoso.local"}
+                    - ADCS_ESC1: {"template": "VulnTemplate", "ca": "contoso-CA"}
 
         Returns:
             Confirmation with vulnerability ID and priority

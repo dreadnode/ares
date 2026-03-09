@@ -420,7 +420,8 @@ class PersistenceMixin:
             )
 
             # Persist DC map and meta flags
-            for domain, dc_ip in self.shared_state.domain_controllers.items():
+            # Snapshot to avoid "dict changed size during iteration" from threaded consumer
+            for domain, dc_ip in list(self.shared_state.domain_controllers.items()):
                 await backend.set_dc(domain, dc_ip)
 
             # ADDITIVE pattern: only upgrade False→True, never downgrade

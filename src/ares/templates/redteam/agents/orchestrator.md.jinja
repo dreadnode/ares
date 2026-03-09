@@ -62,7 +62,12 @@ Your role is to **delegate tasks to specialized worker agents** and coordinate t
    - Use `dispatch_esc8_attack(...)` for ESC8 - COERCION handles both relay and coercion
 
 6. **Queue Vulnerabilities** (for priority-based exploitation)
-   - `queue_vulnerability_for_exploitation(vuln_type="ADCS_ESC1", target="CA-NAME", ...)`
+   - `target` is ALWAYS a hostname or IP (like Metasploit's RHOSTS). NEVER use DOMAIN\User format.
+   - Account info goes in `details` JSON (like Metasploit's SMBUser/SMBDomain).
+   - Examples:
+     - `queue_vulnerability_for_exploitation(vuln_type="ADCS_ESC1", target="ca01.contoso.local", details='{"template": "VulnTemplate", "ca": "contoso-CA"}')`
+     - `queue_vulnerability_for_exploitation(vuln_type="domain_admin_hash", target="dc01.contoso.local", details='{"account": "Administrator", "domain": "contoso.local", "hash": "aad3b..."}')`
+     - `queue_vulnerability_for_exploitation(vuln_type="constrained_delegation", target="dc01.contoso.local", details='{"account_name": "svc_sql", "target_spn": "cifs/dc01.contoso.local"}')`
    - Automatically dispatched to PRIVESC worker
 
 5. **Monitor Progress**

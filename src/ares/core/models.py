@@ -2848,7 +2848,8 @@ class SharedRedTeamState:
         if vuln.vuln_id in self.discovered_vulnerabilities:
             return False
         # Also check for same (type, target) combination to prevent logical duplicates
-        for existing in self.discovered_vulnerabilities.values():
+        # Snapshot to avoid "dict changed size during iteration" from concurrent access
+        for existing in list(self.discovered_vulnerabilities.values()):
             if existing.vuln_type == vuln.vuln_type and existing.target == vuln.target:
                 return False
         self.discovered_vulnerabilities[vuln.vuln_id] = vuln
@@ -2877,9 +2878,10 @@ class SharedRedTeamState:
 
     def get_unexploited_vulnerabilities(self) -> list[VulnerabilityInfo]:
         """Get vulnerabilities that haven't been exploited yet."""
+        # Snapshot to avoid "dict changed size during iteration" from concurrent access
         return [
             v
-            for vid, v in self.discovered_vulnerabilities.items()
+            for vid, v in list(self.discovered_vulnerabilities.items())
             if vid not in self.exploited_vulnerabilities
         ]
 
@@ -2932,7 +2934,8 @@ class SharedRedTeamState:
                     dc_hosts_by_ip[host.ip] = host
 
         # Check all local_admin vulnerabilities for this user
-        for vuln in self.discovered_vulnerabilities.values():
+        # Snapshot to avoid "dict changed size during iteration" from concurrent access
+        for vuln in list(self.discovered_vulnerabilities.values()):
             if vuln.vuln_type != "local_admin":
                 continue
 
@@ -3127,9 +3130,10 @@ class SharedRedTeamState:
     @property
     def weaknesses(self) -> list[str]:
         """Return combined weaknesses and vulnerability descriptions for reporting."""
+        # Snapshot to avoid "dict changed size during iteration" from concurrent access
         vuln_descriptions = [
             f"{v.vuln_type} on {v.target} ({v.vuln_id})"
-            for v in self.discovered_vulnerabilities.values()
+            for v in list(self.discovered_vulnerabilities.values())
         ]
         return self.all_weaknesses + vuln_descriptions
 

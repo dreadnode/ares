@@ -337,6 +337,7 @@ class RedisWorkerAgent:
 
         # Serialize discovered vulnerabilities (delegation, ADCS, etc.)
         if self.shared_state.discovered_vulnerabilities:
+            # Snapshot to avoid "dict changed size during iteration" from threaded consumer
             discoveries["discovered_vulnerabilities"] = [
                 {
                     "vuln_id": v.vuln_id,
@@ -347,7 +348,7 @@ class RedisWorkerAgent:
                     "priority": v.priority,
                     "recommended_agent": v.recommended_agent,
                 }
-                for v in self.shared_state.discovered_vulnerabilities.values()
+                for v in list(self.shared_state.discovered_vulnerabilities.values())
             ]
 
         return discoveries

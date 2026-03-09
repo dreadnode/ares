@@ -777,7 +777,8 @@ class MonitoringMixin:
             vuln_id = f"{normalized_type}_{target}_{uuid.uuid4().hex[:8]}"
 
         # Check for duplicates by type+target (same logic as queue_vulnerability)
-        for existing in self.shared_state.discovered_vulnerabilities.values():
+        # Snapshot to avoid "dict changed size during iteration" from threaded consumer
+        for existing in list(self.shared_state.discovered_vulnerabilities.values()):
             if existing.vuln_type.lower() == normalized_type and existing.target == target:
                 logger.debug(
                     f"Skipping duplicate vulnerability: {existing.vuln_id} "

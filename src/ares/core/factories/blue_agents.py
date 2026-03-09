@@ -436,12 +436,12 @@ def create_blue_hooks(role: BlueRole) -> list:
                             if not target_ip:
                                 target_ip = val
                         elif "." in val and is_likely_fqdn(val):
-                            # FQDN - extract hostname
-                            target_fqdn = val
-                            target_hostname = val.split(".")[0]
+                            # FQDN - extract hostname (lowercase for consistent graph nodes)
+                            target_fqdn = val.lower()
+                            target_hostname = val.split(".")[0].lower()
                         elif "." not in val:
-                            # Plain hostname (no dots)
-                            target_hostname = val
+                            # Plain hostname (no dots, lowercase for consistent graph nodes)
+                            target_hostname = val.lower()
                         # else: value with dot but not FQDN (e.g., username) - skip
                         break
 

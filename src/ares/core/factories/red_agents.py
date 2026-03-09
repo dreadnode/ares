@@ -340,12 +340,12 @@ def create_role_hooks(
                             if not target_ip:
                                 target_ip = val
                         elif "." in val and is_likely_fqdn(val):
-                            # FQDN - extract hostname
-                            target_fqdn = val
-                            target_hostname = val.split(".")[0]
+                            # FQDN - extract hostname (lowercase for consistent graph nodes)
+                            target_fqdn = val.lower()
+                            target_hostname = val.split(".")[0].lower()
                         elif "." not in val:
-                            # Plain hostname (no dots)
-                            target_hostname = val
+                            # Plain hostname (no dots, lowercase for consistent graph nodes)
+                            target_hostname = val.lower()
                         # else: value with dot but not FQDN (e.g., username) - skip
                         break
 
@@ -370,9 +370,9 @@ def create_role_hooks(
         if target_ip and not target_fqdn and shared_state:
             for host in shared_state.all_hosts:
                 if host.ip == target_ip and host.hostname and "." in host.hostname:
-                    target_fqdn = host.hostname
+                    target_fqdn = host.hostname.lower()
                     if not target_hostname:
-                        target_hostname = host.hostname.split(".")[0]
+                        target_hostname = host.hostname.split(".")[0].lower()
                     # Check if it's a DC
                     if host.is_dc:
                         target_type = "domain_controller"

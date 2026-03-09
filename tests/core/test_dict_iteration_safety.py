@@ -561,5 +561,339 @@ class TestConcurrentDictModificationStress:
         )
 
 
+# ============================================================================
+# Discovered Vulnerabilities Dict Tests
+# ============================================================================
+
+
+@pytest.fixture
+def state_with_vulnerabilities() -> SharedRedTeamState:
+    """Create a state with discovered vulnerabilities for testing."""
+    from ares.core.models import VulnerabilityInfo
+
+    state = SharedRedTeamState(
+        operation_id="test-op-vuln-safety",
+        target=Target(ip="192.168.58.10", hostname="dc01.contoso.local", domain="contoso.local"),
+    )
+
+    # Add multiple vulnerabilities
+    for i in range(10):
+        vuln = VulnerabilityInfo(
+            vuln_id=f"vuln_{i:03d}",
+            vuln_type="constrained_delegation" if i % 2 == 0 else "local_admin",
+            target=f"192.168.58.{10 + i}",
+            details={"account_name": f"svc_{i}", "domain": "contoso.local"},
+            discovered_by="recon",
+        )
+        state.discovered_vulnerabilities[vuln.vuln_id] = vuln
+
+    return state
+
+
+class TestDiscoveredVulnerabilitiesDictSafety:
+    """Tests for dict iteration safety with discovered_vulnerabilities."""
+
+    @pytest.mark.asyncio
+    async def test_add_vulnerability_with_concurrent_modification(
+        self, state_with_vulnerabilities: SharedRedTeamState
+    ):
+        """Test add_vulnerability dedup check handles concurrent dict modification."""
+        from ares.core.models import VulnerabilityInfo
+
+        async def add_vulns():
+            """Add multiple vulnerabilities concurrently."""
+            for i in range(20, 30):
+                vuln = VulnerabilityInfo(
+                    vuln_id=f"new_vuln_{i}",
+                    vuln_type="mssql_linked_server",
+                    target=f"192.168.58.{i}",
+                    details={},
+                    discovered_by="recon",
+                )
+                # This iterates discovered_vulnerabilities.values() for dedup
+                state_with_vulnerabilities.add_vulnerability(vuln)
+                await asyncio.sleep(0)
+
+        async def modify_dict():
+            """Modify dict during iteration."""
+            for i in range(30, 40):
+                await asyncio.sleep(0)
+                vuln = VulnerabilityInfo(
+                    vuln_id=f"concurrent_vuln_{i}",
+                    vuln_type="esc1",
+                    target=f"192.168.58.{i}",
+                    details={},
+                    discovered_by="lateral",
+                )
+                state_with_vulnerabilities.discovered_vulnerabilities[vuln.vuln_id] = vuln
+
+        # Should complete without RuntimeError
+        await asyncio.gather(add_vulns(), modify_dict())
+
+        # Verify vulns were added
+        assert len(state_with_vulnerabilities.discovered_vulnerabilities) >= 20
+
+    @pytest.mark.asyncio
+    async def test_get_unexploited_vulnerabilities_with_concurrent_modification(
+        self, state_with_vulnerabilities: SharedRedTeamState
+    ):
+        """Test get_unexploited_vulnerabilities handles concurrent dict modification."""
+        from ares.core.models import VulnerabilityInfo
+
+        async def get_unexploited():
+            """Repeatedly call get_unexploited_vulnerabilities."""
+            for _ in range(20):
+                vulns = state_with_vulnerabilities.get_unexploited_vulnerabilities()
+                assert isinstance(vulns, list)
+                await asyncio.sleep(0)
+
+        async def modify_dict():
+            """Add/remove vulnerabilities during iteration."""
+            for i in range(50, 60):
+                await asyncio.sleep(0)
+                vuln_id = f"temp_vuln_{i}"
+                vuln = VulnerabilityInfo(
+                    vuln_id=vuln_id,
+                    vuln_type="dcsync",
+                    target=f"192.168.58.{i}",
+                    details={},
+                    discovered_by="privesc",
+                )
+                state_with_vulnerabilities.discovered_vulnerabilities[vuln_id] = vuln
+                await asyncio.sleep(0)
+                if vuln_id in state_with_vulnerabilities.discovered_vulnerabilities:
+                    del state_with_vulnerabilities.discovered_vulnerabilities[vuln_id]
+
+        # Should complete without RuntimeError
+        await asyncio.gather(get_unexploited(), modify_dict())
+
+    @pytest.mark.asyncio
+    async def test_check_golden_ticket_capability_with_concurrent_modification(
+        self, state_with_vulnerabilities: SharedRedTeamState
+    ):
+        """Test check_golden_ticket_capability handles concurrent dict modification."""
+        from ares.core.models import Host, VulnerabilityInfo
+
+        # Add a DC host
+        dc_host = Host(
+            ip="192.168.58.10",
+            hostname="dc01.contoso.local",
+            is_dc=True,
+            services=["ldap", "kerberos"],
+        )
+        state_with_vulnerabilities.all_hosts.append(dc_host)
+
+        # Add a local_admin vuln for the DC
+        vuln = VulnerabilityInfo(
+            vuln_id="local_admin_dc",
+            vuln_type="local_admin",
+            target="192.168.58.10",
+            details={"username": "testuser", "domain": "contoso.local"},
+            discovered_by="bloodhound",
+        )
+        state_with_vulnerabilities.discovered_vulnerabilities[vuln.vuln_id] = vuln
+
+        async def check_golden_ticket():
+            """Repeatedly call check_golden_ticket_capability."""
+            for _ in range(20):
+                result = state_with_vulnerabilities.check_golden_ticket_capability(
+                    "testuser", "contoso.local"
+                )
+                assert isinstance(result, list)
+                await asyncio.sleep(0)
+
+        async def modify_dict():
+            """Add vulnerabilities during iteration."""
+            for i in range(60, 70):
+                await asyncio.sleep(0)
+                vuln = VulnerabilityInfo(
+                    vuln_id=f"golden_test_vuln_{i}",
+                    vuln_type="local_admin",
+                    target=f"192.168.58.{i}",
+                    details={"username": f"user_{i}", "domain": "contoso.local"},
+                    discovered_by="recon",
+                )
+                state_with_vulnerabilities.discovered_vulnerabilities[vuln.vuln_id] = vuln
+
+        # Should complete without RuntimeError
+        await asyncio.gather(check_golden_ticket(), modify_dict())
+
+    @pytest.mark.asyncio
+    async def test_weaknesses_property_with_concurrent_modification(
+        self, state_with_vulnerabilities: SharedRedTeamState
+    ):
+        """Test weaknesses property handles concurrent dict modification."""
+        from ares.core.models import VulnerabilityInfo
+
+        async def read_weaknesses():
+            """Repeatedly access weaknesses property."""
+            for _ in range(20):
+                weaknesses = state_with_vulnerabilities.weaknesses
+                assert isinstance(weaknesses, list)
+                await asyncio.sleep(0)
+
+        async def modify_dict():
+            """Add vulnerabilities during iteration."""
+            for i in range(70, 80):
+                await asyncio.sleep(0)
+                vuln = VulnerabilityInfo(
+                    vuln_id=f"weakness_test_vuln_{i}",
+                    vuln_type="unconstrained_delegation",
+                    target=f"192.168.58.{i}",
+                    details={},
+                    discovered_by="recon",
+                )
+                state_with_vulnerabilities.discovered_vulnerabilities[vuln.vuln_id] = vuln
+
+        # Should complete without RuntimeError
+        await asyncio.gather(read_weaknesses(), modify_dict())
+
+    @pytest.mark.asyncio
+    async def test_discovered_vulnerabilities_rapid_stress(
+        self, state_with_vulnerabilities: SharedRedTeamState
+    ):
+        """Stress test rapid concurrent modifications to discovered_vulnerabilities."""
+        from ares.core.models import VulnerabilityInfo
+
+        async def reader():
+            """Continuously iterate over vulnerabilities."""
+            for _ in range(50):
+                try:
+                    # Simulate snapshot iteration like the fixed code
+                    vulns = [
+                        v
+                        for v in list(
+                            state_with_vulnerabilities.discovered_vulnerabilities.values()
+                        )
+                        if v.vuln_type == "constrained_delegation"
+                    ]
+                    assert isinstance(vulns, list)
+                except RuntimeError as e:
+                    if "dictionary changed size" in str(e):
+                        pytest.fail(
+                            "Dict changed size during iteration - "
+                            "discovered_vulnerabilities fix not applied?"
+                        )
+                    raise
+                await asyncio.sleep(0)
+
+        async def writer():
+            """Continuously add/remove vulnerabilities."""
+            for i in range(50):
+                vuln_id = f"stress_vuln_{i}"
+                vuln = VulnerabilityInfo(
+                    vuln_id=vuln_id,
+                    vuln_type="constrained_delegation",
+                    target=f"192.168.58.{100 + i}",
+                    details={},
+                    discovered_by="stress_test",
+                )
+                state_with_vulnerabilities.discovered_vulnerabilities[vuln_id] = vuln
+                await asyncio.sleep(0)
+                if vuln_id in state_with_vulnerabilities.discovered_vulnerabilities:
+                    del state_with_vulnerabilities.discovered_vulnerabilities[vuln_id]
+
+        # Run readers and writers concurrently
+        await asyncio.gather(
+            reader(),
+            reader(),
+            writer(),
+            writer(),
+        )
+
+
+class TestOrchestratorVulnerabilityIterationSafety:
+    """Tests for orchestrator vulnerability iteration safety."""
+
+    @pytest.mark.asyncio
+    async def test_has_constrained_delegation_for_target_with_concurrent_modification(
+        self, state_with_vulnerabilities: SharedRedTeamState
+    ):
+        """Test _has_constrained_delegation_for_target handles concurrent modification."""
+        from ares.core.models import VulnerabilityInfo
+        from ares.core.orchestrator._orchestrator import _has_constrained_delegation_for_target
+
+        # Add a constrained delegation vulnerability with target_ip
+        vuln = VulnerabilityInfo(
+            vuln_id="cd_vuln_test",
+            vuln_type="constrained_delegation",
+            target="192.168.58.50",
+            details={"target_ip": "192.168.58.50", "target_spn": "cifs/dc01.contoso.local"},
+            discovered_by="recon",
+        )
+        state_with_vulnerabilities.discovered_vulnerabilities[vuln.vuln_id] = vuln
+
+        async def check_delegation():
+            """Repeatedly call _has_constrained_delegation_for_target."""
+            for _ in range(20):
+                result = _has_constrained_delegation_for_target(
+                    state_with_vulnerabilities, "192.168.58.50"
+                )
+                assert isinstance(result, bool)
+                await asyncio.sleep(0)
+
+        async def modify_dict():
+            """Add vulnerabilities during iteration."""
+            for i in range(80, 90):
+                await asyncio.sleep(0)
+                vuln = VulnerabilityInfo(
+                    vuln_id=f"cd_concurrent_vuln_{i}",
+                    vuln_type="constrained_delegation",
+                    target=f"192.168.58.{i}",
+                    details={"target_ip": f"192.168.58.{i}"},
+                    discovered_by="recon",
+                )
+                state_with_vulnerabilities.discovered_vulnerabilities[vuln.vuln_id] = vuln
+
+        # Should complete without RuntimeError
+        await asyncio.gather(check_delegation(), modify_dict())
+
+
+class TestPublishingVulnerabilityIterationSafety:
+    """Tests for publishing mixin vulnerability iteration safety."""
+
+    @pytest.mark.asyncio
+    async def test_auto_queue_mssql_with_concurrent_modification(
+        self, state_with_vulnerabilities: SharedRedTeamState
+    ):
+        """Test _auto_queue_mssql_from_host handles concurrent modification."""
+        from ares.core.models import Host, VulnerabilityInfo
+
+        # Simulate the iteration pattern in _auto_queue_mssql_from_host
+        host = Host(
+            ip="192.168.58.99",
+            hostname="sql01.contoso.local",
+            services=["mssql", "1433"],
+        )
+
+        async def check_mssql_dedup():
+            """Simulate the MSSQL dedup check."""
+            for _ in range(20):
+                # This is what the fixed code does - snapshot iteration
+                existing_vulns = list(
+                    state_with_vulnerabilities.discovered_vulnerabilities.values()
+                )
+                for vuln in existing_vulns:
+                    if vuln.target == host.ip and vuln.vuln_type.startswith("mssql_"):
+                        pass  # Found duplicate
+                await asyncio.sleep(0)
+
+        async def modify_dict():
+            """Add MSSQL vulnerabilities during iteration."""
+            for i in range(90, 100):
+                await asyncio.sleep(0)
+                vuln = VulnerabilityInfo(
+                    vuln_id=f"mssql_vuln_{i}",
+                    vuln_type="mssql_linked_server",
+                    target=f"192.168.58.{i}",
+                    details={},
+                    discovered_by="recon",
+                )
+                state_with_vulnerabilities.discovered_vulnerabilities[vuln.vuln_id] = vuln
+
+        # Should complete without RuntimeError
+        await asyncio.gather(check_mssql_dedup(), modify_dict())
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

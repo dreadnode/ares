@@ -552,9 +552,10 @@ class ResultProcessingMixin:
                 continue
 
             # Also check for logical duplicates (same type + target)
+            # Snapshot to avoid "dict changed size during iteration" from threaded consumer
             already_exists = any(
                 v.vuln_type == vuln_type and v.target.lower() == target.lower()
-                for v in self.shared_state.discovered_vulnerabilities.values()
+                for v in list(self.shared_state.discovered_vulnerabilities.values())
             )
             if already_exists:
                 continue
@@ -649,7 +650,8 @@ class ResultProcessingMixin:
         exploit_vuln_id = vuln_id
         if not exploit_vuln_id:
             # Find matching vulnerability in discovered_vulnerabilities
-            for vid, vuln in self.shared_state.discovered_vulnerabilities.items():
+            # Snapshot to avoid "dict changed size during iteration" from threaded consumer
+            for vid, vuln in list(self.shared_state.discovered_vulnerabilities.items()):
                 if vuln.vuln_type != "constrained_delegation":
                     continue
                 # Defensive: ensure vuln.details is a dict before calling .get()
@@ -1617,10 +1619,11 @@ class ResultProcessingMixin:
                 existing_gmsa.add(account_lower)
 
             # Check if already queued as vulnerability
+            # Snapshot to avoid "dict changed size during iteration" from threaded consumer
             vuln_key = f"gmsa_readable:{account_lower}"
             if vuln_key in [
                 v.vuln_type + ":" + v.target.lower()
-                for v in self.shared_state.discovered_vulnerabilities.values()
+                for v in list(self.shared_state.discovered_vulnerabilities.values())
             ]:
                 continue
 
@@ -1779,9 +1782,10 @@ class ResultProcessingMixin:
                 continue
 
             # Check if already queued
+            # Snapshot to avoid "dict changed size during iteration" from threaded consumer
             already_queued = any(
                 v.vuln_type == vuln_type and account.lower() in v.target.lower()
-                for v in self.shared_state.discovered_vulnerabilities.values()
+                for v in list(self.shared_state.discovered_vulnerabilities.values())
             )
             if already_queued:
                 continue
@@ -2174,9 +2178,10 @@ class ResultProcessingMixin:
                 continue
 
             # Check if already queued
+            # Snapshot to avoid "dict changed size during iteration" from threaded consumer
             already_queued = any(
                 v.vuln_type == vuln_type and target.lower() in v.target.lower()
-                for v in self.shared_state.discovered_vulnerabilities.values()
+                for v in list(self.shared_state.discovered_vulnerabilities.values())
             )
             if already_queued:
                 continue
