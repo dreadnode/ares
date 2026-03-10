@@ -663,9 +663,24 @@ class NetworkEnumerationTools(Toolset):
                                     re.MULTILINE,
                                 )
                                 if domain_match:
-                                    domain = domain_match.group(1).strip().lower()
-                                    # Build FQDN: hostname.domain.local (assume .local TLD)
-                                    host.hostname = f"{netbios_name.lower()}.{domain}.local"
+                                    netbios_domain = domain_match.group(1).strip().lower()
+                                    # Resolve NetBIOS domain to FQDN using state if available
+                                    # e.g., "NORTH" -> "north.sevenkingdoms.local"
+                                    if self.state and hasattr(
+                                        self.state, "_resolve_netbios_to_fqdn"
+                                    ):
+                                        fqdn_domain = self.state._resolve_netbios_to_fqdn(
+                                            netbios_domain
+                                        )
+                                        # Only use resolved domain if it's an FQDN (contains dot)
+                                        # Otherwise just use short name without wrong assumptions
+                                        if "." in fqdn_domain:
+                                            host.hostname = f"{netbios_name.lower()}.{fqdn_domain}"
+                                        else:
+                                            host.hostname = netbios_name.lower()
+                                    else:
+                                        # Fallback: just use NetBIOS name without domain assumption
+                                        host.hostname = netbios_name.lower()
                                 else:
                                     host.hostname = netbios_name.lower()
                                 logger.info(

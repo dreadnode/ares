@@ -23,15 +23,15 @@ tasks:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       RESUME: '{{.RESUME | default "false"}}'
       TARGET_ENV: '{{.TARGET_ENV | default "staging"}}'
-      # Computed vars
+      # Computed vars (skip 1Password if .env exists - use multi:local instead)
       ANTHROPIC_API_KEY:
-        sh: op item get "Dreadnode Claude" --fields api-key --reveal 2>/dev/null || echo ""
+        sh: test -f .env && echo "" || op item get "Dreadnode Claude" --fields api-key --reveal 2>/dev/null || echo ""
       DREADNODE_API_KEY:
-        sh: op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo ""
+        sh: test -f .env && echo "" || op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo ""
       GRAFANA_SERVICE_ACCOUNT_TOKEN:
-        sh: op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo ""
+        sh: test -f .env && echo "" || op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo ""
       OPENAI_API_KEY:
-        sh: op item get "Dreadnode Openai" --fields dreadnode-ares-api-key --reveal 2>/dev/null || echo ""
+        sh: test -f .env && echo "" || op item get "Dreadnode Openai" --fields dreadnode-ares-api-key --reveal 2>/dev/null || echo ""
       ARES_MODEL:
         sh: |
           if [ -n "{{.MODEL_ALL}}" ]; then
