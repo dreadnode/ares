@@ -1553,5 +1553,130 @@ class TestTargetFallback:
         # In this case, the vulnerability should be skipped (not published)
 
 
+class TestSpanTargetExtraction:
+    """Tests for span target_ip extraction logic in submit_task.
+
+    Ensures dc_ip is NOT used as target_ip (they are semantically different:
+    dc_ip is for authentication, target_ip is the attack target).
+    """
+
+    @pytest.mark.asyncio
+    async def test_dc_ip_not_used_as_target_ip(self, task_queue, mock_redis_client):
+        """dc_ip should not be extracted as target_ip for span - they're semantically different."""
+        # This is a typical recon payload where dc_ip is set for auth
+        # but target_ips contains the actual targets
+        payload = {
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10",  # DC for authentication
+            "target_ips": ["MEEREEN"],  # Actual target (NetBIOS hostname)
+            "username": "testuser",
+            "techniques": ["ldap_enum"],
+        }
+
+        # Patch the producer_span to capture what target_ip is passed
+        captured_kwargs: dict = {}
+
+        def mock_producer_span(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            # Return a context manager
+            from contextlib import nullcontext
+
+            return nullcontext()
+
+        with patch("ares.core.task_queue.producer_span", mock_producer_span):
+            await task_queue.submit_task(
+                task_type="recon",
+                target_role="recon",
+                payload=payload,
+            )
+
+        # dc_ip (192.168.58.10) should NOT be used as target_ip
+        # target_fqdn should be "MEEREEN" (from target_ips)
+        assert captured_kwargs.get("target_ip") is None
+        assert captured_kwargs.get("target_fqdn") == "MEEREEN"
+
+    @pytest.mark.asyncio
+    async def test_target_ips_list_ip_used_as_target_ip(self, task_queue, mock_redis_client):
+        """First IP from target_ips list should be used as target_ip."""
+        payload = {
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10",  # DC for auth
+            "target_ips": ["192.168.58.100", "192.168.58.101"],  # Actual targets
+        }
+
+        captured_kwargs: dict = {}
+
+        def mock_producer_span(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            from contextlib import nullcontext
+
+            return nullcontext()
+
+        with patch("ares.core.task_queue.producer_span", mock_producer_span):
+            await task_queue.submit_task(
+                task_type="recon",
+                target_role="recon",
+                payload=payload,
+            )
+
+        # target_ip should be first element of target_ips, NOT dc_ip
+        assert captured_kwargs.get("target_ip") == "192.168.58.100"
+
+    @pytest.mark.asyncio
+    async def test_target_ips_list_fqdn_used_as_target_fqdn(self, task_queue, mock_redis_client):
+        """First FQDN from target_ips list should be used as target_fqdn."""
+        payload = {
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10",  # DC for auth
+            "target_ips": ["sql01.contoso.local"],  # FQDN target
+        }
+
+        captured_kwargs: dict = {}
+
+        def mock_producer_span(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            from contextlib import nullcontext
+
+            return nullcontext()
+
+        with patch("ares.core.task_queue.producer_span", mock_producer_span):
+            await task_queue.submit_task(
+                task_type="credential_access",
+                target_role="credential_access",
+                payload=payload,
+            )
+
+        # target_fqdn should be the FQDN from target_ips
+        assert captured_kwargs.get("target_ip") is None
+        assert captured_kwargs.get("target_fqdn") == "sql01.contoso.local"
+
+    @pytest.mark.asyncio
+    async def test_explicit_target_ip_takes_priority(self, task_queue, mock_redis_client):
+        """Explicit target_ip field should take priority over target_ips."""
+        payload = {
+            "target_ip": "192.168.58.200",  # Explicit target
+            "dc_ip": "192.168.58.10",
+            "target_ips": ["192.168.58.100"],
+        }
+
+        captured_kwargs: dict = {}
+
+        def mock_producer_span(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            from contextlib import nullcontext
+
+            return nullcontext()
+
+        with patch("ares.core.task_queue.producer_span", mock_producer_span):
+            await task_queue.submit_task(
+                task_type="exploit",
+                target_role="privesc",
+                payload=payload,
+            )
+
+        # Explicit target_ip should be used
+        assert captured_kwargs.get("target_ip") == "192.168.58.200"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
