@@ -332,6 +332,7 @@ def create_role_hooks(
                         break
 
                 # Extract FQDN/hostname from host args
+                raw_hostname = None
                 for arg in ("target", "host", "hostname"):
                     val = args.get(arg)
                     if val:
@@ -340,14 +341,36 @@ def create_role_hooks(
                             if not target_ip:
                                 target_ip = val
                         elif "." in val and is_likely_fqdn(val):
-                            # FQDN - extract hostname (lowercase for consistent graph nodes)
-                            target_fqdn = val.lower()
-                            target_hostname = val.split(".")[0].lower()
+                            # FQDN - capture raw value for resolution
+                            raw_hostname = val
                         elif "." not in val:
-                            # Plain hostname (no dots, lowercase for consistent graph nodes)
-                            target_hostname = val.lower()
+                            # Plain hostname (no dots) - capture for resolution
+                            raw_hostname = val
                         # else: value with dot but not FQDN (e.g., username) - skip
                         break
+
+                # Normalize hostname to canonical FQDN from discovered hosts
+                # This resolves NetBIOS names (WINTERFELL) and wrong domain suffixes
+                # (winterfell.sevenkingdoms.local) to the canonical FQDN
+                # (winterfell.north.sevenkingdoms.local)
+                if raw_hostname and shared_state:
+                    canonical_fqdn = shared_state.resolve_hostname_to_fqdn(raw_hostname, target_ip)
+                    if canonical_fqdn:
+                        target_fqdn = canonical_fqdn
+                        target_hostname = canonical_fqdn.split(".")[0]
+                    # Resolution failed - use raw value (lowercased)
+                    elif "." in raw_hostname:
+                        target_fqdn = raw_hostname.lower()
+                        target_hostname = raw_hostname.split(".")[0].lower()
+                    else:
+                        target_hostname = raw_hostname.lower()
+                elif raw_hostname:
+                    # No shared_state - fall back to raw value (lowercased)
+                    if "." in raw_hostname:
+                        target_fqdn = raw_hostname.lower()
+                        target_hostname = raw_hostname.split(".")[0].lower()
+                    else:
+                        target_hostname = raw_hostname.lower()
 
                 # Extract domain and user
                 target_domain = args.get("domain") or args.get("target_domain")
@@ -368,14 +391,15 @@ def create_role_hooks(
 
         # Try to resolve IP → FQDN from shared_state if we only have an IP
         if target_ip and not target_fqdn and shared_state:
+            resolved_fqdn = shared_state.resolve_hostname_to_fqdn("", target_ip)
+            if resolved_fqdn:
+                target_fqdn = resolved_fqdn
+                if not target_hostname:
+                    target_hostname = resolved_fqdn.split(".")[0]
+            # Check if target IP is a DC (separate from FQDN resolution)
             for host in shared_state.all_hosts:
-                if host.ip == target_ip and host.hostname and "." in host.hostname:
-                    target_fqdn = host.hostname.lower()
-                    if not target_hostname:
-                        target_hostname = host.hostname.split(".")[0].lower()
-                    # Check if it's a DC
-                    if host.is_dc:
-                        target_type = "domain_controller"
+                if host.ip == target_ip and host.is_dc:
+                    target_type = "domain_controller"
                     break
 
         # If we still don't have target_type but have an IP, check if it's a DC

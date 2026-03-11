@@ -1080,7 +1080,10 @@ class TestDirectNmapNetBIOSEnrichment:
 
         assert len(hosts) == 1
         assert hosts[0].ip == "192.168.58.11"
-        assert hosts[0].hostname == "sql01.contoso.local"
+        # Only NetBIOS name - we don't construct fake FQDNs like "sql01.contoso.local"
+        # because we don't know the actual domain suffix. The FQDN will be discovered
+        # via DNS/LDAP enumeration.
+        assert hosts[0].hostname == "sql01"
 
     @pytest.mark.asyncio
     async def test_netbios_enrichment_skips_aws_hostnames(self, monkeypatch):

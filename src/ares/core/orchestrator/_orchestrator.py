@@ -395,21 +395,15 @@ async def _run_nmap_on_worker(targets: list[str], namespace: str) -> tuple[str, 
                             continue
 
                     # Fallback: parse NetBIOS name from nbstat output
+                    # NOTE: We only use the NetBIOS hostname, not the domain group name.
+                    # Constructing FQDNs like "{netbios}.{domain}.local" is wrong because
+                    # we don't know the actual domain suffix (e.g., "north" could be
+                    # "north.sevenkingdoms.local", not "north.local"). The actual FQDN
+                    # will be discovered via DNS/LDAP enumeration.
                     nb_match = re.search(r"nbstat:\s*NetBIOS name:\s*([^,]+)", nb_stdout)
                     if nb_match:
                         netbios_name = nb_match.group(1).strip()
-                        # Try to find domain from Names section
-                        # Format: "|     DOMAIN<00>  Flags: <group>" (nmap nbstat output)
-                        domain_match = re.search(
-                            r"^\|?\s+([A-Z0-9_-]+)<00>\s+Flags:.*<group>",
-                            nb_stdout,
-                            re.MULTILINE,
-                        )
-                        if domain_match:
-                            domain = domain_match.group(1).strip().lower()
-                            host.hostname = f"{netbios_name.lower()}.{domain}.local"
-                        else:
-                            host.hostname = netbios_name.lower()
+                        host.hostname = netbios_name.lower()
                         logger.info(
                             f"[DIRECT NMAP] Resolved NetBIOS name for {host.ip}: {host.hostname}"
                         )

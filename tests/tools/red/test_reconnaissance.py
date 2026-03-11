@@ -245,9 +245,224 @@ Names:
     def test_fqdn_construction_from_netbios(self):
         """Test FQDN construction from NetBIOS name and domain."""
         netbios_name = "DC01"
-        domain = "CONTOSO"
+        domain = "contoso.local"  # Full domain from LDAP
 
-        # Logic from reconnaissance.py - assumes .local TLD
-        fqdn = f"{netbios_name.lower()}.{domain.lower()}.local"
+        # Logic from reconnaissance.py - uses full domain from LDAP
+        fqdn = f"{netbios_name.lower()}.{domain.lower()}"
 
         assert fqdn == "dc01.contoso.local"
+
+
+class TestTruncatedDomainCorrection:
+    """Tests for correcting truncated domain suffixes from DNS.
+
+    When nmap resolves hostnames via AD DNS, it may return truncated
+    domains like "ws01.child.local" instead of the full
+    "ws01.child.contoso.local". The code should detect
+    and correct these truncated domains using known domains from LDAP.
+    """
+
+    def test_truncated_domain_detection(self):
+        """Test that truncated domains can be detected."""
+        # child.local is truncated, child.contoso.local is correct
+        truncated = "child.local"
+        full_domain = "child.contoso.local"
+
+        # Check if truncated domain's first label matches known domain
+        first_label = truncated.split(".", maxsplit=1)[0]  # "child"
+        is_truncated = full_domain.startswith(first_label + ".")
+
+        assert is_truncated is True
+
+    def test_truncated_domain_correction_logic(self):
+        """Test the logic for correcting truncated hostnames."""
+        hostname = "ws01.child.local"
+        known_domains = {"child.contoso.local", "contoso.local", "fabrikam.local"}
+
+        # Extract domain suffix
+        parts = hostname.lower().split(".", 1)
+        short_name, domain_suffix = parts[0], parts[1]
+
+        # Check if domain_suffix is known
+        if domain_suffix not in known_domains:
+            # Find matching known domain
+            first_label = domain_suffix.split(".")[0]
+            for known in known_domains:
+                if known.startswith(first_label + ".") and known != domain_suffix:
+                    corrected = f"{short_name}.{known}"
+                    break
+            else:
+                corrected = hostname
+        else:
+            corrected = hostname
+
+        assert corrected == "ws01.child.contoso.local"
+
+    def test_valid_domain_not_corrected(self):
+        """Test that valid domains are not incorrectly corrected."""
+        hostname = "dc01.contoso.local"
+        known_domains = {"child.contoso.local", "contoso.local", "fabrikam.local"}
+
+        parts = hostname.lower().split(".", 1)
+        domain_suffix = parts[1]
+
+        # contoso.local IS a known domain, so no correction needed
+        assert domain_suffix in known_domains
+
+    def test_no_match_returns_original(self):
+        """Test that hostnames with unknown domains are not changed."""
+        hostname = "unknown.mystery.local"
+        known_domains = {"child.contoso.local", "contoso.local"}
+
+        parts = hostname.lower().split(".", 1)
+        _, domain_suffix = parts[0], parts[1]
+
+        # No known domain starts with "mystery."
+        first_label = domain_suffix.split(".")[0]
+        matches = [k for k in known_domains if k.startswith(first_label + ".")]
+
+        assert len(matches) == 0  # No match found
+
+    def test_child_domain_from_ldap_enables_correction(self):
+        """Test that domains discovered from LDAP enable hostname correction.
+
+        When nmap scans a child domain DC, the LDAP banner provides the
+        correct child domain (e.g., "child.contoso.local"). This
+        should be used to correct truncated hostnames for other hosts
+        in the same scan.
+        """
+        # Simulate discovering domain from LDAP banner
+        ldap_domain = "child.contoso.local"
+        discovered_domains = set()
+        discovered_domains.add(ldap_domain.lower())
+
+        # Now a truncated hostname can be corrected
+        hostname = "ws01.child.local"
+        parts = hostname.lower().split(".", 1)
+        short_name, domain_suffix = parts[0], parts[1]
+
+        first_label = domain_suffix.split(".")[0]
+        corrected = None
+        for known in discovered_domains:
+            if known.startswith(first_label + "."):
+                corrected = f"{short_name}.{known}"
+                break
+
+        assert corrected == "ws01.child.contoso.local"
+
+    def test_multiple_matching_domains_uses_first(self):
+        """Test behavior when multiple domains could match."""
+        # Edge case: what if we have both child.contoso.local
+        # and child.fabrikam.local? Current logic uses first match.
+        hostname = "srv01.child.local"
+        known_domains = {"child.contoso.local", "child.fabrikam.local"}
+
+        parts = hostname.lower().split(".", 1)
+        _, domain_suffix = parts[0], parts[1]
+
+        first_label = domain_suffix.split(".")[0]
+        matches = [k for k in known_domains if k.startswith(first_label + ".")]
+
+        # Should find matches (order not guaranteed due to set)
+        assert len(matches) == 2
+        # Code will use first match from iteration
+
+    def test_short_hostname_not_affected(self):
+        """Test that short hostnames without domain are not affected."""
+        hostname = "ws01"
+
+        # No dot means no domain suffix to correct
+        has_domain = "." in hostname
+
+        assert has_domain is False
+
+
+class TestLDAPCredentialExtraction:
+    """Tests for LDAP credential extraction edge cases.
+
+    When parsing LDAP output, the password field (often in description)
+    can appear BEFORE the sAMAccountName. The extraction logic must
+    reset context at entry boundaries to avoid false positives.
+    """
+
+    def test_ldap_password_before_samaccountname_no_false_positive(self):
+        """Ensure password isn't associated with previous entry's username.
+
+        Bug scenario: LDAP output has description (with password) before
+        sAMAccountName. Without proper boundary detection, password would
+        be associated with the PREVIOUS user.
+        """
+        from ares.tools.red.reconnaissance import NetworkEnumerationTools
+
+        # LDAP-style output where password appears before sAMAccountName
+        ldap_output = """
+dn: CN=Test User,OU=Users,DC=contoso,DC=local
+sAMAccountName: testuser
+description: Test account
+
+dn: CN=Service Account,OU=Users,DC=contoso,DC=local
+description: Password: SecretP@ss123
+sAMAccountName: svc_backup
+"""
+        tools = NetworkEnumerationTools()
+        creds = tools._extract_passwords_from_user_enum_output(ldap_output)
+
+        # Should find exactly one credential: svc_backup with SecretP@ss123
+        # Should NOT find testuser with SecretP@ss123 (false positive)
+        assert len(creds) == 1
+        username, password = creds[0]
+        assert username == "svc_backup"
+        assert password == "SecretP@ss123"  # pragma: allowlist secret
+
+    def test_ldap_entry_boundary_resets_context(self):
+        """Test that 'dn:' lines reset the user context.
+
+        Each LDAP entry starts with 'dn:'. The current_user tracker must
+        be cleared when crossing entry boundaries.
+        """
+        from ares.tools.red.reconnaissance import NetworkEnumerationTools
+
+        # Multiple LDAP entries with passwords
+        ldap_output = """
+dn: CN=User One,OU=Users,DC=contoso,DC=local
+sAMAccountName: user_one
+description: Password: Pass1
+
+dn: CN=User Two,OU=Users,DC=contoso,DC=local
+sAMAccountName: user_two
+description: Password: Pass2
+
+dn: CN=User Three,OU=Users,DC=contoso,DC=local
+description: Password: Pass3
+sAMAccountName: user_three
+"""
+        tools = NetworkEnumerationTools()
+        creds = tools._extract_passwords_from_user_enum_output(ldap_output)
+
+        # Should find three credentials with correct associations
+        creds_dict = dict(creds)
+        assert len(creds_dict) == 3
+        assert creds_dict.get("user_one") == "Pass1"
+        assert creds_dict.get("user_two") == "Pass2"
+        assert creds_dict.get("user_three") == "Pass3"
+
+    def test_extraction_module_ldap_boundary_handling(self):
+        """Test extraction.py also handles LDAP boundaries correctly."""
+        from ares.core.dispatcher.extraction import extract_plaintext_passwords_from_output
+
+        # LDAP output with password before sAMAccountName
+        ldap_output = """
+dn: CN=Admin,OU=Users,DC=contoso,DC=local
+sAMAccountName: admin
+
+dn: CN=SQL Service,OU=Service,DC=contoso,DC=local
+description: Password: SqlP@ss!
+sAMAccountName: sql_svc
+"""
+        creds = extract_plaintext_passwords_from_output(ldap_output)
+
+        # Should find sql_svc, NOT admin
+        assert len(creds) == 1
+        username, password, _domain = creds[0]
+        assert username == "sql_svc"
+        assert password == "SqlP@ss!"  # pragma: allowlist secret

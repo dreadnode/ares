@@ -461,6 +461,54 @@ class TestDeferredQueueMixin:
         assert await fake_redis.zcard(self._queue_key(dispatcher, "lateral")) == 0
         assert await fake_redis.zcard(self._queue_key(dispatcher, "exploit")) == 0
 
+    @pytest.mark.asyncio
+    async def test_get_deferred_for_starved_roles(self, dispatcher, fake_redis):
+        """Should return one task per starved role (roles with 0 pending tasks)."""
+        from ares.core.models import TaskInfo, TaskStatus
+
+        # Add tasks for multiple roles
+        await dispatcher._enqueue_deferred_task(
+            task_type="credential_access",
+            target_role="credential",
+            payload={"target": "dc01.contoso.local"},
+            source_agent="orchestrator",
+            priority=4,
+        )
+        await dispatcher._enqueue_deferred_task(
+            task_type="lateral",
+            target_role="lateral",
+            payload={"target": "192.168.58.10"},
+            source_agent="orchestrator",
+            priority=5,
+        )
+        await dispatcher._enqueue_deferred_task(
+            task_type="recon",
+            target_role="recon",
+            payload={"target": "192.168.58.0/24"},
+            source_agent="orchestrator",
+            priority=6,
+        )
+
+        # Simulate lateral role having 1 pending task (not starved)
+        dispatcher._shared_state.pending_tasks["task-1"] = TaskInfo(
+            task_id="task-1",
+            task_type="lateral",
+            assigned_agent="lateral",
+            params={},
+            status=TaskStatus.IN_PROGRESS,
+        )
+
+        # Get deferred tasks for starved roles (credential, recon are starved)
+        tasks = await dispatcher._get_deferred_for_starved_roles()
+
+        # Should get 2 tasks (credential and recon), not lateral
+        assert len(tasks) == 2
+        target_roles = {t.target_role for t in tasks}
+        assert target_roles == {"credential", "recon"}
+
+        # Lateral task should remain in queue
+        assert await fake_redis.zcard(self._queue_key(dispatcher, "lateral")) == 1
+
 
 class TestGlobalQueueLimits:
     """Tests for global deferred queue limits (get_max_deferred_total())."""
