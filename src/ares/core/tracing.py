@@ -232,12 +232,16 @@ TOOL_TO_TECHNIQUE: dict[str, str] = {
     "nmap_scan": "T1046",  # Network Service Discovery
     "portscan": "T1046",
     "ping_sweep": "T1018",  # Remote System Discovery
+    "smb_sweep": "T1046",  # Network Service Scanning
+    "resolve_domain_controllers": "T1018",  # Remote System Discovery
     "ldap_domain_dump": "T1087.002",  # Domain Account Discovery
     "ldap_search": "T1087.002",
     "ldap_search_descriptions": "T1087.002",
     "bloodhound_collection": "T1087.002",
+    "run_bloodhound": "T1087.002",  # Domain Account Discovery (also T1482)
     "sharphound": "T1087.002",
     "get_domain_info": "T1087.002",
+    "enumerate_users": "T1087.002",  # Domain Account Discovery
     "enum_domain_trusts": "T1482",  # Domain Trust Discovery
     "enumerate_forest": "T1482",
     "enum_constrained_delegation": "T1087.002",
@@ -309,6 +313,10 @@ TOOL_TO_TECHNIQUE: dict[str, str] = {
     "forge_golden_ticket": "T1558.001",  # Golden Ticket (alias)  # nosec B105
     "forge_silver_ticket": "T1558.002",  # Silver Ticket
     "create_machine_account": "T1136.002",
+    # Reporting / Documentation tools
+    "record_credential": "T1087.002",  # Account Discovery (documenting discovered credentials)
+    "record_weakness": "T1518.001",  # Software Discovery: Security Software
+    "record_timeline_event": "T1087",  # Account Discovery (general)
 }
 
 # Map tool categories to tactics for fallback
@@ -331,6 +339,7 @@ TOOL_CATEGORY_TO_TACTIC: dict[str, str] = {
     "LateralMovementTools": "lateral-movement",
     "CoercionTools": "credential-access",
     "CoercionNetworkTools": "credential-access",
+    "ReportingTools": "discovery",
 }
 
 # Map tool names to their category (toolset class name)
@@ -340,12 +349,16 @@ TOOL_TO_CATEGORY: dict[str, str] = {
     "nmap_scan": "NetworkEnumerationTools",
     "portscan": "NetworkEnumerationTools",
     "ping_sweep": "NetworkEnumerationTools",
+    "smb_sweep": "NetworkEnumerationTools",
+    "resolve_domain_controllers": "NetworkEnumerationTools",
     "ldap_domain_dump": "NetworkEnumerationTools",
     "ldap_search": "NetworkEnumerationTools",
     "ldap_search_descriptions": "NetworkEnumerationTools",
     "bloodhound_collection": "NetworkEnumerationTools",
+    "run_bloodhound": "BloodHoundTools",
     "sharphound": "NetworkEnumerationTools",
     "get_domain_info": "NetworkEnumerationTools",
+    "enumerate_users": "NetworkEnumerationTools",
     "enum_domain_trusts": "NetworkEnumerationTools",
     "enumerate_forest": "NetworkEnumerationTools",
     "enum_constrained_delegation": "NetworkEnumerationTools",
@@ -420,6 +433,10 @@ TOOL_TO_CATEGORY: dict[str, str] = {
     "forge_golden_ticket": "GoldenTicketTools",  # nosec B105
     "forge_silver_ticket": "GoldenTicketTools",
     "create_machine_account": "GoldenTicketTools",
+    # ReportingTools - Documentation and findings recording
+    "record_credential": "ReportingTools",
+    "record_weakness": "ReportingTools",
+    "record_timeline_event": "ReportingTools",
 }
 
 # =============================================================================
@@ -510,7 +527,7 @@ def get_tool_mitre_info(tool_name: str) -> tuple[str | None, str | None]:
 
     if technique_id:
         # Derive tactic from technique ID prefix patterns
-        if technique_id.startswith(("T1087", "T1018", "T1046", "T1135", "T1482")):
+        if technique_id.startswith(("T1087", "T1018", "T1046", "T1135", "T1482", "T1518")):
             tactic = "discovery"
         elif technique_id.startswith(("T1003", "T1558", "T1187", "T1557", "T1552", "T1110")):
             tactic = "credential-access"

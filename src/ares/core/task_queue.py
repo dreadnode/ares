@@ -15,6 +15,11 @@ from typing import Any
 from loguru import logger
 from pydantic import BaseModel
 
+from ares.core.circuit_breaker import (
+    CircuitBreakerError,
+    get_error_debouncer,
+    get_redis_circuit,
+)
 from ares.core.config import get_agent_heartbeat_timeout, get_redis_url
 from ares.core.redis_client import (
     create_redis_client,
@@ -108,11 +113,15 @@ class RedisTaskQueue:
     RESULT_TTL = 86400  # 24 hours
     HEARTBEAT_TTL = 60  # 60 seconds
 
-    def __init__(self, redis_url: str | None = None):
+    def __init__(self, redis_url: str | None = None, use_circuit_breaker: bool = True):
         self.redis_url = redis_url or get_redis_url()
         self._client = None
         self._connected = False
         self._heartbeat_ttl = max(self.HEARTBEAT_TTL, get_agent_heartbeat_timeout() * 2)
+        self._use_circuit_breaker = use_circuit_breaker
+        # Shared circuit breaker and debouncer across all task queue instances
+        self._circuit = get_redis_circuit() if use_circuit_breaker else None
+        self._debouncer = get_error_debouncer() if use_circuit_breaker else None
 
     @property
     def redis(self):
@@ -129,9 +138,17 @@ class RedisTaskQueue:
         Uses socket_timeout=None to allow blocking operations (BRPOP) to wait
         for extended periods without hitting socket timeout. Timeout control
         is handled at the application level via asyncio.wait_for.
+
+        Circuit breaker: If the circuit is open, fails fast without attempting
+        connection. This prevents thundering herd when Redis is unavailable.
         """
         if self._connected:
             return
+
+        # Check circuit breaker FIRST - fail fast if Redis is known to be down
+        if self._circuit and not self._circuit.allow_request_sync():
+            remaining = self._circuit._get_remaining_open_time()
+            raise CircuitBreakerError(self._circuit.name, remaining)
 
         # Use direct connection when in a non-main thread to avoid
         # SentinelConnectionPool's async state being shared across event loops
@@ -151,13 +168,34 @@ class RedisTaskQueue:
             )
             await self._client.ping()
             self._connected = True
+
+            # Record success to close circuit if it was half-open
+            if self._circuit:
+                self._circuit.record_success_sync()
+
             if get_redis_sentinel_config():
                 conn_type = "direct" if direct_connection else "via Sentinel"
                 logger.info(f"TaskQueue connected to Redis {conn_type} (socket_timeout=None)")
             else:
                 logger.info(f"TaskQueue connected to Redis at {self.redis_url}")
 
+        except CircuitBreakerError:
+            raise  # Don't wrap circuit breaker errors
+
         except Exception as e:
+            # Record failure to potentially open circuit
+            if self._circuit and is_connection_error(e):
+                self._circuit.record_failure_sync(e)
+                # Debounce the error log
+                if self._debouncer:
+                    self._debouncer.log_error_sync(
+                        "redis_connect",
+                        f"Redis connect failed: {e}",
+                        level="warning",
+                    )
+                    # Don't raise the original error message if debounced
+                    # Just raise a clean circuit breaker aware error
+                    raise RuntimeError(f"Failed to connect to Redis: {e}") from e
             raise RuntimeError(f"Failed to connect to Redis: {e}") from e
 
     async def disconnect(self) -> None:
@@ -217,6 +255,71 @@ class RedisTaskQueue:
             # The client will be recreated on next connect()
             self._client = None
         logger.warning(f"Redis connection error, will retry: {error}")
+
+    async def _with_circuit_breaker(
+        self,
+        operation_name: str,
+        operation_func,
+        *,
+        suppress_open_error: bool = False,
+    ):
+        """Execute a Redis operation with circuit breaker protection.
+
+        When the circuit is open, operations fail-fast instead of trying to
+        connect to unavailable Redis. This prevents thundering herd when
+        multiple background tasks all discover Redis is down simultaneously.
+
+        IMPORTANT: This method handles connection AND operation failures.
+        Pass a callable (lambda or function) that will be called AFTER
+        the circuit check, not a coroutine.
+
+        Args:
+            operation_name: Name for logging (e.g., "check_results_batch")
+            operation_func: Async callable that performs the operation
+                           (called AFTER circuit check, so connect() is protected)
+            suppress_open_error: If True, return None instead of raising when open
+
+        Returns:
+            Result of the operation, or None if circuit is open and suppress_open_error
+
+        Raises:
+            CircuitBreakerError: If circuit is open and not suppressed
+            Exception: Any exception from the Redis operation
+        """
+        if not self._circuit:
+            # Circuit breaker disabled - execute directly
+            return await operation_func()
+
+        # Check if circuit allows request BEFORE trying to connect
+        if not self._circuit.allow_request_sync():
+            if suppress_open_error:
+                # Log with debouncing to reduce spam (sync version for thread safety)
+                if self._debouncer:
+                    self._debouncer.log_error_sync(
+                        f"circuit_open_{operation_name}",
+                        f"Circuit breaker open, skipping {operation_name}",
+                        level="debug",
+                    )
+                return None
+            remaining = self._circuit._get_remaining_open_time()
+            raise CircuitBreakerError(self._circuit.name, remaining)
+
+        try:
+            # Now execute the operation (which may include connect())
+            result = await operation_func()
+            self._circuit.record_success_sync()
+            return result
+        except Exception as e:
+            if is_connection_error(e):
+                self._circuit.record_failure_sync(e)
+                # Use debouncer for connection errors (sync version)
+                if self._debouncer:
+                    self._debouncer.log_error_sync(
+                        f"redis_error_{operation_name}",
+                        f"Redis {operation_name} failed: {e}",
+                        level="warning",
+                    )
+            raise
 
     def _task_queue_key(self, role: str) -> str:
         """Get task queue key for a role."""
@@ -288,12 +391,26 @@ class RedisTaskQueue:
         target_fqdn = None
         target_user = None
 
-        # Check explicit IP fields first
-        for field in ("target_ip", "dc_ip", "ip"):
+        # Check explicit IP fields first (NOT dc_ip - that's for auth, not target)
+        # dc_ip is the domain controller used for authentication, not the attack target
+        for field in ("target_ip", "ip"):
             val = payload.get(field)
             if val and IP_PATTERN.match(val):
                 target_ip = val
                 break
+
+        # Check target_ips list (common in recon/credential_access payloads)
+        if not target_ip:
+            target_ips = payload.get("target_ips", [])
+            if target_ips and isinstance(target_ips, list) and target_ips[0]:
+                first_target = target_ips[0]
+                if IP_PATTERN.match(first_target):
+                    target_ip = first_target
+                elif is_likely_fqdn(first_target):
+                    target_fqdn = first_target
+                elif first_target:
+                    # NetBIOS hostname - set as FQDN for span tracking
+                    target_fqdn = first_target
 
         # Check target/host fields - distinguish FQDN from username
         for field in ("target", "host", "hostname"):
@@ -303,12 +420,13 @@ class RedisTaskQueue:
                     if not target_ip:
                         target_ip = val
                 elif "." in val and is_likely_fqdn(val):
-                    target_fqdn = val
+                    if not target_fqdn:
+                        target_fqdn = val
                 elif "." in val:
                     # Has dot but not FQDN -> likely username (e.g., "sansa.stark")
                     target_user = val
                 # Plain hostname without dots - set as FQDN for backwards compat
-                elif val:
+                elif val and not target_fqdn:
                     target_fqdn = val
                 break
 
@@ -451,6 +569,9 @@ class RedisTaskQueue:
         N * 30s during connectivity issues. Pipeline batching reduces this to
         a single timeout window regardless of N.
 
+        Circuit breaker protection: When Redis is unavailable, the circuit opens
+        and subsequent calls fail-fast instead of waiting for timeout.
+
         Args:
             task_ids: List of task IDs to check
 
@@ -460,18 +581,30 @@ class RedisTaskQueue:
         if not task_ids:
             return {}
 
-        if not self._connected:
-            await self.connect()
-
-        # Use pipeline for single round-trip
-        pipe = self._client.pipeline()
-        for task_id in task_ids:
-            result_key = self._result_queue_key(task_id)
-            pipe.rpop(result_key)
+        async def _execute_batch():
+            # Connect inside the circuit breaker so failures are tracked
+            if not self._connected:
+                await self.connect()
+            # Use pipeline for single round-trip
+            pipe = self._client.pipeline()
+            for task_id in task_ids:
+                result_key = self._result_queue_key(task_id)
+                pipe.rpop(result_key)
+            return await pipe.execute()
 
         results: dict[str, TaskResult | None] = {}
         try:
-            raw_results = await pipe.execute()
+            # Wrap entire operation (including connect) with circuit breaker
+            raw_results = await self._with_circuit_breaker(
+                "check_results_batch",
+                _execute_batch,  # Pass callable, not coroutine
+                suppress_open_error=True,
+            )
+
+            if raw_results is None:
+                # Circuit is open - return empty results
+                return dict.fromkeys(task_ids)
+
             for task_id, data in zip(task_ids, raw_results, strict=False):
                 if data is None:
                     results[task_id] = None
@@ -481,6 +614,11 @@ class RedisTaskQueue:
                     except Exception as e:
                         logger.warning(f"Failed to parse result for {task_id}: {e}")
                         results[task_id] = None
+
+        except CircuitBreakerError:
+            # Circuit is open - return empty results (already logged by circuit)
+            return dict.fromkeys(task_ids)
+
         except Exception as e:
             # Handle connection errors to force reconnection on next call
             if is_connection_error(e):
@@ -488,7 +626,9 @@ class RedisTaskQueue:
                 # Force fresh DNS resolution on reconnect (handles Sentinel pod restarts)
                 invalidate_sentinel_client()
             # On pipeline failure, return empty results (caller will retry)
-            logger.warning(f"Pipeline check_results_batch failed: {e}")
+            # Note: Circuit breaker already logged this if it's a connection error
+            if not self._circuit or not is_connection_error(e):
+                logger.warning(f"Pipeline check_results_batch failed: {e}")
             return dict.fromkeys(task_ids)
 
         return results
@@ -701,21 +841,34 @@ class RedisTaskQueue:
         """
         Get agent heartbeat data.
 
+        Circuit breaker protection: When Redis is unavailable, returns None
+        instead of blocking on timeout.
+
         Raises:
             Exception: Re-raises connection errors after marking connection as failed
         """
-        if not self._connected:
-            await self.connect()
-
         heartbeat_key = self._heartbeat_key(agent_name)
 
+        async def _get_heartbeat():
+            if not self._connected:
+                await self.connect()
+            return await self._client.get(heartbeat_key)
+
         try:
-            data = await self._client.get(heartbeat_key)
+            data = await self._with_circuit_breaker(
+                "get_heartbeat",
+                _get_heartbeat,  # Pass callable, not coroutine
+                suppress_open_error=True,
+            )
 
             if data is None:
                 return None
 
             return json.loads(data)
+
+        except CircuitBreakerError:
+            # Circuit is open - return None (agent status unknown)
+            return None
 
         except Exception as e:
             if is_connection_error(e):
@@ -1058,6 +1211,9 @@ class RedisTaskQueue:
         """
         Poll for pending discoveries (non-blocking).
 
+        Circuit breaker protection: When Redis is unavailable, returns empty
+        list instead of blocking on timeout.
+
         Args:
             operation_id: The operation ID
             max_items: Maximum discoveries to retrieve per poll
@@ -1065,18 +1221,29 @@ class RedisTaskQueue:
         Returns:
             List of discovery dicts
         """
-        if not self._connected:
-            await self.connect()
-
         queue_key = self._discovery_queue_key(operation_id)
         discoveries = []
 
-        try:
+        async def _execute_poll():
+            # Connect inside the circuit breaker so failures are tracked
+            if not self._connected:
+                await self.connect()
             # Use pipeline for efficiency
             pipe = self._client.pipeline()
             for _ in range(max_items):
                 pipe.rpop(queue_key)
-            results = await pipe.execute()
+            return await pipe.execute()
+
+        try:
+            results = await self._with_circuit_breaker(
+                "poll_discoveries",
+                _execute_poll,  # Pass callable, not coroutine
+                suppress_open_error=True,
+            )
+
+            if results is None:
+                # Circuit is open - return empty list
+                return []
 
             for data in results:
                 if data is None:
@@ -1086,12 +1253,33 @@ class RedisTaskQueue:
                 except json.JSONDecodeError:
                     logger.warning(f"Invalid discovery JSON: {data}")
 
+        except CircuitBreakerError:
+            # Circuit is open - return empty list
+            return []
+
         except Exception as e:
             if is_connection_error(e):
                 self._handle_connection_error(e)
-            logger.warning(f"Failed to poll discoveries: {e}")
+            # Note: Circuit breaker already logged this if it's a connection error
+            if not self._circuit or not is_connection_error(e):
+                logger.warning(f"Failed to poll discoveries: {e}")
 
         return discoveries
+
+    def get_circuit_breaker_status(self) -> dict[str, Any] | None:
+        """Get circuit breaker status for monitoring.
+
+        Returns:
+            Dict with circuit breaker state, or None if disabled
+        """
+        if not self._circuit:
+            return None
+        return self._circuit.get_status()
+
+    async def flush_error_debouncer(self) -> None:
+        """Flush pending debounced errors (call on shutdown)."""
+        if self._debouncer:
+            await self._debouncer.flush()
 
 
 __all__ = [

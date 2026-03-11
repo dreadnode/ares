@@ -26,6 +26,7 @@ dependencies = [
     "kubernetes>=29.0.0",
     "tenacity>=8.2.0",
     "sentence-transformers>=2.2.0",
+    "aiobreaker>=1.2.0",
 ]
 
 [project.optional-dependencies]

@@ -193,12 +193,74 @@ class NetworkEnumerationTools(Toolset):
         if not output:
             return []
         creds: list[tuple[str, str]] = []
+
+        # Check if output contains LDAP entries (dn: lines)
+        # LDAP entries need special handling because password can appear before username
+        if "\ndn:" in output or output.strip().lower().startswith("dn:"):
+            creds.extend(self._extract_passwords_from_ldap_entries(output))
+
+        # Also process line-by-line for non-LDAP formats (netexec, etc.)
+        creds.extend(self._extract_passwords_line_by_line(output))
+
+        # Deduplicate while preserving order
+        seen: set[tuple[str, str]] = set()
+        unique_creds: list[tuple[str, str]] = []
+        for cred in creds:
+            key = (cred[0].lower(), cred[1])
+            if key not in seen:
+                seen.add(key)
+                unique_creds.append(cred)
+        return unique_creds
+
+    def _extract_passwords_from_ldap_entries(self, output: str) -> list[tuple[str, str]]:
+        """Extract credentials from LDAP-formatted output.
+
+        LDAP entries start with 'dn:' and can have password (in description)
+        appear before sAMAccountName. We must parse each entry as a complete
+        unit to correctly associate passwords with usernames.
+        """
+        creds: list[tuple[str, str]] = []
+
+        # Split into LDAP entries (each starts with dn:)
+        entries = re.split(r"(?=^dn:)", output, flags=re.MULTILINE | re.IGNORECASE)
+
+        for entry in entries:
+            if not entry.strip():
+                continue
+
+            # Extract username from sAMAccountName
+            username = ""
+            sam_match = re.search(r"samaccountname:\s*([A-Za-z0-9_.-]+)", entry, re.IGNORECASE)
+            if sam_match:
+                username = sam_match.group(1).strip()
+
+            # Extract password from description or other fields
+            password = ""  # nosec B105 - initialization, not hardcoded password
+            pass_match = re.search(r"Password\s*:\s*([^\s()]+)", entry, re.IGNORECASE)
+            if pass_match:
+                password = pass_match.group(1).strip().rstrip(".,;:()")
+
+            if username and password:
+                creds.append((username, password))
+
+        return creds
+
+    def _extract_passwords_line_by_line(self, output: str) -> list[tuple[str, str]]:
+        """Extract credentials from line-based output (netexec, etc.)."""
+        creds: list[tuple[str, str]] = []
         current_user = ""
+
         for line in output.splitlines():
             stripped = line.strip()
             if not stripped:
                 continue
 
+            # Skip LDAP entry markers (handled by _extract_passwords_from_ldap_entries)
+            if stripped.lower().startswith("dn:"):
+                current_user = ""
+                continue
+
+            # Track current user from various patterns
             user_match = re.search(r"user:\[([^\]]+)\]", stripped, re.IGNORECASE)
             if user_match:
                 current_user = user_match.group(1).strip()
@@ -217,9 +279,9 @@ class NetworkEnumerationTools(Toolset):
             pass_match = re.search(r"Password\s*:\s*([^\s()]+)", stripped, re.IGNORECASE)
             if not pass_match:
                 continue
-            # Only strip clearly trailing punctuation, not ! which is common in passwords
             password = pass_match.group(1).strip().rstrip(".,;:()")
 
+            # Try to extract username from same line first
             username = ""
             account_inline = re.search(r"Account:\s*([A-Za-z0-9_.-]+)", stripped)
             if account_inline:
@@ -231,9 +293,6 @@ class NetworkEnumerationTools(Toolset):
                     username = user_inline.group(1).strip()
 
             if not username:
-                username = current_user
-
-            if not username:
                 netexec_match = re.match(
                     r"^SMB\s+\d+\.\d+\.\d+\.\d+\s+\d+\s+\S+\s+([A-Za-z0-9._-]+)\s+\d{4}-\d{2}-\d{2}",
                     stripped,
@@ -241,8 +300,14 @@ class NetworkEnumerationTools(Toolset):
                 if netexec_match:
                     username = netexec_match.group(1).strip()
 
+            # Only fall back to current_user for non-LDAP lines
+            # (LDAP entries are handled by _extract_passwords_from_ldap_entries)
+            if not username and current_user:
+                username = current_user
+
             if username and password:
                 creds.append((username, password))
+
         return creds
 
     def _add_credential(
@@ -413,11 +478,46 @@ class NetworkEnumerationTools(Toolset):
 
         def _parse_nmap_hosts(output: str) -> list[Host]:
             hosts: list[Host] = []
+            # Track domains discovered from LDAP banners in this scan
+            discovered_domains: set[str] = set()
             current_ip = ""
             current_hostname = ""
             current_os = ""
             current_domain = ""
             current_services: list[str] = []
+
+            def _fix_truncated_domain(hostname: str) -> str:
+                """Fix truncated domain suffixes using known domains."""
+                if not hostname or "." not in hostname:
+                    return hostname
+
+                parts = hostname.lower().split(".", 1)
+                if len(parts) != 2:
+                    return hostname
+
+                short_name, domain_suffix = parts
+
+                # Build list of known domains from state and this scan's discoveries
+                known_domains = {
+                    d.lower() for d in getattr(self.state, "all_domains", []) if self.state
+                }
+                known_domains.update(discovered_domains)
+
+                if domain_suffix in known_domains:
+                    return hostname  # Domain is valid
+
+                # Try to find a known domain that this could be a truncation of
+                # e.g., "north.local" might be truncated "north.sevenkingdoms.local"
+                domain_parts = domain_suffix.split(".")
+                if domain_parts:
+                    first_label = domain_parts[0]  # e.g., "north"
+                    for known in known_domains:
+                        if known.startswith(first_label + ".") and known != domain_suffix:
+                            corrected = f"{short_name}.{known}"
+                            logger.debug(f"Corrected truncated hostname: {hostname} -> {corrected}")
+                            return corrected
+
+                return hostname
 
             def _commit_current() -> None:
                 nonlocal current_hostname
@@ -427,6 +527,12 @@ class NetworkEnumerationTools(Toolset):
                 hostname_to_use = current_hostname
                 if current_hostname and current_domain and "." not in current_hostname:
                     hostname_to_use = f"{current_hostname.lower()}.{current_domain.lower()}"
+                    # Track the domain from LDAP for fixing other hosts
+                    discovered_domains.add(current_domain.lower())
+
+                # Try to fix truncated domain with currently known domains
+                hostname_to_use = _fix_truncated_domain(hostname_to_use)
+
                 # Detect DC based on services (LDAP + Kerberos = domain controller)
                 services_lower = [s.lower() for s in current_services]
                 has_ldap = any("ldap" in s for s in services_lower)
@@ -479,6 +585,8 @@ class NetworkEnumerationTools(Toolset):
                     domain_match = re.search(r"\(Domain:\s*([^,)]+)", line)
                     if domain_match and not current_domain:
                         current_domain = domain_match.group(1).strip()
+                        # Track discovered domains for fixing truncated hostnames
+                        discovered_domains.add(current_domain.lower())
                     # Parse Service Info line for Host and OS
                     # Format: "Service Info: Host: KINGSLANDING; OS: Windows; CPE: ..."
                     if "Service Info:" in line:
@@ -492,6 +600,16 @@ class NetworkEnumerationTools(Toolset):
                             current_os = os_match.group(1).strip()
 
             _commit_current()
+
+            # Second pass: fix any truncated hostnames now that we have all discovered domains
+            # This handles hosts parsed before their correct domain was discovered from LDAP
+            for host in hosts:
+                if host.hostname and "." in host.hostname:
+                    fixed = _fix_truncated_domain(host.hostname)
+                    if fixed != host.hostname:
+                        logger.debug(f"Second pass fix: {host.hostname} -> {fixed}")
+                        host.hostname = fixed
+
             return hosts
 
         def _hosts_to_dicts(hosts: list[Host]) -> list[dict[str, Any]]:
@@ -663,9 +781,24 @@ class NetworkEnumerationTools(Toolset):
                                     re.MULTILINE,
                                 )
                                 if domain_match:
-                                    domain = domain_match.group(1).strip().lower()
-                                    # Build FQDN: hostname.domain.local (assume .local TLD)
-                                    host.hostname = f"{netbios_name.lower()}.{domain}.local"
+                                    netbios_domain = domain_match.group(1).strip().lower()
+                                    # Resolve NetBIOS domain to FQDN using state if available
+                                    # e.g., "NORTH" -> "north.sevenkingdoms.local"
+                                    if self.state and hasattr(
+                                        self.state, "_resolve_netbios_to_fqdn"
+                                    ):
+                                        fqdn_domain = self.state._resolve_netbios_to_fqdn(
+                                            netbios_domain
+                                        )
+                                        # Only use resolved domain if it's an FQDN (contains dot)
+                                        # Otherwise just use short name without wrong assumptions
+                                        if "." in fqdn_domain:
+                                            host.hostname = f"{netbios_name.lower()}.{fqdn_domain}"
+                                        else:
+                                            host.hostname = netbios_name.lower()
+                                    else:
+                                        # Fallback: just use NetBIOS name without domain assumption
+                                        host.hostname = netbios_name.lower()
                                 else:
                                     host.hostname = netbios_name.lower()
                                 logger.info(

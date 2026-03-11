@@ -511,6 +511,14 @@ async def main(
                         set_target_domains(target_domains)
                         logger.info(f"Evidence scope set to domains: {target_domains}")
 
+                    # Extract target deployment for Loki query scoping
+                    # This ensures blue team queries filter by deployment label,
+                    # avoiding noise from other environments in shared Grafana
+                    target_deployment = ""
+                    if state.target and state.target.environment:
+                        target_deployment = state.target.environment
+                        logger.info(f"Target deployment for Loki scoping: {target_deployment}")
+
                     attack_context = {
                         "operation_id": operation_id,
                         "playbook": playbook,
@@ -520,6 +528,7 @@ async def main(
                         "priority_queries": playbook.priority_queries[:10],
                         "detection_targets": playbook.detection_targets[:20],
                         "target_domains": list(target_domains),
+                        "deployment": target_deployment,
                     }
                     logger.success(f"Loaded red team operation: {operation_id}")
                     logger.info(

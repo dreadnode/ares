@@ -95,9 +95,10 @@ def format_state_context(
 
     # Pending vulns - compact
     if hasattr(state, "discovered_vulnerabilities") and state.discovered_vulnerabilities:
+        # Snapshot to avoid "dict changed size during iteration" from concurrent access
         unexploited = [
             v
-            for v in state.discovered_vulnerabilities.values()
+            for v in list(state.discovered_vulnerabilities.values())
             if v.vuln_id not in state.exploited_vulnerabilities
         ]
         if unexploited:

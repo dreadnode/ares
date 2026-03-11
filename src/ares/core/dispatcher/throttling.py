@@ -408,10 +408,10 @@ class ThrottlingMixin:
             },
             "privilege_escalation": {
                 # PRIVESC critical (S4U, ESC1-8), ACL critical (WriteDACL)
-                # CREDENTIAL_ACCESS high (secretsdump), LATERAL growing
+                # CREDENTIAL_ACCESS critical (secretsdump feeds lateral), LATERAL growing
                 "exploit": -2,  # 0.35 - S4U, ESC1/4/8, MSSQL impersonation
                 "acl_analysis": -2,  # 0.25 - shadow creds, password resets
-                "credential_access": -1,  # 0.15 - secretsdump owned hosts
+                "credential_access": -2,  # 0.20 - secretsdump owned hosts → feeds lateral
                 "crack": 0,  # 0.10 - NTLM from secretsdump
                 "lateral": 0,  # 0.10 - test new creds, expand footprint
                 "coercion": +1,  # 0.05 - ESC8 relay, DC coercion

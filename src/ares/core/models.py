@@ -1421,6 +1421,67 @@ class SharedRedTeamState:
         # No FQDN found, return original
         return netbios_lower
 
+    def resolve_hostname_to_fqdn(self, hostname: str, target_ip: str | None = None) -> str | None:
+        """Resolve a hostname to its canonical FQDN from discovered hosts.
+
+        When tools output hostnames like 'WINTERFELL' (NetBIOS) or
+        'winterfell.sevenkingdoms.local' (wrong/partial domain suffix),
+        this method resolves them to the canonical FQDN based on
+        discovered hosts in all_hosts.
+
+        This is the "right" fix for normalizing hostnames at the span emission
+        layer - always emit the canonical FQDN, not variants.
+
+        Resolution strategy:
+        1. If target_ip is provided, find host by IP and return its FQDN
+        2. If hostname is already an exact FQDN match, return it
+        3. If hostname is a NetBIOS name (no dot), match by short hostname
+        4. If hostname is a partial/wrong FQDN, match by short hostname prefix
+
+        Args:
+            hostname: The hostname to resolve (NetBIOS, short, or partial FQDN)
+            target_ip: Optional IP address for disambiguation when multiple
+                       hosts share the same short hostname
+
+        Returns:
+            Canonical FQDN (lowercased) if found, None otherwise
+        """
+        # Strategy 1: If we have an IP, find exact host match first
+        # This is the most reliable since IPs are unique
+        # This handles the case where we only have an IP (no hostname)
+        if target_ip:
+            for host in self.all_hosts:
+                if host.ip == target_ip and host.hostname and "." in host.hostname:
+                    return host.hostname.lower()
+
+        # If no hostname provided and IP resolution didn't find a match, return None
+        if not hostname:
+            return None
+
+        hostname_lower = hostname.lower().strip()
+
+        # Strategy 2-4: Match by hostname
+        # Extract the short name from input (before first dot, if any)
+        input_short = hostname_lower.split(".")[0]
+
+        for host in self.all_hosts:
+            host_hostname = (host.hostname or "").lower()
+            if not host_hostname or "." not in host_hostname:
+                continue  # Skip hosts without FQDN
+
+            host_short = host_hostname.split(".")[0]
+
+            # Strategy 2: Exact FQDN match - already canonical
+            if hostname_lower == host_hostname:
+                return host_hostname
+
+            # Strategy 3 & 4: Short name matches (works for both NetBIOS and partial FQDN)
+            if input_short == host_short:
+                return host_hostname
+
+        # No match found
+        return None
+
     def _validate_hash_domain(self, username: str, domain: str, source_agent: str) -> str:
         """Validate and correct hash domain by cross-referencing with known user domains.
 
@@ -2523,15 +2584,31 @@ class SharedRedTeamState:
                 new_hostname = (host.hostname or "").strip()
                 if new_hostname:
                     existing_lower = existing_hostname.lower()
+                    new_lower = new_hostname.lower()
                     existing_is_short = "." not in existing_hostname
                     new_is_fqdn = "." in new_hostname
                     existing_is_ptr = (
                         existing_lower.startswith("ip-") and "compute.internal" in existing_lower
                     )
+
+                    # Check if new FQDN is more specific (more domain levels) than existing
+                    # e.g., "winterfell.north.sevenkingdoms.local" is more specific than
+                    # "winterfell.sevenkingdoms.local" and should be preferred
+                    new_is_more_specific = False
+                    if new_is_fqdn and "." in existing_hostname:
+                        existing_parts = existing_lower.split(".")
+                        new_parts = new_lower.split(".")
+                        # Same short hostname but new has more domain levels
+                        if existing_parts[0] == new_parts[0] and len(new_parts) > len(
+                            existing_parts
+                        ):
+                            new_is_more_specific = True
+
                     if (
                         not existing_hostname
                         or existing_is_ptr
                         or (existing_is_short and new_is_fqdn)
+                        or new_is_more_specific
                     ):
                         existing.hostname = new_hostname
                         data_changed = True
@@ -2848,7 +2925,8 @@ class SharedRedTeamState:
         if vuln.vuln_id in self.discovered_vulnerabilities:
             return False
         # Also check for same (type, target) combination to prevent logical duplicates
-        for existing in self.discovered_vulnerabilities.values():
+        # Snapshot to avoid "dict changed size during iteration" from concurrent access
+        for existing in list(self.discovered_vulnerabilities.values()):
             if existing.vuln_type == vuln.vuln_type and existing.target == vuln.target:
                 return False
         self.discovered_vulnerabilities[vuln.vuln_id] = vuln
@@ -2877,9 +2955,10 @@ class SharedRedTeamState:
 
     def get_unexploited_vulnerabilities(self) -> list[VulnerabilityInfo]:
         """Get vulnerabilities that haven't been exploited yet."""
+        # Snapshot to avoid "dict changed size during iteration" from concurrent access
         return [
             v
-            for vid, v in self.discovered_vulnerabilities.items()
+            for vid, v in list(self.discovered_vulnerabilities.items())
             if vid not in self.exploited_vulnerabilities
         ]
 
@@ -2932,7 +3011,8 @@ class SharedRedTeamState:
                     dc_hosts_by_ip[host.ip] = host
 
         # Check all local_admin vulnerabilities for this user
-        for vuln in self.discovered_vulnerabilities.values():
+        # Snapshot to avoid "dict changed size during iteration" from concurrent access
+        for vuln in list(self.discovered_vulnerabilities.values()):
             if vuln.vuln_type != "local_admin":
                 continue
 
@@ -3127,9 +3207,10 @@ class SharedRedTeamState:
     @property
     def weaknesses(self) -> list[str]:
         """Return combined weaknesses and vulnerability descriptions for reporting."""
+        # Snapshot to avoid "dict changed size during iteration" from concurrent access
         vuln_descriptions = [
             f"{v.vuln_type} on {v.target} ({v.vuln_id})"
-            for v in self.discovered_vulnerabilities.values()
+            for v in list(self.discovered_vulnerabilities.values())
         ]
         return self.all_weaknesses + vuln_descriptions
 

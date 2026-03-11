@@ -2226,3 +2226,265 @@ class TestAttackChainConsistency:
         # da_hash_id should still be the first one
         assert state.da_hash_id == first_da_hash_id
         assert state.da_hash_id == hash1.id
+
+
+class TestResolveHostnameToFQDN:
+    """Tests for SharedRedTeamState.resolve_hostname_to_fqdn.
+
+    This method normalizes hostnames to canonical FQDNs at the span emission layer.
+    It handles NetBIOS names (WINTERFELL), short names (winterfell), and wrong
+    domain suffixes (winterfell.sevenkingdoms.local -> winterfell.north.sevenkingdoms.local).
+    """
+
+    def test_resolves_netbios_to_fqdn(self) -> None:
+        """Test that NetBIOS hostname is resolved to FQDN from all_hosts."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_hosts = [
+            Host(ip="192.168.58.10", hostname="dc01.contoso.local"),
+            Host(ip="192.168.58.20", hostname="sql01.contoso.local"),
+        ]
+
+        # NetBIOS "DC01" should resolve to "dc01.contoso.local"
+        result = state.resolve_hostname_to_fqdn("DC01")
+        assert result == "dc01.contoso.local"
+
+    def test_resolves_lowercase_short_hostname(self) -> None:
+        """Test that lowercase short hostname is resolved to FQDN."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_hosts = [
+            Host(ip="192.168.58.10", hostname="dc01.contoso.local"),
+        ]
+
+        # Lowercase "dc01" should resolve to "dc01.contoso.local"
+        result = state.resolve_hostname_to_fqdn("dc01")
+        assert result == "dc01.contoso.local"
+
+    def test_corrects_wrong_domain_suffix(self) -> None:
+        """Test that wrong domain suffix is corrected to canonical FQDN."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        # The canonical FQDN is in the child domain
+        state.all_hosts = [
+            Host(ip="192.168.58.10", hostname="dc01.child.contoso.local"),
+        ]
+
+        # Wrong domain suffix should be corrected
+        result = state.resolve_hostname_to_fqdn("dc01.contoso.local")
+        assert result == "dc01.child.contoso.local"
+
+    def test_preserves_exact_fqdn_match(self) -> None:
+        """Test that exact FQDN match is preserved."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_hosts = [
+            Host(ip="192.168.58.10", hostname="dc01.contoso.local"),
+        ]
+
+        # Exact match should be preserved
+        result = state.resolve_hostname_to_fqdn("dc01.contoso.local")
+        assert result == "dc01.contoso.local"
+
+    def test_resolves_by_ip(self) -> None:
+        """Test that target_ip enables resolution even with ambiguous hostname."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_hosts = [
+            Host(ip="192.168.58.10", hostname="dc01.contoso.local"),
+            Host(ip="192.168.58.20", hostname="dc01.fabrikam.local"),
+        ]
+
+        # With target_ip, should resolve to the correct domain
+        result = state.resolve_hostname_to_fqdn("DC01", target_ip="192.168.58.20")
+        assert result == "dc01.fabrikam.local"
+
+    def test_ip_takes_priority_over_hostname_match(self) -> None:
+        """Test that IP-based resolution takes priority over hostname matching."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_hosts = [
+            Host(ip="192.168.58.10", hostname="dc01.contoso.local"),
+            Host(ip="192.168.58.20", hostname="dc01.fabrikam.local"),
+        ]
+
+        # Even with wrong FQDN, IP should resolve correctly
+        result = state.resolve_hostname_to_fqdn("dc01.contoso.local", target_ip="192.168.58.20")
+        assert result == "dc01.fabrikam.local"
+
+    def test_returns_none_when_no_match(self) -> None:
+        """Test that None is returned when no match exists."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_hosts = [
+            Host(ip="192.168.58.10", hostname="dc01.contoso.local"),
+        ]
+
+        # Unknown hostname should return None
+        result = state.resolve_hostname_to_fqdn("sql01")
+        assert result is None
+
+    def test_returns_none_for_empty_hostname(self) -> None:
+        """Test that None is returned for empty hostname."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_hosts = [
+            Host(ip="192.168.58.10", hostname="dc01.contoso.local"),
+        ]
+
+        result = state.resolve_hostname_to_fqdn("")
+        assert result is None
+
+    def test_skips_hosts_without_fqdn(self) -> None:
+        """Test that hosts without FQDN (no dots) are skipped."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_hosts = [
+            Host(ip="192.168.58.10", hostname="dc01"),  # No FQDN
+            Host(ip="192.168.58.20", hostname="dc01.contoso.local"),
+        ]
+
+        # Should skip the first host and match the second
+        result = state.resolve_hostname_to_fqdn("dc01")
+        assert result == "dc01.contoso.local"
+
+    def test_case_insensitive_matching(self) -> None:
+        """Test that hostname matching is case-insensitive."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_hosts = [
+            Host(ip="192.168.58.10", hostname="DC01.CONTOSO.LOCAL"),
+        ]
+
+        # Lowercase input should match uppercase host
+        result = state.resolve_hostname_to_fqdn("dc01")
+        assert result == "dc01.contoso.local"
+
+    def test_handles_empty_hosts(self) -> None:
+        """Test that empty all_hosts returns None."""
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        result = state.resolve_hostname_to_fqdn("dc01")
+        assert result is None
+
+    def test_resolves_ip_only_no_hostname(self) -> None:
+        """Test that IP alone can resolve to FQDN when hostname is empty."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_hosts = [
+            Host(ip="192.168.58.10", hostname="dc01.contoso.local"),
+        ]
+
+        # Empty hostname but valid IP should resolve
+        result = state.resolve_hostname_to_fqdn("", target_ip="192.168.58.10")
+        assert result == "dc01.contoso.local"
+
+    def test_child_domain_resolution(self) -> None:
+        """Test correct resolution in child domain scenarios."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.all_hosts = [
+            # Parent domain DC
+            Host(ip="192.168.58.10", hostname="dc01.contoso.local"),
+            # Child domain DC
+            Host(ip="192.168.58.20", hostname="dc01.child.contoso.local"),
+        ]
+
+        # NetBIOS name should match first occurrence
+        result = state.resolve_hostname_to_fqdn("dc01")
+        assert result == "dc01.contoso.local"
+
+        # With IP, should resolve to child domain
+        result = state.resolve_hostname_to_fqdn("dc01", target_ip="192.168.58.20")
+        assert result == "dc01.child.contoso.local"
+
+
+class TestAddHostMerge:
+    """Tests for SharedRedTeamState.add_host merge behavior.
+
+    When adding a host with the same IP, the merge logic should:
+    - Prefer FQDN over short hostname
+    - Prefer more specific FQDN (more domain levels) over less specific
+    """
+
+    def test_upgrades_short_hostname_to_fqdn(self) -> None:
+        """Test that a short hostname is upgraded to FQDN on merge."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Add host with short hostname first
+        state.add_host(Host(ip="192.168.58.10", hostname="dc01"))
+        assert state.all_hosts[0].hostname == "dc01"
+
+        # Add same host with FQDN - should upgrade
+        state.add_host(Host(ip="192.168.58.10", hostname="dc01.contoso.local"))
+        assert len(state.all_hosts) == 1
+        assert state.all_hosts[0].hostname == "dc01.contoso.local"
+
+    def test_prefers_more_specific_fqdn(self) -> None:
+        """Test that more specific FQDN is preferred over less specific.
+
+        This is the GOAD scenario: winterfell.sevenkingdoms.local should be
+        upgraded to winterfell.north.sevenkingdoms.local (more specific).
+        """
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Add host with less specific FQDN first (wrong domain suffix)
+        state.add_host(Host(ip="10.1.2.240", hostname="winterfell.sevenkingdoms.local"))
+        assert state.all_hosts[0].hostname == "winterfell.sevenkingdoms.local"
+
+        # Add same host with more specific FQDN (correct child domain)
+        state.add_host(Host(ip="10.1.2.240", hostname="winterfell.north.sevenkingdoms.local"))
+        assert len(state.all_hosts) == 1
+        # Should upgrade to more specific FQDN
+        assert state.all_hosts[0].hostname == "winterfell.north.sevenkingdoms.local"
+
+    def test_does_not_downgrade_to_less_specific(self) -> None:
+        """Test that a less specific FQDN does NOT replace a more specific one."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Add host with more specific FQDN first
+        state.add_host(Host(ip="10.1.2.240", hostname="winterfell.north.sevenkingdoms.local"))
+        assert state.all_hosts[0].hostname == "winterfell.north.sevenkingdoms.local"
+
+        # Add same host with less specific FQDN - should NOT downgrade
+        state.add_host(Host(ip="10.1.2.240", hostname="winterfell.sevenkingdoms.local"))
+        assert len(state.all_hosts) == 1
+        # Should keep the more specific FQDN
+        assert state.all_hosts[0].hostname == "winterfell.north.sevenkingdoms.local"
+
+    def test_requires_same_short_hostname_for_upgrade(self) -> None:
+        """Test that FQDN upgrade only happens when short hostnames match."""
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Add host with one FQDN
+        state.add_host(Host(ip="192.168.58.10", hostname="dc01.contoso.local"))
+
+        # Add same IP with completely different hostname - should NOT upgrade
+        # (This is technically the same IP but hostname doesn't match short name)
+        # Since they're different hosts conceptually, the merge preserves first
+        state.add_host(Host(ip="192.168.58.10", hostname="srv01.child.contoso.local"))
+        assert len(state.all_hosts) == 1
+        # Original hostname preserved since short names differ
+        assert state.all_hosts[0].hostname == "dc01.contoso.local"

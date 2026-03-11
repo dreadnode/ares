@@ -473,11 +473,23 @@ class DeferredQueueMixin:
                     for task in critical_tasks:
                         await self._submit_deferred_task(task, is_critical=True)
 
-                if llm_count >= max_tasks:
+                # At soft cap but below hard cap: still process deferred tasks for starved roles
+                # This mirrors the minimum-slots logic in throttling - roles with 0 pending
+                # tasks shouldn't be starved just because recon/exploit are filling slots
+                hard_cap = int(max_tasks * 1.5)
+                if llm_count >= hard_cap:
+                    # At hard cap - only critical tasks (already processed above)
                     continue
 
                 # Process remaining tasks from deferred queue
-                for task in await self._get_highest_priority_deferred(available_slots):
+                if available_slots > 0:
+                    # Below soft cap - process normally with available slots
+                    tasks_to_process = await self._get_highest_priority_deferred(available_slots)
+                else:
+                    # At soft cap - only process tasks for starved roles (0 pending)
+                    tasks_to_process = await self._get_deferred_for_starved_roles()
+
+                for task in tasks_to_process:
                     success = await self._submit_deferred_task(task)
                     if not success:
                         # Re-queue on failure
@@ -567,6 +579,66 @@ class DeferredQueueMixin:
         except Exception as e:
             logger.error(f"Failed to get highest priority deferred tasks: {e}")
             return []
+
+    async def _get_deferred_for_starved_roles(
+        self: RedTeamDispatcher,
+    ) -> list[DeferredTask]:
+        """Get highest priority deferred task for each role that has 0 pending tasks.
+
+        This prevents role starvation when at soft cap - roles with no pending
+        tasks get priority over adding more tasks to already-busy roles.
+
+        Returns:
+            List of tasks, one per starved role (highest priority for that role)
+        """
+        if not self._task_queue or not self._task_queue.redis:
+            return []
+
+        redis = self._task_queue.redis
+        result: list[DeferredTask] = []
+
+        try:
+            # Group deferred tasks by target_role
+            # Store (key, member, score, task) to avoid double deserialization
+            role_tasks: dict[str, list[tuple[str, str, float, DeferredTask]]] = {}
+
+            for task_type in await self._get_all_deferred_task_types():
+                key = self._deferred_queue_key(task_type)
+                items = await redis.zrange(key, 0, -1, withscores=True)
+
+                for member, score in items:
+                    task = DeferredTask.from_json(member)
+                    role = task.target_role
+                    if role not in role_tasks:
+                        role_tasks[role] = []
+                    role_tasks[role].append((key, member, score, task))
+
+            if not role_tasks:
+                return []
+
+            # For each role, check if it's starved and pick highest priority task
+            for role, tasks in role_tasks.items():
+                pending_count = await self._get_pending_count_by_role(role)
+                if pending_count > 0:
+                    # Role already has tasks - not starved
+                    continue
+
+                # Role is starved - pick highest priority task (lowest score)
+                tasks.sort(key=lambda x: x[2])
+                key, member, _score, task = tasks[0]
+
+                # Remove from Redis and add to result
+                await redis.zrem(key, member)
+                result.append(task)
+                logger.info(
+                    f"Processing deferred {task.task_type} task for starved role {role} "
+                    f"(priority {task.priority})"
+                )
+
+        except Exception as e:
+            logger.error(f"Failed to get deferred tasks for starved roles: {e}")
+
+        return result
 
     async def get_deferred_queue_status(
         self: RedTeamDispatcher,

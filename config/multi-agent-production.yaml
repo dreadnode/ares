@@ -9,9 +9,10 @@ operation:
   # redis_url is derived from namespace (redis://redis.{namespace}.svc.cluster.local:6379)
   checkpoint_interval: 60  # seconds
   # Rate limiting - balance concurrency with 500k TPM budget
-  # 3 concurrent tasks allows recon + cred access + exploit in parallel
-  max_concurrent_tasks: 3
-  task_dispatch_delay: 2.0
+  # 8 concurrent tasks matches worker pod count while staying under TPM limit
+  # At ~35k tokens/task, 8 concurrent = 280k TPM (safe margin under 500k)
+  max_concurrent_tasks: 8
+  task_dispatch_delay: 1.0
   rate_limit_backoff: 15.0
   rate_limit_threshold: 2
   # Stop operation immediately when domain admin is achieved (default: false)

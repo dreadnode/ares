@@ -541,7 +541,8 @@ class PublishingMixin:
             return
 
         # Check if we already have an MSSQL vuln queued for this host
-        existing_vulns = self.shared_state.discovered_vulnerabilities.values()
+        # Snapshot to avoid "dict changed size during iteration" from threaded consumer
+        existing_vulns = list(self.shared_state.discovered_vulnerabilities.values())
         for vuln in existing_vulns:
             if vuln.target == host.ip and vuln.vuln_type.startswith("mssql_"):
                 logger.debug(f"MSSQL vulnerability already queued for {host.ip}")
@@ -827,9 +828,10 @@ class PublishingMixin:
                 continue
 
             # Check if we already have an MSSQL vuln queued for this host
+            # Snapshot to avoid "dict changed size during iteration" from threaded consumer
             already_queued = any(
                 vuln.target == host.ip and vuln.vuln_type.startswith("mssql_")
-                for vuln in self.shared_state.discovered_vulnerabilities.values()
+                for vuln in list(self.shared_state.discovered_vulnerabilities.values())
             )
 
             if already_queued:

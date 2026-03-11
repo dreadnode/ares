@@ -1090,14 +1090,28 @@ async def from_operation(
 
         # Add operation_context to all alerts BEFORE correlation
         # This allows the correlator to group by operation_id
+        #
+        # CRITICAL: Include target deployment for Loki query scoping.
+        # Without this, blue team queries {job="windows-security"} which returns
+        # logs from ALL environments, causing noise and missed detections.
+        target_deployment = ""
+        if state.target and state.target.environment:
+            target_deployment = state.target.environment
+            logger.info(f"Target deployment for Loki scoping: {target_deployment}")
+
         operation_context = {
             "operation_id": operation_id,
             "attack_window_start": window_start.isoformat(),
             "attack_window_end": window_end.isoformat(),
             "techniques_used": list(playbook.techniques_used)[:20],
+            "deployment": target_deployment,  # For Loki query scoping
         }
         for alert in alerts:
             alert["operation_context"] = operation_context
+            # Inject deployment into alert labels if not already present
+            # This ensures blue team agents filter Loki queries correctly
+            if target_deployment and "deployment" not in alert.get("labels", {}):
+                alert.setdefault("labels", {})["deployment"] = target_deployment
 
         # Batch alerts using AlertCorrelator if enabled
         if batch and len(alerts) > 1:

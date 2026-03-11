@@ -157,12 +157,78 @@ def extract_plaintext_passwords_from_output(output: str) -> list[tuple[str, str,
 
     creds: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str, str]] = set()
+
+    # Extract from LDAP entries (handles password before username case)
+    if "\ndn:" in output or output.strip().lower().startswith("dn:"):
+        for username, password in _extract_passwords_from_ldap_entries(output):
+            key = (username.lower(), password, "")
+            if key not in seen:
+                seen.add(key)
+                creds.append((username, password, ""))
+
+    # Extract from line-based formats (netexec, LSA, etc.)
+    for username, password, domain in _extract_passwords_line_by_line(output):
+        key = (username.lower(), password, domain.lower())
+        if key not in seen:
+            seen.add(key)
+            creds.append((username, password, domain))
+
+    return creds
+
+
+def _extract_passwords_from_ldap_entries(output: str) -> list[tuple[str, str]]:
+    """Extract credentials from LDAP-formatted output.
+
+    LDAP entries start with 'dn:' and can have password (in description)
+    appear before sAMAccountName. We must parse each entry as a complete
+    unit to correctly associate passwords with usernames.
+    """
+    creds: list[tuple[str, str]] = []
+
+    # Split into LDAP entries (each starts with dn:)
+    entries = re.split(r"(?=^dn:)", output, flags=re.MULTILINE | re.IGNORECASE)
+
+    for entry in entries:
+        if not entry.strip():
+            continue
+
+        # Extract username from sAMAccountName
+        username = ""
+        sam_match = re.search(r"samaccountname:\s*([A-Za-z0-9_.-]+)", entry, re.IGNORECASE)
+        if sam_match:
+            username = sam_match.group(1).strip()
+
+        # Extract password from description or other fields
+        password = ""  # nosec B105 - initialization, not hardcoded password
+        pass_match = re.search(r"Password\s*:\s*([^\s()]+)", entry, re.IGNORECASE)
+        if pass_match:
+            password = pass_match.group(1).strip().rstrip(".,;:()")
+
+        if username and password:
+            # Filter out invalid entries
+            if "/" in username or "\\" in username or username.endswith(".txt"):
+                continue
+            if "/" in password or "\\" in password or password.endswith(".txt"):
+                continue
+            creds.append((username, password))
+
+    return creds
+
+
+def _extract_passwords_line_by_line(output: str) -> list[tuple[str, str, str]]:
+    """Extract credentials from line-based output (netexec, LSA, etc.)."""
+    creds: list[tuple[str, str, str]] = []
     current_user = ""
     expecting_default_password = False
 
     for line in output.splitlines():
         stripped = line.strip()
         if not stripped:
+            continue
+
+        # Skip LDAP entry markers (handled by _extract_passwords_from_ldap_entries)
+        if stripped.lower().startswith("dn:"):
+            current_user = ""
             continue
 
         # Handle LSA DefaultPassword format from secretsdump:
@@ -181,10 +247,7 @@ def extract_plaintext_passwords_from_output(output: str) -> list[tuple[str, str,
                 username = lsa_match.group(2).strip()
                 password = lsa_match.group(3).strip()
                 if username and password:
-                    key = (username.lower(), password, domain.lower())
-                    if key not in seen:
-                        seen.add(key)
-                        creds.append((username, password, domain))
+                    creds.append((username, password, domain))
             continue
 
         # Track current user from various patterns
@@ -218,7 +281,9 @@ def extract_plaintext_passwords_from_output(output: str) -> list[tuple[str, str,
         )
         if smb_match:
             username = smb_match.group(1).strip()
-        elif current_user:
+
+        # Only fall back to current_user for non-LDAP lines
+        if not username and current_user:
             username = current_user
 
         if not username:
@@ -230,11 +295,6 @@ def extract_plaintext_passwords_from_output(output: str) -> list[tuple[str, str,
         if "/" in password or "\\" in password or password.endswith(".txt"):
             continue
 
-        key = (username.lower(), password, "")
-        if key in seen:
-            continue
-
-        seen.add(key)
         creds.append((username, password, ""))
 
     return creds
