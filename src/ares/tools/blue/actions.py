@@ -36,40 +36,54 @@ class CompletionTools(Toolset):  # type: ignore[misc]
         current_findings: str,
         immediate_actions: list[str],
     ) -> str:
-        """Escalate the investigation for human analyst review.
+        """Escalate the investigation for IMMEDIATE human intervention.
 
-        Call this if:
-        - You identify an active, ongoing attack
-        - The scope exceeds investigation capacity
-        - You need human analyst intervention
-        - Critical infrastructure is at risk
-        - Domain Admin or Golden Ticket activity detected
+        ⚠️ ESCALATION IS RARE — use complete_investigation() for 90%+ of cases.
+
+        ONLY escalate when ALL of these conditions are true:
+        1. Attack is ACTIVELY IN PROGRESS (happening right now, not historical)
+        2. Attacker has or is about to achieve Domain Admin / Golden Ticket
+        3. Immediate containment is needed (isolate hosts, disable accounts NOW)
+        4. Scope is still expanding and you cannot fully document it
+
+        DO NOT ESCALATE for:
+        - Historical attacks (even severe ones — complete with findings)
+        - Uncertainty about findings (use low confidence completion)
+        - Alerts you don't understand (investigate more or complete)
+        - "Playing it safe" (this wastes analyst time)
+
+        If the attack already happened (even 30 min ago), use complete_investigation().
 
         Args:
-            reason: Why escalation is needed.
-            severity: critical, high, or medium.
-            current_findings: Summary of what you've found so far.
-            immediate_actions: Actions that should be taken immediately.
+            reason: Why IMMEDIATE human action is needed (not just "attack detected").
+            severity: critical or high (medium should use complete_investigation).
+            current_findings: What's happening RIGHT NOW that requires intervention.
+            immediate_actions: Containment actions needed in the next 5-15 minutes.
 
         Returns:
             Confirmation message.
 
         Example:
+            >>> # CORRECT - Active attack requiring immediate response
             >>> await escalate_investigation(
-            ...     reason="Active lateral movement detected across 15+ hosts",
+            ...     reason="Active lateral movement across 15+ hosts RIGHT NOW, scope expanding",
             ...     severity="critical",
-            ...     current_findings="Attacker has Domain Admin credentials and is actively "
-            ...                      "exfiltrating data from file servers.",
+            ...     current_findings="Attacker is actively moving through network. New hosts "
+            ...                      "compromised in last 5 minutes. Cannot contain scope.",
             ...     immediate_actions=[
-            ...         "Isolate compromised domain controller",
-            ...         "Reset all privileged account passwords",
-            ...         "Block C2 IP addresses at firewall"
+            ...         "Isolate subnet 192.168.58.0/24 immediately",
+            ...         "Disable compromised service account svc_backup",
+            ...         "Block external IP 203.0.113.50 at firewall"
             ...     ]
             ... )
-            'Investigation escalated with severity=critical. Human analyst notified.'
+
+            >>> # WRONG - Should use complete_investigation instead
+            >>> # "DCSync detected 2 hours ago" — historical, not active
+            >>> # "Found evidence of Kerberoasting" — document it, don't escalate
+            >>> # "Uncertain about attack severity" — complete with low confidence
 
         See Also:
-            complete_investigation: For normal investigation completion.
+            complete_investigation: Use this for 90%+ of investigations (default).
         """
         if not self.state:
             return "ERROR: No investigation state. Cannot escalate."

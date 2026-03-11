@@ -1436,5 +1436,65 @@ class TestUpdateEtcHosts:
         assert "192.168.58.100  dc01.child.contoso.local dc01 child.contoso.local\n" in written
 
 
+class TestIsRateLimitError:
+    """Tests for _is_rate_limit_error function."""
+
+    def test_detects_rate_limit_in_exception_type(self):
+        """Test detection of rate limit from exception type name."""
+        from ares.core.worker._worker import _is_rate_limit_error
+
+        class RateLimitError(Exception):
+            pass
+
+        assert _is_rate_limit_error(RateLimitError("test"))
+
+    def test_detects_rate_limit_in_message(self):
+        """Test detection of rate limit from exception message."""
+        from ares.core.worker._worker import _is_rate_limit_error
+
+        assert _is_rate_limit_error(Exception("rate limit exceeded"))
+        assert _is_rate_limit_error(Exception("Rate_Limit_Error"))
+        assert _is_rate_limit_error(Exception("ratelimit"))
+        assert _is_rate_limit_error(Exception("Too many requests"))
+        assert _is_rate_limit_error(Exception("quota exceeded"))
+        assert _is_rate_limit_error(Exception("tokens per min limit"))
+        assert _is_rate_limit_error(Exception("requests per min exceeded"))
+        assert _is_rate_limit_error(Exception("TPM limit"))
+        assert _is_rate_limit_error(Exception("RPM limit reached"))
+
+    def test_detects_http_429_status(self):
+        """Test detection of HTTP 429 status code."""
+        from ares.core.worker._worker import _is_rate_limit_error
+
+        assert _is_rate_limit_error(Exception("Error 429: Too Many Requests"))
+        assert _is_rate_limit_error(Exception("status 429"))
+        assert _is_rate_limit_error(Exception("HTTP/1.1 429"))
+
+    def test_ignores_429_in_object_ids(self):
+        """Test that 429 in object IDs (like MagicMock) is not detected.
+
+        This prevents false positives when MagicMock objects have IDs
+        that happen to contain '429' as a substring.
+        """
+        from ares.core.worker._worker import _is_rate_limit_error
+
+        # Simulate MagicMock stringification with 429 in the ID
+        mock_str = "<MagicMock name='mock.error' id='139808142945184'>"
+        assert not _is_rate_limit_error(Exception(mock_str))
+
+        # Other object IDs that might contain 429
+        assert not _is_rate_limit_error(Exception("object at 0x14293456789"))
+        assert not _is_rate_limit_error(Exception("id=4290001234"))
+
+    def test_non_rate_limit_errors(self):
+        """Test that non-rate-limit errors are not detected."""
+        from ares.core.worker._worker import _is_rate_limit_error
+
+        assert not _is_rate_limit_error(Exception("Connection refused"))
+        assert not _is_rate_limit_error(Exception("timeout"))
+        assert not _is_rate_limit_error(Exception("invalid credentials"))
+        assert not _is_rate_limit_error(Exception("server error"))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

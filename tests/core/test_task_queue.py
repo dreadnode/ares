@@ -1591,9 +1591,11 @@ class TestSpanTargetExtraction:
             )
 
         # dc_ip (192.168.58.10) should NOT be used as target_ip
-        # target_fqdn should be "MEEREEN" (from target_ips)
+        # target_hostname should be "MEEREEN" (NetBIOS name from target_ips)
+        # target_fqdn should be None since MEEREEN is not an FQDN
         assert captured_kwargs.get("target_ip") is None
-        assert captured_kwargs.get("target_fqdn") == "MEEREEN"
+        assert captured_kwargs.get("target_fqdn") is None
+        assert captured_kwargs.get("target_hostname") == "MEEREEN"
 
     @pytest.mark.asyncio
     async def test_target_ips_list_ip_used_as_target_ip(self, task_queue, mock_redis_client):

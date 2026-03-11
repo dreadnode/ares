@@ -16,6 +16,7 @@ from ares.core.redis_client import (
     create_redis_client,
     create_verified_redis_client,
     get_redis_sentinel_config,
+    get_retry_delay,
     is_connection_error,
     timed_redis_write,
 )
@@ -444,3 +445,39 @@ class TestTimedRedisWrite:
 
         result = await timed_redis_write(none_returning_op(), timeout=5.0)
         assert result is None
+
+
+class TestGetRetryDelay:
+    """Tests for get_retry_delay() exponential backoff helper."""
+
+    def test_exponential_backoff_sequence(self) -> None:
+        """Test that delays follow exponential backoff pattern."""
+        delays = [get_retry_delay(i) for i in range(6)]
+        assert delays == [1.0, 2.0, 4.0, 8.0, 10.0, 10.0]
+
+    def test_respects_max_delay_cap(self) -> None:
+        """Test that delay is capped at max_delay."""
+        # With default max_delay=10, attempt 4+ should be capped
+        assert get_retry_delay(4) == 10.0
+        assert get_retry_delay(10) == 10.0
+        assert get_retry_delay(100) == 10.0
+
+    def test_custom_base_delay(self) -> None:
+        """Test that custom base_delay is used."""
+        delays = [get_retry_delay(i, base_delay=0.5) for i in range(4)]
+        assert delays == [0.5, 1.0, 2.0, 4.0]
+
+    def test_custom_max_delay(self) -> None:
+        """Test that custom max_delay is respected."""
+        delays = [get_retry_delay(i, base_delay=1.0, max_delay=5.0) for i in range(6)]
+        assert delays == [1.0, 2.0, 4.0, 5.0, 5.0, 5.0]
+
+    def test_both_custom_params(self) -> None:
+        """Test with both custom base_delay and max_delay."""
+        delays = [get_retry_delay(i, base_delay=0.5, max_delay=3.0) for i in range(6)]
+        assert delays == [0.5, 1.0, 2.0, 3.0, 3.0, 3.0]
+
+    def test_first_attempt_equals_base_delay(self) -> None:
+        """Test that attempt 0 returns base_delay (2^0 = 1)."""
+        assert get_retry_delay(0, base_delay=2.0) == 2.0
+        assert get_retry_delay(0, base_delay=0.1) == 0.1

@@ -300,6 +300,27 @@ def is_connection_error(error: BaseException) -> bool:
     return any(keyword in error_str for keyword in _CONNECTION_ERROR_KEYWORDS)
 
 
+def get_retry_delay(attempt: int, base_delay: float = 1.0, max_delay: float = 10.0) -> float:
+    """Calculate exponential backoff delay for retry attempt.
+
+    Uses the idiomatic pattern from redis-py best practices:
+    - ExponentialBackoff(cap=10, base=1) - delay doubles each retry, capped at max
+
+    Args:
+        attempt: Zero-based attempt number (0 for first retry delay).
+        base_delay: Initial delay in seconds (default: 1.0).
+        max_delay: Maximum delay cap in seconds (default: 10.0).
+
+    Returns:
+        Delay in seconds before the next retry.
+
+    Example:
+        >>> [get_retry_delay(i) for i in range(6)]
+        [1.0, 2.0, 4.0, 8.0, 10.0, 10.0]
+    """
+    return min(base_delay * (2**attempt), max_delay)
+
+
 # Default timeout for Redis write operations (seconds)
 _DEFAULT_WRITE_TIMEOUT = float(os.getenv("REDIS_WRITE_TIMEOUT", "10.0"))
 
