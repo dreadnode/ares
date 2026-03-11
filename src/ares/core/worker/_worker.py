@@ -150,14 +150,17 @@ def _is_rate_limit_error(exc: Exception) -> bool:
         "rate_limit",
         "ratelimit",
         "too many requests",
-        "429",
         "quota exceeded",
         "tokens per min",
         "requests per min",
         "tpm limit",
         "rpm limit",
     ]
-    return any(indicator in exc_str for indicator in rate_limit_indicators)
+    if any(indicator in exc_str for indicator in rate_limit_indicators):
+        return True
+
+    # Check for HTTP 429 status code with word boundaries (avoid matching in object IDs)
+    return bool(re.search(r"\b429\b", exc_str))
 
 
 def _extract_structured_payload(result_text: str) -> dict[str, Any] | None:
