@@ -24,6 +24,11 @@ Redis key structure:
     ares:op:{op_id}:dc_map            HASH
     ares:op:{op_id}:netbios_map       HASH
     ares:op:{op_id}:artifacts         HASH
+
+Resilience:
+    All write operations use tenacity retry with exponential backoff + circuit breaker
+    to handle transient Redis connection issues (e.g., Sentinel failover, pod restarts).
+    Pattern matches redis-py's ExponentialBackoff(cap=10, base=1).
 """
 
 from __future__ import annotations
@@ -33,6 +38,20 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
+from tenacity import (
+    AsyncRetrying,
+    RetryError,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+from ares.core.circuit_breaker import (
+    CircuitBreakerError,
+    get_error_debouncer,
+    get_redis_circuit,
+)
+from ares.core.redis_client import is_connection_error
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -45,6 +64,14 @@ if TYPE_CHECKING:
         User,
         VulnerabilityInfo,
     )
+
+# Redis connection error types for retry logic
+# Matches redis-py's default retry_on_error list
+_REDIS_RETRY_EXCEPTIONS = (
+    ConnectionError,
+    TimeoutError,
+    OSError,  # Includes ConnectionRefusedError, BrokenPipeError
+)
 
 
 class RedisStateBackend:
@@ -106,16 +133,33 @@ class RedisStateBackend:
     # TTL for all keys (24 hours)
     DEFAULT_TTL = 86400
 
-    def __init__(self, redis_client: Redis, operation_id: str):
+    # Retry configuration matching redis-py's ExponentialBackoff(cap=10, base=1)
+    # See: https://redis.io/docs/latest/develop/connect/clients/python/redis-py/
+    RETRY_MAX_ATTEMPTS = 3
+    RETRY_MULTIPLIER = 1.0  # base delay in seconds
+    RETRY_MAX_DELAY = 10.0  # cap in seconds
+
+    def __init__(
+        self,
+        redis_client: Redis,
+        operation_id: str,
+        *,
+        use_circuit_breaker: bool = True,
+    ):
         """Initialize the backend.
 
         Args:
             redis_client: Async Redis client (from create_redis_client)
             operation_id: Unique operation identifier
+            use_circuit_breaker: Enable circuit breaker + retry for resilience
         """
         self._redis = redis_client
         self._operation_id = operation_id
         self._key_prefix = f"{self.KEY_PREFIX}:{operation_id}"
+        self._use_circuit_breaker = use_circuit_breaker
+        # Use shared circuit breaker and debouncer instances
+        self._circuit = get_redis_circuit() if use_circuit_breaker else None
+        self._debouncer = get_error_debouncer() if use_circuit_breaker else None
 
     def _key(self, suffix: str) -> str:
         """Build full Redis key."""
@@ -129,6 +173,81 @@ class RedisStateBackend:
         """Set TTL on a key."""
         await self._redis.expire(key, self.DEFAULT_TTL)
 
+    async def _with_retry(self, operation_name: str, operation):
+        """Execute a Redis operation with circuit breaker + tenacity retry.
+
+        Provides resilience for transient Redis connection issues (Sentinel failover,
+        pod restarts, network blips). Pattern follows:
+        - redis-py's ExponentialBackoff(cap=10, base=1)
+        - tenacity's AsyncRetrying for async retry logic
+        - Shared circuit breaker for fail-fast when Redis is known to be down
+
+        Args:
+            operation_name: Name for logging (e.g., "add_credential")
+            operation: Async callable that performs the Redis operation
+
+        Returns:
+            Result of the operation
+
+        Raises:
+            CircuitBreakerError: If circuit is open (fail-fast)
+            Exception: If all retries exhausted
+        """
+        # Fast path: no circuit breaker configured
+        if not self._circuit:
+            return await operation()
+
+        # Check circuit breaker FIRST - fail fast if Redis is known to be down
+        if not self._circuit.allow_request_sync():
+            remaining = self._circuit._get_remaining_open_time()
+            raise CircuitBreakerError(self._circuit.name, remaining)
+
+        last_exception: Exception | None = None
+
+        try:
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(self.RETRY_MAX_ATTEMPTS),
+                wait=wait_exponential(
+                    multiplier=self.RETRY_MULTIPLIER,
+                    max=self.RETRY_MAX_DELAY,
+                ),
+                retry=retry_if_exception_type(_REDIS_RETRY_EXCEPTIONS),
+                reraise=True,
+            ):
+                with attempt:
+                    result = await operation()
+                    # Success - record and close circuit if half-open
+                    self._circuit.record_success_sync()
+                    return result
+
+        except RetryError as e:
+            # All retries exhausted
+            last_exception = e.last_attempt.exception()
+            if self._debouncer:
+                self._debouncer.log_error_sync(
+                    f"state_backend_{operation_name}",
+                    f"Redis {operation_name} failed after {self.RETRY_MAX_ATTEMPTS} "
+                    f"retries: {last_exception}",
+                    level="warning",
+                )
+            # Record failure to potentially open circuit
+            if is_connection_error(last_exception):
+                self._circuit.record_failure_sync(last_exception)
+            raise last_exception from e
+
+        except Exception as e:
+            # Non-retryable error or retry logic raised
+            last_exception = e
+            if is_connection_error(e):
+                self._circuit.record_failure_sync(e)
+                if self._debouncer:
+                    self._debouncer.log_error_sync(
+                        f"state_backend_{operation_name}",
+                        f"Redis {operation_name} connection error: {e}",
+                        level="warning",
+                    )
+            raise
+
     # =========================================================================
     # Credentials (Redis HASH with HSETNX for O(1) deduplication)
     # =========================================================================
@@ -139,16 +258,20 @@ class RedisStateBackend:
         Deduplication key: {domain}:{username}:{password} (case-insensitive)
         This ensures the same credential isn't stored twice.
 
+        Uses circuit breaker + exponential backoff retry for resilience against
+        transient Redis connection issues (Sentinel failover, pod restarts).
+
         Args:
             cred: Credential to add
 
         Returns:
-            True if added (new), False if duplicate
+            True if added (new), False if duplicate or error
         """
         key = self._key(self.KEY_CREDENTIALS)
-        try:
-            dedup_field = self._build_credential_dedup_key(cred)
-            data = _serialize_credential(cred)
+        dedup_field = self._build_credential_dedup_key(cred)
+        data = _serialize_credential(cred)
+
+        async def _do_add():
             # HSETNX returns 1 if field was set (new), 0 if already existed
             added = await self._redis.hsetnx(key, dedup_field, data)
             if not added:
@@ -156,6 +279,13 @@ class RedisStateBackend:
                 return False
             await self._set_ttl(key)
             return True
+
+        try:
+            return await self._with_retry("add_credential", _do_add)
+        except CircuitBreakerError:
+            # Circuit is open - fail fast, caller should retry later
+            logger.debug(f"Circuit breaker open, skipping add_credential for {dedup_field}")
+            return False
         except Exception as e:
             logger.warning(f"Failed to add credential to Redis: {e}")
             return False
@@ -344,11 +474,13 @@ class RedisStateBackend:
         - Kerberoast: {domain}:{username}:{etype}:{spn}
         - NTLM/other: {domain}:{username}:{hash_value[:32]}
 
+        Uses circuit breaker + exponential backoff retry for resilience.
+
         Args:
             hash_obj: Hash to add
 
         Returns:
-            True if added, False if duplicate
+            True if added, False if duplicate or error
         """
         hash_type = (hash_obj.hash_type or "").strip().lower()
         hash_value = hash_obj.hash_value or ""
@@ -359,8 +491,9 @@ class RedisStateBackend:
         dedup_field = self._build_hash_dedup_key(hash_type, hash_value, domain, username)
 
         key = self._key(self.KEY_HASHES)
-        try:
-            data = _serialize_hash(hash_obj)
+        data = _serialize_hash(hash_obj)
+
+        async def _do_add():
             # HSETNX returns 1 if field was set (new), 0 if already existed
             added = await self._redis.hsetnx(key, dedup_field, data)
             if not added:
@@ -368,6 +501,12 @@ class RedisStateBackend:
                 return False
             await self._set_ttl(key)
             return True
+
+        try:
+            return await self._with_retry("add_hash", _do_add)
+        except CircuitBreakerError:
+            logger.debug(f"Circuit breaker open, skipping add_hash for {dedup_field}")
+            return False
         except Exception as e:
             logger.warning(f"Failed to add hash to Redis: {e}")
             return False
@@ -464,6 +603,7 @@ class RedisStateBackend:
         """Add a host to Redis LIST.
 
         Note: Deduplication/merging should be done by the caller before calling this method.
+        Uses circuit breaker + exponential backoff retry for resilience.
 
         Args:
             host: Host to add
@@ -472,11 +612,18 @@ class RedisStateBackend:
             True if added successfully
         """
         key = self._key(self.KEY_HOSTS)
-        try:
-            data = _serialize_host(host)
+        data = _serialize_host(host)
+
+        async def _do_add():
             await self._redis.rpush(key, data)
             await self._set_ttl(key)
             return True
+
+        try:
+            return await self._with_retry("add_host", _do_add)
+        except CircuitBreakerError:
+            logger.debug(f"Circuit breaker open, skipping add_host for {host.ip}")
+            return False
         except Exception as e:
             logger.warning(f"Failed to add host to Redis: {e}")
             return False
@@ -630,15 +777,18 @@ class RedisStateBackend:
         hash field, allowing semantically identical weaknesses with different
         wording to be deduplicated properly.
 
+        Uses circuit breaker + exponential backoff retry for resilience.
+
         Args:
             weakness: Full weakness description block
             dedup_key: Normalized deduplication key (from _extract_weakness_dedup_key)
 
         Returns:
-            True if added (was new), False if already existed
+            True if added (was new), False if already existed or error
         """
         key = self._key(self.KEY_WEAKNESSES)
-        try:
+
+        async def _do_add():
             # HSETNX returns 1 if field was set (new), 0 if already existed
             added = await self._redis.hsetnx(key, dedup_key, weakness)
             if not added:
@@ -646,6 +796,12 @@ class RedisStateBackend:
                 return False
             await self._set_ttl(key)
             return True
+
+        try:
+            return await self._with_retry("add_weakness", _do_add)
+        except CircuitBreakerError:
+            logger.debug(f"Circuit breaker open, skipping add_weakness for {dedup_key}")
+            return False
         except Exception as e:
             logger.warning(f"Failed to add weakness to Redis: {e}")
             return False
@@ -737,19 +893,28 @@ class RedisStateBackend:
     async def add_vulnerability(self, vuln: VulnerabilityInfo) -> bool:
         """Add a vulnerability to Redis HASH.
 
+        Uses circuit breaker + exponential backoff retry for resilience.
+
         Args:
             vuln: VulnerabilityInfo to add
 
         Returns:
-            True if added (new), False if already existed
+            True if added (new), False if already existed or error
         """
         key = self._key(self.KEY_VULNS)
-        try:
-            data = _serialize_vulnerability(vuln)
+        data = _serialize_vulnerability(vuln)
+
+        async def _do_add():
             # HSETNX returns 1 if field was set (new), 0 if already existed
             result = await self._redis.hsetnx(key, vuln.vuln_id, data)
             await self._set_ttl(key)
             return result == 1
+
+        try:
+            return await self._with_retry("add_vulnerability", _do_add)
+        except CircuitBreakerError:
+            logger.debug(f"Circuit breaker open, skipping add_vulnerability for {vuln.vuln_id}")
+            return False
         except Exception as e:
             logger.warning(f"Failed to add vulnerability to Redis: {e}")
             return False
@@ -771,6 +936,8 @@ class RedisStateBackend:
     async def mark_exploited(self, vuln_id: str) -> bool:
         """Mark a vulnerability as exploited.
 
+        Uses circuit breaker + exponential backoff retry for resilience.
+
         Args:
             vuln_id: Vulnerability ID to mark
 
@@ -778,10 +945,17 @@ class RedisStateBackend:
             True if marked successfully
         """
         key = self._key(self.KEY_EXPLOITED)
-        try:
+
+        async def _do_mark():
             await self._redis.sadd(key, vuln_id)
             await self._set_ttl(key)
             return True
+
+        try:
+            return await self._with_retry("mark_exploited", _do_mark)
+        except CircuitBreakerError:
+            logger.debug(f"Circuit breaker open, skipping mark_exploited for {vuln_id}")
+            return False
         except Exception as e:
             logger.warning(f"Failed to mark vulnerability exploited: {e}")
             return False
@@ -864,6 +1038,8 @@ class RedisStateBackend:
     async def set_meta(self, field: str, value: Any) -> bool:
         """Set a scalar meta field.
 
+        Uses circuit breaker + exponential backoff retry for resilience.
+
         Args:
             field: Field name
             value: Value (will be JSON serialized)
@@ -872,10 +1048,18 @@ class RedisStateBackend:
             True if set successfully
         """
         key = self._key(self.KEY_META)
-        try:
-            await self._redis.hset(key, field, json.dumps(value, default=str))
+        serialized = json.dumps(value, default=str)
+
+        async def _do_set():
+            await self._redis.hset(key, field, serialized)
             await self._set_ttl(key)
             return True
+
+        try:
+            return await self._with_retry("set_meta", _do_set)
+        except CircuitBreakerError:
+            logger.debug(f"Circuit breaker open, skipping set_meta for {field}")
+            return False
         except Exception as e:
             logger.warning(f"Failed to set meta field {field}: {e}")
             return False
@@ -1130,6 +1314,8 @@ class RedisStateBackend:
     async def store_artifact(self, artifact_key: str, content: str) -> bool:
         """Store a base64-encoded artifact.
 
+        Uses circuit breaker + exponential backoff retry for resilience.
+
         Args:
             artifact_key: Artifact key (e.g., "sysvol/login.bat")
             content: Base64-encoded content
@@ -1138,10 +1324,17 @@ class RedisStateBackend:
             True if stored successfully
         """
         key = self._key(self.KEY_ARTIFACTS)
-        try:
+
+        async def _do_store():
             await self._redis.hset(key, artifact_key, content)
             await self._set_ttl(key)
             return True
+
+        try:
+            return await self._with_retry("store_artifact", _do_store)
+        except CircuitBreakerError:
+            logger.debug(f"Circuit breaker open, skipping store_artifact for {artifact_key}")
+            return False
         except Exception as e:
             logger.warning(f"Failed to store artifact {artifact_key}: {e}")
             return False
@@ -1246,6 +1439,8 @@ class RedisStateBackend:
     async def add_pending_task(self, task_id: str, task_info: dict) -> bool:
         """Add a pending task to Redis HASH.
 
+        Uses circuit breaker + exponential backoff retry for resilience.
+
         Args:
             task_id: Unique task identifier
             task_info: Serialized TaskInfo dict
@@ -1254,11 +1449,18 @@ class RedisStateBackend:
             True if added successfully
         """
         redis_key = self._key(self.KEY_PENDING_TASKS)
-        try:
-            data = json.dumps(task_info, separators=(",", ":"), default=str)
+        data = json.dumps(task_info, separators=(",", ":"), default=str)
+
+        async def _do_add():
             await self._redis.hset(redis_key, task_id, data)
             await self._set_ttl(redis_key)
             return True
+
+        try:
+            return await self._with_retry("add_pending_task", _do_add)
+        except CircuitBreakerError:
+            logger.debug(f"Circuit breaker open, skipping add_pending_task for {task_id}")
+            return False
         except Exception as e:
             logger.warning(f"Failed to add pending task to Redis: {e}")
             return False
@@ -1332,6 +1534,8 @@ class RedisStateBackend:
     async def add_completed_task(self, task_id: str, task_result: dict) -> bool:
         """Add a completed task to Redis HASH.
 
+        Uses circuit breaker + exponential backoff retry for resilience.
+
         Args:
             task_id: Unique task identifier
             task_result: Serialized TaskResult dict
@@ -1340,11 +1544,18 @@ class RedisStateBackend:
             True if added successfully
         """
         redis_key = self._key(self.KEY_COMPLETED_TASKS)
-        try:
-            data = json.dumps(task_result, separators=(",", ":"), default=str)
+        data = json.dumps(task_result, separators=(",", ":"), default=str)
+
+        async def _do_add():
             await self._redis.hset(redis_key, task_id, data)
             await self._set_ttl(redis_key)
             return True
+
+        try:
+            return await self._with_retry("add_completed_task", _do_add)
+        except CircuitBreakerError:
+            logger.debug(f"Circuit breaker open, skipping add_completed_task for {task_id}")
+            return False
         except Exception as e:
             logger.warning(f"Failed to add completed task to Redis: {e}")
             return False

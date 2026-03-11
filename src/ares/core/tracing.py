@@ -9,9 +9,11 @@ SDK and include attributes for:
 - attack_phase: Current phase of the operation
 
 OTel Semantic Convention attributes:
-- destination.address: Target FQDN (preferred for dashboard filtering) or IP address
+- destination.address: Target FQDN only (for dashboard "Target FQDN" column)
+- destination.ip: Target IP only (for dashboard "Target IP" column)
 - server.address: Target FQDN when attacking a server
-- host.name: Target hostname (derived from FQDN)
+- host.name: Target hostname (short name, derived from FQDN or NetBIOS name)
+- host.name.type: Hostname resolution quality ("fqdn", "netbios", or "ip_only")
 - user.name: Target username when attacking a user account
 
 Custom attack namespace attributes:
@@ -641,6 +643,17 @@ def create_agent_span_attributes(
         attrs["host.name"] = target_hostname
     elif target_fqdn:
         attrs["host.name"] = target_fqdn.split(".")[0]
+
+    # Indicate hostname resolution quality for observability
+    # - "fqdn": Full FQDN available (e.g., dc01.contoso.local)
+    # - "netbios": Only NetBIOS/plain hostname (e.g., dc01) - resolution failed or unavailable
+    # - "ip_only": Only IP address, no hostname at all
+    if target_fqdn:
+        attrs["host.name.type"] = "fqdn"
+    elif target_hostname:
+        attrs["host.name.type"] = "netbios"
+    elif target_ip:
+        attrs["host.name.type"] = "ip_only"
 
     if target_user:
         # OTel standard: user.name for usernames

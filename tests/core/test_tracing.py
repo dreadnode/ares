@@ -605,6 +605,36 @@ class TestIpFqdnSeparation:
         # IP is not in dc_ips set, so should be server
         assert attrs["attack_target_type"] == "server"
 
+    def test_host_name_type_fqdn(self):
+        """host.name.type should be 'fqdn' when target_fqdn is provided."""
+        attrs = create_agent_span_attributes("lateral", "red", target_fqdn="dc01.contoso.local")
+        assert attrs["host.name.type"] == "fqdn"
+
+    def test_host_name_type_netbios(self):
+        """host.name.type should be 'netbios' when only target_hostname is provided."""
+        attrs = create_agent_span_attributes("lateral", "red", target_hostname="dc01")
+        assert attrs["host.name.type"] == "netbios"
+
+    def test_host_name_type_ip_only(self):
+        """host.name.type should be 'ip_only' when only target_ip is provided."""
+        attrs = create_agent_span_attributes("lateral", "red", target_ip="192.168.58.10")
+        assert attrs["host.name.type"] == "ip_only"
+
+    def test_host_name_type_fqdn_preferred_over_hostname(self):
+        """host.name.type should be 'fqdn' when both FQDN and hostname provided."""
+        attrs = create_agent_span_attributes(
+            "lateral",
+            "red",
+            target_fqdn="dc01.contoso.local",
+            target_hostname="dc01",
+        )
+        assert attrs["host.name.type"] == "fqdn"
+
+    def test_host_name_type_not_set_when_no_target(self):
+        """host.name.type should not be set when no target info provided."""
+        attrs = create_agent_span_attributes("lateral", "red")
+        assert "host.name.type" not in attrs
+
 
 class TestMitreMappings:
     """Tests for MITRE mappings completeness."""

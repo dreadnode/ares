@@ -24,10 +24,16 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 from pydantic import BaseModel
 
-from ares.core.config import get_agent_heartbeat_timeout, get_redis_url
+from ares.core.config import (
+    get_agent_heartbeat_timeout,
+    get_redis_retry_base_delay,
+    get_redis_retry_max_delay,
+    get_redis_url,
+)
 from ares.core.redis_client import (
     create_redis_client,
     get_redis_sentinel_config,
+    get_retry_delay,
     invalidate_sentinel_client,
     is_connection_error,
     timed_redis_write,
@@ -379,11 +385,11 @@ class BlueTaskQueue:
         target_role: str,
         params: dict[str, Any],
         task_id: str | None = None,
-        max_retries: int = 2,
+        max_retries: int = 5,
     ) -> str:
         """Submit a task to a role's queue.
 
-        Includes automatic retry on connection errors.
+        Includes automatic retry with exponential backoff on connection errors.
 
         Args:
             investigation_id: Investigation this task belongs to.
@@ -391,7 +397,7 @@ class BlueTaskQueue:
             target_role: Role to handle the task (triage, threat_hunter, etc.).
             params: Task-specific parameters.
             task_id: Optional task ID (generated if not provided).
-            max_retries: Max retries on connection error (default: 2).
+            max_retries: Max retries on connection error (default: 5, giving 6 total attempts).
 
         Returns:
             Task ID for tracking.
@@ -416,6 +422,8 @@ class BlueTaskQueue:
             queue_key = self._task_queue_key(investigation_id, target_role)
 
         last_error: Exception | None = None
+        base_delay = get_redis_retry_base_delay()
+        max_delay = get_redis_retry_max_delay()
 
         # Create PRODUCER span for Tempo service graph
         with producer_span(
@@ -453,7 +461,6 @@ class BlueTaskQueue:
                     )
                     await self._handle_connection_error(TimeoutError("Timeout submitting task"))
                     last_error = TimeoutError("Timeout submitting task after retries")
-                    continue
 
                 except Exception as e:
                     if is_connection_error(e):
@@ -463,8 +470,14 @@ class BlueTaskQueue:
                         )
                         await self._handle_connection_error(e)
                         last_error = e
-                        continue
-                    raise
+                    else:
+                        raise
+
+                # Exponential backoff before retry (except on last attempt)
+                if attempt < max_retries:
+                    delay = get_retry_delay(attempt, base_delay, max_delay)
+                    logger.info(f"Retrying submit_task in {delay:.1f}s")
+                    await asyncio.sleep(delay)
 
             if last_error:
                 logger.error(f"submit_task failed after {max_retries + 1} attempts: {last_error}")
@@ -475,22 +488,25 @@ class BlueTaskQueue:
         self,
         task_id: str,
         timeout: float = 300.0,
-        max_retries: int = 2,
+        max_retries: int = 5,
     ) -> BlueTaskResult | None:
         """Wait for a task result.
 
-        Includes automatic retry on connection errors.
+        Includes automatic retry with exponential backoff on connection errors.
+        This is critical for handling Sentinel failover where IPs may be stale.
 
         Args:
             task_id: Task ID to wait for.
             timeout: Maximum wait time in seconds.
-            max_retries: Max retries on connection error (default: 2).
+            max_retries: Max retries on connection error (default: 5, giving 6 total attempts).
 
         Returns:
             BlueTaskResult or None if timeout.
         """
         result_key = self._result_queue_key(task_id)
         last_error: Exception | None = None
+        base_delay = get_redis_retry_base_delay()
+        max_delay = get_redis_retry_max_delay()
 
         for attempt in range(max_retries + 1):
             if not self._connected:
@@ -520,7 +536,6 @@ class BlueTaskQueue:
                     TimeoutError("BRPOP hung - possible stale connection")
                 )
                 last_error = TimeoutError("BRPOP hung after retries")
-                continue
 
             except Exception as e:
                 if is_connection_error(e):
@@ -530,8 +545,14 @@ class BlueTaskQueue:
                     )
                     await self._handle_connection_error(e)
                     last_error = e
-                    continue
-                raise
+                else:
+                    raise
+
+            # Exponential backoff before retry (except on last attempt)
+            if attempt < max_retries:
+                delay = get_retry_delay(attempt, base_delay, max_delay)
+                logger.info(f"Retrying in {delay:.1f}s (attempt {attempt + 2}/{max_retries + 1})")
+                await asyncio.sleep(delay)
 
         if last_error:
             logger.error(f"wait_for_result failed after {max_retries + 1} attempts: {last_error}")
@@ -673,11 +694,11 @@ class BlueTaskQueue:
         error: str | None = None,
         worker_pod: str | None = None,
         agent_name: str | None = None,
-        max_retries: int = 2,
+        max_retries: int = 5,
     ) -> None:
         """Send task result back to orchestrator.
 
-        Includes automatic retry on connection errors.
+        Includes automatic retry with exponential backoff on connection errors.
 
         Args:
             task_id: Task ID.
@@ -686,7 +707,7 @@ class BlueTaskQueue:
             error: Error message if failed.
             worker_pod: Pod that processed the task.
             agent_name: Logical agent name.
-            max_retries: Max retries on connection error (default: 2).
+            max_retries: Max retries on connection error (default: 5, giving 6 total attempts).
         """
         task_result = BlueTaskResult(
             task_id=task_id,
@@ -699,6 +720,8 @@ class BlueTaskQueue:
 
         result_key = self._result_queue_key(task_id)
         last_error: Exception | None = None
+        base_delay = get_redis_retry_base_delay()
+        max_delay = get_redis_retry_max_delay()
 
         for attempt in range(max_retries + 1):
             if not self._connected:
@@ -723,7 +746,6 @@ class BlueTaskQueue:
                 )
                 await self._handle_connection_error(TimeoutError("Timeout sending result"))
                 last_error = TimeoutError("Timeout sending result after retries")
-                continue
 
             except Exception as e:
                 if is_connection_error(e):
@@ -733,8 +755,14 @@ class BlueTaskQueue:
                     )
                     await self._handle_connection_error(e)
                     last_error = e
-                    continue
-                raise
+                else:
+                    raise
+
+            # Exponential backoff before retry (except on last attempt)
+            if attempt < max_retries:
+                delay = get_retry_delay(attempt, base_delay, max_delay)
+                logger.info(f"Retrying send_result in {delay:.1f}s")
+                await asyncio.sleep(delay)
 
         if last_error:
             logger.error(f"send_result failed after {max_retries + 1} attempts: {last_error}")

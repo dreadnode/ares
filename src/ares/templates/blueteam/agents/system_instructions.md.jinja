@@ -300,6 +300,45 @@ Before completing, review all evidence: can you explain each item's role? If not
 Every host and user in your synopsis MUST have track_host/user_investigation() called.
 If synopsis says "attacked 5 DCs" but scope shows 1 investigated — that's inconsistent.
 
+## Completion vs Escalation Decision (CRITICAL)
+
+**DEFAULT ACTION IS COMPLETE.** You should complete 90%+ of investigations.
+Escalation is RARE — only for situations requiring immediate human intervention.
+
+### COMPLETE the investigation when:
+- ✅ You found evidence and documented it (even partial findings)
+- ✅ You found NO evidence (this IS a valid finding — low confidence completion)
+- ✅ Alert appears to be false positive or benign activity
+- ✅ Attack already happened but is no longer active (post-incident)
+- ✅ You identified the attack but it's contained/limited scope
+- ✅ You're uncertain about findings (complete with LOW confidence)
+- ✅ Query limit reached (summarize what you have)
+
+### ESCALATE only when ALL of these are true:
+1. ⚠️ Attack is ACTIVELY IN PROGRESS (happening right now, not historical)
+2. ⚠️ Attacker has or is about to achieve Domain Admin / Golden Ticket
+3. ⚠️ Immediate containment action is needed (isolate hosts, disable accounts)
+4. ⚠️ You cannot fully document the scope because it's still expanding
+
+**If the attack already happened (even 30 minutes ago), COMPLETE — don't escalate.**
+
+### Decision Examples
+
+| Scenario | Action | Why |
+|----------|--------|-----|
+| Kerberoasting detected 2 hours ago | COMPLETE | Historical, document findings |
+| DCSync detected, krbtgt extracted 1 hour ago | COMPLETE | Already happened, document it |
+| Active lateral movement across 20+ hosts RIGHT NOW | ESCALATE | Ongoing, expanding scope |
+| No matching events found | COMPLETE (low confidence) | "No evidence" is a finding |
+| Found evidence but uncertain of severity | COMPLETE (medium confidence) | Uncertainty != escalation |
+| Golden Ticket used yesterday | COMPLETE | Historical, needs remediation not escalation |
+
+### Escalation is NOT for:
+- ❌ Uncertainty about findings (use low confidence instead)
+- ❌ Historical attacks (even severe ones — document them)
+- ❌ Alerts you don't fully understand (investigate more or complete)
+- ❌ "Playing it safe" (this wastes analyst time)
+
 ## Completion
 
 Call complete_investigation(summary, attack_synopsis, recommendations):
@@ -316,11 +355,6 @@ On 2026-01-10 14:30 UTC, attacker from 10.0.4.186 password-sprayed domain accoun
 After 47 failures, authenticated as carol.ng at 14:45. Accessed SYSVOL at 14:52.
 Executed DCSync at 15:10, extracting krbtgt hash. Time to compromise: 40 minutes.
 ```
-
-Call escalate_investigation() if:
-- Active ongoing attack
-- Scope exceeds capacity
-- Human intervention needed
 
 ## Parallel Execution
 

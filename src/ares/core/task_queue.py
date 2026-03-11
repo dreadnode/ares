@@ -20,10 +20,16 @@ from ares.core.circuit_breaker import (
     get_error_debouncer,
     get_redis_circuit,
 )
-from ares.core.config import get_agent_heartbeat_timeout, get_redis_url
+from ares.core.config import (
+    get_agent_heartbeat_timeout,
+    get_redis_retry_base_delay,
+    get_redis_retry_max_delay,
+    get_redis_url,
+)
 from ares.core.redis_client import (
     create_redis_client,
     get_redis_sentinel_config,
+    get_retry_delay,
     invalidate_sentinel_client,
     is_connection_error,
     timed_redis_write,
@@ -400,6 +406,7 @@ class RedisTaskQueue:
                 break
 
         # Check target_ips list (common in recon/credential_access payloads)
+        target_hostname = None
         if not target_ip:
             target_ips = payload.get("target_ips", [])
             if target_ips and isinstance(target_ips, list) and target_ips[0]:
@@ -409,8 +416,8 @@ class RedisTaskQueue:
                 elif is_likely_fqdn(first_target):
                     target_fqdn = first_target
                 elif first_target:
-                    # NetBIOS hostname - set as FQDN for span tracking
-                    target_fqdn = first_target
+                    # NetBIOS hostname - NOT an FQDN, use target_hostname
+                    target_hostname = first_target
 
         # Check target/host fields - distinguish FQDN from username
         for field in ("target", "host", "hostname"):
@@ -425,9 +432,9 @@ class RedisTaskQueue:
                 elif "." in val:
                     # Has dot but not FQDN -> likely username (e.g., "sansa.stark")
                     target_user = val
-                # Plain hostname without dots - set as FQDN for backwards compat
-                elif val and not target_fqdn:
-                    target_fqdn = val
+                # Plain hostname without dots - NOT an FQDN, use target_hostname
+                elif val and not target_hostname:
+                    target_hostname = val
                 break
 
         # Check explicit user fields
@@ -444,6 +451,7 @@ class RedisTaskQueue:
             team="red",
             target_ip=target_ip,
             target_fqdn=target_fqdn,
+            target_hostname=target_hostname,
             target_user=target_user,
             additional_attrs={
                 "task.id": task_id,
@@ -639,18 +647,18 @@ class RedisTaskQueue:
         self,
         role: str,
         timeout: float = 5.0,
-        max_retries: int = 2,
+        max_retries: int = 5,
     ) -> TaskMessage | None:
         """
         Poll for next task (blocking).
 
-        Includes automatic retry on stale connection detection to avoid missed
-        poll cycles when Sentinel pods restart.
+        Includes automatic retry with exponential backoff on stale connection
+        detection to avoid missed poll cycles when Sentinel pods restart.
 
         Args:
             role: Worker role to poll for
             timeout: How long to block waiting
-            max_retries: Max retries on stale connection (default: 2)
+            max_retries: Max retries on stale connection (default: 5, giving 6 total attempts)
 
         Returns:
             TaskMessage or None if timeout
@@ -660,6 +668,8 @@ class RedisTaskQueue:
         """
         queue_key = self._task_queue_key(role)
         last_error: Exception | None = None
+        base_delay = get_redis_retry_base_delay()
+        max_delay = get_redis_retry_max_delay()
 
         for attempt in range(max_retries + 1):
             if not self._connected:
@@ -693,8 +703,6 @@ class RedisTaskQueue:
                     TimeoutError("BRPOP hung - possible stale Sentinel connection")
                 )
                 last_error = TimeoutError("BRPOP hung after retries")
-                # Retry immediately after reconnection
-                continue
 
             except Exception as e:
                 if is_connection_error(e):
@@ -702,9 +710,14 @@ class RedisTaskQueue:
                     logger.warning(f"Connection error during poll ({attempt_info}): {e}")
                     self._handle_connection_error(e)
                     last_error = e
-                    # Retry on connection errors
-                    continue
-                raise
+                else:
+                    raise
+
+            # Exponential backoff before retry (except on last attempt)
+            if attempt < max_retries:
+                delay = get_retry_delay(attempt, base_delay, max_delay)
+                logger.info(f"Retrying poll in {delay:.1f}s")
+                await asyncio.sleep(delay)
 
         # All retries exhausted, return None to avoid blocking the worker loop
         if last_error:

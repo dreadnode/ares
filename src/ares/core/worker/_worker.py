@@ -516,6 +516,7 @@ class RedisWorkerAgent:
         # Properly separate IPs, FQDNs, and usernames to avoid putting usernames in host fields
         target_ip = None
         target_fqdn = None
+        target_hostname = None
         target_user = None
 
         # Check explicit IP fields first
@@ -538,8 +539,8 @@ class RedisWorkerAgent:
                     # Has dot but not FQDN -> likely username (e.g., "sansa.stark")
                     target_user = val
                 elif val:
-                    # Plain hostname without dots
-                    target_fqdn = val
+                    # Plain hostname without dots - NOT an FQDN
+                    target_hostname = val
                 break
 
         # Check explicit user fields
@@ -567,6 +568,7 @@ class RedisWorkerAgent:
             "red",
             target_ip=target_ip,
             target_fqdn=target_fqdn,
+            target_hostname=target_hostname,
             target_user=target_user,
             target_environment=target_env,
         )
