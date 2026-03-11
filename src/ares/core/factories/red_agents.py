@@ -27,7 +27,7 @@ from ares.core.config import (
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.models import AgentInfo, AgentRole, SharedRedTeamState
 from ares.core.templates import get_template_loader
-from ares.core.tracing import IP_PATTERN, is_likely_fqdn, trace_tool_call
+from ares.core.tracing import IP_PATTERN, TOOL_TO_TECHNIQUE, is_likely_fqdn, trace_tool_call
 from ares.tools.red import (
     ACLExploitTools,
     BloodHoundTools,
@@ -426,6 +426,13 @@ def create_role_hooks(
             dc_ips=dc_ips or None,
             operation_id=operation_id,
         )
+
+        # Record MITRE technique for successful tool executions
+        # This enables the detection playbook to generate targeted queries
+        if not is_error and shared_state is not None:
+            technique_id = TOOL_TO_TECHNIQUE.get(tool_name)
+            if technique_id:
+                shared_state.add_technique(technique_id)
 
         # Circuit breaker logic
         # Use nonlocal to modify the tripped flag

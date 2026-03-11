@@ -1038,6 +1038,43 @@ class SharedRedTeamState:
         logger.debug("Background tasks cleanup complete")
 
     # =========================================================================
+    # MITRE Technique Tracking (with Redis persistence)
+    # =========================================================================
+
+    def add_technique(self, technique_id: str) -> bool:
+        """Add a MITRE ATT&CK technique to identified_techniques and persist to Redis.
+
+        This should be called when a tool executes that maps to a specific MITRE technique.
+        Techniques are used by the detection playbook to generate targeted queries.
+
+        Args:
+            technique_id: MITRE technique ID (e.g., "T1003.006", "T1558.003")
+
+        Returns:
+            True if added (new), False if already exists or invalid
+        """
+        if not technique_id:
+            return False
+
+        # Check if already in set
+        if technique_id in self.identified_techniques:
+            return False
+
+        # Add to in-memory set
+        self.identified_techniques.add(technique_id)
+        logger.debug(f"Added MITRE technique: {technique_id}")
+
+        # Persist to Redis backend if available and in the correct event loop
+        if self._can_persist_to_backend():
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._backend.add_technique(technique_id))
+            self._track_background_task(task, f"add_technique({technique_id})")
+
+        return True
+
+    # =========================================================================
     # Persistence Tracking Helpers (with Redis persistence)
     # =========================================================================
 

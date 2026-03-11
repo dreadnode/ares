@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -15,20 +14,17 @@ from typing import Any
 from loguru import logger
 from pydantic import BaseModel
 
+from ares.core.base_task_queue import BaseTaskQueue
 from ares.core.circuit_breaker import (
     CircuitBreakerError,
     get_error_debouncer,
     get_redis_circuit,
 )
 from ares.core.config import (
-    get_agent_heartbeat_timeout,
     get_redis_retry_base_delay,
     get_redis_retry_max_delay,
-    get_redis_url,
 )
 from ares.core.redis_client import (
-    create_redis_client,
-    get_redis_sentinel_config,
     get_retry_delay,
     invalidate_sentinel_client,
     is_connection_error,
@@ -72,7 +68,7 @@ class TaskResult(BaseModel):
         super().__init__(**data)
 
 
-class RedisTaskQueue:
+class RedisTaskQueue(BaseTaskQueue):
     """
     Redis-based task queue for inter-pod communication.
 
@@ -114,28 +110,15 @@ class RedisTaskQueue:
     LOCK_PREFIX = "ares:lock"
     STATE_UPDATE_CHANNEL_PREFIX = "ares:state:updates"
 
-    # TTLs
-    # Task results kept 24 hours for long operations, recovery, and debugging
-    RESULT_TTL = 86400  # 24 hours
-    HEARTBEAT_TTL = 60  # 60 seconds
-
     def __init__(self, redis_url: str | None = None, use_circuit_breaker: bool = True):
-        self.redis_url = redis_url or get_redis_url()
-        self._client = None
-        self._connected = False
-        self._heartbeat_ttl = max(self.HEARTBEAT_TTL, get_agent_heartbeat_timeout() * 2)
+        super().__init__(redis_url)
         self._use_circuit_breaker = use_circuit_breaker
         # Shared circuit breaker and debouncer across all task queue instances
         self._circuit = get_redis_circuit() if use_circuit_breaker else None
         self._debouncer = get_error_debouncer() if use_circuit_breaker else None
 
-    @property
-    def redis(self):
-        """Expose the underlying Redis client for legacy call sites."""
-        return self._client
-
     async def connect(self) -> None:
-        """Connect to Redis.
+        """Connect to Redis with circuit breaker protection.
 
         When called from a non-main thread (e.g., threaded result consumer),
         uses direct connection to avoid SentinelConnectionPool's cross-loop
@@ -156,34 +139,13 @@ class RedisTaskQueue:
             remaining = self._circuit._get_remaining_open_time()
             raise CircuitBreakerError(self._circuit.name, remaining)
 
-        # Use direct connection when in a non-main thread to avoid
-        # SentinelConnectionPool's async state being shared across event loops
-        is_main_thread = threading.current_thread() is threading.main_thread()
-        direct_connection = not is_main_thread
-
         try:
-            self._client = await create_redis_client(
-                self.redis_url,
-                decode_responses=True,  # Auto-decode to strings
-                direct_connection=direct_connection,
-                # Disable socket_timeout for blocking operations (BRPOP).
-                # The default 10s socket_timeout breaks BRPOP which may need to
-                # wait minutes for tool execution results. Timeout control is
-                # handled via asyncio.wait_for in wait_for_result/poll_task.
-                socket_timeout=None,
-            )
-            await self._client.ping()
-            self._connected = True
+            # Use parent's connect for actual connection
+            await super().connect()
 
             # Record success to close circuit if it was half-open
             if self._circuit:
                 self._circuit.record_success_sync()
-
-            if get_redis_sentinel_config():
-                conn_type = "direct" if direct_connection else "via Sentinel"
-                logger.info(f"TaskQueue connected to Redis {conn_type} (socket_timeout=None)")
-            else:
-                logger.info(f"TaskQueue connected to Redis at {self.redis_url}")
 
         except CircuitBreakerError:
             raise  # Don't wrap circuit breaker errors
@@ -199,68 +161,7 @@ class RedisTaskQueue:
                         f"Redis connect failed: {e}",
                         level="warning",
                     )
-                    # Don't raise the original error message if debounced
-                    # Just raise a clean circuit breaker aware error
-                    raise RuntimeError(f"Failed to connect to Redis: {e}") from e
-            raise RuntimeError(f"Failed to connect to Redis: {e}") from e
-
-    async def disconnect(self) -> None:
-        """Disconnect from Redis."""
-        if self._client:
-            await self._client.aclose()
-            self._connected = False
-            logger.info("TaskQueue disconnected")
-
-    async def ping_or_reconnect(self, timeout: float = 5.0) -> bool:
-        """Ping Redis and reconnect if the connection is stale.
-
-        This should be called periodically to detect stale connections caused by
-        Sentinel pod restarts. When a Sentinel pod restarts with a new IP, existing
-        connections may hang indefinitely.
-
-        Args:
-            timeout: Max seconds to wait for ping response
-
-        Returns:
-            True if ping succeeded, False if reconnection was needed
-        """
-        if not self._client:
-            await self.connect()
-            return False
-
-        try:
-            import asyncio
-
-            await asyncio.wait_for(self._client.ping(), timeout=timeout)
-            return True
-        except Exception as e:
-            logger.warning(f"Redis ping failed ({type(e).__name__}: {e}), forcing reconnection")
-            # Invalidate Sentinel client to force fresh DNS resolution
-            invalidate_sentinel_client()
-            self._connected = False
-            try:
-                if self._client:
-                    await self._client.aclose()
-            except Exception:
-                pass
-            self._client = None
-            # Reconnect with fresh Sentinel IPs
-            await self.connect()
-            logger.info("Reconnected to Redis after ping failure")
-            return False
-
-    def _handle_connection_error(self, error: Exception) -> None:
-        """
-        Handle Redis connection errors by resetting connection state.
-
-        This allows the next operation to attempt reconnection.
-        """
-        self._connected = False
-        if self._client:
-            # Don't await here since we're in a sync context
-            # The client will be recreated on next connect()
-            self._client = None
-        logger.warning(f"Redis connection error, will retry: {error}")
+            raise
 
     async def _with_circuit_breaker(
         self,
@@ -468,7 +369,7 @@ class RedisTaskQueue:
                 task_json = task.model_dump_json()
                 if priority <= 2:
                     await timed_redis_write(
-                        self._client.rpush(queue_key, task_json),
+                        self.redis.rpush(queue_key, task_json),
                         operation_name=f"submit_task_{task_id}",
                     )
                     logger.info(
@@ -476,7 +377,7 @@ class RedisTaskQueue:
                     )
                 else:
                     await timed_redis_write(
-                        self._client.lpush(queue_key, task_json),
+                        self.redis.lpush(queue_key, task_json),
                         operation_name=f"submit_task_{task_id}",
                     )
                     logger.info(f"Task {task_id} submitted to {queue_key}")
@@ -520,7 +421,7 @@ class RedisTaskQueue:
             # On stale/dead TCP connections, BRPOP can hang forever without this wrapper.
             # We use timeout + 5s margin to allow BRPOP to return naturally if possible.
             result = await asyncio.wait_for(
-                self._client.brpop(result_key, timeout=int(timeout)),
+                self.redis.brpop(result_key, timeout=int(timeout)),
                 timeout=timeout + 5.0,
             )
 
@@ -560,7 +461,7 @@ class RedisTaskQueue:
             await self.connect()
 
         result_key = self._result_queue_key(task_id)
-        data = await self._client.rpop(result_key)
+        data = await self.redis.rpop(result_key)
 
         if data is None:
             return None
@@ -594,7 +495,7 @@ class RedisTaskQueue:
             if not self._connected:
                 await self.connect()
             # Use pipeline for single round-trip
-            pipe = self._client.pipeline()
+            pipe = self.redis.pipeline()
             for task_id in task_ids:
                 result_key = self._result_queue_key(task_id)
                 pipe.rpop(result_key)
@@ -681,7 +582,7 @@ class RedisTaskQueue:
                 # The Redis timeout parameter only works if the request reaches the server.
                 # On a stale/dead TCP connection, the await hangs forever without this.
                 result = await asyncio.wait_for(
-                    self._client.brpop(queue_key, timeout=int(timeout)),
+                    self.redis.brpop(queue_key, timeout=int(timeout)),
                     timeout=timeout + 2.0,  # Extra margin for network latency
                 )
 
@@ -765,11 +666,11 @@ class RedisTaskQueue:
             # Push result and set TTL with timeout protection
             result_json = task_result.model_dump_json()
             await timed_redis_write(
-                self._client.lpush(result_key, result_json),
+                self.redis.lpush(result_key, result_json),
                 operation_name=f"send_result_{task_id}",
             )
             await timed_redis_write(
-                self._client.expire(result_key, self.RESULT_TTL),
+                self.redis.expire(result_key, self.RESULT_TTL),
                 operation_name=f"expire_result_{task_id}",
             )
 
@@ -823,7 +724,7 @@ class RedisTaskQueue:
         )
 
         try:
-            await self._client.set(heartbeat_key, data, ex=self._heartbeat_ttl)
+            await self.redis.set(heartbeat_key, data, ex=self._heartbeat_ttl)
         except Exception as e:
             if is_connection_error(e):
                 self._handle_connection_error(e)
@@ -844,7 +745,7 @@ class RedisTaskQueue:
         key = self._task_status_key(task_id)
 
         try:
-            await self._client.set(key, json.dumps(data, default=str), ex=self.TASK_STATUS_TTL)
+            await self.redis.set(key, json.dumps(data, default=str), ex=self.TASK_STATUS_TTL)
         except Exception as e:
             if is_connection_error(e):
                 self._handle_connection_error(e)
@@ -865,7 +766,7 @@ class RedisTaskQueue:
         async def _get_heartbeat():
             if not self._connected:
                 await self.connect()
-            return await self._client.get(heartbeat_key)
+            return await self.redis.get(heartbeat_key)
 
         try:
             data = await self._with_circuit_breaker(
@@ -894,9 +795,9 @@ class RedisTaskQueue:
             await self.connect()
 
         result = {}
-        async for key in self._client.scan_iter(f"{self.HEARTBEAT_PREFIX}:{pattern}"):
+        async for key in self.redis.scan_iter(f"{self.HEARTBEAT_PREFIX}:{pattern}"):
             agent_name = key.split(":")[-1]
-            data = await self._client.get(key)
+            data = await self.redis.get(key)
             if data:
                 result[agent_name] = json.loads(data)
 
@@ -910,7 +811,7 @@ class RedisTaskQueue:
             await self.connect()
 
         queue_key = self._task_queue_key(role)
-        return await self._client.llen(queue_key)
+        return await self.redis.llen(queue_key)
 
     async def get_all_queue_stats(self) -> dict[str, int]:
         """Get queue lengths for all roles."""
@@ -959,13 +860,13 @@ class RedisTaskQueue:
 
         if force:
             # Force acquire: delete existing lock and set new one
-            await self._client.delete(key)
-            await self._client.set(key, "locked", ex=ttl_seconds)
+            await self.redis.delete(key)
+            await self.redis.set(key, "locked", ex=ttl_seconds)
             logger.info(f"Force-acquired operation lock for {operation_id}")
             return True
 
         # SETNX-style: only set if not exists
-        result = await self._client.set(key, "locked", nx=True, ex=ttl_seconds)
+        result = await self.redis.set(key, "locked", nx=True, ex=ttl_seconds)
 
         if result:
             logger.info(f"Acquired operation lock for {operation_id}")
@@ -980,18 +881,18 @@ class RedisTaskQueue:
             await self.connect()
 
         key = f"{self.LOCK_PREFIX}:{operation_id}"
-        await self._client.delete(key)
+        await self.redis.delete(key)
         logger.info(f"Released operation lock for {operation_id}")
 
         # Clear the active operation pointer if it points to this operation
         try:
-            active_op = await self._client.get("ares:op:active")
+            active_op = await self.redis.get("ares:op:active")
             if active_op:
                 active_op_str = (
                     active_op.decode() if isinstance(active_op, bytes) else str(active_op)
                 )
                 if active_op_str == operation_id:
-                    await self._client.delete("ares:op:active")
+                    await self.redis.delete("ares:op:active")
                     logger.info(f"Cleared active operation pointer for {operation_id}")
         except Exception as e:
             logger.warning(f"Failed to clear active operation pointer: {e}")
@@ -1015,7 +916,7 @@ class RedisTaskQueue:
             await self.connect()
 
         key = f"{self.LOCK_PREFIX}:{operation_id}"
-        result = await self._client.expire(key, ttl_seconds)
+        result = await self.redis.expire(key, ttl_seconds)
         return bool(result)
 
     # === Task Retry ===
@@ -1075,7 +976,7 @@ class RedisTaskQueue:
         try:
             # RPUSH to front of queue (workers use BRPOP from right)
             # This prioritizes retried tasks over new ones
-            await self._client.rpush(queue_key, task.model_dump_json())
+            await self.redis.rpush(queue_key, task.model_dump_json())
 
             logger.info(f"Task {task_id} requeued to {queue_key} (retry {retry_count})")
             return task_id
@@ -1117,7 +1018,7 @@ class RedisTaskQueue:
         )
 
         try:
-            count = await self._client.publish(channel, message)
+            count = await self.redis.publish(channel, message)
             logger.debug(f"State update published to {channel} ({count} subscribers)")
             return count
         except Exception as e:
@@ -1153,7 +1054,7 @@ class RedisTaskQueue:
             await self.connect()
 
         channel = self._state_update_channel(operation_id)
-        pubsub = self._client.pubsub()
+        pubsub = self.redis.pubsub()
         await pubsub.subscribe(channel)
         logger.info(f"Subscribed to state updates on {channel}")
         return pubsub
@@ -1210,8 +1111,8 @@ class RedisTaskQueue:
         )
 
         try:
-            await self._client.lpush(queue_key, message)
-            await self._client.expire(queue_key, self.DISCOVERY_TTL)
+            await self.redis.lpush(queue_key, message)
+            await self.redis.expire(queue_key, self.DISCOVERY_TTL)
             logger.debug(f"Published {discovery_type} discovery to {queue_key}")
             return True
         except Exception as e:
@@ -1242,7 +1143,7 @@ class RedisTaskQueue:
             if not self._connected:
                 await self.connect()
             # Use pipeline for efficiency
-            pipe = self._client.pipeline()
+            pipe = self.redis.pipeline()
             for _ in range(max_items):
                 pipe.rpop(queue_key)
             return await pipe.execute()

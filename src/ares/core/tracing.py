@@ -969,6 +969,36 @@ _tracer = trace.get_tracer("ares.agents")
 
 
 @contextmanager
+def _create_span_context(
+    name: str,
+    kind: SpanKind,
+    attrs: dict[str, Any],
+):
+    """Internal factory for span context managers.
+
+    Creates a span with proper error handling and cleanup.
+
+    Args:
+        name: Span name.
+        kind: OpenTelemetry SpanKind (CLIENT, SERVER, PRODUCER, CONSUMER).
+        attrs: Span attributes dict.
+
+    Yields:
+        The span object (may be None if creation failed).
+    """
+    span = None
+    try:
+        span = _tracer.start_span(name, kind=kind, attributes=attrs)
+    except Exception as e:
+        logger.debug(f"Failed to create {kind.name.lower()} span: {e}")
+    try:
+        yield span
+    finally:
+        if span:
+            span.end()
+
+
+@contextmanager
 def client_span(
     name: str,
     target_service: str,
@@ -1030,17 +1060,8 @@ def client_span(
     attrs["peer.service"] = target_service
     attrs["rpc.service"] = target_service
 
-    span = None
-    try:
-        span = _tracer.start_span(name, kind=SpanKind.CLIENT, attributes=attrs)
-    except Exception as e:
-        logger.debug(f"Failed to create client span: {e}")
-
-    try:
+    with _create_span_context(name, SpanKind.CLIENT, attrs) as span:
         yield span
-    finally:
-        if span:
-            span.end()
 
 
 @contextmanager
@@ -1100,17 +1121,8 @@ def server_span(
         additional_attrs,
     )
 
-    span = None
-    try:
-        span = _tracer.start_span(name, kind=SpanKind.SERVER, attributes=attrs)
-    except Exception as e:
-        logger.debug(f"Failed to create server span: {e}")
-
-    try:
+    with _create_span_context(name, SpanKind.SERVER, attrs) as span:
         yield span
-    finally:
-        if span:
-            span.end()
 
 
 @contextmanager
@@ -1168,17 +1180,8 @@ def producer_span(
     attrs["messaging.destination.name"] = target_service
     attrs["peer.service"] = target_service
 
-    span = None
-    try:
-        span = _tracer.start_span(name, kind=SpanKind.PRODUCER, attributes=attrs)
-    except Exception as e:
-        logger.debug(f"Failed to create producer span: {e}")
-
-    try:
+    with _create_span_context(name, SpanKind.PRODUCER, attrs) as span:
         yield span
-    finally:
-        if span:
-            span.end()
 
 
 @contextmanager
@@ -1232,14 +1235,5 @@ def consumer_span(
         dc_ips,
     )
 
-    span = None
-    try:
-        span = _tracer.start_span(name, kind=SpanKind.CONSUMER, attributes=attrs)
-    except Exception as e:
-        logger.debug(f"Failed to create consumer span: {e}")
-
-    try:
+    with _create_span_context(name, SpanKind.CONSUMER, attrs) as span:
         yield span
-    finally:
-        if span:
-            span.end()

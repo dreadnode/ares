@@ -290,7 +290,8 @@ class TestRedisTaskQueueConnectionErrorHandling:
         queue._client = mock_redis_client
         queue._connected = True
 
-        with patch("ares.core.task_queue.logger") as mock_logger:
+        # _handle_connection_error is defined in base_task_queue, so patch the logger there
+        with patch("ares.core.base_task_queue.logger") as mock_logger:
             error = Exception("Connection reset by peer")
             queue._handle_connection_error(error)
 

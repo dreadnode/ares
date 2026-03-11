@@ -405,6 +405,11 @@ class PersistenceMixin:
                 f"ares:op:{op_id}:exploited", self.shared_state.exploited_vulnerabilities, ttl
             )
 
+            # Persist identified MITRE techniques SET (additive, no delete)
+            await self._persist_set_additive(
+                f"ares:op:{op_id}:techniques", self.shared_state.identified_techniques, ttl
+            )
+
             # Persist HASH collections (additive, no delete - preserves worker data)
             await self._persist_hash_additive(
                 f"ares:op:{op_id}:vulns",
@@ -453,6 +458,7 @@ class PersistenceMixin:
                 f"{len(self.shared_state.discovered_vulnerabilities)} vulns, "
                 f"{len(self.shared_state.exploited_vulnerabilities)} exploited, "
                 f"{len(self.shared_state.downloaded_artifacts)} artifacts, "
+                f"{len(self.shared_state.identified_techniques)} techniques, "
                 f"{len(self.shared_state.pending_tasks)} pending, "
                 f"{len(self.shared_state.completed_tasks)} completed"
             )

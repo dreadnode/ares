@@ -322,6 +322,12 @@ class OperationRecoveryManager:
         if timeline_events:
             logger.info(f"Loaded {len(state.operation_timeline)} timeline events from Redis")
 
+        # Load MITRE techniques
+        techniques = await backend.get_techniques()
+        state.identified_techniques.update(techniques)
+        if techniques:
+            logger.info(f"Loaded {len(techniques)} MITRE techniques from Redis")
+
     def _dedupe_hashes(self, hashes: list) -> list:
         """Deduplicate hashes, keeping first occurrence.
 
