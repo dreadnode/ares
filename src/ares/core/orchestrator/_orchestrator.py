@@ -1042,6 +1042,10 @@ async def run_multi_agent_operation(
         final_state = dispatcher.shared_state
         end_time = datetime.now(timezone.utc)
 
+        # Refresh state from Redis before report generation
+        # Workers write directly to Redis, but orchestrator memory doesn't auto-sync
+        await final_state.refresh_from_redis()
+
         report_path = None
         report_markdown = None
         try:

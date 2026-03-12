@@ -52,6 +52,7 @@ Persistent domain access has been established via Golden Ticket.
 | NTLM Hashes Captured | {{ hashes|length }} |
 | Vulnerabilities Found | {{ vulnerabilities_found }} |
 | Vulnerabilities Exploited | {{ vulnerabilities_exploited }} |
+| Network Shares | {{ shares|length if shares else 0 }} |
 
 ---
 
@@ -78,6 +79,20 @@ Persistent domain access has been established via Golden Ticket.
 {% endif %}
 
 {% endfor %}
+
+---
+
+## Network Shares
+
+{% if shares %}
+| Share | Host | Permissions |
+|-------|------|-------------|
+{% for share in shares %}
+| {{ share.name }} | {{ share.host }} | {{ share.permissions or '-' }} |
+{% endfor %}
+{% else %}
+No network shares discovered.
+{% endif %}
 
 ---
 

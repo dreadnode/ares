@@ -687,6 +687,12 @@ def _print_loot(state, *, json_output: bool = False) -> None:
     """Print loot from state in human-readable or JSON format."""
     import json as json_module
 
+    # Normalize credentials and hashes against discovered users
+    # This handles cases where domains are wrong due to race conditions or LLM hallucination
+    state.normalize_credential_domains_to_users()
+    state.normalize_hash_domains_to_users()
+    state.cleanup_invalid_domains()
+
     unique_users = _dedup_users(state.all_users)
     unique_creds = _dedup_credentials(state.all_credentials)
     unique_hashes = _dedup_hashes(state.all_hashes)

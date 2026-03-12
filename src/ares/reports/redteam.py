@@ -47,6 +47,31 @@ def _parse_weakness_block(block: str) -> dict[str, str]:
     return result
 
 
+def _deduplicate_weaknesses(weaknesses: list[str]) -> list[dict[str, str]]:
+    """Parse and deduplicate weaknesses by normalized title.
+
+    This provides a final deduplication pass at report generation time
+    to catch any duplicates that might have slipped through.
+    """
+    seen_titles: set[str] = set()
+    result: list[dict[str, str]] = []
+
+    for w in weaknesses:
+        parsed = _parse_weakness_block(w)
+        title = parsed.get("title", "").strip()
+        # Normalize title for deduplication: lowercase, normalize dashes (em-dash \u2014, en-dash \u2013)
+        normalized_title = title.lower().replace("\u2014", "-").replace("\u2013", "-")
+        normalized_title = " ".join(normalized_title.split())
+
+        if normalized_title and normalized_title in seen_titles:
+            continue
+        if normalized_title:
+            seen_titles.add(normalized_title)
+        result.append(parsed)
+
+    return result
+
+
 class RedTeamReportGenerator:
     """Generates markdown reports from red team operation results.
 
@@ -82,6 +107,9 @@ class RedTeamReportGenerator:
             user_key = (user.domain.lower(), user.username.lower())
             if user_key not in seen_users:
                 seen_users.add(user_key)
+                # Normalize is_admin for known admin usernames
+                if user.username.lower() in ("administrator", "krbtgt"):
+                    user.is_admin = True
                 unique_users.append(user)
 
         # Deduplicate credentials (case-insensitive on domain+username+password)
@@ -91,18 +119,17 @@ class RedTeamReportGenerator:
             cred_key = (cred.domain.lower(), cred.username.lower(), cred.password)
             if cred_key not in seen_creds:
                 seen_creds.add(cred_key)
+                # Normalize is_admin for known admin usernames
+                if cred.username.lower() in ("administrator", "krbtgt"):
+                    cred.is_admin = True
                 unique_creds.append(cred)
 
         # Calculate counts from SharedRedTeamState
         host_count = len(state.all_hosts)
         credential_count = len(unique_creds)
 
-        # Count admins - check is_admin flag OR known admin usernames
-        admin_count = sum(
-            1
-            for c in unique_creds
-            if c.is_admin or c.username.lower() in ("administrator", "krbtgt")
-        )
+        # Count admins (is_admin already normalized above)
+        admin_count = sum(1 for c in unique_creds if c.is_admin)
 
         # Aggregate MITRE techniques from timeline events
         all_techniques: set[str] = set(state.identified_techniques)
@@ -150,7 +177,7 @@ class RedTeamReportGenerator:
             users=unique_users,
             credentials=unique_creds,
             shares=state.all_shares,
-            weaknesses=[_parse_weakness_block(w) for w in state.all_weaknesses],
+            weaknesses=_deduplicate_weaknesses(state.all_weaknesses),
             discovered_vulns=discovered_vulns,
             timeline=state.operation_timeline,
             techniques_identified=sorted(all_techniques),
@@ -176,17 +203,16 @@ class RedTeamReportGenerator:
             cred_key = (cred.domain.lower(), cred.username.lower(), cred.password)
             if cred_key not in seen_creds:
                 seen_creds.add(cred_key)
+                # Normalize is_admin for known admin usernames (match generate())
+                if cred.username.lower() in ("administrator", "krbtgt"):
+                    cred.is_admin = True
                 unique_creds.append(cred)
 
         # Calculate counts from SharedRedTeamState
         host_count = len(state.all_hosts)
         credential_count = len(unique_creds)
-        # Count admins - check is_admin flag OR known admin usernames (match generate())
-        admin_count = sum(
-            1
-            for c in unique_creds
-            if c.is_admin or c.username.lower() in ("administrator", "krbtgt")
-        )
+        # Count admins (is_admin already normalized above)
+        admin_count = sum(1 for c in unique_creds if c.is_admin)
         vulnerability_count = len(state.discovered_vulnerabilities)
         exploited_count = len(state.exploited_vulnerabilities)
 
@@ -306,6 +332,9 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
         key = (cred.domain.lower(), cred.username.lower(), cred.password)
         if key not in seen_creds:
             seen_creds.add(key)
+            # Normalize is_admin for known admin usernames
+            if cred.username.lower() in ("administrator", "krbtgt"):
+                cred.is_admin = True
             unique_creds.append(cred)
 
     seen_hashes: set[tuple[str, str, str]] = set()
@@ -386,7 +415,8 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
         users=state.all_users,
         credentials=unique_creds,
         hashes=unique_hashes,
-        weaknesses=[_parse_weakness_block(w) for w in state.all_weaknesses],
+        shares=state.all_shares,
+        weaknesses=_deduplicate_weaknesses(state.all_weaknesses),
         timeline=timeline,
         techniques=sorted(all_techniques),
         discovered_vulns=discovered_vulns,

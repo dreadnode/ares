@@ -71,14 +71,25 @@ class PublishingMixin:
             import uuid
             from datetime import datetime, timezone
 
+            # Determine MITRE techniques based on credential source
+            mitre_techniques = ["T1078"] if is_admin else ["T1552"]
+            cred_source_lower = (credential.source or "").lower()
+            if "kerberoast" in cred_source_lower:
+                mitre_techniques.append("T1558.003")  # Kerberoasting
+            if "asrep" in cred_source_lower or "as-rep" in cred_source_lower:
+                mitre_techniques.append("T1558.004")  # AS-REP Roasting
+            if "cracked" in cred_source_lower:
+                mitre_techniques.append("T1110")  # Brute Force (password cracking)
             timeline_event = TimelineEvent(
                 id=f"evt-cred-{uuid.uuid4().hex[:8]}",
                 timestamp=datetime.now(timezone.utc),
                 source=source_agent,
                 description=f"Credential discovered: {credential.domain}\\{credential.username} via {credential.source}",
-                mitre_techniques=["T1078"] if is_admin else ["T1552"],
+                mitre_techniques=mitre_techniques,
             )
             self.shared_state.operation_timeline.append(timeline_event)
+            # Add techniques to identified_techniques set for MITRE mapping in report
+            self.shared_state.identified_techniques.update(mitre_techniques)
             # Persist timeline event to Redis
             await self._persist_timeline_event(timeline_event, task_queue)
             is_main_thread = threading.current_thread() is threading.main_thread()
@@ -256,14 +267,46 @@ class PublishingMixin:
             )
             if is_critical:
                 event_desc = f"CRITICAL: {event_desc}"
+
+            # Determine MITRE techniques based on hash type and source
+            mitre_techniques = ["T1003"]  # OS Credential Dumping
+            hash_value_lower = (hash_obj.hash_value or "").lower()
+            hash_type_lower = (hash_obj.hash_type or "").lower()
+            hash_source_lower = (hash_obj.source or "").lower()
+
+            # Kerberoasting: TGS-REP hashes
+            if (
+                "$krb5tgs$" in hash_value_lower
+                or hash_type_lower in ("kerberoast", "krb5tgs", "tgs-rep", "tgs")
+                or "kerberoast" in hash_source_lower
+            ):
+                mitre_techniques.append("T1558.003")  # Kerberoasting
+
+            # AS-REP Roasting: AS-REP hashes
+            if (
+                "$krb5asrep$" in hash_value_lower
+                or hash_type_lower in ("asrep", "as-rep", "krb5asrep")
+                or "asrep" in hash_source_lower
+                or "as-rep" in hash_source_lower
+            ):
+                mitre_techniques.append("T1558.004")  # AS-REP Roasting
+
+            # DCSync or secretsdump for NTLM hashes
+            if hash_type_lower == "ntlm" and (
+                "secretsdump" in hash_source_lower or "dcsync" in hash_source_lower
+            ):
+                mitre_techniques.append("T1003.006")  # DCSync
+
             timeline_event = TimelineEvent(
                 id=f"evt-hash-{uuid.uuid4().hex[:8]}",
                 timestamp=datetime.now(timezone.utc),
                 source=source_agent,
                 description=event_desc,
-                mitre_techniques=["T1003"],  # OS Credential Dumping
+                mitre_techniques=mitre_techniques,
             )
             self.shared_state.operation_timeline.append(timeline_event)
+            # Add techniques to identified_techniques set for MITRE mapping in report
+            self.shared_state.identified_techniques.update(mitre_techniques)
             # Persist timeline event to Redis
             await self._persist_timeline_event(timeline_event, task_queue)
             if is_main_thread:
