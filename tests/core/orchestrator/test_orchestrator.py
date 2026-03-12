@@ -44,6 +44,7 @@ async def test_run_multi_agent_operation_skips_wait_when_completed(monkeypatch):
         pending_tasks={},
         processed_asrep_domains=set(),  # For immediate AS-REP dispatch
         golden_tickets=[],  # For _wait_for_golden_ticket
+        refresh_from_redis=AsyncMock(),  # For final state refresh
     )
 
     dispatcher = SimpleNamespace(shared_state=shared_state)
