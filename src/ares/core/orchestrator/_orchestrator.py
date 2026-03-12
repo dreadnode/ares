@@ -50,6 +50,7 @@ from ares.core.models import (
     Target,
     TaskStatus,
 )
+from ares.core.persistent_store import PersistentStore, get_persistent_store_config
 from ares.core.recovery import OperationRecoveryManager, RecoveryError
 from ares.core.task_queue import RedisTaskQueue
 from ares.core.workflows import exploitation_workflow
@@ -1055,6 +1056,23 @@ async def run_multi_agent_operation(
                 await final_state._backend.store_report(report_markdown)
         except Exception as e:
             logger.warning(f"Failed to generate report for {operation_id}: {e}")
+
+        # Offload to persistent store (PostgreSQL) for long-term retention
+        ps_config = get_persistent_store_config()
+        if ps_config.is_enabled and ps_config.offload_on_completion:
+            try:
+                store = PersistentStore(ps_config)
+                if await store.initialize():
+                    success = await store.offload_operation(final_state)
+                    if success:
+                        logger.info(f"Offloaded operation {operation_id} to persistent store")
+                    else:
+                        logger.warning(
+                            f"Failed to offload operation {operation_id} to persistent store"
+                        )
+                    await store.close()
+            except Exception as e:
+                logger.warning(f"Persistent store offload failed for {operation_id}: {e}")
 
         # Final summary log before return
         duration = (end_time - start_time).total_seconds()
