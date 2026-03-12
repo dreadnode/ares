@@ -570,6 +570,7 @@ def create_agent_span_attributes(
     target_environment: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
     dc_ips: set[str] | None = None,
+    credential_domain: str | None = None,
 ) -> dict[str, Any]:
     """Create span attributes for an agent operation.
 
@@ -586,6 +587,8 @@ def create_agent_span_attributes(
         target_environment: Optional target environment (e.g., "dev", "staging", "prod").
         additional_attrs: Optional additional attributes to include.
         dc_ips: Optional set of known DC IP addresses for target type inference.
+        credential_domain: Optional domain where the authenticating credential belongs
+            (may differ from target_domain in cross-domain/trust scenarios).
 
     Returns:
         Dictionary of span attributes.
@@ -681,6 +684,12 @@ def create_agent_span_attributes(
         if len(parts) > 1:
             attrs["attack_target_domain"] = parts[1]
 
+    # Credential domain: where the authenticating user actually belongs
+    # This differs from target_domain in cross-domain/trust scenarios
+    # (e.g., child domain user attacking parent domain)
+    if credential_domain:
+        attrs["credential.domain"] = credential_domain
+
     # Add target environment for filtering spans by deployment target
     # OTel requires primitive types - ensure string even if dict was passed
     if target_environment:
@@ -715,6 +724,7 @@ def agent_span(
     target_environment: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
     dc_ips: set[str] | None = None,
+    credential_domain: str | None = None,
 ):
     """Create a traced span for agent operations.
 
@@ -731,10 +741,12 @@ def agent_span(
         target_hostname: Optional hostname (e.g., "dc01").
         target_type: Optional target type.
         target_user: Optional target username.
-        target_domain: Optional target domain.
+        target_domain: Optional target domain (where the attack is directed).
         target_environment: Optional target environment.
         additional_attrs: Optional additional attributes.
         dc_ips: Optional set of known DC IP addresses for target type inference.
+        credential_domain: Optional domain where the credential belongs (may differ
+            from target_domain in cross-domain/trust scenarios).
 
     Yields:
         The span object for adding additional attributes.
@@ -758,6 +770,7 @@ def agent_span(
         target_environment,
         additional_attrs,
         dc_ips,
+        credential_domain,
     )
 
     with dn.span(name, attributes=attrs) as span:
@@ -778,6 +791,7 @@ def trace_tool_call(
     target_domain: str | None = None,
     dc_ips: set[str] | None = None,
     operation_id: str | None = None,
+    credential_domain: str | None = None,
 ) -> None:
     """Record a tool call as a span.
 
@@ -795,9 +809,11 @@ def trace_tool_call(
         target_hostname: Optional hostname (e.g., "dc01").
         target_type: Optional target type.
         target_user: Optional target username.
-        target_domain: Optional target domain.
+        target_domain: Optional target domain (where the attack is directed).
         dc_ips: Optional set of known DC IP addresses for target type inference.
         operation_id: Optional operation ID for correlation (attack_operation_id).
+        credential_domain: Optional domain where the credential belongs (may differ
+            from target_domain in cross-domain/trust scenarios).
     """
     attrs = create_agent_span_attributes(
         role,
@@ -810,6 +826,7 @@ def trace_tool_call(
         target_user=target_user,
         target_domain=target_domain,
         dc_ips=dc_ips,
+        credential_domain=credential_domain,
     )
     attrs["tool.status"] = "error" if is_error else "success"
     if is_error and error_message:
@@ -1013,6 +1030,7 @@ def client_span(
     target_domain: str | None = None,
     target_environment: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
+    credential_domain: str | None = None,
 ):
     """Create a CLIENT span for outgoing calls to another service.
 
@@ -1033,6 +1051,7 @@ def client_span(
         target_domain: Optional target domain.
         target_environment: Optional target environment.
         additional_attrs: Optional additional attributes.
+        credential_domain: Optional domain where the credential belongs.
 
     Yields:
         The span object for adding additional attributes.
@@ -1055,6 +1074,7 @@ def client_span(
         target_domain,
         target_environment,
         additional_attrs,
+        credential_domain=credential_domain,
     )
     # peer.service is the standard OTel attribute for service graph edges
     attrs["peer.service"] = target_service
@@ -1078,6 +1098,7 @@ def server_span(
     target_domain: str | None = None,
     target_environment: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
+    credential_domain: str | None = None,
 ):
     """Create a SERVER span for incoming requests.
 
@@ -1097,6 +1118,7 @@ def server_span(
         target_domain: Optional target domain.
         target_environment: Optional target environment.
         additional_attrs: Optional additional attributes.
+        credential_domain: Optional domain where the credential belongs.
 
     Yields:
         The span object for adding additional attributes.
@@ -1119,6 +1141,7 @@ def server_span(
         target_domain,
         target_environment,
         additional_attrs,
+        credential_domain=credential_domain,
     )
 
     with _create_span_context(name, SpanKind.SERVER, attrs) as span:
@@ -1140,6 +1163,7 @@ def producer_span(
     target_environment: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
     dc_ips: set[str] | None = None,
+    credential_domain: str | None = None,
 ):
     """Create a PRODUCER span for async message publishing.
 
@@ -1159,6 +1183,7 @@ def producer_span(
         dc_ips: Optional set of known DC IP addresses for target type inference.
         target_environment: Optional target environment.
         additional_attrs: Optional additional attributes.
+        credential_domain: Optional domain where the credential belongs.
 
     Yields:
         The span object for adding additional attributes.
@@ -1176,6 +1201,7 @@ def producer_span(
         target_environment,
         additional_attrs,
         dc_ips,
+        credential_domain,
     )
     attrs["messaging.destination.name"] = target_service
     attrs["peer.service"] = target_service
@@ -1198,6 +1224,7 @@ def consumer_span(
     target_environment: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
     dc_ips: set[str] | None = None,
+    credential_domain: str | None = None,
 ):
     """Create a CONSUMER span for async message consumption.
 
@@ -1216,6 +1243,7 @@ def consumer_span(
         target_environment: Optional target environment.
         additional_attrs: Optional additional attributes.
         dc_ips: Optional set of known DC IP addresses for target type inference.
+        credential_domain: Optional domain where the credential belongs.
 
     Yields:
         The span object for adding additional attributes.
@@ -1233,6 +1261,7 @@ def consumer_span(
         target_environment,
         additional_attrs,
         dc_ips,
+        credential_domain,
     )
 
     with _create_span_context(name, SpanKind.CONSUMER, attrs) as span:

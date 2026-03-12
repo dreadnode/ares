@@ -411,6 +411,14 @@ def create_role_hooks(
             dispatcher, "operation_id", None
         )
 
+        # Get credential domain from context (the domain the auth user belongs to)
+        # This may differ from target_domain in cross-domain/trust scenarios
+        # (e.g., child domain user attacking parent domain)
+        from ares.tools.red.common import get_credential_context
+
+        cred_ctx = get_credential_context()
+        credential_domain = cred_ctx.source_domain if cred_ctx else None
+
         trace_tool_call(
             role.value,
             "red",
@@ -425,6 +433,7 @@ def create_role_hooks(
             target_type=target_type,
             dc_ips=dc_ips or None,
             operation_id=operation_id,
+            credential_domain=credential_domain,
         )
 
         # Record MITRE technique for successful tool executions
