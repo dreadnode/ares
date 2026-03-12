@@ -38,20 +38,9 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
-from tenacity import (
-    AsyncRetrying,
-    RetryError,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
-from ares.core.circuit_breaker import (
-    CircuitBreakerError,
-    get_error_debouncer,
-    get_redis_circuit,
-)
-from ares.core.redis_client import is_connection_error
+from ares.core.circuit_breaker import CircuitBreakerError
+from ares.core.redis_backend_base import BaseRedisBackend
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -65,16 +54,8 @@ if TYPE_CHECKING:
         VulnerabilityInfo,
     )
 
-# Redis connection error types for retry logic
-# Matches redis-py's default retry_on_error list
-_REDIS_RETRY_EXCEPTIONS = (
-    ConnectionError,
-    TimeoutError,
-    OSError,  # Includes ConnectionRefusedError, BrokenPipeError
-)
 
-
-class RedisStateBackend:
+class RedisStateBackend(BaseRedisBackend):
     """Redis-native state storage for SharedRedTeamState.
 
     This backend stores state directly in Redis using native data structures,
@@ -124,20 +105,14 @@ class RedisStateBackend:
     # Dedup set prefix
     KEY_DEDUP_PREFIX = "dedup"
 
+    # MITRE technique tracking (SET for efficient membership checks)
+    KEY_TECHNIQUES = "techniques"
+
     # Dispatch tracking keys
     KEY_MSSQL_ENUM_DISPATCHED = "mssql_enum_dispatched"
     KEY_PENDING_TASKS = "pending_tasks"
     KEY_COMPLETED_TASKS = "completed_tasks"
     KEY_VULN_TYPE_FAILURES = "vuln_type_failures"
-
-    # TTL for all keys (24 hours)
-    DEFAULT_TTL = 86400
-
-    # Retry configuration matching redis-py's ExponentialBackoff(cap=10, base=1)
-    # See: https://redis.io/docs/latest/develop/connect/clients/python/redis-py/
-    RETRY_MAX_ATTEMPTS = 3
-    RETRY_MULTIPLIER = 1.0  # base delay in seconds
-    RETRY_MAX_DELAY = 10.0  # cap in seconds
 
     def __init__(
         self,
@@ -153,100 +128,22 @@ class RedisStateBackend:
             operation_id: Unique operation identifier
             use_circuit_breaker: Enable circuit breaker + retry for resilience
         """
-        self._redis = redis_client
+        super().__init__(redis_client, operation_id, use_circuit_breaker=use_circuit_breaker)
+        # Keep _operation_id for backward compatibility
         self._operation_id = operation_id
-        self._key_prefix = f"{self.KEY_PREFIX}:{operation_id}"
-        self._use_circuit_breaker = use_circuit_breaker
-        # Use shared circuit breaker and debouncer instances
-        self._circuit = get_redis_circuit() if use_circuit_breaker else None
-        self._debouncer = get_error_debouncer() if use_circuit_breaker else None
 
-    def _key(self, suffix: str) -> str:
-        """Build full Redis key."""
-        return f"{self._key_prefix}:{suffix}"
+    def _build_key_prefix(self, entity_id: str) -> str:
+        """Build key prefix for red team operations."""
+        return f"{self.KEY_PREFIX}:{entity_id}"
+
+    @property
+    def _log_prefix(self) -> str:
+        """Log prefix for error messages."""
+        return "state_backend"
 
     def _dedup_key(self, set_name: str) -> str:
         """Build dedup set key."""
         return f"{self._key_prefix}:{self.KEY_DEDUP_PREFIX}:{set_name}"
-
-    async def _set_ttl(self, key: str) -> None:
-        """Set TTL on a key."""
-        await self._redis.expire(key, self.DEFAULT_TTL)
-
-    async def _with_retry(self, operation_name: str, operation):
-        """Execute a Redis operation with circuit breaker + tenacity retry.
-
-        Provides resilience for transient Redis connection issues (Sentinel failover,
-        pod restarts, network blips). Pattern follows:
-        - redis-py's ExponentialBackoff(cap=10, base=1)
-        - tenacity's AsyncRetrying for async retry logic
-        - Shared circuit breaker for fail-fast when Redis is known to be down
-
-        Args:
-            operation_name: Name for logging (e.g., "add_credential")
-            operation: Async callable that performs the Redis operation
-
-        Returns:
-            Result of the operation
-
-        Raises:
-            CircuitBreakerError: If circuit is open (fail-fast)
-            Exception: If all retries exhausted
-        """
-        # Fast path: no circuit breaker configured
-        if not self._circuit:
-            return await operation()
-
-        # Check circuit breaker FIRST - fail fast if Redis is known to be down
-        if not self._circuit.allow_request_sync():
-            remaining = self._circuit._get_remaining_open_time()
-            raise CircuitBreakerError(self._circuit.name, remaining)
-
-        last_exception: Exception | None = None
-
-        try:
-            async for attempt in AsyncRetrying(
-                stop=stop_after_attempt(self.RETRY_MAX_ATTEMPTS),
-                wait=wait_exponential(
-                    multiplier=self.RETRY_MULTIPLIER,
-                    max=self.RETRY_MAX_DELAY,
-                ),
-                retry=retry_if_exception_type(_REDIS_RETRY_EXCEPTIONS),
-                reraise=True,
-            ):
-                with attempt:
-                    result = await operation()
-                    # Success - record and close circuit if half-open
-                    self._circuit.record_success_sync()
-                    return result
-
-        except RetryError as e:
-            # All retries exhausted
-            last_exception = e.last_attempt.exception()
-            if self._debouncer:
-                self._debouncer.log_error_sync(
-                    f"state_backend_{operation_name}",
-                    f"Redis {operation_name} failed after {self.RETRY_MAX_ATTEMPTS} "
-                    f"retries: {last_exception}",
-                    level="warning",
-                )
-            # Record failure to potentially open circuit
-            if is_connection_error(last_exception):
-                self._circuit.record_failure_sync(last_exception)
-            raise last_exception from e
-
-        except Exception as e:
-            # Non-retryable error or retry logic raised
-            last_exception = e
-            if is_connection_error(e):
-                self._circuit.record_failure_sync(e)
-                if self._debouncer:
-                    self._debouncer.log_error_sync(
-                        f"state_backend_{operation_name}",
-                        f"Redis {operation_name} connection error: {e}",
-                        level="warning",
-                    )
-            raise
 
     # =========================================================================
     # Credentials (Redis HASH with HSETNX for O(1) deduplication)
@@ -972,6 +869,57 @@ class RedisStateBackend:
             return {item if isinstance(item, str) else item.decode() for item in items}
         except Exception as e:
             logger.warning(f"Failed to get exploited vulnerabilities: {e}")
+            return set()
+
+    # =========================================================================
+    # MITRE Techniques (Redis SET)
+    # =========================================================================
+
+    async def add_technique(self, technique_id: str) -> bool:
+        """Add a MITRE ATT&CK technique ID to the identified techniques set.
+
+        Uses Redis SET for efficient membership checks and deduplication.
+
+        Args:
+            technique_id: MITRE technique ID (e.g., "T1003.006", "T1558.003")
+
+        Returns:
+            True if newly added, False if already existed or error
+        """
+        if not technique_id:
+            return False
+
+        key = self._key(self.KEY_TECHNIQUES)
+
+        async def _do_add():
+            result = await self._redis.sadd(key, technique_id)
+            await self._set_ttl(key)
+            return result > 0
+
+        try:
+            added = await self._with_retry("add_technique", _do_add)
+            if added:
+                logger.debug(f"Added MITRE technique: {technique_id}")
+            return added
+        except CircuitBreakerError:
+            logger.debug(f"Circuit breaker open, skipping add_technique for {technique_id}")
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to add technique {technique_id}: {e}")
+            return False
+
+    async def get_techniques(self) -> set[str]:
+        """Get all identified MITRE ATT&CK technique IDs.
+
+        Returns:
+            Set of technique IDs
+        """
+        key = self._key(self.KEY_TECHNIQUES)
+        try:
+            items = await self._redis.smembers(key)
+            return {item if isinstance(item, str) else item.decode() for item in items}
+        except Exception as e:
+            logger.warning(f"Failed to get techniques: {e}")
             return set()
 
     # =========================================================================

@@ -16,32 +16,25 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import threading
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel
 
+from ares.core.base_task_queue import BaseTaskQueue
 from ares.core.config import (
-    get_agent_heartbeat_timeout,
     get_redis_retry_base_delay,
     get_redis_retry_max_delay,
-    get_redis_url,
 )
 from ares.core.redis_client import (
-    create_redis_client,
-    get_redis_sentinel_config,
     get_retry_delay,
     invalidate_sentinel_client,
     is_connection_error,
     timed_redis_write,
 )
 from ares.core.tracing import producer_span
-
-if TYPE_CHECKING:
-    from redis.asyncio import Redis
 
 
 class BlueTaskMessage(BaseModel):
@@ -77,7 +70,7 @@ class BlueTaskResult(BaseModel):
         super().__init__(**data)
 
 
-class BlueTaskQueue:
+class BlueTaskQueue(BaseTaskQueue):
     """Redis-based task queue for blue team inter-pod communication.
 
     Supports two modes:
@@ -124,105 +117,22 @@ class BlueTaskQueue:
     INVESTIGATIONS_KEY = "ares:blue:active_investigations"
     INVESTIGATION_META_PREFIX = "ares:blue:investigation"
 
-    # TTLs
-    RESULT_TTL = 86400  # 24 hours
-    HEARTBEAT_TTL = 60  # 60 seconds
+    # Investigation TTL
     INVESTIGATION_TTL = 86400  # 24 hours
 
     def __init__(self, redis_url: str | None = None, use_global_queue: bool = True):
-        self.redis_url = redis_url or get_redis_url()
+        super().__init__(redis_url)
         self.use_global_queue = use_global_queue
-        self._client: Redis | None = None
-        self._connected = False
-        self._heartbeat_ttl = max(self.HEARTBEAT_TTL, get_agent_heartbeat_timeout() * 2)
 
-    @property
-    def redis(self) -> Redis:
-        """Expose the underlying Redis client for legacy call sites."""
-        if self._client is None:
-            raise RuntimeError("Not connected to Redis")
-        return self._client
+    def _handle_connection_error(self, error: Exception) -> None:
+        """Handle Redis connection errors by resetting connection state.
 
-    async def connect(self) -> None:
-        """Connect to Redis.
-
-        When called from a non-main thread (e.g., threaded result consumer),
-        uses direct connection to avoid SentinelConnectionPool's cross-loop
-        Future issues.
+        Overrides base class to also invalidate Sentinel client for fresh DNS resolution.
         """
-        if self._connected:
-            return
-
-        # Use direct connection when in a non-main thread to avoid
-        # SentinelConnectionPool's async state being shared across event loops
-        is_main_thread = threading.current_thread() is threading.main_thread()
-        direct_connection = not is_main_thread
-
-        try:
-            self._client = await create_redis_client(
-                self.redis_url,
-                decode_responses=True,
-                direct_connection=direct_connection,
-            )
-            await self._client.ping()
-            self._connected = True
-            if get_redis_sentinel_config():
-                conn_type = "direct" if direct_connection else "via Sentinel"
-                logger.info(f"BlueTaskQueue connected to Redis {conn_type}")
-            else:
-                logger.info(f"BlueTaskQueue connected to Redis at {self.redis_url}")
-
-        except Exception as e:
-            raise RuntimeError(f"Failed to connect to Redis: {e}") from e
-
-    async def disconnect(self) -> None:
-        """Disconnect from Redis."""
-        if self._client:
-            await self._client.aclose()
-            self._connected = False
-            logger.info("BlueTaskQueue disconnected")
-
-    async def ping_or_reconnect(self, timeout: float = 5.0) -> bool:
-        """Ping Redis and reconnect if the connection is stale.
-
-        Args:
-            timeout: Max seconds to wait for ping response
-
-        Returns:
-            True if ping succeeded, False if reconnection was needed
-        """
-        if not self._client:
-            await self.connect()
-            return False
-
-        try:
-            await asyncio.wait_for(self._client.ping(), timeout=timeout)
-            return True
-        except Exception as e:
-            logger.warning(f"Redis ping failed ({type(e).__name__}: {e}), forcing reconnection")
-            invalidate_sentinel_client()
-            self._connected = False
-            try:
-                if self._client:
-                    await self._client.aclose()
-            except Exception:
-                pass
-            self._client = None
-            await self.connect()
-            logger.info("Reconnected to Redis after ping failure")
-            return False
-
-    async def _handle_connection_error(self, error: Exception) -> None:
-        """Handle Redis connection errors by resetting connection state and reconnecting."""
-        self._connected = False
+        # Call base class to reset state
+        super()._handle_connection_error(error)
+        # Also invalidate Sentinel for fresh DNS resolution
         invalidate_sentinel_client()
-        if self._client:
-            try:
-                await self._client.aclose()
-            except Exception:
-                pass
-            self._client = None
-        logger.warning(f"Redis connection error, reconnecting: {error}")
 
     def _task_queue_key(self, investigation_id: str, role: str) -> str:
         """Get task queue key for a role within an investigation (legacy mode)."""
@@ -459,7 +369,7 @@ class BlueTaskQueue:
                     logger.warning(
                         f"Timeout submitting task {task_id} (attempt {attempt + 1}/{max_retries + 1})"
                     )
-                    await self._handle_connection_error(TimeoutError("Timeout submitting task"))
+                    self._handle_connection_error(TimeoutError("Timeout submitting task"))
                     last_error = TimeoutError("Timeout submitting task after retries")
 
                 except Exception as e:
@@ -468,7 +378,7 @@ class BlueTaskQueue:
                             f"Connection error submitting {task_id} "
                             f"(attempt {attempt + 1}/{max_retries + 1}): {e}"
                         )
-                        await self._handle_connection_error(e)
+                        self._handle_connection_error(e)
                         last_error = e
                     else:
                         raise
@@ -532,7 +442,7 @@ class BlueTaskQueue:
                     f"BRPOP hung waiting for result {task_id} - "
                     f"stale connection (attempt {attempt + 1}/{max_retries + 1})"
                 )
-                await self._handle_connection_error(
+                self._handle_connection_error(
                     TimeoutError("BRPOP hung - possible stale connection")
                 )
                 last_error = TimeoutError("BRPOP hung after retries")
@@ -543,7 +453,7 @@ class BlueTaskQueue:
                         f"Connection error waiting for {task_id} "
                         f"(attempt {attempt + 1}/{max_retries + 1}): {e}"
                     )
-                    await self._handle_connection_error(e)
+                    self._handle_connection_error(e)
                     last_error = e
                 else:
                     raise
@@ -605,7 +515,7 @@ class BlueTaskQueue:
                     f"BRPOP hung for {timeout + 2.0}s on queue {queue_key} - "
                     f"stale connection detected (attempt {attempt + 1}/{max_retries + 1})"
                 )
-                await self._handle_connection_error(
+                self._handle_connection_error(
                     TimeoutError("BRPOP hung - possible stale Sentinel connection")
                 )
                 last_error = TimeoutError("BRPOP hung after retries")
@@ -615,7 +525,7 @@ class BlueTaskQueue:
                 if is_connection_error(e):
                     attempt_info = f"attempt {attempt + 1}/{max_retries + 1}"
                     logger.warning(f"Connection error during poll ({attempt_info}): {e}")
-                    await self._handle_connection_error(e)
+                    self._handle_connection_error(e)
                     last_error = e
                     continue
                 raise
@@ -667,7 +577,7 @@ class BlueTaskQueue:
                     f"BRPOP hung for {timeout + 2.0}s on queue {queue_key} - "
                     f"stale connection detected (attempt {attempt + 1}/{max_retries + 1})"
                 )
-                await self._handle_connection_error(
+                self._handle_connection_error(
                     TimeoutError("BRPOP hung - possible stale Sentinel connection")
                 )
                 last_error = TimeoutError("BRPOP hung after retries")
@@ -677,7 +587,7 @@ class BlueTaskQueue:
                 if is_connection_error(e):
                     attempt_info = f"attempt {attempt + 1}/{max_retries + 1}"
                     logger.warning(f"Connection error during poll ({attempt_info}): {e}")
-                    await self._handle_connection_error(e)
+                    self._handle_connection_error(e)
                     last_error = e
                     continue
                 raise
@@ -744,7 +654,7 @@ class BlueTaskQueue:
                 logger.warning(
                     f"Timeout sending result {task_id} (attempt {attempt + 1}/{max_retries + 1})"
                 )
-                await self._handle_connection_error(TimeoutError("Timeout sending result"))
+                self._handle_connection_error(TimeoutError("Timeout sending result"))
                 last_error = TimeoutError("Timeout sending result after retries")
 
             except Exception as e:
@@ -753,7 +663,7 @@ class BlueTaskQueue:
                         f"Connection error sending result {task_id} "
                         f"(attempt {attempt + 1}/{max_retries + 1}): {e}"
                     )
-                    await self._handle_connection_error(e)
+                    self._handle_connection_error(e)
                     last_error = e
                 else:
                     raise

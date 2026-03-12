@@ -877,6 +877,58 @@ class TestTraceToolCall:
         call_kwargs = mock_dn_span.call_args[1]
         assert "attack_operation_id" not in call_kwargs["attributes"]
 
+    def test_trace_tool_call_with_credential_domain(self):
+        """trace_tool_call should include credential.domain for cross-domain attacks."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.tracing import trace_tool_call
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+
+        # Scenario: child domain user (north.sevenkingdoms.local) attacking parent domain
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_tool_call(
+                "lateral",
+                "red",
+                "secretsdump",
+                target_fqdn="dc01.contoso.local",
+                target_domain="contoso.local",  # Parent domain (target)
+                target_user="samwell.tarly",
+                credential_domain="child.contoso.local",  # Child domain (credential)
+            )
+
+        call_kwargs = mock_dn_span.call_args[1]
+        # Target domain is where the attack is directed
+        assert call_kwargs["attributes"]["attack_target_domain"] == "contoso.local"
+        # Credential domain is where the user actually belongs
+        assert call_kwargs["attributes"]["credential.domain"] == "child.contoso.local"
+        assert call_kwargs["attributes"]["user.name"] == "samwell.tarly"
+
+    def test_trace_tool_call_credential_domain_not_set_when_none(self):
+        """trace_tool_call should not include credential.domain when not provided."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.tracing import trace_tool_call
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_tool_call(
+                "lateral",
+                "red",
+                "secretsdump",
+                target_fqdn="dc01.contoso.local",
+                target_domain="contoso.local",
+            )
+
+        call_kwargs = mock_dn_span.call_args[1]
+        assert call_kwargs["attributes"]["attack_target_domain"] == "contoso.local"
+        assert "credential.domain" not in call_kwargs["attributes"]
+
 
 class TestTraceBlueInvestigation:
     """Tests for trace_blue_investigation function."""

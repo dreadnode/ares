@@ -197,7 +197,7 @@ class TestBlueTaskQueueConnection:
         mock_client.ping = AsyncMock(return_value=True)
 
         with patch(
-            "ares.core.blue_task_queue.create_redis_client",
+            "ares.core.base_task_queue.create_redis_client",
             return_value=mock_client,
         ):
             await queue.connect()
@@ -209,7 +209,7 @@ class TestBlueTaskQueueConnection:
         queue = BlueTaskQueue(redis_url="redis://localhost")
         queue._connected = True
 
-        with patch("ares.core.blue_task_queue.create_redis_client") as mock_create:
+        with patch("ares.core.base_task_queue.create_redis_client") as mock_create:
             await queue.connect()
             mock_create.assert_not_called()
 
@@ -253,10 +253,10 @@ class TestBlueTaskQueueConnection:
 
         with (
             patch(
-                "ares.core.blue_task_queue.create_redis_client",
+                "ares.core.base_task_queue.create_redis_client",
                 return_value=new_mock_client,
             ),
-            patch("ares.core.blue_task_queue.invalidate_sentinel_client"),
+            patch("ares.core.base_task_queue.invalidate_sentinel_client"),
         ):
             result = await queue.ping_or_reconnect()
 
@@ -643,7 +643,7 @@ class TestBlueTaskQueueErrorHandling:
 
         with (
             patch(
-                "ares.core.blue_task_queue.create_redis_client",
+                "ares.core.base_task_queue.create_redis_client",
                 return_value=connected_queue._client,
             ),
             pytest.raises(ConnectionError),
@@ -667,9 +667,9 @@ class TestBlueTaskQueueErrorHandling:
         connected_queue._client.brpop = slow_brpop
 
         with (
-            patch("ares.core.blue_task_queue.invalidate_sentinel_client"),
+            patch("ares.core.base_task_queue.invalidate_sentinel_client"),
             patch(
-                "ares.core.blue_task_queue.create_redis_client",
+                "ares.core.base_task_queue.create_redis_client",
                 return_value=connected_queue._client,
             ),
         ):
@@ -684,11 +684,8 @@ class TestBlueTaskQueueErrorHandling:
         assert result is None
         assert connected_queue._connected is False
 
-    @pytest.mark.asyncio
-    async def test_handle_connection_error_resets_state(self, connected_queue):
-        connected_queue._client.aclose = AsyncMock()
-
-        await connected_queue._handle_connection_error(ConnectionError("Test error"))
+    def test_handle_connection_error_resets_state(self, connected_queue):
+        connected_queue._handle_connection_error(ConnectionError("Test error"))
 
         assert connected_queue._connected is False
         assert connected_queue._client is None
@@ -721,7 +718,7 @@ class TestBlueTaskQueueRetryLogic:
         queue_with_reconnect._client.brpop = failing_then_success
 
         with patch(
-            "ares.core.blue_task_queue.create_redis_client",
+            "ares.core.base_task_queue.create_redis_client",
             return_value=queue_with_reconnect._client,
         ):
             result = await queue_with_reconnect.poll_task(
@@ -754,7 +751,7 @@ class TestBlueTaskQueueRetryLogic:
             return mock
 
         with patch(
-            "ares.core.blue_task_queue.create_redis_client",
+            "ares.core.base_task_queue.create_redis_client",
             side_effect=mock_create_client,
         ):
             result = await queue_with_reconnect.poll_task(
@@ -790,7 +787,7 @@ class TestBlueTaskQueueRetryLogic:
         queue_with_reconnect._client.brpop = fail_then_succeed
 
         with patch(
-            "ares.core.blue_task_queue.create_redis_client",
+            "ares.core.base_task_queue.create_redis_client",
             return_value=queue_with_reconnect._client,
         ):
             result = await queue_with_reconnect.poll_task(
@@ -819,9 +816,9 @@ class TestBlueTaskQueueRetryLogic:
         queue_with_reconnect._client.brpop = slow_then_normal
 
         with (
-            patch("ares.core.blue_task_queue.invalidate_sentinel_client"),
+            patch("ares.core.base_task_queue.invalidate_sentinel_client"),
             patch(
-                "ares.core.blue_task_queue.create_redis_client",
+                "ares.core.base_task_queue.create_redis_client",
                 return_value=queue_with_reconnect._client,
             ),
         ):
@@ -857,7 +854,7 @@ class TestBlueTaskQueueRetryLogic:
             return mock
 
         with patch(
-            "ares.core.blue_task_queue.create_redis_client",
+            "ares.core.base_task_queue.create_redis_client",
             side_effect=mock_create_client,
         ):
             result = await queue_with_reconnect.poll_global_task(
@@ -901,7 +898,7 @@ class TestBlueTaskQueueAutoConnect:
         mock_client.expire = AsyncMock()
 
         with patch(
-            "ares.core.blue_task_queue.create_redis_client",
+            "ares.core.base_task_queue.create_redis_client",
             return_value=mock_client,
         ):
             await queue.submit_task(
@@ -923,7 +920,7 @@ class TestBlueTaskQueueAutoConnect:
         mock_client.expire = AsyncMock()
 
         with patch(
-            "ares.core.blue_task_queue.create_redis_client",
+            "ares.core.base_task_queue.create_redis_client",
             return_value=mock_client,
         ):
             await queue.register_investigation(
