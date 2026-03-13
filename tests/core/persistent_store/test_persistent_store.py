@@ -315,7 +315,7 @@ class TestHelperFunctions:
         from ares.core.persistent_store.store import _is_ip
 
         assert _is_ip("192.168.58.10") is True
-        assert _is_ip("10.0.0.1") is True
+        assert _is_ip("192.168.58.20") is True
         assert _is_ip("255.255.255.255") is True
 
     def test_is_ip_invalid(self):

@@ -1410,7 +1410,7 @@ class TestS4UDelegationDetection:
 
     This detection catches the attack from op-20260214-141846:
     - jon.snow used constrained delegation via S4U2Proxy
-    - Impersonated Administrator to CIFS/winterfell
+    - Impersonated Administrator to CIFS/dc02
     - Led to secretsdump and krbtgt extraction
     """
 
@@ -1447,9 +1447,7 @@ class TestS4UDelegationDetection:
             mock_client.return_value.__aenter__.return_value.get = AsyncMock(
                 return_value=mock_response
             )
-            result = await tools.detect_s4u_delegation(
-                domain_controller="winterfell.north.contoso.local"
-            )
+            result = await tools.detect_s4u_delegation(domain_controller="dc02.child.contoso.local")
 
         assert result["_query_template"] == "s4u_delegation"
         assert result["_mitre_technique"] == "T1558.003"
@@ -1550,7 +1548,7 @@ class TestLSASecretsAccessDetection:
             mock_client.return_value.__aenter__.return_value.get = AsyncMock(
                 return_value=mock_response
             )
-            result = await tools.detect_lsa_secrets_access(target_host="winterfell.contoso.local")
+            result = await tools.detect_lsa_secrets_access(target_host="dc02.contoso.local")
 
         assert result["_query_template"] == "lsa_secrets_access"
 
@@ -1563,7 +1561,7 @@ class TestRemoteRegistryStartDetection:
     - Service state change to running/started
 
     From op-20260214-141846:
-    - "secretsdump started the RemoteRegistry service on winterfell"
+    - "secretsdump started the RemoteRegistry service on dc02"
     """
 
     @pytest.fixture
@@ -1600,8 +1598,6 @@ class TestRemoteRegistryStartDetection:
             mock_client.return_value.__aenter__.return_value.get = AsyncMock(
                 return_value=mock_response
             )
-            result = await tools.detect_remote_registry_start(
-                target_host="winterfell.contoso.local"
-            )
+            result = await tools.detect_remote_registry_start(target_host="dc02.contoso.local")
 
         assert result["_query_template"] == "remote_registry_start"

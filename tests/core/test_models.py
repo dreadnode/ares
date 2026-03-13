@@ -1033,13 +1033,13 @@ class TestResolveNetBIOSToFQDN:
 
         state = SharedRedTeamState(operation_id="test-op")
         # DC discovered early - this is the common case
-        state.domain_controllers = {"north.sevenkingdoms.local": "192.168.58.240"}
+        state.domain_controllers = {"child.contoso.local": "192.168.58.240"}
 
-        # Should resolve "north" to "north.sevenkingdoms.local"
-        result = state._resolve_netbios_to_fqdn("north")
-        assert result == "north.sevenkingdoms.local"
+        # Should resolve "child" to "child.contoso.local"
+        result = state._resolve_netbios_to_fqdn("child")
+        assert result == "child.contoso.local"
         # Should also cache the mapping for future lookups
-        assert state.netbios_to_fqdn["north"] == "north.sevenkingdoms.local"
+        assert state.netbios_to_fqdn["child"] == "child.contoso.local"
 
     def test_domain_controllers_priority_over_target(self) -> None:
         """Test that domain_controllers takes priority over target.domain."""
@@ -1047,13 +1047,13 @@ class TestResolveNetBIOSToFQDN:
 
         state = SharedRedTeamState(operation_id="test-op")
         # Target is parent domain
-        state.target = Target(ip="192.168.58.1", domain="sevenkingdoms.local")
+        state.target = Target(ip="192.168.58.1", domain="contoso.local")
         # But DC for child domain is known
-        state.domain_controllers = {"north.sevenkingdoms.local": "192.168.58.240"}
+        state.domain_controllers = {"child.contoso.local": "192.168.58.240"}
 
         # Should prefer domain_controllers over target.domain
-        result = state._resolve_netbios_to_fqdn("north")
-        assert result == "north.sevenkingdoms.local"
+        result = state._resolve_netbios_to_fqdn("child")
+        assert result == "child.contoso.local"
 
 
 class TestAddNetBIOSMapping:
@@ -1986,10 +1986,10 @@ class TestGoldenTicketCapabilityDetection:
 
         state = SharedRedTeamState(operation_id="test-op")
 
-        # "north" should match "north.sevenkingdoms.local"
-        assert state._domains_match("north", "north.sevenkingdoms.local") is True
-        # But "north" should not match "south.sevenkingdoms.local"
-        assert state._domains_match("north", "south.sevenkingdoms.local") is False
+        # "child" should match "child.contoso.local"
+        assert state._domains_match("child", "child.contoso.local") is True
+        # But "child" should not match "other.contoso.local"
+        assert state._domains_match("child", "other.contoso.local") is False
 
     def test_golden_ticket_capable_creds_field_default(self) -> None:
         """Test golden_ticket_capable_creds field has empty dict default."""
@@ -2232,8 +2232,8 @@ class TestResolveHostnameToFQDN:
     """Tests for SharedRedTeamState.resolve_hostname_to_fqdn.
 
     This method normalizes hostnames to canonical FQDNs at the span emission layer.
-    It handles NetBIOS names (WINTERFELL), short names (winterfell), and wrong
-    domain suffixes (winterfell.sevenkingdoms.local -> winterfell.north.sevenkingdoms.local).
+    It handles NetBIOS names (DC02), short names (dc02), and wrong
+    domain suffixes (dc02.contoso.local -> dc02.child.contoso.local).
     """
 
     def test_resolves_netbios_to_fqdn(self) -> None:
@@ -2439,22 +2439,22 @@ class TestAddHostMerge:
     def test_prefers_more_specific_fqdn(self) -> None:
         """Test that more specific FQDN is preferred over less specific.
 
-        This is the GOAD scenario: winterfell.sevenkingdoms.local should be
-        upgraded to winterfell.north.sevenkingdoms.local (more specific).
+        This scenario: dc02.contoso.local should be
+        upgraded to dc02.child.contoso.local (more specific).
         """
         from ares.core.models import Host, SharedRedTeamState
 
         state = SharedRedTeamState(operation_id="test-op")
 
         # Add host with less specific FQDN first (wrong domain suffix)
-        state.add_host(Host(ip="10.1.2.240", hostname="winterfell.sevenkingdoms.local"))
-        assert state.all_hosts[0].hostname == "winterfell.sevenkingdoms.local"
+        state.add_host(Host(ip="192.168.58.240", hostname="dc02.contoso.local"))
+        assert state.all_hosts[0].hostname == "dc02.contoso.local"
 
         # Add same host with more specific FQDN (correct child domain)
-        state.add_host(Host(ip="10.1.2.240", hostname="winterfell.north.sevenkingdoms.local"))
+        state.add_host(Host(ip="192.168.58.240", hostname="dc02.child.contoso.local"))
         assert len(state.all_hosts) == 1
         # Should upgrade to more specific FQDN
-        assert state.all_hosts[0].hostname == "winterfell.north.sevenkingdoms.local"
+        assert state.all_hosts[0].hostname == "dc02.child.contoso.local"
 
     def test_does_not_downgrade_to_less_specific(self) -> None:
         """Test that a less specific FQDN does NOT replace a more specific one."""
@@ -2463,14 +2463,14 @@ class TestAddHostMerge:
         state = SharedRedTeamState(operation_id="test-op")
 
         # Add host with more specific FQDN first
-        state.add_host(Host(ip="10.1.2.240", hostname="winterfell.north.sevenkingdoms.local"))
-        assert state.all_hosts[0].hostname == "winterfell.north.sevenkingdoms.local"
+        state.add_host(Host(ip="192.168.58.240", hostname="dc02.child.contoso.local"))
+        assert state.all_hosts[0].hostname == "dc02.child.contoso.local"
 
         # Add same host with less specific FQDN - should NOT downgrade
-        state.add_host(Host(ip="10.1.2.240", hostname="winterfell.sevenkingdoms.local"))
+        state.add_host(Host(ip="192.168.58.240", hostname="dc02.contoso.local"))
         assert len(state.all_hosts) == 1
         # Should keep the more specific FQDN
-        assert state.all_hosts[0].hostname == "winterfell.north.sevenkingdoms.local"
+        assert state.all_hosts[0].hostname == "dc02.child.contoso.local"
 
     def test_requires_same_short_hostname_for_upgrade(self) -> None:
         """Test that FQDN upgrade only happens when short hostnames match."""

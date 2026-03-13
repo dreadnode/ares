@@ -106,7 +106,7 @@ class ResultProcessingMixin:
 
         # Extracted domain is NetBIOS (no ".") - check if target_domain matches
         # Check if target_domain starts with the NetBIOS name
-        # e.g., extracted="north", target="north.sevenkingdoms.local" → match
+        # e.g., extracted="child", target="child.contoso.local" -> match
         if (
             target_domain
             and "." in target_domain
@@ -507,7 +507,7 @@ class ResultProcessingMixin:
         # _extract_shares_from_output() in _process_output_text().
 
         # Get fallback domain for users by resolving from target host's FQDN
-        # This correctly handles child domain DCs (e.g., winterfell serves north.sevenkingdoms.local)
+        # This correctly handles child domain DCs (e.g., dc02 serves child.contoso.local)
         target_domain = self._resolve_domain_from_target_host(target_ip)
 
         discovered_users = result.get("discovered_users")
@@ -734,7 +734,7 @@ class ResultProcessingMixin:
         discovery_step = parent_attack_step + 1 if parent_credential_id else 0
 
         # Get fallback domain for hashes by resolving from target host's FQDN
-        # This correctly handles child domain DCs (e.g., winterfell serves north.sevenkingdoms.local)
+        # This correctly handles child domain DCs (e.g., dc02 serves child.contoso.local)
         target_domain = self._resolve_domain_from_target_host(target_ip)
 
         cred_data = result.get("credential")
@@ -772,8 +772,8 @@ class ResultProcessingMixin:
         if isinstance(hash_data, dict):
             # Resolve hash domain: prefer target_domain FQDN over LLM-extracted NetBIOS
             # When secretsdump runs against a DC, the target host's domain is authoritative.
-            # LLM often extracts "NORTH" (NetBIOS) from output like "NORTH\krbtgt:hash",
-            # but we should use "north.sevenkingdoms.local" from the DC's FQDN.
+            # LLM often extracts "CHILD" (NetBIOS) from output like "CHILD\krbtgt:hash",
+            # but we should use "child.contoso.local" from the DC's FQDN.
             extracted_domain = hash_data.get("domain", "").strip().lower()
             hash_domain = self._resolve_extracted_domain(extracted_domain, target_domain)
             hash_obj = Hash(
@@ -1029,9 +1029,9 @@ class ResultProcessingMixin:
         """Extract hosts from netexec SMB output.
 
         Parses two types of SMB output lines:
-        1. Banner lines with [*]: "SMB 10.1.2.183 445 KINGSLANDING [*] Windows 10..."
+        1. Banner lines with [*]: "SMB 192.168.58.10 445 DC01 [*] Windows 10..."
            - Extracts IP, hostname, and OS from the banner details
-        2. Non-banner lines: "SMB 10.1.2.240 445 WINTERFELL ADMIN$ Remote Admin"
+        2. Non-banner lines: "SMB 192.168.58.20 445 DC02 ADMIN$ Remote Admin"
            - Extracts IP and hostname only (OS will be "Unknown")
            - These appear in share enumeration, user enumeration, etc.
         """

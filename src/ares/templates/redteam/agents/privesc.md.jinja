@@ -50,6 +50,31 @@ If enumeration shows your assigned credential has NO exploitable path:
 Do NOT spend 40 steps documenting vulnerabilities for OTHER users you don't have credentials for.
 Report what you found and let the orchestrator dispatch a new task with the right credential.
 
+### FAIL FAST when missing required parameters:
+**CRITICAL:** If your task payload is missing required data for the attack, fail IMMEDIATELY:
+
+| Vuln Type | Required Params | If Missing |
+|-----------|----------------|------------|
+| adcs_esc8 | ca_name, ca_host OR domain/dc_ip | Fail - cannot start relay without CA target |
+| adcs_esc1/esc4 | ca_name, template | Fail - cannot request cert without template |
+| constrained_delegation | target_spn, username, password | Fail - cannot perform S4U |
+| mssql_impersonation | target, username, password | Fail - cannot connect to SQL |
+
+**Example fail-fast for ESC8 without CA details:**
+```
+task_complete(
+    task_id="your_task_id",
+    result="FAILED: ESC8 task missing required params (ca_name, ca_host). "
+           "Need CA details from certipy_find. Task payload had: {params}",
+    success=False
+)
+```
+
+Do NOT:
+- Loop calling record_weakness about missing params
+- Spend steps trying to enumerate missing data (that's recon's job)
+- Call get_operation_summary hoping to find the data
+
 If you find yourself calling documentation tools more than attack tools, STOP and refocus on exploitation.
 
 ## Your Responsibilities
@@ -109,6 +134,10 @@ Or manually:
 ```
 
 ### ESC8 - Web Enrollment Relay
+**Required task params:** `ca_name`, `ca_host` (or `domain`/`dc_ip` to derive them)
+
+**If missing required params:** FAIL IMMEDIATELY with task_complete(success=False). Do NOT loop.
+
 When ESC8 vulnerability is found (coordinate with COERCION agent):
 ```
 1. COERCION agent starts ntlmrelayx_to_adcs(ca_host="CA_IP", template="DomainController")
@@ -117,6 +146,9 @@ When ESC8 vulnerability is found (coordinate with COERCION agent):
 4. certipy_auth(domain="contoso.local", pfx_file="dc.pfx", dc_ip="DC_IP")
 → Get DC machine account NTLM hash
 ```
+
+**Note:** ESC8 exploitation is primarily handled by the COERCION agent. If you receive an ESC8
+task without ca_host/ca_name, fail with: "ESC8 requires ca_host for relay target. Missing from payload."
 
 ### Shadow Credentials
 For any user/computer you have GenericAll on:
