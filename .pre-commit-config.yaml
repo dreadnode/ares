@@ -93,7 +93,7 @@ repos:
     rev: v1.19.1
     hooks:
       - id: mypy
-        exclude: ^tests/
+        exclude: ^(tests/|alembic/)
         additional_dependencies:
           - "types-PyYAML"
           - "types-requests"

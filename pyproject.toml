@@ -30,6 +30,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# PostgreSQL persistent store for long-term data retention
+postgres = [
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.0",
+    "greenlet>=3.0.0",  # Required for SQLAlchemy async
+]
 docs = [
     "mkdocs>=1.6.1",
     "mkdocs-material>=9.6.1",
@@ -59,6 +66,7 @@ dev = [
 ares = "ares.__main__:run"
 ares-ops = "ares.cli_ops:main"
 ares-blue-ops = "ares.cli_blue_ops:main"
+ares-history = "ares.cli_history:main"
 
 [tool.poetry.plugins."pipx.run"]
 ares = 'ares.__main__:run'
@@ -113,7 +121,7 @@ markers = [
 [tool.mypy]
 strict = true
 python_version = "3.11"
-exclude = ["tests", ".hooks", "scripts"]
+exclude = ["tests", ".hooks", "scripts", "alembic"]
 
 [[tool.mypy.overrides]]
 module = ["ares.*"]
@@ -281,9 +289,18 @@ skip-magic-trailing-comma = false
     "T201",    # printing is fine for CLI commands
     "PLR0912", # too many branches is acceptable for CLI command functions
 ]
+"src/ares/cli_history.py" = [
+    "T201",    # printing is fine for CLI commands
+]
 "src/ares/main.py" = [
     "T201",    # printing is intentional for CI JSON output
 ]
 "src/ares/eval/*.py" = [
     "PLR0912", # complex evaluation functions have many branches by nature
+]
+"alembic/**/*.py" = [
+    "INP001",  # alembic doesn't follow package conventions
+]
+"src/ares/core/persistent_store/models.py" = [
+    "A003",    # SQLAlchemy uses 'id' as column name by convention
 ]
