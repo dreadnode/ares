@@ -364,6 +364,26 @@ class ResultProcessingMixin:
                 if success:
                     logger.info(f"✅ Marked vulnerability {vuln_id} as exploited")
 
+        # Mark parent vulnerability as exploited when chained task succeeds
+        # This handles the S4U chain: constrained_delegation exploit -> secretsdump
+        # The secretsdump task carries parent_vuln_id from the original exploit
+        # When secretsdump succeeds, it proves the S4U attack worked end-to-end
+        parent_vuln_id = task_params.get("parent_vuln_id", "")
+        if (
+            parent_vuln_id
+            and success
+            and parent_vuln_id not in self.shared_state.exploited_vulnerabilities
+        ):
+            result_dict = result if isinstance(result, dict) else {"output": str(result)}
+            await self.mark_vulnerability_exploited(
+                parent_vuln_id, success, result_dict, task_queue=task_queue
+            )
+            da_note = " (achieved DA!)" if self.shared_state.has_domain_admin else ""
+            logger.info(
+                f"✅ Marked parent vulnerability {parent_vuln_id} as exploited "
+                f"(chained secretsdump succeeded{da_note})"
+            )
+
         # Resolve any waiting futures
         self._resolve_task_future(task_id, success, result, error)
 

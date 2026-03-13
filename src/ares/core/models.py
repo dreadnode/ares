@@ -1012,6 +1012,108 @@ class SharedRedTeamState:
 
                     logger.warning(f"Failed to load processed set {attr_name}: {e}")
 
+    async def refresh_from_redis(self) -> None:
+        """Refresh all collections from Redis into memory.
+
+        This should be called before report generation to ensure the orchestrator's
+        in-memory state includes data that workers persisted directly to Redis.
+        Workers write directly to Redis, but the orchestrator's memory doesn't
+        automatically sync those changes. This method fetches fresh data and
+        merges it with existing in-memory state.
+        """
+        if not self._backend:
+            logger.debug("No backend configured, skipping refresh_from_redis")
+            return
+
+        logger.info("Refreshing state from Redis before report generation...")
+
+        try:
+            # Refresh shares (workers add these directly to Redis)
+            redis_shares = await self._backend.get_shares()
+            existing_share_keys = {(s.host, s.name) for s in self.all_shares}
+            for share in redis_shares:
+                if (share.host, share.name) not in existing_share_keys:
+                    self.all_shares.append(share)
+
+            # Refresh exploited vulnerabilities
+            redis_exploited = await self._backend.get_exploited_vulnerabilities()
+            self.exploited_vulnerabilities.update(redis_exploited)
+
+            # Refresh credentials (workers may add via threaded consumers)
+            redis_creds = await self._backend.get_credentials()
+            existing_cred_keys = {
+                (c.username.lower(), c.domain.lower(), c.password) for c in self.all_credentials
+            }
+            for cred in redis_creds:
+                key = (cred.username.lower(), cred.domain.lower(), cred.password)
+                if key not in existing_cred_keys:
+                    self.all_credentials.append(cred)
+
+            # Refresh hashes
+            redis_hashes = await self._backend.get_hashes()
+            existing_hash_keys = {
+                (h.username.lower(), h.domain.lower(), h.hash_value) for h in self.all_hashes
+            }
+            for h in redis_hashes:
+                key = (h.username.lower(), h.domain.lower(), h.hash_value)
+                if key not in existing_hash_keys:
+                    self.all_hashes.append(h)
+
+            # Refresh users
+            redis_users = await self._backend.get_users()
+            existing_user_keys = {(u.username.lower(), u.domain.lower()) for u in self.all_users}
+            for user in redis_users:
+                user_key = (user.username.lower(), user.domain.lower())
+                if user_key not in existing_user_keys:
+                    self.all_users.append(user)
+
+            # Refresh hosts
+            redis_hosts = await self._backend.get_hosts()
+            existing_host_ips = {h.ip for h in self.all_hosts}
+            for host in redis_hosts:
+                if host.ip not in existing_host_ips:
+                    self.all_hosts.append(host)
+
+            # Refresh completion state flags (critical for accurate reporting)
+            has_da, da_path, _da_hash_id = await self._backend.get_domain_admin()
+            if has_da:
+                self.has_domain_admin = True
+                if da_path:
+                    self.domain_admin_path = da_path
+
+            has_gt = await self._backend.get_golden_ticket()
+            if has_gt:
+                self.has_golden_ticket = True
+
+            # Refresh golden tickets list
+            redis_golden_tickets = await self._backend.get_golden_tickets()
+            existing_gt_domains = {t.get("domain", "").lower() for t in self.golden_tickets}
+            for gt in redis_golden_tickets:
+                if gt.get("domain", "").lower() not in existing_gt_domains:
+                    self.golden_tickets.append(gt)
+
+            # Refresh completed_at timestamp
+            completed_at_str = await self._backend.get_meta("completed_at")
+            if completed_at_str and not self.completed_at:
+                from datetime import datetime
+
+                self.completed_at = datetime.fromisoformat(completed_at_str)
+
+            # Refresh completed flag
+            redis_completed = await self._backend.get_meta("completed", default=False)
+            if redis_completed:
+                self.completed = True
+
+            logger.info(
+                f"State refreshed from Redis: {len(self.all_shares)} shares, "
+                f"{len(self.exploited_vulnerabilities)} exploited vulns, "
+                f"{len(self.all_credentials)} creds, {len(self.all_hashes)} hashes, "
+                f"DA={self.has_domain_admin}, GT={self.has_golden_ticket}"
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to refresh state from Redis: {e}")
+
     async def cleanup_background_tasks(self) -> None:
         """Cancel and await all pending background publish tasks.
 
@@ -2087,9 +2189,17 @@ class SharedRedTeamState:
 
         When a new FQDN domain is added, retroactively normalizes any existing
         credentials/users/hashes that have a matching NetBIOS domain name.
+
+        Only accepts valid FQDN domains (must contain at least one dot).
+        Single-word names (hostnames, NetBIOS names) are rejected.
         """
         normalized = (domain or "").strip().lower()
         if not normalized:
+            return False
+        # Reject single-word entries - these are hostnames or NetBIOS names, not FQDN domains
+        # Valid AD domains always have at least one dot (e.g., contoso.local)
+        if "." not in normalized:
+            logger.debug(f"Rejected non-FQDN domain: {normalized}")
             return False
         if any(existing.lower() == normalized for existing in self.all_domains):
             return False
@@ -2812,7 +2922,7 @@ class SharedRedTeamState:
         if ips:
             return ips
 
-        # User accounts with dots/underscores (svc_backup, admin.user)
+        # User accounts with dots/underscores (svc_backup, admin.user, jon.snow)
         user_accounts = [
             m.group(1)
             for m in re.finditer(r"\b([a-z]+[._][a-z]+)\b", block_lower)
@@ -2820,6 +2930,17 @@ class SharedRedTeamState:
         ]
         if user_accounts:
             return user_accounts
+
+        # Also check for usernames after dashes (e.g., "Constrained Delegation - user.name")
+        # Normalize various dash types first (em-dash \u2014 and en-dash \u2013)
+        normalized = block_lower.replace("\u2014", "-").replace("\u2013", "-")
+        title_usernames = [
+            m.group(1)
+            for m in re.finditer(r"-\s*([a-z][a-z0-9._]+)\s*$", normalized, re.MULTILINE)
+            if "." in m.group(1) or "_" in m.group(1)
+        ]
+        if title_usernames:
+            return title_usernames
 
         # Hostnames with digits (dc01, sql01)
         common_words = {
@@ -2887,7 +3008,13 @@ class SharedRedTeamState:
         The key is derived from weakness TYPE + affected entities.
         This handles LLM rephrasing the same finding with different titles.
         """
+        # Normalize the block: lowercase, normalize dashes, collapse whitespace
         block_lower = block.lower()
+        # Normalize various dash types to regular dash (em-dash \u2014 and en-dash \u2013)
+        block_lower = block_lower.replace("\u2014", "-").replace("\u2013", "-")
+        # Collapse multiple spaces
+        block_lower = " ".join(block_lower.split())
+
         entities = self._extract_entities_from_weakness(block_lower)
         weakness_type = self._classify_weakness_type(block_lower)
         unique_entities = sorted(set(entities))
@@ -3348,6 +3475,237 @@ class SharedRedTeamState:
             cred.password = password
             deduped.append(cred)
         return deduped
+
+    def normalize_credential_domains_to_users(self) -> int:
+        """Normalize credential domains to match discovered user domains.
+
+        Handles cross-domain duplicates where the same credential was stored
+        with different domains (e.g., parent vs child domain). This happens
+        when credentials are added before user enumeration completes, or when
+        Redis updates fail from threaded consumers.
+
+        For each username:password pair with multiple domain entries:
+        - If user exists in exactly one domain, keep only that credential
+        - If user exists in multiple domains, keep all (legitimate password reuse)
+        - If user not found, keep the most specific domain (longest FQDN)
+
+        Returns:
+            Number of duplicate credentials removed.
+        """
+        # Build user domain lookup: username -> set of domains
+        user_domains: dict[str, set[str]] = {}
+        for user in self.all_users:
+            username_lower = user.username.lower()
+            if user.domain:
+                user_domains.setdefault(username_lower, set()).add(user.domain.lower())
+
+        # Group credentials by username:password
+        cred_groups: dict[str, list[Credential]] = {}
+        for cred in self.all_credentials:
+            key = f"{cred.username.lower()}:{cred.password}"
+            cred_groups.setdefault(key, []).append(cred)
+
+        # Process each group
+        normalized: list[Credential] = []
+        removed = 0
+
+        for key, creds in cred_groups.items():
+            username_lower = creds[0].username.lower()
+            domains_for_user = user_domains.get(username_lower, set())
+
+            if len(creds) == 1:
+                # Only one credential for this username:password
+                cred = creds[0]
+                # Check if domain needs correction based on where user actually exists
+                if len(domains_for_user) == 1:
+                    correct_domain = next(iter(domains_for_user))
+                    if cred.domain.lower() != correct_domain:
+                        old_domain = cred.domain
+                        cred.domain = correct_domain
+                        logger.info(
+                            f"Credential domain corrected: {cred.username} "
+                            f"{old_domain} -> {correct_domain}"
+                        )
+                normalized.append(cred)
+                continue
+
+            # Multiple credentials with same username:password but different domains
+            if len(domains_for_user) == 0:
+                # User not enumerated - keep most specific (longest) domain
+                best = max(creds, key=lambda c: len(c.domain))
+                normalized.append(best)
+                removed += len(creds) - 1
+                logger.debug(
+                    f"Credential dedup (no user): {key.split(':')[0]} - "
+                    f"kept {best.domain}, removed {len(creds) - 1} others"
+                )
+            elif len(domains_for_user) == 1:
+                # User exists in exactly one domain - keep only matching credential
+                correct_domain = next(iter(domains_for_user))
+                kept = None
+                for cred in creds:
+                    if cred.domain.lower() == correct_domain:
+                        kept = cred
+                        break
+                if kept:
+                    normalized.append(kept)
+                    removed += len(creds) - 1
+                    logger.info(
+                        f"Credential dedup (user in {correct_domain}): {key.split(':')[0]} - "
+                        f"removed {len(creds) - 1} cross-domain duplicates"
+                    )
+                else:
+                    # No exact match - update the most specific credential's domain
+                    best = max(creds, key=lambda c: len(c.domain))
+                    old_domain = best.domain
+                    best.domain = correct_domain
+                    normalized.append(best)
+                    removed += len(creds) - 1
+                    logger.info(
+                        f"Credential domain corrected: {key.split(':')[0]} "
+                        f"{old_domain} -> {correct_domain}"
+                    )
+            else:
+                # User exists in multiple domains - check which credentials match actual domains
+                for cred in creds:
+                    if cred.domain.lower() in domains_for_user:
+                        normalized.append(cred)
+                    else:
+                        removed += 1
+                        logger.debug(
+                            f"Credential dedup (multi-domain): removed "
+                            f"{cred.domain}\\{cred.username} (user not in that domain)"
+                        )
+
+        if removed > 0:
+            self.all_credentials = normalized
+            logger.info(f"Normalized {removed} cross-domain credential duplicate(s)")
+
+        return removed
+
+    def normalize_hash_domains_to_users(self) -> int:
+        """Normalize hash domains to match discovered user domains.
+
+        Handles LLM hallucinations where the domain is misspelled (e.g., 'sevenkingdomain'
+        instead of 'sevenkingdoms'). For each hash, if the user exists in exactly one
+        known domain and the hash's domain doesn't match, correct it.
+
+        Returns:
+            Number of hashes with domains corrected.
+        """
+        # Build user domain lookup: username -> set of domains
+        user_domains: dict[str, set[str]] = {}
+        for user in self.all_users:
+            username_lower = user.username.lower()
+            if user.domain:
+                user_domains.setdefault(username_lower, set()).add(user.domain.lower())
+
+        # Build set of known valid domains from AUTHORITATIVE sources only
+        # (not from all_domains which may contain LLM-hallucinated typos)
+        known_domains: set[str] = set()
+        # From user domains
+        for domains_set in user_domains.values():
+            known_domains.update(domains_set)
+        # From host FQDNs
+        for host in self.all_hosts:
+            if host.hostname and "." in host.hostname:
+                parts = host.hostname.lower().split(".")
+                if len(parts) > 1:
+                    known_domains.add(".".join(parts[1:]))
+        # From target
+        if self.target and self.target.domain:
+            known_domains.add(self.target.domain.lower())
+
+        corrected = 0
+        seen_hashes: set[str] = set()  # For deduplication after normalization
+        normalized_hashes: list[Hash] = []
+
+        for hash_obj in self.all_hashes:
+            username_lower = hash_obj.username.lower()
+            hash_domain = (hash_obj.domain or "").lower()
+
+            # Skip well-known accounts that exist in every domain
+            if username_lower in {"krbtgt", "administrator", "guest", "defaultaccount"}:
+                # Still dedupe by hash value
+                dedup_key = f"{hash_domain}:{username_lower}:{hash_obj.hash_value}"
+                if dedup_key not in seen_hashes:
+                    seen_hashes.add(dedup_key)
+                    normalized_hashes.append(hash_obj)
+                continue
+
+            domains_for_user = user_domains.get(username_lower, set())
+
+            # If hash domain is not in known domains but user exists in exactly one domain
+            if hash_domain not in known_domains and len(domains_for_user) == 1:
+                correct_domain = next(iter(domains_for_user))
+                old_domain = hash_obj.domain
+                hash_obj.domain = correct_domain
+                corrected += 1
+                logger.info(
+                    f"Hash domain corrected: {username_lower} {old_domain} -> {correct_domain}"
+                )
+
+            # Deduplicate by hash value (after potential domain correction)
+            dedup_key = f"{hash_obj.domain.lower()}:{username_lower}:{hash_obj.hash_value}"
+            if dedup_key not in seen_hashes:
+                seen_hashes.add(dedup_key)
+                normalized_hashes.append(hash_obj)
+
+        if corrected > 0 or len(normalized_hashes) != len(self.all_hashes):
+            removed = len(self.all_hashes) - len(normalized_hashes)
+            self.all_hashes = normalized_hashes
+            if corrected > 0:
+                logger.info(f"Normalized {corrected} hash domain(s)")
+            if removed > 0:
+                logger.info(f"Removed {removed} duplicate hash(es) after normalization")
+
+        return corrected
+
+    def cleanup_invalid_domains(self) -> int:
+        """Remove domains that don't match any known valid pattern.
+
+        Cleans up typo domains like 'sevenkingdomain.local' that were added
+        due to LLM hallucination. A domain is considered invalid if:
+        - No users exist in that domain
+        - No hosts have that domain in their FQDN
+        - It's not the target domain
+
+        Returns:
+            Number of invalid domains removed.
+        """
+        # Build set of valid domains from various sources
+        valid_domains: set[str] = set()
+
+        # From target
+        if self.target and self.target.domain:
+            valid_domains.add(self.target.domain.lower())
+
+        # From hosts (extract domain from FQDN)
+        for host in self.all_hosts:
+            if host.hostname and "." in host.hostname:
+                parts = host.hostname.lower().split(".")
+                if len(parts) > 1:
+                    valid_domains.add(".".join(parts[1:]))
+
+        # From users
+        for user in self.all_users:
+            if user.domain:
+                valid_domains.add(user.domain.lower())
+
+        # Check which domains in all_domains are actually valid
+        invalid_domains = []
+        for domain in self.all_domains:
+            domain_lower = domain.lower()
+            if domain_lower not in valid_domains:
+                invalid_domains.append(domain)
+
+        # Remove invalid domains
+        if invalid_domains:
+            self.all_domains = [d for d in self.all_domains if d.lower() in valid_domains]
+            for domain in invalid_domains:
+                logger.info(f"Removed invalid domain: {domain}")
+
+        return len(invalid_domains)
 
     @staticmethod
     def _extract_domains(state: SharedRedTeamState) -> list[str]:

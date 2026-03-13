@@ -857,5 +857,148 @@ class TestResultProcessingPassesTaskQueue:
         assert call_kwargs.get("task_queue") is mock_task_queue
 
 
+class TestParentVulnIdTracking:
+    """Tests for parent_vuln_id propagation through S4U chain.
+
+    When a constrained_delegation exploit dispatches a chained secretsdump task,
+    the parent_vuln_id is passed through so the vulnerability can be marked as
+    exploited when secretsdump succeeds.
+    """
+
+    @pytest.mark.asyncio
+    async def test_secretsdump_marks_parent_vuln_exploited(self):
+        """When secretsdump with parent_vuln_id succeeds, parent vuln is marked exploited."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState, TaskInfo
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-parent-vuln")
+        dispatcher._running = True
+        dispatcher._redis_client = AsyncMock()
+
+        # Mock the methods we don't want to actually run
+        dispatcher._persist_completed_task = AsyncMock()
+        dispatcher._auto_chain_s4u_lateral_movement = AsyncMock(return_value=0)
+        dispatcher.mark_vulnerability_exploited = AsyncMock()
+        dispatcher._get_task_info_from_redis = AsyncMock(return_value=None)
+
+        # Create mock task_queue
+        mock_task_queue = MagicMock()
+        mock_task_queue.redis = AsyncMock()
+
+        # Create task info for secretsdump (credential_access) with parent_vuln_id
+        task_info = TaskInfo(
+            task_id="task-secretsdump-1",
+            task_type="credential_access",  # NOT "exploit"
+            assigned_agent="credaccess",
+            params={"parent_vuln_id": "constrained_delegation_192.168.58.10_abc123"},
+        )
+        dispatcher._shared_state.pending_tasks["task-secretsdump-1"] = task_info
+
+        # Also need to mock the persist method
+        dispatcher._persist_task_info_to_redis = AsyncMock()
+
+        result = {"output": "Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6..."}
+
+        await dispatcher.complete_task(
+            task_id="task-secretsdump-1",
+            success=True,
+            result=result,
+            source_agent="credaccess",
+            task_queue=mock_task_queue,
+        )
+
+        # mark_vulnerability_exploited should be called for the parent_vuln_id
+        dispatcher.mark_vulnerability_exploited.assert_called_once()
+        call_args = dispatcher.mark_vulnerability_exploited.call_args
+        assert call_args.args[0] == "constrained_delegation_192.168.58.10_abc123"
+        assert call_args.args[1] is True  # success=True
+
+    @pytest.mark.asyncio
+    async def test_secretsdump_without_parent_vuln_id_does_not_mark(self):
+        """Secretsdump without parent_vuln_id doesn't call mark_vulnerability_exploited."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState, TaskInfo
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-no-parent")
+        dispatcher._running = True
+        dispatcher._redis_client = AsyncMock()
+
+        # Mock the methods we don't want to actually run
+        dispatcher._persist_completed_task = AsyncMock()
+        dispatcher._auto_chain_s4u_lateral_movement = AsyncMock(return_value=0)
+        dispatcher.mark_vulnerability_exploited = AsyncMock()
+        dispatcher._get_task_info_from_redis = AsyncMock(return_value=None)
+
+        # Create task info for secretsdump without parent_vuln_id
+        task_info = TaskInfo(
+            task_id="task-secretsdump-2",
+            task_type="credential_access",
+            assigned_agent="credaccess",
+            params={},  # No parent_vuln_id
+        )
+        dispatcher._shared_state.pending_tasks["task-secretsdump-2"] = task_info
+
+        dispatcher._persist_task_info_to_redis = AsyncMock()
+
+        result = {"output": "Some output"}
+
+        await dispatcher.complete_task(
+            task_id="task-secretsdump-2",
+            success=True,
+            result=result,
+            source_agent="credaccess",
+            task_queue=MagicMock(),
+        )
+
+        # mark_vulnerability_exploited should NOT be called
+        dispatcher.mark_vulnerability_exploited.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_secretsdump_does_not_mark_parent_vuln(self):
+        """Failed secretsdump with parent_vuln_id doesn't mark parent vuln exploited."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState, TaskInfo
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-failed")
+        dispatcher._running = True
+        dispatcher._redis_client = AsyncMock()
+
+        dispatcher._persist_completed_task = AsyncMock()
+        dispatcher._auto_chain_s4u_lateral_movement = AsyncMock(return_value=0)
+        dispatcher.mark_vulnerability_exploited = AsyncMock()
+        dispatcher._get_task_info_from_redis = AsyncMock(return_value=None)
+
+        task_info = TaskInfo(
+            task_id="task-secretsdump-3",
+            task_type="credential_access",
+            assigned_agent="credaccess",
+            params={"parent_vuln_id": "constrained_delegation_192.168.58.10_def456"},
+        )
+        dispatcher._shared_state.pending_tasks["task-secretsdump-3"] = task_info
+
+        dispatcher._persist_task_info_to_redis = AsyncMock()
+
+        await dispatcher.complete_task(
+            task_id="task-secretsdump-3",
+            success=False,  # Failed
+            result={"error": "Access denied"},
+            error="Access denied",
+            source_agent="credaccess",
+            task_queue=MagicMock(),
+        )
+
+        # mark_vulnerability_exploited should NOT be called for failed task
+        dispatcher.mark_vulnerability_exploited.assert_not_called()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
