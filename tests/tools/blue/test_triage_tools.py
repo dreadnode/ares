@@ -96,6 +96,78 @@ class TestEscalationTriageToolsInit:
         assert triage_tools._result_data == {}
 
 
+class TestGetImpliedCapabilities:
+    """Tests for _get_implied_capabilities method."""
+
+    def test_empty_techniques_returns_empty(self, triage_tools):
+        result = triage_tools._get_implied_capabilities(set())
+        assert result == []
+
+    def test_dcsync_implies_golden_ticket_and_da(self, triage_tools):
+        result = triage_tools._get_implied_capabilities({"T1003.006"})
+
+        assert len(result) == 2
+        assert any("GOLDEN TICKET CAPABILITY" in r for r in result)
+        assert any("DOMAIN ADMIN ACHIEVED" in r for r in result)
+        # Verify it explains why logs won't show golden ticket
+        golden_ticket_msg = next(r for r in result if "GOLDEN TICKET" in r)
+        assert "NO log evidence" in golden_ticket_msg
+
+    def test_lsass_dump_implies_golden_ticket(self, triage_tools):
+        result = triage_tools._get_implied_capabilities({"T1003.001"})
+
+        assert len(result) == 1
+        assert "GOLDEN TICKET CAPABILITY" in result[0]
+
+    def test_ntds_dump_implies_golden_ticket(self, triage_tools):
+        result = triage_tools._get_implied_capabilities({"T1003.003"})
+
+        assert len(result) == 1
+        assert "GOLDEN TICKET CAPABILITY" in result[0]
+
+    def test_generic_credential_dump_implies_golden_ticket(self, triage_tools):
+        result = triage_tools._get_implied_capabilities({"T1003"})
+
+        assert len(result) == 1
+        assert "GOLDEN TICKET CAPABILITY" in result[0]
+
+    def test_constrained_delegation_implies_privesc(self, triage_tools):
+        result = triage_tools._get_implied_capabilities({"T1550.003"})
+
+        assert len(result) >= 1
+        assert any("PRIVILEGE ESCALATION CAPABILITY" in r for r in result)
+        assert any("impersonate ANY user" in r for r in result)
+
+    def test_kerberoasting_implies_offline_cracking(self, triage_tools):
+        result = triage_tools._get_implied_capabilities({"T1558.003"})
+
+        assert len(result) == 1
+        assert "CREDENTIAL COMPROMISE RISK" in result[0]
+        assert "offline cracking" in result[0].lower()
+
+    def test_asrep_roasting_implies_offline_cracking(self, triage_tools):
+        result = triage_tools._get_implied_capabilities({"T1558.004"})
+
+        assert len(result) == 1
+        assert "CREDENTIAL COMPROMISE RISK" in result[0]
+        assert "pre-auth disabled" in result[0].lower()
+
+    def test_multiple_techniques_combine_implications(self, triage_tools):
+        # Simulate a full attack chain: DCSync + Kerberoasting
+        result = triage_tools._get_implied_capabilities({"T1003.006", "T1558.003"})
+
+        # Should have: golden ticket, DA achieved, kerberoasting
+        assert len(result) == 3
+        assert any("GOLDEN TICKET" in r for r in result)
+        assert any("DOMAIN ADMIN ACHIEVED" in r for r in result)
+        assert any("Kerberoasting" in r for r in result)
+
+    def test_unrelated_technique_returns_empty(self, triage_tools):
+        # T1087 is account discovery - no implied capabilities
+        result = triage_tools._get_implied_capabilities({"T1087.002"})
+        assert result == []
+
+
 class TestGetInvestigationContext:
     """Tests for get_investigation_context tool."""
 
@@ -121,6 +193,31 @@ class TestGetInvestigationContext:
         assert "Total evidence items: 2" in result
         assert "Level 6" in result  # TTPs
         assert "Level 2" in result  # IP Addresses
+
+    def test_includes_attack_chain_implications(self, triage_tools, mock_shared_state):
+        # mock_shared_state has T1003.001 which should trigger golden ticket implication
+        triage_tools.set_shared_state(mock_shared_state)
+        result = triage_tools.get_investigation_context()
+
+        assert "ATTACK CHAIN IMPLICATIONS" in result
+        assert "GOLDEN TICKET CAPABILITY" in result
+
+    def test_shows_no_implications_when_none(self, triage_tools, mock_shared_state):
+        # Set techniques that don't have implications
+        mock_shared_state.identified_techniques = {"T1087.002"}  # Account discovery only
+        triage_tools.set_shared_state(mock_shared_state)
+        result = triage_tools.get_investigation_context()
+
+        assert "ATTACK CHAIN IMPLICATIONS" in result
+        assert "No additional implied capabilities" in result
+
+    def test_dcsync_shows_both_implications(self, triage_tools, mock_shared_state):
+        mock_shared_state.identified_techniques = {"T1003.006"}
+        triage_tools.set_shared_state(mock_shared_state)
+        result = triage_tools.get_investigation_context()
+
+        assert "GOLDEN TICKET CAPABILITY" in result
+        assert "DOMAIN ADMIN ACHIEVED" in result
 
 
 class TestConfirmEscalation:
