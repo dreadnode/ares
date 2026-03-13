@@ -280,6 +280,8 @@ _CONNECTION_ERROR_KEYWORDS = frozenset(
         "getaddrinfo",
         "temporary failure in name resolution",
         "no address associated",
+        # Sentinel failover errors
+        "no master found",
     }
 )
 

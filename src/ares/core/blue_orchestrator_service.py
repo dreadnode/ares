@@ -22,6 +22,7 @@ from ares.core.blue_task_queue import BlueTaskQueue
 from ares.core.config import get_namespace, get_redis_url
 from ares.core.litellm_env import configure_litellm_env
 from ares.core.redis_client import (
+    get_retry_delay,
     invalidate_sentinel_client,
     is_connection_error,
 )
@@ -639,14 +640,35 @@ class BlueOrchestratorService:
                     max_steps=request.max_steps,
                 )
 
-            # Run the investigation
+            # Run the investigation with retry for transient connection errors
             # Note: Status is updated to "completed" inside investigate() after report generation
             logger.info(f"Starting investigation: {request.investigation_id}")
-            result = await orchestrator.investigate(
-                alert=request.alert,
-                correlation_context=request.correlation_context,
-                investigation_id=request.investigation_id,
-            )
+            max_retries = 3
+            last_error: Exception | None = None
+            for attempt in range(max_retries):
+                try:
+                    result = await orchestrator.investigate(
+                        alert=request.alert,
+                        correlation_context=request.correlation_context,
+                        investigation_id=request.investigation_id,
+                    )
+                    break  # Success
+                except Exception as e:
+                    last_error = e
+                    if is_connection_error(e) and attempt < max_retries - 1:
+                        delay = get_retry_delay(attempt)
+                        logger.warning(
+                            f"Connection error in investigation {request.investigation_id} "
+                            f"(attempt {attempt + 1}/{max_retries}): {e}. "
+                            f"Retrying in {delay:.1f}s..."
+                        )
+                        invalidate_sentinel_client()
+                        await asyncio.sleep(delay)
+                    else:
+                        raise
+            else:
+                # All retries exhausted
+                raise last_error  # type: ignore[misc]
 
             completed_at = datetime.now(timezone.utc)
             elapsed = (completed_at - started_at).total_seconds()

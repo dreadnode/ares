@@ -69,6 +69,77 @@ class EscalationTriageTools(Toolset):  # type: ignore[misc]
         if self._completion_event:
             self._completion_event.set()
 
+    def _get_implied_capabilities(self, techniques: set[str]) -> list[str]:
+        """Infer attack capabilities from observed techniques.
+
+        Certain techniques imply that other attacks are now possible,
+        even if we haven't observed them directly. This is critical for
+        triage - we shouldn't downgrade just because we didn't SEE the
+        follow-on attack in logs.
+
+        Args:
+            techniques: Set of observed MITRE technique IDs.
+
+        Returns:
+            List of implied capability warnings.
+        """
+        implied = []
+
+        # krbtgt hash extraction → Golden Ticket capability
+        # T1003.006 = DCSync, T1003.001 = LSASS dump, T1003.003 = NTDS.dit
+        credential_dump_techniques = {"T1003.006", "T1003.001", "T1003.003", "T1003"}
+        if credential_dump_techniques & techniques:
+            implied.append(
+                "GOLDEN TICKET CAPABILITY: Credential dumping detected (T1003.x). "
+                "If krbtgt hash was obtained, attacker can forge Golden Tickets. "
+                "Golden Ticket creation leaves NO log evidence - absence of T1558.001 "
+                "detection does NOT mean it wasn't created."
+            )
+
+        # Constrained delegation → impersonation to any service on target SPN
+        if "T1550.003" in techniques:
+            implied.append(
+                "PRIVILEGE ESCALATION CAPABILITY: Constrained delegation abuse detected. "
+                "Attacker can impersonate ANY user (including Domain Admin) to the "
+                "delegated service via S4U2Proxy. This can lead to DC compromise."
+            )
+
+        # Unconstrained delegation → TGT theft from any authenticating user
+        if any(t in techniques for t in ["T1558", "T1550"]):
+            has_delegation = "T1550.003" in techniques or any(
+                "delegation" in str(techniques).lower() for _ in [1]
+            )
+            if has_delegation:
+                implied.append(
+                    "DOMAIN COMPROMISE RISK: Delegation abuse can lead to domain admin "
+                    "access if a privileged user authenticates to the compromised service."
+                )
+
+        # Kerberoasting → offline password cracking capability
+        if "T1558.003" in techniques:
+            implied.append(
+                "CREDENTIAL COMPROMISE RISK: Kerberoasting detected. Attacker has "
+                "service account password hashes for offline cracking. Weak passwords "
+                "can be cracked in minutes."
+            )
+
+        # AS-REP Roasting → offline password cracking for pre-auth disabled accounts
+        if "T1558.004" in techniques:
+            implied.append(
+                "CREDENTIAL COMPROMISE RISK: AS-REP Roasting detected. Accounts with "
+                "Kerberos pre-auth disabled are vulnerable to offline password cracking."
+            )
+
+        # DCSync specifically → full domain compromise
+        if "T1003.006" in techniques:
+            implied.append(
+                "DOMAIN ADMIN ACHIEVED: DCSync (T1003.006) requires Domain Admin or "
+                "replication rights. If this technique was successful, the attacker "
+                "has DA-equivalent access and can extract ALL domain credentials."
+            )
+
+        return implied
+
     @dn.tool_method  # type: ignore[untyped-decorator]
     def get_investigation_context(self) -> str:
         """Get the full investigation context for triage decision.
@@ -172,6 +243,16 @@ class EscalationTriageTools(Toolset):  # type: ignore[misc]
         lines.append("")
         lines.append("--- SYNOPSIS ---")
         lines.append(state.attack_synopsis or "No synopsis generated")
+
+        # Attack chain implications - infer capabilities from observed techniques
+        lines.append("")
+        lines.append("--- ATTACK CHAIN IMPLICATIONS ---")
+        implied_capabilities = self._get_implied_capabilities(state.identified_techniques)
+        if implied_capabilities:
+            for capability in implied_capabilities:
+                lines.append(f"  ⚠️  {capability}")
+        else:
+            lines.append("  No additional implied capabilities")
 
         # Recommendations
         if state.recommendations:
