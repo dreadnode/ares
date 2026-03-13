@@ -537,3 +537,109 @@ class TestBlueOrchestratorService:
         mock_task_queue.connect.assert_awaited_once()
         mock_blue_queue.disconnect.assert_awaited_once()
         mock_blue_queue.connect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_process_investigation_request_retries_on_sentinel_master_error(self):
+        """Test that _process_investigation_request retries on Sentinel master not found errors."""
+        service = BlueOrchestratorService(redis_url="redis://", namespace="test")
+        service._publish_investigation_status = AsyncMock()
+        service._grafana_url = "http://grafana:3000"
+        service._grafana_api_key = "test-key"  # pragma: allowlist secret
+
+        request_data = {
+            "investigation_id": "inv-sentinel-retry",
+            "alert": {"labels": {"alertname": "TestAlert", "severity": "low"}},
+            "model": "test-model",
+            "auto_route": True,
+        }
+
+        call_count = 0
+
+        async def mock_investigate(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call fails with Sentinel master not found
+                raise Exception("No master found for 'aresmaster'")  # noqa: TRY002
+            # Second call succeeds
+            return {
+                "investigation_id": "inv-sentinel-retry",
+                "status": "completed",
+                "evidence_count": 1,
+                "techniques_identified": [],
+            }
+
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.investigate = AsyncMock(side_effect=mock_investigate)
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ares.agents.blue.InvestigationOrchestrator",
+                return_value=mock_orchestrator,
+            ),
+            patch("ares.integrations.mitre.MITREAttackClient"),
+            patch("ares.core.litellm_env.configure_litellm_env"),
+            patch(
+                "ares.core.blue_orchestrator_service.invalidate_sentinel_client"
+            ) as mock_invalidate,
+        ):
+            await service._process_investigation_request(request_data)
+
+            # Should have retried and succeeded on second attempt
+            assert call_count == 2
+            mock_invalidate.assert_called_once()
+
+            # Should have published running status, not failed
+            status_calls = service._publish_investigation_status.call_args_list
+            # Check the last call was not a "failed" status
+            assert not any(call[0][1] == "failed" for call in status_calls), (
+                "Investigation should not have failed"
+            )
+
+    @pytest.mark.asyncio
+    async def test_process_investigation_request_fails_after_max_retries_on_sentinel_error(
+        self,
+    ):
+        """Test that investigation fails after exhausting retries on Sentinel errors."""
+        service = BlueOrchestratorService(redis_url="redis://", namespace="test")
+        service._publish_investigation_status = AsyncMock()
+        service._grafana_url = "http://grafana:3000"
+        service._grafana_api_key = "test-key"  # pragma: allowlist secret
+
+        request_data = {
+            "investigation_id": "inv-sentinel-exhaust",
+            "alert": {"labels": {"alertname": "TestAlert", "severity": "low"}},
+            "model": "test-model",
+            "auto_route": True,
+        }
+
+        mock_orchestrator = MagicMock()
+        # All calls fail with Sentinel error
+        mock_orchestrator.investigate = AsyncMock(
+            side_effect=Exception("No master found for 'aresmaster'")
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ares.agents.blue.InvestigationOrchestrator",
+                return_value=mock_orchestrator,
+            ),
+            patch("ares.integrations.mitre.MITREAttackClient"),
+            patch("ares.core.litellm_env.configure_litellm_env"),
+            patch("ares.core.blue_orchestrator_service.invalidate_sentinel_client"),
+        ):
+            await service._process_investigation_request(request_data)
+
+            # Should have tried 3 times (max_retries)
+            assert mock_orchestrator.investigate.await_count == 3
+
+            # Should have published "failed" status
+            failed_call = None
+            for call in service._publish_investigation_status.call_args_list:
+                if call[0][1] == "failed":
+                    failed_call = call
+                    break
+            assert failed_call is not None, "Should have published failed status"
+            assert "No master found" in failed_call[0][2]["error"]

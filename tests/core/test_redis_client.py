@@ -335,6 +335,8 @@ class TestIsConnectionError:
             "getaddrinfo failed: Name does not resolve",
             "Temporary failure in name resolution",
             "No address associated with hostname",
+            # Sentinel failover errors
+            "No master found for 'aresmaster'",
         ],
     )
     def test_detects_connection_errors(self, error_message: str) -> None:
