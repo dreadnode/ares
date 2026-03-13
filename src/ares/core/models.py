@@ -1074,10 +1074,41 @@ class SharedRedTeamState:
                 if host.ip not in existing_host_ips:
                     self.all_hosts.append(host)
 
+            # Refresh completion state flags (critical for accurate reporting)
+            has_da, da_path, _da_hash_id = await self._backend.get_domain_admin()
+            if has_da:
+                self.has_domain_admin = True
+                if da_path:
+                    self.domain_admin_path = da_path
+
+            has_gt = await self._backend.get_golden_ticket()
+            if has_gt:
+                self.has_golden_ticket = True
+
+            # Refresh golden tickets list
+            redis_golden_tickets = await self._backend.get_golden_tickets()
+            existing_gt_domains = {t.get("domain", "").lower() for t in self.golden_tickets}
+            for gt in redis_golden_tickets:
+                if gt.get("domain", "").lower() not in existing_gt_domains:
+                    self.golden_tickets.append(gt)
+
+            # Refresh completed_at timestamp
+            completed_at_str = await self._backend.get_meta("completed_at")
+            if completed_at_str and not self.completed_at:
+                from datetime import datetime
+
+                self.completed_at = datetime.fromisoformat(completed_at_str)
+
+            # Refresh completed flag
+            redis_completed = await self._backend.get_meta("completed", default=False)
+            if redis_completed:
+                self.completed = True
+
             logger.info(
                 f"State refreshed from Redis: {len(self.all_shares)} shares, "
                 f"{len(self.exploited_vulnerabilities)} exploited vulns, "
-                f"{len(self.all_credentials)} creds, {len(self.all_hashes)} hashes"
+                f"{len(self.all_credentials)} creds, {len(self.all_hashes)} hashes, "
+                f"DA={self.has_domain_admin}, GT={self.has_golden_ticket}"
             )
 
         except Exception as e:

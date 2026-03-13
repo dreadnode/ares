@@ -3150,9 +3150,14 @@ async def _auto_golden_ticket(
     """
     import re
 
+    first_check = True
     while True:
         try:
-            await asyncio.sleep(check_interval)
+            # Check immediately on first iteration, then sleep between subsequent checks.
+            # This avoids missing krbtgt hashes discovered just before we start.
+            if not first_check:
+                await asyncio.sleep(check_interval)
+            first_check = False
 
             state = dispatcher.shared_state
 
