@@ -328,6 +328,23 @@ class OperationRecoveryManager:
         if techniques:
             logger.info(f"Loaded {len(techniques)} MITRE techniques from Redis")
 
+        # Normalize credentials and hashes against discovered users
+        # This handles cases where Redis updates failed from threaded consumers
+        # or LLM hallucinated typo domains
+        cred_fixed = state.normalize_credential_domains_to_users()
+        hash_fixed = state.normalize_hash_domains_to_users()
+        state.cleanup_invalid_domains()  # Side-effect: modifies state in place
+
+        # Persist corrections to Redis
+        if cred_fixed > 0:
+            for cred in state.all_credentials:
+                await backend.add_credential(cred)
+        if hash_fixed > 0:
+            for h in state.all_hashes:
+                await backend.add_hash(h)
+        # Note: domain cleanup not persisted - invalid domains will remain in Redis
+        # but won't affect operation since they're not in memory
+
     def _dedupe_hashes(self, hashes: list) -> list:
         """Deduplicate hashes, keeping first occurrence.
 

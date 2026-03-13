@@ -146,7 +146,7 @@ class OrchestratorService:
         return result
 
     async def _get_checkpoint_time(self, op_id: str) -> datetime | None:
-        if self.task_queue is None:
+        if self.task_queue is None or self.task_queue._client is None:
             return None
         # Read started_at from redis-native meta hash
         meta_key = f"ares:op:{op_id}:meta"

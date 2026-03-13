@@ -1,0 +1,96 @@
+# MITRE ATT&CK Technique Names
+# Static mapping for report generation without network dependency
+# Reference: https://attack.mitre.org/techniques/enterprise/
+---
+
+# Credential Access (TA0006)
+T1003: "OS Credential Dumping"
+T1003.001: "LSASS Memory"
+T1003.002: "Security Account Manager"
+T1003.003: "NTDS"
+T1003.004: "LSA Secrets"
+T1003.005: "Cached Domain Credentials"
+T1003.006: "DCSync"
+
+T1110: "Brute Force"
+T1110.001: "Password Guessing"
+T1110.002: "Password Cracking"
+T1110.003: "Password Spraying"
+T1110.004: "Credential Stuffing"
+
+T1552: "Unsecured Credentials"
+T1552.001: "Credentials In Files"
+T1552.002: "Credentials in Registry"
+T1552.004: "Private Keys"
+T1552.006: "Group Policy Preferences"
+
+T1555: "Credentials from Password Stores"
+
+T1558: "Steal or Forge Kerberos Tickets"
+T1558.001: "Golden Ticket"
+T1558.002: "Silver Ticket"
+T1558.003: "Kerberoasting"
+T1558.004: "AS-REP Roasting"
+
+# Discovery (TA0007)
+T1016: "System Network Configuration Discovery"
+T1018: "Remote System Discovery"
+T1033: "System Owner/User Discovery"
+T1046: "Network Service Discovery"
+
+T1069: "Permission Groups Discovery"
+T1069.001: "Local Groups"
+T1069.002: "Domain Groups"
+
+T1082: "System Information Discovery"
+
+T1087: "Account Discovery"
+T1087.001: "Local Account"
+T1087.002: "Domain Account"
+
+T1135: "Network Share Discovery"
+T1201: "Password Policy Discovery"
+
+# Lateral Movement (TA0008)
+T1021: "Remote Services"
+T1021.001: "Remote Desktop Protocol"
+T1021.002: "SMB/Windows Admin Shares"
+T1021.003: "Distributed Component Object Model"
+T1021.006: "Windows Remote Management"
+
+T1550: "Use Alternate Authentication Material"
+T1550.002: "Pass the Hash"
+T1550.003: "Pass the Ticket"
+
+# Privilege Escalation (TA0004)
+T1068: "Exploitation for Privilege Escalation"
+
+T1078: "Valid Accounts"
+T1078.002: "Domain Accounts"
+
+T1134: "Access Token Manipulation"
+
+T1484: "Domain Policy Modification"
+T1484.001: "Group Policy Modification"
+
+# Persistence (TA0003)
+T1098: "Account Manipulation"
+
+T1136: "Create Account"
+T1136.002: "Domain Account"
+
+# Execution (TA0002)
+T1047: "Windows Management Instrumentation"
+T1053: "Scheduled Task/Job"
+
+T1059: "Command and Scripting Interpreter"
+T1059.001: "PowerShell"
+
+T1569: "System Services"
+T1569.002: "Service Execution"
+
+# Defense Evasion (TA0005)
+T1070: "Indicator Removal"
+T1070.001: "Clear Windows Event Logs"
+
+T1562: "Impair Defenses"

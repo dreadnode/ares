@@ -592,7 +592,18 @@ class RoutingMixin:
 
         dc_ip = self._find_domain_controller_ip(domain)
 
-        logger.info(f"🎫 S4U SUCCESS! Auto-chaining secretsdump: {ticket_path} -> {target_host}")
+        # Get vuln_id from parent task to propagate through the chain
+        # This ensures the vulnerability is marked as exploited when secretsdump succeeds
+        parent_vuln_id = params.get("vuln_id", "")
+        if parent_vuln_id:
+            logger.info(
+                f"🎫 S4U SUCCESS! Auto-chaining secretsdump: {ticket_path} -> {target_host} "
+                f"(tracking vuln_id: {parent_vuln_id})"
+            )
+        else:
+            logger.info(
+                f"🎫 S4U SUCCESS! Auto-chaining secretsdump: {ticket_path} -> {target_host}"
+            )
 
         await self.request_credential_access(
             domain=domain,
@@ -605,6 +616,10 @@ class RoutingMixin:
                 "ticket_path": ticket_path,
                 "no_pass": True,  # nosec B105 - not a password, it's a flag
                 "dc_ip": dc_ip,
+                # Propagate vuln_id for exploitation tracking
+                # When secretsdump succeeds (especially if it dumps krbtgt),
+                # the parent vulnerability should be marked as exploited
+                "parent_vuln_id": parent_vuln_id,
             },
             task_queue=task_queue,
         )

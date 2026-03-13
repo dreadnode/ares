@@ -1468,26 +1468,29 @@ class TestDispatcherAddUserDelegation:
 class TestRetroactiveDomainNormalize:
     """Tests for retroactive domain normalization."""
 
-    def test_retroactive_normalize_removes_netbios_from_domains(self):
-        """Adding FQDN should remove corresponding NetBIOS from all_domains."""
-        state = SharedRedTeamState(operation_id="op-test-retro-netbios")
+    def test_add_domain_rejects_netbios_names(self):
+        """NetBIOS names (single-word, no dot) should be rejected from all_domains."""
+        state = SharedRedTeamState(operation_id="op-test-netbios-reject")
 
-        # Add NetBIOS domain first
-        state.add_domain("child")
-        assert "child" in state.all_domains
-
-        # Add FQDN - should trigger retroactive normalization
-        state.add_domain("child.contoso.local")
-
-        # NetBIOS should be removed
+        # NetBIOS names should be rejected (no dot = not a valid FQDN)
+        result = state.add_domain("child")
+        assert result is False
         assert "child" not in state.all_domains
+
+        result = state.add_domain("CONTOSO")
+        assert result is False
+        assert "contoso" not in state.all_domains
+
+        # FQDNs should be accepted
+        result = state.add_domain("child.contoso.local")
+        assert result is True
         assert "child.contoso.local" in state.all_domains
 
     def test_retroactive_normalize_updates_credentials(self):
         """Adding FQDN should update credentials with NetBIOS domain."""
         state = SharedRedTeamState(operation_id="op-test-retro-creds")
 
-        # Add credential with NetBIOS domain
+        # Add credential with NetBIOS domain (simulating tool output with short domain)
         cred = Credential(
             username="sql_svc",
             password="SqlP@ss!",  # pragma: allowlist secret
@@ -1495,12 +1498,13 @@ class TestRetroactiveDomainNormalize:
             source="test",
         )
         state.all_credentials.append(cred)
-        state.add_domain("child")
+        # Note: add_domain("child") would be rejected now, but the credential
+        # was added directly to all_credentials with the NetBIOS domain
 
-        # Add FQDN
+        # Add FQDN - should trigger retroactive normalization of credentials
         state.add_domain("child.contoso.local")
 
-        # Credential should be updated
+        # Credential should be updated to use FQDN
         assert state.all_credentials[0].domain == "child.contoso.local"
 
     def test_retroactive_normalize_triggers_parent_child_normalization(self):
@@ -1531,6 +1535,106 @@ class TestRetroactiveDomainNormalize:
         state.add_domain("child.contoso.local")
 
         # Credential should be updated to child domain
+        assert state.all_credentials[0].domain == "child.contoso.local"
+
+
+class TestNormalizeCredentialDomainsToUsers:
+    """Tests for normalize_credential_domains_to_users method."""
+
+    def test_removes_cross_domain_duplicate_when_user_in_one_domain(self):
+        """Same credential with different domains, user only exists in one domain."""
+        from ares.core.models import User
+
+        state = SharedRedTeamState(operation_id="op-test-normalize-cred")
+
+        # User only exists in child domain
+        state.all_users.append(User(username="samwell.tarly", domain="north.sevenkingdoms.local"))
+
+        # Two credentials: one with parent domain (wrong), one with child domain (correct)
+        state.all_credentials.append(
+            Credential(
+                username="samwell.tarly",
+                password="Heartsbane",  # pragma: allowlist secret
+                domain="sevenkingdoms.local",
+                source="test1",
+            )
+        )
+        state.all_credentials.append(
+            Credential(
+                username="samwell.tarly",
+                password="Heartsbane",  # pragma: allowlist secret
+                domain="north.sevenkingdoms.local",
+                source="test2",
+            )
+        )
+
+        # Run normalization
+        removed = state.normalize_credential_domains_to_users()
+
+        # Should remove the parent domain credential
+        assert removed == 1
+        assert len(state.all_credentials) == 1
+        assert state.all_credentials[0].domain == "north.sevenkingdoms.local"
+
+    def test_keeps_legitimate_password_reuse_across_domains(self):
+        """Same credential in multiple domains where user exists in both."""
+        from ares.core.models import User
+
+        state = SharedRedTeamState(operation_id="op-test-legit-reuse")
+
+        # User exists in BOTH domains (legitimate password reuse)
+        state.all_users.append(User(username="arya.stark", domain="sevenkingdoms.local"))
+        state.all_users.append(User(username="arya.stark", domain="north.sevenkingdoms.local"))
+
+        # Credentials in both domains
+        state.all_credentials.append(
+            Credential(
+                username="arya.stark",
+                password="needle",  # pragma: allowlist secret
+                domain="sevenkingdoms.local",
+                source="test1",
+            )
+        )
+        state.all_credentials.append(
+            Credential(
+                username="arya.stark",
+                password="needle",  # pragma: allowlist secret
+                domain="north.sevenkingdoms.local",
+                source="test2",
+            )
+        )
+
+        # Run normalization
+        removed = state.normalize_credential_domains_to_users()
+
+        # Should keep both (user exists in both domains)
+        assert removed == 0
+        assert len(state.all_credentials) == 2
+
+    def test_corrects_credential_domain_when_no_exact_match(self):
+        """Credential with wrong domain, user exists in different domain."""
+        from ares.core.models import User
+
+        state = SharedRedTeamState(operation_id="op-test-correct-domain")
+
+        # User only exists in child domain
+        state.all_users.append(User(username="sql_svc", domain="child.contoso.local"))
+
+        # Credential has parent domain (wrong)
+        state.all_credentials.append(
+            Credential(
+                username="sql_svc",
+                password="SqlP@ss123!",  # pragma: allowlist secret
+                domain="contoso.local",
+                source="test",
+            )
+        )
+
+        # Run normalization
+        state.normalize_credential_domains_to_users()
+
+        # Should correct the domain (treated as duplicate removal + domain fix)
+        assert len(state.all_credentials) == 1
         assert state.all_credentials[0].domain == "child.contoso.local"
 
 

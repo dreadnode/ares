@@ -1043,6 +1043,10 @@ async def run_multi_agent_operation(
         final_state = dispatcher.shared_state
         end_time = datetime.now(timezone.utc)
 
+        # Refresh state from Redis before report generation
+        # Workers write directly to Redis, but orchestrator memory doesn't auto-sync
+        await final_state.refresh_from_redis()
+
         report_path = None
         report_markdown = None
         try:
@@ -3164,9 +3168,14 @@ async def _auto_golden_ticket(
     """
     import re
 
+    first_check = True
     while True:
         try:
-            await asyncio.sleep(check_interval)
+            # Check immediately on first iteration, then sleep between subsequent checks.
+            # This avoids missing krbtgt hashes discovered just before we start.
+            if not first_check:
+                await asyncio.sleep(check_interval)
+            first_check = False
 
             state = dispatcher.shared_state
 
