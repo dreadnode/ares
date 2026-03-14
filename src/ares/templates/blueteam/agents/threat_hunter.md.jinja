@@ -83,10 +83,25 @@ For `high` and `critical` investigations, hunt the full chain:
 
 When pre-built detection queries are insufficient, write custom LogQL:
 
+**CRITICAL: Use the correct log source label:**
+- Windows Security events: `{job="windows-security"}` or `{channel="Security"}`
+- **NEVER** use `{alertname="..."}` — this queries alerts, not actual log data
+
 ```
 query_loki_logs(
-    datasourceUid=<datasource>,
-    logql='<custom_query>',
+    datasourceUid="loki",
+    logql='{job="windows-security"} | json | event_id = <EVENT_ID> |~ "<filter>"',
+    startRfc3339=<start>,
+    endRfc3339=<end>,
+    limit=100
+)
+```
+
+**Alternative if job label unavailable:**
+```
+query_loki_logs(
+    datasourceUid="loki",
+    logql='{channel="Security"} |= "<EVENT_ID>" |~ "<filter>"',
     startRfc3339=<start>,
     endRfc3339=<end>,
     limit=100

@@ -402,17 +402,22 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
         return "\n".join(lines)
 
     async def _check_workers_alive_for_tasks(self, pending_task_ids: set[str]) -> tuple[bool, int]:
-        """Check if any workers are actively working on pending tasks.
+        """Check if workers are alive and could process pending tasks.
 
         Uses heartbeats to determine liveness. A worker is considered
-        alive if it has heartbeated recently AND claims to be working
-        on one of our pending tasks.
+        alive if it has heartbeated recently AND is either:
+        1. Working on one of our pending tasks (busy with our work), OR
+        2. Idle/available (could pick up our tasks from the queue)
+
+        This avoids false "no heartbeats" when workers are between tasks
+        or waiting on the queue.
 
         Args:
             pending_task_ids: Set of task IDs we're waiting for.
 
         Returns:
-            Tuple of (any_alive, alive_count).
+            Tuple of (any_alive, alive_count) where alive_count is workers
+            that could potentially process our tasks.
         """
         from datetime import datetime, timezone
 
@@ -428,31 +433,50 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             return (True, 0)
 
         now = datetime.now(timezone.utc)
-        alive_count = 0
+        working_on_our_tasks = 0
+        available_workers = 0
         stale_threshold_seconds = 60  # Heartbeat TTL
 
         for hb in heartbeats.values():
             current_task = hb.get("current_task")
+            status = hb.get("status", "unknown")
             timestamp_str = hb.get("timestamp")
 
-            if not current_task or current_task not in pending_task_ids:
-                continue
-
-            # Check heartbeat freshness
+            # Check heartbeat freshness first
             if timestamp_str:
                 try:
                     hb_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
                     age = (now - hb_time).total_seconds()
-                    if age <= stale_threshold_seconds:
-                        alive_count += 1
+                    if age > stale_threshold_seconds:
+                        # Stale heartbeat - worker might be dead
+                        continue
                 except (ValueError, TypeError):
-                    # Can't parse timestamp, assume alive
-                    alive_count += 1
+                    # Can't parse timestamp, skip this worker
+                    continue
             else:
-                # No timestamp but has current_task, assume alive
-                alive_count += 1
+                # No timestamp - can't verify freshness
+                continue
 
-        return (alive_count > 0, alive_count)
+            # Worker has fresh heartbeat - check if it's relevant to us
+            if current_task and current_task in pending_task_ids:
+                # Worker is actively working on one of our tasks
+                working_on_our_tasks += 1
+            elif status == "idle" or not current_task:
+                # Worker is available to pick up our tasks from the queue
+                available_workers += 1
+
+        # Consider alive if we have workers on our tasks OR available workers
+        # (available workers can pick up our pending tasks from the queue)
+        total_relevant = working_on_our_tasks + available_workers
+        any_alive = total_relevant > 0 or working_on_our_tasks > 0
+
+        if working_on_our_tasks > 0:
+            logger.debug(
+                f"Worker liveness: {working_on_our_tasks} on our tasks, "
+                f"{available_workers} available"
+            )
+
+        return (any_alive, working_on_our_tasks)
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def wait_for_all_tasks(

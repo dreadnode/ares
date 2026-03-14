@@ -595,6 +595,29 @@ class ResultProcessingMixin:
                 else:
                     details["has_credentials"] = False
 
+            # For ADCS vulnerabilities, ensure we have credential context for exploitation
+            # (worker may have run certipy_find with creds that orchestrator doesn't know about)
+            if vuln_type.startswith("adcs_"):
+                # If no credentials in details, try to find valid creds for the domain
+                if not details.get("username") or not details.get("password"):
+                    domain_hint = details.get("domain") or ""
+                    for cred in self.shared_state.all_credentials:
+                        # Prefer creds from the same domain, or any valid cred as fallback
+                        if cred.password and (
+                            not domain_hint or cred.domain.lower() == domain_hint.lower()
+                        ):
+                            details["username"] = cred.username
+                            details["password"] = cred.password
+                            details["domain"] = cred.domain
+                            break
+
+                # Log warning if ADCS details are sparse (helps debug)
+                if not details.get("ca_name") and not details.get("ca_host"):
+                    logger.debug(
+                        f"ADCS vulnerability {vuln_type} on {target} has sparse details: "
+                        f"{list(details.keys())}. ESC8 exploitation may require CA info."
+                    )
+
             # Queue the vulnerability and get its ID
             vuln_id = await self.queue_vulnerability(
                 vuln_type=vuln_type,

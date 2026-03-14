@@ -961,7 +961,8 @@ def create_role_hooks(
     # Real-time vulnerability discovery publishing
     # Tool set defined at module level: VULNERABILITY_EXTRACTION_TOOLS
     vuln_extraction_roles = {
-        AgentRole.PRIVESC,  # certipy_find
+        AgentRole.RECON,  # certipy_find (primary ADCS enumeration)
+        AgentRole.PRIVESC,  # certipy_find (may also run ADCS enum)
         AgentRole.LATERAL,  # mssql_enum_impersonation
     }
 
