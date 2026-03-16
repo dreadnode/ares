@@ -78,18 +78,18 @@ async def test_get_exploitation_status_handles_string_result():
     dispatcher = RedTeamDispatcher()
     dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-str-result")
 
-    vuln_key = b"ares:op:op-test-str-result:vulns:adcs_esc8_10.1.2.183"
+    vuln_key = b"ares:op:op-test-str-result:vulns:adcs_esc8_192.168.58.10"
     vuln_payload = json.dumps(
         {
             "type": "adcs_esc8",
-            "target": "10.1.2.183",
+            "target": "192.168.58.10",
             "details": {"ca_server": "ADCS01"},
             "discovered_by": "recon",
             "queued_at": "2024-01-01T00:00:00+00:00",
         }
     )
     # Bug case: result is a string error message, not a dict
-    exploit_key = b"ares:op:op-test-str-result:exploited:adcs_esc8_10.1.2.183"
+    exploit_key = b"ares:op:op-test-str-result:exploited:adcs_esc8_192.168.58.10"
     exploit_payload = json.dumps(
         {
             "success": False,
@@ -110,7 +110,7 @@ async def test_get_exploitation_status_handles_string_result():
     assert status["total_failed"] == 1
     assert len(status["failed"]) == 1
     assert status["failed"][0]["type"] == "adcs_esc8"
-    assert status["failed"][0]["target"] == "10.1.2.183"
+    assert status["failed"][0]["target"] == "192.168.58.10"
     # Error should be extracted from string result
     assert "AttributeError" in status["failed"][0]["error"]
 
@@ -541,6 +541,43 @@ class TestFindDomainControllerIp:
             f"Expected dc01.fabrikam.local (192.168.58.240), got {fabrikam_dc}"
         )
         assert fabrikam_dc != "192.168.58.146", "BUG: sql01 selected - 3389 matched as 389!"
+
+    def test_child_domain_does_not_match_parent(self):
+        """Child domain hosts must NOT match parent domain lookups.
+
+        dc01.child.contoso.local should NOT match contoso.local.
+        This was a critical bug where hostname.endswith(".contoso.local")
+        incorrectly matched child.contoso.local hosts to parent domain.
+        """
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-child")
+
+        # Add parent domain DC
+        dispatcher._shared_state.all_hosts.append(
+            Host(
+                ip="192.168.58.10",
+                hostname="dc01.contoso.local",
+                roles=["Domain Controller"],
+                services=["88/tcp kerberos-sec", "389/tcp ldap"],
+            )
+        )
+        # Add child domain DC - should NOT match parent domain
+        dispatcher._shared_state.all_hosts.append(
+            Host(
+                ip="192.168.58.20",
+                hostname="dc02.child.contoso.local",
+                roles=["Domain Controller"],
+                services=["88/tcp kerberos-sec", "389/tcp ldap"],
+            )
+        )
+
+        # Looking up contoso.local MUST return dc01, NOT dc02
+        parent_dc = dispatcher._find_domain_controller_ip("contoso.local")
+        assert parent_dc == "192.168.58.10", f"Expected dc01 (192.168.58.10), got {parent_dc}"
+
+        # Looking up child.contoso.local MUST return dc02
+        child_dc = dispatcher._find_domain_controller_ip("child.contoso.local")
+        assert child_dc == "192.168.58.20", f"Expected dc02 (192.168.58.20), got {child_dc}"
 
     def test_uses_target_when_domain_matches(self):
         """When target.domain matches requested domain, use target.ip.
@@ -1425,8 +1462,8 @@ class TestDispatcherAddUserDelegation:
         """Dispatcher._add_user should prevent same user in parent and child domains.
 
         This is a regression test for a bug where:
-        1. User was added to sevenkingdoms.local
-        2. Same user was added to north.sevenkingdoms.local (child domain)
+        1. User was added to contoso.local
+        2. Same user was added to child.contoso.local (child domain)
         3. Bug: both were added because _add_user only checked exact match
         4. Fix: _add_user now delegates to shared_state.add_user() which handles parent/child
         """
@@ -1548,22 +1585,22 @@ class TestNormalizeCredentialDomainsToUsers:
         state = SharedRedTeamState(operation_id="op-test-normalize-cred")
 
         # User only exists in child domain
-        state.all_users.append(User(username="samwell.tarly", domain="north.sevenkingdoms.local"))
+        state.all_users.append(User(username="svc_backup", domain="child.contoso.local"))
 
         # Two credentials: one with parent domain (wrong), one with child domain (correct)
         state.all_credentials.append(
             Credential(
-                username="samwell.tarly",
-                password="Heartsbane",  # pragma: allowlist secret
-                domain="sevenkingdoms.local",
+                username="svc_backup",
+                password="BackupPass123",  # pragma: allowlist secret
+                domain="contoso.local",
                 source="test1",
             )
         )
         state.all_credentials.append(
             Credential(
-                username="samwell.tarly",
-                password="Heartsbane",  # pragma: allowlist secret
-                domain="north.sevenkingdoms.local",
+                username="svc_backup",
+                password="BackupPass123",  # pragma: allowlist secret
+                domain="child.contoso.local",
                 source="test2",
             )
         )
@@ -1574,7 +1611,7 @@ class TestNormalizeCredentialDomainsToUsers:
         # Should remove the parent domain credential
         assert removed == 1
         assert len(state.all_credentials) == 1
-        assert state.all_credentials[0].domain == "north.sevenkingdoms.local"
+        assert state.all_credentials[0].domain == "child.contoso.local"
 
     def test_keeps_legitimate_password_reuse_across_domains(self):
         """Same credential in multiple domains where user exists in both."""
@@ -1583,23 +1620,23 @@ class TestNormalizeCredentialDomainsToUsers:
         state = SharedRedTeamState(operation_id="op-test-legit-reuse")
 
         # User exists in BOTH domains (legitimate password reuse)
-        state.all_users.append(User(username="arya.stark", domain="sevenkingdoms.local"))
-        state.all_users.append(User(username="arya.stark", domain="north.sevenkingdoms.local"))
+        state.all_users.append(User(username="sql_svc", domain="contoso.local"))
+        state.all_users.append(User(username="sql_svc", domain="child.contoso.local"))
 
         # Credentials in both domains
         state.all_credentials.append(
             Credential(
-                username="arya.stark",
-                password="needle",  # pragma: allowlist secret
-                domain="sevenkingdoms.local",
+                username="sql_svc",
+                password="SqlPass123",  # pragma: allowlist secret
+                domain="contoso.local",
                 source="test1",
             )
         )
         state.all_credentials.append(
             Credential(
-                username="arya.stark",
-                password="needle",  # pragma: allowlist secret
-                domain="north.sevenkingdoms.local",
+                username="sql_svc",
+                password="SqlPass123",  # pragma: allowlist secret
+                domain="child.contoso.local",
                 source="test2",
             )
         )

