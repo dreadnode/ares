@@ -1,3 +1,5 @@
+"""Package entry point for the Ares command-line interface."""
+
 from .main import app
 
 

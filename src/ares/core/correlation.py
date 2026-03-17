@@ -11,7 +11,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 
+from typing import TypeAlias
+
 from loguru import logger
+
+AttackChainEntry: TypeAlias = dict[str, Any]
 
 
 @dataclass
@@ -30,7 +34,7 @@ class RedTeamActivity:
 
     @property
     def key(self) -> str:
-        """Generate a unique key for this activity."""
+        """Return a unique correlation key for this activity."""
         return f"{self.timestamp.isoformat()}:{self.technique_id}:{self.target_ip}"
 
 
@@ -52,7 +56,7 @@ class BlueTeamDetection:
 
     @property
     def key(self) -> str:
-        """Generate a unique key for this detection."""
+        """Return a unique correlation key for this detection."""
         return f"{self.timestamp.isoformat()}:{self.technique_id}:{self.alert_name}"
 
 
