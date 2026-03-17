@@ -68,7 +68,6 @@ async def discover_running_operation(redis_url: str) -> str | None:
         await client.aclose()
 
         if lock_keys:
-            # Return the first running operation (or latest if multiple)
             for key in lock_keys:
                 parts = key.split(":", 2)
                 if len(parts) >= 3:
@@ -99,7 +98,6 @@ async def discover_recent_completed_operation(
     try:
         client = await create_verified_redis_client(redis_url, decode_responses=True)
 
-        # Get running operations to exclude
         running_ops: set[str] = set()
         lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
         for key in lock_keys:
@@ -107,7 +105,6 @@ async def discover_recent_completed_operation(
             if len(parts) >= 3:
                 running_ops.add(parts[2])
 
-        # Find completed operations
         meta_keys = await client.keys("ares:op:*:meta")
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(hours=max_age_hours)
@@ -123,7 +120,6 @@ async def discover_recent_completed_operation(
             if op_id in running_ops:
                 continue
 
-            # Get started_at and completed_at from meta
             meta_data = await client.hgetall(f"ares:op:{op_id}:meta")
             if not meta_data:
                 continue
@@ -137,7 +133,6 @@ async def discover_recent_completed_operation(
             except (ValueError, TypeError):
                 continue
 
-            # Check if within time window
             if started_at < cutoff:
                 continue
 
@@ -146,7 +141,6 @@ async def discover_recent_completed_operation(
         await client.aclose()
 
         if candidates:
-            # Return most recent
             candidates.sort(key=lambda x: x[0], reverse=True)
             return candidates[0][1]
 
@@ -174,11 +168,9 @@ async def get_operation_time_window(
     try:
         client = await create_verified_redis_client(redis_url, decode_responses=True)
 
-        # Check if running
         lock_key = f"{RedisTaskQueue.LOCK_PREFIX}:{operation_id}"
         is_running = await client.exists(lock_key)
 
-        # Get timestamps from meta
         meta_data = await client.hgetall(f"ares:op:{operation_id}:meta")
         await client.aclose()
 
@@ -194,7 +186,6 @@ async def get_operation_time_window(
         except Exception:
             return None
 
-        # Get end time
         if is_running:
             end_time = datetime.now(timezone.utc)
         else:
@@ -236,7 +227,6 @@ def merge_alerts(firing: list[dict], historical: list[dict]) -> list[dict]:
             seen_fingerprints.add(fp)
             merged.append(alert)
 
-    # Add historical alerts not already present
     for alert in historical:
         fp = alert.get("fingerprint", "")
         if fp and fp not in seen_fingerprints:
@@ -375,7 +365,6 @@ async def main(
         console=dn_args.console,
     )
 
-    # Validate required credentials
     if not grafana_api_key:
         logger.warning("=" * 60)
         logger.warning("WARNING: No Grafana API key configured!")
@@ -431,13 +420,11 @@ async def main(
                 args.operation_id = running_op
                 operation_is_running = True
             else:
-                # Check for recently completed operations
                 recent_op = await discover_recent_completed_operation(auto_redis_url)
                 if recent_op:
                     logger.info(f"Auto-discovered recent operation: {recent_op}")
                     args.operation_id = recent_op
 
-    # Load red team operation context if specified or discovered
     attack_context = None
     if args.operation_id or args.latest:
         from ares.core.config import get_redis_url
@@ -450,10 +437,8 @@ async def main(
         try:
             client = await create_verified_redis_client(redis_url, decode_responses=False)
 
-            # Resolve operation ID
             operation_id = args.operation_id
             if args.latest and not operation_id:
-                # Find latest operation (prefer running)
                 from ares.core.task_queue import RedisTaskQueue
 
                 lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
@@ -486,7 +471,6 @@ async def main(
                     elif latest_op:
                         operation_id = latest_op
 
-            # Check if operation is running (if not already determined)
             if operation_id and not operation_is_running:
                 from ares.core.task_queue import RedisTaskQueue
 
@@ -505,15 +489,12 @@ async def main(
                 if state:
                     playbook = create_detection_playbook(state)
 
-                    # Extract and set target domain scope for evidence filtering
                     target_domains = extract_domains_from_red_team_state(state)
                     if target_domains:
                         set_target_domains(target_domains)
                         logger.info(f"Evidence scope set to domains: {target_domains}")
 
-                    # Extract target deployment for Loki query scoping
-                    # This ensures blue team queries filter by deployment label,
-                    # avoiding noise from other environments in shared Grafana
+                    # Filter by deployment label to avoid noise from other environments
                     target_deployment = ""
                     if state.target and state.target.environment:
                         target_deployment = state.target.environment
@@ -556,7 +537,6 @@ async def main(
 
     blue_redis_url = args.redis_url or os.getenv("ARES_REDIS_URL", "") or get_redis_url()
 
-    # Create orchestrators based on configuration
     single_agent_orchestrator: InvestigationOrchestratorProtocol | None = None
     multi_agent_orchestrator: InvestigationOrchestratorProtocol | None = None
 
@@ -648,7 +628,6 @@ async def main(
         ):
             return multi_agent_orchestrator, "multi-agent (auto-routed)"
 
-        # Fallback to single-agent
         if single_agent_orchestrator is not None:
             return single_agent_orchestrator, "single-agent"
 
@@ -900,7 +879,6 @@ async def investigate_alert(
 
     blue_redis_url = args.redis_url or os.getenv("ARES_REDIS_URL", "") or get_redis_url()
 
-    # Extract severity for routing
     severity = alert.get("labels", {}).get("severity", "unknown")
     alert_name = alert.get("labels", {}).get("alertname", "unknown")
 
@@ -909,8 +887,6 @@ async def investigate_alert(
         args.auto_route and should_use_multi_agent(severity) and blue_redis_url
     )
 
-    # Create orchestrator based on routing decision
-    # Use InvestigationOrchestratorProtocol type to handle both orchestrator types
     orchestrator: InvestigationOrchestratorProtocol
     if use_multi:
         if not blue_redis_url:
@@ -943,7 +919,6 @@ async def investigate_alert(
             max_steps=args.max_steps,
         )
 
-    # Run investigation
     logger.info(f"Investigating alert: {alert_name}")
 
     result = await orchestrator.investigate(alert)
@@ -1026,14 +1001,12 @@ async def multi_agent(
         )
         return
 
-    # Load config file for defaults
     config = load_config(multi_args.config_file or None)
 
     # Use config values if CLI args not specified
     redis_url = multi_args.redis_url or config.redis_url
     namespace = multi_args.namespace or config.namespace
 
-    # Parse target IPs
     ips = [ip.strip() for ip in target_ips.split(",") if ip.strip()]
     if not ips:
         logger.error("No target IPs provided")
@@ -1072,7 +1045,6 @@ async def multi_agent(
     from ares.core.models import Credential
     from ares.core.orchestrator import run_multi_agent_operation
 
-    # Build initial credential if provided
     initial_cred = None
     if multi_args.initial_user and multi_args.initial_password:
         initial_cred = Credential(
@@ -1200,7 +1172,6 @@ async def worker(
     worker_args = worker_args or WorkerArgs()
     dn_args = dn_args or DreadnodeArgs()
 
-    # Validate role
     valid_roles = [
         "recon",
         "credential_access",
@@ -1214,11 +1185,9 @@ async def worker(
         logger.error(f"Invalid role: {role}. Must be one of: {', '.join(valid_roles)}")
         return
 
-    # Load config file for defaults
     config = load_config(worker_args.config_file or None)
     agent_config = get_agent_config(role)
 
-    # Use config values if CLI args not specified
     redis_url = worker_args.redis_url or config.redis_url
     model = worker_args.model or os.getenv(f"ARES_AGENT_{role.upper()}_MODEL")
     if not model:
@@ -1268,7 +1237,6 @@ async def worker(
     from ares.core.models import AgentRole
     from ares.core.worker import run_worker
 
-    # Convert string role to AgentRole enum
     role_mapping = {
         "recon": AgentRole.RECON,
         "credential_access": AgentRole.CREDENTIAL_ACCESS,
@@ -1361,13 +1329,11 @@ async def blue_worker(
     # Normalize role (accept hyphens or underscores)
     role = role.replace("-", "_")
 
-    # Validate role
     valid_roles = ["triage", "threat_hunter", "lateral_analyst"]
     if role not in valid_roles:
         logger.error(f"Invalid role: {role}. Must be one of: {', '.join(valid_roles)}")
         return
 
-    # Load config file for defaults
     config = load_config(worker_args.config_file or None)
 
     # Use config values if CLI args not specified
@@ -1412,7 +1378,6 @@ async def blue_worker(
     from ares.core.blue_worker import run_blue_global_worker, run_blue_worker
     from ares.core.models import BlueRole
 
-    # Convert string role to BlueRole enum
     role_mapping = {
         "triage": BlueRole.TRIAGE,
         "threat_hunter": BlueRole.THREAT_HUNTER,
@@ -1536,7 +1501,6 @@ async def evaluate(
     except Exception as e:
         logger.warning(f"Dreadnode platform unavailable: {e}")
 
-    # Validate inputs
     state_path = Path(red_state_file)
     if not state_path.exists():
         logger.error(f"Red team state file not found: {state_path}")
@@ -1607,7 +1571,6 @@ async def evaluate(
         import json
         import sys
 
-        # Check pass/fail against thresholds
         passed = (
             result.overall_score >= eval_args.min_score
             and result.ioc_detection_rate >= eval_args.min_ioc_rate
@@ -1687,7 +1650,6 @@ async def evaluate_dataset(
     except Exception as e:
         logger.warning(f"Dreadnode platform unavailable: {e}")
 
-    # Load dataset
     dataset_path_obj = Path(dataset_path)
     if not dataset_path_obj.exists():
         logger.error(f"Dataset path not found: {dataset_path}")
@@ -1766,7 +1728,6 @@ async def evaluate_dataset(
         import json
         import sys
 
-        # Check pass/fail against thresholds
         passed = (
             result.avg_overall_score >= eval_args.min_score
             and result.avg_ioc_detection_rate >= eval_args.min_ioc_rate

@@ -212,11 +212,27 @@ class BlueRedisWorkerAgent:
 
             # Run the agent
             logger.info(f"[{self.agent_name}] Running agent for task {task.task_id}")
-            await self.agent.run(prompt)
+            agent_result = await self.agent.run(prompt)
+
+            # Extract token usage for metrics and tracing
+            usage = getattr(agent_result, "usage", None)
+            usage_dict: dict[str, int] | None = None
+            if usage:
+                usage_dict = {
+                    "input_tokens": getattr(usage, "input_tokens", 0),
+                    "output_tokens": getattr(usage, "output_tokens", 0),
+                    "total_tokens": getattr(usage, "total_tokens", 0),
+                }
+                # Add to span for Tempo/OTel (follows OpenTelemetry GenAI semantic conventions)
+                _task_span.set_attribute("gen_ai.usage.input_tokens", usage_dict["input_tokens"])
+                _task_span.set_attribute("gen_ai.usage.output_tokens", usage_dict["output_tokens"])
+                _task_span.set_attribute("gen_ai.usage.total_tokens", usage_dict["total_tokens"])
 
             # Check if agent completed via callback
             if completion_event.is_set():
                 result = self.callback_tools.result_data
+                if usage_dict:
+                    result["usage"] = usage_dict
                 logger.info(f"[{self.agent_name}] Task {task.task_id} completed via callback")
                 await self._send_success_result(task.task_id, result)
             else:
@@ -224,14 +240,14 @@ class BlueRedisWorkerAgent:
                 logger.warning(
                     f"[{self.agent_name}] Task {task.task_id} ended without completion callback"
                 )
-                await self._send_success_result(
-                    task.task_id,
-                    {
-                        "type": self.role.value,
-                        "summary": "Agent completed without explicit completion signal",
-                        "partial": True,
-                    },
-                )
+                partial_result: dict[str, Any] = {
+                    "type": self.role.value,
+                    "summary": "Agent completed without explicit completion signal",
+                    "partial": True,
+                }
+                if usage_dict:
+                    partial_result["usage"] = usage_dict
+                await self._send_success_result(task.task_id, partial_result)
 
             self._tasks_completed += 1
 
@@ -754,11 +770,23 @@ async def run_blue_global_worker(
                 callback_tools.set_completion_event(completion_event)
 
                 logger.info(f"[{agent_name}] Running agent for task {task.task_id}")
-                await agent.run(prompt)
+                agent_result = await agent.run(prompt)
+
+                # Extract token usage for metrics
+                usage = getattr(agent_result, "usage", None)
+                usage_dict: dict[str, int] | None = None
+                if usage:
+                    usage_dict = {
+                        "input_tokens": getattr(usage, "input_tokens", 0),
+                        "output_tokens": getattr(usage, "output_tokens", 0),
+                        "total_tokens": getattr(usage, "total_tokens", 0),
+                    }
 
                 # Send result
                 if completion_event.is_set():
                     result_data = callback_tools.result_data
+                    if usage_dict:
+                        result_data["usage"] = usage_dict
                     logger.info(f"[{agent_name}] Task {task.task_id} completed")
                     await task_queue.send_result(
                         task_id=task.task_id,
@@ -769,14 +797,17 @@ async def run_blue_global_worker(
                     )
                 else:
                     logger.warning(f"[{agent_name}] Task {task.task_id} ended without callback")
+                    partial_result: dict[str, Any] = {
+                        "type": role.value,
+                        "summary": "Agent completed without explicit completion signal",
+                        "partial": True,
+                    }
+                    if usage_dict:
+                        partial_result["usage"] = usage_dict
                     await task_queue.send_result(
                         task_id=task.task_id,
                         success=True,
-                        result={
-                            "type": role.value,
-                            "summary": "Agent completed without explicit completion signal",
-                            "partial": True,
-                        },
+                        result=partial_result,
                         worker_pod=pod_name,
                         agent_name=agent_name,
                     )

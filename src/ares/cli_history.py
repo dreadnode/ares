@@ -38,7 +38,10 @@ app = cyclopts.App(
 
 
 def _check_enabled():
-    """Check if persistent store is enabled."""
+    """Check if persistent store is enabled.
+
+    Exits with code 1 if ARES_DATABASE_URL is not set.
+    """
     from ares.core.persistent_store import get_persistent_store_config
 
     config = get_persistent_store_config()

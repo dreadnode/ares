@@ -232,12 +232,10 @@ _Refer to MITRE ATT&CK Navigator for visual representation._
         for ev in state.evidence:
             distribution[ev.pyramid_level] += 1
 
-        # Calculate elevation score
         total = len(state.evidence) or 1
         weighted_sum = sum(level.value * count for level, count in distribution.items())
         elevation_score = weighted_sum / (total * 6)
 
-        # Build pyramid visualization
         pyramid_viz = f"""```
                     ▲ TTPs ({distribution[PyramidLevel.TTPS]})
                    ▲▲▲ Tools ({distribution[PyramidLevel.TOOLS]})

@@ -420,6 +420,171 @@ class TestBlueRedisWorkerAgentWorkerLoop:
         assert error_count >= 1
 
 
+class TestBlueRedisWorkerAgentUsageExtraction:
+    """Tests for token usage extraction from agent results."""
+
+    @pytest.fixture
+    def worker(self):
+        mock_queue = AsyncMock()
+        mock_queue.send_result = AsyncMock()
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock()
+
+        mock_callback_tools = MagicMock()
+        mock_callback_tools.set_completion_event = MagicMock()
+        mock_callback_tools.result_data = {"summary": "Triage complete"}
+
+        mock_backend = AsyncMock()
+        mock_backend.snapshot = AsyncMock(return_value={})
+
+        return BlueRedisWorkerAgent(
+            role=BlueRole.TRIAGE,
+            task_queue=mock_queue,
+            agent=mock_agent,
+            agent_name="blue-triage-test",
+            callback_tools=mock_callback_tools,
+            backend=mock_backend,
+            investigation_id="inv-123",
+        )
+
+    @pytest.mark.asyncio
+    async def test_usage_included_in_result_when_available(self, worker):
+        """Test that token usage is included in result payload when agent returns it."""
+        task = BlueTaskMessage(
+            task_id="task-usage",
+            task_type="triage_alert",
+            investigation_id="inv-123",
+            assigned_role="triage",
+            params={"alert_name": "HighCPU"},
+        )
+
+        # Create mock usage object
+        mock_usage = MagicMock()
+        mock_usage.input_tokens = 1500
+        mock_usage.output_tokens = 500
+        mock_usage.total_tokens = 2000
+
+        # Create mock agent result with usage
+        mock_result = MagicMock()
+        mock_result.usage = mock_usage
+        worker.agent.run = AsyncMock(return_value=mock_result)
+
+        # Simulate completion callback being set
+        def set_event(event):
+            event.set()
+
+        worker.callback_tools.set_completion_event = set_event
+
+        await worker._process_task(task)
+
+        # Verify result includes usage
+        call_kwargs = worker.task_queue.send_result.call_args.kwargs
+        assert call_kwargs["success"] is True
+        assert "usage" in call_kwargs["result"]
+        assert call_kwargs["result"]["usage"]["input_tokens"] == 1500
+        assert call_kwargs["result"]["usage"]["output_tokens"] == 500
+        assert call_kwargs["result"]["usage"]["total_tokens"] == 2000
+
+    @pytest.mark.asyncio
+    async def test_usage_included_in_partial_result(self, worker):
+        """Test that token usage is included in partial result when callback not called."""
+        task = BlueTaskMessage(
+            task_id="task-partial-usage",
+            task_type="triage_alert",
+            investigation_id="inv-123",
+            assigned_role="triage",
+            params={},
+        )
+
+        # Create mock usage object
+        mock_usage = MagicMock()
+        mock_usage.input_tokens = 800
+        mock_usage.output_tokens = 200
+        mock_usage.total_tokens = 1000
+
+        # Create mock agent result with usage
+        mock_result = MagicMock()
+        mock_result.usage = mock_usage
+        worker.agent.run = AsyncMock(return_value=mock_result)
+
+        # Don't set the completion event
+        worker.callback_tools.set_completion_event = MagicMock()
+
+        await worker._process_task(task)
+
+        # Verify partial result includes usage
+        call_kwargs = worker.task_queue.send_result.call_args.kwargs
+        assert call_kwargs["success"] is True
+        assert call_kwargs["result"]["partial"] is True
+        assert "usage" in call_kwargs["result"]
+        assert call_kwargs["result"]["usage"]["input_tokens"] == 800
+
+    @pytest.mark.asyncio
+    async def test_no_usage_when_agent_returns_none(self, worker):
+        """Test that result works correctly when agent has no usage data."""
+        task = BlueTaskMessage(
+            task_id="task-no-usage",
+            task_type="triage_alert",
+            investigation_id="inv-123",
+            assigned_role="triage",
+            params={},
+        )
+
+        # Create mock agent result without usage
+        mock_result = MagicMock()
+        mock_result.usage = None
+        worker.agent.run = AsyncMock(return_value=mock_result)
+
+        def set_event(event):
+            event.set()
+
+        worker.callback_tools.set_completion_event = set_event
+
+        await worker._process_task(task)
+
+        # Verify result doesn't have usage key (or it's absent)
+        call_kwargs = worker.task_queue.send_result.call_args.kwargs
+        assert call_kwargs["success"] is True
+        # Usage should not be in result since it wasn't available
+        assert "usage" not in call_kwargs["result"] or call_kwargs["result"].get("usage") is None
+
+    @pytest.mark.asyncio
+    async def test_usage_extraction_with_large_values(self, worker):
+        """Test that large token counts are handled correctly."""
+        task = BlueTaskMessage(
+            task_id="task-large",
+            task_type="triage_alert",
+            investigation_id="inv-123",
+            assigned_role="triage",
+            params={},
+        )
+
+        # Create mock usage object with large values
+        mock_usage = MagicMock()
+        mock_usage.input_tokens = 128000  # Large context
+        mock_usage.output_tokens = 4096
+        mock_usage.total_tokens = 132096
+
+        mock_result = MagicMock()
+        mock_result.usage = mock_usage
+        worker.agent.run = AsyncMock(return_value=mock_result)
+
+        def set_event(event):
+            event.set()
+
+        worker.callback_tools.set_completion_event = set_event
+
+        await worker._process_task(task)
+
+        # Verify large values are preserved
+        call_kwargs = worker.task_queue.send_result.call_args.kwargs
+        assert call_kwargs["success"] is True
+        assert call_kwargs["result"]["usage"]["input_tokens"] == 128000
+        assert call_kwargs["result"]["usage"]["output_tokens"] == 4096
+        assert call_kwargs["result"]["usage"]["total_tokens"] == 132096
+
+
 class TestLoadMcpTools:
     """Tests for _load_mcp_tools helper."""
 

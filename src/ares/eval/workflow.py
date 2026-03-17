@@ -380,7 +380,6 @@ class EvaluationDataset:
         )
 
 
-# Cost estimates per 1M tokens (as of 2024)
 MODEL_COSTS: dict[str, dict[str, float]] = {
     "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
     "claude-opus-4-20250514": {"input": 15.0, "output": 75.0},
@@ -550,10 +549,27 @@ class EvaluationRunner:
                                     time_to_ttp_elevation = event_offset
                                     break
 
-                # TODO(martin): Extract token counts from Dreadnode metrics if available
-                # For now, estimate based on steps
-                estimated_tokens_per_step = 2000
-                if state:
+                # Extract token counts from completed task results
+                # Workers include usage metrics in result payloads, stored in Redis
+                if orchestrator is not None:
+                    try:
+                        dispatcher = getattr(orchestrator, "_dispatcher", None)
+                        if dispatcher is not None:
+                            backend = getattr(dispatcher, "backend", None)
+                            if backend is not None:
+                                completed = await backend.get_completed_tasks()
+                                for task_result in completed.values():
+                                    result_data = task_result.get("result", {})
+                                    usage = result_data.get("usage", {})
+                                    prompt_tokens += usage.get("input_tokens", 0)
+                                    completion_tokens += usage.get("output_tokens", 0)
+                                    total_tokens += usage.get("total_tokens", 0)
+                    except Exception as usage_err:
+                        logger.debug(f"Could not extract usage from tasks: {usage_err}")
+
+                # Fallback to estimation if no usage data collected
+                if total_tokens == 0 and state:
+                    estimated_tokens_per_step = 2000
                     total_tokens = len(state.executed_queries) * estimated_tokens_per_step
                     prompt_tokens = int(total_tokens * 0.7)
                     completion_tokens = int(total_tokens * 0.3)
@@ -561,7 +577,6 @@ class EvaluationRunner:
             else:
                 logger.warning("No alert fired - this is a detection gap")
 
-            # Run the evaluation task (for Dreadnode metrics)
             await evaluate_investigation(state, ground_truth)
 
         except Exception as e:

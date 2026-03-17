@@ -114,7 +114,15 @@ def score_ioc_detection(
 
 
 def _ioc_matches(ioc: ExpectedIOC, found_values: set[str]) -> bool:
-    """Check if an expected IOC matches any found value."""
+    """Check if an expected IOC matches any found value.
+
+    Args:
+        ioc: Expected IOC to match.
+        found_values: Set of lowercase found values from evidence.
+
+    Returns:
+        True if IOC matches any found value.
+    """
     ioc_value = ioc.value.lower()
 
     # Exact match
@@ -200,7 +208,15 @@ def score_technique_coverage(
 
 
 def _technique_matches(expected: ExpectedTechnique, found_techniques: set[str]) -> bool:
-    """Check if an expected technique matches any found technique."""
+    """Check if an expected technique matches any found technique.
+
+    Args:
+        expected: Expected technique to match.
+        found_techniques: Set of technique IDs found during investigation.
+
+    Returns:
+        True if expected technique matches any found technique.
+    """
     return any(expected.matches(found) for found in found_techniques)
 
 
@@ -302,6 +318,13 @@ def _timeline_event_matches(pattern: str, descriptions: list[str]) -> bool:
     1. Regex pattern match (if pattern looks like regex)
     2. Exact substring match
     3. Keyword overlap (>50% of significant words match)
+
+    Args:
+        pattern: Pattern to search for.
+        descriptions: List of lowercase timeline descriptions.
+
+    Returns:
+        True if pattern matches any description.
     """
     import re
 

@@ -1675,13 +1675,8 @@ class SharedRedTeamState:
             )
             return domain_lower
 
-        # CRITICAL: If the incoming domain is already an FQDN (contains "."), trust it.
-        # Domain correction was designed for fixing NetBIOS names like "CONTOSO" -> "contoso.local",
-        # NOT for overriding valid FQDNs like "child.contoso.local" -> "contoso.local".
-        #
-        # Why this matters: Users like krbtgt exist in EVERY domain with the same name.
-        # If we only enumerated krbtgt from the parent domain, we shouldn't "correct" a child
-        # domain's krbtgt hash to the parent domain. They're different accounts with different hashes.
+        # Trust FQDNs (contain ".") - domain correction is only for NetBIOS names.
+        # Users like krbtgt exist in every domain; don't incorrectly map child → parent.
         is_incoming_fqdn = "." in domain_lower
 
         # Find all domains where this user has been seen
@@ -2475,22 +2470,14 @@ class SharedRedTeamState:
                         f"Hash updated with cracked password: {domain}\\{username} ({hash_type}) "
                         f"from {source_agent}"
                     )
-                    # NOTE: Credential creation is handled by publish_hash() in publishing.py,
-                    # which calls publish_credential() to trigger immediate dispatch (delegation
-                    # checks, secretsdump, etc). We don't create credentials here because:
-                    # 1. add_credential() is state-layer only - no immediate dispatch
-                    # 2. The caller (publish_hash) will call publish_credential() which has dispatch logic
-                    # 3. Creating here + caller creating = duplicate, which skips dispatch entirely
-                    #
-                    # Signal credential access if dispatcher available so loops wake up
+                    # Credential creation is the caller's responsibility (publish_hash → publish_credential).
+                    # Signal credential access so dispatcher loops wake up.
                     if self._dispatcher:
                         if threading.current_thread() is threading.main_thread():
                             self._dispatcher.signal_credential_access()
                         elif hasattr(self._dispatcher, "_credential_access_requested"):
-                            # Thread-safe signal - maintenance loop will transfer to asyncio.Event
-                            self._dispatcher._credential_access_requested.set()
-                    # Request checkpoint from dispatcher's maintenance loop
-                    # _checkpoint_requested is a threading.Event, safe from any thread
+                            self._dispatcher._credential_access_requested.set()  # Thread-safe
+                    # Request checkpoint (threading.Event, safe from any thread)
                     if self._dispatcher and hasattr(self._dispatcher, "_checkpoint_requested"):
                         self._dispatcher._checkpoint_requested.set()
                     return True  # Return True since we updated it

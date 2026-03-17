@@ -234,7 +234,15 @@ class OperationRecoveryManager:
         state: SharedRedTeamState,
         backend,  # RedisStateBackend, but avoid circular import
     ) -> None:
-        """Load all state data from Redis backend into memory."""
+        """Load all state data from Redis backend into memory.
+
+        Hydrates credentials, hashes, hosts, users, shares, weaknesses, domains,
+        vulnerabilities, meta fields (DA status, golden ticket), and DC mappings.
+
+        Args:
+            state: Shared state object to populate.
+            backend: RedisStateBackend instance (type hint omitted to avoid circular import).
+        """
         # Load collections
         state.all_credentials.extend(await backend.get_credentials())
         state.all_hashes.extend(await backend.get_hashes())
@@ -432,7 +440,19 @@ class OperationRecoveryManager:
         operation_id: str,
         auto_requeue: bool,
     ) -> list[str]:
-        """Requeue tasks that were interrupted by pod restart."""
+        """Requeue tasks that were interrupted by pod restart.
+
+        Scans pending_tasks for PENDING, IN_PROGRESS, or RETRYING status and
+        requeues them via Redis task queue if within retry limits.
+
+        Args:
+            state: Shared state containing pending_tasks to scan.
+            operation_id: Operation identifier for logging.
+            auto_requeue: If True, requeue tasks to Redis; if False, only log.
+
+        Returns:
+            List of task IDs that were successfully requeued.
+        """
         interrupted_count = 0
         requeued_count = 0
         failed_count = 0

@@ -922,8 +922,7 @@ class BlueTeamOrchestrator:
                 return "routed"
 
             if triage_result.decision == TriageDecision.REINVESTIGATE:
-                # For now, reinvestigate counts as confirmed (needs more work)
-                # Future: dispatch additional workers with focus areas
+                # Reinvestigate keeps escalated status (focus_areas dispatching not yet implemented)
                 logger.info(
                     f"Triage requested reinvestigation (focus: {triage_result.focus_areas}), "
                     f"keeping escalated status"

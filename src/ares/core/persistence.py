@@ -472,8 +472,15 @@ class InvestigationStore:
     ) -> tuple[float, list[str]]:
         """Calculate similarity score for an investigation.
 
+        Args:
+            investigation: Stored investigation to compare against.
+            alert_name: Alert name to match (partial match supported).
+            alert_fingerprint: Exact fingerprint to match (highest weight).
+            technique_id: MITRE technique ID to match.
+            severity: Alert severity to match.
+
         Returns:
-            Tuple of (score, list of matching factors)
+            Tuple of (score, list of matching factors).
         """
         score = 0.0
         factors = []

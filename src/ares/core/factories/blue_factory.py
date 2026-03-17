@@ -696,7 +696,11 @@ def reset_query_tracking():
 
 
 def set_investigation_state(state: "InvestigationState"):
-    """Set the current investigation state for query recording."""
+    """Set the current investigation state for query recording.
+
+    Args:
+        state: Investigation state to track for query limits and bonus grants.
+    """
     global _current_state
     _current_state = state
 
@@ -845,7 +849,11 @@ def _check_duplicate_query(query: str, bypass_for_resilience: bool = False) -> s
 
 
 def _increment_query_attempt(tool_name: str):
-    """Increment query attempt counter (called before query execution)."""
+    """Increment query attempt counter (called before query execution).
+
+    Args:
+        tool_name: Name of the query tool being called.
+    """
     global _total_queries_attempted
     _total_queries_attempted += 1
     _consecutive_queries.append(tool_name)
@@ -862,6 +870,9 @@ def _count_successful_query(result_count: int | None):
 
     Only queries that return data count against the limit.
     Failed queries (0 results) get a "free retry".
+
+    Args:
+        result_count: Number of results returned, or None for failed queries.
     """
     global _total_queries
 
@@ -881,7 +892,14 @@ def _record_query(
     result_count: int | None = None,
     result_data: Any = None,
 ):
-    """Record a query to the investigation state and store for evidence validation."""
+    """Record a query to the investigation state and store for evidence validation.
+
+    Args:
+        tool_name: Name of the query tool (e.g., "query_loki_logs").
+        kwargs: Query parameters including logql/expr and datasource.
+        result_count: Number of results returned.
+        result_data: Full result data for evidence extraction.
+    """
     from datetime import datetime, timezone
 
     query_string = kwargs.get("logql") or kwargs.get("expr") or str(kwargs)

@@ -756,7 +756,20 @@ class RedisWorkerAgent:
             if result_summary:
                 logger.info(f"[{self.agent_name}] Agent result summary: {result_summary}")
 
+            # Extract token usage for metrics and tracing
+            usage_metrics = self._extract_usage(result)
+            if usage_metrics:
+                # Add to span for Tempo/OTel (follows OpenTelemetry GenAI semantic conventions)
+                _task_span.set_attribute("gen_ai.usage.input_tokens", usage_metrics["input_tokens"])
+                _task_span.set_attribute(
+                    "gen_ai.usage.output_tokens", usage_metrics["output_tokens"]
+                )
+                _task_span.set_attribute("gen_ai.usage.total_tokens", usage_metrics["total_tokens"])
+
             result_payload: dict[str, Any] = {"output": result_text, "task_type": task.task_type}
+            # Include usage in result payload for downstream aggregation
+            if usage_metrics:
+                result_payload["usage"] = usage_metrics
             structured = _extract_structured_payload(result_text)
             if structured:
                 for key in ("credential", "hash"):
@@ -1556,6 +1569,23 @@ class RedisWorkerAgent:
             summary_parts.append(f"usage={usage}")
         return ", ".join(summary_parts)
 
+    def _extract_usage(self, result: Any) -> dict[str, int] | None:
+        """Extract token usage from agent result for metrics/tracing.
+
+        Returns a dict with input_tokens, output_tokens, total_tokens if available.
+        """
+        usage = getattr(result, "usage", None)
+        if usage is None:
+            return None
+        try:
+            return {
+                "input_tokens": getattr(usage, "input_tokens", 0),
+                "output_tokens": getattr(usage, "output_tokens", 0),
+                "total_tokens": getattr(usage, "total_tokens", 0),
+            }
+        except Exception:
+            return None
+
     def _format_agent_messages(
         self, result: Any, max_messages: int = 50, max_chars: int = 2000
     ) -> tuple[list[str], int]:
@@ -2083,6 +2113,14 @@ class WorkerAgent:
             result_text = self._extract_result(result)
 
             result_payload: dict[str, Any] = {"output": result_text, "task_type": msg.type.value}
+            # Extract token usage for downstream aggregation
+            usage = getattr(result, "usage", None)
+            if usage:
+                result_payload["usage"] = {
+                    "input_tokens": getattr(usage, "input_tokens", 0),
+                    "output_tokens": getattr(usage, "output_tokens", 0),
+                    "total_tokens": getattr(usage, "total_tokens", 0),
+                }
             structured = _extract_structured_payload(result_text)
             if structured:
                 for key in ("credential", "hash"):

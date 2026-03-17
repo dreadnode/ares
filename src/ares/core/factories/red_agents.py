@@ -561,16 +561,12 @@ def create_role_hooks(
 
         hooks.append(check_domain_admin)
 
-        # Stop orchestrator when DA is achieved externally (by worker agents)
-        # This handles the case where a worker discovers krbtgt hash via secretsdump
-        # and sets has_domain_admin=True, but the orchestrator LLM doesn't know to stop
-        # NOTE: We check on BOTH StepStart AND ToolEnd to minimize latency.
-        # StepStart only fires at the beginning of steps (after LLM generation),
-        # but ToolEnd fires after every tool execution, catching DA sooner.
-        # IMPORTANT: Only fires if stop_on_domain_admin=True in config. If
-        # stop_on_golden_ticket=True, we continue past DA to forge golden ticket.
         async def stop_on_external_domain_admin(event: StepStart | ToolEnd) -> Finish | None:
-            """Stop orchestrator when Domain Admin is achieved by worker agents."""
+            """Stop orchestrator when Domain Admin is achieved by worker agents.
+
+            Triggers on both StepStart and ToolEnd to minimize latency after workers
+            discover krbtgt hash. Only fires if stop_on_domain_admin=True in config.
+            """
             if not isinstance(event, (StepStart, ToolEnd)):
                 return None
 

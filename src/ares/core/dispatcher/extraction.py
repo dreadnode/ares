@@ -342,16 +342,13 @@ def extract_shares_from_output(output: str, default_host: str = "") -> list[Shar
 
             lower = body.lower()
 
-            # Detect share table header
             if lower.startswith("share") and "permission" in lower:
                 in_table = True
                 continue
 
-            # Skip separator lines
             if in_table and set(body) <= {"-", " "}:
                 continue
 
-            # End of table
             if in_table and (body.startswith("[") or lower.startswith("smb")):
                 in_table = False
                 continue
@@ -359,7 +356,6 @@ def extract_shares_from_output(output: str, default_host: str = "") -> list[Shar
             if not in_table:
                 continue
 
-            # Parse share row
             parts = body.split(None, 2)
             if not parts:
                 continue

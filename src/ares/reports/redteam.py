@@ -103,7 +103,6 @@ def _format_vuln_details(details: Any) -> str:
             if value is not None and value != "":
                 parts.append(f"{display_name}: {value}")
 
-    # Add any remaining keys not in key_display
     for key, value in details.items():
         if (
             key not in key_display
@@ -130,13 +129,11 @@ def _parse_weakness_block(block: str) -> dict[str, str]:
         if not stripped:
             continue
 
-        # Parse title (### Title)
         if stripped.startswith("### "):
             result["title"] = stripped[4:].strip()
         elif stripped.startswith("**") and ":**" not in stripped and stripped.endswith("**"):
             result["title"] = stripped.strip("*").strip()
 
-        # Parse **Key:** Value patterns
         elif ":**" in stripped:
             clean = stripped.lstrip("-").strip()
             match = re.match(r"\*\*([^*:]+):\*\*\s*(.*)$", clean)
@@ -225,20 +222,15 @@ class RedTeamReportGenerator:
                     cred.is_admin = True
                 unique_creds.append(cred)
 
-        # Calculate counts from SharedRedTeamState
         host_count = len(state.all_hosts)
         credential_count = len(unique_creds)
-
-        # Count admins (is_admin already normalized above)
         admin_count = sum(1 for c in unique_creds if c.is_admin)
 
-        # Aggregate MITRE techniques from timeline events
         all_techniques: set[str] = set(state.identified_techniques)
         for event in state.operation_timeline:
             if event.mitre_techniques:
                 all_techniques.update(event.mitre_techniques)
 
-        # Build discovered vulnerabilities list for template
         discovered_vulns = []
         for vuln_id, vuln in state.discovered_vulnerabilities.items():
             discovered_vulns.append(
@@ -253,10 +245,8 @@ class RedTeamReportGenerator:
             )
         discovered_vulns.sort(key=lambda v: v.get("priority", 999))  # type: ignore[arg-type,return-value]
 
-        # Enrich MITRE techniques with names
         techniques_enriched = [_get_technique_display(t) for t in sorted(all_techniques)]
 
-        # Render the report using the template
         target_ips = state.target_ips or ([state.target.ip] if state.target else [])
         return self.loader.render(
             "redteam/reports/operation_summary.md.jinja",
@@ -312,10 +302,8 @@ class RedTeamReportGenerator:
                     cred.is_admin = True
                 unique_creds.append(cred)
 
-        # Calculate counts from SharedRedTeamState
         host_count = len(state.all_hosts)
         credential_count = len(unique_creds)
-        # Count admins (is_admin already normalized above)
         admin_count = sum(1 for c in unique_creds if c.is_admin)
         vulnerability_count = len(state.discovered_vulnerabilities)
         exploited_count = len(state.exploited_vulnerabilities)
@@ -460,10 +448,8 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
 
     unique_hashes.sort(key=hash_priority)
 
-    # Count DCs
     dc_count = sum(1 for h in state.all_hosts if h.is_dc)
 
-    # Build vulnerability info for template
     discovered_vulns = []
     for vuln_id, vuln in state.discovered_vulnerabilities.items():
         discovered_vulns.append(
@@ -479,7 +465,6 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
         )
     discovered_vulns.sort(key=lambda v: v.get("priority", 999))  # type: ignore[arg-type,return-value]
 
-    # Format timeline events and collect MITRE techniques
     timeline = []
     all_techniques: set[str] = set(state.identified_techniques)
     for event in state.operation_timeline:
@@ -494,15 +479,12 @@ def generate_comprehensive_report(state: SharedRedTeamState) -> str:
         if event.mitre_techniques:
             all_techniques.update(event.mitre_techniques)
 
-    # Enrich MITRE techniques with names
     techniques_enriched = [_get_technique_display(t) for t in sorted(all_techniques)]
 
-    # Get target info
     target_ip = state.target.ip if state.target else "Unknown"
     target_domain = state.target.domain if state.target else "Unknown"
     target_ips = state.target_ips or ([target_ip] if target_ip != "Unknown" else [])
 
-    # Render the comprehensive report
     return loader.render(
         "redteam/reports/comprehensive_report.md.jinja",
         operation_id=state.operation_id,

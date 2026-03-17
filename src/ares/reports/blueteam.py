@@ -43,7 +43,6 @@ class BlueTeamOperation:
     def add_investigation(self, state: InvestigationState) -> None:
         """Add an investigation to this operation."""
         self.investigations.append(state)
-        # Update time bounds
         self.started_at = min(self.started_at, state.started_at)
 
     @property
@@ -200,7 +199,6 @@ class BlueTeamReportGenerator:
         duration = completed_at - operation.started_at
         duration_str = str(duration).split(".")[0]
 
-        # Build alert summaries
         alert_summaries = []
         for inv in operation.investigations:
             alert = inv.alert if isinstance(inv.alert, dict) else {}
@@ -217,7 +215,6 @@ class BlueTeamReportGenerator:
                 }
             )
 
-        # Build evidence by pyramid level
         evidence_by_level: dict[int, list[dict[str, Any]]] = {i: [] for i in range(1, 7)}
         for ev in operation.all_evidence:
             evidence_by_level[ev.pyramid_level.value].append(
@@ -231,7 +228,6 @@ class BlueTeamReportGenerator:
                 }
             )
 
-        # Build timeline
         timeline = []
         for event in operation.all_timeline_events:
             timeline.append(
@@ -243,7 +239,6 @@ class BlueTeamReportGenerator:
                 }
             )
 
-        # Build technique coverage
         technique_names = operation.get_technique_names()
         technique_to_tactic = operation.get_technique_to_tactic()
         techniques = []
@@ -256,7 +251,6 @@ class BlueTeamReportGenerator:
                 }
             )
 
-        # Build tactics summary
         tactics = sorted(operation.all_tactics)
 
         # Pyramid distribution (convert enum keys to int for template)
@@ -264,7 +258,6 @@ class BlueTeamReportGenerator:
             level.value: count for level, count in operation.get_pyramid_distribution().items()
         }
 
-        # Build per-investigation details for appendix
         investigation_details = []
         for inv in operation.investigations:
             alert = inv.alert if isinstance(inv.alert, dict) else {}
@@ -289,7 +282,6 @@ class BlueTeamReportGenerator:
             }
             investigation_details.append(detail)
 
-        # Render the comprehensive report
         return self.loader.render(
             "blueteam/reports/comprehensive_report.md.jinja",
             operation_id=operation.operation_id,
