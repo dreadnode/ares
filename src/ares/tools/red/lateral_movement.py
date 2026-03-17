@@ -617,6 +617,10 @@ class LateralMovementTools(Toolset):
                 f"→ Use the hostname instead, e.g., 'dc01.{domain}' instead of '{target}'"
             )
 
+        # NOTE: Do NOT derive domain from target FQDN here. For Kerberos ticket auth,
+        # the domain must match what's encoded in the ccache ticket. Overwriting it
+        # would break golden ticket authentication.
+
         actual_ticket = ticket_path or f"{username}.ccache"
         target_string = f"{domain}/{username}@{target}"
 

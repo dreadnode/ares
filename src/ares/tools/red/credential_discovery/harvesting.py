@@ -226,6 +226,19 @@ class CredentialHarvestingTools(Toolset):
             resolved_password = None
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
             return "[!] Refusing to use placeholder password; provide a real credential."
+
+        # CRITICAL: If target is FQDN, derive domain from it for accurate hash parsing.
+        # The LLM might pass wrong domain (e.g., parent domain when targeting child DC).
+        # For dc01.child.contoso.local -> child.contoso.local
+        if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", target):
+            # Target is FQDN, extract domain
+            target_parts = target.lower().split(".")
+            if len(target_parts) >= 3:
+                derived_domain = ".".join(target_parts[1:])
+                if domain and derived_domain != domain.lower():
+                    logger.info(f"Domain corrected from target FQDN: {domain} -> {derived_domain}")
+                domain = derived_domain
+
         if self.state and hasattr(self.state, "add_domain") and domain:
             self.state.add_domain(domain)
 

