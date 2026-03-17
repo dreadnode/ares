@@ -201,6 +201,7 @@ class TimelineEvent(Model):
         mitre_techniques: MITRE ATT&CK technique IDs associated with this event.
         confidence: Confidence score between 0.0 and 1.0.
         source: Source of this event (e.g., "investigation", "alert").
+        extra_data_json: Optional JSON-encoded structured metadata for decision tracing.
     """
 
     id: str
@@ -210,10 +211,31 @@ class TimelineEvent(Model):
     mitre_techniques: list[str] = wrapped("mitre-techniques", element(tag="technique", default=[]))
     confidence: float = 0.5
     source: str = "investigation"
+    # Store as JSON string to avoid pydantic_xml limitations with dict[str, Any]
+    extra_data_json: str | None = None
+
+    @property
+    def extra_data(self) -> dict[str, Any] | None:
+        """Get extra_data as dict (deserialized from JSON)."""
+        if self.extra_data_json is None:
+            return None
+        import json
+
+        try:
+            return json.loads(self.extra_data_json)
+        except (json.JSONDecodeError, TypeError):
+            return None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for storage."""
-        return self.model_dump(mode="json")
+        d = self.model_dump(mode="json")
+        # Convert extra_data_json to extra_data dict for storage
+        if self.extra_data_json:
+            d["extra_data"] = self.extra_data
+            d.pop("extra_data_json", None)
+        else:
+            d.pop("extra_data_json", None)
+        return d
 
 
 class InvestigativeQuestion(Model):
@@ -935,6 +957,63 @@ class SharedRedTeamState:
 
         self._background_tasks.add(task)
         task.add_done_callback(done_callback)
+
+    # =========================================================================
+    # Multi-Forest Mode Helpers
+    # =========================================================================
+
+    def all_forests_dominated(self) -> bool:
+        """Check if DA has been achieved on all trusted forests.
+
+        For multi-forest mode, the operation should only complete when
+        DA (krbtgt hash) has been obtained from ALL trusted forests,
+        not just the initial target domain.
+
+        Returns:
+            True if:
+            - No trusted domains discovered (nothing to pivot to)
+            - All trusted domains have been dominated (have DA)
+            False if there are undominated trusted domains.
+        """
+        if not self.trusted_domains:
+            # No trusted domains discovered yet - only have initial domain
+            return True
+
+        da_domains_lower = {d.lower() for d in self.domain_admin_domains}
+
+        for trusted in self.trusted_domains:
+            trusted_lower = trusted.lower()
+            # Skip if this is our target domain (we check that separately)
+            if self.target and trusted_lower == self.target.domain.lower():
+                continue
+            # Check if we have DA on this trusted domain
+            if trusted_lower not in da_domains_lower:
+                logger.debug(f"Trusted domain not yet dominated: {trusted}")
+                return False
+
+        return True
+
+    def get_undominated_forests(self) -> list[str]:
+        """Get list of trusted forests where we don't have DA yet.
+
+        Returns:
+            List of domain FQDNs that are trusted but not yet dominated.
+        """
+        if not self.trusted_domains:
+            return []
+
+        da_domains_lower = {d.lower() for d in self.domain_admin_domains}
+        undominated = []
+
+        for trusted in self.trusted_domains:
+            trusted_lower = trusted.lower()
+            # Skip if this is our target domain
+            if self.target and trusted_lower == self.target.domain.lower():
+                continue
+            if trusted_lower not in da_domains_lower:
+                undominated.append(trusted)
+
+        return undominated
 
     # =========================================================================
     # Processed Set Helpers (with Redis persistence)
@@ -2531,9 +2610,17 @@ class SharedRedTeamState:
         # - krbtgt only exists on DCs, so its hash proves DC-level access
         # - "Administrator" could be a LOCAL admin on a workstation (not DA!)
         # - Having 7 hashes instead of all ntds.dit hashes = NOT domain admin
-        if hash_type == "ntlm" and username == "krbtgt" and not self.has_domain_admin:
-            self.has_domain_admin = True
-            self.da_hash_id = hash_obj.id  # Store the ID for consistent attack chain building
+        if hash_type == "ntlm" and username == "krbtgt":
+            # Track which domains we have DA on (for multi-forest mode)
+            domain_lower = domain.lower()
+            if domain_lower not in self.domain_admin_domains:
+                self.domain_admin_domains.append(domain_lower)
+                logger.info(f"Domain admin achieved on: {domain_lower}")
+
+            # Only set global has_domain_admin flag on first DA
+            if not self.has_domain_admin:
+                self.has_domain_admin = True
+                self.da_hash_id = hash_obj.id  # Store the ID for consistent attack chain building
             # NOTE: Do NOT set completed_at here - that's controlled by stop_on_domain_admin
             # or stop_on_golden_ticket config in announcements.py
             # Build attack path from credential chain instead of hardcoding

@@ -1212,16 +1212,11 @@ class PublishingMixin:
             event: The TimelineEvent to persist.
             task_queue: Optional task queue for threaded dispatch.
         """
-        # Serialize TimelineEvent to dict
-        event_dict = {
-            "id": event.id,
-            "timestamp": event.timestamp.isoformat(),
-            "description": event.description,
-            "evidence_ids": event.evidence_ids,
-            "mitre_techniques": event.mitre_techniques,
-            "confidence": event.confidence,
-            "source": event.source,
-        }
+        # Serialize TimelineEvent to dict (use to_dict() for consistent serialization)
+        event_dict = event.to_dict()
+        # Ensure timestamp is serialized as ISO string
+        if hasattr(event.timestamp, "isoformat"):
+            event_dict["timestamp"] = event.timestamp.isoformat()
 
         is_main_thread = threading.current_thread() is threading.main_thread()
         backend = getattr(self.shared_state, "_backend", None)

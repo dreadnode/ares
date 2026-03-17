@@ -917,6 +917,71 @@ def trace_discovery(
         logger.debug(f"Failed to create discovery span: {e}")
 
 
+def trace_decision(
+    role: str,
+    team: str,
+    tools_considered: list[str],
+    tool_chosen: str,
+    reasoning_summary: str,
+    confidence: float | None = None,
+    operation_id: str | None = None,
+    task_id: str | None = None,
+) -> None:
+    """Record an agent tool selection decision as a span.
+
+    Creates a span capturing why an agent chose specific tools, including
+    the reasoning and alternatives considered. This enables post-hoc analysis
+    of agent decision patterns in Tempo.
+
+    Args:
+        role: Agent role making the decision (e.g., "credential_access").
+        team: Team name ("red" or "blue").
+        tools_considered: List of tool names the agent could have chosen.
+        tool_chosen: The tool name that was actually selected.
+        reasoning_summary: Truncated reasoning text from LLM response.
+        confidence: Optional confidence score (0.0 to 1.0) inferred from language.
+        operation_id: Optional operation ID for correlation.
+        task_id: Optional task ID for correlation.
+    """
+    attrs: dict[str, Any] = {
+        "service.namespace": "ares",
+        "attack_team": team,
+        "agent.role": role,
+        "decision.type": "tool_selection",
+        "decision.tool_chosen": tool_chosen,
+        "decision.reasoning_length": len(reasoning_summary),
+    }
+
+    # Store up to 5 considered tools (OTel array attribute)
+    if tools_considered:
+        attrs["decision.tools_considered"] = tools_considered[:5]
+
+    if confidence is not None:
+        attrs["decision.confidence"] = confidence
+
+    if operation_id:
+        attrs["attack_operation_id"] = operation_id
+
+    if task_id:
+        attrs["task.id"] = task_id
+
+    # Add MITRE technique for the chosen tool
+    technique_id = TOOL_TO_TECHNIQUE.get(tool_chosen)
+    if technique_id:
+        attrs["mitre.technique.id"] = technique_id
+
+    # Add tool category for the chosen tool
+    category = TOOL_TO_CATEGORY.get(tool_chosen)
+    if category:
+        attrs["attack_tool_category"] = category
+
+    try:
+        with dn.span(f"decision.{role}", attributes=attrs):
+            pass  # Point-in-time span
+    except Exception as e:
+        logger.debug(f"Failed to create decision span: {e}")
+
+
 def trace_blue_investigation(
     role: str,
     investigation_id: str,

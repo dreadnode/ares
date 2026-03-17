@@ -21,13 +21,20 @@ from ares.core.config import (
     get_agent_config,
     get_max_context_tokens,
     get_min_messages_to_keep,
+    get_multi_forest_mode,
     get_stop_on_domain_admin,
     get_stop_on_golden_ticket,
 )
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.models import AgentInfo, AgentRole, SharedRedTeamState
 from ares.core.templates import get_template_loader
-from ares.core.tracing import IP_PATTERN, TOOL_TO_TECHNIQUE, is_likely_fqdn, trace_tool_call
+from ares.core.tracing import (
+    IP_PATTERN,
+    TOOL_TO_TECHNIQUE,
+    is_likely_fqdn,
+    trace_decision,
+    trace_tool_call,
+)
 from ares.tools.red import (
     ACLExploitTools,
     BloodHoundTools,
@@ -169,22 +176,100 @@ ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
 DEFAULT_MAX_STEPS = 75
 
 
-def load_agent_instructions(role: AgentRole) -> str:
+# =============================================================================
+# Decision Reasoning Extraction Helpers
+# =============================================================================
+
+
+def _extract_reasoning_text(content: str | list | None) -> str:
+    """Extract text reasoning from LLM message content.
+
+    The LLM response contains reasoning text before or alongside tool calls.
+    This extracts the text portions that explain the agent's decision.
+
+    Args:
+        content: Message content (string, list of parts, or None).
+
+    Returns:
+        Extracted reasoning text (may be empty).
+    """
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content.strip()
+    # Handle list of content parts (TextPart, ContentText, etc.)
+    texts = []
+    for part in content:
+        if hasattr(part, "text"):
+            texts.append(part.text)
+        elif isinstance(part, str):
+            texts.append(part)
+    return " ".join(texts).strip()
+
+
+def _estimate_confidence(reasoning: str) -> float:
+    """Estimate confidence from language patterns in reasoning.
+
+    Heuristic confidence based on hedging language vs. assertive language.
+    This provides a rough signal for decision analysis.
+
+    Args:
+        reasoning: The reasoning text to analyze.
+
+    Returns:
+        Confidence score between 0.0 and 1.0.
+    """
+    if not reasoning:
+        return 0.5
+
+    lower = reasoning.lower()
+
+    # High confidence indicators
+    if any(w in lower for w in ["will", "must", "need to", "should", "going to"]):
+        return 0.9
+
+    # Medium-low confidence indicators
+    if any(w in lower for w in ["might", "try", "attempt", "could", "maybe", "possibly"]):
+        return 0.6
+
+    # Default medium-high
+    return 0.8
+
+
+def load_agent_instructions(
+    role: AgentRole,
+    shared_state: SharedRedTeamState | None = None,
+) -> str:
     """
     Load role-specific system instructions from template.
 
     Falls back to generic red team instructions if role-specific not found.
     Capabilities are loaded from config and passed to the template.
+
+    Args:
+        role: The agent role.
+        shared_state: Optional shared state for multi-forest mode context.
     """
     # Get capabilities from config (single source of truth)
     config_key = role.value  # e.g., "recon", "credential_access", "privesc"
     agent_config = get_agent_config(config_key)
     capabilities = agent_config.capabilities
 
+    # Multi-forest mode context for templates
+    multi_forest_mode = get_multi_forest_mode()
+    undominated_forests: list[str] = []
+    if multi_forest_mode and shared_state:
+        undominated_forests = shared_state.get_undominated_forests()
+
     template_path = ROLE_INSTRUCTIONS.get(role)
     if template_path:
         try:
-            return get_template_loader().render(template_path, capabilities=capabilities)
+            return get_template_loader().render(
+                template_path,
+                capabilities=capabilities,
+                multi_forest_mode=multi_forest_mode,
+                undominated_forests=undominated_forests,
+            )
         except Exception as e:
             logger.warning(f"Failed to load template {template_path}: {e}")
 
@@ -202,6 +287,8 @@ def load_agent_instructions(role: AgentRole) -> str:
         "redteam/agents/system_instructions.md.jinja",
         capabilities=capabilities,
         all_capabilities=all_capabilities,
+        multi_forest_mode=multi_forest_mode,
+        undominated_forests=undominated_forests,
     )
 
 
@@ -478,6 +565,91 @@ def create_role_hooks(
         return None
 
     hooks.extend([log_tool_usage, log_tool_result])
+
+    # Decision reasoning capture hook - records why agents chose specific tools
+    # This enables post-hoc analysis of agent decision patterns via timeline and OTel
+    async def capture_decision_reasoning(event: GenerationEnd) -> None:
+        """Capture reasoning from LLM tool selection for traceability.
+
+        When the LLM responds with tool calls, extract the reasoning text
+        and persist it to timeline + OTel for crash recovery and analysis.
+        """
+        if not isinstance(event, GenerationEnd):
+            return
+
+        # Only process messages with tool calls (actual decisions)
+        if not event.message or not getattr(event.message, "tool_calls", None):
+            return
+
+        tool_calls = event.message.tool_calls
+        if not tool_calls:
+            return
+
+        # Extract reasoning from message content (text before/with tool calls)
+        reasoning_text = _extract_reasoning_text(event.message.content)
+        tools_chosen = [tc.name for tc in tool_calls if hasattr(tc, "name")]
+        if not tools_chosen:
+            return
+
+        # Confidence heuristic from language patterns
+        confidence = _estimate_confidence(reasoning_text)
+
+        # Get operation_id for correlation
+        operation_id = getattr(shared_state, "operation_id", None) or getattr(
+            dispatcher, "operation_id", None
+        )
+
+        # Create timeline event with decision metadata
+        import json
+        import uuid
+        from datetime import datetime, timezone
+
+        from ares.core.models import TimelineEvent
+
+        extra_data = {
+            "decision_type": "tool_selection",
+            "tools_chosen": tools_chosen,
+            "reasoning_summary": reasoning_text[:500] if reasoning_text else "",
+        }
+        decision_event = TimelineEvent(
+            id=f"evt-decision-{uuid.uuid4().hex[:8]}",
+            timestamp=datetime.now(timezone.utc),
+            source=f"{role.value}_decision",
+            description=f"Agent chose {tools_chosen[0]}"
+            + (f" (+{len(tools_chosen) - 1} more)" if len(tools_chosen) > 1 else ""),
+            mitre_techniques=[TOOL_TO_TECHNIQUE.get(tools_chosen[0], "")],
+            confidence=confidence,
+            extra_data_json=json.dumps(extra_data),
+        )
+
+        # Add to in-memory timeline for immediate access
+        shared_state.operation_timeline.append(decision_event)
+
+        # Persist to Redis timeline (survives crash recovery)
+        # Use the backend pattern from publishing.py
+        backend = getattr(shared_state, "_backend", None)
+        if backend:
+            try:
+                event_dict = decision_event.to_dict()
+                # Ensure timestamp is serialized as ISO string
+                if hasattr(decision_event.timestamp, "isoformat"):
+                    event_dict["timestamp"] = decision_event.timestamp.isoformat()
+                await backend.add_timeline_event(event_dict)
+            except Exception as e:
+                logger.debug(f"Failed to persist decision event to Redis: {e}")
+
+        # Create OTel span for Tempo correlation
+        trace_decision(
+            role=role.value,
+            team="red",
+            tools_considered=tools_chosen,  # We only know what was chosen, not alternatives
+            tool_chosen=tools_chosen[0],
+            reasoning_summary=reasoning_text[:500] if reasoning_text else "",
+            confidence=confidence,
+            operation_id=operation_id,
+        )
+
+    hooks.append(capture_decision_reasoning)
 
     # Context management for ALL roles: summarize conversation when approaching token limits
     # This prevents context window exhaustion from accumulated tool outputs
@@ -1280,8 +1452,8 @@ def create_specialized_agent(
     if additional_tools:
         tools.extend(additional_tools)
 
-    # Load role-specific instructions
-    instructions = load_agent_instructions(role)
+    # Load role-specific instructions (with shared_state for multi-forest context)
+    instructions = load_agent_instructions(role, shared_state=shared_state)
 
     # Create hooks for this role
     hooks = create_role_hooks(role, dispatcher, shared_state)

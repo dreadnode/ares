@@ -10,6 +10,8 @@ from dreadnode.agent.reactions import Finish
 from ares.core.config import AgentConfig
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.factories.red_agents import (
+    _estimate_confidence,
+    _extract_reasoning_text,
     create_agent_info,
     create_multi_agent_ensemble,
     create_role_hooks,
@@ -1439,3 +1441,81 @@ Certificate Authorities
                         return
 
         pytest.fail("Expected publish_discovery to be called with enriched ESC8 details")
+
+
+# =============================================================================
+# Tests for decision reasoning helpers
+# =============================================================================
+
+
+class TestDecisionReasoningHelpers:
+    """Tests for _extract_reasoning_text and _estimate_confidence helper functions."""
+
+    def test_extract_reasoning_text_from_string(self):
+        """Extract reasoning from simple string content."""
+
+        result = _extract_reasoning_text("I will use secretsdump to get credentials")
+        assert result == "I will use secretsdump to get credentials"
+
+    def test_extract_reasoning_text_from_list(self):
+        """Extract reasoning from list of content parts."""
+
+        # Simulate list of content parts with text attribute
+        class TextPart:
+            def __init__(self, text: str):
+                self.text = text
+
+        content = [TextPart("First reasoning"), TextPart("Second reasoning")]
+        result = _extract_reasoning_text(content)
+        assert "First reasoning" in result
+        assert "Second reasoning" in result
+
+    def test_extract_reasoning_text_from_mixed_list(self):
+        """Extract reasoning handles mixed list with strings and objects."""
+
+        content = ["Direct text", MagicMock(text="Object text")]
+        result = _extract_reasoning_text(content)
+        assert "Direct text" in result
+        assert "Object text" in result
+
+    def test_extract_reasoning_text_from_none(self):
+        """Extract reasoning returns empty string for None."""
+
+        result = _extract_reasoning_text(None)
+        assert result == ""
+
+    def test_extract_reasoning_text_strips_whitespace(self):
+        """Extract reasoning strips leading/trailing whitespace."""
+
+        result = _extract_reasoning_text("  padded text  ")
+        assert result == "padded text"
+
+    def test_estimate_confidence_high_for_assertive(self):
+        """Estimate high confidence for assertive language."""
+
+        assert _estimate_confidence("I will use secretsdump") == 0.9
+        assert _estimate_confidence("We must run kerberoast") == 0.9
+        assert _estimate_confidence("I need to enumerate") == 0.9
+        assert _estimate_confidence("I should try psexec") == 0.9
+        assert _estimate_confidence("I'm going to run nmap") == 0.9
+
+    def test_estimate_confidence_medium_low_for_hedging(self):
+        """Estimate lower confidence for hedging language."""
+
+        assert _estimate_confidence("I might try secretsdump") == 0.6
+        assert _estimate_confidence("Let me attempt this") == 0.6
+        assert _estimate_confidence("This could work") == 0.6
+        assert _estimate_confidence("Maybe we can enumerate") == 0.6
+        assert _estimate_confidence("possibly this can succeed") == 0.6
+
+    def test_estimate_confidence_default_for_neutral(self):
+        """Estimate default confidence for neutral language."""
+
+        assert _estimate_confidence("Running secretsdump") == 0.8
+        assert _estimate_confidence("Executing kerberoast now") == 0.8
+
+    def test_estimate_confidence_handles_empty(self):
+        """Estimate default confidence for empty reasoning."""
+
+        assert _estimate_confidence("") == 0.5
+        assert _estimate_confidence(None) == 0.5  # type: ignore[arg-type]
