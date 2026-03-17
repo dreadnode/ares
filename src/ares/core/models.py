@@ -1171,11 +1171,9 @@ class SharedRedTeamState:
         if not technique_id:
             return False
 
-        # Check if already in set
         if technique_id in self.identified_techniques:
             return False
 
-        # Add to in-memory set
         self.identified_techniques.add(technique_id)
         logger.debug(f"Added MITRE technique: {technique_id}")
 
@@ -1345,34 +1343,28 @@ class SharedRedTeamState:
             return
 
         try:
-            # Load golden tickets
             tickets = await self._backend.get_golden_tickets()
             for ticket in tickets:
-                # Add without triggering another Redis write
                 if ticket not in self.golden_tickets:
                     self.golden_tickets.append(ticket)
 
-            # Load AdminSD backdoors
             backdoors = await self._backend.get_adminsd_backdoors()
             for backdoor in backdoors:
                 if backdoor not in self.adminsd_holder_backdoors:
                     self.adminsd_holder_backdoors.append(backdoor)
 
-            # Load ACL chains
             chains = await self._backend.get_acl_chains()
             existing_chain_ids = {c.get("chain_id") for c in self.acl_chains}
             for chain in chains:
                 if chain.get("chain_id") not in existing_chain_ids:
                     self.acl_chains.append(chain)
 
-            # Load gMSA accounts
             gmsas = await self._backend.get_gmsa_accounts()
             existing_accounts = {g.get("account", "").lower() for g in self.gmsa_accounts}
             for gmsa in gmsas:
                 if gmsa.get("account", "").lower() not in existing_accounts:
                     self.gmsa_accounts.append(gmsa)
 
-            # Load golden ticket capable credentials
             gt_capable = await self._backend.get_golden_ticket_capable_creds()
             for cred_key, capabilities in gt_capable.items():
                 if cred_key not in self.golden_ticket_capable_creds:

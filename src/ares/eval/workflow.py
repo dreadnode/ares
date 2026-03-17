@@ -282,7 +282,6 @@ class EvaluationScenario:
         if isinstance(self.red_state, SharedRedTeamState):
             return self.red_state
 
-        # Load from file
         path = Path(self.red_state)
         if not path.exists():
             raise FileNotFoundError(f"Red team state file not found: {path}")
@@ -594,7 +593,6 @@ class EvaluationRunner:
         duration = time.time() - start_time
         estimated_cost = estimate_cost(self.model, prompt_tokens, completion_tokens)
 
-        # Build result
         result = build_evaluation_result(
             evaluation_id=evaluation_id,
             state=state,
@@ -682,7 +680,6 @@ class EvaluationRunner:
                 for i, result in enumerate(results, 1):
                     dn.log_metric(f"scenario_{i}_overall", result.overall_score)
 
-            # Build dataset result
             dataset_result = DatasetEvaluationResult(
                 dataset_name=dataset.name,
                 results=list(results),
@@ -764,7 +761,6 @@ class EvaluationRunner:
             if mitre_technique is None and techniques:
                 mitre_technique = techniques[0].technique_id
 
-        # Get operation timestamp if available
         if isinstance(red_state, SharedRedTeamState) or hasattr(red_state, "started_at"):
             starts_at = red_state.started_at.isoformat()
         else:
@@ -1050,7 +1046,6 @@ def _deserialize_red_state(data: dict[str, Any]) -> SharedRedTeamState:
 
     state = SharedRedTeamState(operation_id=data.get("operation_id", "unknown"))
 
-    # Load credentials
     for cred_data in data.get("all_credentials", []):
         cred = Credential(
             username=cred_data.get("username", ""),
@@ -1060,7 +1055,6 @@ def _deserialize_red_state(data: dict[str, Any]) -> SharedRedTeamState:
         )
         state.all_credentials.append(cred)
 
-    # Load hashes
     for hash_data in data.get("all_hashes", []):
         h = Hash(
             username=hash_data.get("username", ""),
@@ -1071,7 +1065,6 @@ def _deserialize_red_state(data: dict[str, Any]) -> SharedRedTeamState:
         )
         state.all_hashes.append(h)
 
-    # Load hosts
     for host_data in data.get("all_hosts", []):
         host = Host(
             ip=host_data.get("ip", ""),
@@ -1082,7 +1075,6 @@ def _deserialize_red_state(data: dict[str, Any]) -> SharedRedTeamState:
         )
         state.all_hosts.append(host)
 
-    # Load users
     for user_data in data.get("all_users", []):
         user = User(
             username=user_data.get("username", ""),
@@ -1091,7 +1083,6 @@ def _deserialize_red_state(data: dict[str, Any]) -> SharedRedTeamState:
         )
         state.all_users.append(user)
 
-    # Load simple fields
     state.all_domains = data.get("all_domains", [])
     state.has_domain_admin = data.get("has_domain_admin", False)
     state.has_golden_ticket = data.get("has_golden_ticket", False)

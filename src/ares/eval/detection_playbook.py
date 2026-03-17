@@ -355,12 +355,10 @@ def create_detection_playbook(state: SharedRedTeamState) -> DetectionPlaybook:
         domain_admin_path=state.domain_admin_path,
     )
 
-    # Build detection targets from IOCs
     detection_targets = []
     priority_queries = []
     technique_detections: dict[str, TechniqueDetection] = {}
 
-    # Extract hosts as detection targets
     for host in state.all_hosts:
         target = DetectionTarget(
             ioc_type="ip",
@@ -391,7 +389,6 @@ def create_detection_playbook(state: SharedRedTeamState) -> DetectionPlaybook:
                 )
             )
 
-    # Extract credentials as detection targets
     for cred in state.all_credentials:
         account_name = f"{cred.domain}\\{cred.username}" if cred.domain else cred.username
         target = DetectionTarget(
@@ -408,7 +405,6 @@ def create_detection_playbook(state: SharedRedTeamState) -> DetectionPlaybook:
         )
         detection_targets.append(target)
 
-    # Extract hashes as detection targets
     for hash_obj in state.all_hashes:
         # Only include NTLM hashes for detection (not full hash values for security)
         hash_preview = (
@@ -429,13 +425,9 @@ def create_detection_playbook(state: SharedRedTeamState) -> DetectionPlaybook:
         )
         detection_targets.append(target)
 
-    # Build technique-specific detections
     technique_detections = _build_technique_detections(state, attack_start, attack_end)
-
-    # Build priority queries
     priority_queries = _build_priority_queries(state, attack_start, attack_end)
 
-    # Generate executive summary
     summary_parts = []
 
     summary_parts.append(

@@ -72,7 +72,6 @@ def score_ioc_detection(
     if not ground_truth.expected_iocs:
         return 1.0  # No IOCs expected = perfect score
 
-    # Build set of found values from evidence
     found_values: set[str] = set()
     for evidence in state.evidence:
         found_values.add(evidence.value.lower())
@@ -281,7 +280,6 @@ def score_timeline_accuracy(
     if not state.timeline:
         return 0.0  # No timeline generated = zero score
 
-    # Build set of timeline descriptions and techniques
     found_descriptions: list[str] = [event.description.lower() for event in state.timeline]
     found_techniques_in_timeline: set[str] = set()
 

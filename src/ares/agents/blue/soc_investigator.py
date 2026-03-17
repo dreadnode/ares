@@ -119,10 +119,8 @@ def build_initial_prompt(alert: dict, attack_context: dict | None = None) -> str
                 mitre_technique = annotations[key]
                 break
 
-    # Current time for reference
     current_time = datetime.now(timezone.utc)
 
-    # Build attack context for template
     attack_window_start = None
     attack_window_end = None
     techniques_used = []
