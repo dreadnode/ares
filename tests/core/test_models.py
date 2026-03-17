@@ -1643,6 +1643,216 @@ class TestRetroactiveDomainNormalization:
         # Credential domain should remain unchanged
         assert state.all_credentials[0].domain == "contoso"
 
+    def test_parent_child_normalize_excludes_well_known_accounts(self) -> None:
+        """Test that parent->child normalization does NOT affect well-known accounts.
+
+        CRITICAL BUG FIX: Well-known accounts (Administrator, krbtgt, Guest, etc.)
+        exist in EVERY domain with the same name but different hashes.
+        We must NOT reassign their hashes based on incomplete user enumeration.
+
+        Scenario that was broken:
+        1. Secretsdump on contoso.local gets Administrator hash
+        2. User enumeration only finds Administrator in child.contoso.local
+        3. BUG: Administrator hash gets wrongly normalized to child.contoso.local
+        4. Golden ticket PTH fails because hash is for parent, not child
+        """
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Add parent domain first
+        state.add_domain("contoso.local")
+
+        # Add Administrator hash for parent domain (from secretsdump on parent DC)
+        admin_hash = Hash(
+            username="Administrator",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            hash_type="NTLM",
+            domain="contoso.local",
+        )
+        state.add_hash(admin_hash, "secretsdump")
+
+        # Add krbtgt hash for parent domain
+        krbtgt_hash = Hash(
+            username="krbtgt",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890",
+            hash_type="NTLM",
+            domain="contoso.local",
+        )
+        state.add_hash(krbtgt_hash, "secretsdump")
+
+        # Add a regular user hash that SHOULD be normalized (when child domain discovered)
+        regular_hash = Hash(
+            username="sql_svc",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:1234567890abcdef1234567890abcdef",
+            hash_type="NTLM",
+            domain="contoso.local",
+        )
+        state.add_hash(regular_hash, "secretsdump")
+
+        # Add user for sql_svc ONLY in child domain - this will trigger add_domain
+        # for child.contoso.local, which triggers parent->child normalization
+        state.add_user("sql_svc", "child.contoso.local", "bloodhound")
+
+        # Verify: Regular user hash SHOULD be normalized to child domain
+        # (since sql_svc was only seen in child domain at time of normalization)
+        regular_hashes = [h for h in state.all_hashes if h.username.lower() == "sql_svc"]
+        assert len(regular_hashes) == 1
+        assert regular_hashes[0].domain == "child.contoso.local", (
+            f"Regular user hash should be normalized, got {regular_hashes[0].domain}"
+        )
+
+        # Now add Administrator only in child domain (simulates incomplete enumeration)
+        # Note: This won't re-trigger normalization since child domain already added
+        state.add_user("administrator", "child.contoso.local", "bloodhound")
+
+        # Verify: Administrator hash must stay in parent domain (not affected)
+        admin_hashes = [h for h in state.all_hashes if h.username.lower() == "administrator"]
+        assert len(admin_hashes) == 1
+        assert admin_hashes[0].domain == "contoso.local", (
+            f"Administrator hash incorrectly normalized to {admin_hashes[0].domain}"
+        )
+
+        # Verify: krbtgt hash must stay in parent domain
+        krbtgt_hashes = [h for h in state.all_hashes if h.username.lower() == "krbtgt"]
+        assert len(krbtgt_hashes) == 1
+        assert krbtgt_hashes[0].domain == "contoso.local", (
+            f"krbtgt hash incorrectly normalized to {krbtgt_hashes[0].domain}"
+        )
+
+    def test_parent_child_normalize_excludes_administrator_at_discovery(self) -> None:
+        """Test that Administrator hash is NOT normalized even when it's the first user found.
+
+        This simulates the exact bug scenario:
+        1. Secretsdump on parent DC gets Administrator hash
+        2. BloodHound finds Administrator user in child domain (before parent enumeration)
+        3. child domain is added -> triggers normalization
+        4. Administrator hash must NOT be moved to child domain
+        """
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Setup parent domain and Administrator hash
+        state.add_domain("contoso.local")
+        admin_hash = Hash(
+            username="Administrator",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            hash_type="NTLM",
+            domain="contoso.local",
+        )
+        state.add_hash(admin_hash, "secretsdump")
+
+        # First user discovery is Administrator in child domain
+        # This triggers add_domain("child.contoso.local") and normalization
+        state.add_user("administrator", "child.contoso.local", "bloodhound")
+
+        # Verify: Administrator hash stays in parent domain
+        admin_hashes = [h for h in state.all_hashes if h.username.lower() == "administrator"]
+        assert len(admin_hashes) == 1
+        assert admin_hashes[0].domain == "contoso.local", (
+            f"BUG: Administrator hash incorrectly normalized to {admin_hashes[0].domain}"
+        )
+
+    def test_resolve_credential_domain_excludes_well_known_accounts(self) -> None:
+        """Test that _resolve_credential_domain_from_users does NOT correct well-known accounts.
+
+        Well-known accounts (Administrator, krbtgt, Guest) exist in EVERY domain.
+        We must NOT reassign their credentials based on user enumeration.
+        """
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Add users only in child domain (simulate incomplete enumeration)
+        state.add_user("administrator", "child.contoso.local", "bloodhound")
+        state.add_user("krbtgt", "child.contoso.local", "bloodhound")
+        state.add_user("sql_svc", "child.contoso.local", "bloodhound")
+
+        # Test: Administrator credential from parent domain should NOT be corrected
+        admin_resolved = state._resolve_credential_domain_from_users(
+            "administrator", "contoso.local"
+        )
+        assert admin_resolved == "contoso.local", (
+            f"Administrator domain incorrectly resolved to {admin_resolved}"
+        )
+
+        # Test: krbtgt credential from parent domain should NOT be corrected
+        krbtgt_resolved = state._resolve_credential_domain_from_users("krbtgt", "contoso.local")
+        assert krbtgt_resolved == "contoso.local", (
+            f"krbtgt domain incorrectly resolved to {krbtgt_resolved}"
+        )
+
+        # Test: Regular user SHOULD be corrected to child domain
+        sql_svc_resolved = state._resolve_credential_domain_from_users("sql_svc", "contoso.local")
+        assert sql_svc_resolved == "child.contoso.local", (
+            f"sql_svc should be resolved to child domain, got {sql_svc_resolved}"
+        )
+
+    def test_normalize_credential_domains_excludes_well_known_accounts(self) -> None:
+        """Test that normalize_credential_domains_to_users keeps all well-known credentials.
+
+        When we have Administrator/krbtgt from multiple domains, they are DIFFERENT
+        accounts and must ALL be kept, not deduplicated.
+        """
+        from ares.core.models import Credential, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+
+        # Add Administrator credentials from both parent and child domains
+        # These are different accounts with (presumably) different passwords
+        cred1 = Credential(
+            username="Administrator",
+            password="ParentPass123!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="secretsdump",
+        )
+        cred2 = Credential(
+            username="Administrator",
+            password="ChildPass456!",  # pragma: allowlist secret
+            domain="child.contoso.local",
+            source="secretsdump",
+        )
+        # Add a regular user with duplicates (SHOULD be deduplicated)
+        cred3 = Credential(
+            username="sql_svc",
+            password="SqlPass789!",  # pragma: allowlist secret
+            domain="contoso.local",
+            source="source1",
+        )
+        cred4 = Credential(
+            username="sql_svc",
+            password="SqlPass789!",  # pragma: allowlist secret
+            domain="child.contoso.local",
+            source="source2",
+        )
+
+        # Manually add to bypass add_credential deduplication
+        state.all_credentials = [cred1, cred2, cred3, cred4]
+
+        # Add user only in child domain
+        state.add_user("sql_svc", "child.contoso.local", "bloodhound")
+
+        # Run normalization
+        state.normalize_credential_domains_to_users()
+
+        # Verify: Both Administrator credentials are kept (different accounts)
+        admin_creds = [c for c in state.all_credentials if c.username.lower() == "administrator"]
+        assert len(admin_creds) == 2, (
+            f"Both Administrator creds should be kept, got {len(admin_creds)}"
+        )
+        admin_domains = {c.domain for c in admin_creds}
+        assert admin_domains == {"contoso.local", "child.contoso.local"}, (
+            f"Expected both domains, got {admin_domains}"
+        )
+
+        # Verify: sql_svc should be deduplicated to child domain only
+        sql_creds = [c for c in state.all_credentials if c.username.lower() == "sql_svc"]
+        assert len(sql_creds) == 1, f"sql_svc should be deduplicated, got {len(sql_creds)}"
+        assert sql_creds[0].domain == "child.contoso.local", (
+            f"sql_svc should be in child domain, got {sql_creds[0].domain}"
+        )
+
 
 class TestDomainAdminAutoDetection:
     """Tests for automatic domain admin detection via hash analysis.
