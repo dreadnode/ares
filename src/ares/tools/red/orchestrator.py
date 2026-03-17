@@ -1613,7 +1613,6 @@ class OrchestratorTools(Toolset):
             discovered_by=self._agent_name,
         )
 
-        # Get the priority for reporting
         priority = self.dispatcher._vulnerability_priorities.get(vuln_type, 99)
 
         return (

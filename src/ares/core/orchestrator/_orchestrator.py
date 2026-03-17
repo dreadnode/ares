@@ -750,7 +750,6 @@ async def run_multi_agent_operation(
         target_environment=target_environment,
     )
 
-    # Create agent ensemble
     agents = await _create_agent_ensemble(
         dispatcher=dispatcher,
         model=model,

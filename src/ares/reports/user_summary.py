@@ -156,7 +156,6 @@ def generate_user_summaries(state: SharedRedTeamState) -> list[UserSummary]:
     Returns:
         List of UserSummary objects sorted by domain then username.
     """
-    # Build index for chain tracing
     item_index = _build_item_index(state.all_credentials, state.all_hashes)
 
     # Group credentials and hashes by user key
@@ -201,7 +200,6 @@ def generate_user_summaries(state: SharedRedTeamState) -> list[UserSummary]:
             # (could add option to include all users later)
             pass
 
-    # Build summaries
     summaries: list[UserSummary] = []
     all_user_keys = set(creds_by_user.keys()) | set(hashes_by_user.keys())
 

@@ -88,7 +88,6 @@ class EscalationTriageAgent:
         completion_event = asyncio.Event()
         triage_tools.set_completion_event(completion_event)
 
-        # Create agent
         agent = dn.Agent(
             name="Escalation Triage",
             model=self.model,
@@ -98,7 +97,6 @@ class EscalationTriageAgent:
             thread=Thread(),  # type: ignore[call-arg]
         )
 
-        # Build initial prompt
         initial_prompt = f"""Triage escalated investigation: {investigation_id}
 
 Escalation reason: {shared_state.escalation_reason or "Not specified"}

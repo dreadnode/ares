@@ -59,7 +59,6 @@ async def submit(
     follow_logs: Annotated[bool, cyclopts.Parameter(help="Follow orchestrator logs")] = False,
 ) -> None:
     """Submit an investigation to the blue team orchestrator service."""
-    # Parse alert JSON
     alert_path = Path(alert_json)
     if alert_path.is_file():
         alert = json.loads(alert_path.read_text())
@@ -135,7 +134,6 @@ async def status(
     redis_url = redis_url or get_redis_url()
 
     if latest:
-        # Find latest investigation
         inv_id = await _get_latest_investigation_id(redis_url)
         if not inv_id:
             print("No investigations found")
@@ -181,7 +179,6 @@ async def list_investigations(
     try:
         investigations: list[dict[str, Any]] = []
 
-        # Get investigations from status keys (ares:blue:inv:*:status)
         status_keys = await client.keys("ares:blue:inv:*:status")
         for key in status_keys:
             key_str = key if isinstance(key, str) else key.decode()
@@ -230,7 +227,6 @@ async def list_investigations(
                     }
                 )
 
-        # Sort by started_at (most recent first)
         investigations.sort(
             key=lambda x: x.get("started_at") or "",
             reverse=True,
@@ -284,7 +280,6 @@ async def delete(
 
     client = await create_verified_redis_client(redis_url, decode_responses=True)
     try:
-        # Find and delete all keys for this investigation
         pattern = f"ares:blue:inv:{investigation_id}:*"
         keys = await client.keys(pattern)
 
@@ -292,7 +287,6 @@ async def delete(
         if keys:
             deleted = await client.delete(*keys)
 
-        # Also remove from active investigations set
         removed = await client.srem("ares:blue:active_investigations", investigation_id)
         if removed:
             deleted += removed
@@ -319,13 +313,11 @@ async def delete_operation(
 
     client = await create_verified_redis_client(redis_url, decode_responses=True)
     try:
-        # Get investigation IDs for this operation
         op_inv_key = f"ares:blue:op:{operation_id}:investigations"
         inv_ids = await client.smembers(op_inv_key)
 
         if not inv_ids:
             print(f"No investigations found for operation: {operation_id}")
-            # Check if the operation key exists at all
             exists = await client.exists(op_inv_key)
             if not exists:
                 print(f"Operation tracking key does not exist: {op_inv_key}")
@@ -345,7 +337,6 @@ async def delete_operation(
                 print("Aborted")
                 return
 
-        # Delete all investigation keys
         total_deleted = 0
         for inv_id in inv_ids:
             pattern = f"ares:blue:inv:{inv_id}:*"
@@ -354,12 +345,10 @@ async def delete_operation(
                 deleted = await client.delete(*keys)
                 total_deleted += deleted
 
-        # Remove from active investigations set
         if inv_ids:
             removed = await client.srem("ares:blue:active_investigations", *inv_ids)
             total_deleted += removed
 
-        # Delete the operation tracking key
         await client.delete(op_inv_key)
         total_deleted += 1
 
@@ -389,7 +378,6 @@ async def cleanup(
 
     try:
         if all_investigations:
-            # Clear ALL investigations
             inv_keys = await client.keys("ares:blue:inv:*")
             op_keys = await client.keys("ares:blue:op:*")
             active_exists = await client.exists("ares:blue:active_investigations")
@@ -428,8 +416,6 @@ async def cleanup(
 
         # Original behavior: clean up old investigations
         cutoff = datetime.now(timezone.utc).timestamp() - (max_age_hours * 3600)
-
-        # Find investigations to clean up
         status_keys = await client.keys("ares:blue:inv:*:status")
         to_delete: list[str] = []
 
@@ -449,7 +435,6 @@ async def cleanup(
             if status.get("status") not in ("completed", "failed"):
                 continue
 
-            # Check age
             completed_at = status.get("completed_at") or status.get("failed_at")
             if completed_at:
                 try:
@@ -473,7 +458,6 @@ async def cleanup(
             print("(dry run - no changes made)")
             return
 
-        # Delete keys for each investigation
         total_deleted = 0
         for inv_id in to_delete:
             pattern = f"ares:blue:inv:{inv_id}:*"
@@ -482,7 +466,6 @@ async def cleanup(
                 deleted = await client.delete(*keys)
                 total_deleted += deleted
 
-        # Also remove from active investigations set
         if to_delete:
             removed = await client.srem("ares:blue:active_investigations", *to_delete)
             total_deleted += removed
@@ -586,11 +569,9 @@ async def techniques(
 
     client = await create_verified_redis_client(redis_url, decode_responses=True)
     try:
-        # Get techniques
         techniques_key = f"ares:blue:inv:{investigation_id}:techniques"
         techniques = await client.smembers(techniques_key)
 
-        # Get technique names
         names_key = f"ares:blue:inv:{investigation_id}:technique_names"
         names = await client.hgetall(names_key)
 
@@ -676,14 +657,16 @@ async def runtime(
 async def _get_latest_operation_id(redis_url: str) -> tuple[str | None, bool]:
     """Get the ID of the latest red team operation (prefer running).
 
+    Args:
+        redis_url: Redis connection URL.
+
     Returns:
-        Tuple of (operation_id, is_running)
+        Tuple of (operation_id, is_running).
     """
     from ares.core.task_queue import RedisTaskQueue
 
     client = await create_verified_redis_client(redis_url, decode_responses=True)
     try:
-        # Check for running operations first
         lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
         running_ops: set[str] = set()
         for key in lock_keys:
@@ -692,7 +675,6 @@ async def _get_latest_operation_id(redis_url: str) -> tuple[str | None, bool]:
             if len(parts) >= 2:
                 running_ops.add(parts[-1])
 
-        # Get all operations with meta data
         meta_keys = await client.keys("ares:op:*:meta")
         operations: list[tuple[str, str | None]] = []  # (id, started_at)
 
@@ -716,7 +698,6 @@ async def _get_latest_operation_id(redis_url: str) -> tuple[str | None, bool]:
             running.sort(key=lambda x: x[1] or "", reverse=True)
             return running[0][0], True
 
-        # Otherwise, return most recent
         operations.sort(key=lambda x: x[1] or "", reverse=True)
         return operations[0][0], False
 
@@ -750,7 +731,6 @@ async def operation_status(
         """Show status, return True if all investigations are done."""
         client = await create_verified_redis_client(redis_url, decode_responses=True)
         try:
-            # Get investigation IDs for this operation
             op_inv_key = f"ares:blue:op:{operation_id}:investigations"
             inv_ids = await client.smembers(op_inv_key)
 
@@ -758,7 +738,6 @@ async def operation_status(
                 print(f"No investigations found for operation: {operation_id}")
                 return True
 
-            # Get status for each investigation
             statuses: dict[str, list[dict]] = {
                 "submitted": [],
                 "running": [],
@@ -786,7 +765,6 @@ async def operation_status(
                     status["investigation_id"] = inv_id
                     statuses.setdefault(status.get("status", "unknown"), []).append(status)
 
-                    # Track timing
                     if status.get("started_at"):
                         started = datetime.fromisoformat(
                             status["started_at"].replace("Z", "+00:00")
@@ -815,7 +793,6 @@ async def operation_status(
                 else:
                     statuses["submitted"].append({"investigation_id": inv_id})
 
-            # Calculate duration
             now = datetime.now(timezone.utc)
             if earliest_start:
                 if statuses["running"] or statuses["submitted"]:
@@ -829,7 +806,6 @@ async def operation_status(
             else:
                 elapsed = 0
 
-            # Format duration
             hours, remainder = divmod(int(elapsed), 3600)
             minutes, seconds = divmod(remainder, 60)
             if hours > 0:
@@ -839,7 +815,6 @@ async def operation_status(
             else:
                 duration = f"{seconds}s"
 
-            # Print summary
             total = len(inv_ids)
             running = len(statuses["running"])
             completed = len(statuses["completed"])
@@ -858,7 +833,6 @@ async def operation_status(
             print(f"  Submitted: {submitted}")
             print(f"Duration: {duration}")
 
-            # Show triage breakdown if any triage occurred
             total_triaged = sum(triage_counts.values())
             if total_triaged > 0:
                 print("\nTriage breakdown:")
@@ -873,7 +847,6 @@ async def operation_status(
             if latest_end and not (statuses["running"] or statuses["submitted"]):
                 print(f"Completed: {latest_end.isoformat()}")
 
-            # Show running investigations
             if statuses["running"]:
                 print("\nRunning investigations:")
                 for inv in statuses["running"]:
@@ -881,7 +854,6 @@ async def operation_status(
                     started_str = inv.get("started_at", "")[:19] if inv.get("started_at") else ""
                     print(f"  {inv_id} (started: {started_str})")
 
-            # Show failed investigations
             if statuses["failed"]:
                 print("\nFailed investigations:")
                 for inv in statuses["failed"]:
@@ -896,7 +868,6 @@ async def operation_status(
 
     if watch > 0:
         while True:
-            # Clear screen
             print("\033[2J\033[H", end="")
             all_done = await show_status()
             if all_done:
@@ -955,7 +926,6 @@ async def from_operation(
         operation_id = resolved_op
         logger.info(f"Using latest operation: {operation_id} (running={operation_is_running})")
 
-    # Load operation state
     client = await create_verified_redis_client(redis_url, decode_responses=False)
     try:
         state = await _load_state_from_redis(client, operation_id)
@@ -974,7 +944,6 @@ async def from_operation(
     logger.info(f"Attack window: {window_start.isoformat()} to {window_end.isoformat()}")
     logger.info(f"Techniques used: {len(playbook.techniques_used)}")
 
-    # Resolve Grafana config
     grafana_url = grafana_url or os.environ.get("GRAFANA_URL", "")
     grafana_api_key = grafana_api_key or os.environ.get("GRAFANA_SERVICE_ACCOUNT_TOKEN", "")
 
@@ -987,7 +956,6 @@ async def from_operation(
         )
         sys.exit(1)
 
-    # Fetch alerts from Grafana
     grafana = GrafanaTools(base_url=grafana_url, api_key=grafana_api_key)
 
     if operation_is_running:
@@ -1238,7 +1206,14 @@ async def from_operation(
 
 
 async def _get_latest_investigation_id(redis_url: str) -> str | None:
-    """Get the ID of the latest investigation (prefer running)."""
+    """Get the ID of the latest investigation (prefer running).
+
+    Args:
+        redis_url: Redis connection URL.
+
+    Returns:
+        Investigation ID if found, None otherwise.
+    """
     client = await create_verified_redis_client(redis_url, decode_responses=True)
     try:
         investigations: list[tuple[str, str, str | None]] = []  # (id, status, started_at)
@@ -1311,11 +1286,9 @@ async def triage_status(
 
     client = await create_verified_redis_client(redis_url, decode_responses=True)
     try:
-        # Get triage decision
         decision_key = f"ares:blue:inv:{investigation_id}:triage:decision"
         decision_data = await client.get(decision_key)
 
-        # Get triage records (audit trail)
         records_key = f"ares:blue:inv:{investigation_id}:triage:records"
         records_raw = await client.lrange(records_key, 0, -1)
         records = []
@@ -1325,7 +1298,6 @@ async def triage_status(
             except json.JSONDecodeError:
                 pass
 
-        # Get investigation status
         status_key = f"ares:blue:inv:{investigation_id}:status"
         status_data = await client.get(status_key)
         status = "unknown"
@@ -1333,7 +1305,6 @@ async def triage_status(
             status_json = json.loads(status_data)
             status = status_json.get("status", "unknown")
 
-        # Get escalation reason from meta
         meta_key = f"ares:blue:inv:{investigation_id}:meta"
         meta_data = await client.hgetall(meta_key)
         escalated = False
@@ -1375,7 +1346,6 @@ async def triage_status(
             print("No triage data found (investigation may not have been escalated)")
             return
 
-        # Show current decision
         print("\nTriage Decision:")
         if decision_data:
             decision = json.loads(decision_data)
@@ -1391,7 +1361,6 @@ async def triage_status(
         else:
             print("  Decision: PENDING")
 
-        # Show audit trail
         if records:
             print("\n" + "-" * 60)
             print("Triage Audit Trail:")

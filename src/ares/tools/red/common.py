@@ -299,7 +299,18 @@ def format_weakness_block(
     impact: str | None = None,
     discovery_method: str | None = None,
 ) -> str:
-    """Format a markdown block describing a discovered weakness."""
+    """Format a markdown block describing a discovered weakness.
+
+    Args:
+        title: Title for the weakness (used as markdown heading).
+        vulnerability: Main vulnerability description.
+        details: Key-value pairs of additional details.
+        impact: Description of the security impact.
+        discovery_method: How the weakness was discovered.
+
+    Returns:
+        Formatted markdown block string.
+    """
     lines: list[str] = []
     if title:
         lines.append(f"### {title}")
@@ -317,7 +328,12 @@ def format_weakness_block(
 
 
 def track_cross_domain_reuse(state: SharedRedTeamState, credential: Credential) -> None:
-    """Track credential reuse across domains and record as weakness."""
+    """Track credential reuse across domains and record as weakness.
+
+    Args:
+        state: Shared state to check and update.
+        credential: New credential to check against existing credentials.
+    """
     if not state or not credential.domain:
         return
     same_creds = [
@@ -349,7 +365,14 @@ def track_cross_domain_reuse(state: SharedRedTeamState, credential: Credential) 
 
 
 def is_ntlm_hash(value: str) -> bool:
-    """Check if a string appears to be an NTLM hash."""
+    """Check if a string appears to be an NTLM hash.
+
+    Args:
+        value: String to check.
+
+    Returns:
+        True if value matches NTLM hash format (32 hex chars or LM:NTLM pair).
+    """
     if not value:
         return False
     normalized = value.strip()
@@ -367,7 +390,15 @@ def is_ntlm_hash(value: str) -> bool:
 
 
 def resolve_recon_route(cmd: list[str], target_role: str | None = None) -> str | None:
-    """Resolve target role for command execution. Always runs locally."""
+    """Resolve target role for command execution. Always runs locally.
+
+    Args:
+        cmd: Command being executed (unused, kept for interface consistency).
+        target_role: Optional role to route command to.
+
+    Returns:
+        The target_role unchanged.
+    """
     return target_role
 
 
@@ -484,7 +515,14 @@ def store_remote_artifact(
 
 
 def infer_listener_ip(target: str | None = None) -> str | None:
-    """Infer a listener IP reachable from the target network."""
+    """Infer a listener IP reachable from the target network.
+
+    Args:
+        target: Optional target IP to use for route determination.
+
+    Returns:
+        Listener IP from env var or socket route, None if unavailable.
+    """
     for key in ("ARES_ESC8_LISTENER", "ARES_RELAY_LISTENER", "ARES_LISTENER_IP", "POD_IP"):
         value = os.getenv(key)
         if value:
@@ -514,9 +552,12 @@ def write_users_file_remote(
     Filters out MOTD garbage and invalid usernames before writing.
 
     Args:
-        users: List of usernames to write
-        users_file: Path to write the file
-        target_role: Optional worker role to route the write to (e.g., "recon")
+        users: List of usernames to write.
+        users_file: Path to write the file.
+        target_role: Optional worker role to route the write to (e.g., "recon").
+
+    Returns:
+        Tuple of (success, error_message).
     """
     if not users:
         return False, "no users provided"
@@ -543,8 +584,11 @@ def remote_file_exists(path: str, target_role: str | None = None) -> tuple[bool,
     """Check if a file exists and is non-empty on the remote system.
 
     Args:
-        path: Path to check
-        target_role: Optional worker role to route the check to (e.g., "recon")
+        path: Path to check.
+        target_role: Optional worker role to route the check to (e.g., "recon").
+
+    Returns:
+        Tuple of (exists, error_message).
     """
     cmd = f"test -s {shlex.quote(path)}"
     result = run_remote(["bash", "-lc", cmd], timeout_seconds=30, target_role=target_role)
@@ -562,9 +606,12 @@ def filter_users_file_remote(
     """Filter a remote users file to exclude certain usernames and MOTD garbage.
 
     Args:
-        users_file: Path to the users file
-        exclude_users: Set of usernames to exclude
-        target_role: Optional worker role to route operations to (e.g., "recon")
+        users_file: Path to the users file.
+        exclude_users: Set of usernames to exclude (lowercase).
+        target_role: Optional worker role to route operations to (e.g., "recon").
+
+    Returns:
+        Tuple of (filtered_file_path, error_message_or_none).
     """
     if not exclude_users:
         # Still need to filter for MOTD garbage even with no exclude list
@@ -631,6 +678,15 @@ def resolve_password(
 
     If the password is a placeholder like 'password' or 'changeme',
     attempts to find the actual password for the user from state.
+
+    Args:
+        state: Shared state containing known credentials.
+        username: Username to look up.
+        domain: Domain for the user.
+        password: Current password value (may be placeholder).
+
+    Returns:
+        Resolved password from state, or original password if not found.
     """
     if not password:
         return password
@@ -658,7 +714,15 @@ def resolve_password(
 
 
 def resolve_host_or_ip(state: SharedRedTeamState | None, host: str) -> str:
-    """Resolve a hostname to IP using state host list if needed."""
+    """Resolve a hostname to IP using state host list if needed.
+
+    Args:
+        state: Shared state with discovered hosts.
+        host: Hostname or IP to resolve.
+
+    Returns:
+        IP address if resolvable, otherwise the original host value.
+    """
     if not host:
         return host
     if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", host):
@@ -676,7 +740,16 @@ def resolve_host_or_ip(state: SharedRedTeamState | None, host: str) -> str:
 
 
 def check_port(target: str, port: int, timeout_seconds: int = 5) -> bool:
-    """Check if a port is reachable on a target."""
+    """Check if a port is reachable on a target.
+
+    Args:
+        target: Target hostname or IP.
+        port: Port number to check.
+        timeout_seconds: Connection timeout.
+
+    Returns:
+        True if port is open, False otherwise.
+    """
     cmd = ["nc", "-zv", "-w", str(timeout_seconds), target, str(port)]
     try:
         ssm_timeout = max(30, timeout_seconds + 5)
@@ -691,14 +764,25 @@ def add_credential_to_state(
     cred: Credential,
     source_role: str = "recon",
 ) -> None:
-    """Add a credential to state."""
+    """Add a credential to state.
+
+    Args:
+        state: Shared state to update.
+        cred: Credential to add.
+        source_role: Agent role that discovered the credential.
+    """
     if not state or not cred.username:
         return
     state.add_credential(cred, source_role)
 
 
 def add_weakness_to_state(state: SharedRedTeamState | None, block: str) -> None:
-    """Add a weakness block to state if not already present."""
+    """Add a weakness block to state if not already present.
+
+    Args:
+        state: Shared state to update.
+        block: Markdown weakness block to add.
+    """
     if not state or not block:
         return
     state.add_weakness(block)
@@ -709,7 +793,13 @@ def add_host_to_state(
     host,
     source_role: str = "recon",
 ) -> None:
-    """Add a host to state."""
+    """Add a host to state.
+
+    Args:
+        state: Shared state to update.
+        host: Host object to add.
+        source_role: Agent role that discovered the host.
+    """
     if not state or not host:
         return
     state.add_host(host)
@@ -720,7 +810,13 @@ def add_hash_to_state(
     hash_obj,
     source_role: str = "recon",
 ) -> None:
-    """Add a hash to state."""
+    """Add a hash to state.
+
+    Args:
+        state: Shared state to update.
+        hash_obj: Hash object to add.
+        source_role: Agent role that discovered the hash.
+    """
     if not state or not hash_obj:
         return
     state.add_hash(hash_obj, source_role)

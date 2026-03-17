@@ -97,11 +97,23 @@ class BlueWorkerAgent:
         # Run the agent
         try:
             logger.info(f"[{self.agent_name}] Starting agent.run() for task {task.task_id}")
-            await self.agent.run(prompt)
+            agent_result = await self.agent.run(prompt)
+
+            # Extract token usage for metrics
+            usage = getattr(agent_result, "usage", None)
+            usage_dict: dict[str, int] | None = None
+            if usage:
+                usage_dict = {
+                    "input_tokens": getattr(usage, "input_tokens", 0),
+                    "output_tokens": getattr(usage, "output_tokens", 0),
+                    "total_tokens": getattr(usage, "total_tokens", 0),
+                }
 
             # Check if the agent called a completion callback
             if completion_event.is_set():
                 result = self.callback_tools.result_data
+                if usage_dict:
+                    result["usage"] = usage_dict
                 logger.info(f"[{self.agent_name}] Task {task.task_id} completed via callback")
                 return result
 
@@ -109,11 +121,14 @@ class BlueWorkerAgent:
             logger.warning(
                 f"[{self.agent_name}] Task {task.task_id} ended without completion callback"
             )
-            return {
+            partial_result: dict[str, Any] = {
                 "type": self.role.value,
                 "summary": "Agent completed without explicit completion signal",
                 "partial": True,
             }
+            if usage_dict:
+                partial_result["usage"] = usage_dict
+            return partial_result
 
         except asyncio.CancelledError:
             logger.info(f"[{self.agent_name}] Task {task.task_id} cancelled")

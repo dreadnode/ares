@@ -215,7 +215,6 @@ def create_ground_truth_from_red_state(
     discovered_vulns = state.discovered_vulnerabilities
     exploited_vulns = state.exploited_vulnerabilities
 
-    # Extract IOCs from hosts
     for host in hosts:
         expected_iocs.append(
             ExpectedIOC(
@@ -239,7 +238,6 @@ def create_ground_truth_from_red_state(
                 )
             )
 
-    # Extract IOCs from users (level 4 - Network/Host Artifacts)
     for user in users:
         expected_iocs.append(
             ExpectedIOC(
@@ -252,7 +250,6 @@ def create_ground_truth_from_red_state(
             )
         )
 
-    # Extract IOCs from credentials
     for cred in credentials:
         expected_iocs.append(
             ExpectedIOC(
@@ -265,7 +262,6 @@ def create_ground_truth_from_red_state(
             )
         )
 
-    # Extract IOCs from hashes (level 1 - Hash Values)
     for hash_obj in hashes:
         expected_iocs.append(
             ExpectedIOC(
@@ -278,7 +274,6 @@ def create_ground_truth_from_red_state(
             )
         )
 
-    # Extract expected techniques from identified_techniques
     for technique_id in techniques:
         required = _is_technique_required(technique_id)
         expected_techniques.append(
@@ -289,7 +284,6 @@ def create_ground_truth_from_red_state(
             )
         )
 
-    # Extract timeline events
     for event in timeline:
         expected_timeline.append(
             ExpectedTimelineEvent(
@@ -300,7 +294,6 @@ def create_ground_truth_from_red_state(
             )
         )
 
-    # Add domain admin technique if achieved
     has_domain_admin = state.has_domain_admin
     has_golden_ticket = state.has_golden_ticket
 
@@ -321,7 +314,6 @@ def create_ground_truth_from_red_state(
             )
         )
 
-    # Extract expected shares (lateral movement indicators)
     expected_shares: list[ExpectedShare] = []
     for share in shares:
         expected_shares.append(

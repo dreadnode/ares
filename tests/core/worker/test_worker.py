@@ -1496,5 +1496,115 @@ class TestIsRateLimitError:
         assert not _is_rate_limit_error(Exception("server error"))
 
 
+class TestRedisWorkerAgentUsageExtraction:
+    """Tests for _extract_usage method in RedisWorkerAgent."""
+
+    @pytest.fixture
+    def worker(self):
+        """Create a RedisWorkerAgent with mocked dependencies."""
+        from unittest.mock import MagicMock
+
+        from ares.core.models import AgentRole, SharedRedTeamState, Target
+        from ares.core.worker._worker import RedisWorkerAgent
+
+        mock_queue = MagicMock()
+
+        shared_state = SharedRedTeamState(
+            operation_id="op-usage-test",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+
+        mock_agent = MagicMock()
+
+        return RedisWorkerAgent(
+            role=AgentRole.RECON,
+            task_queue=mock_queue,
+            agent=mock_agent,
+            agent_name="test-recon",
+            shared_state=shared_state,
+        )
+
+    def test_extract_usage_returns_dict_with_valid_usage(self, worker):
+        """Test that _extract_usage returns correct dict when usage is present."""
+        mock_usage = MagicMock()
+        mock_usage.input_tokens = 2500
+        mock_usage.output_tokens = 750
+        mock_usage.total_tokens = 3250
+
+        mock_result = MagicMock()
+        mock_result.usage = mock_usage
+
+        result = worker._extract_usage(mock_result)
+
+        assert result is not None
+        assert result["input_tokens"] == 2500
+        assert result["output_tokens"] == 750
+        assert result["total_tokens"] == 3250
+
+    def test_extract_usage_returns_none_when_no_usage(self, worker):
+        """Test that _extract_usage returns None when result has no usage."""
+        mock_result = MagicMock()
+        mock_result.usage = None
+
+        result = worker._extract_usage(mock_result)
+
+        assert result is None
+
+    def test_extract_usage_returns_none_for_missing_attribute(self, worker):
+        """Test that _extract_usage returns None when result lacks usage attribute."""
+        mock_result = MagicMock(spec=[])  # No usage attribute
+
+        result = worker._extract_usage(mock_result)
+
+        assert result is None
+
+    def test_extract_usage_handles_zero_values(self, worker):
+        """Test that _extract_usage handles zero token counts correctly."""
+        mock_usage = MagicMock()
+        mock_usage.input_tokens = 0
+        mock_usage.output_tokens = 0
+        mock_usage.total_tokens = 0
+
+        mock_result = MagicMock()
+        mock_result.usage = mock_usage
+
+        result = worker._extract_usage(mock_result)
+
+        assert result is not None
+        assert result["input_tokens"] == 0
+        assert result["output_tokens"] == 0
+        assert result["total_tokens"] == 0
+
+    def test_extract_usage_uses_defaults_for_missing_token_fields(self, worker):
+        """Test that _extract_usage uses 0 as default for missing token fields."""
+        mock_usage = MagicMock(spec=[])  # No token attributes
+
+        mock_result = MagicMock()
+        mock_result.usage = mock_usage
+
+        result = worker._extract_usage(mock_result)
+
+        assert result is not None
+        assert result["input_tokens"] == 0
+        assert result["output_tokens"] == 0
+        assert result["total_tokens"] == 0
+
+    def test_extract_usage_handles_exception_gracefully(self, worker):
+        """Test that _extract_usage returns None on exception."""
+        mock_usage = MagicMock()
+        # Make getattr raise an exception
+        type(mock_usage).input_tokens = property(
+            lambda _self: (_ for _ in ()).throw(RuntimeError("fail"))
+        )
+
+        mock_result = MagicMock()
+        mock_result.usage = mock_usage
+
+        result = worker._extract_usage(mock_result)
+
+        # Should return None instead of raising
+        assert result is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

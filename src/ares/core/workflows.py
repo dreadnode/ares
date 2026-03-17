@@ -63,14 +63,12 @@ def _has_admin_access(state: SharedRedTeamState, host: Host) -> bool:
 
     Looks for successful secretsdump or admin credential for this host.
     """
-    # Check compromised hosts tracking
     for cred in state.all_credentials:
         if cred.is_admin and (
             host.ip in cred.source or host.hostname.lower() in cred.source.lower()
         ):
             return True
 
-    # Check completed tasks for successful secretsdump on this host
     # Snapshot to avoid "dict changed size during iteration"
     for result in list(state.completed_tasks.values()):
         if result.success and result.result:
@@ -415,13 +413,11 @@ async def exploitation_workflow(
                 await credential_expansion_loop(dispatcher, max_iterations=5)
 
     while True:
-        # Check runtime limit
         elapsed = asyncio.get_event_loop().time() - start_time
         if elapsed > max_runtime:
             logger.warning(f"Exploitation workflow reached max runtime ({max_runtime}s)")
             break
 
-        # Check for Domain Admin success
         state = dispatcher.shared_state
         if state.has_domain_admin:
             logger.success("Domain Admin achieved! Halting exploitation workflow.")
@@ -448,15 +444,12 @@ async def exploitation_workflow(
                 )
             break
 
-        # Clean up completed tasks
         done_tasks = {t for t in active_tasks if t.done()}
         for task in done_tasks:
             active_tasks.discard(task)
-            # Check for exceptions
             if task.exception():
                 logger.warning(f"Exploit task failed with exception: {task.exception()}")
 
-        # Get next vulnerability if we have capacity
         if len(active_tasks) < max_concurrent_exploits:
             vuln = await dispatcher.get_next_vulnerability()
             if not vuln:
@@ -615,12 +608,10 @@ async def _wait_with_da_check(
     """
     start = asyncio.get_event_loop().time()
     while (asyncio.get_event_loop().time() - start) < timeout:
-        # Check if DA achieved during wait
         if dispatcher.shared_state.has_domain_admin:
             logger.info(f"DA achieved - abandoning wait for task {task_id}")
             return {"success": False, "error": "Cancelled: DA achieved", "abandoned": True}
 
-        # Try to get result with short timeout
         try:
             return await dispatcher.wait_for_task(task_id, timeout=check_interval)
         except asyncio.TimeoutError:

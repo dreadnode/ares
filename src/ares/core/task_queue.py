@@ -293,7 +293,6 @@ class RedisTaskQueue(BaseTaskQueue):
         queue_key = self._task_queue_key(target_role)
 
         # Extract target info from payload for span metrics
-        # Properly separate IPs, FQDNs, and usernames
         target_ip = None
         target_fqdn = None
         target_user = None
@@ -338,7 +337,6 @@ class RedisTaskQueue(BaseTaskQueue):
                     target_hostname = val
                 break
 
-        # Check explicit user fields
         if not target_user:
             target_user = (
                 payload.get("target_user") or payload.get("username") or payload.get("user")

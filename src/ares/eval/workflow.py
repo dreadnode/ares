@@ -78,7 +78,6 @@ async def evaluate_investigation(
     Returns:
         Tuple of (state, ground_truth) for scorers to evaluate.
     """
-    # Log evaluation context
     dn.log_param("operation_id", ground_truth.operation_id)
     dn.log_param("target_ip", ground_truth.target_ip)
     dn.log_param("expected_iocs", len(ground_truth.expected_iocs))
@@ -156,18 +155,15 @@ def build_evaluation_result(
         + timeline_score * 3.5
     ) / total_weight
 
-    # Calculate category scores
     detection_score = (ioc_score + technique_score) / 2
     quality_score = (pyramid_score + evidence_score) / 2
     completeness_score = (stage_score + timeline_score) / 2
 
-    # Get gap analysis
     missed_iocs = get_missed_iocs(state, ground_truth)
     missed_techniques = get_missed_techniques(state, ground_truth)
     found_iocs = get_found_iocs(state, ground_truth)
     found_techniques = get_found_techniques(state, ground_truth)
 
-    # Determine stages completed
     stages_completed = []
     if state is not None:
         from ares.core.models import InvestigationStage
@@ -282,7 +278,6 @@ class EvaluationScenario:
         if isinstance(self.red_state, SharedRedTeamState):
             return self.red_state
 
-        # Load from file
         path = Path(self.red_state)
         if not path.exists():
             raise FileNotFoundError(f"Red team state file not found: {path}")
@@ -380,7 +375,6 @@ class EvaluationDataset:
         )
 
 
-# Cost estimates per 1M tokens (as of 2024)
 MODEL_COSTS: dict[str, dict[str, float]] = {
     "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
     "claude-opus-4-20250514": {"input": 15.0, "output": 75.0},
@@ -504,7 +498,6 @@ class EvaluationRunner:
             use_synthetic = self.inject_synthetic_alerts
 
         try:
-            # Get or inject alert
             alert: dict[str, Any] | None = None
             if use_synthetic:
                 alert = self._create_synthetic_alert(ground_truth, red_state)
@@ -525,10 +518,8 @@ class EvaluationRunner:
                     logger.info(f"Alert found: {alert_name}")
 
             if alert is not None:
-                # Run investigation
                 state, orchestrator = await self._run_investigation(alert)
 
-                # Calculate timing metrics from state timeline
                 if state and state.timeline:
                     for event in state.timeline:
                         delta = (event.timestamp - state.started_at).total_seconds()
@@ -550,10 +541,27 @@ class EvaluationRunner:
                                     time_to_ttp_elevation = event_offset
                                     break
 
-                # TODO(martin): Extract token counts from Dreadnode metrics if available
-                # For now, estimate based on steps
-                estimated_tokens_per_step = 2000
-                if state:
+                # Extract token counts from completed task results
+                # Workers include usage metrics in result payloads, stored in Redis
+                if orchestrator is not None:
+                    try:
+                        dispatcher = getattr(orchestrator, "_dispatcher", None)
+                        if dispatcher is not None:
+                            backend = getattr(dispatcher, "backend", None)
+                            if backend is not None:
+                                completed = await backend.get_completed_tasks()
+                                for task_result in completed.values():
+                                    result_data = task_result.get("result", {})
+                                    usage = result_data.get("usage", {})
+                                    prompt_tokens += usage.get("input_tokens", 0)
+                                    completion_tokens += usage.get("output_tokens", 0)
+                                    total_tokens += usage.get("total_tokens", 0)
+                    except Exception as usage_err:
+                        logger.debug(f"Could not extract usage from tasks: {usage_err}")
+
+                # Fallback to estimation if no usage data collected
+                if total_tokens == 0 and state:
+                    estimated_tokens_per_step = 2000
                     total_tokens = len(state.executed_queries) * estimated_tokens_per_step
                     prompt_tokens = int(total_tokens * 0.7)
                     completion_tokens = int(total_tokens * 0.3)
@@ -561,7 +569,6 @@ class EvaluationRunner:
             else:
                 logger.warning("No alert fired - this is a detection gap")
 
-            # Run the evaluation task (for Dreadnode metrics)
             await evaluate_investigation(state, ground_truth)
 
         except Exception as e:
@@ -579,7 +586,6 @@ class EvaluationRunner:
         duration = time.time() - start_time
         estimated_cost = estimate_cost(self.model, prompt_tokens, completion_tokens)
 
-        # Build result
         result = build_evaluation_result(
             evaluation_id=evaluation_id,
             state=state,
@@ -597,12 +603,10 @@ class EvaluationRunner:
             estimated_cost_usd=estimated_cost,
         )
 
-        # Log summary
         logger.info(f"Evaluation complete: {result.grade} ({result.overall_score:.1%})")
         if not alert_fired:
             logger.warning("  Alert did not fire - detection gap identified")
 
-        # Save individual result
         self._save_evaluation_result(result)
 
         return result
@@ -667,7 +671,6 @@ class EvaluationRunner:
                 for i, result in enumerate(results, 1):
                     dn.log_metric(f"scenario_{i}_overall", result.overall_score)
 
-            # Build dataset result
             dataset_result = DatasetEvaluationResult(
                 dataset_name=dataset.name,
                 results=list(results),
@@ -680,7 +683,6 @@ class EvaluationRunner:
             dn.log_metric("avg_technique_coverage", dataset_result.avg_technique_coverage)
             dn.log_metric("alert_fire_rate", dataset_result.alert_fire_rate)
 
-            # Save results
             self._save_dataset_results(dataset_result)
 
         logger.info("\nDataset evaluation complete")
@@ -749,7 +751,6 @@ class EvaluationRunner:
             if mitre_technique is None and techniques:
                 mitre_technique = techniques[0].technique_id
 
-        # Get operation timestamp if available
         if isinstance(red_state, SharedRedTeamState) or hasattr(red_state, "started_at"):
             starts_at = red_state.started_at.isoformat()
         else:
@@ -765,7 +766,6 @@ class EvaluationRunner:
         if mitre_technique:
             labels["mitre_technique"] = mitre_technique
 
-        # Build description from ground truth
         ioc_summary = f"{len(ground_truth.expected_iocs)} IOCs"
         technique_summary = f"{len(ground_truth.expected_techniques)} techniques"
 
@@ -1035,7 +1035,6 @@ def _deserialize_red_state(data: dict[str, Any]) -> SharedRedTeamState:
 
     state = SharedRedTeamState(operation_id=data.get("operation_id", "unknown"))
 
-    # Load credentials
     for cred_data in data.get("all_credentials", []):
         cred = Credential(
             username=cred_data.get("username", ""),
@@ -1045,7 +1044,6 @@ def _deserialize_red_state(data: dict[str, Any]) -> SharedRedTeamState:
         )
         state.all_credentials.append(cred)
 
-    # Load hashes
     for hash_data in data.get("all_hashes", []):
         h = Hash(
             username=hash_data.get("username", ""),
@@ -1056,7 +1054,6 @@ def _deserialize_red_state(data: dict[str, Any]) -> SharedRedTeamState:
         )
         state.all_hashes.append(h)
 
-    # Load hosts
     for host_data in data.get("all_hosts", []):
         host = Host(
             ip=host_data.get("ip", ""),
@@ -1067,7 +1064,6 @@ def _deserialize_red_state(data: dict[str, Any]) -> SharedRedTeamState:
         )
         state.all_hosts.append(host)
 
-    # Load users
     for user_data in data.get("all_users", []):
         user = User(
             username=user_data.get("username", ""),
@@ -1076,7 +1072,6 @@ def _deserialize_red_state(data: dict[str, Any]) -> SharedRedTeamState:
         )
         state.all_users.append(user)
 
-    # Load simple fields
     state.all_domains = data.get("all_domains", [])
     state.has_domain_admin = data.get("has_domain_admin", False)
     state.has_golden_ticket = data.get("has_golden_ticket", False)

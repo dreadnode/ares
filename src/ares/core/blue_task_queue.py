@@ -233,7 +233,6 @@ class BlueTaskQueue(BaseTaskQueue):
         start = datetime.now(timezone.utc)
 
         while True:
-            # Get all active investigations
             inv_ids = await self.redis.smembers(self.INVESTIGATIONS_KEY)
             if inv_ids:
                 # Return the first one (could prioritize by start time)

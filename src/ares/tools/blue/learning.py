@@ -193,7 +193,6 @@ class LearningTools(Toolset):  # type: ignore[misc]
         dn.log_metric("learning_fp_check", 1, mode="count")
         logger.info(f"Checking false positive patterns for: {alert_name}")
 
-        # Check for similar false positives
         similar = self.get_store().find_similar_investigations(
             alert_name=alert_name,
             alert_fingerprint=alert_fingerprint,
@@ -207,18 +206,15 @@ class LearningTools(Toolset):  # type: ignore[misc]
                 "confidence": "low",
             }
 
-        # Count true/false positives
         true_positives = sum(1 for s in similar if s.investigation.is_true_positive is True)
         false_positives = sum(1 for s in similar if s.investigation.is_true_positive is False)
         unlabeled = len(similar) - true_positives - false_positives
 
-        # Calculate false positive likelihood
         if true_positives + false_positives > 0:
             fp_rate = false_positives / (true_positives + false_positives)
         else:
             fp_rate = 0.0
 
-        # Check known FP patterns
         fp_patterns = self.get_store().get_false_positive_patterns(min_occurrences=2)
         matching_pattern = None
         for pattern in fp_patterns:
@@ -373,7 +369,6 @@ class LearningTools(Toolset):  # type: ignore[misc]
         dn.log_metric("learning_playbook_load", 1, mode="count")
         logger.info(f"Loading attack playbook for operation: {operation_id or 'latest'}")
 
-        # Get Redis URL from environment if not provided
         effective_redis_url = redis_url or os.environ.get(
             "ARES_REDIS_URL", "redis://localhost:6379"
         )
@@ -392,7 +387,6 @@ class LearningTools(Toolset):  # type: ignore[misc]
                         "error": "No red team operations found in Redis.",
                     }
 
-                # Parse operation IDs and find most recent
                 latest_op = None
                 for key in meta_keys:
                     key_str = key.decode() if isinstance(key, bytes) else key
@@ -407,7 +401,6 @@ class LearningTools(Toolset):  # type: ignore[misc]
                 await client.aclose()
                 return {"found": False, "error": "Could not determine operation ID."}
 
-            # Load state from Redis
             from ares.cli_ops import _load_state_from_redis
 
             state = await _load_state_from_redis(client, operation_id)
@@ -419,8 +412,7 @@ class LearningTools(Toolset):  # type: ignore[misc]
                     "error": f"No state found for operation: {operation_id}",
                 }
 
-            # Set target domains for evidence validation scoping
-            # This filters extracted IOCs to only include domains/users from the attack
+            # Filter extracted IOCs to only include domains/users from the attack
             from ares.core.evidence_validation import (
                 extract_domains_from_red_team_state,
                 set_target_domains,

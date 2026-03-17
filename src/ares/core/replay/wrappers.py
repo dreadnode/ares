@@ -134,10 +134,7 @@ def normalize_command_for_key(cmd: str) -> str:
         Normalized key string suitable for hashing.
     """
     ctx = get_normalization_context()
-    # For key generation, we might also want to sort flags
-    # This is tricky because flag order can matter for some tools
-    # For now, we leave the order as-is to avoid breaking commands
-    # where order matters (like positional arguments)
+    # Don't sort flags - order matters for positional arguments
     return normalize_command(cmd, ctx)
 
 

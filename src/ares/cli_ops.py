@@ -42,7 +42,6 @@ from ares.core.redis_client import create_verified_redis_client  # noqa: E402
 def _get_vuln_priorities() -> dict[str, int]:
     """Get vulnerability priorities with lowercase aliases for CLI convenience."""
     priorities = get_vulnerability_priorities()
-    # Add lowercase aliases for CLI convenience (e.g., "esc1" -> "ADCS_ESC1")
     aliases = {
         "esc1": priorities.get("ADCS_ESC1", 1),
         "esc4": priorities.get("ADCS_ESC4", 2),
@@ -85,7 +84,6 @@ async def _generate_local_report(
     # Use verified client to avoid stale reads from demoted masters
     client = await create_verified_redis_client(redis_url, decode_responses=False)
     try:
-        # Check for cached report first (stored by orchestrator on completion)
         if not force_regenerate:
             backend = RedisStateBackend(client, operation_id)
             cached_report = await backend.get_report()
@@ -98,7 +96,6 @@ async def _generate_local_report(
                 logger.success(f"Report saved (from cache): {output_path}")
                 return output_path
 
-        # Fall back to regenerating from state
         state = await _load_state_from_redis(client, operation_id)
         if not state:
             logger.warning(f"No state found for operation {operation_id}")
@@ -128,6 +125,14 @@ def _persist_report(
 
     This is a fallback that uses the report_markdown from the orchestrator.
     Prefer using _generate_local_report for comprehensive reports.
+
+    Args:
+        status: Orchestrator status dict containing report_markdown.
+        operation_id: Operation identifier for the filename.
+        report_dir: Directory to save the report (default: ./reports).
+
+    Returns:
+        Path to the saved report, or None if no report in status.
     """
     result_payload = status.get("result") if isinstance(status.get("result"), dict) else None
     report_markdown = None
@@ -161,6 +166,13 @@ async def _stream_orchestrator_logs(
     log_path: Path | None,
     filter_token: str | None = None,
 ) -> None:
+    """Stream logs from the orchestrator deployment via kubectl.
+
+    Args:
+        namespace: Kubernetes namespace containing the orchestrator.
+        log_path: Optional path to write logs to disk.
+        filter_token: If provided, only print lines containing this string.
+    """
     command = ["kubectl", "logs", "-f", "-n", namespace, "deploy/ares-orchestrator"]
     proc = await asyncio.create_subprocess_exec(
         *command,
@@ -198,6 +210,15 @@ async def _stream_orchestrator_logs(
 
 
 def _resolve_log_path(log_file: str | None, operation_id: str) -> Path:
+    """Resolve the log file path for orchestrator logs.
+
+    Args:
+        log_file: Explicit path from user, or None for auto-generated.
+        operation_id: Used to generate a timestamped filename if log_file is None.
+
+    Returns:
+        Resolved path for the log file.
+    """
     if log_file is not None:
         return Path(log_file)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -265,7 +286,6 @@ async def submit(
         logger.error("No target IPs specified. Use --ips to provide target IPs.")
         sys.exit(1)
 
-    # Build initial credential if provided (filter out None values for type safety)
     initial_cred: dict[str, str] | None = None
     if username:
         cred_data = {
@@ -466,7 +486,14 @@ async def wait_for(
 
 
 def _dedup_users(users: list) -> list:
-    """Deduplicate users by normalized domain+username."""
+    """Deduplicate users by normalized domain+username.
+
+    Args:
+        users: List of User objects to deduplicate.
+
+    Returns:
+        Deduplicated list preserving first occurrence of each user.
+    """
     seen: set[tuple[str, str]] = set()
     result = []
     for user in users:
@@ -480,7 +507,14 @@ def _dedup_users(users: list) -> list:
 
 
 def _dedup_credentials(credentials: list) -> list:
-    """Deduplicate credentials by normalized domain+username+password."""
+    """Deduplicate credentials by normalized domain+username+password.
+
+    Args:
+        credentials: List of Credential objects to deduplicate.
+
+    Returns:
+        Deduplicated list preserving first occurrence of each credential.
+    """
     seen: set[tuple[str, str, str]] = set()
     result = []
     for cred in credentials:
@@ -495,7 +529,14 @@ def _dedup_credentials(credentials: list) -> list:
 
 
 def _dedup_hashes(hashes: list) -> list:
-    """Deduplicate hashes by normalized domain+username+hash_type+hash_value."""
+    """Deduplicate hashes by normalized domain+username+hash_type+hash_value.
+
+    Args:
+        hashes: List of Hash objects to deduplicate.
+
+    Returns:
+        Deduplicated list preserving first occurrence of each hash.
+    """
     seen: set[tuple[str, str, str, str]] = set()
     result = []
     for h in hashes:
@@ -520,16 +561,13 @@ def _normalize_source_label(source: str) -> str:
     if not source:
         return "Unknown"
 
-    # Remove duplicate source patterns (e.g., "Task input (x):Task input (x)")
     if ":" in source:
         parts = source.split(":")
         if len(parts) >= 2 and parts[0] == parts[1]:
             source = parts[0]
 
-    # Strip "Task input (...)" wrapper - extract task type from task ID
     lower = source.lower()
     if "task input" in lower:
-        # Extract task type from "Task input (exploit_xxx)" -> "exploit"
         match = re.search(r"\((\w+)_[a-f0-9]+\)", source)
         if match:
             source = match.group(1)
@@ -566,23 +604,19 @@ def _normalize_source_label(source: str) -> str:
         "unknown": "Unknown",
     }
 
-    # Check for exact match first
     if lower in label_map:
         return label_map[lower]
 
-    # Check for prefix matches (e.g., "recon_task" -> "Reconnaissance")
     for key, label in label_map.items():
         if lower.startswith(key):
             return label
 
-    # Check for task ID patterns (e.g., "exploit_abc123" -> "Exploitation")
     task_match = re.match(r"^(\w+)_[a-f0-9]{8,}$", lower)
     if task_match:
         task_type = task_match.group(1)
         if task_type in label_map:
             return label_map[task_type]
 
-    # Return original with title case if no mapping found
     return source.replace("_", " ").title()
 
 
@@ -612,19 +646,14 @@ def _parse_weakness_block(block: str) -> dict[str, str]:
         if not stripped:
             continue
 
-        # Parse title (### Title or **Title**)
         if stripped.startswith("### "):
             result["title"] = stripped[4:].strip()
         elif stripped.startswith("**") and ":**" not in stripped and stripped.endswith("**"):
             # Bold title without colon (e.g., **Domain Admin Achieved**)
             result["title"] = stripped.strip("*").strip()
 
-        # Parse **Key:** Value patterns (e.g., "**Vulnerability:** text" or "- **Impact:** text")
-        # Note: The colon is inside the bold markers: **Key:**
         elif ":**" in stripped:
-            # Handle both "**Key:** Value" and "- **Key:** Value"
             clean = stripped.lstrip("-").strip()
-            # Match **Key:** patterns where colon is inside the bold
             match = re.match(r"\*\*([^*:]+):\*\*\s*(.*)$", clean)
             if match:
                 key = match.group(1).strip().lower().replace(" ", "_")
@@ -635,7 +664,14 @@ def _parse_weakness_block(block: str) -> dict[str, str]:
 
 
 def _loot_snapshot(state) -> dict:
-    """Build a snapshot dict of all loot for diffing."""
+    """Build a snapshot dict of all loot for diffing.
+
+    Args:
+        state: SharedRedTeamState to snapshot.
+
+    Returns:
+        Dict with frozensets of domains, hosts, users, creds, hashes, shares, weaknesses.
+    """
     return {
         "domains": frozenset(d.strip().lower() for d in getattr(state, "all_domains", []) if d),
         "host_keys": frozenset((h.hostname, h.ip) for h in state.all_hosts),
@@ -673,7 +709,14 @@ _WEAKNESS_NOISE_PREFIXES = (
 
 
 def _filter_real_weaknesses(weaknesses: list[str]) -> list[tuple[str, dict]]:
-    """Filter out agent task suggestions incorrectly recorded as weaknesses."""
+    """Filter out agent task suggestions incorrectly recorded as weaknesses.
+
+    Args:
+        weaknesses: Raw weakness block strings from state.
+
+    Returns:
+        List of (raw_block, parsed_dict) tuples for real weaknesses only.
+    """
     real = []
     for w in weaknesses:
         parsed = _parse_weakness_block(w)
@@ -684,7 +727,12 @@ def _filter_real_weaknesses(weaknesses: list[str]) -> list[tuple[str, dict]]:
 
 
 def _print_loot(state, *, json_output: bool = False) -> None:
-    """Print loot from state in human-readable or JSON format."""
+    """Print loot from state in human-readable or JSON format.
+
+    Args:
+        state: SharedRedTeamState containing all discovered loot.
+        json_output: If True, output JSON; otherwise human-readable format.
+    """
     import json as json_module
 
     # Normalize credentials and hashes against discovered users
@@ -881,7 +929,13 @@ def _print_loot(state, *, json_output: bool = False) -> None:
 
 
 def _print_diff(prev_snapshot: dict, curr_snapshot: dict, state) -> None:
-    """Print only new items since the last snapshot."""
+    """Print only new items since the last snapshot.
+
+    Args:
+        prev_snapshot: Previous loot snapshot from _loot_snapshot().
+        curr_snapshot: Current loot snapshot from _loot_snapshot().
+        state: SharedRedTeamState for resolving full object details.
+    """
     new_domains = curr_snapshot["domains"] - prev_snapshot["domains"]
     new_hosts = curr_snapshot["host_keys"] - prev_snapshot["host_keys"]
     new_users = curr_snapshot["user_keys"] - prev_snapshot["user_keys"]
@@ -948,7 +1002,14 @@ def _print_diff(prev_snapshot: dict, curr_snapshot: dict, state) -> None:
 
 
 async def _resolve_latest_operation(redis_url: str) -> str | None:
-    """Resolve the latest operation ID (preferring running operations)."""
+    """Resolve the latest operation ID (preferring running operations).
+
+    Args:
+        redis_url: Redis connection URL.
+
+    Returns:
+        Operation ID if found, None otherwise.
+    """
     from ares.core.task_queue import RedisTaskQueue
 
     # Use verified client to avoid stale reads from demoted masters
@@ -956,7 +1017,6 @@ async def _resolve_latest_operation(redis_url: str) -> str | None:
 
     all_ops: list[tuple[datetime | None, str, bool]] = []
 
-    # Check for running operations (have locks)
     running_ops: set[str] = set()
     lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
     for key in lock_keys:
@@ -964,10 +1024,8 @@ async def _resolve_latest_operation(redis_url: str) -> str | None:
         if len(parts) >= 3:
             running_ops.add(parts[2])
 
-    # Track seen operation IDs to avoid duplicates
     seen_ops: set[str] = set()
 
-    # Get operations with redis-native state format (ares:op:*:meta)
     meta_keys = await client.keys("ares:op:*:meta")
     for key in meta_keys:
         parts = key.split(":")
@@ -977,7 +1035,6 @@ async def _resolve_latest_operation(redis_url: str) -> str | None:
         if op_id in seen_ops:
             continue
         seen_ops.add(op_id)
-        # Try to get started_at from meta or checkpoint_time
         checkpoint_time = None
         meta_data = await client.hgetall(f"ares:op:{op_id}:meta")
         if meta_data:
@@ -1079,15 +1136,12 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
     from ares.core.models import SharedRedTeamState, Target, TimelineEvent
     from ares.core.state_backend import RedisStateBackend
 
-    # Check if operation exists by looking for meta key
     meta_exists = await client.exists(f"ares:op:{operation_id}:meta")
     if not meta_exists:
         return None
 
-    # Create backend and load state
     backend = RedisStateBackend(client, operation_id)
 
-    # Load all collections
     credentials = await backend.get_credentials()
     hashes = await backend.get_hashes()
     hosts = await backend.get_hosts()
@@ -1098,7 +1152,6 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
     vulnerabilities = await backend.get_vulnerabilities()
     exploited_vulns = await backend.get_exploited_vulnerabilities()
 
-    # Load meta
     meta = await backend.get_all_meta()
     has_domain_admin = meta.get("has_domain_admin", False)
     has_golden_ticket = meta.get("has_golden_ticket", False)
@@ -1119,7 +1172,6 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
         except Exception:
             pass
 
-    # Load target from meta if present
     target = None
     target_ip = meta.get("target_ip")
     target_domain = meta.get("target_domain")
@@ -1129,15 +1181,12 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
     )
     if target_ip:
         target = Target(ip=target_ip, domain=target_domain)
-        # Ensure target_ips includes at least the primary target
         if not target_ips:
             target_ips = [target_ip]
 
-    # Load DC map and NetBIOS map
     dc_map = await backend.get_all_dcs()
     netbios_map = await backend.get_all_netbios_mappings()
 
-    # Load timeline events
     timeline_events_raw = await backend.get_timeline_events()
     timeline_events = []
     for event_dict in timeline_events_raw:
@@ -1153,9 +1202,8 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
             )
             timeline_events.append(event)
         except (KeyError, ValueError):
-            pass  # Skip invalid events
+            pass
 
-    # Create state object with correct field names
     kwargs: dict = {
         "operation_id": operation_id,
         "target": target,
@@ -1184,7 +1232,13 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
 
 
 async def _loot_once(operation_id: str, redis_url: str, json_output: bool) -> None:
-    """Single-shot loot dump."""
+    """Single-shot loot dump.
+
+    Args:
+        operation_id: Operation to dump loot for.
+        redis_url: Redis connection URL.
+        json_output: If True, output JSON format.
+    """
     # Use verified client to avoid stale reads from demoted masters
     client = await create_verified_redis_client(redis_url, decode_responses=False)
     state = await _load_state_from_redis(client, operation_id)
@@ -1204,7 +1258,15 @@ async def _loot_watch(
     diff_mode: bool,
     json_output: bool,
 ) -> None:
-    """Watch mode: continuously poll Redis and display loot."""
+    """Watch mode: continuously poll Redis and display loot.
+
+    Args:
+        operation_id: Operation to watch.
+        redis_url: Redis connection URL.
+        interval: Seconds between refreshes.
+        diff_mode: If True, only show new items since last refresh.
+        json_output: If True, output JSON format.
+    """
     prev_snapshot: dict | None = None
     # Use verified client to avoid stale reads from demoted masters
     client = await create_verified_redis_client(redis_url, decode_responses=False)
@@ -1378,17 +1440,14 @@ async def export_detection(
             # Output JSON to stdout
             print(json_module.dumps(playbook.to_dict(), indent=2, default=str))
         else:
-            # Write to files
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
 
-            # Write JSON
             json_path = output_path / f"{operation_id}_detection_playbook.json"
             json_content = json_module.dumps(playbook.to_dict(), indent=2, default=str)
             json_path.write_text(json_content)
             logger.success(f"Detection playbook JSON: {json_path}")
 
-            # Write markdown if requested
             if markdown:
                 md_path = output_path / f"{operation_id}_detection_playbook.md"
                 md_path.write_text(playbook.to_markdown())
@@ -1514,7 +1573,14 @@ async def tasks(
 
 
 def _format_duration(seconds: float) -> str:
-    """Format duration in seconds to human-readable string."""
+    """Format duration in seconds to human-readable string.
+
+    Args:
+        seconds: Duration in seconds.
+
+    Returns:
+        Formatted string like "1h 23m 45s" or "5m 30s" or "10s".
+    """
     if seconds < 0:
         return "0s"
     hours, remainder = divmod(int(seconds), 3600)
@@ -1559,11 +1625,8 @@ async def list_operations(
         client = await create_verified_redis_client(resolved_redis_url, decode_responses=False)
         await client.ping()
 
-        # Gather all operations with their checkpoint times, running status, and start time
-        # (checkpoint_time, op_id, is_running, started_at)
         all_ops: list[tuple[datetime | None, str, bool, datetime | None]] = []
 
-        # Check for running operations (have locks)
         # Use KEYS instead of SCAN for reliability - SCAN can miss keys
         running_ops: set[str] = set()
         lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
@@ -1573,10 +1636,8 @@ async def list_operations(
             if len(parts) >= 3:
                 running_ops.add(parts[2])
 
-        # Track seen operation IDs to avoid duplicates
         seen_ops: set[str] = set()
 
-        # Get operations from redis-native state format (ares:op:*:meta)
         meta_keys = await client.keys("ares:op:*:meta")
         for key in meta_keys:
             key_str = key.decode() if isinstance(key, bytes) else key
@@ -1623,16 +1684,12 @@ async def list_operations(
                 print(pick_latest([(t, op) for t, op, _, _ in all_ops]))
             return
 
-        # Full listing
         print("Multi-Agent Operations:")
         print("=" * 70)
-        # Sort by checkpoint time (newest first)
         all_ops.sort(key=lambda x: x[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         now = datetime.now(timezone.utc)
         for checkpoint_time, op_id, is_running, started_at in all_ops:
             status = " [running]" if is_running else ""
-
-            # Calculate runtime
             runtime_str = ""
             if started_at:
                 # For running ops, runtime is until now; for completed, until checkpoint
@@ -1682,15 +1739,12 @@ async def runtime(
     try:
         # Use verified client to avoid stale reads from demoted masters
         client = await create_verified_redis_client(resolved_redis_url, decode_responses=False)
-
-        # Get state using redis-native format
         state = await _load_state_from_redis(client, operation_id)
         if not state:
             logger.error(f"No state found for operation: {operation_id}")
             await client.aclose()
             sys.exit(1)
 
-        # Check if running
         lock_key = f"{RedisTaskQueue.LOCK_PREFIX}:{operation_id}"
         is_running = await client.exists(lock_key) > 0
 
@@ -1700,7 +1754,6 @@ async def runtime(
         started_at = state.started_at
         completed_at = state.completed_at
 
-        # Calculate runtime
         if completed_at:
             runtime_seconds = (completed_at - started_at).total_seconds()
             status = "completed"
@@ -1712,7 +1765,6 @@ async def runtime(
             runtime_seconds = (now - started_at).total_seconds()
             status = "stopped"
 
-        # Output
         print(f"Operation: {operation_id}")
         print(f"Status:    {status}")
         print(f"Started:   {started_at.isoformat()}")
@@ -1877,7 +1929,6 @@ async def delete(
         # Use verified client to ensure we're deleting from master
         client = await create_verified_redis_client(resolved_redis_url, decode_responses=True)
 
-        # Check if operation exists (redis-native format)
         meta_key = f"ares:op:{operation_id}:meta"
         exists = await client.exists(meta_key)
 
@@ -1893,20 +1944,15 @@ async def delete(
                 await client.aclose()
                 return
 
-        # Find all keys to delete (redis-native format)
         keys_to_delete: list[str] = []
-
-        # Scan for all redis-native keys: ares:op:{op_id}:*
         native_keys = await client.keys(f"ares:op:{operation_id}:*")
         keys_to_delete.extend(native_keys)
 
-        # Also clean up lock and active pointer if they reference this operation
         keys_to_delete.append(f"ares:lock:{operation_id}")
         active_op = await client.get("ares:op:active")
         if active_op == operation_id:
             keys_to_delete.append("ares:op:active")
 
-        # Find task status keys for this operation
         import json as json_module
 
         task_keys = await client.keys("ares:task_status:*")
@@ -1920,7 +1966,6 @@ async def delete(
                 except (json_module.JSONDecodeError, ValueError):
                     pass
 
-        # Delete all keys
         deleted_count = 0
         for key in keys_to_delete:
             result = await client.delete(key)
@@ -2061,7 +2106,6 @@ async def inject_credential(
             await client.aclose()
             sys.exit(1)
 
-        # Create and add the credential to in-memory state
         cred = Credential(
             username=username,
             password=password,
@@ -2138,13 +2182,11 @@ async def inject_vulnerability(
             await client.aclose()
             sys.exit(1)
 
-        # Parse additional details
         try:
             extra_details = json_module.loads(details) if details else {}
         except json_module.JSONDecodeError:
             extra_details = {}
 
-        # Build vulnerability details
         vuln_details = {
             "target_ip": target_ip,
             "target_hostname": target_hostname,
@@ -2276,7 +2318,13 @@ def _print_user_summaries_json(
     operation_id: str,
     state,
 ) -> None:
-    """Print user summaries as JSON."""
+    """Print user summaries as JSON.
+
+    Args:
+        summaries: List of UserSummary objects.
+        operation_id: Operation identifier.
+        state: SharedRedTeamState for global context.
+    """
     import json as json_module
 
     output = {
@@ -2346,7 +2394,14 @@ def _print_user_summaries(
     *,
     show_chains: bool = False,
 ) -> None:
-    """Print user summaries in human-readable format."""
+    """Print user summaries in human-readable format.
+
+    Args:
+        summaries: List of UserSummary objects.
+        operation_id: Operation identifier.
+        state: SharedRedTeamState for global context.
+        show_chains: If True, display attack chains for each item.
+    """
     from ares.reports.user_summary import format_attack_chain
 
     print(f"Operation: {operation_id}")
@@ -2412,6 +2467,9 @@ async def _get_all_operations_with_status(
 ) -> list[tuple[str, str, datetime | None]]:
     """Get all operations with their status and completion time.
 
+    Args:
+        redis_url: Redis connection URL.
+
     Returns:
         List of (operation_id, status, completed_at) tuples.
     """
@@ -2423,7 +2481,6 @@ async def _get_all_operations_with_status(
 
     results: list[tuple[str, str, datetime | None]] = []
 
-    # Check for running operations (have locks)
     running_ops: set[str] = set()
     lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
     for key in lock_keys:
@@ -2431,7 +2488,6 @@ async def _get_all_operations_with_status(
         if len(parts) >= 3:
             running_ops.add(parts[2])
 
-    # Get all operations with meta keys
     meta_keys = await client.keys("ares:op:*:meta")
     seen_ops: set[str] = set()
 
@@ -2444,7 +2500,6 @@ async def _get_all_operations_with_status(
             continue
         seen_ops.add(op_id)
 
-        # Get status from status key
         status_key = f"ares:op:{op_id}:status"
         status_json = await client.get(status_key)
         status = "unknown"
@@ -2462,7 +2517,6 @@ async def _get_all_operations_with_status(
             except json_module.JSONDecodeError:
                 pass
 
-        # Override status if running (has lock)
         if op_id in running_ops:
             status = "running"
 
@@ -2498,10 +2552,8 @@ async def watch(
     report_dir = Path(output_dir).resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
 
-    # Track operations we've already processed this session
     processed_ops: set[str] = set()
 
-    # Pre-populate with operations that already have local reports
     for report_file in report_dir.glob("op-*_report.md"):
         # Extract operation ID from filename: op-YYYYMMDD-HHMMSS_report.md
         op_id = report_file.stem.replace("_report", "")
@@ -2522,7 +2574,6 @@ async def watch(
                         continue
 
                     if status == "completed":
-                        # Auto-fetch the report
                         logger.info(f"Fetching report for completed operation: {op_id}")
                         try:
                             report_path = await _generate_local_report(

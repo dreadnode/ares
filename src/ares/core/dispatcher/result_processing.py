@@ -50,7 +50,6 @@ class ResultProcessingMixin:
             The resolved domain (FQDN) or empty string if cannot be determined.
         """
         if not target_ip:
-            # Fall back to operation's target domain
             if self.shared_state.target and self.shared_state.target.domain:
                 return self.shared_state.target.domain
             return ""
@@ -70,7 +69,6 @@ class ResultProcessingMixin:
                         return domain
                 break
 
-        # Fall back to operation's target domain
         if self.shared_state.target and self.shared_state.target.domain:
             return self.shared_state.target.domain
         return ""
@@ -316,7 +314,6 @@ class ResultProcessingMixin:
                 target_ip=target_ip,
             )
 
-        # Process additional result fields only on success
         if success and isinstance(result, dict):
             await self._process_success_result_data(
                 result,
@@ -1396,20 +1393,16 @@ class ResultProcessingMixin:
                 if not body:
                     continue
                 lower = body.lower()
-                # Detect share table header
                 if lower.startswith("share") and "permission" in lower:
                     in_table = True
                     continue
-                # Skip separator lines
                 if in_table and set(body) <= {"-", " "}:
                     continue
-                # End of table
                 if in_table and (body.startswith("[") or lower.startswith("smb")):
                     in_table = False
                     continue
                 if not in_table:
                     continue
-                # Parse share row
                 parts = body.split(None, 2)
                 if not parts:
                     continue
@@ -1639,7 +1632,6 @@ class ResultProcessingMixin:
         if self.shared_state.target and self.shared_state.target.domain:
             domain = self.shared_state.target.domain
 
-        # Get existing gMSA accounts from state to avoid duplicates
         existing_gmsa = {g.get("account", "").lower() for g in self.shared_state.gmsa_accounts}
 
         for gmsa in gmsa_accounts:

@@ -92,7 +92,6 @@ class CompletionTools(Toolset):  # type: ignore[misc]
         self.state.escalated = True
         self.state.escalation_reason = reason
 
-        # Add immediate actions as recommendations
         if immediate_actions:
             self.state.recommendations.extend(immediate_actions)
 
@@ -113,7 +112,6 @@ class CompletionTools(Toolset):  # type: ignore[misc]
 
         logger.warning(f"Investigation ESCALATED: {reason}")
 
-        # Build formatted escalation output
         severity_upper = severity.upper()
         severity_tag = f"[{severity_upper}]"
 
@@ -195,12 +193,10 @@ class CompletionTools(Toolset):  # type: ignore[misc]
         if self.state.stage.value not in ["lateral", "synthesis"]:
             logger.info(f"Investigation completed at '{self.state.stage.value}' stage")
 
-        # Store attack synopsis if provided
         if attack_synopsis:
             self.state.attack_synopsis = attack_synopsis
             logger.info(f"Attack synopsis recorded: {attack_synopsis[:100]}...")
 
-        # Process recommendations
         if recommendations:
             self.state.recommendations.extend(recommendations)
             logger.info(f"Added {len(recommendations)} recommendations")
@@ -309,7 +305,6 @@ class CompletionTools(Toolset):  # type: ignore[misc]
         tool_count = sum(1 for e in self.state.evidence if e.pyramid_level.value == 5)
         validated_count = sum(1 for e in self.state.evidence if e.validated)
 
-        # Add achievements based on conditions
         if ttp_count > 0:
             achievements.append(f"  ✅ TTP LEVEL REACHED ({ttp_count} TTPs)")
         if tool_count > 0:

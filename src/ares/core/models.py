@@ -951,7 +951,6 @@ class SharedRedTeamState:
             set_name: Name of the processed set (e.g., "cred_expansion")
             key: The key to mark as processed
         """
-        # Get the corresponding in-memory set attribute
         attr_name = f"processed_{set_name}" if not set_name.startswith("processed_") else set_name
         if attr_name not in _PROCESSED_SET_MAP and set_name not in _PROCESSED_SET_MAP.values():
             # Try direct attribute access for non-mapped sets
@@ -971,7 +970,6 @@ class SharedRedTeamState:
             # Find the in-memory attribute
             in_memory_attr = next((k for k, v in _PROCESSED_SET_MAP.items() if v == set_name), None)
 
-        # Update in-memory set
         if in_memory_attr is not None and hasattr(self, in_memory_attr):
             getattr(self, in_memory_attr).add(key)
 
@@ -996,7 +994,6 @@ class SharedRedTeamState:
         Returns:
             True if the key has been processed
         """
-        # Get the corresponding in-memory set attribute
         attr_name = f"processed_{set_name}" if not set_name.startswith("processed_") else set_name
         if hasattr(self, attr_name):
             return key in getattr(self, attr_name)
@@ -1171,11 +1168,9 @@ class SharedRedTeamState:
         if not technique_id:
             return False
 
-        # Check if already in set
         if technique_id in self.identified_techniques:
             return False
 
-        # Add to in-memory set
         self.identified_techniques.add(technique_id)
         logger.debug(f"Added MITRE technique: {technique_id}")
 
@@ -1345,34 +1340,28 @@ class SharedRedTeamState:
             return
 
         try:
-            # Load golden tickets
             tickets = await self._backend.get_golden_tickets()
             for ticket in tickets:
-                # Add without triggering another Redis write
                 if ticket not in self.golden_tickets:
                     self.golden_tickets.append(ticket)
 
-            # Load AdminSD backdoors
             backdoors = await self._backend.get_adminsd_backdoors()
             for backdoor in backdoors:
                 if backdoor not in self.adminsd_holder_backdoors:
                     self.adminsd_holder_backdoors.append(backdoor)
 
-            # Load ACL chains
             chains = await self._backend.get_acl_chains()
             existing_chain_ids = {c.get("chain_id") for c in self.acl_chains}
             for chain in chains:
                 if chain.get("chain_id") not in existing_chain_ids:
                     self.acl_chains.append(chain)
 
-            # Load gMSA accounts
             gmsas = await self._backend.get_gmsa_accounts()
             existing_accounts = {g.get("account", "").lower() for g in self.gmsa_accounts}
             for gmsa in gmsas:
                 if gmsa.get("account", "").lower() not in existing_accounts:
                     self.gmsa_accounts.append(gmsa)
 
-            # Load golden ticket capable credentials
             gt_capable = await self._backend.get_golden_ticket_capable_creds()
             for cred_key, capabilities in gt_capable.items():
                 if cred_key not in self.golden_ticket_capable_creds:
@@ -1675,13 +1664,8 @@ class SharedRedTeamState:
             )
             return domain_lower
 
-        # CRITICAL: If the incoming domain is already an FQDN (contains "."), trust it.
-        # Domain correction was designed for fixing NetBIOS names like "CONTOSO" -> "contoso.local",
-        # NOT for overriding valid FQDNs like "child.contoso.local" -> "contoso.local".
-        #
-        # Why this matters: Users like krbtgt exist in EVERY domain with the same name.
-        # If we only enumerated krbtgt from the parent domain, we shouldn't "correct" a child
-        # domain's krbtgt hash to the parent domain. They're different accounts with different hashes.
+        # Trust FQDNs (contain ".") - domain correction is only for NetBIOS names.
+        # Users like krbtgt exist in every domain; don't incorrectly map child → parent.
         is_incoming_fqdn = "." in domain_lower
 
         # Find all domains where this user has been seen
@@ -2302,21 +2286,18 @@ class SharedRedTeamState:
         updated_users = 0
         updated_hashes = 0
 
-        # Update credentials with matching NetBIOS domain
         for cred in self.all_credentials:
             cred_domain = (cred.domain or "").strip().lower()
             if cred_domain == netbios:
                 cred.domain = fqdn
                 updated_creds += 1
 
-        # Update users with matching NetBIOS domain
         for user in self.all_users:
             user_domain = (user.domain or "").strip().lower()
             if user_domain == netbios:
                 user.domain = fqdn
                 updated_users += 1
 
-        # Update hashes with matching NetBIOS domain
         for hash_obj in self.all_hashes:
             hash_domain = (hash_obj.domain or "").strip().lower()
             if hash_domain == netbios:
@@ -2329,8 +2310,7 @@ class SharedRedTeamState:
                 f"{updated_creds} creds, {updated_users} users, {updated_hashes} hashes"
             )
 
-        # Remove the NetBIOS name from all_domains since it's now represented by the FQDN
-        # e.g., remove "child" after normalizing to "child.contoso.local"
+        # Remove NetBIOS name from all_domains since it's now represented by the FQDN
         self.all_domains = [d for d in self.all_domains if d.lower() != netbios]
 
         # Now deduplicate credentials that may now be duplicates after normalization
@@ -2367,7 +2347,6 @@ class SharedRedTeamState:
         # e.g., "child.contoso.local" -> "contoso.local"
         parent_domain = ".".join(parts[1:])
 
-        # Check if parent domain is in our known domains
         if parent_domain not in [d.lower() for d in self.all_domains]:
             return
 
@@ -2475,22 +2454,14 @@ class SharedRedTeamState:
                         f"Hash updated with cracked password: {domain}\\{username} ({hash_type}) "
                         f"from {source_agent}"
                     )
-                    # NOTE: Credential creation is handled by publish_hash() in publishing.py,
-                    # which calls publish_credential() to trigger immediate dispatch (delegation
-                    # checks, secretsdump, etc). We don't create credentials here because:
-                    # 1. add_credential() is state-layer only - no immediate dispatch
-                    # 2. The caller (publish_hash) will call publish_credential() which has dispatch logic
-                    # 3. Creating here + caller creating = duplicate, which skips dispatch entirely
-                    #
-                    # Signal credential access if dispatcher available so loops wake up
+                    # Credential creation is the caller's responsibility (publish_hash → publish_credential).
+                    # Signal credential access so dispatcher loops wake up.
                     if self._dispatcher:
                         if threading.current_thread() is threading.main_thread():
                             self._dispatcher.signal_credential_access()
                         elif hasattr(self._dispatcher, "_credential_access_requested"):
-                            # Thread-safe signal - maintenance loop will transfer to asyncio.Event
-                            self._dispatcher._credential_access_requested.set()
-                    # Request checkpoint from dispatcher's maintenance loop
-                    # _checkpoint_requested is a threading.Event, safe from any thread
+                            self._dispatcher._credential_access_requested.set()  # Thread-safe
+                    # Request checkpoint (threading.Event, safe from any thread)
                     if self._dispatcher and hasattr(self._dispatcher, "_checkpoint_requested"):
                         self._dispatcher._checkpoint_requested.set()
                     return True  # Return True since we updated it

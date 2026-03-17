@@ -442,7 +442,6 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             status = hb.get("status", "unknown")
             timestamp_str = hb.get("timestamp")
 
-            # Check heartbeat freshness first
             if timestamp_str:
                 try:
                     hb_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
@@ -922,8 +921,7 @@ class BlueTeamOrchestrator:
                 return "routed"
 
             if triage_result.decision == TriageDecision.REINVESTIGATE:
-                # For now, reinvestigate counts as confirmed (needs more work)
-                # Future: dispatch additional workers with focus areas
+                # Reinvestigate keeps escalated status (focus_areas dispatching not yet implemented)
                 logger.info(
                     f"Triage requested reinvestigation (focus: {triage_result.focus_areas}), "
                     f"keeping escalated status"
@@ -1124,11 +1122,9 @@ class BlueTeamOrchestrator:
         finally:
             watchdog.cancel()
 
-            # Stop workers
             for worker in workers.values():
                 await worker.stop()
 
-            # Stop dispatcher
             await dispatcher.stop()
 
             # Close Redis

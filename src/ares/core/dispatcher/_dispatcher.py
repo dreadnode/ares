@@ -252,15 +252,9 @@ class RedTeamDispatcher(
         # Start background tasks
         self._heartbeat_task = asyncio.create_task(self._heartbeat_monitor())
 
-        # Start result consumer for Redis-based task completion (orchestrator only)
-        # Workers send results via task_queue.send_result(), they don't consume them.
-        # Running result consumer on workers causes spurious warnings because workers
-        # recover pending_tasks from Redis but never update them when tasks complete.
-        #
-        # IMPORTANT: The result consumer runs in a SEPARATE THREAD to prevent blocking
-        # when the orchestrator's LLM API calls timeout. This mirrors the worker's
-        # threaded heartbeat pattern. Without this, 14+ minute freezes can occur
-        # when LiteLLM retries timeout (5 retries x 300s = 25 min blocking).
+        # Orchestrator-only: start threaded result consumer for Redis task completion.
+        # Workers send results but don't consume them - that's the orchestrator's job.
+        # Thread isolation prevents LLM API timeouts from blocking result processing.
         if self._task_queue and self._is_orchestrator:
             self._start_threaded_result_consumer()
             logger.info("Threaded result consumer started for Redis task completion")

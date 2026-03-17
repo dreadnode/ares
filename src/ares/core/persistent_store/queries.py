@@ -457,8 +457,7 @@ class HistoricalQueryService:
         if not self._session_factory:
             return None
 
-        # Implementation would follow parent_id references
-        # For now, return None as this requires more complex recursive queries
+        # Requires recursive CTE queries to follow parent_id references
         logger.debug("Attack chain reconstruction not yet implemented")
         return None
 
