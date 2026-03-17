@@ -113,8 +113,8 @@ Call when:
 escalate_investigation(
     reason="Active credential theft attack chain",
     severity="critical",
-    attack_synopsis="Credential dumping (T1003) detected on winterfell.north.sevenkingdoms.local followed by lateral movement to castelblack within 30 minutes. Attacker used pass-the-hash with compromised NTLM hashes.",
-    recommendations=["Isolate winterfell and castelblack immediately", "Reset all credentials on affected hosts", "Check for golden ticket activity"]
+    attack_synopsis="Credential dumping (T1003) detected on dc02.child.contoso.local followed by lateral movement to sql01 within 30 minutes. Attacker used pass-the-hash with compromised NTLM hashes.",
+    recommendations=["Isolate dc02 and sql01 immediately", "Reset all credentials on affected hosts", "Check for golden ticket activity"]
 )
 ```
 
