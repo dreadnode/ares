@@ -30,6 +30,7 @@ from ares.core.config import (
     get_agent_config,
     get_crack_task_grace_period,
     get_max_runtime,
+    get_multi_forest_mode,
     get_namespace,
     get_rate_limit_backoff_delays,
     get_rate_limit_max_retries,
@@ -808,9 +809,24 @@ async def run_multi_agent_operation(
 
         # Check if DA was already achieved (e.g., recovery after restart) and should stop
         if dispatcher.shared_state.has_domain_admin and get_stop_on_domain_admin():
-            logger.info("DA already achieved and stop_on_domain_admin=True; marking complete")
-            dispatcher.shared_state.completed = True
-            await dispatcher._checkpoint()
+            # In multi-forest mode, only stop if ALL forests are dominated
+            if get_multi_forest_mode():
+                if dispatcher.shared_state.all_forests_dominated():
+                    logger.info(
+                        "DA achieved on all forests and multi_forest_mode=True; marking complete"
+                    )
+                    dispatcher.shared_state.completed = True
+                    await dispatcher._checkpoint()
+                else:
+                    undominated = dispatcher.shared_state.get_undominated_forests()
+                    logger.info(
+                        f"DA achieved but multi_forest_mode=True - "
+                        f"{len(undominated)} forest(s) remaining: {undominated}"
+                    )
+            else:
+                logger.info("DA already achieved and stop_on_domain_admin=True; marking complete")
+                dispatcher.shared_state.completed = True
+                await dispatcher._checkpoint()
 
         # Create the orchestrator agent with tools
         orchestrator_agent = await _create_orchestrator_agent(

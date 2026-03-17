@@ -219,7 +219,9 @@ class OperationConfig:
     # Stop operation immediately when golden ticket is forged (for forest escalation)
     # NOTE: stop_on_domain_admin and stop_on_golden_ticket are mutually exclusive
     stop_on_golden_ticket: bool = False
-    # Multi-forest mode: continue operation until DA is achieved on all trusted forests
+    # Multi-forest mode: continue until DA achieved on ALL trusted forests
+    # When enabled, operation continues after initial DA to pivot to trusted forests
+    # via trust key extraction and inter-realm ticket forgery
     multi_forest_mode: bool = False
 
     # Rate limit retry settings (for worker agents)
@@ -458,10 +460,10 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
 
 
 def _validate_stop_conditions(config: OperationConfig) -> None:
-    """Validate that stop_on_domain_admin and stop_on_golden_ticket are mutually exclusive.
+    """Validate stop condition flags are compatible.
 
     Raises:
-        ConfigValidationError: If both flags are True.
+        ConfigValidationError: If incompatible flags are set.
     """
     if config.stop_on_domain_admin and config.stop_on_golden_ticket:
         raise ConfigValidationError(
@@ -470,6 +472,15 @@ def _validate_stop_conditions(config: OperationConfig) -> None:
             "  - stop_on_domain_admin: Stop when krbtgt hash is obtained (child domain DA)\n"
             "  - stop_on_golden_ticket: Stop after golden ticket with ExtraSid is forged "
             "(forest escalation)"
+        )
+
+    if config.multi_forest_mode and not config.stop_on_domain_admin:
+        raise ConfigValidationError(
+            "multi_forest_mode requires stop_on_domain_admin=True. "
+            "multi_forest_mode extends DA-based completion to require DA on ALL trusted forests.\n"
+            "Set both:\n"
+            "  - stop_on_domain_admin: true\n"
+            "  - multi_forest_mode: true"
         )
 
 
@@ -675,6 +686,8 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:
         config.stop_on_domain_admin = stop_on_da.lower() in ("true", "1", "yes")
     if stop_on_gt := os.environ.get("ARES_STOP_ON_GOLDEN_TICKET"):
         config.stop_on_golden_ticket = stop_on_gt.lower() in ("true", "1", "yes")
+    if multi_forest := os.environ.get("ARES_MULTI_FOREST_MODE"):
+        config.multi_forest_mode = multi_forest.lower() in ("true", "1", "yes")
 
     # Service-level operation timeout override
     if op_timeout := os.environ.get("ARES_OPERATION_TIMEOUT"):
@@ -1016,7 +1029,12 @@ def get_stop_on_golden_ticket() -> bool:
 
 
 def get_multi_forest_mode() -> bool:
-    """Get whether multi-forest mode is enabled (continue until DA on all trusted forests)."""
+    """Get whether multi-forest mode is enabled.
+
+    When enabled, operation continues after initial DA to pivot to trusted forests
+    via trust key extraction and inter-realm ticket forgery. Operation completes
+    only when DA is achieved on ALL discovered trusted forests.
+    """
     return load_config().multi_forest_mode
 
 
@@ -1151,6 +1169,7 @@ __all__ = [
     "get_max_vulnerability_failures",
     "get_min_messages_to_keep",
     "get_min_slots_per_role",
+    "get_multi_forest_mode",
     "get_namespace",
     "get_offload_threshold",
     "get_offload_ttl",

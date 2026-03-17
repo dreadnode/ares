@@ -12,7 +12,11 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from ares.core.config import get_stop_on_domain_admin, get_stop_on_golden_ticket
+from ares.core.config import (
+    get_multi_forest_mode,
+    get_stop_on_domain_admin,
+    get_stop_on_golden_ticket,
+)
 from ares.core.tracing import trace_discovery
 
 if TYPE_CHECKING:
@@ -46,13 +50,38 @@ class AnnouncementMixin:
         self.shared_state.has_domain_admin = True
         self.shared_state.domain_admin_path = attack_path
 
-        # Only mark complete if stop_on_domain_admin is enabled
-        # If stop_on_golden_ticket is enabled, we continue past DA to forge golden ticket
+        # Track which domain we achieved DA on (for multi-forest mode)
+        domain_lower = domain.lower()
+        if domain_lower not in self.shared_state.domain_admin_domains:
+            self.shared_state.domain_admin_domains.append(domain_lower)
+
+        # Determine if we should mark operation as complete
+        should_complete = False
+
         if get_stop_on_domain_admin():
+            if get_multi_forest_mode():
+                # In multi-forest mode, only complete when ALL forests are dominated
+                if self.shared_state.all_forests_dominated():
+                    should_complete = True
+                    logger.info(
+                        "ARES_MULTI_FOREST_MODE enabled - all trusted forests dominated, "
+                        "marking operation complete"
+                    )
+                else:
+                    undominated = self.shared_state.get_undominated_forests()
+                    logger.info(
+                        f"ARES_MULTI_FOREST_MODE enabled - {len(undominated)} trusted "
+                        f"forest(s) remaining: {undominated}"
+                    )
+            else:
+                # Standard mode: stop on first DA
+                should_complete = True
+                logger.info("ARES_STOP_ON_DOMAIN_ADMIN enabled - marking operation complete")
+
+        if should_complete:
             self.shared_state.completed = True
             if not self.shared_state.completed_at:
                 self.shared_state.completed_at = datetime.now(timezone.utc)
-            logger.info("ARES_STOP_ON_DOMAIN_ADMIN enabled - marking operation complete")
 
         await self._checkpoint()
         logger.success(f"DOMAIN ADMIN ACHIEVED: {domain}\\{username}")
