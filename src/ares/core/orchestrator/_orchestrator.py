@@ -808,9 +808,15 @@ async def run_multi_agent_operation(
         await _prime_operation(recovery, dispatcher, target_ips, target_domain)
 
         # Check if DA was already achieved (e.g., recovery after restart) and should stop
-        if dispatcher.shared_state.has_domain_admin and get_stop_on_domain_admin():
-            # In multi-forest mode, only stop if ALL forests are dominated
-            if get_multi_forest_mode():
+        # These modes are mutually exclusive (validated in config)
+        if dispatcher.shared_state.has_domain_admin:
+            if get_stop_on_domain_admin():
+                # Single-domain mode: stop on first DA
+                logger.info("DA already achieved and stop_on_domain_admin=True; marking complete")
+                dispatcher.shared_state.completed = True
+                await dispatcher._checkpoint()
+            elif get_multi_forest_mode():
+                # Multi-forest mode: only stop if ALL forests are dominated
                 if dispatcher.shared_state.all_forests_dominated():
                     logger.info(
                         "DA achieved on all forests and multi_forest_mode=True; marking complete"
@@ -823,10 +829,6 @@ async def run_multi_agent_operation(
                         f"DA achieved but multi_forest_mode=True - "
                         f"{len(undominated)} forest(s) remaining: {undominated}"
                     )
-            else:
-                logger.info("DA already achieved and stop_on_domain_admin=True; marking complete")
-                dispatcher.shared_state.completed = True
-                await dispatcher._checkpoint()
 
         # Create the orchestrator agent with tools
         orchestrator_agent = await _create_orchestrator_agent(

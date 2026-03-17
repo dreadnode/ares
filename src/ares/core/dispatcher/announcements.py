@@ -56,27 +56,27 @@ class AnnouncementMixin:
             self.shared_state.domain_admin_domains.append(domain_lower)
 
         # Determine if we should mark operation as complete
+        # These modes are mutually exclusive (validated in config)
         should_complete = False
 
         if get_stop_on_domain_admin():
-            if get_multi_forest_mode():
-                # In multi-forest mode, only complete when ALL forests are dominated
-                if self.shared_state.all_forests_dominated():
-                    should_complete = True
-                    logger.info(
-                        "ARES_MULTI_FOREST_MODE enabled - all trusted forests dominated, "
-                        "marking operation complete"
-                    )
-                else:
-                    undominated = self.shared_state.get_undominated_forests()
-                    logger.info(
-                        f"ARES_MULTI_FOREST_MODE enabled - {len(undominated)} trusted "
-                        f"forest(s) remaining: {undominated}"
-                    )
-            else:
-                # Standard mode: stop on first DA
+            # Single-domain mode: stop on first DA
+            should_complete = True
+            logger.info("ARES_STOP_ON_DOMAIN_ADMIN enabled - marking operation complete")
+        elif get_multi_forest_mode():
+            # Multi-forest mode: stop only when ALL trusted forests are dominated
+            if self.shared_state.all_forests_dominated():
                 should_complete = True
-                logger.info("ARES_STOP_ON_DOMAIN_ADMIN enabled - marking operation complete")
+                logger.info(
+                    "ARES_MULTI_FOREST_MODE enabled - all trusted forests dominated, "
+                    "marking operation complete"
+                )
+            else:
+                undominated = self.shared_state.get_undominated_forests()
+                logger.info(
+                    f"ARES_MULTI_FOREST_MODE enabled - {len(undominated)} trusted "
+                    f"forest(s) remaining: {undominated}"
+                )
 
         if should_complete:
             self.shared_state.completed = True

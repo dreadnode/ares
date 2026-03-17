@@ -214,14 +214,14 @@ class OperationConfig:
     max_runtime: float = 3600.0
     # Grace period for crack tasks when operation is completing (seconds)
     crack_task_grace_period: float = 300.0
-    # Stop operation immediately when domain admin is achieved
+    # Stop operation immediately when domain admin is achieved (first krbtgt hash)
     stop_on_domain_admin: bool = False
     # Stop operation immediately when golden ticket is forged (for forest escalation)
-    # NOTE: stop_on_domain_admin and stop_on_golden_ticket are mutually exclusive
     stop_on_golden_ticket: bool = False
-    # Multi-forest mode: continue until DA achieved on ALL trusted forests
-    # When enabled, operation continues after initial DA to pivot to trusted forests
-    # via trust key extraction and inter-realm ticket forgery
+    # Multi-forest mode: stop only when DA achieved on ALL trusted forests
+    # Continues after initial DA to pivot to trusted forests via trust keys
+    # NOTE: stop_on_domain_admin, stop_on_golden_ticket, and multi_forest_mode
+    # are mutually exclusive - only one can be True
     multi_forest_mode: bool = False
 
     # Rate limit retry settings (for worker agents)
@@ -474,13 +474,20 @@ def _validate_stop_conditions(config: OperationConfig) -> None:
             "(forest escalation)"
         )
 
-    if config.multi_forest_mode and not config.stop_on_domain_admin:
+    if config.multi_forest_mode and config.stop_on_domain_admin:
         raise ConfigValidationError(
-            "multi_forest_mode requires stop_on_domain_admin=True. "
-            "multi_forest_mode extends DA-based completion to require DA on ALL trusted forests.\n"
-            "Set both:\n"
-            "  - stop_on_domain_admin: true\n"
-            "  - multi_forest_mode: true"
+            "multi_forest_mode and stop_on_domain_admin are mutually exclusive.\n"
+            "  - stop_on_domain_admin: Stop on FIRST domain admin (single domain)\n"
+            "  - multi_forest_mode: Stop when DA achieved on ALL trusted forests\n"
+            "Use one or the other, not both."
+        )
+
+    if config.multi_forest_mode and config.stop_on_golden_ticket:
+        raise ConfigValidationError(
+            "multi_forest_mode and stop_on_golden_ticket are mutually exclusive.\n"
+            "  - stop_on_golden_ticket: Stop after golden ticket forged\n"
+            "  - multi_forest_mode: Stop when DA achieved on ALL trusted forests\n"
+            "Use one or the other, not both."
         )
 
 
