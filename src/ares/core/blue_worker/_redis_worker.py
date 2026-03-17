@@ -651,7 +651,6 @@ async def run_blue_global_worker(
         dispatcher = BlueTeamDispatcher(redis_client)
         await dispatcher.start(investigation_id, alert)
 
-        # Create agent for this investigation
         agent, callback_tools = create_blue_agent(
             role=role,
             model=current_model,

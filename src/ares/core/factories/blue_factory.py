@@ -190,8 +190,6 @@ def _queue_pivot_queries(state: "InvestigationState", result_data: dict) -> None
 
     # Extract hosts from various result formats
     hosts_to_investigate = _extract_hosts_from_results(result_data)
-
-    # Remove already-queried hosts
     hosts_to_investigate -= state.queried_hosts
 
     if not hosts_to_investigate:

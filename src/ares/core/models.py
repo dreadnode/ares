@@ -951,7 +951,6 @@ class SharedRedTeamState:
             set_name: Name of the processed set (e.g., "cred_expansion")
             key: The key to mark as processed
         """
-        # Get the corresponding in-memory set attribute
         attr_name = f"processed_{set_name}" if not set_name.startswith("processed_") else set_name
         if attr_name not in _PROCESSED_SET_MAP and set_name not in _PROCESSED_SET_MAP.values():
             # Try direct attribute access for non-mapped sets
@@ -971,7 +970,6 @@ class SharedRedTeamState:
             # Find the in-memory attribute
             in_memory_attr = next((k for k, v in _PROCESSED_SET_MAP.items() if v == set_name), None)
 
-        # Update in-memory set
         if in_memory_attr is not None and hasattr(self, in_memory_attr):
             getattr(self, in_memory_attr).add(key)
 
@@ -996,7 +994,6 @@ class SharedRedTeamState:
         Returns:
             True if the key has been processed
         """
-        # Get the corresponding in-memory set attribute
         attr_name = f"processed_{set_name}" if not set_name.startswith("processed_") else set_name
         if hasattr(self, attr_name):
             return key in getattr(self, attr_name)

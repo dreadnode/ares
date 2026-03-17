@@ -597,7 +597,6 @@ class PyramidClimber:
             for strategy in strategies:
                 elevation_score = strategy["elevation"] / 5.0  # Normalize to 0-1
 
-                # Format the question text using the template format string
                 question_text = loader.render(
                     "engines/pyramid_climb.md.jinja",
                     question_text=strategy["template"].format(value=ev.value),

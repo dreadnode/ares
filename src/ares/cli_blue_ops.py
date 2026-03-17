@@ -318,7 +318,6 @@ async def delete_operation(
 
         if not inv_ids:
             print(f"No investigations found for operation: {operation_id}")
-            # Check if the operation key exists at all
             exists = await client.exists(op_inv_key)
             if not exists:
                 print(f"Operation tracking key does not exist: {op_inv_key}")
@@ -668,7 +667,6 @@ async def _get_latest_operation_id(redis_url: str) -> tuple[str | None, bool]:
 
     client = await create_verified_redis_client(redis_url, decode_responses=True)
     try:
-        # Check for running operations first
         lock_keys = await client.keys(f"{RedisTaskQueue.LOCK_PREFIX}:*")
         running_ops: set[str] = set()
         for key in lock_keys:

@@ -892,11 +892,9 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
         if not self.state:
             return {"error": "No investigation state", "total": 0}
 
-        # Pop all queued queries
         pivot_queries = list(self.state.queued_pivot_queries)
         chain_queries = list(self.state.queued_chain_queries)
 
-        # Clear the queues
         self.state.queued_pivot_queries.clear()
         self.state.queued_chain_queries.clear()
 

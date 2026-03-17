@@ -589,7 +589,6 @@ def create_agent_span_attributes(
         "agent.role": role,
     }
 
-    # Set attack phase
     if team == "red":
         phase = ROLE_TO_PHASE.get(role, "unknown")
         tactic = ROLE_TO_TACTIC.get(role, "unknown")

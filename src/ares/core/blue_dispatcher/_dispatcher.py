@@ -106,7 +106,6 @@ class BlueTeamDispatcher(
         )
         self._shared_state.set_backend(self._backend)
 
-        # Store alert and meta in Redis
         await self._backend.set_meta("alert", alert)
         await self._backend.set_meta("stage", InvestigationStage.TRIAGE.value)
         await self._backend.set_meta("escalated", value=False)

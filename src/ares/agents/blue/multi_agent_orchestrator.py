@@ -1122,11 +1122,9 @@ class BlueTeamOrchestrator:
         finally:
             watchdog.cancel()
 
-            # Stop workers
             for worker in workers.values():
                 await worker.stop()
 
-            # Stop dispatcher
             await dispatcher.stop()
 
             # Close Redis

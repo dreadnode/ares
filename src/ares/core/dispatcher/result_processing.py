@@ -314,7 +314,6 @@ class ResultProcessingMixin:
                 target_ip=target_ip,
             )
 
-        # Process additional result fields only on success
         if success and isinstance(result, dict):
             await self._process_success_result_data(
                 result,
@@ -1633,7 +1632,6 @@ class ResultProcessingMixin:
         if self.shared_state.target and self.shared_state.target.domain:
             domain = self.shared_state.target.domain
 
-        # Get existing gMSA accounts from state to avoid duplicates
         existing_gmsa = {g.get("account", "").lower() for g in self.shared_state.gmsa_accounts}
 
         for gmsa in gmsa_accounts:

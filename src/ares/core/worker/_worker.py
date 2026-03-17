@@ -2452,7 +2452,6 @@ async def run_worker(
             lateral_callbacks.set_dispatcher(dispatcher)
             additional_tools.append(lateral_callbacks)
 
-        # Create the specialized agent
         agent = create_specialized_agent(
             role=role,
             model=resolved_model,

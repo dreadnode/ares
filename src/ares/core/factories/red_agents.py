@@ -1421,7 +1421,6 @@ async def create_multi_agent_ensemble(
                 "Provide model args or set ARES_MODEL/ARES_ORCHESTRATOR_MODEL/ARES_WORKER_MODEL."
             )
 
-        # Create agent
         agent = create_specialized_agent(
             role=role,
             model=agent_model,

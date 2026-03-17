@@ -218,8 +218,7 @@ class DeferredQueueMixin:
             for task_type in await self._get_all_deferred_task_types():
                 key = self._deferred_queue_key(task_type)
 
-                # Get all tasks and check enqueue_time
-                # We need to check each task because score encodes both priority and time
+                # Score encodes both priority and time, so check each task
                 items = await redis.zrange(key, 0, -1, withscores=True)
                 stale_members = []
 
