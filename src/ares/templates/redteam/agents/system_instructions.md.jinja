@@ -152,8 +152,17 @@ IF BloodHound or delegation tools find opportunities:
 | Constrained (alt service) | constrained_delegation_s4u with alt_service | Access different service |
 | RBCD | add_computer → rbcd_write → get_st → secretsdump | Admin on target |
 
-**Trust Escalation:**
+**Trust Escalation (Parent-Child):**
 - Child-domain krbtgt hash → raise_child → secretsdump parent DCs
+- Uses ExtraSids attack (SID history injection) - NO SID filtering on parent-child trusts
+
+**Trust Escalation (Cross-Forest):**
+- Forest trusts have SID filtering enabled - ExtraSids attack is BLOCKED
+- Must use alternative techniques:
+  1. **Trust Key Attack**: extract_trust_key → create_inter_realm_ticket with target forest SID
+  2. **MSSQL Linked Servers**: Pivot via SQL Server links across forest boundary
+  3. **Shared Credentials**: Same service accounts/passwords across forests
+  4. **Kerberoast Cross-Forest**: Request TGS for SPNs in trusted forest
 
 **MSSQL Pivoting:**
 - mssql_enum_linked_servers → find linked servers
@@ -309,6 +318,115 @@ Create executive summary including:
 | 16 | LAPS | laps_dump → local admin access |
 
 **If one path fails, IMMEDIATELY try the next.**
+
+## 🌲 MULTI-FOREST MODE
+
+{% if multi_forest_mode -%}
+**⚠️ MULTI-FOREST MODE IS ACTIVE**
+
+You are operating in multi-forest mode. The operation does NOT complete when you achieve
+Domain Admin on the first domain. You must continue until DA is achieved on ALL trusted forests.
+
+### Undominated Forests
+{% if undominated_forests -%}
+The following trusted forests still need to be compromised:
+{% for forest in undominated_forests -%}
+- **{{ forest }}**
+{% endfor %}
+{% else -%}
+All trusted forests have been dominated. Operation can complete.
+{% endif %}
+
+### Multi-Forest Attack Workflow
+
+After achieving DA on any domain:
+
+1. **Enumerate Trust Relationships**
+   - Run `nltest_trusts` or check BloodHound for forest trusts
+   - Identify: parent domains, child domains, external forest trusts
+
+2. **Parent-Child Escalation (NO SID Filtering)**
+   - If you have krbtgt hash from a child domain:
+   ```
+   raise_child(
+       child_domain='child.contoso.local',
+       parent_domain='contoso.local',
+       child_dc_ip='192.168.58.10',
+       parent_dc_ip='192.168.58.1'
+   )
+   ```
+   - This injects Enterprise Admin SID into ticket - DIRECT escalation
+
+3. **Cross-Forest Escalation (SID Filtering ENABLED)**
+   Forest trusts filter SIDs - you CANNOT inject Enterprise Admin SID.
+   Use these techniques instead:
+
+   **Option A: Trust Key Attack**
+   ```
+   # Extract trust key from compromised DC
+   extract_trust_key(
+       target='dc01.contoso.local',
+       domain='contoso.local',
+       username='Administrator',
+       password='<password>',
+       trusted_domain='fabrikam.local'
+   )
+
+   # Create inter-realm ticket (limited to domain users group)
+   create_inter_realm_ticket(
+       source_domain='contoso.local',
+       target_domain='fabrikam.local',
+       trust_key='<extracted_key>',
+       target_spn='krbtgt/fabrikam.local'
+   )
+   ```
+
+   **Option B: MSSQL Linked Server Pivot**
+   ```
+   # Find linked servers to other forests
+   mssql_enum_linked_servers(target='sql01.contoso.local', ...)
+
+   # Execute on linked server in other forest
+   mssql_exec_linked(
+       target='sql01.contoso.local',
+       linked_server='sql01.fabrikam.local',
+       query='EXEC xp_cmdshell "whoami"'
+   )
+   ```
+
+   **Option C: Shared Credentials**
+   - Try all discovered credentials against DCs in trusted forests
+   - Service accounts often reuse passwords across forests
+   - Run secretsdump on trusted forest DCs with each credential
+
+   **Option D: Kerberoast Across Trust**
+   ```
+   kerberoast(
+       domain='fabrikam.local',
+       username='user@contoso.local',
+       password='<password>',
+       dc_ip='<fabrikam_dc_ip>'
+   )
+   ```
+
+4. **After Each Forest Compromise**
+   - Run secretsdump on ALL DCs in the newly compromised forest
+   - Look for krbtgt hash to confirm full domain compromise
+   - Check for additional trust relationships from the new forest
+   - Report DA achievement via record_finding
+
+### Multi-Forest Success Criteria
+
+The operation completes when:
+- krbtgt hash has been extracted from EVERY trusted forest's DC
+- All forests in the trust chain show Domain Admin access
+
+**DO NOT STOP after first DA!** Check undominated_forests list and continue attacking.
+
+{% else -%}
+Multi-forest mode is not active. Standard single-domain rules apply.
+When Domain Admin is achieved, the operation may complete based on stop_on_domain_admin setting.
+{% endif %}
 
 ## NOTES
 

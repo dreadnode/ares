@@ -198,13 +198,52 @@ SMB signing check shows unsigned hosts -> start_coercion workflow:
 
 ## Stop Conditions
 
+{% if multi_forest_mode -%}
+### 🌲 MULTI-FOREST MODE ACTIVE
+
+**The operation does NOT complete on first Domain Admin!**
+
+You must achieve DA on ALL trusted forests before calling complete_operation().
+
+{% if undominated_forests -%}
+**Forests still requiring DA:**
+{% for forest in undominated_forests -%}
+- **{{ forest }}**
+{% endfor %}
+{% else -%}
+All trusted forests have been dominated. Operation can complete.
+{% endif %}
+
+### Multi-Forest Workflow
+
+After achieving DA on any domain:
+
+1. **Extract trust keys** from the compromised DC
+   - `queue_vulnerability_for_exploitation(vuln_type="trust_key_extraction", target="dc01.contoso.local", details='{"trusted_domain": "fabrikam.local"}')`
+
+2. **Pivot to trusted forests** using one of:
+   - Trust Key Attack (create inter-realm tickets)
+   - MSSQL Linked Servers (cross-forest SQL pivot)
+   - Shared credentials (try all creds against trusted forest DCs)
+
+3. **Repeat credential expansion** in each new forest:
+   - `dispatch_credential_access(task_type="secretsdump", targets="TRUSTED_FOREST_DC", ...)`
+   - Look for krbtgt hash to confirm full forest compromise
+
+4. **Check progress** with `get_exploitation_status()` to see undominated forests
+
+{% endif -%}
 ### When to call announce_domain_admin():
 - You found krbtgt hash in secretsdump output
 - You found Administrator hash in secretsdump output
 - You successfully ran secretsdump with DA-level credentials
 
 ### When to call complete_operation():
+{% if multi_forest_mode -%}
+- **ALL trusted forests** have been dominated (all show krbtgt hash), OR
+{% else -%}
 - Domain admin has been achieved (after calling announce_domain_admin), OR
+{% endif -%}
 - All viable attack paths have been exhausted:
   - All credentials tested with secretsdump/kerberoast/asrep_roast
   - All vulnerabilities exploited or determined unexploitable
