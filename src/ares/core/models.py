@@ -2289,21 +2289,18 @@ class SharedRedTeamState:
         updated_users = 0
         updated_hashes = 0
 
-        # Update credentials with matching NetBIOS domain
         for cred in self.all_credentials:
             cred_domain = (cred.domain or "").strip().lower()
             if cred_domain == netbios:
                 cred.domain = fqdn
                 updated_creds += 1
 
-        # Update users with matching NetBIOS domain
         for user in self.all_users:
             user_domain = (user.domain or "").strip().lower()
             if user_domain == netbios:
                 user.domain = fqdn
                 updated_users += 1
 
-        # Update hashes with matching NetBIOS domain
         for hash_obj in self.all_hashes:
             hash_domain = (hash_obj.domain or "").strip().lower()
             if hash_domain == netbios:
@@ -2316,8 +2313,7 @@ class SharedRedTeamState:
                 f"{updated_creds} creds, {updated_users} users, {updated_hashes} hashes"
             )
 
-        # Remove the NetBIOS name from all_domains since it's now represented by the FQDN
-        # e.g., remove "child" after normalizing to "child.contoso.local"
+        # Remove NetBIOS name from all_domains since it's now represented by the FQDN
         self.all_domains = [d for d in self.all_domains if d.lower() != netbios]
 
         # Now deduplicate credentials that may now be duplicates after normalization
@@ -2354,7 +2350,6 @@ class SharedRedTeamState:
         # e.g., "child.contoso.local" -> "contoso.local"
         parent_domain = ".".join(parts[1:])
 
-        # Check if parent domain is in our known domains
         if parent_domain not in [d.lower() for d in self.all_domains]:
             return
 

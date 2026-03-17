@@ -92,7 +92,6 @@ class CompletionTools(Toolset):  # type: ignore[misc]
         self.state.escalated = True
         self.state.escalation_reason = reason
 
-        # Add immediate actions as recommendations
         if immediate_actions:
             self.state.recommendations.extend(immediate_actions)
 
@@ -113,7 +112,6 @@ class CompletionTools(Toolset):  # type: ignore[misc]
 
         logger.warning(f"Investigation ESCALATED: {reason}")
 
-        # Build formatted escalation output
         severity_upper = severity.upper()
         severity_tag = f"[{severity_upper}]"
 

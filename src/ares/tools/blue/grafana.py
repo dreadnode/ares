@@ -87,12 +87,10 @@ class MCPConnectionPool:
             cls._lock = asyncio.Lock()
 
         async with cls._lock:
-            # Check if credentials changed
             creds_changed = (grafana_url and grafana_url != cls._grafana_url) or (
                 grafana_api_key and grafana_api_key != cls._grafana_api_key
             )
 
-            # Return existing client if valid
             if cls._client is not None and not force_reconnect and not creds_changed:
                 logger.debug("Reusing existing MCP connection")
                 return cls._client
@@ -109,11 +107,9 @@ class MCPConnectionPool:
                     logger.warning(f"Error closing previous MCP connection: {e}")
                 cls._client = None
 
-            # Store credentials
             cls._grafana_url = grafana_url
             cls._grafana_api_key = grafana_api_key
 
-            # Create new connection
             logger.info("Creating new MCP connection (pooled)")
             cls._client = await _connect_grafana_mcp_internal(
                 grafana_url=grafana_url,

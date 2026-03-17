@@ -378,7 +378,6 @@ async def main(
         logger.error("No model specified. Set ARES_MODEL or pass --args.model.")
         return
 
-    # Log startup
     logger.info("=" * 60)
     logger.info("ARES SOC INVESTIGATION AGENT")
     logger.info("=" * 60)
@@ -1028,7 +1027,6 @@ async def multi_agent(
     except Exception as e:
         logger.warning(f"Dreadnode platform unavailable, continuing without telemetry: {e}")
 
-    # Log startup
     logger.info("=" * 60)
     logger.info("ARES MULTI-AGENT RED TEAM OPERATION")
     logger.info("=" * 60)
@@ -1221,7 +1219,6 @@ async def worker(
     if not operation_id:
         operation_id = os.getenv("OPERATION_ID", "")
 
-    # Log startup
     logger.info("=" * 60)
     logger.info(f"ARES WORKER AGENT: {role.upper()}")
     logger.info("=" * 60)
@@ -1361,7 +1358,6 @@ async def blue_worker(
     if not investigation_id:
         investigation_id = os.getenv("INVESTIGATION_ID", "")
 
-    # Log startup
     logger.info("=" * 60)
     logger.info(f"ARES BLUE WORKER AGENT: {role.upper()}")
     logger.info("=" * 60)
@@ -1385,7 +1381,6 @@ async def blue_worker(
     }
     blue_role = role_mapping[role]
 
-    # Check if global worker mode is enabled (for distributed orchestrator architecture)
     # ARES_BLUE_GLOBAL_POOL is the canonical env var set in K8s deployments
     use_global_worker = os.getenv("ARES_BLUE_GLOBAL_POOL", "").lower() in ("1", "true", "yes")
     if use_global_worker:
@@ -1531,7 +1526,6 @@ async def evaluate(
     else:
         mode_str = "single-agent"
 
-    # Log startup
     logger.info("=" * 60)
     logger.info("ARES BLUE TEAM EVALUATION")
     logger.info("=" * 60)
@@ -1692,7 +1686,6 @@ async def evaluate_dataset(
     else:
         mode_str = "single-agent"
 
-    # Log startup
     logger.info("=" * 60)
     logger.info("ARES BLUE TEAM DATASET EVALUATION")
     logger.info("=" * 60)

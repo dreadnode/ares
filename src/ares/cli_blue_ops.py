@@ -227,7 +227,6 @@ async def list_investigations(
                     }
                 )
 
-        # Sort by started_at (most recent first)
         investigations.sort(
             key=lambda x: x.get("started_at") or "",
             reverse=True,
@@ -380,7 +379,6 @@ async def cleanup(
 
     try:
         if all_investigations:
-            # Clear ALL investigations
             inv_keys = await client.keys("ares:blue:inv:*")
             op_keys = await client.keys("ares:blue:op:*")
             active_exists = await client.exists("ares:blue:active_investigations")
@@ -769,7 +767,6 @@ async def operation_status(
                     status["investigation_id"] = inv_id
                     statuses.setdefault(status.get("status", "unknown"), []).append(status)
 
-                    # Track timing
                     if status.get("started_at"):
                         started = datetime.fromisoformat(
                             status["started_at"].replace("Z", "+00:00")
@@ -838,7 +835,6 @@ async def operation_status(
             print(f"  Submitted: {submitted}")
             print(f"Duration: {duration}")
 
-            # Show triage breakdown if any triage occurred
             total_triaged = sum(triage_counts.values())
             if total_triaged > 0:
                 print("\nTriage breakdown:")
@@ -853,7 +849,6 @@ async def operation_status(
             if latest_end and not (statuses["running"] or statuses["submitted"]):
                 print(f"Completed: {latest_end.isoformat()}")
 
-            # Show running investigations
             if statuses["running"]:
                 print("\nRunning investigations:")
                 for inv in statuses["running"]:
@@ -861,7 +856,6 @@ async def operation_status(
                     started_str = inv.get("started_at", "")[:19] if inv.get("started_at") else ""
                     print(f"  {inv_id} (started: {started_str})")
 
-            # Show failed investigations
             if statuses["failed"]:
                 print("\nFailed investigations:")
                 for inv in statuses["failed"]:
@@ -876,7 +870,6 @@ async def operation_status(
 
     if watch > 0:
         while True:
-            # Clear screen
             print("\033[2J\033[H", end="")
             all_done = await show_status()
             if all_done:
@@ -1355,7 +1348,6 @@ async def triage_status(
             print("No triage data found (investigation may not have been escalated)")
             return
 
-        # Show current decision
         print("\nTriage Decision:")
         if decision_data:
             decision = json.loads(decision_data)
@@ -1371,7 +1363,6 @@ async def triage_status(
         else:
             print("  Decision: PENDING")
 
-        # Show audit trail
         if records:
             print("\n" + "-" * 60)
             print("Triage Audit Trail:")

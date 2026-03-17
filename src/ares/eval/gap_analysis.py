@@ -140,7 +140,6 @@ def analyze_detection_gaps(result: EvaluationResult) -> GapAnalysisReport:
         if rec:
             recommendations.append(rec)
 
-    # Check for alert coverage gap
     if not result.alert_fired:
         detection_gaps.append("No alert fired for this attack scenario")
         recommendations.append(
@@ -160,7 +159,6 @@ def analyze_detection_gaps(result: EvaluationResult) -> GapAnalysisReport:
             )
         )
 
-    # Check for investigation completion
     if result.investigation_started and not result.investigation_completed:
         detection_gaps.append("Investigation started but did not complete")
         recommendations.append(
@@ -176,7 +174,6 @@ def analyze_detection_gaps(result: EvaluationResult) -> GapAnalysisReport:
             )
         )
 
-    # Check pyramid level
     if result.highest_pyramid_level < 4:
         detection_gaps.append(
             f"Only reached pyramid level {result.highest_pyramid_level}/6 "

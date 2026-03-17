@@ -263,16 +263,12 @@ class OperationRecoveryManager:
         # Load vulnerabilities (get_vulnerabilities returns dict[str, VulnerabilityInfo])
         state.discovered_vulnerabilities.update(await backend.get_vulnerabilities())
 
-        # Load exploited vulnerabilities
         state.exploited_vulnerabilities.update(await backend.get_exploited_vulnerabilities())
-
-        # Load processed sets
         await state.load_processed_sets_from_backend()
 
         # Load persistence tracking (golden tickets, backdoors, ACL chains, gMSA accounts)
         await state.load_persistence_tracking_from_backend()
 
-        # Load meta fields
         (
             state.has_domain_admin,
             state.domain_admin_path,
@@ -286,7 +282,6 @@ class OperationRecoveryManager:
             except (ValueError, TypeError):
                 pass
 
-        # Load DC map
         dc_map = await backend.get_all_dcs()
         state.domain_controllers.update(dc_map)
 
@@ -303,15 +298,12 @@ class OperationRecoveryManager:
                 environment=target_env or "",
             )
 
-        # Load NetBIOS map
         netbios_map = await backend.get_all_netbios_mappings()
         state.netbios_to_fqdn.update(netbios_map)
 
-        # Load artifacts
         artifacts = await backend.get_all_artifacts()
         state.downloaded_artifacts.update(artifacts)
 
-        # Load timeline events
         timeline_events = await backend.get_timeline_events()
         for event_dict in timeline_events:
             try:
@@ -330,7 +322,6 @@ class OperationRecoveryManager:
         if timeline_events:
             logger.info(f"Loaded {len(state.operation_timeline)} timeline events from Redis")
 
-        # Load MITRE techniques
         techniques = await backend.get_techniques()
         state.identified_techniques.update(techniques)
         if techniques:

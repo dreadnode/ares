@@ -104,7 +104,6 @@ def score_ioc_detection(
         if _ioc_matches(ioc, found_values):
             optional_found += 1
 
-    # Calculate weighted score
     required_score = required_found / required_total if required_total > 0 else 1.0
     optional_score = optional_found / optional_total if optional_total > 0 else 1.0
 
@@ -198,7 +197,6 @@ def score_technique_coverage(
         if _technique_matches(expected, found_techniques):
             optional_found += 1
 
-    # Calculate weighted score
     required_score = required_found / required_total if required_total > 0 else 1.0
     optional_score = optional_found / optional_total if optional_total > 0 else 1.0
 
@@ -435,7 +433,6 @@ def get_missed_iocs(
     if state is None:
         return ground_truth.expected_iocs.copy()
 
-    # Build set of found values
     found_values: set[str] = set()
     for evidence in state.evidence:
         found_values.add(evidence.value.lower())

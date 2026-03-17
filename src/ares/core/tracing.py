@@ -140,7 +140,6 @@ def setup_otel_tracing() -> bool:
     if _otel_initialized:
         return True
 
-    # Check for OTLP endpoint configuration
     traces_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
     base_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
 
@@ -161,11 +160,9 @@ def setup_otel_tracing() -> bool:
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-        # Build resource attributes
         service_name = os.environ.get("OTEL_SERVICE_NAME", "ares-agent")
         resource_attrs = {"service.name": service_name}
 
-        # Parse OTEL_RESOURCE_ATTRIBUTES (comma-separated key=value pairs)
         resource_attrs_str = os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "")
         if resource_attrs_str:
             for raw_pair in resource_attrs_str.split(","):
@@ -175,16 +172,12 @@ def setup_otel_tracing() -> bool:
                     resource_attrs[key.strip()] = value.strip()
 
         resource = Resource.create(resource_attrs)
-
-        # Create TracerProvider with resource
         provider = TracerProvider(resource=resource)
 
         # Configure OTLP exporter
         # Use http/protobuf by default (matches K8s configmap OTEL_EXPORTER_OTLP_PROTOCOL)
         exporter = OTLPSpanExporter(endpoint=endpoint)
         provider.add_span_processor(BatchSpanProcessor(exporter))
-
-        # Set as global TracerProvider
         trace.set_tracer_provider(provider)
         _otel_initialized = True
 
@@ -490,13 +483,11 @@ def infer_target_type(hostname: str | None, dc_ips: set[str] | None = None) -> s
     if not hostname:
         return None
 
-    hostname_lower = hostname.lower().split(".")[0]  # Get first part before domain
+    hostname_lower = hostname.lower().split(".")[0]
 
-    # Check if IP matches known DC
     if dc_ips and hostname in dc_ips:
         return "domain_controller"
 
-    # Check hostname patterns
     if hostname_lower in DC_HOSTNAME_PATTERNS or hostname_lower.startswith("dc"):
         return "domain_controller"
     if any(hostname_lower.startswith(p) for p in SQL_HOSTNAME_PATTERNS):

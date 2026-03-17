@@ -147,10 +147,7 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
             with contextlib.suppress(ValueError):
                 ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
 
-        # Validate evidence against recent query results
         validated, source_query_id = validate_evidence_value(value)
-
-        # Adjust confidence based on validation
         adjusted_confidence = adjust_confidence_for_validation(confidence, validated)
 
         ev = Evidence(
@@ -184,7 +181,6 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
             f"(pyramid level {pyramid_level}, {validation_status})"
         )
 
-        # Format enhanced output
         level_emoji = PYRAMID_EMOJI.get(pyramid_level, "⚪")
         status_icon = "✓" if validated else "⚠"
         value_preview = value[:60] + "..." if len(value) > 60 else value
@@ -636,7 +632,6 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
                 for c in self.state.lateral_graph.get_host_connections(focus_host)
             ]
 
-        # Log metrics
         dn.log_metric("lateral_connections", len(self.state.lateral_graph.connections))
         dn.log_metric("hosts_pending_investigation", len(self.state.lateral_graph.pending_hosts))
 
@@ -819,7 +814,6 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
                 "detect_pass_the_hash, etc.) to trigger auto-pivot and chaining."
             )
 
-        # Log metrics
         dn.log_metric("pivot_queries_queued", len(self.state.queued_pivot_queries))
         dn.log_metric("chain_queries_queued", len(self.state.queued_chain_queries))
 

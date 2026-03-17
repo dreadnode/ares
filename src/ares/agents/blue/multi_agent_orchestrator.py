@@ -442,7 +442,6 @@ class BlueOrchestratorTools(Toolset):  # type: ignore[misc]
             status = hb.get("status", "unknown")
             timestamp_str = hb.get("timestamp")
 
-            # Check heartbeat freshness first
             if timestamp_str:
                 try:
                     hb_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))

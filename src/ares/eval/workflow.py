@@ -78,7 +78,6 @@ async def evaluate_investigation(
     Returns:
         Tuple of (state, ground_truth) for scorers to evaluate.
     """
-    # Log evaluation context
     dn.log_param("operation_id", ground_truth.operation_id)
     dn.log_param("target_ip", ground_truth.target_ip)
     dn.log_param("expected_iocs", len(ground_truth.expected_iocs))
@@ -156,18 +155,15 @@ def build_evaluation_result(
         + timeline_score * 3.5
     ) / total_weight
 
-    # Calculate category scores
     detection_score = (ioc_score + technique_score) / 2
     quality_score = (pyramid_score + evidence_score) / 2
     completeness_score = (stage_score + timeline_score) / 2
 
-    # Get gap analysis
     missed_iocs = get_missed_iocs(state, ground_truth)
     missed_techniques = get_missed_techniques(state, ground_truth)
     found_iocs = get_found_iocs(state, ground_truth)
     found_techniques = get_found_techniques(state, ground_truth)
 
-    # Determine stages completed
     stages_completed = []
     if state is not None:
         from ares.core.models import InvestigationStage
@@ -502,7 +498,6 @@ class EvaluationRunner:
             use_synthetic = self.inject_synthetic_alerts
 
         try:
-            # Get or inject alert
             alert: dict[str, Any] | None = None
             if use_synthetic:
                 alert = self._create_synthetic_alert(ground_truth, red_state)
@@ -523,10 +518,8 @@ class EvaluationRunner:
                     logger.info(f"Alert found: {alert_name}")
 
             if alert is not None:
-                # Run investigation
                 state, orchestrator = await self._run_investigation(alert)
 
-                # Calculate timing metrics from state timeline
                 if state and state.timeline:
                     for event in state.timeline:
                         delta = (event.timestamp - state.started_at).total_seconds()
@@ -610,12 +603,10 @@ class EvaluationRunner:
             estimated_cost_usd=estimated_cost,
         )
 
-        # Log summary
         logger.info(f"Evaluation complete: {result.grade} ({result.overall_score:.1%})")
         if not alert_fired:
             logger.warning("  Alert did not fire - detection gap identified")
 
-        # Save individual result
         self._save_evaluation_result(result)
 
         return result
@@ -692,7 +683,6 @@ class EvaluationRunner:
             dn.log_metric("avg_technique_coverage", dataset_result.avg_technique_coverage)
             dn.log_metric("alert_fire_rate", dataset_result.alert_fire_rate)
 
-            # Save results
             self._save_dataset_results(dataset_result)
 
         logger.info("\nDataset evaluation complete")
@@ -776,7 +766,6 @@ class EvaluationRunner:
         if mitre_technique:
             labels["mitre_technique"] = mitre_technique
 
-        # Build description from ground truth
         ioc_summary = f"{len(ground_truth.expected_iocs)} IOCs"
         technique_summary = f"{len(ground_truth.expected_techniques)} techniques"
 

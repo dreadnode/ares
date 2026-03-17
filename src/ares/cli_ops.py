@@ -1440,17 +1440,14 @@ async def export_detection(
             # Output JSON to stdout
             print(json_module.dumps(playbook.to_dict(), indent=2, default=str))
         else:
-            # Write to files
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
 
-            # Write JSON
             json_path = output_path / f"{operation_id}_detection_playbook.json"
             json_content = json_module.dumps(playbook.to_dict(), indent=2, default=str)
             json_path.write_text(json_content)
             logger.success(f"Detection playbook JSON: {json_path}")
 
-            # Write markdown if requested
             if markdown:
                 md_path = output_path / f"{operation_id}_detection_playbook.md"
                 md_path.write_text(playbook.to_markdown())

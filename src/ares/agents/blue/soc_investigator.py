@@ -107,7 +107,6 @@ def build_initial_prompt(alert: dict, attack_context: dict | None = None) -> str
     labels = alert.get("labels", {})
     annotations = alert.get("annotations", {})
 
-    # Extract MITRE technique from alert if present
     mitre_technique = None
     for key in ["mitre_technique", "mitre", "technique_id", "technique"]:
         if key in labels:
@@ -138,7 +137,6 @@ def build_initial_prompt(alert: dict, attack_context: dict | None = None) -> str
                 attack_context["attack_window_end"].isoformat().replace("+00:00", "Z")
             )
         techniques_used = attack_context.get("techniques_used", [])
-        # Convert priority queries to serializable format
         priority_queries = [
             {
                 "technique_id": q.technique_id,
@@ -315,10 +313,9 @@ class InvestigationOrchestrator:
 
         logger.info(f"Starting investigation {investigation_id} for alert: {alert_name}")
 
-        # Reset query tracking for this investigation
         reset_query_tracking()
 
-        # Create investigation state early so we can generate partial reports on timeout
+        # Create state early to support partial reports on timeout
         state = InvestigationState(
             investigation_id=investigation_id,
             alert=alert,
@@ -337,13 +334,8 @@ class InvestigationOrchestrator:
         watchdog.start()
 
         try:
-            # Ensure MCP connection is ready
             await self._ensure_mcp_connection()
-
-            # Post "investigation started" annotation to Grafana
             await self._post_started_annotation(investigation_id, alert)
-
-            # Auto-extract and record MITRE technique from alert
             self._extract_mitre_technique(alert, state)
 
             self._create_alert_timeline_event(state, alert)
@@ -511,7 +503,6 @@ class InvestigationOrchestrator:
             state: Investigation state.
         """
         try:
-            # Get summary from state if available
             summary = None
             if state.attack_synopsis:
                 summary = state.attack_synopsis
@@ -591,22 +582,15 @@ class InvestigationOrchestrator:
         """
         try:
             store = get_investigation_store()
-
-            # Create stored investigation from state
             stored = create_stored_investigation_from_state(state, status)
-
-            # Store the investigation
             store.store_investigation(stored)
 
-            # Update query effectiveness statistics
             alert_name = state.alert.get("labels", {}).get("alertname", "unknown")
             for query in state.executed_queries:
                 query_str = query.get("query", "")
                 if query_str:
-                    # Normalize query for pattern matching
                     pattern = self._normalize_query_pattern(query_str)
                     successful = query.get("result_count", 0) > 0
-                    # Check if any evidence was recorded after this query
                     produced_evidence = len(state.evidence) > 0
 
                     store.update_query_effectiveness(

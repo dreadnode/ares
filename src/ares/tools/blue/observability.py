@@ -389,7 +389,6 @@ class LokiTools(Toolset):  # type: ignore[misc]
             else:
                 processed_results.append(result)  # type: ignore[arg-type]
 
-        # Log summary
         successful = sum(1 for r in processed_results if r.get("success"))
         logger.info(f"Parallel queries complete: {successful}/{len(queries)} successful")
 
