@@ -38,33 +38,6 @@ from rigging.parsing import (
 
 from ares.core.config import get_default_max_retries
 
-
-def _get_uuid() -> str:
-    """Get a UUID, deterministic if replay context is active."""
-    try:
-        from ares.core.replay.determinism import get_deterministic_uuid
-
-        return get_deterministic_uuid()
-    except ImportError:
-        return str(uuid.uuid4())
-
-
-# Default retry count for tasks - exported for test compatibility
-DEFAULT_MAX_RETRIES = 3
-
-# Well-known accounts that exist in EVERY Active Directory domain.
-# These accounts (Administrator, krbtgt, Guest, etc.) have the same username in every
-# domain but are completely different accounts with different hashes/passwords.
-# Domain normalization MUST NOT change domains for these accounts.
-WELL_KNOWN_ACCOUNTS: frozenset[str] = frozenset(
-    {
-        "krbtgt",
-        "administrator",
-        "guest",
-        "defaultaccount",
-    }
-)
-
 __all__ = [
     "DEFAULT_MAX_RETRIES",
     "AgentInfo",
@@ -103,6 +76,32 @@ __all__ = [
     "try_parse_many",
     "try_parse_set",
 ]
+
+# Default retry count for tasks - exported for test compatibility
+DEFAULT_MAX_RETRIES = 3
+
+# Well-known accounts that exist in EVERY Active Directory domain.
+# These accounts (Administrator, krbtgt, Guest, etc.) have the same username in every
+# domain but are completely different accounts with different hashes/passwords.
+# Domain normalization MUST NOT change domains for these accounts.
+WELL_KNOWN_ACCOUNTS: frozenset[str] = frozenset(
+    {
+        "krbtgt",
+        "administrator",
+        "guest",
+        "defaultaccount",
+    }
+)
+
+
+def _get_uuid() -> str:
+    """Get a UUID, deterministic if replay context is active."""
+    try:
+        from ares.core.replay.determinism import get_deterministic_uuid
+
+        return get_deterministic_uuid()
+    except ImportError:
+        return str(uuid.uuid4())
 
 
 class PyramidLevel(IntEnum):

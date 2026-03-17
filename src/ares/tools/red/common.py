@@ -19,6 +19,83 @@ from loguru import logger
 from ares.core.models import Credential, SharedRedTeamState
 from ares.core.remote import run_remote
 
+# Shared placeholder passwords used across multiple toolsets
+PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = {"password", "changeme", "<password>"}
+
+# Well-known NTLM hash for empty/NULL password - skip these when extracting creds
+EMPTY_NT_HASH = "31d6cfe0d16ae931b73c59d7e0c089c0"  # pragma: allowlist secret
+
+# Characters that indicate Kali MOTD pollution (box-drawing characters)
+# These appear when bash outputs the Kali "minimal installation" message
+MOTD_GARBAGE_CHARS: frozenset[str] = frozenset("┏┃┗┓┛━─│┌┐└┘├┤┬┴┼╔╗╚╝║═")
+
+# Known tool paths for common red team tools (checked in order)
+# These are fallback paths when tools aren't in the default PATH
+TOOL_PATHS: dict[str, list[str]] = {
+    "nmap": ["/usr/bin/nmap", "/usr/local/bin/nmap", "/opt/nmap/bin/nmap"],
+    "coercer": [
+        "/usr/local/bin/coercer",
+        "/opt/coercer/coercer",
+        "/root/.local/bin/coercer",
+    ],
+    "impacket-findDelegation": [
+        "/usr/local/bin/impacket-findDelegation",
+        "/usr/bin/impacket-findDelegation",
+        "/opt/impacket/examples/findDelegation.py",
+    ],
+    "impacket-getST": [
+        "/usr/local/bin/impacket-getST",
+        "/usr/bin/impacket-getST",
+        "/opt/impacket/examples/getST.py",
+    ],
+    "impacket-secretsdump": [
+        "/usr/local/bin/impacket-secretsdump",
+        "/usr/bin/impacket-secretsdump",
+        "/opt/impacket/examples/secretsdump.py",
+    ],
+    "impacket-psexec": [
+        "/usr/local/bin/impacket-psexec",
+        "/usr/bin/impacket-psexec",
+        "/opt/impacket/examples/psexec.py",
+    ],
+    "certipy": [
+        "/usr/local/bin/certipy",
+        "/usr/bin/certipy",
+        "/root/.local/bin/certipy",
+    ],
+    "netexec": [
+        "/usr/local/bin/netexec",
+        "/usr/bin/netexec",
+        "/root/.local/bin/netexec",
+    ],
+    "hashcat": ["/usr/bin/hashcat", "/usr/local/bin/hashcat", "/opt/hashcat/hashcat"],
+    "john": ["/usr/bin/john", "/usr/local/bin/john", "/opt/john/run/john"],
+    "responder": [
+        "/usr/bin/responder",
+        "/usr/local/bin/responder",
+        "/opt/Responder/Responder.py",
+    ],
+    "bloodhound-python": [
+        "/usr/local/bin/bloodhound-python",
+        "/usr/bin/bloodhound-python",
+        "/root/.local/bin/bloodhound-python",
+    ],
+}
+
+# Patterns that indicate MOTD or system messages, not valid usernames
+TEMP_USERS_PATTERN = f"{tempfile.gettempdir().rstrip(os.sep)}{os.sep}users".lower()
+
+MOTD_GARBAGE_PATTERNS: tuple[str, ...] = (
+    "message from kali",
+    "minimal installation",
+    "kali.org",
+    "hushlogin",
+    "supplementary tools",
+    "learn how",
+    TEMP_USERS_PATTERN,  # File path leaking as username
+    ".txt",  # File extension leaking
+)
+
 
 @dataclass
 class CredentialContext:
@@ -100,84 +177,6 @@ def clear_credential_context() -> None:
     """Clear the credential context (call after task completes)."""
     global _credential_context
     _credential_context = CredentialContext()
-
-
-# Shared placeholder passwords used across multiple toolsets
-PLACEHOLDER_PASSWORDS: ClassVar[set[str]] = {"password", "changeme", "<password>"}
-
-# Well-known NTLM hash for empty/NULL password - skip these when extracting creds
-EMPTY_NT_HASH = "31d6cfe0d16ae931b73c59d7e0c089c0"  # pragma: allowlist secret
-
-# Characters that indicate Kali MOTD pollution (box-drawing characters)
-# These appear when bash outputs the Kali "minimal installation" message
-MOTD_GARBAGE_CHARS: frozenset[str] = frozenset("┏┃┗┓┛━─│┌┐└┘├┤┬┴┼╔╗╚╝║═")
-
-# Known tool paths for common red team tools (checked in order)
-# These are fallback paths when tools aren't in the default PATH
-TOOL_PATHS: dict[str, list[str]] = {
-    "nmap": ["/usr/bin/nmap", "/usr/local/bin/nmap", "/opt/nmap/bin/nmap"],
-    "coercer": [
-        "/usr/local/bin/coercer",
-        "/opt/coercer/coercer",
-        "/root/.local/bin/coercer",
-    ],
-    "impacket-findDelegation": [
-        "/usr/local/bin/impacket-findDelegation",
-        "/usr/bin/impacket-findDelegation",
-        "/opt/impacket/examples/findDelegation.py",
-    ],
-    "impacket-getST": [
-        "/usr/local/bin/impacket-getST",
-        "/usr/bin/impacket-getST",
-        "/opt/impacket/examples/getST.py",
-    ],
-    "impacket-secretsdump": [
-        "/usr/local/bin/impacket-secretsdump",
-        "/usr/bin/impacket-secretsdump",
-        "/opt/impacket/examples/secretsdump.py",
-    ],
-    "impacket-psexec": [
-        "/usr/local/bin/impacket-psexec",
-        "/usr/bin/impacket-psexec",
-        "/opt/impacket/examples/psexec.py",
-    ],
-    "certipy": [
-        "/usr/local/bin/certipy",
-        "/usr/bin/certipy",
-        "/root/.local/bin/certipy",
-    ],
-    "netexec": [
-        "/usr/local/bin/netexec",
-        "/usr/bin/netexec",
-        "/root/.local/bin/netexec",
-    ],
-    "hashcat": ["/usr/bin/hashcat", "/usr/local/bin/hashcat", "/opt/hashcat/hashcat"],
-    "john": ["/usr/bin/john", "/usr/local/bin/john", "/opt/john/run/john"],
-    "responder": [
-        "/usr/bin/responder",
-        "/usr/local/bin/responder",
-        "/opt/Responder/Responder.py",
-    ],
-    "bloodhound-python": [
-        "/usr/local/bin/bloodhound-python",
-        "/usr/bin/bloodhound-python",
-        "/root/.local/bin/bloodhound-python",
-    ],
-}
-
-# Patterns that indicate MOTD or system messages, not valid usernames
-TEMP_USERS_PATTERN = f"{tempfile.gettempdir().rstrip(os.sep)}{os.sep}users".lower()
-
-MOTD_GARBAGE_PATTERNS: tuple[str, ...] = (
-    "message from kali",
-    "minimal installation",
-    "kali.org",
-    "hushlogin",
-    "supplementary tools",
-    "learn how",
-    TEMP_USERS_PATTERN,  # File path leaking as username
-    ".txt",  # File extension leaking
-)
 
 
 def resolve_tool_path(tool_name: str) -> str:

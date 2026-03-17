@@ -205,7 +205,7 @@ requires-dist = [
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.29.0" },
     { name = "boto3", specifier = ">=1.42.25" },
     { name = "cyclopts", specifier = ">=4.2.0" },
-    { name = "dreadnode", specifier = ">=1.17.0" },
+    { name = "dreadnode", specifier = ">=1.17.0,<2.0.0" },
     { name = "greenlet", marker = "extra == 'postgres'", specifier = ">=3.0.0" },
     { name = "httpx", specifier = ">=0.28.0,<1.0.0" },
     { name = "importlib-resources", marker = "python_full_version < '3.11'", specifier = ">=5.0.0" },
