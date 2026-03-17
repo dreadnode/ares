@@ -156,43 +156,43 @@ task blue:reports:latest      # Show latest report
 
 **Available Tasks:**
 
-| Command                              | Description                                                  |
-| ------------------------------------ | ------------------------------------------------------------ |
-| `task blue:poll`                     | Run blue team agent in poll mode (checks Grafana every 30s)  |
-| `task blue:once`                     | Run blue team once and exit                                  |
-| `task blue:poll:local`               | Run blue team using .env file instead of 1Password           |
-| `task blue:investigate ALERT=<file>` | Investigate a specific alert from JSON file                  |
-| `task ares:config:check`             | Verify configuration and 1Password access                    |
-| `task ares:config:show`              | Display current configuration (no secrets)                   |
-| `task blue:reports:list`             | List all investigation reports                               |
-| `task blue:reports:latest`           | Show the most recent report                                  |
-| `task blue:reports:clean`            | Delete all reports (asks for confirmation)                   |
-| `task blue:mitre:test`               | Test MITRE ATT&CK data loading                               |
+| Command                              | Description                                                 |
+| ------------------------------------ | ----------------------------------------------------------- |
+| `task blue:poll`                     | Run blue team agent in poll mode (checks Grafana every 30s) |
+| `task blue:once`                     | Run blue team once and exit                                 |
+| `task blue:poll:local`               | Run blue team using .env file instead of 1Password          |
+| `task blue:investigate ALERT=<file>` | Investigate a specific alert from JSON file                 |
+| `task ares:config:check`             | Verify configuration and 1Password access                   |
+| `task ares:config:show`              | Display current configuration (no secrets)                  |
+| `task blue:reports:list`             | List all investigation reports                              |
+| `task blue:reports:latest`           | Show the most recent report                                 |
+| `task blue:reports:clean`            | Delete all reports (asks for confirmation)                  |
+| `task blue:mitre:test`               | Test MITRE ATT&CK data loading                              |
 
 **Blue Team Multi-Agent Tasks (K8s):**
 
-| Command                                           | Description                                                                  |
-| ------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `task blue:multi:remote LATEST=true`              | Submit investigations from latest red team operation                         |
-| `task blue:multi:operation-status LATEST=true`    | Show aggregate status of all investigations from an operation                |
-| `task blue:multi:operation-status ... WATCH=10`   | Watch mode: refresh every N seconds                                          |
-| `task blue:multi:logs ALL=true`                   | Follow all blue team agent logs                                              |
-| `task blue:multi:logs ROLE=triage`                | Follow specific agent logs (triage, threat-hunter, lateral-analyst)          |
-| `task blue:multi:status LATEST=true`              | Check individual investigation status                                        |
-| `task blue:multi:list`                            | List all investigations                                                      |
-| `task blue:multi:evidence LATEST=true`            | Show collected evidence                                                      |
+| Command                                         | Description                                                         |
+| ----------------------------------------------- | ------------------------------------------------------------------- |
+| `task blue:multi:remote LATEST=true`            | Submit investigations from latest red team operation                |
+| `task blue:multi:operation-status LATEST=true`  | Show aggregate status of all investigations from an operation       |
+| `task blue:multi:operation-status ... WATCH=10` | Watch mode: refresh every N seconds                                 |
+| `task blue:multi:logs ALL=true`                 | Follow all blue team agent logs                                     |
+| `task blue:multi:logs ROLE=triage`              | Follow specific agent logs (triage, threat-hunter, lateral-analyst) |
+| `task blue:multi:status LATEST=true`            | Check individual investigation status                               |
+| `task blue:multi:list`                          | List all investigations                                             |
+| `task blue:multi:evidence LATEST=true`          | Show collected evidence                                             |
 
 **Red Team Tasks (Multi-Agent):**
 
-| Command                                | Description                                                  |
-| -------------------------------------- | ------------------------------------------------------------ |
-| `task red:multi TARGET=<name>`         | Run multi-agent red team operation                           |
-| `task red:multi:status LATEST=true`    | Check operation status                                       |
-| `task red:multi:loot LATEST=true`      | Show discovered credentials, hashes, hosts                   |
-| `task red:multi:list`                  | List all operations                                          |
-| `task remote:logs ROLE=orchestrator`   | Tail orchestrator logs                                       |
-| `task remote:sync:full`                | Sync local code to K8s pods                                  |
-| `task red:multi:sync:align`            | Full sync + Redis clear + pod rollout                        |
+| Command                              | Description                                |
+| ------------------------------------ | ------------------------------------------ |
+| `task red:multi TARGET=<name>`       | Run multi-agent red team operation         |
+| `task red:multi:status LATEST=true`  | Check operation status                     |
+| `task red:multi:loot LATEST=true`    | Show discovered credentials, hashes, hosts |
+| `task red:multi:list`                | List all operations                        |
+| `task remote:logs ROLE=orchestrator` | Tail orchestrator logs                     |
+| `task remote:sync:full`              | Sync local code to K8s pods                |
+| `task red:multi:sync:align`          | Full sync + Redis clear + pod rollout      |
 
 See [Taskfile Usage Guide](docs/taskfile_usage.md) for detailed documentation.
 
@@ -759,7 +759,7 @@ For security vulnerabilities, please see our [Security Policy](SECURITY.md).
 ## Acknowledgments
 
 - Built with
-  [Dreadnode Agent SDK](https://github.com/dreadnode/agent-sdk)
+  [Dreadnode SDK](https://github.com/dreadnode/sdk)
 - MITRE ATT&CK data via
   [TAXII server](https://github.com/mitre-attack/attack-stix-data)
 - Pyramid of Pain concept by
