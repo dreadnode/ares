@@ -52,6 +52,19 @@ def _get_uuid() -> str:
 # Default retry count for tasks - exported for test compatibility
 DEFAULT_MAX_RETRIES = 3
 
+# Well-known accounts that exist in EVERY Active Directory domain.
+# These accounts (Administrator, krbtgt, Guest, etc.) have the same username in every
+# domain but are completely different accounts with different hashes/passwords.
+# Domain normalization MUST NOT change domains for these accounts.
+WELL_KNOWN_ACCOUNTS: frozenset[str] = frozenset(
+    {
+        "krbtgt",
+        "administrator",
+        "guest",
+        "defaultaccount",
+    }
+)
+
 __all__ = [
     "DEFAULT_MAX_RETRIES",
     "AgentInfo",
@@ -1523,7 +1536,7 @@ class SharedRedTeamState:
             return self.netbios_to_fqdn[netbios_lower]
 
         # 2. Check domain_controllers keys (FQDNs discovered early via DC enumeration)
-        # e.g., if netbios="north" and we have domain_controllers["north.sevenkingdoms.local"]
+        # e.g., if netbios="child" and we have domain_controllers["child.contoso.local"]
         matching_dc_domains = [
             d for d in self.domain_controllers if d.startswith(netbios_lower + ".")
         ]
@@ -1563,8 +1576,8 @@ class SharedRedTeamState:
     def resolve_hostname_to_fqdn(self, hostname: str, target_ip: str | None = None) -> str | None:
         """Resolve a hostname to its canonical FQDN from discovered hosts.
 
-        When tools output hostnames like 'WINTERFELL' (NetBIOS) or
-        'winterfell.sevenkingdoms.local' (wrong/partial domain suffix),
+        When tools output hostnames like 'DC01' (NetBIOS) or
+        'dc01.contoso.local' (wrong/partial domain suffix),
         this method resolves them to the canonical FQDN based on
         discovered hosts in all_hosts.
 
@@ -1654,11 +1667,8 @@ class SharedRedTeamState:
         domain_lower = domain.lower()
 
         # CRITICAL: Never correct domain for well-known accounts that exist in EVERY domain.
-        # These accounts (krbtgt, Administrator, Guest, etc.) have the same username in every
-        # domain but are completely different accounts with different hashes/passwords.
         # "Correcting" their domain based on user lookups is ALWAYS wrong.
-        well_known_accounts = {"krbtgt", "administrator", "guest", "defaultaccount"}
-        if username_lower in well_known_accounts:
+        if username_lower in WELL_KNOWN_ACCOUNTS:
             logger.debug(
                 f"Domain kept as-is (well-known account): {domain_lower}\\{username_lower} "
                 f"(never correct well-known accounts, source: {source_agent})"
@@ -1789,6 +1799,15 @@ class SharedRedTeamState:
 
         username_lower = username.lower()
         provided_lower = provided_domain.lower()
+
+        # CRITICAL: Never correct domain for well-known accounts that exist in EVERY domain.
+        # "Correcting" their domain based on user lookups is ALWAYS wrong.
+        if username_lower in WELL_KNOWN_ACCOUNTS:
+            logger.debug(
+                f"Domain kept as-is (well-known account): {provided_domain}\\{username} "
+                "(never correct well-known accounts)"
+            )
+            return provided_domain
 
         # Find all domains where this user exists
         user_domains: list[str] = []
@@ -2372,6 +2391,11 @@ class SharedRedTeamState:
         # Users that are ONLY in child domain (not in parent)
         child_only_users = users_in_child - users_in_parent
 
+        # CRITICAL: Exclude well-known accounts that exist in EVERY domain.
+        # "Correcting" their domain based on user enumeration is ALWAYS wrong.
+        # See also: _validate_hash_domain() and normalize_hash_domains_to_users()
+        child_only_users -= WELL_KNOWN_ACCOUNTS
+
         if not child_only_users:
             return
 
@@ -2739,8 +2763,8 @@ class SharedRedTeamState:
                     )
 
                     # Check if new FQDN is more specific (more domain levels) than existing
-                    # e.g., "winterfell.north.sevenkingdoms.local" is more specific than
-                    # "winterfell.sevenkingdoms.local" and should be preferred
+                    # e.g., "dc02.child.contoso.local" is more specific than
+                    # "dc02.contoso.local" and should be preferred
                     new_is_more_specific = False
                     if new_is_fqdn and "." in existing_hostname:
                         existing_parts = existing_lower.split(".")
@@ -3225,7 +3249,7 @@ class SharedRedTeamState:
                 # Determine the domain of this DC
                 dc_domain = ""
                 if dc_host.hostname and "." in dc_host.hostname:
-                    # Extract domain from FQDN: winterfell.north.sevenkingdoms.local -> north.sevenkingdoms.local
+                    # Extract domain from FQDN: dc02.child.contoso.local -> child.contoso.local
                     parts = dc_host.hostname.lower().split(".", 1)
                     if len(parts) > 1:
                         dc_domain = parts[1]
@@ -3265,7 +3289,7 @@ class SharedRedTeamState:
         if d1_fqdn == d2_fqdn:
             return True
 
-        # Check if one is a prefix of the other (north vs north.sevenkingdoms.local)
+        # Check if one is a prefix of the other (child vs child.contoso.local)
         return d1_fqdn.startswith(d2 + ".") or d2_fqdn.startswith(d1 + ".")
 
     def update_golden_ticket_capability(
@@ -3513,6 +3537,12 @@ class SharedRedTeamState:
             username_lower = creds[0].username.lower()
             domains_for_user = user_domains.get(username_lower, set())
 
+            # CRITICAL: Never normalize/dedupe well-known accounts across domains.
+            # They exist in EVERY domain with the same name but different passwords.
+            if username_lower in WELL_KNOWN_ACCOUNTS:
+                normalized.extend(creds)  # Keep all well-known account credentials
+                continue
+
             if len(creds) == 1:
                 # Only one credential for this username:password
                 cred = creds[0]
@@ -3586,8 +3616,8 @@ class SharedRedTeamState:
     def normalize_hash_domains_to_users(self) -> int:
         """Normalize hash domains to match discovered user domains.
 
-        Handles LLM hallucinations where the domain is misspelled (e.g., 'sevenkingdomain'
-        instead of 'sevenkingdoms'). For each hash, if the user exists in exactly one
+        Handles LLM hallucinations where the domain is misspelled (e.g., 'contosco'
+        instead of 'contoso'). For each hash, if the user exists in exactly one
         known domain and the hash's domain doesn't match, correct it.
 
         Returns:
@@ -3625,7 +3655,7 @@ class SharedRedTeamState:
             hash_domain = (hash_obj.domain or "").lower()
 
             # Skip well-known accounts that exist in every domain
-            if username_lower in {"krbtgt", "administrator", "guest", "defaultaccount"}:
+            if username_lower in WELL_KNOWN_ACCOUNTS:
                 # Still dedupe by hash value
                 dedup_key = f"{hash_domain}:{username_lower}:{hash_obj.hash_value}"
                 if dedup_key not in seen_hashes:

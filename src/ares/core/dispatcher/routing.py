@@ -136,13 +136,27 @@ class RoutingMixin:
             )
 
         def _hostname_matches_domain(hostname: str, domain: str) -> bool:
-            """Check if hostname belongs to the domain."""
+            """Check if hostname belongs to the domain.
+
+            Extract the domain from hostname (everything after first component)
+            and compare exactly. This prevents dc01.child.contoso.local
+            from incorrectly matching contoso.local (parent domain).
+            """
             if not hostname or not domain:
                 return False
             hostname_lower = hostname.lower()
             domain_lower_check = domain.lower()
-            if hostname_lower.endswith(f".{domain_lower_check}"):
-                return True
+
+            # Extract domain from hostname: dc01.child.contoso.local
+            # -> child.contoso.local
+            parts = hostname_lower.split(".")
+            if len(parts) >= 2:
+                # Domain is everything after the hostname (first component)
+                hostname_domain = ".".join(parts[1:])
+                if hostname_domain == domain_lower_check:
+                    return True
+
+            # Fallback: hostname IS the domain (rare edge case)
             return hostname_lower == domain_lower_check
 
         # Check target first (if it belongs to this domain)
@@ -187,14 +201,12 @@ class RoutingMixin:
                     return host.ip
 
         # Priority 3.5: For child domains, find a DC in the same forest
-        # e.g., north.sevenkingdoms.local -> find a DC with hostname *.sevenkingdoms.local
+        # e.g., child.contoso.local -> find a DC with hostname *.contoso.local
         # that is NOT the parent domain's registered DC (prefer child domain's own DC)
         if domain_lower and "." in domain_lower:
             parts = domain_lower.split(".")
             if len(parts) >= 3:  # child.parent.tld has 3+ parts
-                parent_domain = ".".join(
-                    parts[1:]
-                )  # north.sevenkingdoms.local -> sevenkingdoms.local
+                parent_domain = ".".join(parts[1:])  # child.contoso.local -> contoso.local
                 parent_dc_ip = self.shared_state.domain_controllers.get(parent_domain)
 
                 # Find all DCs in the same forest (hostname ends with parent domain)
@@ -225,7 +237,7 @@ class RoutingMixin:
                     return parent_dc_ip
 
         # Priority 4: DNS SRV lookup (try before generic fallback - more accurate)
-        # This correctly finds DCs for child domains like north.sevenkingdoms.local
+        # This correctly finds DCs for child domains like child.contoso.local
         # when hostname data is incomplete or missing
         if domain_lower:
             dc_ip = self._dns_lookup_dc(domain_lower)
@@ -346,13 +358,13 @@ class RoutingMixin:
         """Query LDAP rootDSE to get the domain name a DC serves.
 
         Uses raw socket LDAP to query the defaultNamingContext attribute which
-        contains the domain DN (e.g., DC=north,DC=sevenkingdoms,DC=local).
+        contains the domain DN (e.g., DC=child,DC=contoso,DC=local).
 
         Args:
             dc_ip: IP address of the DC to query
 
         Returns:
-            Domain name (e.g., "north.sevenkingdoms.local") or empty string on failure
+            Domain name (e.g., "child.contoso.local") or empty string on failure
         """
         import socket
 
@@ -434,7 +446,7 @@ class RoutingMixin:
             )
             if match:
                 dn = match.group(1)
-                # Convert DN to domain name: DC=north,DC=sevenkingdoms,DC=local -> north.sevenkingdoms.local
+                # Convert DN to domain name: DC=child,DC=contoso,DC=local -> child.contoso.local
                 parts = []
                 for component in dn.split(","):
                     stripped = component.strip()

@@ -718,10 +718,10 @@ class TestTargetDomainScope:
 
     def test_multiple_target_domains(self):
         """Test multiple target domains all work."""
-        set_target_domains(["sevenkingdoms.local", "north.sevenkingdoms.local", "essos.local"])
-        assert _is_in_target_scope("winterfell.north.sevenkingdoms.local") is True
-        assert _is_in_target_scope("kingslanding.sevenkingdoms.local") is True
-        assert _is_in_target_scope("meereen.essos.local") is True
+        set_target_domains(["contoso.local", "child.contoso.local", "fabrikam.local"])
+        assert _is_in_target_scope("dc02.child.contoso.local") is True
+        assert _is_in_target_scope("dc01.contoso.local") is True
+        assert _is_in_target_scope("dc01.fabrikam.local") is True
         assert _is_in_target_scope("unrelated.domain.com") is False
 
     def test_clear_domains_resets_scope(self):

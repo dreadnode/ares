@@ -740,7 +740,7 @@ class MonitoringMixin:
 
         # Fallback to domain resolved from target host's FQDN
         # (non-domain-prefixed secretsdump output: "user:rid:lmhash:nthash:::")
-        # This correctly handles child domain DCs (e.g., winterfell serves north.sevenkingdoms.local)
+        # This correctly handles child domain DCs (e.g., dc02 serves child.contoso.local)
         if not domain:
             domain = self._resolve_domain_from_target_host(target_ip)
 
