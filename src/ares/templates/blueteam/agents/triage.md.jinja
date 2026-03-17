@@ -19,23 +19,43 @@ If the alert already has severity=critical/high AND MITRE techniques, you can go
 
 ### Step 2: One Loki Query (1 tool call)
 
-Run ONE targeted query for the alert's core activity:
+Run ONE targeted query for the alert's core activity.
 
+**CRITICAL: Use the correct log source label:**
+- Windows Security events: `{job="windows-security"}` or `{channel="Security"}`
+- Windows Application events: `{channel="Application"}`
+- Windows System events: `{channel="System"}`
+- DO NOT use `{alertname="..."}` - this queries alerts, not logs
+
+**Query template for Windows Security events:**
 ```
 query_loki_logs(
     datasourceUid="loki",
-    logql='{deployment="<from_alert>"} |= "<primary_event_id>"',
-    startRfc3339=<1 hour ago>,
+    logql='{job="windows-security"} | json | event_id = <EVENT_ID>',
+    startRfc3339=<2 hours ago>,
     endRfc3339=<now>,
     limit=50
 )
 ```
 
-Pick the most relevant event ID:
-- Credential theft: `4625` or `4624`
-- Kerberos: `4769` or `4768`
-- Lateral movement: `4624` with `|= "LogonType" |= "3"`
-- DCSync: `4662`
+**Alternative if job label unavailable:**
+```
+query_loki_logs(
+    datasourceUid="loki",
+    logql='{channel="Security"} |= "<EVENT_ID>"',
+    startRfc3339=<2 hours ago>,
+    endRfc3339=<now>,
+    limit=50
+)
+```
+
+Pick the most relevant event ID based on attack type:
+- AS-REP Roasting: `event_id = 4768` with `|~ "PreAuthType.{0,10}0"`
+- Kerberoasting: `event_id = 4769` with `!~ "ServiceName.>krbtgt<"`
+- DCSync: `event_id = 4662` with `|~ "1131f6a"`
+- Credential theft: `event_id = 4625` (failed) or `event_id = 4624` (success)
+- Lateral movement: `event_id = 4624` with `|~ "LogonType.{0,10}(3|10)"`
+- SYSVOL/Share access: `event_id = 5140` or `event_id = 5145`
 
 ### Step 3: Record Evidence (1-2 tool calls)
 
@@ -73,3 +93,5 @@ triage_complete(
 - **DO NOT** expand time windows beyond 2 hours — leave deep history to the threat hunter
 - **DO NOT** run more than 2 Loki queries — one focused query is enough for triage
 - **ALWAYS** call `triage_complete()` — the orchestrator is waiting for your result
+- **NEVER** query `{alertname="..."}` — this searches for alerts, not log data. Always use `{job="windows-security"}` or `{channel="Security"}` to find the actual Windows events
+- **If query returns empty**: Try the alternative label selector. If both fail, note "no corroborating logs found" in triage summary — do NOT mark as false_positive unless you confirm benign pattern

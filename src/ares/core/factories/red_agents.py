@@ -350,9 +350,9 @@ def create_role_hooks(
                         break
 
                 # Normalize hostname to canonical FQDN from discovered hosts
-                # This resolves NetBIOS names (WINTERFELL) and wrong domain suffixes
-                # (winterfell.sevenkingdoms.local) to the canonical FQDN
-                # (winterfell.north.sevenkingdoms.local)
+                # This resolves NetBIOS names (DC02) and wrong domain suffixes
+                # (dc02.contoso.local) to the canonical FQDN
+                # (dc02.child.contoso.local)
                 if raw_hostname and shared_state:
                     canonical_fqdn = shared_state.resolve_hostname_to_fqdn(raw_hostname, target_ip)
                     if canonical_fqdn:
@@ -911,8 +911,8 @@ def create_role_hooks(
                         # Use extracted domain only - do NOT fallback to target_domain here.
                         # The orchestrator will resolve the correct domain from the target host's
                         # FQDN in _process_realtime_hash_discovery(). This correctly handles
-                        # child domain DCs (e.g., winterfell serves north.sevenkingdoms.local,
-                        # not the operation's target domain sevenkingdoms.local).
+                        # child domain DCs (e.g., dc02 serves child.contoso.local,
+                        # not the operation's target domain contoso.local).
                         hash_domain = h.domain or ""
                         await task_queue.publish_discovery(
                             operation_id=operation_id,
@@ -961,7 +961,8 @@ def create_role_hooks(
     # Real-time vulnerability discovery publishing
     # Tool set defined at module level: VULNERABILITY_EXTRACTION_TOOLS
     vuln_extraction_roles = {
-        AgentRole.PRIVESC,  # certipy_find
+        AgentRole.RECON,  # certipy_find (primary ADCS enumeration)
+        AgentRole.PRIVESC,  # certipy_find (may also run ADCS enum)
         AgentRole.LATERAL,  # mssql_enum_impersonation
     }
 
@@ -1003,6 +1004,19 @@ def create_role_hooks(
             if tool_name == "certipy_find":
                 esc_matches = re.findall(r"(ESC\d+)", output, re.IGNORECASE)
                 seen_esc = set()
+
+                # Parse CA details from certipy output for enriched vulnerability data
+                # Typical format: "CA Name : CONTOSO-CA" and "DNS Name : dc01.contoso.local"
+                ca_name_match = re.search(r"CA Name\s*:\s*([^\n]+)", output)
+                ca_dns_match = re.search(r"DNS Name\s*:\s*([^\n]+)", output)
+                ca_name = ca_name_match.group(1).strip() if ca_name_match else None
+                ca_host = ca_dns_match.group(1).strip() if ca_dns_match else None
+
+                # Get tool call args for credential context
+                args: dict[str, str] = {}
+                if hasattr(event, "tool_call") and event.tool_call:
+                    args = getattr(event.tool_call, "arguments", {}) or {}
+
                 for esc in esc_matches:
                     esc_type = esc.upper()
                     if esc_type in seen_esc:
@@ -1010,10 +1024,7 @@ def create_role_hooks(
                     seen_esc.add(esc_type)
 
                     # Extract target from tool call args, fallback to shared_state
-                    target = ""
-                    if hasattr(event, "tool_call") and event.tool_call:
-                        args = getattr(event.tool_call, "arguments", {}) or {}
-                        target = args.get("dc_ip", "") or args.get("domain", "")
+                    target = args.get("dc_ip", "") or args.get("domain", "")
                     if not target:
                         # Fallback to first DC or target domain
                         # domain_controllers is dict[str, str] mapping domain -> IP
@@ -1027,6 +1038,22 @@ def create_role_hooks(
                         logger.debug(f"Skipping ADCS vuln {esc_type}: no target available")
                         continue
 
+                    # Build enriched details for exploitation
+                    details: dict[str, str | None] = {"esc_type": esc_type}
+                    if ca_name:
+                        details["ca_name"] = ca_name
+                    if ca_host:
+                        details["ca_host"] = ca_host
+                    # Include credential context from the certipy_find call
+                    if args.get("domain"):
+                        details["domain"] = args["domain"]
+                    if args.get("dc_ip"):
+                        details["dc_ip"] = args["dc_ip"]
+                    if args.get("username"):
+                        details["username"] = args["username"]
+                    if args.get("password"):
+                        details["password"] = args["password"]
+
                     try:
                         await task_queue.publish_discovery(
                             operation_id=operation_id,
@@ -1034,12 +1061,15 @@ def create_role_hooks(
                             data={
                                 "vuln_type": f"adcs_{esc_type.lower()}",
                                 "target": target,
-                                "details": {"esc_type": esc_type},
+                                "details": details,
                                 "priority": 2 if esc_type in ("ESC1", "ESC4", "ESC8") else 5,
                             },
                             source_agent=log_name,
                         )
-                        logger.warning(f"📡 [{log_name}] Published ADCS vuln: {esc_type}")
+                        logger.warning(
+                            f"📡 [{log_name}] Published ADCS vuln: {esc_type} "
+                            f"(CA: {ca_name or 'unknown'}, host: {ca_host or target})"
+                        )
                     except Exception as e:
                         logger.warning(f"Failed to publish ADCS vulnerability: {e}")
 

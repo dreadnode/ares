@@ -71,7 +71,7 @@ def resolve_dc_ip_for_domain(
 
     # Priority 0: Check cached domain_controllers (populated by orchestrator)
     # This handles child domains where hostname doesn't match domain FQDN
-    # e.g., north.sevenkingdoms.local DC is winterfell.sevenkingdoms.local
+    # e.g., child.contoso.local DC is dc02.contoso.local
     cached_dc = getattr(state, "domain_controllers", {}).get(domain_lower)
     if cached_dc:
         if provided_dc_ip and provided_dc_ip != cached_dc:

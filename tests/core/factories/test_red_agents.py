@@ -1371,3 +1371,71 @@ Password: SqlP@ss123
                         f"Should use target_domain contoso.local, got {call.kwargs['data']['domain']}"
                     )
                     return
+
+    @pytest.mark.asyncio
+    async def test_certipy_find_extracts_ca_details_for_esc8(self):
+        """Test that certipy_find extracts CA name and host for enriched ESC8 vulnerability."""
+        from ares.core.models import Target
+
+        shared_state = SharedRedTeamState(operation_id="op-test-esc8-details")
+        shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # Mock dispatcher with task_queue attribute
+        mock_task_queue = MagicMock()
+        mock_task_queue.publish_discovery = AsyncMock()
+
+        dispatcher = MagicMock(spec=RedTeamDispatcher)
+        dispatcher.shared_state = shared_state
+        dispatcher._task_queue = mock_task_queue  # Hook reads task_queue from dispatcher
+
+        hooks = create_role_hooks(AgentRole.PRIVESC, dispatcher, shared_state)
+
+        # Simulate certipy_find output with CA details
+        certipy_find_output = """
+Certificate Authorities
+  0
+    CA Name                             : CONTOSO-CA
+    DNS Name                            : dc01.contoso.local
+    Certificate Subject                 : CN=CONTOSO-CA, DC=contoso, DC=local
+    Web Enrollment                      : Enabled
+    [!] Vulnerabilities
+      ESC8                              : Web Enrollment is vulnerable
+        """
+
+        event = self._make_tool_end_event("certipy_find", certipy_find_output)
+        # Add tool call args for credential context
+        event.tool_call.arguments = {
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10",
+            "username": "testuser",
+            "password": "P@ssw0rd!",  # pragma: allowlist secret
+        }
+
+        for hook in hooks:
+            try:
+                await hook(event)
+            except TypeError:
+                pass
+
+        # Check that publish_discovery was called with enriched details
+        if mock_task_queue.publish_discovery.called:
+            for call in mock_task_queue.publish_discovery.call_args_list:
+                if call.kwargs.get("discovery_type") == "vulnerability":
+                    data = call.kwargs["data"]
+                    if data.get("vuln_type") == "adcs_esc8":
+                        details = data.get("details", {})
+                        assert details.get("ca_name") == "CONTOSO-CA", (
+                            f"Expected ca_name 'CONTOSO-CA', got {details.get('ca_name')}"
+                        )
+                        assert details.get("ca_host") == "dc01.contoso.local", (
+                            f"Expected ca_host 'dc01.contoso.local', got {details.get('ca_host')}"
+                        )
+                        assert details.get("domain") == "contoso.local", (
+                            f"Expected domain 'contoso.local', got {details.get('domain')}"
+                        )
+                        assert details.get("username") == "testuser", (
+                            f"Expected username 'testuser', got {details.get('username')}"
+                        )
+                        return
+
+        pytest.fail("Expected publish_discovery to be called with enriched ESC8 details")

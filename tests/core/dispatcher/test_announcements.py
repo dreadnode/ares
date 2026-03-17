@@ -165,8 +165,8 @@ class TestAnnouncementTracing:
     ):
         """announce_domain_admin should call trace_discovery with correct attributes."""
         await dispatcher.announce_domain_admin(
-            username="jon.snow",
-            domain="north.sevenkingdoms.local",
+            username="testuser",
+            domain="child.contoso.local",
             attack_path="privesc → krbtgt (NTLM)",
             credential_type="hash",
             source_agent="privesc",
@@ -178,8 +178,8 @@ class TestAnnouncementTracing:
         assert call_kwargs["discovery_type"] == "domain_admin"
         assert call_kwargs["source_agent"] == "privesc"
         assert call_kwargs["operation_id"] == "op-test-announce"
-        assert call_kwargs["target_user"] == "jon.snow"
-        assert call_kwargs["target_domain"] == "north.sevenkingdoms.local"
+        assert call_kwargs["target_user"] == "testuser"
+        assert call_kwargs["target_domain"] == "child.contoso.local"
         assert call_kwargs["additional_attrs"]["attack_path"] == "privesc → krbtgt (NTLM)"
         assert call_kwargs["additional_attrs"]["credential_type"] == "hash"
         assert call_kwargs["additional_attrs"]["mitre.technique.id"] == "T1003.006"

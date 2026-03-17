@@ -392,7 +392,7 @@ class TestIsLikelyFqdn:
     def test_ip_address_returns_false(self):
         """IP addresses should return False (not FQDNs)."""
         assert is_likely_fqdn("192.168.58.10") is False
-        assert is_likely_fqdn("10.1.2.3") is False
+        assert is_likely_fqdn("192.168.58.20") is False
 
     def test_plain_hostname_returns_false(self):
         """Plain hostnames without dots should return False."""
@@ -887,7 +887,7 @@ class TestTraceToolCall:
         mock_span.__enter__ = MagicMock(return_value=mock_span)
         mock_span.__exit__ = MagicMock(return_value=False)
 
-        # Scenario: child domain user (north.sevenkingdoms.local) attacking parent domain
+        # Scenario: child domain user (child.contoso.local) attacking parent domain
         with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
             trace_tool_call(
                 "lateral",
