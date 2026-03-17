@@ -10,6 +10,7 @@ from ares.core.query_resilience import (
     QueryAttempt,
     QueryResilientExecutor,
     QueryStats,
+    QueryTimeoutError,
     get_resilient_executor,
     reset_resilient_executor,
 )
@@ -86,9 +87,9 @@ class TestQueryResilientExecutor:
         executor = QueryResilientExecutor()
 
         assert executor.max_retries == 3
-        assert executor.initial_timeout == 8.0  # Updated: must be under mcp-grafana's 10s limit
+        assert executor.initial_timeout == 8.0
         assert executor.enable_chunking is True
-        assert executor.chunk_size_minutes == 15  # Updated: smaller chunks for better reliability
+        assert executor.chunk_size_minutes == 15
 
     def test_init_custom_values(self) -> None:
         """Test initialization with custom values."""
@@ -139,7 +140,7 @@ class TestQueryResilientExecutor:
             nonlocal call_count
             call_count += 1
             if call_count < 2:
-                await asyncio.sleep(1)  # Will timeout
+                await asyncio.sleep(1)
             return {"status": "success", "data": {"result": []}}
 
         mock_query_fn = AsyncMock(side_effect=timeout_then_success)
@@ -160,7 +161,7 @@ class TestQueryResilientExecutor:
         executor = QueryResilientExecutor(max_retries=2, initial_timeout=0.1)
 
         async def always_timeout(**kwargs: Any) -> dict[str, Any]:
-            await asyncio.sleep(1)  # Always timeout
+            await asyncio.sleep(1)
             return {"status": "success", "data": {"result": []}}
 
         mock_query_fn = AsyncMock(side_effect=always_timeout)
@@ -178,7 +179,7 @@ class TestQueryResilientExecutor:
 
     @pytest.mark.asyncio
     async def test_execute_with_resilience_error_response(self) -> None:
-        """Test handling of error responses from query function."""
+        """Test handling of timeout-like error responses from query function."""
         executor = QueryResilientExecutor(max_retries=2)
 
         mock_query_fn = AsyncMock(
@@ -195,7 +196,6 @@ class TestQueryResilientExecutor:
             end_time="2024-01-15T10:30:00Z",
         )
 
-        # Should retry on timeout errors
         assert executor.stats.timeout_count > 0
 
     @pytest.mark.asyncio
@@ -210,10 +210,8 @@ class TestQueryResilientExecutor:
             nonlocal call_count
             call_count += 1
             received_time_ranges.append((kwargs.get("start_time", ""), kwargs.get("end_time", "")))
-
-            # Fail first few, succeed later with smaller range
             if call_count < 3:
-                await asyncio.sleep(1)  # Timeout
+                await asyncio.sleep(1)
             return {"status": "success", "data": {"result": []}}
 
         mock_query_fn = AsyncMock(side_effect=track_time_ranges)
@@ -225,8 +223,8 @@ class TestQueryResilientExecutor:
             end_time="2024-01-15T11:00:00Z",
         )
 
-        # Should have reduced time range at some point
         assert executor.stats.time_range_reductions > 0
+        assert len(received_time_ranges) >= 3
 
     @pytest.mark.asyncio
     async def test_execute_chunked_for_large_range(self) -> None:
@@ -241,7 +239,6 @@ class TestQueryResilientExecutor:
 
         mock_query_fn = AsyncMock(side_effect=track_chunks)
 
-        # 3 hour range should trigger chunking
         result = await executor.execute_with_resilience(
             query_fn=mock_query_fn,
             query="{job='test'}",
@@ -249,7 +246,6 @@ class TestQueryResilientExecutor:
             end_time="2024-01-15T13:00:00Z",
         )
 
-        # Should have made multiple chunk calls (3 hours / 30 min = 6 chunks)
         assert len(call_times) >= 4
         assert "_chunked_execution" in result
 
@@ -267,7 +263,6 @@ class TestQueryResilientExecutor:
 
         mock_query_fn = AsyncMock(side_effect=count_calls)
 
-        # 3 hour range but chunking disabled
         await executor.execute_with_resilience(
             query_fn=mock_query_fn,
             query="{job='test'}",
@@ -275,7 +270,6 @@ class TestQueryResilientExecutor:
             end_time="2024-01-15T13:00:00Z",
         )
 
-        # Should have made only one call (not chunked)
         assert call_count == 1
 
     @pytest.mark.asyncio
@@ -295,17 +289,91 @@ class TestQueryResilientExecutor:
 
         mock_query_fn = AsyncMock(side_effect=return_chunk_results)
 
-        # Range > 2 hours triggers chunking (chunking threshold is > 2h)
         result = await executor.execute_with_resilience(
             query_fn=mock_query_fn,
             query="{job='test'}",
             start_time="2024-01-15T10:00:00Z",
-            end_time="2024-01-15T13:00:00Z",  # 3 hours = 6 chunks
+            end_time="2024-01-15T13:00:00Z",
         )
 
-        # Results should be merged (6 chunks for 3 hours / 30 min)
         assert "data" in result
         assert len(result["data"]["result"]) >= 2
+
+    @pytest.mark.asyncio
+    async def test_execute_chunked_collects_partial_results_after_exception_group(self) -> None:
+        """Test chunked execution preserves completed chunk results when one task fails."""
+        executor = QueryResilientExecutor(chunk_size_minutes=120, max_retries=1)
+
+        started_chunks: list[str] = []
+
+        async def chunk_query(**kwargs: Any) -> dict[str, Any]:
+            started_chunks.append(kwargs["start_time"])
+            if kwargs["start_time"].startswith("2024-01-15T12:00:00"):
+                raise RuntimeError("chunk failed")
+            return {
+                "status": "success",
+                "data": {"result": [{"stream": {}, "values": [[1, kwargs["start_time"]]]}]},
+            }
+
+        result = await executor.execute_with_resilience(
+            query_fn=AsyncMock(side_effect=chunk_query),
+            query="{job='test'}",
+            start_time="2024-01-15T10:00:00Z",
+            end_time="2024-01-15T16:00:00Z",
+        )
+
+        assert result["status"] == "success"
+        assert result["_chunked_execution"]["total_chunks"] == 3
+        assert result["_chunked_execution"]["failed_chunks"] >= 1
+        assert len(result["data"]["result"]) >= 1
+
+    @pytest.mark.asyncio
+    async def test_execute_with_tenacity_returns_none_for_non_retryable_error(self) -> None:
+        """Test non-timeout exceptions are treated as non-retryable failures."""
+        executor = QueryResilientExecutor(max_retries=2)
+
+        async def fail_non_retryable(**kwargs: Any) -> dict[str, Any]:
+            raise ValueError("bad query")
+
+        result = await executor._execute_with_tenacity(
+            fail_non_retryable,
+            "{job='test'}",
+            "2024-01-15T10:00:00Z",
+            "2024-01-15T11:00:00Z",
+            1.0,
+            "2024-01-15T10:00:00Z",
+            "2024-01-15T11:00:00Z",
+        )
+
+        assert result is None
+        assert executor.stats.total_attempts == 1
+
+    @pytest.mark.asyncio
+    async def test_execute_with_tenacity_retries_query_timeout_error(self) -> None:
+        """Test QueryTimeoutError is retried and counted via tenacity."""
+        executor = QueryResilientExecutor(max_retries=2, initial_timeout=5)
+        call_count = 0
+
+        async def timeout_then_success(**kwargs: Any) -> dict[str, Any]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {"status": "error", "error": "deadline exceeded"}
+            return {"status": "success", "data": {"result": []}}
+
+        result = await executor._execute_with_tenacity(
+            AsyncMock(side_effect=timeout_then_success),
+            "{job='test'}",
+            "2024-01-15T10:00:00Z",
+            "2024-01-15T11:00:00Z",
+            1.0,
+            "2024-01-15T10:00:00Z",
+            "2024-01-15T11:00:00Z",
+        )
+
+        assert result is not None
+        assert executor.stats.timeout_count == 1
+        assert executor.stats.retry_count == 1
 
     def test_count_results_list(self) -> None:
         """Test counting results from a list."""
@@ -330,7 +398,7 @@ class TestQueryResilientExecutor:
         }
         count = executor._count_results(result)
 
-        assert count == 3  # 2 + 1 values
+        assert count == 3
 
     def test_count_results_empty(self) -> None:
         """Test counting results from empty response."""
@@ -339,6 +407,14 @@ class TestQueryResilientExecutor:
         assert executor._count_results({}) == 0
         assert executor._count_results({"data": {}}) == 0
         assert executor._count_results({"data": {"result": []}}) == 0
+
+    def test_count_results_ignores_non_list_values(self) -> None:
+        """Test counting ignores malformed stream values payloads."""
+        executor = QueryResilientExecutor()
+
+        result = {"data": {"result": [{"values": "not-a-list"}]}}
+
+        assert executor._count_results(result) == 0
 
     def test_get_stats_summary(self) -> None:
         """Test getting stats summary."""
@@ -429,8 +505,8 @@ class TestTimeRangeFactors:
         factors = QueryResilientExecutor.TIME_RANGE_FACTORS
 
         assert factors == tuple(sorted(factors, reverse=True))
-        assert factors[0] == 1.0  # Start with full range
-        assert factors[-1] <= 0.1  # End with small range
+        assert factors[0] == 1.0
+        assert factors[-1] <= 0.1
 
 
 class TestEdgeCases:
@@ -482,7 +558,6 @@ class TestEdgeCases:
             end_time="2024-01-15T10:30:00Z",
         )
 
-        # Should give up on gRPC errors and move to next time range factor
         assert result["status"] == "error"
 
     @pytest.mark.asyncio
@@ -504,6 +579,11 @@ class TestEdgeCases:
             end_time="2024-01-15T10:30:00Z",
         )
 
-        # Non-timeout errors should be returned (not retried indefinitely)
-        # The result might still have metadata
         assert executor.stats.timeout_count == 0
+
+    def test_query_timeout_error_is_custom_exception(self) -> None:
+        """Test QueryTimeoutError is a distinct exception type."""
+        error = QueryTimeoutError("timed out")
+
+        assert isinstance(error, Exception)
+        assert str(error) == "timed out"

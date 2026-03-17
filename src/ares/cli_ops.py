@@ -17,7 +17,7 @@ from loguru import logger
 # Suppress DEBUG/INFO logs from noisy modules (Redis client, config) in CLI output.
 # Keep all logs from cli_ops itself and show WARNING+ from other modules.
 def _cli_log_filter(record):
-    """Filter out DEBUG/INFO from noisy modules, keep all from cli_ops."""
+    """Return whether a log record should be shown in CLI output."""
     module = record["name"]
     level = record["level"].no
     # Allow all logs from this module
@@ -2616,7 +2616,7 @@ async def watch(
 
 
 def main() -> None:
-    """Entry point for ares-ops CLI."""
+    """Run the ares-ops CLI application."""
     try:
         app()
     except Exception as e:

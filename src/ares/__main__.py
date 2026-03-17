@@ -2,7 +2,7 @@ from .main import app
 
 
 def run() -> None:
-    """CLI entry point for ares."""
+    """Run the package CLI entry point."""
     app()
 
 

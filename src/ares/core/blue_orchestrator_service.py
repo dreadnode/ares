@@ -30,6 +30,7 @@ from ares.core.task_queue import RedisTaskQueue
 
 
 def _configure_dreadnode():
+    """Configure runtime integrations before returning the Dreadnode SDK."""
     configure_litellm_env()
 
     # Configure OTEL tracing to export to OTLP endpoint (e.g., Alloy/Tempo)
@@ -143,6 +144,7 @@ class BlueOrchestratorService:
 
     @staticmethod
     def _decode_redis_value(value: str | bytes) -> str:
+        """Return a Redis value as a decoded string."""
         return value.decode() if isinstance(value, bytes) else str(value)
 
     async def start(self) -> None:
@@ -454,7 +456,7 @@ class BlueOrchestratorService:
         return None
 
     def _should_use_multi_agent(self, request: InvestigationRequest) -> bool:
-        """Determine if multi-agent should be used for this investigation."""
+        """Return whether an investigation should use the multi-agent path."""
         if request.multi_agent:
             return True
         if not request.auto_route:
