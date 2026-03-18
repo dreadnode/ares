@@ -51,12 +51,12 @@ class MessageType(Enum):
 
 
 def generate_message_id() -> str:
-    """Generate a unique message ID."""
+    """Return a unique message identifier."""
     return f"msg-{uuid.uuid4().hex[:12]}"
 
 
 def generate_task_id() -> str:
-    """Generate a unique task ID."""
+    """Return a unique task identifier."""
     return f"task-{uuid.uuid4().hex[:12]}"
 
 
@@ -332,7 +332,16 @@ class OperationAbort(AgentMessage):
 
 
 def create_message(message_type: MessageType, source_agent: str, **kwargs) -> AgentMessage:
-    """Factory function to create appropriate message type."""
+    """Create an agent message instance for the requested message type.
+
+    Args:
+        message_type: The message type to instantiate.
+        source_agent: The agent that is sending the message.
+        **kwargs: Additional fields passed to the concrete message model.
+
+    Returns:
+        An initialized agent message model.
+    """
     message_classes = {
         MessageType.CREDENTIAL_DISCOVERED: CredentialDiscovered,
         MessageType.HASH_DISCOVERED: HashDiscovered,

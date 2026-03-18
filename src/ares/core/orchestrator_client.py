@@ -200,11 +200,11 @@ async def get_operation_status(
     """Get the current status of an operation.
 
     Args:
-        operation_id: Operation ID
-        redis_url: Redis connection URL (default: from config)
+        operation_id: Operation ID.
+        redis_url: Redis connection URL. Defaults to the configured value.
 
     Returns:
-        Operation status dict or None if not found
+        Operation status data, or None if no status has been stored yet.
     """
     redis_url = redis_url or get_redis_url()
     task_queue = RedisTaskQueue(redis_url)

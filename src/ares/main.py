@@ -243,6 +243,7 @@ app = cyclopts.App(
 
 
 def _configure_dreadnode():
+    """Configure runtime integrations before returning the Dreadnode SDK."""
     from ares.core.litellm_env import configure_litellm_env
 
     configure_litellm_env()
@@ -304,6 +305,7 @@ class DreadnodeArgs:
 
 
 def _resolve_model(cli_model: str, *, prefer_orchestrator: bool = False) -> str:
+    """Resolve the model name from CLI input and environment defaults."""
     if cli_model:
         return cli_model
     if prefer_orchestrator:
@@ -341,11 +343,6 @@ async def main(
         logger.error("No model specified. Set ARES_MODEL or pass --args.model.")
         return
 
-    model = _resolve_model(args.model)
-    if not model:
-        logger.error("No model specified. Set ARES_MODEL or pass --args.model.")
-        return
-
     # Prefer GRAFANA_SERVICE_ACCOUNT_TOKEN, fallback to GRAFANA_API_KEY for compatibility
     grafana_api_key = (
         args.grafana_api_key
@@ -372,11 +369,6 @@ async def main(
         logger.warning("or use --args.grafana-api-key CLI argument.")
         logger.warning("The agent will not be able to retrieve alerts.")
         logger.warning("=" * 60)
-
-    model = _resolve_model(args.model)
-    if not model:
-        logger.error("No model specified. Set ARES_MODEL or pass --args.model.")
-        return
 
     logger.info("=" * 60)
     logger.info("ARES SOC INVESTIGATION AGENT")

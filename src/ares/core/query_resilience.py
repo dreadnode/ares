@@ -49,6 +49,7 @@ class QueryStats:
 
     @property
     def success_rate(self) -> float:
+        """Return the fraction of query attempts that succeeded."""
         if self.total_attempts == 0:
             return 0.0
         return self.successful_attempts / self.total_attempts
@@ -56,6 +57,10 @@ class QueryStats:
 
 class QueryTimeoutError(Exception):
     """Raised when a query times out."""
+
+
+class NonRetryableQueryError(Exception):
+    """Raised when a query fails in a non-retryable way."""
 
 
 class QueryResilientExecutor:
@@ -141,16 +146,21 @@ class QueryResilientExecutor:
                 logger.info(f"Reducing time range to {factor * 100:.0f}% ({reduced_range})")
 
             # Try with tenacity retry
-            result = await self._execute_with_tenacity(
-                query_fn,
-                query,
-                new_start_str,
-                new_end_str,
-                factor,
-                start_time,
-                end_time,
-                **kwargs,
-            )
+            try:
+                result = await self._execute_with_tenacity(
+                    query_fn,
+                    query,
+                    new_start_str,
+                    new_end_str,
+                    factor,
+                    start_time,
+                    end_time,
+                    raise_non_retryable=True,
+                    **kwargs,
+                )
+            except NonRetryableQueryError as exc:
+                last_error = str(exc)
+                break
 
             if result is not None:
                 return result
@@ -186,6 +196,8 @@ class QueryResilientExecutor:
         time_range_factor: float,
         original_start: str,
         original_end: str,
+        *,
+        raise_non_retryable: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any] | None:
         """Execute query with tenacity retry logic.
@@ -293,10 +305,15 @@ class QueryResilientExecutor:
                 f"All {self.max_retries} retries exhausted for time range factor {time_range_factor}"
             )
             return None
+        except (QueryTimeoutError, asyncio.TimeoutError):
+            # reraise=True surfaces the last timeout exception after retries are exhausted
+            return None
 
         except Exception as e:
             # Non-retryable error
             logger.error(f"Query failed with non-retryable error: {e}")
+            if raise_non_retryable:
+                raise NonRetryableQueryError(str(e)) from e
             return None
 
         return None
@@ -311,7 +328,7 @@ class QueryResilientExecutor:
     ) -> dict[str, Any]:
         """Execute a query in parallel chunks and merge results.
 
-        Uses asyncio.gather for concurrent chunk execution.
+        Uses asyncio.TaskGroup for concurrent chunk execution.
         """
         chunk_delta = timedelta(minutes=self.chunk_size_minutes)
         chunks = []
@@ -336,10 +353,32 @@ class QueryResilientExecutor:
                 **kwargs,
             )
 
-        results = await asyncio.gather(
-            *[execute_chunk(start, end) for start, end in chunks],
-            return_exceptions=True,
-        )
+        tasks: list[asyncio.Task[dict[str, Any]]] = []
+        try:
+            async with asyncio.TaskGroup() as task_group:
+                for chunk_start, chunk_end in chunks:
+                    tasks.append(task_group.create_task(execute_chunk(chunk_start, chunk_end)))
+        except Exception as exc:
+            exceptions = getattr(exc, "exceptions", (exc,))
+            for raised in exceptions:
+                logger.warning(f"Chunk execution failed: {raised}")
+
+            results: list[dict[str, Any] | BaseException] = []
+            for task in tasks:
+                if task.cancelled():
+                    results.append(asyncio.CancelledError())
+                    continue
+                if task.done():
+                    try:
+                        results.append(task.result())
+                    except (
+                        Exception
+                    ) as task_exc:  # pragma: no cover - covered via exception group path
+                        results.append(task_exc)
+                else:
+                    results.append(asyncio.CancelledError())
+        else:
+            results = [task.result() for task in tasks]
 
         # Separate successful results from failures
         successful_results: list[dict[str, Any]] = []
@@ -421,7 +460,7 @@ _resilient_executor: QueryResilientExecutor | None = None
 
 
 def get_resilient_executor() -> QueryResilientExecutor:
-    """Get or create the global resilient executor instance."""
+    """Return the shared query executor instance for the current process."""
     global _resilient_executor
     if _resilient_executor is None:
         _resilient_executor = QueryResilientExecutor()
@@ -429,6 +468,6 @@ def get_resilient_executor() -> QueryResilientExecutor:
 
 
 def reset_resilient_executor() -> None:
-    """Reset the global executor (for testing or new investigations)."""
+    """Reset the shared query executor instance."""
     global _resilient_executor
     _resilient_executor = None

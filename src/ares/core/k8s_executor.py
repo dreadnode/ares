@@ -70,13 +70,12 @@ class KubernetesPodExecutor:
         kubeconfig: str | None = None,
         in_cluster: bool = False,
     ):
-        """
-        Initialize the Kubernetes pod executor.
+        """Initialize the executor for a Kubernetes namespace.
 
         Args:
             namespace: Kubernetes namespace to operate in.
-            kubeconfig: Path to kubeconfig file. If None, uses default.
-            in_cluster: If True, use in-cluster configuration.
+            kubeconfig: Path to the kubeconfig file, if any.
+            in_cluster: Whether to use in-cluster Kubernetes configuration.
         """
         self.namespace = namespace
         self._kubeconfig = kubeconfig
@@ -219,13 +218,18 @@ class KubernetesPodExecutor:
                 logger.warning(f"Pod execution failed, retrying with fresh pod discovery: {e}")
                 pod_name = await self.get_pod_for_role(role)
                 if pod_name:
-                    return await self._execute_in_pod(
-                        pod_name=pod_name,
-                        command=command,
-                        container=container,
-                        timeout=timeout_seconds,
-                        stdin_data=stdin_data,
-                    )
+                    try:
+                        return await self._execute_in_pod(
+                            pod_name=pod_name,
+                            command=command,
+                            container=container,
+                            timeout=timeout_seconds,
+                            stdin_data=stdin_data,
+                        )
+                    except Exception as retry_exc:
+                        raise PodExecutionError(
+                            f"Command execution failed: {retry_exc}"
+                        ) from retry_exc
             raise PodExecutionError(f"Command execution failed: {e}") from e
 
     async def _execute_in_pod(
@@ -309,9 +313,10 @@ class KubernetesPodExecutor:
         """
         await self._ensure_initialized()
 
-        start = asyncio.get_event_loop().time()
+        loop = asyncio.get_running_loop()
+        start = loop.time()
 
-        while asyncio.get_event_loop().time() - start < timeout:
+        while loop.time() - start < timeout:
             pod_name = await self.get_pod_for_role(role)
             if pod_name:
                 logger.info(f"Pod ready for role {role}: {pod_name}")
@@ -481,8 +486,13 @@ class KubernetesPodExecutor:
 
             # Decode and write locally
             import base64
+            import binascii
 
-            data = base64.b64decode(stdout.strip())
+            try:
+                data = base64.b64decode(stdout.strip())
+            except (binascii.Error, ValueError) as e:
+                logger.error(f"Failed to decode pod file payload: {e}")
+                return False
 
             with open(local_path, "wb") as f:  # noqa: ASYNC230
                 f.write(data)

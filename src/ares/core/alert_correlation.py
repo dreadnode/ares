@@ -185,7 +185,7 @@ class AlertCorrelator:
     CLUSTER_THRESHOLD = 0.3  # Minimum similarity to join a cluster
 
     def __init__(self):
-        """Initialize the correlator."""
+        """Initialize empty alert cluster state."""
         self.clusters: list[AlertCluster] = []
         self._cluster_counter = 0
         self._alert_to_cluster: dict[str, str] = {}  # fingerprint -> cluster_id

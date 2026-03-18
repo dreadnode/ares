@@ -1,8 +1,10 @@
+"""Package entry point for the Ares command-line interface."""
+
 from .main import app
 
 
 def run() -> None:
-    """CLI entry point for ares."""
+    """Run the package CLI entry point."""
     app()
 
 
