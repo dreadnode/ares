@@ -23,8 +23,11 @@ class TestAnnounceDomainAdmin:
     """Tests for announce_domain_admin completed_at behavior."""
 
     @pytest.mark.asyncio
+    @patch("ares.core.dispatcher.announcements.get_multi_forest_mode", return_value=False)
     @patch("ares.core.dispatcher.announcements.get_stop_on_domain_admin", return_value=False)
-    async def test_does_not_set_completed_at_when_stop_disabled(self, mock_stop_on_da, dispatcher):
+    async def test_does_not_set_completed_at_when_stop_disabled(
+        self, mock_stop_on_da, mock_multi_forest, dispatcher
+    ):
         """When stop_on_domain_admin=False, completed_at should NOT be set."""
         await dispatcher.announce_domain_admin(
             username="Administrator",
@@ -122,10 +125,11 @@ class TestStopConditionInteraction:
     """Tests for interaction between stop conditions."""
 
     @pytest.mark.asyncio
+    @patch("ares.core.dispatcher.announcements.get_multi_forest_mode", return_value=False)
     @patch("ares.core.dispatcher.announcements.get_stop_on_domain_admin", return_value=False)
     @patch("ares.core.dispatcher.announcements.get_stop_on_golden_ticket", return_value=True)
     async def test_da_then_gt_only_sets_completed_at_on_gt(
-        self, mock_stop_on_gt, mock_stop_on_da, dispatcher
+        self, mock_stop_on_gt, mock_stop_on_da, mock_multi_forest, dispatcher
     ):
         """When stop_on_golden_ticket=True, DA should not set completed_at but GT should."""
         # DA achieved - should not set completed_at
@@ -159,9 +163,10 @@ class TestAnnouncementTracing:
 
     @pytest.mark.asyncio
     @patch("ares.core.dispatcher.announcements.trace_discovery")
+    @patch("ares.core.dispatcher.announcements.get_multi_forest_mode", return_value=False)
     @patch("ares.core.dispatcher.announcements.get_stop_on_domain_admin", return_value=False)
     async def test_domain_admin_emits_trace_discovery(
-        self, mock_stop_on_da, mock_trace_discovery, dispatcher
+        self, mock_stop_on_da, mock_multi_forest, mock_trace_discovery, dispatcher
     ):
         """announce_domain_admin should call trace_discovery with correct attributes."""
         await dispatcher.announce_domain_admin(

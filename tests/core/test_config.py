@@ -604,11 +604,12 @@ class TestStopConditionsValidation:
         """Test get_stop_on_golden_ticket with env variable set."""
         from ares.core.config import clear_config_cache, get_stop_on_golden_ticket
 
-        # Clear any existing config, and also disable stop_on_domain_admin
-        # since the two are mutually exclusive
+        # Clear any existing config, and also disable stop_on_domain_admin and multi_forest_mode
+        # since they are mutually exclusive with stop_on_golden_ticket
         clean_env = {k: v for k, v in os.environ.items() if not k.startswith("ARES_")}
         clean_env["ARES_STOP_ON_GOLDEN_TICKET"] = "true"
         clean_env["ARES_STOP_ON_DOMAIN_ADMIN"] = "false"
+        clean_env["ARES_MULTI_FOREST_MODE"] = "false"
 
         with patch.dict(os.environ, clean_env, clear=True):
             clear_config_cache()
