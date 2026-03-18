@@ -748,6 +748,15 @@ def create_role_hooks(
                 return None
 
             if shared_state.has_domain_admin:
+                # Multi-forest mode: don't stop if other forests remain undominated
+                if get_multi_forest_mode() and not shared_state.all_forests_dominated():
+                    undominated = shared_state.get_undominated_forests()
+                    logger.info(
+                        f"🌲 DA achieved but multi-forest mode active - "
+                        f"{len(undominated)} forest(s) remain: {', '.join(undominated)}"
+                    )
+                    return None
+
                 event_type = "StepStart" if isinstance(event, StepStart) else "ToolEnd"
                 logger.success(
                     f"🎯 Domain Admin detected (achieved externally, {event_type}) - "

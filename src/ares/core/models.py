@@ -706,6 +706,7 @@ _PROCESSED_SET_MAP: dict[str, str] = {
     "processed_expansion_creds": "expansion_creds",
     "dispatched_acl_steps": "acl_steps",
     "scanned_targets": "scanned_targets",
+    "processed_trust_extractions": "trust_extractions",
 }
 
 
@@ -822,6 +823,9 @@ class SharedRedTeamState:
     processed_expansion_creds: set[str] = field(
         default_factory=set
     )  # "domain:user:pwdhash" - expansion loop triggered
+    processed_trust_extractions: set[str] = field(
+        default_factory=set
+    )  # "source_domain:target_forest" - trust key extraction dispatched
 
     # Golden ticket capability tracking
     # Key: "domain:username" (lowercase), Value: list of capability info dicts
@@ -971,49 +975,95 @@ class SharedRedTeamState:
 
         Returns:
             True if:
-            - No trusted domains discovered (nothing to pivot to)
-            - All trusted domains have been dominated (have DA)
-            False if there are undominated trusted domains.
+            - No foreign domains discovered (nothing to pivot to)
+            - All foreign domains have been dominated (have DA)
+            False if there are undominated foreign domains.
         """
-        if not self.trusted_domains:
-            # No trusted domains discovered yet - only have initial domain
+        # Get all foreign domains (from explicit trusts AND from host discovery)
+        foreign_domains = self._get_foreign_domains()
+
+        logger.info(
+            f"all_forests_dominated check: foreign_domains={foreign_domains}, "
+            f"da_domains={self.domain_admin_domains}"
+        )
+
+        if not foreign_domains:
+            # No foreign domains discovered yet - only have initial domain
+            logger.info("all_forests_dominated: True (no foreign domains)")
             return True
 
         da_domains_lower = {d.lower() for d in self.domain_admin_domains}
 
-        for trusted in self.trusted_domains:
-            trusted_lower = trusted.lower()
-            # Skip if this is our target domain (we check that separately)
-            if self.target and trusted_lower == self.target.domain.lower():
-                continue
-            # Check if we have DA on this trusted domain
-            if trusted_lower not in da_domains_lower:
-                logger.debug(f"Trusted domain not yet dominated: {trusted}")
+        for foreign in foreign_domains:
+            foreign_lower = foreign.lower()
+            # Check if we have DA on this foreign domain
+            if foreign_lower not in da_domains_lower:
+                logger.info(f"all_forests_dominated: False (undominated: {foreign})")
                 return False
 
+        logger.info("all_forests_dominated: True (all foreign domains dominated)")
         return True
 
     def get_undominated_forests(self) -> list[str]:
-        """Get list of trusted forests where we don't have DA yet.
+        """Get list of foreign domains/forests where we don't have DA yet.
 
         Returns:
-            List of domain FQDNs that are trusted but not yet dominated.
+            List of domain FQDNs that are foreign but not yet dominated.
         """
-        if not self.trusted_domains:
+        # Get all foreign domains (from explicit trusts AND from host discovery)
+        foreign_domains = self._get_foreign_domains()
+
+        if not foreign_domains:
             return []
 
         da_domains_lower = {d.lower() for d in self.domain_admin_domains}
         undominated = []
 
-        for trusted in self.trusted_domains:
-            trusted_lower = trusted.lower()
-            # Skip if this is our target domain
-            if self.target and trusted_lower == self.target.domain.lower():
-                continue
-            if trusted_lower not in da_domains_lower:
-                undominated.append(trusted)
+        for foreign in foreign_domains:
+            foreign_lower = foreign.lower()
+            if foreign_lower not in da_domains_lower:
+                undominated.append(foreign)
 
         return undominated
+
+    def _get_foreign_domains(self) -> set[str]:
+        """Get all foreign domains discovered (from trusts AND host enumeration).
+
+        A foreign domain is one that:
+        1. Is different from the target domain
+        2. Is NOT a child of the target domain (i.e., a separate forest)
+
+        Returns:
+            Set of foreign domain FQDNs.
+        """
+        target_domain = self.target.domain.lower() if self.target else ""
+        foreign: set[str] = set()
+
+        # Log inputs for debugging
+        logger.info(
+            f"_get_foreign_domains called: target={target_domain}, "
+            f"all_domains={self.all_domains}, trusted_domains={self.trusted_domains}"
+        )
+
+        # Add explicitly discovered trusted domains
+        for td in self.trusted_domains:
+            td_lower = td.lower()
+            if td_lower != target_domain and not td_lower.endswith("." + target_domain):
+                foreign.add(td_lower)
+
+        # Add domains discovered from host enumeration that are foreign
+        for domain in self.all_domains:
+            domain_lower = domain.lower()
+            # Skip target domain and its children
+            if domain_lower == target_domain:
+                continue
+            if domain_lower.endswith("." + target_domain):
+                continue
+            # A domain is foreign if it's not in the same namespace as target
+            foreign.add(domain_lower)
+
+        logger.info(f"_get_foreign_domains result: {foreign}")
+        return foreign
 
     # =========================================================================
     # Processed Set Helpers (with Redis persistence)
@@ -3266,12 +3316,15 @@ class SharedRedTeamState:
             if vuln.vuln_type != "local_admin":
                 continue
 
+            # Defensive: ensure vuln.details is a dict before calling .get()
+            details = vuln.details if isinstance(vuln.details, dict) else {}
+
             # Get the principal from the vulnerability
-            principal = vuln.details.get("username", "").lower()
-            principal_domain = vuln.details.get("domain", "").lower()
+            principal = details.get("username", "").lower()
+            principal_domain = details.get("domain", "").lower()
 
             # Also check the principal field directly (may include domain)
-            vuln_principal = str(vuln.details.get("principal", "")).lower()
+            vuln_principal = str(details.get("principal", "")).lower()
             if "@" in vuln_principal:
                 parts = vuln_principal.split("@")
                 if len(parts) == 2:

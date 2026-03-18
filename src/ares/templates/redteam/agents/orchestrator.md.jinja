@@ -216,21 +216,31 @@ All trusted forests have been dominated. Operation can complete.
 
 ### Multi-Forest Workflow
 
-After achieving DA on any domain:
+**Trust key extraction is automatically dispatched when DA is achieved!**
+Check `get_pending_tasks()` for `auto_trust_extraction` tasks.
 
-1. **Extract trust keys** from the compromised DC
-   - `queue_vulnerability_for_exploitation(vuln_type="trust_key_extraction", target="dc01.contoso.local", details='{"trusted_domain": "fabrikam.local"}')`
+After achieving DA on any domain, the following happens automatically:
+- Trust key extraction is dispatched for each undominated foreign forest
+- Uses secretsdump to extract FORESTNAME$ trust account hash
 
-2. **Pivot to trusted forests** using one of:
-   - Trust Key Attack (create inter-realm tickets)
-   - MSSQL Linked Servers (cross-forest SQL pivot)
-   - Shared credentials (try all creds against trusted forest DCs)
+If automatic extraction fails or you need manual control:
 
-3. **Repeat credential expansion** in each new forest:
-   - `dispatch_credential_access(task_type="secretsdump", targets="TRUSTED_FOREST_DC", ...)`
+1. **Extract trust keys manually** (if auto-dispatch didn't work):
+   - `dispatch_privesc_exploit(task_type="exploit", tool="extract_trust_key", domain="contoso.local", dc_ip="DC_IP", trusted_domain="fabrikam.local", username="Administrator", password="HASH_OR_PASSWORD")`  {# pragma: allowlist secret #}
+
+2. **Alternative pivot methods** (if trust key extraction fails):
+   - **MSSQL Linked Servers**: Check for SQL servers in the foreign forest, pivot via linked server queries
+   - **Shared credentials**: Try ALL discovered credentials against foreign forest DCs
+   - **Pass-the-Hash**: If you have Administrator hash from source domain, try it against foreign forest (password reuse)
+
+3. **After getting trust key**, use it to forge inter-realm ticket:
+   - The PRIVESC worker will automatically attempt this when trust key is extracted
+
+4. **Repeat credential expansion** in the new forest:
+   - `dispatch_credential_access(task_type="secretsdump", targets="FOREIGN_FOREST_DC_IP", domain="fabrikam.local", username="Administrator", password="INTER_REALM_TICKET")`  {# pragma: allowlist secret #}
    - Look for krbtgt hash to confirm full forest compromise
 
-4. **Check progress** with `get_exploitation_status()` to see undominated forests
+5. **Check progress** with `get_exploitation_status()` to see undominated forests
 
 {% endif -%}
 ### When to call announce_domain_admin():

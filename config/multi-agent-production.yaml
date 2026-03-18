@@ -16,17 +16,21 @@ operation:
   rate_limit_backoff: 15.0
   rate_limit_threshold: 2
   # Stop operation immediately when domain admin is achieved (default: false)
-  # NOTE: stop_on_domain_admin and stop_on_golden_ticket are mutually exclusive
+  # NOTE: stop_on_domain_admin, stop_on_golden_ticket, and multi_forest_mode are mutually exclusive
   # stop_on_domain_admin: true
   # Stop operation when golden ticket is forged (for child→parent forest escalation)
   # When true, operation continues past DA to forge golden ticket with ExtraSid
-  stop_on_golden_ticket: true
+  # stop_on_golden_ticket: true
+  # Multi-forest mode: continue after DA to compromise ALL trusted forests
+  multi_forest_mode: true
+  # Increase max_steps for multi-forest mode (need more steps to pivot across forests)
+  max_steps: 500
 
 # Agent configurations
 agents:
   orchestrator:
     model: "gpt-5.2"
-    max_steps: 200
+    max_steps: 500  # Higher for multi-forest mode
     pod_selector: "app.kubernetes.io/name=ares-orchestrator"
     # Tools: OrchestratorTools, RedTeamReportingTools
     # NOTE: Orchestrator NEVER executes tools directly - it dispatches to workers

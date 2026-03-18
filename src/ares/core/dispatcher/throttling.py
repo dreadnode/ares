@@ -502,10 +502,19 @@ class ThrottlingMixin:
         Returns:
             Task ID if submitted, empty string on failure
         """
-        # HALT: If DA achieved, reject all new tasks immediately
+        # HALT: If DA achieved, reject new tasks UNLESS multi-forest mode is active
+        # and other forests remain undominated
         if self._shared_state and self._shared_state.has_domain_admin:
-            logger.debug(f"Rejecting {task_type} task - Domain Admin achieved, halting new tasks")
-            return ""
+            from ares.core.config import get_multi_forest_mode
+
+            if get_multi_forest_mode() and not self._shared_state.all_forests_dominated():
+                # Multi-forest mode: continue accepting tasks to attack other forests
+                pass
+            else:
+                logger.debug(
+                    f"Rejecting {task_type} task - Domain Admin achieved, halting new tasks"
+                )
+                return ""
 
         # Check if this is a critical path task BEFORE the threading check
         # Critical path tasks can be dispatched directly from threaded consumer

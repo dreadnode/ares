@@ -149,10 +149,16 @@ async def credential_expansion_loop(
     while iterations < max_iterations:
         state = dispatcher.shared_state
 
-        # Short-circuit if Domain Admin achieved
+        # Short-circuit if Domain Admin achieved (unless multi-forest mode with undominated forests)
         if state.has_domain_admin:
-            logger.info("Domain Admin achieved - stopping credential expansion early")
-            break
+            from ares.core.config import get_multi_forest_mode
+
+            if get_multi_forest_mode() and not state.all_forests_dominated():
+                # Continue credential expansion to reach other forests
+                pass
+            else:
+                logger.info("Domain Admin achieved - stopping credential expansion early")
+                break
 
         credentials = state.all_credentials
         hosts = state.all_hosts
@@ -243,11 +249,18 @@ async def credential_expansion_loop(
 
         for task_id in tasks_dispatched:
             # Short-circuit if DA achieved while waiting for tasks
+            # (unless multi-forest mode with undominated forests)
             if dispatcher.shared_state.has_domain_admin:
-                logger.info(
-                    f"Domain Admin achieved - skipping {len(tasks_dispatched) - tasks_dispatched.index(task_id)} remaining tasks"
-                )
-                break
+                from ares.core.config import get_multi_forest_mode
+
+                if get_multi_forest_mode() and not dispatcher.shared_state.all_forests_dominated():
+                    # Continue - need to reach other forests
+                    pass
+                else:
+                    logger.info(
+                        f"Domain Admin achieved - skipping {len(tasks_dispatched) - tasks_dispatched.index(task_id)} remaining tasks"
+                    )
+                    break
 
             try:
                 result = await dispatcher.wait_for_task(task_id, timeout=45.0)
@@ -420,6 +433,20 @@ async def exploitation_workflow(
 
         state = dispatcher.shared_state
         if state.has_domain_admin:
+            from ares.core.config import get_multi_forest_mode, get_stop_on_golden_ticket
+
+            # Multi-forest mode: continue exploitation until ALL forests are dominated
+            if get_multi_forest_mode() and not state.all_forests_dominated():
+                undominated = state.get_undominated_forests()
+                logger.info(
+                    f"DA achieved but multi-forest mode active - "
+                    f"{len(undominated)} forest(s) remain: {', '.join(undominated)}"
+                )
+                # Don't break - continue exploiting to reach other forests
+                # Sleep briefly to avoid tight loop
+                await asyncio.sleep(1.0)
+                continue
+
             logger.success("Domain Admin achieved! Halting exploitation workflow.")
 
             # Cancel all active exploitation tasks immediately
@@ -434,8 +461,6 @@ async def exploitation_workflow(
 
             # Only announce operation complete if NOT waiting for golden ticket
             # If stop_on_golden_ticket is enabled, the operation continues past DA
-            from ares.core.config import get_stop_on_golden_ticket
-
             if not get_stop_on_golden_ticket():
                 await dispatcher.announce_operation_complete(
                     source_agent="exploitation_workflow",

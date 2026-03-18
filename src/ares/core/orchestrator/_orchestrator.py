@@ -1195,7 +1195,8 @@ async def _create_orchestrator_agent(
     tools = [orchestrator_tools]
 
     # Load orchestrator-specific instructions
-    instructions = load_agent_instructions(AgentRole.ORCHESTRATOR)
+    # Pass shared_state for multi-forest mode context (undominated forests)
+    instructions = load_agent_instructions(AgentRole.ORCHESTRATOR, shared_state)
 
     # Create hooks for monitoring and guidance
     hooks = create_role_hooks(AgentRole.ORCHESTRATOR, dispatcher, shared_state)
@@ -3911,19 +3912,31 @@ async def _wait_for_completion(
 
         # Check for domain admin or explicit completion
         if dispatcher.shared_state.has_domain_admin:
-            from ares.core.config import get_stop_on_golden_ticket
+            from ares.core.config import get_multi_forest_mode, get_stop_on_golden_ticket
 
-            if get_stop_on_golden_ticket():
-                logger.success("Domain Admin achieved! Continuing to forge golden ticket...")
+            # Multi-forest mode: continue until ALL forests are dominated
+            if get_multi_forest_mode() and not dispatcher.shared_state.all_forests_dominated():
+                # DA achieved but other forests remain - continue operation
+                # Don't break - just continue the loop to keep attacking
+                pass
             else:
-                logger.success("Domain Admin achieved! Operation complete.")
-            # Wait for loot collection (share spider, etc.) while background tasks are still running
-            await _wait_for_loot_collection(dispatcher)
-            # Wait for golden ticket generation (if krbtgt hash is available)
-            await _wait_for_golden_ticket(dispatcher)
-            # Wait for running crack tasks before fully exiting
-            await _wait_for_crack_tasks(dispatcher)
-            break
+                # Either not multi-forest mode, or all forests dominated
+                if get_multi_forest_mode():
+                    dominated = dispatcher.shared_state.domain_admin_domains
+                    logger.success(
+                        f"All forests dominated ({', '.join(dominated)})! Operation complete."
+                    )
+                elif get_stop_on_golden_ticket():
+                    logger.success("Domain Admin achieved! Continuing to forge golden ticket...")
+                else:
+                    logger.success("Domain Admin achieved! Operation complete.")
+                # Wait for loot collection (share spider, etc.) while background tasks are still running
+                await _wait_for_loot_collection(dispatcher)
+                # Wait for golden ticket generation (if krbtgt hash is available)
+                await _wait_for_golden_ticket(dispatcher)
+                # Wait for running crack tasks before fully exiting
+                await _wait_for_crack_tasks(dispatcher)
+                break
         if dispatcher.shared_state.completed:
             logger.success("Operation marked complete.")
             # Wait for golden ticket generation (if krbtgt hash is available)

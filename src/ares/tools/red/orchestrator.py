@@ -1434,6 +1434,33 @@ class OrchestratorTools(Toolset):
         if summary["has_golden_ticket"]:
             lines.append("  ✅ GOLDEN TICKET FORGED")
 
+        # Multi-forest mode status
+        from ares.core.config import get_multi_forest_mode
+
+        if get_multi_forest_mode():
+            lines.extend(
+                [
+                    "",
+                    "🌲 Multi-Forest Mode:",
+                ]
+            )
+            trusted = state.trusted_domains
+            dominated = state.domain_admin_domains
+            undominated = state.get_undominated_forests()
+
+            if trusted:
+                lines.append(f"  • Trusted domains discovered: {', '.join(trusted)}")
+            else:
+                lines.append("  • Trusted domains: None discovered yet")
+
+            if dominated:
+                lines.append(f"  • DA achieved on: {', '.join(dominated)}")
+
+            if undominated:
+                lines.append(f"  ⚠️ FORESTS STILL TO ATTACK: {', '.join(undominated)}")
+            elif trusted:
+                lines.append("  ✅ ALL FORESTS DOMINATED")
+
         lines.extend(
             [
                 "",

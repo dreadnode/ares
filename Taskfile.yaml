@@ -68,7 +68,7 @@ vars:
   POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
   MAX_STEPS_BLUE: '{{.MAX_STEPS_BLUE | default "50"}}'
   MAX_STEPS_BLUE_ONCE: '{{.MAX_STEPS_BLUE_ONCE | default "15"}}'  # ~15 min max for once mode
-  MAX_STEPS_RED: '{{.MAX_STEPS_RED | default "150"}}'
+  MAX_STEPS_RED: '{{.MAX_STEPS_RED | default "300"}}'
   REPORT_DIR: '{{.REPORT_DIR | default "./reports"}}'
   LOG_DIR: '{{.LOG_DIR | default "./logs"}}'
   DREADNODE_SERVER_URL: '{{.DREADNODE_SERVER_URL | default "https://platform.dev.plundr.ai/"}}'
