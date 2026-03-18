@@ -389,14 +389,14 @@ def is_ntlm_hash(value: str) -> bool:
 
 
 def resolve_recon_route(cmd: list[str], target_role: str | None = None) -> str | None:
-    """Resolve target role for command execution. Always runs locally.
+    """Resolve the worker role to use for command execution.
 
     Args:
-        cmd: Command being executed (unused, kept for interface consistency).
-        target_role: Optional role to route command to.
+        cmd: Command being executed, kept for interface compatibility.
+        target_role: Optional worker role to route the command to.
 
     Returns:
-        The target_role unchanged.
+        The requested target role, or None to use the default execution context.
     """
     return target_role
 
@@ -530,15 +530,17 @@ def infer_listener_ip(target: str | None = None) -> str | None:
     if not target:
         return None
 
+    sock: socket.socket | None = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(1.0)
         sock.connect((target, 88))
-        ip = sock.getsockname()[0]
-        sock.close()
-        return ip
+        return sock.getsockname()[0]
     except Exception:
         return None
+    finally:
+        if sock is not None:
+            sock.close()
 
 
 def write_users_file_remote(

@@ -11,11 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 
-from typing import TypeAlias
-
 from loguru import logger
-
-AttackChainEntry: TypeAlias = dict[str, Any]
 
 
 @dataclass

@@ -71,7 +71,12 @@ def test_crack_request_defaults_include_generated_task_id_and_wordlist():
         ),
         pytest.param(
             MessageType.DOMAIN_ADMIN_ACHIEVED,
-            {"username": "alice", "domain": "CONTOSO", "attack_path": "Kerberoast", "credential_type": "hash"},
+            {
+                "username": "alice",
+                "domain": "CONTOSO",
+                "attack_path": "Kerberoast",
+                "credential_type": "hash",
+            },
             DomainAdminAchieved,
             id="specialized-domain-admin-message",
         ),
@@ -95,7 +100,7 @@ def test_create_message_falls_back_to_base_message_for_unmapped_type():
     )
 
     assert type(message) is AgentMessage
-    assert message.type is MessageType.USER_DISCOVERED
+    assert message.type == MessageType.USER_DISCOVERED.value
     assert message.data == {"username": "bob"}
 
 
