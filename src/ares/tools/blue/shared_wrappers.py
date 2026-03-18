@@ -60,15 +60,15 @@ class SharedInvestigationTools(InvestigationTools):
     _timeline_counter: int = 0
 
     def set_backend(self, backend: BlueStateBackend) -> None:
-        """Set the Redis backend for state persistence."""
+        """Set the Redis backend used for shared investigation state."""
         self._backend = backend
 
     def set_shared_state(self, shared_state: SharedBlueTeamState) -> None:
-        """Set reference to shared state for reads."""
+        """Set the shared state reference used for read operations."""
         self._shared_state = shared_state
 
     def set_mitre_client(self, client: MITREAttackClient) -> None:
-        """Set the MITRE client for technique lookups."""
+        """Set the MITRE ATT&CK client used for technique lookups."""
         self._mitre_client = client
         # Also set on parent class
         self.mitre_client = client
@@ -284,9 +284,11 @@ class SharedInvestigationTools(InvestigationTools):
         if not self._backend:
             return "ERROR: No backend configured"
 
+        source_norm = source.strip().lower()
+        destination_norm = destination.strip().lower()
         connection = {
-            "source": source,
-            "destination": destination,
+            "source": source_norm,
+            "destination": destination_norm,
             "connection_type": connection_type,
             "user": user,
             "mitre_technique": mitre_technique,
@@ -294,11 +296,11 @@ class SharedInvestigationTools(InvestigationTools):
         await self._backend.add_lateral_connection(connection)
 
         # Track hosts
-        await self._backend.track_host(source.strip().lower())
-        await self._backend.track_host(destination.strip().lower())
+        await self._backend.track_host(source_norm)
+        await self._backend.track_host(destination_norm)
 
-        logger.info(f"Lateral connection: {source} -> {destination} ({connection_type})")
-        return f"{STATUS_SUCCESS} Recorded lateral connection: {source} -> {destination} via {connection_type}"
+        logger.info(f"Lateral connection: {source_norm} -> {destination_norm} ({connection_type})")
+        return f"{STATUS_SUCCESS} Recorded lateral connection: {source_norm} -> {destination_norm} via {connection_type}"
 
     @dn.tool_method  # type: ignore[untyped-decorator]
     async def get_investigation_summary(self) -> dict:  # type: ignore[override]

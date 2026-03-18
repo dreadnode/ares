@@ -1004,3 +1004,131 @@ class TestTraceBlueInvestigation:
         with patch("dreadnode.span", side_effect=Exception("Tracing unavailable")):
             # Should not raise - just logs debug
             trace_blue_investigation(role="triage", investigation_id="inv-fail")
+
+
+class TestTraceDecision:
+    """Tests for trace_decision function."""
+
+    def test_trace_decision_creates_span_with_tool_info(self):
+        """trace_decision should create a span with tool selection attributes."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.tracing import trace_decision
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_decision(
+                role="credential_access",
+                team="red",
+                tools_considered=["secretsdump", "kerberoast", "asrep_roast"],
+                tool_chosen="secretsdump",
+                reasoning_summary="I will use secretsdump to get credentials",
+                confidence=0.9,
+                operation_id="op-test-123",
+            )
+
+        mock_dn_span.assert_called_once()
+        call_kwargs = mock_dn_span.call_args[1]
+        attrs = call_kwargs["attributes"]
+
+        assert "decision.credential_access" in mock_dn_span.call_args[0][0]
+        assert attrs["decision.type"] == "tool_selection"
+        assert attrs["decision.tool_chosen"] == "secretsdump"
+        assert attrs["decision.tools_considered"] == ["secretsdump", "kerberoast", "asrep_roast"]
+        assert attrs["decision.confidence"] == 0.9
+        assert attrs["attack_operation_id"] == "op-test-123"
+
+    def test_trace_decision_adds_mitre_technique(self):
+        """trace_decision should add MITRE technique for known tools."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.tracing import trace_decision
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_decision(
+                role="credential_access",
+                team="red",
+                tools_considered=["secretsdump"],
+                tool_chosen="secretsdump",
+                reasoning_summary="Running DCSync",
+            )
+
+        call_kwargs = mock_dn_span.call_args[1]
+        attrs = call_kwargs["attributes"]
+
+        # secretsdump maps to T1003.006 (DCSync)
+        assert attrs["mitre.technique.id"] == "T1003.006"
+
+    def test_trace_decision_truncates_tools_considered(self):
+        """trace_decision should limit tools_considered to 5 entries."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.tracing import trace_decision
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+
+        many_tools = [f"tool_{i}" for i in range(10)]
+
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_decision(
+                role="recon",
+                team="red",
+                tools_considered=many_tools,
+                tool_chosen="tool_0",
+                reasoning_summary="Testing",
+            )
+
+        call_kwargs = mock_dn_span.call_args[1]
+        attrs = call_kwargs["attributes"]
+
+        assert len(attrs["decision.tools_considered"]) == 5
+
+    def test_trace_decision_handles_exception(self):
+        """trace_decision should not raise if span creation fails."""
+        from unittest.mock import patch
+
+        from ares.core.tracing import trace_decision
+
+        with patch("dreadnode.span", side_effect=Exception("Tracing unavailable")):
+            # Should not raise - just logs debug
+            trace_decision(
+                role="recon",
+                team="red",
+                tools_considered=["nmap_scan"],
+                tool_chosen="nmap_scan",
+                reasoning_summary="Test",
+            )
+
+    def test_trace_decision_includes_tool_category(self):
+        """trace_decision should include attack_tool_category for known tools."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.tracing import trace_decision
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_decision(
+                role="lateral",
+                team="red",
+                tools_considered=["psexec"],
+                tool_chosen="psexec",
+                reasoning_summary="Use psexec for lateral movement",
+            )
+
+        call_kwargs = mock_dn_span.call_args[1]
+        attrs = call_kwargs["attributes"]
+
+        # psexec maps to LateralMovementTools category
+        assert attrs["attack_tool_category"] == "LateralMovementTools"

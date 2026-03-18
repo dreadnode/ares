@@ -27,6 +27,7 @@ from ares.core.task_queue import RedisTaskQueue
 
 
 def _configure_dreadnode():
+    """Configure runtime integrations before returning the Dreadnode SDK."""
     configure_litellm_env()
 
     # Configure OTEL tracing to export to OTLP endpoint (e.g., Alloy/Tempo)
@@ -122,6 +123,7 @@ class OrchestratorService:
 
     @staticmethod
     def _decode_redis_value(value: str | bytes) -> str:
+        """Return a Redis value as a decoded string."""
         return value.decode() if isinstance(value, bytes) else str(value)
 
     @staticmethod
@@ -507,7 +509,7 @@ class OrchestratorService:
         return None
 
     def _log_env_vars(self, raw_env_vars: Any) -> None:
-        """Log environment variables from request."""
+        """Log which request environment variables were supplied."""
         if raw_env_vars is None:
             logger.warning("Request missing env_vars")
         elif isinstance(raw_env_vars, dict):
@@ -520,7 +522,7 @@ class OrchestratorService:
             logger.warning(f"Request env_vars not a dict: {type(raw_env_vars)}")
 
     def _resolve_openai_api_key(self, request_env_vars: dict[str, str] | None) -> str | None:
-        """Resolve OpenAI API key from request or environment."""
+        """Resolve the OpenAI API key from request data or process environment."""
         openai_api_key = request_env_vars.get("OPENAI_API_KEY") if request_env_vars else None
         if request_env_vars:
             present_keys = sorted(k for k, v in request_env_vars.items() if v)

@@ -2077,8 +2077,8 @@ class TestDomainAdminTraceDiscovery:
         da_calls = [c for c in captured_calls if c["discovery_type"] == "domain_admin"]
         assert len(da_calls) == 0, "Non-krbtgt hash should NOT trigger domain_admin trace"
 
-    def test_add_hash_krbtgt_only_traces_once(self):
-        """Multiple krbtgt hashes should only trace DA once (first occurrence)."""
+    def test_add_hash_krbtgt_traces_each_domain_once(self):
+        """Multiple krbtgt hashes from different domains each trace DA (multi-forest support)."""
         from unittest.mock import patch
 
         from ares.core.models import Hash
@@ -2101,6 +2101,15 @@ class TestDomainAdminTraceDiscovery:
             source="secretsdump",
         )
 
+        # Same domain as hash1, should NOT trace again
+        krbtgt_hash3 = Hash(
+            username="krbtgt",
+            domain="contoso.local",
+            hash_type="ntlm",
+            hash_value="aad3b435b51404eeaad3b435b51404ee:cccc",
+            source="secretsdump",
+        )
+
         captured_calls = []
 
         def mock_trace_discovery(*args, **kwargs):
@@ -2109,10 +2118,12 @@ class TestDomainAdminTraceDiscovery:
         with patch("ares.core.tracing.trace_discovery", side_effect=mock_trace_discovery):
             state.add_hash(krbtgt_hash1, source_agent="lateral")
             state.add_hash(krbtgt_hash2, source_agent="lateral")
+            state.add_hash(krbtgt_hash3, source_agent="lateral")
 
         # Filter for domain_admin discovery only
         da_calls = [c for c in captured_calls if c["discovery_type"] == "domain_admin"]
 
-        # Should only trace once (first krbtgt sets has_domain_admin=True)
-        assert len(da_calls) == 1, f"Expected 1 domain_admin trace, got {len(da_calls)}"
-        assert da_calls[0]["target_domain"] == "contoso.local"
+        # Multi-forest mode: trace DA for each DISTINCT domain (dedup same domain)
+        assert len(da_calls) == 2, f"Expected 2 domain_admin traces, got {len(da_calls)}"
+        traced_domains = {c["target_domain"] for c in da_calls}
+        assert traced_domains == {"contoso.local", "child.contoso.local"}

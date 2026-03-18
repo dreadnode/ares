@@ -219,6 +219,8 @@ class OperationConfig:
     # Stop operation immediately when golden ticket is forged (for forest escalation)
     # NOTE: stop_on_domain_admin and stop_on_golden_ticket are mutually exclusive
     stop_on_golden_ticket: bool = False
+    # Multi-forest mode: continue operation until DA is achieved on all trusted forests
+    multi_forest_mode: bool = False
 
     # Rate limit retry settings (for worker agents)
     # Delays between retries when rate limited (list of seconds)
@@ -437,6 +439,7 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         crack_task_grace_period=operation.get("crack_task_grace_period", 300.0),
         stop_on_domain_admin=operation.get("stop_on_domain_admin", False),
         stop_on_golden_ticket=operation.get("stop_on_golden_ticket", False),
+        multi_forest_mode=operation.get("multi_forest_mode", False),
         # Rate limit retry settings
         rate_limit_backoff_delays=operation.get(
             "rate_limit_backoff_delays", [5.0, 10.0, 20.0, 40.0, 60.0, 60.0]
@@ -1010,6 +1013,11 @@ def get_stop_on_domain_admin() -> bool:
 def get_stop_on_golden_ticket() -> bool:
     """Get whether to stop operation immediately when golden ticket is forged."""
     return load_config().stop_on_golden_ticket
+
+
+def get_multi_forest_mode() -> bool:
+    """Get whether multi-forest mode is enabled (continue until DA on all trusted forests)."""
+    return load_config().multi_forest_mode
 
 
 def get_operation_timeout() -> int:

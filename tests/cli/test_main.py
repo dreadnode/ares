@@ -1,6 +1,7 @@
 """Tests for main.py entry point module."""
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,15 +10,24 @@ import pytest
 from ares.main import (
     HIGH_SEVERITY_LEVELS,
     Args,
+    BlueWorkerArgs,
     DreadnodeArgs,
     EvalArgs,
+    MultiAgentArgs,
+    WorkerArgs,
     _resolve_model,
     app,
+    blue_worker,
+    discover_recent_completed_operation,
+    discover_running_operation,
+    get_operation_time_window,
     investigate_alert,
     main,
     merge_alerts,
+    multi_agent,
     should_use_multi_agent,
     version,
+    worker,
 )
 
 
@@ -53,6 +63,36 @@ class TestArgsDataclass:
         assert args.max_steps == 50
         assert args.report_dir == "/tmp/reports"
         assert args.once is True
+
+
+class TestAdditionalDataclasses:
+    """Tests for other command dataclasses."""
+
+    def test_worker_args_defaults(self):
+        """Test WorkerArgs exposes expected default values."""
+        worker_args = WorkerArgs()
+
+        assert worker_args.role == ""
+        assert worker_args.operation_id == ""
+        assert worker_args.redis_url == ""
+        assert worker_args.max_steps == 0
+
+    def test_blue_worker_args_defaults(self):
+        """Test BlueWorkerArgs exposes expected default values."""
+        worker_args = BlueWorkerArgs()
+
+        assert worker_args.role == ""
+        assert worker_args.investigation_id == ""
+        assert worker_args.grafana_url == ""
+
+    def test_multi_agent_args_defaults(self):
+        """Test MultiAgentArgs exposes expected default values."""
+        multi_args = MultiAgentArgs()
+
+        assert multi_args.target_domain == ""
+        assert multi_args.target_ips == ""
+        assert multi_args.initial_user == ""
+        assert multi_args.namespace == ""
 
 
 class TestDreadnodeArgsDataclass:
@@ -91,7 +131,6 @@ class TestVersionCommand:
 
     def test_version_returns_none(self):
         """Test version command runs without error."""
-        # version() is empty but should not raise
         result = version()
         assert result is None
 
@@ -123,8 +162,112 @@ class TestResolveModel:
             assert _resolve_model("", prefer_orchestrator=True) == "env-model"
 
 
+class TestRedisDiscoveryHelpers:
+    """Tests for Redis-backed operation discovery helpers."""
+
+    @pytest.mark.asyncio
+    async def test_discover_running_operation_returns_first_operation_id(self):
+        """Test running operation discovery returns the first parsed lock id."""
+        client = AsyncMock()
+        client.keys.return_value = ["ares:lock:op-123"]
+
+        with patch(
+            "ares.core.redis_client.create_verified_redis_client", AsyncMock(return_value=client)
+        ):
+            operation_id = await discover_running_operation("redis://example")
+
+        assert operation_id == "op-123"
+        client.aclose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_discover_running_operation_returns_none_on_client_error(self):
+        """Test running operation discovery swallows Redis client failures."""
+        with patch(
+            "ares.core.redis_client.create_verified_redis_client",
+            AsyncMock(side_effect=RuntimeError("redis down")),
+        ):
+            operation_id = await discover_running_operation("redis://example")
+
+        assert operation_id is None
+
+    @pytest.mark.asyncio
+    async def test_discover_recent_completed_operation_prefers_latest_non_running_candidate(self):
+        """Test recent completed operation discovery prefers newest eligible operation."""
+        client = AsyncMock()
+        client.keys.side_effect = [[], ["ares:op:old:meta", "ares:op:new:meta"]]
+        client.hgetall.side_effect = [
+            {"started_at": "2024-01-01T10:00:00+00:00"},
+            {"started_at": "2024-01-01T12:00:00+00:00"},
+        ]
+
+        fake_now = datetime(2024, 1, 1, 13, 0, tzinfo=timezone.utc)
+
+        with (
+            patch(
+                "ares.core.redis_client.create_verified_redis_client",
+                AsyncMock(return_value=client),
+            ),
+            patch("ares.main.datetime") as mock_datetime,
+        ):
+            mock_datetime.now.return_value = fake_now
+            mock_datetime.fromisoformat.side_effect = datetime.fromisoformat
+            operation_id = await discover_recent_completed_operation(
+                "redis://example", max_age_hours=24
+            )
+
+        assert operation_id == "new"
+        client.aclose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_get_operation_time_window_returns_running_window(self):
+        """Test operation time window uses now as end time for running operations."""
+        client = AsyncMock()
+        client.exists.return_value = 1
+        client.hgetall.return_value = {"started_at": "2024-01-01T10:00:00+00:00"}
+        fake_now = datetime(2024, 1, 1, 13, 0, tzinfo=timezone.utc)
+
+        with (
+            patch(
+                "ares.core.redis_client.create_verified_redis_client",
+                AsyncMock(return_value=client),
+            ),
+            patch("ares.main.datetime") as mock_datetime,
+        ):
+            mock_datetime.now.return_value = fake_now
+            mock_datetime.fromisoformat.side_effect = datetime.fromisoformat
+            window = await get_operation_time_window("redis://example", "op-123")
+
+        assert window == (datetime.fromisoformat("2024-01-01T10:00:00+00:00"), fake_now, True)
+        client.aclose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_get_operation_time_window_returns_none_for_invalid_start_time(self):
+        """Test operation time window returns None for malformed metadata."""
+        client = AsyncMock()
+        client.exists.return_value = 0
+        client.hgetall.return_value = {
+            "started_at": "not-a-date",
+            "completed_at": "2024-01-01T11:00:00+00:00",
+        }
+
+        with patch(
+            "ares.core.redis_client.create_verified_redis_client", AsyncMock(return_value=client)
+        ):
+            window = await get_operation_time_window("redis://example", "op-123")
+
+        assert window is None
+
+
 class TestMainFunction:
     """Tests for main() function."""
+
+    @pytest.mark.asyncio
+    async def test_main_returns_early_when_model_missing(self, tmp_path: Path):
+        """Test main exits before expensive setup when no model is configured."""
+        with patch("ares.main.logger") as mock_logger:
+            await main(args=Args(model="", once=True, report_dir=str(tmp_path)))
+
+        mock_logger.error.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_main_once_mode_no_alerts(self, tmp_path: Path):
@@ -136,7 +279,6 @@ class TestMainFunction:
             patch("ares.integrations.mitre.MITREAttackClient") as mock_mitre_class,
             patch("ares.core.alert_correlation.AlertCorrelator") as mock_correlator_class,
         ):
-            # Setup mocks
             mock_mitre = MagicMock()
             mock_mitre.load = AsyncMock()
             mock_mitre._techniques = {}
@@ -154,18 +296,11 @@ class TestMainFunction:
             mock_correlator = MagicMock()
             mock_correlator_class.return_value = mock_correlator
 
-            args = Args(
-                model="test-model",
-                once=True,
-                report_dir=str(tmp_path),
-            )
+            args = Args(model="test-model", once=True, report_dir=str(tmp_path))
 
             await main(args=args)
 
-            # Verify MITRE client was loaded
             mock_mitre.load.assert_called_once()
-
-            # Verify cleanup was called
             mock_orchestrator._shutdown_mcp.assert_called_once()
 
     @pytest.mark.asyncio
@@ -178,7 +313,6 @@ class TestMainFunction:
             patch("ares.integrations.mitre.MITREAttackClient") as mock_mitre_class,
             patch("ares.core.alert_correlation.AlertCorrelator") as mock_correlator_class,
         ):
-            # Setup mocks
             mock_mitre = MagicMock()
             mock_mitre.load = AsyncMock()
             mock_mitre._techniques = {}
@@ -212,17 +346,10 @@ class TestMainFunction:
             mock_correlator.get_cluster_context.return_value = {"related_alerts": 0}
             mock_correlator_class.return_value = mock_correlator
 
-            # Disable auto_route to test monolithic path
-            args = Args(
-                model="test-model",
-                once=True,
-                report_dir=str(tmp_path),
-                auto_route=False,
-            )
+            args = Args(model="test-model", once=True, report_dir=str(tmp_path), auto_route=False)
 
             await main(args=args)
 
-            # Verify investigation was called
             mock_orchestrator.investigate.assert_called_once()
 
     @pytest.mark.asyncio
@@ -241,7 +368,6 @@ class TestMainFunction:
             mock_mitre._tactics = {}
             mock_mitre_class.return_value = mock_mitre
 
-            # Infrastructure alert that should be skipped
             infra_alert = {
                 "fingerprint": "infra-fp-001",
                 "labels": {"alertname": "DatasourceNoData", "severity": "high"},
@@ -258,15 +384,10 @@ class TestMainFunction:
             mock_correlator = MagicMock()
             mock_correlator_class.return_value = mock_correlator
 
-            args = Args(
-                model="test-model",
-                once=True,
-                report_dir=str(tmp_path),
-            )
+            args = Args(model="test-model", once=True, report_dir=str(tmp_path))
 
             await main(args=args)
 
-            # Verify investigation was NOT called for infrastructure alert
             mock_orchestrator.investigate.assert_not_called()
 
 
@@ -306,7 +427,6 @@ class TestInvestigateAlertCommand:
     @pytest.mark.asyncio
     async def test_investigate_alert_file_path(self, tmp_path: Path):
         """Test investigate_alert with file path input."""
-        # Create alert file
         alert_file = tmp_path / "alert.json"
         alert_data = {"labels": {"alertname": "FileAlert"}}
         alert_file.write_text(json.dumps(alert_data))
@@ -337,13 +457,116 @@ class TestInvestigateAlertCommand:
 
             mock_orchestrator.investigate.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_investigate_alert_requires_redis_for_forced_multi_agent(self, tmp_path: Path):
+        """Test investigate_alert exits early when multi-agent is forced without Redis."""
+        alert_json = json.dumps({"labels": {"alertname": "TestAlert", "severity": "critical"}})
+
+        with (
+            patch("ares.main.dn.configure"),
+            patch("ares.integrations.mitre.MITREAttackClient") as mock_mitre_class,
+            patch("ares.main.logger") as mock_logger,
+            patch("ares.core.config.get_redis_url", return_value=""),
+        ):
+            mock_mitre = MagicMock()
+            mock_mitre.load = AsyncMock()
+            mock_mitre_class.return_value = mock_mitre
+
+            await investigate_alert(
+                alert_json,
+                args=Args(model="test-model", report_dir=str(tmp_path), multi_agent=True),
+            )
+
+        mock_logger.error.assert_called()
+
+
+class TestWorkerCommands:
+    """Tests for worker command entry points."""
+
+    @pytest.mark.asyncio
+    async def test_worker_rejects_invalid_role(self):
+        """Test worker returns early for invalid roles."""
+        with patch("ares.main.logger") as mock_logger:
+            await worker("bad-role")
+
+        mock_logger.error.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_worker_runs_with_discovered_defaults(self):
+        """Test worker delegates to run_worker with mapped AgentRole."""
+        config = MagicMock(redis_url="redis://example")
+        agent_config = MagicMock(model="cfg-model", max_steps=42)
+        run_worker_mock = AsyncMock()
+
+        with (
+            patch("ares.main.dn.configure"),
+            patch("ares.core.config.load_config", return_value=config),
+            patch("ares.core.config.get_agent_config", return_value=agent_config),
+            patch("ares.core.worker.run_worker", run_worker_mock),
+        ):
+            await worker("recon", operation_id="op-1")
+
+        run_worker_mock.assert_awaited_once()
+        assert run_worker_mock.await_args.kwargs["operation_id"] == "op-1"
+
+    @pytest.mark.asyncio
+    async def test_blue_worker_normalizes_hyphenated_role(self):
+        """Test blue_worker normalizes hyphenated role names before dispatch."""
+        config = MagicMock(redis_url="redis://example")
+        run_blue_worker_mock = AsyncMock()
+
+        with (
+            patch("ares.main.dn.configure"),
+            patch("ares.core.config.load_config", return_value=config),
+            patch("ares.core.blue_worker.run_blue_worker", run_blue_worker_mock),
+            patch("ares.core.blue_worker.run_blue_global_worker", AsyncMock()),
+        ):
+            await blue_worker("threat-hunter", investigation_id="inv-1")
+
+        run_blue_worker_mock.assert_awaited_once()
+        assert run_blue_worker_mock.await_args.kwargs["investigation_id"] == "inv-1"
+
+    @pytest.mark.asyncio
+    async def test_blue_worker_uses_global_pool_when_enabled(self):
+        """Test blue_worker calls global worker entry point when env flag is set."""
+        config = MagicMock(redis_url="redis://example")
+        run_global_mock = AsyncMock()
+
+        with (
+            patch.dict("os.environ", {"ARES_BLUE_GLOBAL_POOL": "true"}, clear=False),
+            patch("ares.main.dn.configure"),
+            patch("ares.core.config.load_config", return_value=config),
+            patch("ares.core.blue_worker.run_blue_global_worker", run_global_mock),
+            patch("ares.core.blue_worker.run_blue_worker", AsyncMock()),
+        ):
+            await blue_worker("triage", investigation_id="inv-1")
+
+        run_global_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_multi_agent_returns_when_no_target_ips_present(self, tmp_path: Path):
+        """Test multi_agent exits before orchestration if target IP list is empty."""
+        config = MagicMock(redis_url="redis://example", namespace="default")
+
+        with (
+            patch("ares.main.dn.configure"),
+            patch("ares.core.config.load_config", return_value=config),
+            patch("ares.main.logger") as mock_logger,
+        ):
+            await multi_agent(
+                "contoso.local",
+                " , ",
+                args=Args(model="test-model", report_dir=str(tmp_path)),
+            )
+
+        mock_logger.error.assert_called_once()
+
 
 class TestAppObject:
     """Tests for the cyclopts app object."""
 
     def test_app_name(self):
         """Test app has correct name."""
-        # cyclopts App name is stored as a tuple
         assert "ares" in app.name
 
     def test_app_help_text(self):
@@ -365,16 +588,12 @@ class TestEvalArgsDataclass:
         assert eval_args.min_ioc_rate == 0.5
         assert eval_args.min_technique_rate == 0.5
         assert eval_args.parallel == 1
-        # New multi-agent fields
         assert eval_args.multi_agent is False
         assert eval_args.redis_url == ""
 
     def test_multi_agent_values(self):
         """Test EvalArgs accepts multi-agent configuration."""
-        eval_args = EvalArgs(
-            multi_agent=True,
-            redis_url="redis://localhost:6379",
-        )
+        eval_args = EvalArgs(multi_agent=True, redis_url="redis://localhost:6379")
         assert eval_args.multi_agent is True
         assert eval_args.redis_url == "redis://localhost:6379"
 
@@ -382,40 +601,49 @@ class TestEvalArgsDataclass:
 class TestShouldUseMultiAgent:
     """Tests for severity-based multi-agent routing."""
 
-    def test_critical_severity_uses_multi_agent(self):
-        """Critical severity should use multi-agent."""
-        assert should_use_multi_agent("critical") is True
-        assert should_use_multi_agent("CRITICAL") is True
-        assert should_use_multi_agent("Critical") is True
+    @pytest.mark.parametrize(
+        "severity",
+        [
+            pytest.param("critical", id="critical-lower"),
+            pytest.param("CRITICAL", id="critical-upper"),
+            pytest.param("Critical", id="critical-title"),
+            pytest.param("high", id="high-lower"),
+            pytest.param("HIGH", id="high-upper"),
+            pytest.param("High", id="high-title"),
+        ],
+    )
+    def test_high_severities_use_multi_agent(self, severity: str):
+        """High and critical severities should route to multi-agent."""
+        assert should_use_multi_agent(severity) is True
 
-    def test_high_severity_uses_multi_agent(self):
-        """High severity should use multi-agent."""
-        assert should_use_multi_agent("high") is True
-        assert should_use_multi_agent("HIGH") is True
-        assert should_use_multi_agent("High") is True
+    @pytest.mark.parametrize(
+        "severity",
+        [
+            pytest.param("medium", id="medium"),
+            pytest.param("MEDIUM", id="medium-upper"),
+            pytest.param("low", id="low"),
+            pytest.param("LOW", id="low-upper"),
+            pytest.param("warning", id="warning"),
+            pytest.param("info", id="info"),
+            pytest.param("", id="empty"),
+        ],
+    )
+    def test_other_severities_use_monolithic(self, severity: str):
+        """Non-high severities should stay on the single-agent path."""
+        assert should_use_multi_agent(severity) is False
 
-    def test_medium_severity_uses_monolithic(self):
-        """Medium severity should use monolithic."""
-        assert should_use_multi_agent("medium") is False
-        assert should_use_multi_agent("MEDIUM") is False
-
-    def test_low_severity_uses_monolithic(self):
-        """Low severity should use monolithic."""
-        assert should_use_multi_agent("low") is False
-        assert should_use_multi_agent("LOW") is False
-
-    def test_unknown_severity_uses_monolithic(self):
-        """Unknown severity should use monolithic."""
-        assert should_use_multi_agent("warning") is False
-        assert should_use_multi_agent("info") is False
-        assert should_use_multi_agent("") is False
-
-    def test_force_multi_agent_overrides_severity(self):
+    @pytest.mark.parametrize(
+        "severity",
+        [
+            pytest.param("low", id="low"),
+            pytest.param("medium", id="medium"),
+            pytest.param("high", id="high"),
+            pytest.param("critical", id="critical"),
+        ],
+    )
+    def test_force_multi_agent_overrides_severity(self, severity: str):
         """force_multi_agent=True should always use multi-agent."""
-        assert should_use_multi_agent("low", force_multi_agent=True) is True
-        assert should_use_multi_agent("medium", force_multi_agent=True) is True
-        assert should_use_multi_agent("high", force_multi_agent=True) is True
-        assert should_use_multi_agent("critical", force_multi_agent=True) is True
+        assert should_use_multi_agent(severity, force_multi_agent=True) is True
 
 
 class TestHighSeverityLevels:
@@ -472,27 +700,20 @@ class TestMergeAlerts:
 
     def test_merge_deduplicates_by_fingerprint(self):
         """Test that alerts with same fingerprint are deduplicated."""
-        firing = [
-            {"fingerprint": "fp-1", "labels": {"alertname": "Alert1-Firing"}},
-        ]
+        firing = [{"fingerprint": "fp-1", "labels": {"alertname": "Alert1-Firing"}}]
         historical = [
             {"fingerprint": "fp-1", "labels": {"alertname": "Alert1-Historical"}},
             {"fingerprint": "fp-2", "labels": {"alertname": "Alert2"}},
         ]
         result = merge_alerts(firing, historical)
         assert len(result) == 2
-        # Firing alert should take priority
         assert result[0]["labels"]["alertname"] == "Alert1-Firing"
         assert result[1]["fingerprint"] == "fp-2"
 
     def test_merge_preserves_order(self):
         """Test that firing alerts appear before historical."""
-        firing = [
-            {"fingerprint": "fp-1", "labels": {"alertname": "Firing1"}},
-        ]
-        historical = [
-            {"fingerprint": "fp-2", "labels": {"alertname": "Historical1"}},
-        ]
+        firing = [{"fingerprint": "fp-1", "labels": {"alertname": "Firing1"}}]
+        historical = [{"fingerprint": "fp-2", "labels": {"alertname": "Historical1"}}]
         result = merge_alerts(firing, historical)
         assert result[0]["fingerprint"] == "fp-1"
         assert result[1]["fingerprint"] == "fp-2"

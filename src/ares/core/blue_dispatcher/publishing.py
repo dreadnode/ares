@@ -79,14 +79,16 @@ class BluePublishingMixin:
             user: User account used.
             mitre_technique: Associated MITRE technique.
         """
+        source_norm = source.strip().lower()
+        destination_norm = destination.strip().lower()
         connection = {
-            "source": source,
-            "destination": destination,
+            "source": source_norm,
+            "destination": destination_norm,
             "connection_type": connection_type,
             "user": user,
             "mitre_technique": mitre_technique,
         }
         await self._backend.add_lateral_connection(connection)
-        await self._backend.track_host(source.strip().lower())
-        await self._backend.track_host(destination.strip().lower())
-        logger.debug(f"Published lateral: {source} -> {destination} ({connection_type})")
+        await self._backend.track_host(source_norm)
+        await self._backend.track_host(destination_norm)
+        logger.debug(f"Published lateral: {source_norm} -> {destination_norm} ({connection_type})")

@@ -19,7 +19,7 @@ from loguru import logger
 
 # Suppress DEBUG/INFO logs from noisy modules in CLI output
 def _cli_log_filter(record):
-    """Filter out DEBUG/INFO from noisy modules."""
+    """Return whether a log record should be shown in CLI output."""
     module = record["name"]
     level = record["level"].no
     if module in {"ares.cli_history", "__main__"}:
@@ -38,10 +38,7 @@ app = cyclopts.App(
 
 
 def _check_enabled():
-    """Check if persistent store is enabled.
-
-    Exits with code 1 if ARES_DATABASE_URL is not set.
-    """
+    """Exit if the persistent store is not configured."""
     from ares.core.persistent_store import get_persistent_store_config
 
     config = get_persistent_store_config()
@@ -578,7 +575,7 @@ async def _apply_retention():
 
 
 def main():
-    """Entry point for the CLI."""
+    """Run the ares-history CLI application."""
     app()
 
 

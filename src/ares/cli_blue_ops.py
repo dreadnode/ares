@@ -14,7 +14,7 @@ from loguru import logger
 
 # Suppress DEBUG/INFO logs from noisy modules in CLI output.
 def _cli_log_filter(record):
-    """Filter out DEBUG/INFO from noisy modules, keep all from cli_blue_ops."""
+    """Return whether a log record should be shown in CLI output."""
     module = record["name"]
     level = record["level"].no
     if module in {"ares.cli_blue_ops", "__main__"}:
@@ -1378,7 +1378,7 @@ async def triage_status(
 
 
 def main():
-    """Entry point."""
+    """Run the ares-blue-ops CLI application."""
     app()
 
 
