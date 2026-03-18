@@ -19,7 +19,7 @@ from ares.core.messages import (
 
 
 @pytest.mark.parametrize(
-    "generator,prefix",
+    ("generator", "prefix"),
     [
         pytest.param(generate_message_id, "msg-", id="message-id"),
         pytest.param(generate_task_id, "task-", id="task-id"),
@@ -61,7 +61,7 @@ def test_crack_request_defaults_include_generated_task_id_and_wordlist():
 
 
 @pytest.mark.parametrize(
-    "message_type,kwargs,expected_type",
+    ("message_type", "kwargs", "expected_type"),
     [
         pytest.param(
             MessageType.CRACK_REQUEST,

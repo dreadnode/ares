@@ -79,7 +79,7 @@ class TestSharedInvestigationToolsRecordEvidence:
         shared_tools.set_backend(backend)
         shared_tools.set_mitre_client(
             SimpleNamespace(
-                get_technique=lambda technique_id: SimpleNamespace(
+                get_technique=lambda _technique_id: SimpleNamespace(
                     name="Command and Scripting Interpreter",
                     tactic="execution",
                 )
@@ -152,7 +152,7 @@ class TestSharedInvestigationToolsTimelineAndTracking:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "method_name,input_value,expected_call,expected_message",
+        ("method_name", "input_value", "expected_call", "expected_message"),
         [
             pytest.param(
                 "track_host_investigation",

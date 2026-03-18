@@ -8,7 +8,7 @@ from ares.core.logging_utils import truncate_output
 
 
 @pytest.mark.parametrize(
-    "raw_value,expected",
+    ("raw_value", "expected"),
     [
         pytest.param("", "", id="empty-string"),
         pytest.param("   ", "", id="whitespace-only"),
