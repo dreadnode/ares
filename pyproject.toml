@@ -16,7 +16,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "dreadnode>=1.17.0,<2.0.0",
+    "dreadnode>=2.0.1,<2.1.0",
     "cyclopts>=4.2.0",
     "loguru>=0.7.3",
     "httpx>=0.28.0,<1.0.0",
