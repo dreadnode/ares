@@ -78,7 +78,10 @@ async def test_publish_technique_adds_tactic_only_when_present() -> None:
         await harness.publish_technique("T1059", name="Command and Scripting Interpreter")
         await harness.publish_technique("T1078", name="Valid Accounts", tactic="initial-access")
 
-    assert backend.add_technique.await_args_list[0].args == ("T1059", "Command and Scripting Interpreter")
+    assert backend.add_technique.await_args_list[0].args == (
+        "T1059",
+        "Command and Scripting Interpreter",
+    )
     assert backend.add_technique.await_args_list[1].args == ("T1078", "Valid Accounts")
     backend.add_tactic.assert_awaited_once_with("initial-access")
     assert debug_mock.call_count == 2

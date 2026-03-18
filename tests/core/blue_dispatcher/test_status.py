@@ -102,9 +102,7 @@ async def test_get_task_status_serializes_pending_and_completed_tasks() -> None:
                 "ignored": "value",
             }
         },
-        "completed_tasks": {
-            "task-b": {"task_id": "task-b", "success": True, "details": "done"}
-        },
+        "completed_tasks": {"task-b": {"task_id": "task-b", "success": True, "details": "done"}},
     }
     harness = StatusHarness(backend)
 

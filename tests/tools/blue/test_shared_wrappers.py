@@ -27,7 +27,9 @@ class TestSharedInvestigationToolsRecordEvidence:
     """Tests for shared evidence recording helpers."""
 
     @pytest.mark.asyncio
-    async def test_record_evidence_requires_backend(self, shared_tools: SharedInvestigationTools) -> None:
+    async def test_record_evidence_requires_backend(
+        self, shared_tools: SharedInvestigationTools
+    ) -> None:
         """record_evidence reports a configuration error when no backend is set."""
         result = await shared_tools.record_evidence(
             evidence_type="ip",
@@ -49,15 +51,19 @@ class TestSharedInvestigationToolsRecordEvidence:
         shared_tools.set_backend(backend)
         backend.add_evidence.return_value = False
 
-        with patch(
-            "ares.tools.blue.shared_wrappers.validate_evidence_value",
-            autospec=True,
-            return_value=(True, "query-1"),
-        ), patch(
-            "ares.tools.blue.shared_wrappers.adjust_confidence_for_validation",
-            autospec=True,
-            return_value=0.8,
-        ), patch("ares.tools.blue.shared_wrappers.dn.log_metric", autospec=True):
+        with (
+            patch(
+                "ares.tools.blue.shared_wrappers.validate_evidence_value",
+                autospec=True,
+                return_value=(True, "query-1"),
+            ),
+            patch(
+                "ares.tools.blue.shared_wrappers.adjust_confidence_for_validation",
+                autospec=True,
+                return_value=0.8,
+            ),
+            patch("ares.tools.blue.shared_wrappers.dn.log_metric", autospec=True),
+        ):
             result = await shared_tools.record_evidence(
                 evidence_type="domain",
                 value="example.com",
@@ -87,15 +93,19 @@ class TestSharedInvestigationToolsRecordEvidence:
         )
         backend.add_evidence.return_value = True
 
-        with patch(
-            "ares.tools.blue.shared_wrappers.validate_evidence_value",
-            autospec=True,
-            return_value=(False, "query-99"),
-        ), patch(
-            "ares.tools.blue.shared_wrappers.adjust_confidence_for_validation",
-            autospec=True,
-            return_value=0.25,
-        ), patch("ares.tools.blue.shared_wrappers.dn.log_metric", autospec=True) as metric_mock:
+        with (
+            patch(
+                "ares.tools.blue.shared_wrappers.validate_evidence_value",
+                autospec=True,
+                return_value=(False, "query-99"),
+            ),
+            patch(
+                "ares.tools.blue.shared_wrappers.adjust_confidence_for_validation",
+                autospec=True,
+                return_value=0.25,
+            ),
+            patch("ares.tools.blue.shared_wrappers.dn.log_metric", autospec=True) as metric_mock,
+        ):
             result = await shared_tools.record_evidence(
                 evidence_type="tool",
                 value="mimikatz.exe",
@@ -113,9 +123,7 @@ class TestSharedInvestigationToolsRecordEvidence:
         assert stored_payload["validated"] is False
         assert stored_payload["source_query_id"] == "query-99"
         backend.add_tactic.assert_awaited_once_with("execution")
-        backend.add_technique.assert_awaited_once_with(
-            "T1059", "Command and Scripting Interpreter"
-        )
+        backend.add_technique.assert_awaited_once_with("T1059", "Command and Scripting Interpreter")
         assert metric_mock.call_count == 2
         assert "Recorded evidence: ev-0001" in result
         assert "Techniques: T1059" in result
@@ -134,8 +142,9 @@ class TestSharedInvestigationToolsTimelineAndTracking:
         """Invalid timeline timestamps fall back to current UTC time."""
         shared_tools.set_backend(backend)
 
-        with patch("ares.tools.blue.shared_wrappers.dn.log_metric", autospec=True), patch(
-            "ares.tools.blue.shared_wrappers.logger.info", autospec=True
+        with (
+            patch("ares.tools.blue.shared_wrappers.dn.log_metric", autospec=True),
+            patch("ares.tools.blue.shared_wrappers.logger.info", autospec=True),
         ):
             event_id = await shared_tools.add_timeline_event(
                 timestamp="not-a-timestamp",
@@ -184,7 +193,9 @@ class TestSharedInvestigationToolsTimelineAndTracking:
 
         result = await getattr(shared_tools, method_name)(input_value)
 
-        track_mock = backend.track_host if method_name == "track_host_investigation" else backend.track_user
+        track_mock = (
+            backend.track_host if method_name == "track_host_investigation" else backend.track_user
+        )
         track_mock.assert_awaited_once_with(expected_call)
         assert expected_message in result
 
@@ -234,7 +245,9 @@ class TestSharedInvestigationToolsReadHelpers:
     """Tests for shared read/query helper methods."""
 
     @pytest.mark.asyncio
-    async def test_read_helpers_require_backend(self, shared_tools: SharedInvestigationTools) -> None:
+    async def test_read_helpers_require_backend(
+        self, shared_tools: SharedInvestigationTools
+    ) -> None:
         """Read helper methods return error payloads when backend is missing."""
         summary = await shared_tools.get_investigation_summary()
         queued = await shared_tools.get_queued_queries()
