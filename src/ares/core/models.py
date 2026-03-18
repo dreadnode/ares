@@ -2613,7 +2613,9 @@ class SharedRedTeamState:
         if hash_type == "ntlm" and username == "krbtgt":
             # Track which domains we have DA on (for multi-forest mode)
             domain_lower = domain.lower()
-            if domain_lower not in self.domain_admin_domains:
+            is_new_domain = domain_lower not in self.domain_admin_domains
+
+            if is_new_domain:
                 self.domain_admin_domains.append(domain_lower)
                 logger.info(f"Domain admin achieved on: {domain_lower}")
 
@@ -2621,43 +2623,46 @@ class SharedRedTeamState:
             if not self.has_domain_admin:
                 self.has_domain_admin = True
                 self.da_hash_id = hash_obj.id  # Store the ID for consistent attack chain building
+
+            # Only log, add weakness, and trace for NEW domain DA achievements
             # NOTE: Do NOT set completed_at here - that's controlled by stop_on_domain_admin
             # or stop_on_golden_ticket config in announcements.py
-            # Build attack path from credential chain instead of hardcoding
-            attack_chain = self.format_attack_chain(hash_obj)
-            self.domain_admin_path = attack_chain
-            logger.success(
-                f"🏆 DOMAIN ADMIN AUTO-DETECTED: {domain}\\{username} NTLM hash "
-                f"found in state (source: {source_agent})"
-            )
-            logger.info(f"Attack chain: {attack_chain}")
-            self.add_weakness(
-                f"### Domain Admin Achieved — krbtgt NTLM hash extracted\n"
-                f"**Attack Path:** {attack_chain}\n"
-                f"**Vulnerability:** krbtgt hash extracted via DCSync or ntds.dit dump, "
-                f"enabling Golden Ticket attacks.\n"
-                f"- **Affected Resource:** {domain} domain\n"
-                f"- **Discovery Method:** {source_agent}\n"
-                f"- **Impact:** Complete domain compromise. Golden Tickets grant indefinite DA access."
-            )
+            if is_new_domain:
+                # Build attack path from credential chain instead of hardcoding
+                attack_chain = self.format_attack_chain(hash_obj)
+                self.domain_admin_path = attack_chain
+                logger.success(
+                    f"🏆 DOMAIN ADMIN AUTO-DETECTED: {domain}\\{username} NTLM hash "
+                    f"found in state (source: {source_agent})"
+                )
+                logger.info(f"Attack chain: {attack_chain}")
+                self.add_weakness(
+                    f"### Domain Admin Achieved — krbtgt NTLM hash extracted\n"
+                    f"**Attack Path:** {attack_chain}\n"
+                    f"**Vulnerability:** krbtgt hash extracted via DCSync or ntds.dit dump, "
+                    f"enabling Golden Ticket attacks.\n"
+                    f"- **Affected Resource:** {domain} domain\n"
+                    f"- **Discovery Method:** {source_agent}\n"
+                    f"- **Impact:** Complete domain compromise. Golden Tickets grant indefinite DA access."
+                )
 
-            # Trace the domain admin achievement for OpenTelemetry
-            # This is critical for Grafana dashboards to show DA as achieved
-            from ares.core.tracing import trace_discovery
+                # Trace the domain admin achievement for OpenTelemetry
+                # This is critical for Grafana dashboards to show DA as achieved
+                from ares.core.tracing import trace_discovery
 
-            trace_discovery(
-                discovery_type="domain_admin",
-                source_agent=source_agent or "auto-detect",
-                operation_id=self.operation_id,
-                target_user="krbtgt",
-                target_domain=domain,
-                additional_attrs={
-                    "attack_path": attack_chain,
-                    "credential_type": "ntlm_hash",
-                    "mitre.technique.id": "T1003.006",  # DCSync/credential dumping
-                    "auto_detected": True,
-                },
-            )
+                trace_discovery(
+                    discovery_type="domain_admin",
+                    source_agent=source_agent or "auto-detect",
+                    operation_id=self.operation_id,
+                    target_user="krbtgt",
+                    target_domain=domain,
+                    additional_attrs={
+                        "attack_path": attack_chain,
+                        "credential_type": "ntlm_hash",
+                        "mitre.technique.id": "T1003.006",  # DCSync/credential dumping
+                        "auto_detected": True,
+                    },
+                )
 
         # Persist to Redis backend if available and in the correct event loop
         if self._can_persist_to_backend():

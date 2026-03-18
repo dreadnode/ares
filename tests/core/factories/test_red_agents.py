@@ -96,7 +96,7 @@ def test_create_specialized_agent_uses_set_state(monkeypatch):
     )
     monkeypatch.setattr(
         "ares.core.factories.red_agents.load_agent_instructions",
-        lambda _role, _shared_state=None: "instructions",
+        lambda _role, **_kwargs: "instructions",
     )
     monkeypatch.setattr(
         "ares.core.factories.red_agents.create_role_hooks",
