@@ -2,6 +2,9 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
 version: "3"
 
+# Load .env for API keys (red:multi:local needs OPENAI_API_KEY)
+dotenv: [".env"]
+
 includes:
   aws: "https://raw.githubusercontent.com/CowDogMoo/taskfile-templates/main/aws/Taskfile.yaml"
   github: "https://raw.githubusercontent.com/CowDogMoo/taskfile-templates/main/github/Taskfile.yaml"

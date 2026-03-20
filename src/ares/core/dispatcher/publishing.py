@@ -337,6 +337,13 @@ class PublishingMixin:
                         logger.success(
                             "✅ Domain Admin status persisted directly to Redis (krbtgt found)"
                         )
+                        # Auto-dispatch trust key extraction for multi-forest mode
+                        # This runs from threaded consumer, so we dispatch directly to Redis
+                        await self._auto_dispatch_trust_key_extraction_threaded(
+                            da_domain=hash_obj.domain or "",
+                            task_queue=task_queue,
+                            source_agent=source_agent,
+                        )
                     logger.debug(
                         f"✅ Hash persisted directly to Redis: "
                         f"{hash_obj.domain}\\{hash_obj.username}"
@@ -1257,6 +1264,138 @@ class PublishingMixin:
                 logger.info(f"Loaded {len(dispatched)} MSSQL enum dispatch entries from Redis")
         except Exception as e:
             logger.warning(f"Failed to load MSSQL enum dispatch tracking: {e}")
+
+    async def _auto_dispatch_trust_key_extraction_threaded(
+        self: RedTeamDispatcher,
+        da_domain: str,
+        task_queue: Any,
+        source_agent: str,
+    ) -> None:
+        """Auto-dispatch trust key extraction for multi-forest mode (from threaded consumer).
+
+        When DA is achieved on a domain and other forests remain undominated,
+        this dispatches trust key extraction tasks directly to Redis.
+
+        This is called from the threaded result consumer when krbtgt hash is found.
+        Since we're not on the main thread, we dispatch directly to Redis queue
+        instead of using the dispatcher's _throttled_submit_task().
+
+        Args:
+            da_domain: Domain where we just achieved DA.
+            task_queue: Task queue with Redis client for direct dispatch.
+            source_agent: Agent that found the krbtgt hash.
+        """
+        from ares.core.config import get_multi_forest_mode
+
+        if not get_multi_forest_mode():
+            return
+
+        if not task_queue:
+            logger.warning("Cannot dispatch trust key extraction: no task_queue available")
+            return
+
+        # Check undominated forests
+        if self.shared_state.all_forests_dominated():
+            logger.info("MULTI_FOREST_MODE: All forests dominated, no trust key extraction needed")
+            return
+
+        undominated = self.shared_state.get_undominated_forests()
+        if not undominated:
+            return
+
+        logger.info(f"MULTI_FOREST_MODE: {len(undominated)} forest(s) remaining: {undominated}")
+
+        # Get DC IP for the domain where we have DA
+        da_domain_lower = da_domain.lower()
+        dc_ip = self.shared_state.domain_controllers.get(da_domain_lower)
+        if not dc_ip:
+            logger.warning(f"Cannot dispatch trust key extraction: no DC IP for {da_domain}")
+            return
+
+        # Find DA credential (Administrator NTLM hash preferred)
+        da_hash = None
+        da_password = None
+        da_username = "Administrator"
+
+        # Look for Administrator hash
+        for h in self.shared_state.all_hashes:
+            if (
+                h.username.lower() == "administrator"
+                and h.domain
+                and h.domain.lower() == da_domain_lower
+                and (h.hash_type or "").lower() == "ntlm"
+            ):
+                da_hash = h.hash_value
+                break
+
+        # Fallback to password credential
+        if not da_hash:
+            for cred in self.shared_state.all_credentials:
+                if (
+                    cred.domain
+                    and cred.domain.lower() == da_domain_lower
+                    and cred.password
+                    and cred.username.lower() == "administrator"
+                ):
+                    da_password = cred.password
+                    da_username = cred.username
+                    break
+
+        if not da_hash and not da_password:
+            logger.warning(
+                f"Cannot dispatch trust key extraction: no DA credentials for {da_domain}"
+            )
+            return
+
+        # Dispatch trust key extraction for each undominated forest
+        import json
+        import uuid
+
+        for target_forest in undominated:
+            # Dedup key to prevent re-dispatch on restart
+            dedup_key = f"{da_domain_lower}:{target_forest.lower()}"
+            if dedup_key in self.shared_state.processed_trust_extractions:
+                logger.debug(f"Trust key extraction already dispatched: {dedup_key}")
+                continue
+
+            self.shared_state.processed_trust_extractions.add(dedup_key)
+
+            # Build task payload (must match exploit prompt format)
+            task_payload = {
+                "vuln_type": "trust_key_extraction",
+                "target": dc_ip,
+                "domain": da_domain,
+                "username": da_username,
+                "password": da_hash or da_password,
+                "dc_ip": dc_ip,
+                "trusted_domain": target_forest,
+                "use_hash": bool(da_hash),
+            }
+
+            task_id = f"trust_extraction_{uuid.uuid4().hex[:12]}"
+            task_data = {
+                "task_id": task_id,
+                "task_type": "exploit",
+                "target_agent": "privesc",
+                "payload": task_payload,
+                "source_agent": "auto_trust_extraction",
+                "priority": 1,  # High priority
+            }
+
+            logger.warning(
+                f"🌲 Auto-dispatching trust key extraction: {da_domain} → {target_forest} "
+                f"(DC: {dc_ip}, using {'hash' if da_hash else 'password'})"
+            )
+
+            try:
+                # Submit directly to privesc queue (where KerberosTools lives)
+                await task_queue.redis.lpush(
+                    "ares:tasks:privesc",
+                    json.dumps(task_data),
+                )
+                logger.info(f"Trust key extraction task {task_id} submitted to Redis queue")
+            except Exception as e:
+                logger.error(f"Failed to dispatch trust key extraction: {e}")
 
 
 __all__ = ["PublishingMixin"]

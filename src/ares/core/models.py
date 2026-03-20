@@ -1032,6 +1032,7 @@ class SharedRedTeamState:
         A foreign domain is one that:
         1. Is different from the target domain
         2. Is NOT a child of the target domain (i.e., a separate forest)
+        3. Is validated by authoritative sources (hosts, trusts, users)
 
         Returns:
             Set of foreign domain FQDNs.
@@ -1039,10 +1040,32 @@ class SharedRedTeamState:
         target_domain = self.target.domain.lower() if self.target else ""
         foreign: set[str] = set()
 
+        # Build set of validated domains from authoritative sources
+        validated_domains: set[str] = set()
+        if target_domain:
+            validated_domains.add(target_domain)
+
+        # From hosts (extract domain from FQDN) - authoritative
+        for host in self.all_hosts:
+            if host.hostname and "." in host.hostname:
+                parts = host.hostname.lower().split(".")
+                if len(parts) > 1:
+                    validated_domains.add(".".join(parts[1:]))
+
+        # From users - authoritative
+        for user in self.all_users:
+            if user.domain:
+                validated_domains.add(user.domain.lower())
+
+        # From explicit trusts - authoritative
+        for td in self.trusted_domains:
+            validated_domains.add(td.lower())
+
         # Log inputs for debugging
         logger.info(
             f"_get_foreign_domains called: target={target_domain}, "
-            f"all_domains={self.all_domains}, trusted_domains={self.trusted_domains}"
+            f"all_domains={self.all_domains}, trusted_domains={self.trusted_domains}, "
+            f"validated_domains={validated_domains}"
         )
 
         # Add explicitly discovered trusted domains
@@ -1051,13 +1074,21 @@ class SharedRedTeamState:
             if td_lower != target_domain and not td_lower.endswith("." + target_domain):
                 foreign.add(td_lower)
 
-        # Add domains discovered from host enumeration that are foreign
+        # Add domains from all_domains ONLY if validated by authoritative sources
+        # This filters out typos from LLM parsing of credential/hash output
         for domain in self.all_domains:
             domain_lower = domain.lower()
             # Skip target domain and its children
             if domain_lower == target_domain:
                 continue
             if domain_lower.endswith("." + target_domain):
+                continue
+            # Only include if validated by authoritative source
+            if domain_lower not in validated_domains:
+                logger.warning(
+                    f"Skipping unvalidated domain '{domain_lower}' - "
+                    f"not corroborated by hosts/users/trusts"
+                )
                 continue
             # A domain is foreign if it's not in the same namespace as target
             foreign.add(domain_lower)

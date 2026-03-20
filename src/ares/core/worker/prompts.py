@@ -804,6 +804,40 @@ def _generate_exploit_prompt(
         state_context = format_state_context(state, "exploit", current_target=target)
         return unconstrained_prompt + state_context
 
+    # Special handling for trust key extraction (multi-forest mode)
+    if vuln_type == "trust_key_extraction":
+        domain = payload.get("domain", "")
+        username = payload.get("username", "Administrator")
+        password = payload.get("password", "")
+        dc_ip = payload.get("dc_ip", target)
+        trusted_domain = payload.get("trusted_domain", "")
+        use_hash = payload.get("use_hash", False)
+
+        trust_prompt = (
+            f"**TRUST KEY EXTRACTION (Multi-Forest Escalation)**\n\n"
+            f"Source Domain (owned): {domain}\n"
+            f"Target Forest: {trusted_domain}\n"
+            f"DC IP: {dc_ip}\n"
+            f"Credentials: {domain}\\{username}\n"
+            f"Auth type: {'NTLM hash' if use_hash else 'password'}\n"
+            f"Task ID: {task.task_id}\n\n"
+            "**OBJECTIVE:** Extract the inter-realm trust key to pivot to the target forest.\n\n"
+            "**STEP 1 - Extract trust key:**\n"
+            f"Use extract_trust_key tool:\n"
+            f"  extract_trust_key(domain='{domain}', username='{username}', "
+            f"password='{password}', dc_ip='{dc_ip}', trusted_domain='{trusted_domain}'"
+            f"{', use_hash=True' if use_hash else ''})\n\n"
+            "**STEP 2 - If trust key obtained, forge inter-realm ticket:**\n"
+            f"Use forge_inter_realm_tgt to create ticket for {trusted_domain}\n\n"
+            "**STEP 3 - Use ticket to access target forest:**\n"
+            "- DCSync the target forest's krbtgt\n"
+            "- Or access resources in the target forest\n\n"
+            "**CRITICAL:** Report the trust key hash and any credentials obtained!\n"
+            "This enables full compromise of the target forest."
+        )
+        state_context = format_state_context(state, "exploit", current_target=target)
+        return trust_prompt + state_context
+
     # Special handling for ADCS ESC vulnerabilities
     vuln_type_lower = vuln_type.lower()
     if "esc1" in vuln_type_lower or "esc4" in vuln_type_lower or "esc8" in vuln_type_lower:

@@ -325,11 +325,14 @@ def load_config(config_path: str | Path | None = None) -> OperationConfig:
                 config_data = _load_yaml(path)
                 break
 
-    # Build config from loaded data
+    # Build config from loaded data (validation runs here but before env overrides)
     config = _build_config(config_data)
 
     # Override with environment variables
     config = _apply_env_overrides(config)
+
+    # Re-validate after env overrides (env vars can create invalid combinations)
+    _validate_stop_conditions(config)
 
     if config_path is None:
         _cached_config = config

@@ -442,32 +442,31 @@ async def exploitation_workflow(
                     f"DA achieved but multi-forest mode active - "
                     f"{len(undominated)} forest(s) remain: {', '.join(undominated)}"
                 )
-                # Don't break - continue exploiting to reach other forests
-                # Sleep briefly to avoid tight loop
-                await asyncio.sleep(1.0)
-                continue
+                # Don't break - fall through to vuln dispatch logic below
+                # This allows the workflow to continue exploiting to reach other forests
+            else:
+                # Single-forest mode OR all forests dominated - we're done
+                logger.success("Domain Admin achieved! Halting exploitation workflow.")
 
-            logger.success("Domain Admin achieved! Halting exploitation workflow.")
+                # Cancel all active exploitation tasks immediately
+                if active_tasks:
+                    logger.info(f"Cancelling {len(active_tasks)} active exploit tasks...")
+                    for task in list(active_tasks):
+                        if not task.done():
+                            task.cancel()
+                    # Wait briefly for cancellations to propagate
+                    await asyncio.gather(*active_tasks, return_exceptions=True)
+                    active_tasks.clear()
 
-            # Cancel all active exploitation tasks immediately
-            if active_tasks:
-                logger.info(f"Cancelling {len(active_tasks)} active exploit tasks...")
-                for task in list(active_tasks):
-                    if not task.done():
-                        task.cancel()
-                # Wait briefly for cancellations to propagate
-                await asyncio.gather(*active_tasks, return_exceptions=True)
-                active_tasks.clear()
-
-            # Only announce operation complete if NOT waiting for golden ticket
-            # If stop_on_golden_ticket is enabled, the operation continues past DA
-            if not get_stop_on_golden_ticket():
-                await dispatcher.announce_operation_complete(
-                    source_agent="exploitation_workflow",
-                    success=True,
-                    summary=f"Domain Admin achieved via {state.domain_admin_path or 'unknown'}",
-                )
-            break
+                # Only announce operation complete if NOT waiting for golden ticket
+                # If stop_on_golden_ticket is enabled, the operation continues past DA
+                if not get_stop_on_golden_ticket():
+                    await dispatcher.announce_operation_complete(
+                        source_agent="exploitation_workflow",
+                        success=True,
+                        summary=f"Domain Admin achieved via {state.domain_admin_path or 'unknown'}",
+                    )
+                break
 
         done_tasks = {t for t in active_tasks if t.done()}
         for task in done_tasks:

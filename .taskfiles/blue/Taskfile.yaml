@@ -32,7 +32,7 @@ tasks:
   # ===========================================================================
 
   poll:
-    desc: "Run blue team agent in poll mode (uses 1Password for API keys)"
+    desc: "Run blue team agent in poll mode (auto-detects .env or 1Password)"
     silent: true
     cmds:
       - |
@@ -50,6 +50,11 @@ tasks:
 
         mkdir -p {{.LOG_DIR}}
         LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
+        if [ -f .env ]; then
+          echo "Credentials: .env"
+        else
+          echo "Credentials: 1Password"
+        fi
         echo "Logging to: $LOGFILE"
 
         uv run python -m ares \
@@ -60,41 +65,6 @@ tasks:
           --args.report-dir {{.REPORT_DIR}} \
           --dn-args.server {{.DREADNODE_SERVER_URL}} \
           --dn-args.token "$DREADNODE_API_KEY" \
-          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
-          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.DREADNODE_PROJECT}} \
-          2>&1 | tee -a "$LOGFILE"
-
-  poll:local:
-    desc: "Run blue team agent in poll mode using .env file"
-    silent: true
-    preconditions:
-      - sh: test -f .env
-        msg: ".env file not found"
-    cmds:
-      - |
-        # Verify AWS auth
-        if ! aws sts get-caller-identity --profile "{{.PROFILE}}" --region "{{.REGION}}" >/dev/null 2>&1; then
-            echo "AWS authentication failed for profile: {{.PROFILE}}"
-            echo "Run: aws sso login --profile {{.PROFILE}}"
-            exit 1
-        fi
-
-        set -a
-        . ./.env
-        set +a
-
-        mkdir -p {{.LOG_DIR}}
-        LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
-        echo "Logging to: $LOGFILE"
-
-        uv run python -m ares \
-          --args.model "{{.MODEL_ARG}}" \
-          --args.grafana-url {{.GRAFANA_URL}} \
-          --args.poll-interval {{.POLL_INTERVAL}} \
-          --args.max-steps {{.MAX_STEPS_BLUE}} \
-          --args.report-dir {{.REPORT_DIR}} \
-          --dn-args.server {{.DREADNODE_SERVER_URL}} \
           --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
           --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
           --dn-args.project {{.DREADNODE_PROJECT}} \
@@ -122,6 +92,11 @@ tasks:
 
         mkdir -p {{.LOG_DIR}}
         LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
+        if [ -f .env ]; then
+          echo "Credentials: .env"
+        else
+          echo "Credentials: 1Password"
+        fi
         echo "Logging to: $LOGFILE"
 
         # Build operation context args
@@ -192,54 +167,6 @@ tasks:
           --dn-args.organization "{{.DREADNODE_ORGANIZATION}}" \
           --dn-args.workspace "{{.DREADNODE_WORKSPACE}}" \
           --dn-args.project "{{.DREADNODE_PROJECT}}"
-
-  once:local:
-    desc: "Run blue team agent once and exit using .env file (usage: task blue:once:local [OPERATION_ID=op-xxx] [LATEST=true])"
-    silent: true
-    vars:
-      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
-      LATEST: '{{.LATEST | default ""}}'
-    preconditions:
-      - sh: test -f .env
-        msg: ".env file not found"
-    cmds:
-      - |
-        # Verify AWS auth
-        if ! aws sts get-caller-identity --profile "{{.PROFILE}}" --region "{{.REGION}}" >/dev/null 2>&1; then
-            echo "AWS authentication failed for profile: {{.PROFILE}}"
-            echo "Run: aws sso login --profile {{.PROFILE}}"
-            exit 1
-        fi
-
-        set -a
-        . ./.env
-        set +a
-
-        mkdir -p {{.LOG_DIR}}
-        LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
-        echo "Logging to: $LOGFILE"
-
-        # Build operation context args
-        OP_ARGS=""
-        if [ "{{.LATEST}}" = "true" ]; then
-          OP_ARGS="--args.latest"
-        elif [ -n "{{.OPERATION_ID}}" ]; then
-          OP_ARGS="--args.operation-id {{.OPERATION_ID}}"
-        fi
-
-        uv run python -m ares \
-          --args.model "{{.MODEL_ARG}}" \
-          --args.grafana-url {{.GRAFANA_URL}} \
-          --args.poll-interval {{.POLL_INTERVAL}} \
-          --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
-          --args.report-dir {{.REPORT_DIR}} \
-          --args.once \
-          $OP_ARGS \
-          --dn-args.server {{.DREADNODE_SERVER_URL}} \
-          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
-          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.DREADNODE_PROJECT}} \
-          2>&1 | tee -a "$LOGFILE"
 
   investigate:
     desc: "Investigate a specific alert from JSON file (usage: task blue:investigate ALERT=alert.json)"
@@ -578,6 +505,11 @@ tasks:
         echo "Submitting investigation to blue orchestrator service..."
         echo "Alert file: {{.ALERT}}"
         echo "K8s namespace: {{.K8S_NAMESPACE}}"
+        if [ -f .env ]; then
+          echo "Credentials: .env"
+        else
+          echo "Credentials: 1Password"
+        fi
         echo ""
 
         INV_ID_ARG=""
@@ -606,74 +538,6 @@ tasks:
           $INV_ID_ARG \
           --model "{{.MODEL_ARG}}" \
           --max-steps {{.MAX_STEPS_BLUE}} \
-          $MULTI_AGENT_FLAG
-
-  multi:local:
-    desc: "Submit investigation using .env file (usage: task blue:multi:local ALERT=alert.json)"
-    silent: true
-    vars:
-      ALERT: '{{.ALERT | default ""}}'
-      INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
-      MULTI_AGENT: '{{.MULTI_AGENT | default "false"}}'
-      MODEL_ARG:
-        sh: |
-          if [ -n "{{.MODEL_ALL}}" ]; then
-            echo "{{.MODEL_ALL}}"
-          else
-            echo "{{.MODEL}}"
-          fi
-      REDIS_URL:
-        sh: |
-          REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
-          if [ -n "$REDIS_PASS" ]; then
-            echo "redis://:${REDIS_PASS}@redis:6379"
-          else
-            echo "redis://redis:6379"
-          fi
-    preconditions:
-      - sh: test -f .env
-        msg: ".env file not found"
-      - sh: test -n "{{.ALERT}}"
-        msg: "ALERT variable is required. Usage: task blue:multi:local ALERT=alert.json"
-      - sh: test -f "{{.ALERT}}"
-        msg: "Alert file not found: {{.ALERT}}"
-    cmds:
-      - |
-        set -a
-        . ./.env
-        set +a
-
-        echo "Submitting investigation to blue orchestrator service..."
-        echo "Alert file: {{.ALERT}}"
-        echo ""
-
-        INV_ID_ARG=""
-        if [ -n "{{.INVESTIGATION_ID}}" ]; then
-          INV_ID_ARG="--investigation-id {{.INVESTIGATION_ID}}"
-        fi
-
-        MULTI_AGENT_FLAG=""
-        if [ "{{.MULTI_AGENT}}" = "true" ]; then
-          MULTI_AGENT_FLAG="--multi-agent"
-        fi
-
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
-          env OPENAI_API_KEY="$OPENAI_API_KEY" \
-          ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-          DREADNODE_API_KEY="$DREADNODE_API_KEY" \
-          DREADNODE_SERVER_URL="$DREADNODE_SERVER_URL" \
-          DREADNODE_ORGANIZATION="$DREADNODE_ORGANIZATION" \
-          DREADNODE_WORKSPACE="$DREADNODE_WORKSPACE" \
-          DREADNODE_PROJECT="$DREADNODE_PROJECT" \
-          GRAFANA_SERVICE_ACCOUNT_TOKEN="$GRAFANA_SERVICE_ACCOUNT_TOKEN" \
-          GRAFANA_URL="$GRAFANA_URL" \
-          ARES_MODEL="{{.MODEL_ARG}}" \
-          ARES_ORCHESTRATOR_MODEL="{{.MODEL_ARG}}" \
-          python -m ares.cli_blue_ops submit "$(cat {{.ALERT}})" \
-          $INV_ID_ARG \
-          --model "{{.MODEL_ARG}}" \
-          --max-steps {{.MAX_STEPS_BLUE}} \
-          --redis-url "{{.REDIS_URL}}" \
           $MULTI_AGENT_FLAG
 
   multi:remote:
