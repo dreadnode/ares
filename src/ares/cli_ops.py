@@ -1186,6 +1186,7 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
 
     dc_map = await backend.get_all_dcs()
     netbios_map = await backend.get_all_netbios_mappings()
+    domain_sids = await backend.get_domain_sids()
 
     timeline_events_raw = await backend.get_timeline_events()
     timeline_events = []
@@ -1222,6 +1223,7 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
         "domain_admin_path": domain_admin_path,
         "domain_controllers": dc_map,
         "netbios_to_fqdn": netbios_map,
+        "domain_sids": domain_sids,
         "operation_timeline": timeline_events,
     }
     if started_at is not None:
@@ -2236,6 +2238,245 @@ async def inject_vulnerability(
 
     except Exception as e:
         logger.error(f"Failed to inject vulnerability: {e}")
+        sys.exit(1)
+
+
+@app.command(name="inject-hash")
+async def inject_hash(
+    operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
+    username: Annotated[str, cyclopts.Parameter(help="Username (e.g., krbtgt, Administrator)")],
+    hash_value: Annotated[str, cyclopts.Parameter(help="Hash value (LM:NT or just NT)")],
+    *,
+    domain: Annotated[str, cyclopts.Parameter(help="Domain for the hash")] = "",
+    hash_type: Annotated[
+        str, cyclopts.Parameter(help="Hash type (NTLM, Kerberos, AS-REP)")
+    ] = "NTLM",
+    source: Annotated[str, cyclopts.Parameter(help="Source of the hash")] = "manual-inject",
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Inject a hash into an operation's shared state.
+
+    This is useful for testing multi-forest mode by simulating DA achievement.
+    Injecting a krbtgt hash will trigger DA status and trust key extraction.
+
+    Examples:
+        # Inject krbtgt to simulate DA
+        ares-ops inject-hash op-xxx krbtgt \\
+            "aad3b435b51404eeaad3b435b51404ee:313b6f423a71d74c0a1b8a2f43b22d4c" \\
+            --domain sevenkingdoms.local
+
+        # Inject Administrator NTLM hash
+        ares-ops inject-hash op-xxx Administrator \\
+            "31d6cfe0d16ae931b73c59d7e0c089c0" \\  # pragma: allowlist secret
+            --domain contoso.local
+    """
+    from ares.core.models import Hash
+    from ares.core.state_backend import RedisStateBackend
+
+    resolved_redis_url = redis_url or get_redis_url()
+
+    try:
+        client = await create_verified_redis_client(resolved_redis_url, decode_responses=False)
+        state = await _load_state_from_redis(client, operation_id)
+
+        if not state:
+            logger.error(f"No state found for operation: {operation_id}")
+            await client.aclose()
+            sys.exit(1)
+
+        hash_obj = Hash(
+            username=username,
+            domain=domain,
+            hash_value=hash_value,
+            hash_type=hash_type,
+        )
+
+        backend = RedisStateBackend(client, operation_id)
+        added = state.add_hash(hash_obj, source_agent=source)
+
+        if added:
+            await backend.add_hash(hash_obj)
+
+        # If krbtgt hash, always set DA status (even if hash already existed)
+        if username.lower() == "krbtgt":
+            state.has_domain_admin = True
+            if domain and domain.lower() not in [d.lower() for d in state.domain_admin_domains]:
+                state.domain_admin_domains.append(domain.lower())
+            await backend.set_domain_admin(
+                achieved=True,
+                path=f"manual-inject:{domain}",
+                domain=domain.lower() if domain else None,
+            )
+            logger.info("Set has_domain_admin=True (krbtgt hash injected)")
+
+        await client.aclose()
+
+        # Notify subscribers
+        from ares.core.task_queue import RedisTaskQueue
+
+        tq = RedisTaskQueue(resolved_redis_url)
+        await tq.connect()
+        n = await tq.publish_state_update(operation_id)
+        await tq.disconnect()
+
+        if added:
+            logger.success(
+                f"Injected hash: {domain}\\{username} ({hash_type}, {n} subscribers notified)"
+            )
+        else:
+            logger.info(f"Hash already exists: {domain}\\{username} (DA status updated)")
+
+    except Exception as e:
+        logger.error(f"Failed to inject hash: {e}")
+        sys.exit(1)
+
+
+@app.command(name="inject-host")
+async def inject_host(
+    operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
+    ip: Annotated[str, cyclopts.Parameter(help="Host IP address")],
+    hostname: Annotated[str, cyclopts.Parameter(help="Host FQDN (e.g., dc01.fabrikam.local)")],
+    *,
+    source: Annotated[str, cyclopts.Parameter(help="Source of the host")] = "manual-inject",
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Inject a host into an operation's shared state.
+
+    This is useful for testing multi-forest mode by making foreign domains
+    appear as "discovered" (validated by having a host in that domain).
+
+    Examples:
+        # Inject DC from foreign forest (makes essos.local a discovered domain)
+        ares-ops inject-host op-xxx 192.168.58.20 dc01.essos.local
+
+        # Inject child domain DC
+        ares-ops inject-host op-xxx 192.168.58.30 dc01.north.sevenkingdoms.local
+    """
+    from ares.core.models import Host
+    from ares.core.state_backend import RedisStateBackend
+
+    resolved_redis_url = redis_url or get_redis_url()
+
+    try:
+        client = await create_verified_redis_client(resolved_redis_url, decode_responses=False)
+        state = await _load_state_from_redis(client, operation_id)
+
+        if not state:
+            logger.error(f"No state found for operation: {operation_id}")
+            await client.aclose()
+            sys.exit(1)
+
+        host = Host(ip=ip, hostname=hostname)
+
+        # Add to state (validates the domain from hostname)
+        added = state.add_host(host)
+
+        if added:
+            backend = RedisStateBackend(client, operation_id)
+            await backend.add_host(host)
+
+            # Extract domain from hostname and add to validated domains
+            parts = hostname.split(".", 1)
+            if len(parts) > 1:
+                domain = parts[1]
+                if domain not in state.all_domains:
+                    state.all_domains.append(domain)
+                state._validated_domains.add(domain)
+                logger.info(f"Domain '{domain}' now validated (host discovered)")
+
+            await client.aclose()
+
+            # Notify subscribers
+            from ares.core.task_queue import RedisTaskQueue
+
+            tq = RedisTaskQueue(resolved_redis_url)
+            await tq.connect()
+            n = await tq.publish_state_update(operation_id)
+            await tq.disconnect()
+
+            logger.success(f"Injected host: {ip} ({hostname}, {n} subscribers notified)")
+        else:
+            await client.aclose()
+            logger.info(f"Host already exists: {ip}")
+
+    except Exception as e:
+        logger.error(f"Failed to inject host: {e}")
+        sys.exit(1)
+
+
+@app.command(name="inject-domain-sid")
+async def inject_domain_sid(
+    operation_id: Annotated[str, cyclopts.Parameter(help="Operation ID")],
+    domain: Annotated[str, cyclopts.Parameter(help="Domain FQDN (e.g., contoso.local)")],
+    sid: Annotated[str, cyclopts.Parameter(help="Domain SID (e.g., S-1-5-21-xxx-yyy-zzz)")],
+    *,
+    redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
+) -> None:
+    """Inject a domain SID into an operation's shared state.
+
+    This is useful for golden ticket generation when lookupsid fails
+    (e.g., Netlogon service not running on DC).
+
+    The domain SID cache is used by the orchestrator's auto-golden-ticket
+    logic when it cannot obtain the SID via lookupsid or LDAP.
+
+    Examples:
+        # Inject domain SID for north.sevenkingdoms.local
+        ares-ops inject-domain-sid op-xxx north.sevenkingdoms.local \\
+            "S-1-5-21-3870412345-54678901-1234567890"
+
+        # Inject parent domain SID for sevenkingdoms.local
+        ares-ops inject-domain-sid op-xxx sevenkingdoms.local \\
+            "S-1-5-21-1234567890-9876543210-5555555555"
+    """
+    from ares.core.state_backend import RedisStateBackend
+
+    resolved_redis_url = redis_url or get_redis_url()
+
+    # Validate SID format
+    if not re.match(r"^S-\d+-\d+-\d+-\d+-\d+-\d+$", sid):
+        logger.error(f"Invalid SID format: {sid}")
+        logger.info("Expected format: S-1-5-21-xxx-yyy-zzz (domain SID)")
+        sys.exit(1)
+
+    try:
+        client = await create_verified_redis_client(resolved_redis_url, decode_responses=False)
+        state = await _load_state_from_redis(client, operation_id)
+
+        if not state:
+            logger.error(f"No state found for operation: {operation_id}")
+            await client.aclose()
+            sys.exit(1)
+
+        domain_lower = domain.lower()
+        existing = state.domain_sids.get(domain_lower)
+
+        # Update in-memory state
+        state.domain_sids[domain_lower] = sid
+
+        # Persist to Redis
+        backend = RedisStateBackend(client, operation_id)
+        await backend.set_domain_sid(domain_lower, sid)
+
+        await client.aclose()
+
+        # Notify subscribers
+        from ares.core.task_queue import RedisTaskQueue
+
+        tq = RedisTaskQueue(resolved_redis_url)
+        await tq.connect()
+        n = await tq.publish_state_update(operation_id)
+        await tq.disconnect()
+
+        if existing:
+            logger.success(
+                f"Updated domain SID: {domain} = {sid} (was: {existing}, {n} subscribers notified)"
+            )
+        else:
+            logger.success(f"Injected domain SID: {domain} = {sid} ({n} subscribers notified)")
+
+    except Exception as e:
+        logger.error(f"Failed to inject domain SID: {e}")
         sys.exit(1)
 
 

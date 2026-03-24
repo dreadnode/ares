@@ -371,6 +371,45 @@ class TestBlueTaskQueueInvestigationManagement:
 
         assert result == alert
 
+    @pytest.mark.asyncio
+    async def test_register_investigation_with_operation_id(self, connected_queue):
+        """Test that operation_id is stored for red-blue trace correlation."""
+        alert = {"labels": {"alertname": "HighCPU"}}
+
+        await connected_queue.register_investigation(
+            investigation_id="inv-correlated",
+            alert=alert,
+            model="gpt-4.1",
+            operation_id="op-red-12345",
+        )
+
+        # Verify hset was called with operation_id in the mapping
+        connected_queue._client.hset.assert_awaited()
+        call_kwargs = connected_queue._client.hset.call_args
+        mapping = call_kwargs.kwargs.get("mapping") or call_kwargs[1].get("mapping")
+        assert mapping["operation_id"] == "op-red-12345"
+
+    @pytest.mark.asyncio
+    async def test_get_investigation_operation_id(self, connected_queue):
+        """Test retrieving operation_id for trace correlation."""
+        connected_queue._client.hget = AsyncMock(return_value="op-red-12345")
+
+        result = await connected_queue.get_investigation_operation_id("inv-correlated")
+
+        assert result == "op-red-12345"
+        connected_queue._client.hget.assert_awaited_with(
+            "ares:blue:investigation:inv-correlated:meta", "operation_id"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_investigation_operation_id_returns_none(self, connected_queue):
+        """Test that get_investigation_operation_id returns None when not set."""
+        connected_queue._client.hget = AsyncMock(return_value=None)
+
+        result = await connected_queue.get_investigation_operation_id("inv-standalone")
+
+        assert result is None
+
 
 class TestBlueTaskQueueTaskSubmission:
     """Tests for task submission and polling."""

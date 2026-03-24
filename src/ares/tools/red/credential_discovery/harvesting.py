@@ -275,7 +275,14 @@ class CredentialHarvestingTools(Toolset):
             cmd = ["env", f"KRB5CCNAME={ccache_file}"] + cmd
 
         try:
-            logger.info(f"[*] Running secretsdump on {target} with {username}")
+            auth_method = "Kerberos" if no_pass else ("PTH" if hash else "password")
+            logger.warning(
+                f"🔓 SECRETSDUMP: Credential harvesting\n"
+                f"   Target: {target}\n"
+                f"   Domain: {domain or 'unknown'}\n"
+                f"   User: {username}\n"
+                f"   Auth: {auth_method}"
+            )
 
             stdout, stderr, returncode = run_tool(cmd, timeout_seconds=timeout_minutes * 60)
 
@@ -285,7 +292,7 @@ class CredentialHarvestingTools(Toolset):
                     "Target may be unreachable or credentials invalid."
                 )
 
-            logger.info(f"[*] Secretsdump completed for {target}")
+            logger.info(f"[*] Secretsdump completed for {target} (domain: {domain or 'unknown'})")
             raw_output = stdout or stderr or f"Secretsdump returned code {returncode}"
 
             # Parse the output to extract hashes and detect high-value accounts

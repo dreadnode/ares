@@ -1005,6 +1005,48 @@ class TestTraceBlueInvestigation:
             # Should not raise - just logs debug
             trace_blue_investigation(role="triage", investigation_id="inv-fail")
 
+    def test_trace_blue_investigation_with_operation_id(self):
+        """trace_blue_investigation should include attack_operation_id for red-blue correlation."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.tracing import trace_blue_investigation
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_blue_investigation(
+                role="triage",
+                investigation_id="inv-correlated",
+                operation_id="op-red-12345",
+            )
+
+        call_kwargs = mock_dn_span.call_args[1]
+        assert call_kwargs["attributes"]["investigation.id"] == "inv-correlated"
+        assert call_kwargs["attributes"]["attack_operation_id"] == "op-red-12345"
+        assert call_kwargs["attributes"]["attack_team"] == "blue"
+
+    def test_trace_blue_investigation_without_operation_id(self):
+        """trace_blue_investigation should not include attack_operation_id if not provided."""
+        from unittest.mock import MagicMock, patch
+
+        from ares.core.tracing import trace_blue_investigation
+
+        mock_span = MagicMock()
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
+
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_blue_investigation(
+                role="threat_hunter",
+                investigation_id="inv-standalone",
+            )
+
+        call_kwargs = mock_dn_span.call_args[1]
+        assert call_kwargs["attributes"]["investigation.id"] == "inv-standalone"
+        assert "attack_operation_id" not in call_kwargs["attributes"]
+
 
 class TestTraceDecision:
     """Tests for trace_decision function."""

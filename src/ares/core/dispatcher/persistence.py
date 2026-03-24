@@ -442,6 +442,9 @@ class PersistenceMixin:
                     await backend.set_meta("has_golden_ticket", value=True)
             if self.shared_state.domain_admin_path:
                 await backend.set_meta("domain_admin_path", self.shared_state.domain_admin_path)
+            # Persist domain_admin_domains (additive - uses SADD)
+            for da_domain in self.shared_state.domain_admin_domains:
+                await backend.add_domain_admin_domain(da_domain)
             # Persist completed_at timestamp (set in-memory when DA achieved via add_hash)
             if self.shared_state.completed_at:
                 await backend.set_meta("completed_at", self.shared_state.completed_at.isoformat())

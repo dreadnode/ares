@@ -57,6 +57,7 @@ from ares.tools.red import (
     RedTeamReportingTools,
     SharePilferingTools,
     TrustAttackTools,
+    TrustEnumerationTools,
 )
 
 if TYPE_CHECKING:
@@ -88,6 +89,7 @@ ALL_TOOLSETS: list[type] = [
     NetworkEnumerationTools,
     BloodHoundTools,
     PostureValidationTools,
+    TrustEnumerationTools,
     # Credential discovery
     CredentialDiscoveryTools,
     CredentialHarvestingTools,
@@ -1080,6 +1082,17 @@ def create_role_hooks(
             cred_ctx = get_credential_context()
             current_task_id = cred_ctx.task_id if cred_ctx else ""
 
+            # Extract target from tool call arguments for logging/tracing
+            tool_target: str | None = None
+            if hasattr(event, "tool_call") and event.tool_call and event.tool_call.function:
+                try:
+                    import json
+
+                    args = json.loads(event.tool_call.function.arguments or "{}")
+                    tool_target = args.get("target") or args.get("target_host") or args.get("dc_ip")
+                except Exception:
+                    pass
+
             # Extract and publish hashes
             if tool_name in HASH_EXTRACTION_TOOLS:
                 hashes = dispatcher._extract_hashes_from_output(output)
@@ -1099,6 +1112,7 @@ def create_role_hooks(
                                 "hash_value": h.hash_value,
                                 "hash_type": h.hash_type,
                                 "domain": hash_domain,
+                                "target": tool_target,  # Include target for tracing
                             },
                             source_agent=log_name,
                             task_id=current_task_id,

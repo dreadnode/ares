@@ -342,7 +342,8 @@ All trusted forests have been dominated. Operation can complete.
 After achieving DA on any domain:
 
 1. **Enumerate Trust Relationships**
-   - Run `nltest_trusts` or check BloodHound for forest trusts
+   - Run `enumerate_domain_trusts` to discover AD trust relationships via LDAP
+   - BloodHound also discovers trusts during collection
    - Identify: parent domains, child domains, external forest trusts
 
 2. **Parent-Child Escalation (NO SID Filtering)**

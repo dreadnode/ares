@@ -77,6 +77,45 @@ class TestBlueRedisWorkerAgentInit:
 
         assert worker.pod_name == "explicit-pod"
 
+    def test_accepts_operation_id_for_trace_correlation(self):
+        """Test that operation_id is stored for red-blue trace correlation."""
+        mock_queue = MagicMock()
+        mock_agent = MagicMock()
+        mock_callback_tools = MagicMock()
+        mock_backend = MagicMock()
+
+        worker = BlueRedisWorkerAgent(
+            role=BlueRole.TRIAGE,
+            task_queue=mock_queue,
+            agent=mock_agent,
+            agent_name="blue-triage",
+            callback_tools=mock_callback_tools,
+            backend=mock_backend,
+            investigation_id="inv-correlated",
+            operation_id="op-red-12345",
+        )
+
+        assert worker.operation_id == "op-red-12345"
+
+    def test_operation_id_defaults_to_none(self):
+        """Test that operation_id defaults to None when not provided."""
+        mock_queue = MagicMock()
+        mock_agent = MagicMock()
+        mock_callback_tools = MagicMock()
+        mock_backend = MagicMock()
+
+        worker = BlueRedisWorkerAgent(
+            role=BlueRole.TRIAGE,
+            task_queue=mock_queue,
+            agent=mock_agent,
+            agent_name="blue-triage",
+            callback_tools=mock_callback_tools,
+            backend=mock_backend,
+            investigation_id="inv-standalone",
+        )
+
+        assert worker.operation_id is None
+
 
 class TestBlueRedisWorkerAgentLifecycle:
     """Tests for worker start/stop lifecycle."""

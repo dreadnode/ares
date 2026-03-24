@@ -687,6 +687,73 @@ tasks:
           python -m ares.cli_ops inject-vulnerability "{{.OPERATION_ID}}" "{{.VULN_TYPE}}" "{{.TARGET_IP}}" \
           $HOSTNAME_ARG $SPN_ARG $ACCOUNT_ARG $DOMAIN_ARG --details '{{.DETAILS}}'
 
+  multi:inject-hash:
+    desc: "Inject a hash into operation shared state (usage: task red:multi:inject-hash OPERATION_ID=op-xxx USERNAME=krbtgt DOMAIN=contoso.local HASH=aad3b435b51404eeaad3b435b51404ee:... [HASH_TYPE=NTLM])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      USERNAME: '{{.USERNAME | default ""}}'
+      HASH: '{{.HASH | default ""}}'
+      DOMAIN: '{{.DOMAIN | default ""}}'
+      HASH_TYPE: '{{.HASH_TYPE | default "NTLM"}}'
+      SOURCE: '{{.SOURCE | default "manual-inject"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.USERNAME}}"
+        msg: "USERNAME variable is required (e.g., krbtgt, Administrator)"
+      - sh: test -n "{{.HASH}}"
+        msg: "HASH variable is required (LM:NT or just NT hash)"
+    cmds:
+      - |
+        DOMAIN_ARG=""
+        if [ -n "{{.DOMAIN}}" ]; then
+          DOMAIN_ARG="--domain {{.DOMAIN}}"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
+          python -m ares.cli_ops inject-hash "{{.OPERATION_ID}}" "{{.USERNAME}}" "{{.HASH}}" \
+          $DOMAIN_ARG --hash-type "{{.HASH_TYPE}}" --source "{{.SOURCE}}"
+
+  multi:inject-host:
+    desc: "Inject a host into operation shared state (usage: task red:multi:inject-host OPERATION_ID=op-xxx IP=192.168.58.20 HOSTNAME=dc01.fabrikam.local)"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      IP: '{{.IP | default ""}}'
+      HOSTNAME: '{{.HOSTNAME | default ""}}'
+      SOURCE: '{{.SOURCE | default "manual-inject"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.IP}}"
+        msg: "IP variable is required"
+      - sh: test -n "{{.HOSTNAME}}"
+        msg: "HOSTNAME variable is required (FQDN like dc01.fabrikam.local)"
+    cmds:
+      - |
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
+          python -m ares.cli_ops inject-host "{{.OPERATION_ID}}" "{{.IP}}" "{{.HOSTNAME}}" \
+          --source "{{.SOURCE}}"
+
+  multi:inject-domain-sid:
+    desc: "Inject a domain SID for golden ticket generation (usage: task red:multi:inject-domain-sid OPERATION_ID=op-xxx DOMAIN=contoso.local SID=S-1-5-21-xxx-yyy-zzz)"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      DOMAIN: '{{.DOMAIN | default ""}}'
+      SID: '{{.SID | default ""}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.DOMAIN}}"
+        msg: "DOMAIN variable is required (e.g., north.sevenkingdoms.local)"
+      - sh: test -n "{{.SID}}"
+        msg: "SID variable is required (e.g., S-1-5-21-xxx-yyy-zzz)"
+    cmds:
+      - |
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
+          python -m ares.cli_ops inject-domain-sid "{{.OPERATION_ID}}" "{{.DOMAIN}}" "{{.SID}}"
+
   multi:resume:
     desc: "Resume a multi-agent operation from checkpoint (usage: task red:multi:resume OPERATION_ID=op-xxx DOMAIN=target.local TARGETS=192.168.56.10)"
     silent: true

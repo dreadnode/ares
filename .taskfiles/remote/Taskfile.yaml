@@ -831,6 +831,118 @@ tasks:
         fi
 
   # ============================================================================
+  # CHECK: Compare local vs remote code
+  # ============================================================================
+  check:
+    desc: "Check if local code matches remote pods (usage: task remote:check [FILES=src/ares/core/worker.py] [TEAM=red|blue|all])"
+    silent: true
+    vars:
+      FILES: '{{.FILES | default ""}}'
+    cmds:
+      - |
+        echo -e "{{.INFO}} Comparing local code to remote pods (team={{.TEAM}})"
+        echo ""
+
+        # Get pods based on team
+        ORCH_PODS=""
+        WORKER_PODS=""
+
+        if [ "{{.TEAM}}" = "red" ] || [ "{{.TEAM}}" = "all" ]; then
+          RED_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.RED_ORCH_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -n "$RED_ORCH" ]; then
+            ORCH_PODS="$ORCH_PODS $RED_ORCH"
+          fi
+        fi
+
+        if [ "{{.TEAM}}" = "blue" ] || [ "{{.TEAM}}" = "all" ]; then
+          BLUE_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.BLUE_ORCH_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -n "$BLUE_ORCH" ]; then
+            ORCH_PODS="$ORCH_PODS $BLUE_ORCH"
+          fi
+        fi
+
+        ORCH_PODS=$(echo "$ORCH_PODS" | xargs)
+
+        if [ -z "$ORCH_PODS" ]; then
+          echo -e "{{.ERROR}} No running orchestrator pods found for team={{.TEAM}}"
+          exit 1
+        fi
+
+        # Determine files to check
+        if [ -n "{{.FILES}}" ]; then
+          FILES_TO_CHECK="{{.FILES}}"
+        else
+          # Default: check files that differ from HEAD (staged + unstaged)
+          FILES_TO_CHECK=$(git diff --name-only HEAD -- src/ares 2>/dev/null || true)
+          if [ -z "$FILES_TO_CHECK" ]; then
+            echo -e "{{.INFO}} No local changes detected. Checking a sample of key files..."
+            FILES_TO_CHECK="src/ares/core/dispatcher/routing.py src/ares/core/dispatcher/persistence.py src/ares/core/dispatcher/result_processing.py src/ares/core/dispatcher/publishing.py"
+          fi
+        fi
+
+        FILES_TO_CHECK=$(echo "$FILES_TO_CHECK" | tr '\n' ' ' | xargs)
+
+        if [ -z "$FILES_TO_CHECK" ]; then
+          echo -e "{{.SUCCESS}} No files to check"
+          exit 0
+        fi
+
+        echo -e "{{.INFO}} Checking $(echo $FILES_TO_CHECK | wc -w | xargs) file(s) against: $ORCH_PODS"
+        echo ""
+
+        TOTAL_CHECKED=0
+        TOTAL_MATCH=0
+        TOTAL_DIFFER=0
+        TOTAL_MISSING=0
+
+        for f in $FILES_TO_CHECK; do
+          if [ ! -f "$f" ]; then
+            continue
+          fi
+
+          relative_path="${f#src/ares/}"
+          local_hash=$(shasum -a 256 "$f" 2>/dev/null | awk '{print $1}')
+
+          # Check against first orchestrator pod
+          ORCH_POD=$(echo $ORCH_PODS | awk '{print $1}')
+          remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+            sha256sum "{{.PVC_PATH}}/src/ares/$relative_path" 2>/dev/null | awk '{print $1}')
+
+          TOTAL_CHECKED=$((TOTAL_CHECKED + 1))
+
+          if [ -z "$remote_hash" ]; then
+            echo -e "{{.WARN}} $relative_path: MISSING on remote"
+            TOTAL_MISSING=$((TOTAL_MISSING + 1))
+          elif [ "$remote_hash" = "$local_hash" ]; then
+            echo -e "{{.SUCCESS}} $relative_path: OK"
+            TOTAL_MATCH=$((TOTAL_MATCH + 1))
+          else
+            echo -e "{{.ERROR}} $relative_path: DIFFERS"
+            echo "        local:  ${local_hash:0:16}..."
+            echo "        remote: ${remote_hash:0:16}..."
+            TOTAL_DIFFER=$((TOTAL_DIFFER + 1))
+          fi
+        done
+
+        echo ""
+        echo "========================================"
+        echo -e "{{.INFO}} Summary: $TOTAL_CHECKED checked, $TOTAL_MATCH match, $TOTAL_DIFFER differ, $TOTAL_MISSING missing"
+
+        if [ "$TOTAL_DIFFER" -gt 0 ] || [ "$TOTAL_MISSING" -gt 0 ]; then
+          echo ""
+          echo -e "{{.WARN}} Run 'task remote:sync:full TEAM={{.TEAM}}' to sync code"
+          exit 1
+        else
+          echo -e "{{.SUCCESS}} All checked files match remote"
+        fi
+
+  # ============================================================================
   # VERIFY: Check synced code
   # ============================================================================
   verify:

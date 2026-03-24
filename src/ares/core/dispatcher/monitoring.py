@@ -726,7 +726,15 @@ class MonitoringMixin:
         parent_credential_id: str | None = None
         parent_attack_step: int = 0
         target_ip: str | None = None
-        if task_id and self._shared_state:
+
+        # First try to get target from the data payload itself (worker may include it)
+        target_ip = data.get("target") or data.get("target_ip") or data.get("target_host")
+        logger.info(
+            f"_process_realtime_hash_discovery: domain={domain}, target_from_data={target_ip}, task_id={task_id}"
+        )
+
+        # Fallback to task params if not in data
+        if not target_ip and task_id and self._shared_state:
             task_info = self._shared_state.pending_tasks.get(task_id)
             if task_info and task_info.params:
                 parent_credential_id = task_info.params.get("parent_credential_id")
@@ -737,12 +745,23 @@ class MonitoringMixin:
                     target_ips = task_info.params.get("target_ips", [])
                     if target_ips and isinstance(target_ips, list):
                         target_ip = target_ips[0]
+            logger.info(f"_process_realtime_hash_discovery: target_from_task_params={target_ip}")
 
-        # Fallback to domain resolved from target host's FQDN
+        # Resolve NetBIOS domain names (e.g., "NORTH") to FQDN (e.g., "north.sevenkingdoms.local")
+        # This handles domain-prefixed secretsdump output like "NORTH\krbtgt:..."
+        if domain and "." not in domain and self._shared_state:
+            resolved = self._shared_state._resolve_netbios_to_fqdn(domain)
+            if resolved != domain:
+                logger.debug(f"Resolved NetBIOS domain: {domain} -> {resolved}")
+                domain = resolved
+
+        # Fallback to domain resolved from target host if still empty or unresolved NetBIOS
         # (non-domain-prefixed secretsdump output: "user:rid:lmhash:nthash:::")
         # This correctly handles child domain DCs (e.g., dc02 serves child.contoso.local)
-        if not domain:
-            domain = self._resolve_domain_from_target_host(target_ip)
+        if not domain or (domain and "." not in domain):
+            target_domain = self._resolve_domain_from_target_host(target_ip)
+            if target_domain and "." in target_domain:
+                domain = target_domain
 
         hash_obj = Hash(
             username=username,
@@ -756,7 +775,10 @@ class MonitoringMixin:
 
         # publish_hash handles deduplication, DA detection, and immediate crack dispatch
         await self.publish_hash(hash_obj, source_agent, task_queue=task_queue)
-        logger.info(f"📡 Real-time hash: {domain}\\{username} ({hash_type})")
+        logger.info(
+            f"📡 Real-time hash: {domain}\\{username} ({hash_type}) "
+            f"[source: {source_agent}, target: {target_ip or 'unknown'}]"
+        )
 
     async def _process_realtime_vulnerability_discovery(
         self: RedTeamDispatcher, data: dict, source_agent: str, task_queue: Any = None

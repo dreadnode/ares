@@ -311,6 +311,26 @@ class PublishingMixin:
             await self._persist_timeline_event(timeline_event, task_queue)
             if is_main_thread:
                 await self._checkpoint()
+                # CRITICAL: Also dispatch trust key extraction on main thread for multi-forest mode
+                # Triggered by EITHER krbtgt OR Administrator NTLM hash to ensure extraction runs
+                # even if krbtgt was first published with Unknown type
+                username_lower = hash_obj.username.lower()
+                hash_type_lower = (hash_obj.hash_type or "").lower()
+                is_ntlm = hash_type_lower == "ntlm"
+                is_da_hash = username_lower in ("krbtgt", "administrator") and is_ntlm
+
+                if is_da_hash and self.shared_state.has_domain_admin:
+                    from ares.core.config import get_multi_forest_mode
+
+                    if get_multi_forest_mode() and not self.shared_state.all_forests_dominated():
+                        undominated = self.shared_state.get_undominated_forests()
+                        if undominated:
+                            await self._auto_dispatch_trust_key_extraction(
+                                da_domain=hash_obj.domain or "",
+                                da_username="Administrator",
+                                undominated_forests=undominated,
+                                source_agent=source_agent,
+                            )
             # CRITICAL: Persist directly to Redis using the threaded consumer's client.
             # The main-thread checkpoint may be blocked by LLM API calls for minutes,
             # causing hashes to be stuck in memory and not visible to CLI.
@@ -324,21 +344,32 @@ class PublishingMixin:
                     # add_hash() sets has_domain_admin=True in memory but skips Redis
                     # persist due to event loop check. We MUST persist DA to Redis here
                     # so the orchestrator can see it and exit promptly.
-                    if (
-                        hash_obj.username.lower() == "krbtgt"
-                        and (hash_obj.hash_type or "").lower() == "ntlm"
-                        and self.shared_state.has_domain_admin
-                    ):
-                        await backend.set_domain_admin(
-                            achieved=True,
-                            path=self.shared_state.domain_admin_path,
-                            da_hash_id=self.shared_state.da_hash_id,
-                        )
-                        logger.success(
-                            "✅ Domain Admin status persisted directly to Redis (krbtgt found)"
-                        )
+                    username_lower = hash_obj.username.lower()
+                    hash_type_lower = (hash_obj.hash_type or "").lower()
+                    is_ntlm = hash_type_lower == "ntlm"
+                    is_da_hash = username_lower in ("krbtgt", "administrator") and is_ntlm
+
+                    logger.debug(
+                        f"publish_hash DA check: user={username_lower}, type={hash_type_lower}, "
+                        f"is_da_hash={is_da_hash}, has_domain_admin={self.shared_state.has_domain_admin}"
+                    )
+
+                    if is_da_hash and self.shared_state.has_domain_admin:
+                        # Persist DA to Redis if krbtgt found
+                        if username_lower == "krbtgt":
+                            da_domain = hash_obj.domain.lower() if hash_obj.domain else None
+                            await backend.set_domain_admin(
+                                achieved=True,
+                                path=self.shared_state.domain_admin_path,
+                                da_hash_id=self.shared_state.da_hash_id,
+                                domain=da_domain,
+                            )
+                            logger.success(
+                                f"✅ Domain Admin status persisted directly to Redis (krbtgt found for {da_domain})"
+                            )
                         # Auto-dispatch trust key extraction for multi-forest mode
-                        # This runs from threaded consumer, so we dispatch directly to Redis
+                        # Triggered by EITHER krbtgt OR Administrator NTLM hash
+                        # This ensures extraction runs even if krbtgt was first with Unknown type
                         await self._auto_dispatch_trust_key_extraction_threaded(
                             da_domain=hash_obj.domain or "",
                             task_queue=task_queue,
@@ -358,7 +389,8 @@ class PublishingMixin:
                 # No task_queue available, fall back to checkpoint request
                 self._checkpoint_requested.set()
             logger.info(
-                f"Hash published: {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type})"
+                f"Hash published: {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type}) "
+                f"[source: {hash_obj.source or 'unknown'}]"
             )
 
             # Trace the hash discovery
@@ -1287,11 +1319,24 @@ class PublishingMixin:
         """
         from ares.core.config import get_multi_forest_mode
 
+        logger.info(f"🌲 _auto_dispatch_trust_key_extraction_threaded called for {da_domain}")
+
         if not get_multi_forest_mode():
+            logger.debug("🌲 Multi-forest mode disabled, skipping trust extraction")
             return
 
         if not task_queue:
-            logger.warning("Cannot dispatch trust key extraction: no task_queue available")
+            logger.warning("🌲 Cannot dispatch trust key extraction: no task_queue available")
+            return
+
+        # Deduplicate: only dispatch once per DA domain
+        # This prevents multiple dispatches when both krbtgt and Administrator hashes trigger
+        if not hasattr(self, "_trust_extraction_dispatched"):
+            self._trust_extraction_dispatched: set[str] = set()
+
+        da_domain_lower = da_domain.lower()
+        if da_domain_lower in self._trust_extraction_dispatched:
+            logger.debug(f"MULTI_FOREST_MODE: Trust extraction already dispatched for {da_domain}")
             return
 
         # Check undominated forests
@@ -1302,6 +1347,9 @@ class PublishingMixin:
         undominated = self.shared_state.get_undominated_forests()
         if not undominated:
             return
+
+        # Mark as dispatched BEFORE actual dispatch (fail-safe)
+        self._trust_extraction_dispatched.add(da_domain_lower)
 
         logger.info(f"MULTI_FOREST_MODE: {len(undominated)} forest(s) remaining: {undominated}")
 
@@ -1351,9 +1399,103 @@ class PublishingMixin:
         import json
         import uuid
 
+        # Check if we should extract from parent domain (forest root) instead of child
+        # Trust accounts like ESSOS$ exist at the forest level, so we need forest root DA
+        extraction_domain = da_domain_lower
+        extraction_dc_ip = dc_ip
+
+        # If DA domain is a child, ALWAYS use forest root for trust extraction
+        # IMPORTANT: Child domain credentials do NOT work on parent DC via PTH!
+        # We need to wait for golden ticket with ExtraSid to get parent domain creds.
+        domain_parts = da_domain_lower.split(".")
+        if len(domain_parts) >= 3:  # child.parent.tld
+            parent_domain = ".".join(domain_parts[1:])
+            # Try to get parent DC from state
+            parent_dc_ip = self.shared_state.domain_controllers.get(parent_domain)
+
+            # DNS fallback if parent DC not in state
+            if not parent_dc_ip:
+                logger.info(
+                    f"MULTI_FOREST_MODE: Parent DC not in state, trying DNS for {parent_domain}"
+                )
+                try:
+                    import subprocess
+
+                    # Query SRV record for parent DC
+                    dns_cmd = ["dig", "+short", f"_ldap._tcp.dc._msdcs.{parent_domain}", "SRV"]
+                    result = subprocess.run(  # noqa: ASYNC221
+                        dns_cmd, capture_output=True, text=True, timeout=10, check=False
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        for line in result.stdout.strip().split("\n"):
+                            parts = line.split()
+                            if len(parts) >= 4:
+                                dc_hostname = parts[3].rstrip(".")
+                                a_cmd = ["dig", "+short", dc_hostname, "A"]
+                                a_result = subprocess.run(  # noqa: ASYNC221
+                                    a_cmd, capture_output=True, text=True, timeout=10, check=False
+                                )
+                                if a_result.returncode == 0 and a_result.stdout.strip():
+                                    parent_dc_ip = a_result.stdout.strip().split("\n")[0]
+                                    logger.info(
+                                        f"MULTI_FOREST_MODE: Resolved parent DC via DNS: "
+                                        f"{dc_hostname} -> {parent_dc_ip}"
+                                    )
+                                    # Cache for future use
+                                    self.shared_state.domain_controllers[parent_domain] = (
+                                        parent_dc_ip
+                                    )
+                                    break
+                except Exception as dns_err:
+                    logger.warning(f"MULTI_FOREST_MODE: DNS resolution failed: {dns_err}")
+
+            if parent_dc_ip:
+                extraction_domain = parent_domain
+                extraction_dc_ip = parent_dc_ip
+
+                # For child domains, we need PARENT domain Administrator hash
+                # Child domain hash won't work on parent DC (PTH doesn't cross domain boundary)
+                # Check if we have parent Administrator hash from golden ticket DCSync
+                parent_admin_hash = None
+                for h in self.shared_state.all_hashes:
+                    if (
+                        h.username.lower() == "administrator"
+                        and h.domain
+                        and h.domain.lower() == parent_domain.lower()
+                        and (h.hash_type or "").lower() == "ntlm"
+                    ):
+                        parent_admin_hash = h.hash_value
+                        break
+
+                if parent_admin_hash:
+                    # Use parent domain hash
+                    da_hash = parent_admin_hash
+                    logger.info(
+                        f"MULTI_FOREST_MODE: Using parent domain hash for trust extraction "
+                        f"({parent_domain}\\Administrator)"
+                    )
+                else:
+                    # Don't have parent hash yet - golden ticket with ExtraSid needs to
+                    # DCSync the parent domain first. Skip dispatch, will retry later.
+                    logger.warning(
+                        f"MULTI_FOREST_MODE: Child domain {da_domain} detected but no parent "
+                        f"Administrator hash found for {parent_domain}. Waiting for golden ticket "
+                        f"flow to DCSync parent domain. Trust extraction deferred."
+                    )
+                    # Clear the dedup flag so this can be retried when parent hash appears
+                    self._trust_extraction_dispatched.discard(da_domain_lower)
+                    return
+            else:
+                logger.warning(
+                    f"MULTI_FOREST_MODE: Cannot find parent DC for {parent_domain}, "
+                    f"using child DC {da_domain_lower} (may not find trust accounts)"
+                )
+
         for target_forest in undominated:
+            target_forest_lower = target_forest.lower()
+
             # Dedup key to prevent re-dispatch on restart
-            dedup_key = f"{da_domain_lower}:{target_forest.lower()}"
+            dedup_key = f"{extraction_domain}:{target_forest_lower}"
             if dedup_key in self.shared_state.processed_trust_extractions:
                 logger.debug(f"Trust key extraction already dispatched: {dedup_key}")
                 continue
@@ -1361,15 +1503,19 @@ class PublishingMixin:
             self.shared_state.processed_trust_extractions.add(dedup_key)
 
             # Build task payload (must match exploit prompt format)
+            # Use extraction_domain/extraction_dc_ip which may be parent (forest root) if
+            # we have Enterprise Admin via ExtraSid
             task_payload = {
                 "vuln_type": "trust_key_extraction",
-                "target": dc_ip,
-                "domain": da_domain,
+                "target": extraction_dc_ip,
+                "domain": extraction_domain,
                 "username": da_username,
                 "password": da_hash or da_password,
-                "dc_ip": dc_ip,
+                "dc_ip": extraction_dc_ip,
                 "trusted_domain": target_forest,
                 "use_hash": bool(da_hash),
+                # Original DA domain for credential context (cross-domain auth via trust)
+                "auth_domain": da_domain,
             }
 
             task_id = f"trust_extraction_{uuid.uuid4().hex[:12]}"
@@ -1383,19 +1529,26 @@ class PublishingMixin:
             }
 
             logger.warning(
-                f"🌲 Auto-dispatching trust key extraction: {da_domain} → {target_forest} "
-                f"(DC: {dc_ip}, using {'hash' if da_hash else 'password'})"
+                f"🌲 Auto-dispatching trust key extraction: {extraction_domain} → {target_forest} "
+                f"(DC: {extraction_dc_ip}, using {'hash' if da_hash else 'password'})"
             )
 
             try:
                 # Submit directly to privesc queue (where KerberosTools lives)
-                await task_queue.redis.lpush(
+                # Use RPUSH for priority <= 2 (urgent) tasks - workers BRPOP from right,
+                # so RPUSH items are processed immediately (front of queue)
+                task_json = json.dumps(task_data)
+                logger.debug(f"🌲 Trust extraction task payload: {task_json[:200]}...")
+                result = await task_queue.redis.rpush(
                     "ares:tasks:privesc",
-                    json.dumps(task_data),
+                    task_json,
                 )
-                logger.info(f"Trust key extraction task {task_id} submitted to Redis queue")
+                logger.warning(
+                    f"🌲 Trust key extraction task {task_id} submitted to privesc queue "
+                    f"(rpush result: {result})"
+                )
             except Exception as e:
-                logger.error(f"Failed to dispatch trust key extraction: {e}")
+                logger.error(f"🌲 Failed to dispatch trust key extraction: {e}", exc_info=True)
 
 
 __all__ = ["PublishingMixin"]

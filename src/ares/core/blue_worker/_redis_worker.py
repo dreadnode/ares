@@ -62,6 +62,7 @@ class BlueRedisWorkerAgent:
         investigation_id: str,
         pod_name: str | None = None,
         redis_url: str | None = None,
+        operation_id: str | None = None,
     ):
         self.role = role
         self.task_queue = task_queue
@@ -72,6 +73,7 @@ class BlueRedisWorkerAgent:
         self.investigation_id = investigation_id
         self.pod_name = pod_name or os.environ.get("HOSTNAME", "unknown")
         self.redis_url = redis_url
+        self.operation_id = operation_id  # Red team operation ID for trace correlation
 
         self._running = False
         self._current_task: str | None = None
@@ -183,6 +185,9 @@ class BlueRedisWorkerAgent:
                 "worker.agent": self.agent_name,
             }
         )
+        # Add red team operation ID for trace correlation if available
+        if self.operation_id:
+            span_attrs["attack_operation_id"] = self.operation_id
         _task_span = _tracer.start_span(
             "process_task", kind=SpanKind.CONSUMER, attributes=span_attrs
         )
@@ -485,6 +490,11 @@ async def run_blue_worker(
             # Get alert for agent context
             alert = await task_queue.get_investigation_alert(current_investigation_id)
 
+            # Get operation ID for trace correlation
+            operation_id = await task_queue.get_investigation_operation_id(current_investigation_id)
+            if operation_id:
+                logger.info(f"Investigation correlated to red team operation: {operation_id}")
+
             logger.info(
                 f"Starting {role.value} worker for investigation {current_investigation_id}"
             )
@@ -530,6 +540,7 @@ async def run_blue_worker(
                 investigation_id=current_investigation_id,
                 pod_name=pod_name,
                 redis_url=redis_url,
+                operation_id=operation_id,
             )
 
             await worker.start()
@@ -637,6 +648,11 @@ async def run_blue_global_worker(
                 f"Loaded {len(credentials)} credentials for investigation {investigation_id}"
             )
 
+        # Get operation ID for trace correlation
+        operation_id = await task_queue.get_investigation_operation_id(investigation_id)
+        if operation_id:
+            logger.info(f"Investigation correlated to red team operation: {operation_id}")
+
         # Load MCP tools now that credentials are available
         # (credentials may include GRAFANA_SERVICE_ACCOUNT_TOKEN)
         inv_mcp_tools = await _load_mcp_tools(grafana_url)
@@ -669,6 +685,7 @@ async def run_blue_global_worker(
             "dispatcher": dispatcher,
             "agent": agent,
             "callback_tools": callback_tools,
+            "operation_id": operation_id,
         }
         _investigation_cache[investigation_id] = ctx
         return ctx
@@ -729,6 +746,24 @@ async def run_blue_global_worker(
                 agent = ctx["agent"]
                 callback_tools = ctx["callback_tools"]
                 backend = ctx["backend"]
+                operation_id = ctx.get("operation_id")
+
+                # Create CONSUMER span for Tempo service graph (for trace correlation)
+                span_attrs = create_agent_span_attributes(role.value, "blue")
+                span_attrs.update(
+                    {
+                        "task.id": task.task_id,
+                        "task.type": task.task_type,
+                        "investigation.id": task.investigation_id,
+                        "worker.pod": pod_name,
+                        "worker.agent": agent_name,
+                    }
+                )
+                if operation_id:
+                    span_attrs["attack_operation_id"] = operation_id
+                _task_span = _tracer.start_span(
+                    "process_task", kind=SpanKind.CONSUMER, attributes=span_attrs
+                )
 
                 # Process the task
                 try:
@@ -811,11 +846,19 @@ async def run_blue_global_worker(
                         agent_name=agent_name,
                     )
 
+                # End the task span
+                _task_span.end()
                 retry_delay = 1.0
 
             except asyncio.CancelledError:
+                # End span if it was created
+                if "_task_span" in dir() and _task_span:
+                    _task_span.end()
                 break
             except Exception as e:
+                # End span if it was created
+                if "_task_span" in dir() and _task_span:
+                    _task_span.end()
                 if is_connection_error(e):
                     logger.warning(
                         f"Global worker connection error, retrying in {retry_delay:.1f}s: {e}"

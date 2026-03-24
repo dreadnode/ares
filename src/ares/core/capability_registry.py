@@ -49,6 +49,7 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
         "ldap_search_descriptions",
         "check_sidhistory",
         "enumerate_domain_netbios_mappings",
+        "enumerate_domain_trusts",
     ],
     "enum4linux": ["enumerate_users"],
     "enum4linux-ng": ["enumerate_users"],

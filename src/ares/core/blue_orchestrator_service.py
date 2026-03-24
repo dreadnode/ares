@@ -567,6 +567,12 @@ class BlueOrchestratorService:
                         f"Tracked investigation {request.investigation_id} "
                         f"to operation {operation_id}"
                     )
+                    # Update investigation status with operation_id for trace correlation
+                    await self._publish_investigation_status(
+                        request.investigation_id,
+                        "running",
+                        {"operation_id": operation_id},
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to track investigation to operation: {e}")
 
@@ -615,6 +621,7 @@ class BlueOrchestratorService:
                         alert=request.alert,
                         model=request.model,
                         credentials=worker_credentials,
+                        operation_id=operation_id,
                     )
                     inv_id = request.investigation_id
                     logger.info(f"Registered investigation {inv_id} for distributed workers")

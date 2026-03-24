@@ -275,6 +275,9 @@ class OperationRecoveryManager:
             state.da_hash_id,
         ) = await backend.get_domain_admin()
         state.has_golden_ticket = await backend.get_meta("has_golden_ticket", default=False)
+        # Load domain_admin_domains (for multi-forest mode)
+        da_domains = await backend.get_domain_admin_domains()
+        state.domain_admin_domains.extend(da_domains)
         completed_at_str = await backend.get_meta("completed_at")
         if completed_at_str:
             try:
@@ -300,6 +303,12 @@ class OperationRecoveryManager:
 
         netbios_map = await backend.get_all_netbios_mappings()
         state.netbios_to_fqdn.update(netbios_map)
+
+        # Load cached domain SIDs (for golden ticket generation when lookupsid fails)
+        domain_sids = await backend.get_domain_sids()
+        state.domain_sids.update(domain_sids)
+        if domain_sids:
+            logger.info(f"Loaded {len(domain_sids)} cached domain SIDs from Redis")
 
         artifacts = await backend.get_all_artifacts()
         state.downloaded_artifacts.update(artifacts)

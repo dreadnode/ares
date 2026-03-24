@@ -162,6 +162,7 @@ class BlueTaskQueue(BaseTaskQueue):
         alert: dict[str, Any],
         model: str | None = None,
         credentials: dict[str, str] | None = None,
+        operation_id: str | None = None,
     ) -> None:
         """Register an active investigation for workers to discover.
 
@@ -170,6 +171,7 @@ class BlueTaskQueue(BaseTaskQueue):
             alert: The alert JSON that triggered the investigation.
             model: LLM model to use for workers.
             credentials: API credentials to pass to workers.
+            operation_id: Red team operation ID for trace correlation.
         """
         if not self._connected:
             await self.connect()
@@ -188,6 +190,8 @@ class BlueTaskQueue(BaseTaskQueue):
             meta["model"] = model
         if credentials:
             meta["credentials"] = json.dumps(credentials)
+        if operation_id:
+            meta["operation_id"] = operation_id
 
         await self.redis.hset(meta_key, mapping=meta)
         await self.redis.expire(meta_key, self.INVESTIGATION_TTL)
@@ -284,6 +288,14 @@ class BlueTaskQueue(BaseTaskQueue):
             except json.JSONDecodeError:
                 pass
         return {}
+
+    async def get_investigation_operation_id(self, investigation_id: str) -> str | None:
+        """Get the red team operation ID for trace correlation."""
+        if not self._connected:
+            await self.connect()
+
+        meta_key = self._investigation_meta_key(investigation_id)
+        return await self.redis.hget(meta_key, "operation_id")
 
     # === Orchestrator Methods ===
 

@@ -25,11 +25,19 @@ class MockRedisClient:
         self.data = {}
 
     async def lpush(self, key: str, value: str) -> int:
-        """Push to list (used for task submission)."""
+        """Push to list (used for normal priority task submission)."""
         self.calls.append(("lpush", key, value))
         if key not in self.data:
             self.data[key] = []
         self.data[key].insert(0, value)
+        return len(self.data[key])
+
+    async def rpush(self, key: str, value: str) -> int:
+        """Push to end of list (used for high priority task submission)."""
+        self.calls.append(("rpush", key, value))
+        if key not in self.data:
+            self.data[key] = []
+        self.data[key].append(value)
         return len(self.data[key])
 
     async def hset(self, key: str, field: str, value: str) -> int:
@@ -114,12 +122,12 @@ class TestTrustKeyExtractionTaskFormat:
                 source_agent="ares-privesc",
             )
 
-        # Verify lpush was called
-        lpush_calls = [c for c in task_queue.redis.calls if c[0] == "lpush"]
-        assert len(lpush_calls) == 1, "Expected one lpush call for trust extraction task"
+        # Verify rpush was called (high priority tasks use rpush so workers pick them up first)
+        rpush_calls = [c for c in task_queue.redis.calls if c[0] == "rpush"]
+        assert len(rpush_calls) == 1, "Expected one rpush call for trust extraction task"
 
         # Parse the task data
-        _, _queue_key, task_json = lpush_calls[0]
+        _, _queue_key, task_json = rpush_calls[0]
         task_data = json.loads(task_json)
 
         # CRITICAL: target_agent must be present

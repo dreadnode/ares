@@ -44,6 +44,7 @@ from ares.tools.red.reconnaissance import (
     BloodHoundTools,
     NetworkEnumerationTools,
     PostureValidationTools,
+    TrustEnumerationTools,
 )
 
 # Reporting
@@ -73,4 +74,5 @@ __all__ = [
     "RedTeamReportingTools",
     "SharePilferingTools",
     "TrustAttackTools",
+    "TrustEnumerationTools",
 ]

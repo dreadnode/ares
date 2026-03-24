@@ -2412,3 +2412,180 @@ class BloodHoundTools(Toolset):
         except Exception as e:
             logger.error(f"BloodHound failed: {e}")
             return f"BloodHound failed: {e}"
+
+
+class TrustEnumerationTools(Toolset):
+    """Tools for enumerating AD trust relationships."""
+
+    state: SharedRedTeamState | None = None
+
+    def set_state(self, state: SharedRedTeamState) -> None:
+        self.state = state
+
+    @dn.tool_method
+    def enumerate_domain_trusts(
+        self,
+        domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+    ) -> str:
+        """
+        Enumerate Active Directory trust relationships via LDAP.
+
+        CRITICAL for multi-forest attacks: Discovers all trusted domains including
+        parent domains, child domains, and external forest trusts.
+
+        This tool queries the AD trustedDomain objects to find:
+        - Parent-child trusts (implicit, no SID filtering)
+        - Forest trusts (explicit, SID filtering may apply)
+        - External trusts
+
+        Args:
+            domain: Target domain (e.g., 'contoso.local')
+            username: Valid domain username
+            password: Password for authentication
+            dc_ip: Domain controller IP address
+
+        Returns:
+            Structured output with discovered trust relationships
+
+        Example:
+            >>> enumerate_domain_trusts("north.sevenkingdoms.local", "admin", "pass", "192.168.58.10")
+        """
+        import subprocess
+
+        trusts: list[dict[str, str]] = []
+
+        # Use ldapsearch to query trustedDomain objects
+        ldap_filter = "(objectClass=trustedDomain)"
+        attributes = "cn,trustPartner,trustDirection,trustType,trustAttributes,flatName"
+
+        cmd = [
+            "ldapsearch",
+            "-x",
+            "-H",
+            f"ldap://{dc_ip}",
+            "-D",
+            f"{username}@{domain}",
+            "-w",
+            password,
+            "-b",
+            f"CN=System,{','.join('DC=' + p for p in domain.split('.'))}",
+            ldap_filter,
+            *attributes.split(","),
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            output = result.stdout + "\n" + (result.stderr or "")
+
+            # Parse LDAP output
+            current_trust: dict[str, str] = {}
+            for raw_line in output.split("\n"):
+                line = raw_line.strip()
+                if line.startswith("dn:"):
+                    if current_trust:
+                        trusts.append(current_trust)
+                    current_trust = {"dn": line[3:].strip()}
+                elif ": " in line and current_trust:
+                    key, value = line.split(": ", 1)
+                    current_trust[key.lower()] = value
+
+            if current_trust and "dn" in current_trust:
+                trusts.append(current_trust)
+
+            # Extract trust direction info
+            trust_details: list[dict[str, str]] = []
+            discovered_domains: list[str] = []
+
+            for trust in trusts:
+                trust_partner = trust.get("trustpartner", "")
+                if not trust_partner:
+                    continue
+
+                direction = trust.get("trustdirection", "0")
+                trust_type = trust.get("trusttype", "0")
+                flat_name = trust.get("flatname", "")
+
+                # Trust direction: 1=Inbound, 2=Outbound, 3=Bidirectional
+                direction_str = {
+                    "0": "Disabled",
+                    "1": "Inbound",
+                    "2": "Outbound",
+                    "3": "Bidirectional",
+                }.get(direction, f"Unknown({direction})")
+
+                # Trust type: 1=NT4, 2=AD, 3=MIT
+                type_str = {
+                    "1": "Downlevel (NT4)",
+                    "2": "Uplevel (AD)",
+                    "3": "MIT (Kerberos)",
+                }.get(trust_type, f"Unknown({trust_type})")
+
+                trust_info = {
+                    "domain": trust_partner,
+                    "netbios": flat_name,
+                    "direction": direction_str,
+                    "type": type_str,
+                    "raw_direction": direction,
+                    "raw_type": trust_type,
+                }
+                trust_details.append(trust_info)
+                discovered_domains.append(trust_partner.lower())
+
+            # Update state with discovered trusts
+            if self.state:
+                for td in discovered_domains:
+                    if td not in self.state.trusted_domains:
+                        self.state.trusted_domains.append(td)
+                        logger.info(f"Trust discovered: {td}")
+
+            # Build output
+            output_parts = [f"🔗 DOMAIN TRUST ENUMERATION: {domain}"]
+            output_parts.append(f"DC: {dc_ip}")
+            output_parts.append(f"\n📊 {len(trust_details)} trust(s) found:\n")
+
+            for t in trust_details:
+                output_parts.append(f"  → {t['domain']} ({t['netbios']})")
+                output_parts.append(f"    Direction: {t['direction']}")
+                output_parts.append(f"    Type: {t['type']}")
+                # Add attack guidance
+                if t["direction"] in ("Bidirectional", "Outbound"):
+                    output_parts.append("    ⚠️ ATTACKABLE: Can authenticate TO this domain")
+                output_parts.append("")
+
+            if trust_details:
+                output_parts.append("\n📋 ATTACK IMPLICATIONS:")
+                for t in trust_details:
+                    if t["direction"] in ("Bidirectional", "Outbound"):
+                        output_parts.append(
+                            f"  - {t['domain']}: With DA, can extract trust key and forge tickets"
+                        )
+
+            # JSON structured output
+            output_parts.append("\n\n📊 STRUCTURED DATA (JSON):")
+            output_parts.append(
+                json.dumps(
+                    {
+                        "trusts_found": len(trust_details),
+                        "trusts": trust_details,
+                        "trusted_domains": discovered_domains,
+                    },
+                    indent=2,
+                )
+            )
+
+            return "\n".join(output_parts)
+
+        except subprocess.TimeoutExpired:
+            return f"Trust enumeration timed out for {domain}"
+        except Exception as e:
+            logger.error(f"Trust enumeration failed: {e}")
+            return f"Trust enumeration failed: {e}"

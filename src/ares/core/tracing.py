@@ -319,6 +319,7 @@ TOOL_CATEGORY_TO_TACTIC: dict[str, str] = {
     "NetworkEnumerationTools": "discovery",
     "BloodHoundTools": "discovery",
     "PostureValidationTools": "discovery",
+    "TrustEnumerationTools": "discovery",
     "CredentialDiscoveryTools": "credential-access",
     "CredentialHarvestingTools": "credential-access",
     "SharePilferingTools": "collection",
@@ -354,7 +355,8 @@ TOOL_TO_CATEGORY: dict[str, str] = {
     "sharphound": "NetworkEnumerationTools",
     "get_domain_info": "NetworkEnumerationTools",
     "enumerate_users": "NetworkEnumerationTools",
-    "enum_domain_trusts": "NetworkEnumerationTools",
+    "enum_domain_trusts": "TrustEnumerationTools",
+    "enumerate_domain_trusts": "TrustEnumerationTools",
     "enumerate_forest": "NetworkEnumerationTools",
     "enum_constrained_delegation": "NetworkEnumerationTools",
     "enum_unconstrained_delegation": "NetworkEnumerationTools",
@@ -991,6 +993,7 @@ def trace_blue_investigation(
     target_fqdn: str | None = None,
     target_user: str | None = None,
     target_domain: str | None = None,
+    operation_id: str | None = None,
 ) -> None:
     """Record a blue team investigation span.
 
@@ -1006,6 +1009,7 @@ def trace_blue_investigation(
         target_fqdn: Optional target FQDN being investigated.
         target_user: Optional target user being investigated.
         target_domain: Optional target domain.
+        operation_id: Red team operation ID for correlation (attack_operation_id).
     """
     attrs = create_agent_span_attributes(
         role,
@@ -1024,6 +1028,9 @@ def trace_blue_investigation(
 
     if severity:
         attrs["investigation.severity"] = severity
+
+    if operation_id:
+        attrs["attack_operation_id"] = operation_id
 
     try:
         with dn.span(f"investigation.{role}", attributes=attrs):

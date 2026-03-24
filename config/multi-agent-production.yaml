@@ -25,6 +25,8 @@ operation:
   multi_forest_mode: true
   # Increase max_steps for multi-forest mode (need more steps to pivot across forests)
   max_steps: 500
+  # Maximum runtime for multi-forest mode (default 3600s is too short for cross-forest pivots)
+  max_runtime: 7200.0
 
 # Agent configurations
 agents:

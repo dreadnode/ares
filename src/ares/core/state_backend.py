@@ -1058,6 +1058,7 @@ class RedisStateBackend(BaseRedisBackend):
         achieved: bool,
         path: str | None = None,
         da_hash_id: str | None = None,
+        domain: str | None = None,
     ) -> None:
         """Set domain admin achievement status.
 
@@ -1067,12 +1068,35 @@ class RedisStateBackend(BaseRedisBackend):
 
         Note: completed_at is set by announce_domain_admin() or announce_golden_ticket()
         in announcements.py when the appropriate stop condition is met.
+
+        Args:
+            achieved: Whether DA was achieved.
+            path: Attack path description.
+            da_hash_id: Hash ID that achieved DA.
+            domain: Domain where DA was achieved (added to domain_admin_domains list).
         """
         await self.set_meta("has_domain_admin", achieved)
         if path:
             await self.set_meta("domain_admin_path", path)
         if da_hash_id:
             await self.set_meta("da_hash_id", da_hash_id)
+        if domain:
+            await self.add_domain_admin_domain(domain)
+
+    async def add_domain_admin_domain(self, domain: str) -> None:
+        """Add a domain to the domain_admin_domains list.
+
+        Uses SADD for idempotent addition (set semantics - no duplicates).
+        """
+        key = f"{self.KEY_PREFIX}:{self._operation_id}:domain_admin_domains"
+        await self._redis.sadd(key, domain.lower())
+        await self._redis.expire(key, self.DEFAULT_TTL)
+
+    async def get_domain_admin_domains(self) -> list[str]:
+        """Get list of domains where DA was achieved."""
+        key = f"{self.KEY_PREFIX}:{self._operation_id}:domain_admin_domains"
+        domains = await self._redis.smembers(key)
+        return [d.decode() if isinstance(d, bytes) else d for d in domains]
 
     async def get_domain_admin(self) -> tuple[bool, str | None, str | None]:
         """Get domain admin status, path, and hash ID."""
@@ -1136,6 +1160,71 @@ class RedisStateBackend(BaseRedisBackend):
     async def get_completed(self) -> bool:
         """Get operation completion status."""
         return await self.get_meta("completed", default=False)
+
+    # =========================================================================
+    # Domain SID Cache (Redis HASH)
+    # =========================================================================
+
+    async def set_domain_sid(self, domain: str, sid: str) -> bool:
+        """Set domain SID for golden ticket generation.
+
+        Domain SIDs are cached to enable golden ticket generation when
+        lookupsid fails (e.g., Netlogon service not running).
+
+        Args:
+            domain: Domain FQDN (will be lowercased)
+            sid: Domain SID (e.g., S-1-5-21-xxx-yyy-zzz)
+
+        Returns:
+            True if set successfully
+        """
+        key = f"{self.KEY_PREFIX}:{self._operation_id}:domain_sids"
+        try:
+            await self._redis.hset(key, domain.lower(), sid)
+            await self._redis.expire(key, self.DEFAULT_TTL)
+            logger.debug(f"Cached domain SID: {domain} = {sid}")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to set domain SID for {domain}: {e}")
+            return False
+
+    async def get_domain_sids(self) -> dict[str, str]:
+        """Get all cached domain SIDs.
+
+        Returns:
+            Dict mapping lowercase domain FQDN to SID string
+        """
+        key = f"{self.KEY_PREFIX}:{self._operation_id}:domain_sids"
+        try:
+            items = await self._redis.hgetall(key)
+            return {
+                (k.decode() if isinstance(k, bytes) else k): (
+                    v.decode() if isinstance(v, bytes) else v
+                )
+                for k, v in items.items()
+            }
+        except Exception as e:
+            logger.warning(f"Failed to get domain SIDs: {e}")
+            return {}
+
+    async def get_domain_sid(self, domain: str) -> str | None:
+        """Get cached SID for a specific domain.
+
+        Args:
+            domain: Domain FQDN (case-insensitive)
+
+        Returns:
+            SID string if cached, None otherwise
+        """
+        key = f"{self.KEY_PREFIX}:{self._operation_id}:domain_sids"
+        try:
+            sid = await self._redis.hget(key, domain.lower())
+            if sid:
+                return sid.decode() if isinstance(sid, bytes) else sid
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get domain SID for {domain}: {e}")
+            return None
 
     # =========================================================================
     # Domain Controller Map (Redis HASH)

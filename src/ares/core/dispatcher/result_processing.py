@@ -50,14 +50,26 @@ class ResultProcessingMixin:
             The resolved domain (FQDN) or empty string if cannot be determined.
         """
         if not target_ip:
-            if self.shared_state.target and self.shared_state.target.domain:
-                return self.shared_state.target.domain
-            return ""
+            fallback = self.shared_state.target.domain if self.shared_state.target else ""
+            logger.warning(
+                f"_resolve_domain_from_target_host: NO TARGET provided, fallback={fallback}"
+            )
+            return fallback
 
-        # Look up host by IP
+        # Look up host by IP or hostname
+        target_lower = target_ip.lower()
+        logger.info(
+            f"_resolve_domain_from_target_host: target={target_ip}, "
+            f"hosts=[{', '.join(f'{h.ip}:{h.hostname}' for h in self.shared_state.all_hosts[:5])}...]"
+        )
         for host in self.shared_state.all_hosts:
-            if host.ip == target_ip:
-                hostname = (host.hostname or "").strip().lower()
+            hostname = (host.hostname or "").strip().lower()
+            # Match by IP or by hostname (worker may send either)
+            if (
+                host.ip == target_ip
+                or hostname == target_lower
+                or hostname.startswith(target_lower + ".")
+            ):
                 if hostname and "." in hostname:
                     # Extract domain from FQDN (e.g., "dc01.child.contoso.local" -> "child.contoso.local")
                     parts = hostname.split(".", 1)
@@ -69,7 +81,17 @@ class ResultProcessingMixin:
                         return domain
                 break
 
+        # Check if target_ip is a known DC by IP
+        for domain, dc_ip in self.shared_state.domain_controllers.items():
+            if dc_ip == target_ip:
+                logger.debug(f"Resolved domain from DC registry: {target_ip} -> {domain}")
+                return domain
+
         if self.shared_state.target and self.shared_state.target.domain:
+            logger.warning(
+                f"_resolve_domain_from_target_host: FALLBACK to target.domain={self.shared_state.target.domain} "
+                f"for target={target_ip}"
+            )
             return self.shared_state.target.domain
         return ""
 
@@ -434,13 +456,18 @@ class ResultProcessingMixin:
             logger.info(
                 f"Processing {len(discovered_credentials)} discovered credentials from {target_label}"
             )
+            # Resolve domain from target host's FQDN for empty/NetBIOS domains
+            cred_target_domain = self._resolve_domain_from_target_host(target_ip)
             for c in discovered_credentials:
                 if not isinstance(c, dict):
                     continue
+                # Resolve credential domain: prefer target_domain FQDN over empty/NetBIOS
+                extracted_domain = c.get("domain", "").strip().lower()
+                cred_domain = self._resolve_extracted_domain(extracted_domain, cred_target_domain)
                 credential = Credential(
                     username=c.get("username", ""),
                     password=c.get("password", ""),
-                    domain=c.get("domain", ""),
+                    domain=cred_domain,
                     source=c.get("source", f"worker:{source_agent}"),
                     is_admin=c.get("is_admin", False),
                     parent_id=parent_credential_id,  # Track attack chain
@@ -453,16 +480,31 @@ class ResultProcessingMixin:
             logger.info(
                 f"Processing {len(discovered_hashes)} discovered hashes from {target_label}"
             )
+            # Resolve domain from target host's FQDN for empty/NetBIOS domains
+            hash_target_domain = self._resolve_domain_from_target_host(target_ip)
             for h in discovered_hashes:
                 if not isinstance(h, dict):
                     continue
+                # Enhance source with target info if not already provided
+                raw_source = h.get("source", "")
+                if raw_source and target_ip and target_ip not in raw_source:
+                    enhanced_source = f"{raw_source}@{target_ip}"
+                elif not raw_source and target_ip:
+                    enhanced_source = f"{source_agent}@{target_ip}"
+                elif not raw_source:
+                    enhanced_source = source_agent
+                else:
+                    enhanced_source = raw_source
+                # Resolve hash domain: prefer target_domain FQDN over empty/NetBIOS
+                extracted_domain = h.get("domain", "").strip().lower()
+                hash_domain = self._resolve_extracted_domain(extracted_domain, hash_target_domain)
                 hash_obj = Hash(
                     username=h.get("username", ""),
                     hash_value=h.get("hash_value", ""),
                     hash_type=h.get("hash_type", "NTLM"),
-                    domain=h.get("domain", ""),
+                    domain=hash_domain,
                     cracked_password=h.get("cracked_password", ""),
-                    source=h.get("source", ""),
+                    source=enhanced_source,
                     parent_id=parent_credential_id,  # Track attack chain
                     attack_step=parent_attack_step + 1 if parent_credential_id else 0,
                 )
@@ -929,6 +971,15 @@ class ResultProcessingMixin:
                 hash_obj.parent_id = parent_credential_id
                 hash_obj.attack_step = parent_attack_step + 1
             await self.publish_hash(hash_obj, source_agent, task_queue=task_queue)
+
+        # Extract and cache domain SID from secretsdump output
+        # This SID is used for golden ticket generation when lookupsid/LDAP fail
+        extracted_sid = self._extract_domain_sid_from_output(output, domain)
+        if extracted_sid and domain:
+            domain_lower = domain.lower()
+            if domain_lower not in self.state.domain_sids:
+                self.state.domain_sids[domain_lower] = extracted_sid
+                logger.info(f"🔑 Cached domain SID for {domain}: {extracted_sid}")
 
         # Extract and auto-queue delegation vulnerabilities from findDelegation output
         # Always extract as a backup - dedup handled in _auto_queue_delegation_vulnerabilities
@@ -1531,6 +1582,31 @@ class ResultProcessingMixin:
                 hashes.append(h)
 
         return hashes
+
+    def _extract_domain_sid_from_output(
+        self: RedTeamDispatcher, output: str, domain: str | None
+    ) -> str | None:
+        """
+        Extract domain SID from secretsdump/lookupsid output.
+
+        Secretsdump output contains:
+            [*] Domain SID is: S-1-5-21-xxx-yyy-zzz
+
+        Args:
+            output: Tool output to search
+            domain: Target domain to associate with the SID
+
+        Returns:
+            Domain SID string or None if not found
+        """
+        if not output or not domain:
+            return None
+
+        # Look for "[*] Domain SID is: S-1-5-21-..."
+        match = re.search(r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output)
+        if match:
+            return match.group(1)
+        return None
 
     def _extract_gmsa_from_output(self: RedTeamDispatcher, output: str) -> list[dict[str, str]]:
         """

