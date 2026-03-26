@@ -834,13 +834,15 @@ tasks:
   # CHECK: Compare local vs remote code
   # ============================================================================
   check:
-    desc: "Check if local code matches remote pods (usage: task remote:check [FILES=src/ares/core/worker.py] [TEAM=red|blue|all])"
+    desc: "Check if local code matches remote pods (usage: task remote:check [FILES=src/ares/core/worker.py] [TEAM=red|blue|all] [WORKERS=true])"
     silent: true
     vars:
       FILES: '{{.FILES | default ""}}'
+      WORKERS: '{{.WORKERS | default "true"}}'
+      MAX_WORKERS: '{{.MAX_WORKERS | default "3"}}'
     cmds:
       - |
-        echo -e "{{.INFO}} Comparing local code to remote pods (team={{.TEAM}})"
+        echo -e "{{.INFO}} Comparing local code to remote pods (team={{.TEAM}}, workers={{.WORKERS}})"
         echo ""
 
         # Get pods based on team
@@ -855,6 +857,14 @@ tasks:
           if [ -n "$RED_ORCH" ]; then
             ORCH_PODS="$ORCH_PODS $RED_ORCH"
           fi
+
+          if [ "{{.WORKERS}}" = "true" ]; then
+            RED_WORKERS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+              -l {{.RED_COMPONENT_LABEL}} \
+              --field-selector=status.phase=Running \
+              -o json | jq -r --arg orch "$RED_ORCH" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | head -n {{.MAX_WORKERS}} | tr '\n' ' ')
+            WORKER_PODS="$WORKER_PODS $RED_WORKERS"
+          fi
         fi
 
         if [ "{{.TEAM}}" = "blue" ] || [ "{{.TEAM}}" = "all" ]; then
@@ -865,9 +875,18 @@ tasks:
           if [ -n "$BLUE_ORCH" ]; then
             ORCH_PODS="$ORCH_PODS $BLUE_ORCH"
           fi
+
+          if [ "{{.WORKERS}}" = "true" ]; then
+            BLUE_WORKERS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+              -l {{.BLUE_COMPONENT_LABEL}} \
+              --field-selector=status.phase=Running \
+              -o json | jq -r --arg orch "$BLUE_ORCH" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | head -n {{.MAX_WORKERS}} | tr '\n' ' ')
+            WORKER_PODS="$WORKER_PODS $BLUE_WORKERS"
+          fi
         fi
 
         ORCH_PODS=$(echo "$ORCH_PODS" | xargs)
+        WORKER_PODS=$(echo "$WORKER_PODS" | xargs)
 
         if [ -z "$ORCH_PODS" ]; then
           echo -e "{{.ERROR}} No running orchestrator pods found for team={{.TEAM}}"
@@ -893,13 +912,19 @@ tasks:
           exit 0
         fi
 
-        echo -e "{{.INFO}} Checking $(echo $FILES_TO_CHECK | wc -w | xargs) file(s) against: $ORCH_PODS"
+        FILE_COUNT=$(echo $FILES_TO_CHECK | wc -w | xargs)
+        ORCH_COUNT=$(echo $ORCH_PODS | wc -w | xargs)
+        WORKER_COUNT=$(echo $WORKER_PODS | wc -w | xargs)
+        if [ -z "$WORKER_PODS" ]; then WORKER_COUNT=0; fi
+
+        echo -e "{{.INFO}} Checking $FILE_COUNT file(s) against $ORCH_COUNT orchestrator(s) + $WORKER_COUNT worker(s)"
         echo ""
 
         TOTAL_CHECKED=0
         TOTAL_MATCH=0
         TOTAL_DIFFER=0
         TOTAL_MISSING=0
+        FAILED_PODS=""
 
         for f in $FILES_TO_CHECK; do
           if [ ! -f "$f" ]; then
@@ -909,24 +934,95 @@ tasks:
           relative_path="${f#src/ares/}"
           local_hash=$(shasum -a 256 "$f" 2>/dev/null | awk '{print $1}')
 
-          # Check against first orchestrator pod
-          ORCH_POD=$(echo $ORCH_PODS | awk '{print $1}')
-          remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
-            sha256sum "{{.PVC_PATH}}/src/ares/$relative_path" 2>/dev/null | awk '{print $1}')
-
           TOTAL_CHECKED=$((TOTAL_CHECKED + 1))
+          FILE_OK=true
+          POD_RESULTS=""
 
-          if [ -z "$remote_hash" ]; then
-            echo -e "{{.WARN}} $relative_path: MISSING on remote"
-            TOTAL_MISSING=$((TOTAL_MISSING + 1))
-          elif [ "$remote_hash" = "$local_hash" ]; then
-            echo -e "{{.SUCCESS}} $relative_path: OK"
+          # Check orchestrator pods
+          for ORCH_POD in $ORCH_PODS; do
+            remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
+              sha256sum "{{.PVC_PATH}}/src/ares/$relative_path" 2>/dev/null | awk '{print $1}')
+
+            if [ -z "$remote_hash" ]; then
+              POD_RESULTS="$POD_RESULTS $ORCH_POD:MISSING"
+              FILE_OK=false
+              if ! echo "$FAILED_PODS" | grep -q "$ORCH_POD"; then
+                FAILED_PODS="$FAILED_PODS $ORCH_POD"
+              fi
+            elif [ "$remote_hash" != "$local_hash" ]; then
+              POD_RESULTS="$POD_RESULTS $ORCH_POD:DIFFERS"
+              FILE_OK=false
+              if ! echo "$FAILED_PODS" | grep -q "$ORCH_POD"; then
+                FAILED_PODS="$FAILED_PODS $ORCH_POD"
+              fi
+            else
+              POD_RESULTS="$POD_RESULTS $ORCH_POD:OK"
+            fi
+          done
+
+          # Check worker pods
+          if [ -n "$WORKER_PODS" ]; then
+            for WORKER_POD in $WORKER_PODS; do
+              worker_container="{{.WORKER_CONTAINER}}"
+              if [ -z "$worker_container" ]; then
+                worker_container=$(kubectl get pod -n {{.K8S_NAMESPACE}} "$WORKER_POD" \
+                  -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
+              fi
+              if [ -n "$worker_container" ]; then
+                container_flag="-c $worker_container"
+              else
+                container_flag=""
+              fi
+
+              remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} $container_flag "$WORKER_POD" -- \
+                sha256sum "{{.PVC_PATH}}/src/ares/$relative_path" 2>/dev/null | awk '{print $1}')
+
+              if [ -z "$remote_hash" ]; then
+                POD_RESULTS="$POD_RESULTS $WORKER_POD:MISSING"
+                FILE_OK=false
+                if ! echo "$FAILED_PODS" | grep -q "$WORKER_POD"; then
+                  FAILED_PODS="$FAILED_PODS $WORKER_POD"
+                fi
+              elif [ "$remote_hash" != "$local_hash" ]; then
+                POD_RESULTS="$POD_RESULTS $WORKER_POD:DIFFERS"
+                FILE_OK=false
+                if ! echo "$FAILED_PODS" | grep -q "$WORKER_POD"; then
+                  FAILED_PODS="$FAILED_PODS $WORKER_POD"
+                fi
+              else
+                POD_RESULTS="$POD_RESULTS $WORKER_POD:OK"
+              fi
+            done
+          fi
+
+          # Report results for this file
+          if [ "$FILE_OK" = "true" ]; then
+            echo -e "{{.SUCCESS}} $relative_path: OK (all pods)"
             TOTAL_MATCH=$((TOTAL_MATCH + 1))
           else
-            echo -e "{{.ERROR}} $relative_path: DIFFERS"
-            echo "        local:  ${local_hash:0:16}..."
-            echo "        remote: ${remote_hash:0:16}..."
-            TOTAL_DIFFER=$((TOTAL_DIFFER + 1))
+            # Count failures
+            MISSING_COUNT=$(echo "$POD_RESULTS" | tr ' ' '\n' | grep -c ':MISSING' || true)
+            DIFFER_COUNT=$(echo "$POD_RESULTS" | tr ' ' '\n' | grep -c ':DIFFERS' || true)
+
+            if [ "$MISSING_COUNT" -gt 0 ] && [ "$DIFFER_COUNT" -eq 0 ]; then
+              echo -e "{{.WARN}} $relative_path: MISSING on $MISSING_COUNT pod(s)"
+              TOTAL_MISSING=$((TOTAL_MISSING + 1))
+            elif [ "$DIFFER_COUNT" -gt 0 ] && [ "$MISSING_COUNT" -eq 0 ]; then
+              echo -e "{{.ERROR}} $relative_path: DIFFERS on $DIFFER_COUNT pod(s)"
+              TOTAL_DIFFER=$((TOTAL_DIFFER + 1))
+            else
+              echo -e "{{.ERROR}} $relative_path: DIFFERS=$DIFFER_COUNT, MISSING=$MISSING_COUNT"
+              TOTAL_DIFFER=$((TOTAL_DIFFER + 1))
+            fi
+
+            # Show per-pod details
+            for result in $POD_RESULTS; do
+              pod_name=$(echo "$result" | cut -d: -f1)
+              pod_status=$(echo "$result" | cut -d: -f2)
+              if [ "$pod_status" != "OK" ]; then
+                echo "        $pod_name: $pod_status"
+              fi
+            done
           fi
         done
 
@@ -935,11 +1031,14 @@ tasks:
         echo -e "{{.INFO}} Summary: $TOTAL_CHECKED checked, $TOTAL_MATCH match, $TOTAL_DIFFER differ, $TOTAL_MISSING missing"
 
         if [ "$TOTAL_DIFFER" -gt 0 ] || [ "$TOTAL_MISSING" -gt 0 ]; then
+          FAILED_PODS=$(echo "$FAILED_PODS" | xargs)
+          FAILED_COUNT=$(echo "$FAILED_PODS" | wc -w | xargs)
+          echo -e "{{.WARN}} $FAILED_COUNT pod(s) out of sync"
           echo ""
           echo -e "{{.WARN}} Run 'task remote:sync:full TEAM={{.TEAM}}' to sync code"
           exit 1
         else
-          echo -e "{{.SUCCESS}} All checked files match remote"
+          echo -e "{{.SUCCESS}} All checked files match on all pods"
         fi
 
   # ============================================================================
