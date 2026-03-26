@@ -68,6 +68,10 @@ All agents share state through Redis:
 - Hosts and vulnerabilities are cataloged
 - Task status is visible to all agents
 
+For the detailed Redis transport and canonical state contract, including key
+ownership and the orchestrator/worker sequence, see
+[Red Team Redis Architecture](red-redis-architecture.md).
+
 ## Agent Quick Reference
 
 Quick reference table for all red team agents with their key configuration and
